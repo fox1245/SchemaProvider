@@ -2,9 +2,9 @@
 
 ## 0. Status
 
-**This is a design proposal. Nothing described here is implemented.** The repository contains no code. Every sketch below is a contract to be built and tested, not observed behaviour. Statements about other projects or about the current NeoGraph implementation are labelled as such and are summarised in [RESEARCH.md](RESEARCH.md). Testable requirements are tied to the named properties in [CONFORMANCE.md](CONFORMANCE.md) (written like `ChunkPartitionInvariant`). Decisions that are still open are in section 12 and must not be treated as made; decided questions and their reasoning are recorded in [decisions/](decisions/).
+**This is a design proposal. Nothing described here is implemented.** The repository contains no code. Every sketch below is a contract to be built and tested, not observed behaviour. Statements about other projects or about the current NeoGraph implementation are labelled as such and are summarised in [RESEARCH.md](RESEARCH.md). Testable requirements are tied to the named properties in [CONFORMANCE.md](CONFORMANCE.md) (written like `ChunkPartitionInvariant`). Decisions are recorded in [decisions/](decisions/README.md) with a status (FIRM or GATED); only the four items listed at the end of section 12 are still open. The staged release plan is in [ROADMAP.md](ROADMAP.md); this document describes the full target, not what ships first.
 
-Words: MUST, SHOULD, MAY are used as in RFC 2119. "Family" means a wire protocol shape (Chat Completions, Responses, Messages, Gemini generate, Interactions). "Vendor" means an endpoint operator speaking a family. "Descriptor" means a JSON file of vendor values.
+Words: MUST, SHOULD, MAY are used as in RFC 2119. "Family" means a wire protocol shape (Chat Completions, Responses, Messages, Gemini generate, Interactions). "Vendor" means an endpoint operator speaking a family. "Descriptor" means a JSON file of vendor values. Labels: `[read docs]` = a primary vendor page was read while writing; `[INFERENCE]` = not observed, reasoned; "unverified" = a claim that a fixture or canary must still establish.
 
 ## 1. Thesis and non-goals
 
@@ -23,7 +23,8 @@ Non-goals:
 - No descriptor scripting: no event actions, hooks, conditionals over state, templates or loops (section 5).
 - No graph/agent runtime, tool execution, cost tables, tenant billing, circuit breaker, or cross-vendor fallback. Those stay in the host.
 - No Python or other language bindings until the C++ API settles.
-- Non-chat endpoints (image, long-running video operations, routing-decision endpoints) are not part of the first scope; see open decision D2. Nothing here claims they are supported.
+- **Non-chat endpoints are out of the first release (D2, FIRM):** standalone image endpoints, long-running video operations and the OpenRouter decisions endpoint are not covered by the Event set and not supported. Artifacts that arrive inside a chat response (`Completion.artifacts`) are in scope. NeoGraph owns the cutover of those features (section 13).
+- **Native access to Amazon Bedrock or Google Cloud Vertex is out of scope** unless separately designed: SigV4 signing, OAuth/Azure AD style credential refresh and AWS binary event-stream framing are not in this design. A vendor is reachable only through an HTTP endpoint that a descriptor can express with a static credential binding.
 
 ## 2. Architecture
 
@@ -35,14 +36,14 @@ Arrows mean "depends on" (compile-time), not call flow.
 graph TD
   App[Application or NeoGraph adapter] --> Pub[Installed public headers]
   Pub --> Runtime[sp_runtime: client, retry controller, operation state]
-  Runtime --> Codecs[sp_codecs: five family codecs, usage mapper, accumulator]
-  Runtime --> Transport[sp_transport: HTTP, SSE framer, WebSocket]
+  Runtime --> Codecs[sp_codecs: family codecs, usage mapper, accumulator]
+  Runtime --> Transport[sp_transport: HTTP/1.1, SSE framer, WebSocket]
   Codecs --> Desc[sp_descriptor: strict loader, validated types]
   Codecs --> Core[sp_core: value types, Event, Error]
   Desc --> Core
   Desc --> Json[sp_json: private JSON wrapper]
   Codecs --> Json
-  Transport --> TP[transport backend: D1 open]
+  Transport --> TP[Asio + OpenSSL, D1 default A]
   Core --> Std[C++20 standard library only]
 ```
 
@@ -50,7 +51,7 @@ Rules:
 
 1. `sp_core` depends on the C++20 standard library only. It does not know HTTP, JSON libraries, descriptors, or NeoGraph.
 2. Codecs are pure with respect to I/O: they consume frames and emit events; they never perform retries, sleeps, or sockets.
-3. The transport reports one `AttemptObservation` (bytes sent, response headers seen, first output byte seen, close/reset kind) and never interprets semantics or retries.
+3. The transport reports one `AttemptObservation` (bytes sent, response headers seen, close/reset kind, transport-internal resends) and never interprets semantics or retries. Whether semantic output was observed is an accumulator/runtime judgment, not a transport one (section 3.6).
 4. Only the runtime owns retry, deadlines, cancellation and threads.
 5. NeoGraph-specific pieces (coroutine bridge, graph cancellation token, journal digest) live in NeoGraph, not here.
 
@@ -69,94 +70,171 @@ Private (not installed, no stability promise): all `sp_*` object targets, codec 
 | `sp_core` | C++20 standard library |
 | `sp_json` | yyjson (private; never in a public header) |
 | `sp_descriptor`, `sp_codecs` | `sp_core`, `sp_json` |
-| `sp_transport` | one backend, chosen by D1 (Asio + OpenSSL, or libcurl plus platform TLS) |
+| `sp_transport` | standalone Asio + OpenSSL (D1 default A, GATED; flip conditions in section 12) |
 | `sp_runtime` | the above, standard threads, `std::stop_token` |
 | public headers | standard library only |
 
-No language runtimes, no general JSON Schema validator, no second HTTP stack, no `httplib` in the new library. `SP_ENABLE_WEBSOCKET` selects a transport implementation only; it does not change the semantic contract. The embedded descriptor index is generated at configure time; there is no runtime directory globbing.
+No language runtimes, no general JSON Schema validator, no second HTTP stack, no `httplib`, no libcurl, no runtime backend flag. `SP_ENABLE_WEBSOCKET` selects a transport implementation only; it does not change the semantic contract. The default descriptors are embedded at configure time (a generated index; no runtime directory globbing, no fetch).
 
 ### 2.4 Include-direction gate
 
-CI MUST fail when any of these hold (property `InstallAndDependencyDAG`):
+CI MUST fail when any of these hold (property `InstallAndDependencyDAG`). The forbidden edges are listed once here and CONFORMANCE refers to this list:
 
 - an installed header includes yyjson, asio, OpenSSL, `httplib`, curl, or any `src/` header;
 - `sp_core` links or includes anything but the standard library;
 - the CMake target graph has an edge from `sp_core` or `sp_descriptor` to `sp_codecs`, `sp_transport` or `sp_runtime`, or from `sp_codecs` to `sp_transport`;
 - a clean consumer project fails to `find_package`, compile each public header standalone, link, and complete one loopback request against the installed tree.
 
-The check reads compile commands and compiler dependency output, and inspects the target graph; it does not rely on grep of source alone. Structural indicators to track after implementation (not results): public dependency leaks = 0, accumulators = 1, retry owners = 1, vendor-name branches in shared code = 0, C++ files touched to add a compatible vendor = 0.
+The check reads compile commands and compiler dependency output, and inspects the target graph; it does not rely on grep of source alone. Measurable proxies (to be tracked after implementation; not results): public dependency leaks = 0; accumulator implementations = 1; retry-owning classes = 1; vendor-name branches in shared code = 0 (counted by a named-vendor token scan of `sp_codecs` shared files and `sp_runtime`); C++ files touched to add a strict-compatible vendor = 0 (measured on each real addition, section 9).
 
 ## 3. Core vocabulary
 
-These are header-level sketches. Names may change; the invariants in the prose are the contract.
+The sketches are intended to compile as C++20 against a stub `JsonValue`; a CI step (`sketch-compile`) extracts and compiles them. Simple helper types are given minimal bodies so nothing is undefined. Names may change; the invariants in the prose are the contract.
 
-### 3.1 Origin
+**Error model (one sentence).** Everything that can fail at runtime returns a value: `Result<T>` (a library type; `std::expected` is C++23) from the factory, the descriptor loader and `Client::option`, `Outcome` from `complete()`/`start()`, and `Status` from `join()`; exceptions are not part of the contract except `std::bad_alloc`, and programmer misuse (join from a callback, use after close) is reported as `ErrorKind::Misuse`, never as undefined behaviour or abort.
+
+### 3.1 Origin and binding facts
 
 ```cpp
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <map>
+#include <memory>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <variant>
+#include <vector>
 namespace sp {
+class JsonValue;   // immutable validated JSON text; defined in json_value.h
+
 struct Origin {
   std::string family;      // "openai.responses", "anthropic.messages", ...
   std::string vendor;      // stable descriptor id, not a display name
   std::string authority;   // normalized effective host + API surface
   std::string route_scope; // caller-supplied non-secret binding (deployment, tenant, credential class)
+  friend bool operator==(const Origin&, const Origin&) = default;
 };
-bool operator==(const Origin&, const Origin&) = default; // exact equality only
+
+// Facts the codec checks before dispatch; recorded per capsule by the decoder.
+struct BindingFacts {
+  std::string model;                // producing model id as returned by the wire
+  std::string context_fingerprint;  // digest of the replay prefix (system, tools, preceding messages as sent)
+  std::string account_scope;        // non-secret credential-profile / account label; never derived from a secret
+  friend bool operator==(const BindingFacts&, const BindingFacts&) = default;
+};
 }
 ```
 
-Origin equality is exact on all four fields. There are no equivalence aliases between hosts (direct Anthropic, Bedrock, Vertex and OpenRouter are distinct authorities); signature interoperability between them is unverified (D4). `route_scope` is never key material and is never derived by hashing a credential. An origin label is not cryptographic proof of anything; it only gates local replay.
+Design position (D4, FIRM), from what vendor documentation says `[read docs]` (Anthropic extended-thinking page, sections on signatures, block binding and cross-platform use): signature values are compatible across the Claude API, Bedrock and Vertex; a thinking block is readable only by the producing model and some others, and unreadable blocks are silently dropped; newer models bind blocks to the preceding system/tools/messages prefix (a changed prefix is a 400 where enforced; enforcement is default for accounts created on or after 2026-08-31 and opt-in for older ones); some models' blocks are account-bound; toggling thinking mid-turn silently disables it. Consequences:
+
+1. Exact `Origin` equality is the default replay gate. It is a necessary, not a sufficient, condition. `route_scope` is never key material and is never derived by hashing a credential.
+2. **Each capsule also records `BindingFacts`.** Before dispatch the codec compares them with the request being built: model id, context fingerprint, account scope. A mismatch is `ReplayIneligible` before any network I/O (property `OriginBindingFacts`).
+3. **Documented equivalence class.** A class (for example Messages across direct, Bedrock and Vertex) exists only as a C++ allow-list in the family codec with status `Documented-Unverified`. It is activated per canary cell after a negative-control canary passes (section 6, property `CanaryNegativeControl`). Descriptors cannot declare, extend or activate a class. OpenRouter is never in a class: a recorded live run of OpenRouter-issued signed thinking replayed to Anthropic failed in roughly 40-50% of runs with an invalid-signature error, cause unknown, and OpenRouter accepted tampered signatures with a 200, so its acceptances are not evidence. Bedrock/Vertex entries are declared but inert while native access is out of scope (section 1) and the credentials question is open (section 12, O2).
+4. Origin is an observed/configured replay boundary, **not cryptographic proof of issuer**. "Sealed" means C++ immutability plus provenance, not authentication (threat model, section 6.1).
 
 ### 3.2 Native state and sealed capsules
 
 ```cpp
 namespace sp {
-// Immutable, shared, created only by trusted decoders or an explicit history importer.
+class CapsuleKey;  // passkey: constructible only by trusted decoders and the history importer
+
+// Immutable, shared. Private state; no setters; the only factory takes the passkey.
 class SealedCapsule {
  public:
-  const Origin& origin() const;
-  int representation_version() const;
-  bool complete() const;                 // false => never replay natively
-  std::span<const std::byte> bytes() const; // exact opaque bytes; never logged
-  // owner part keys and original order are part of the capsule
+  static std::shared_ptr<const SealedCapsule> make(
+      CapsuleKey, Origin, BindingFacts, int representation_version, bool complete,
+      std::vector<std::byte> bytes, std::vector<std::string> owner_part_keys);
+  const Origin& origin() const { return origin_; }
+  const BindingFacts& binding() const { return binding_; }
+  int representation_version() const { return version_; }
+  bool complete() const { return complete_; }                    // false => never replay natively
+  std::span<const std::byte> bytes() const { return bytes_; }    // opaque; never logged
+  const std::vector<std::string>& owner_part_keys() const { return owners_; } // ordered group
+ private:
+  SealedCapsule(Origin, BindingFacts, int, bool, std::vector<std::byte>, std::vector<std::string>);
+  Origin origin_; BindingFacts binding_; int version_; bool complete_;
+  std::vector<std::byte> bytes_; std::vector<std::string> owners_;
 };
 struct NativeState { std::shared_ptr<const SealedCapsule> capsule; };
 }
 ```
 
-The capsule holds the whole native item or block, its owning part keys, its original position, the origin, a representation version, and a completeness flag. Opaque string values are never trimmed, re-encoded, or canonicalised. "Sealed" means C++ immutability plus provenance, not vendor signature verification.
+The capsule holds the whole native item or block, its owning part keys (an **ordered group**: removing any member invalidates the whole group), original position, origin, binding facts, representation version and a completeness flag. Opaque string values are never trimmed, re-encoded or canonicalised.
 
-Messages are immutable once produced by a decoder. Editing goes through an explicit builder; editing the text, order, or ownership of a part that owns a capsule invalidates that capsule's replay eligibility (the builder drops the seal, and a later native replay attempt fails with `ReplayIneligible` rather than sending a stale block).
+**Immutability is enforced by the type system.** Decoded `Message`s are reachable only as `std::shared_ptr<const Message>`; `Message` has no mutating member. Editing goes through `MessageBuilder`, which copies; editing text, order or ownership of a part inside a capsule group yields a builder result whose group has no seal, and a later native replay fails with `ReplayIneligible` rather than sending a stale block. History is a persistent (shared-prefix) list, so appending a turn is O(1) and a long conversation does not cost O(N²) copies.
 
 ### 3.3 Parts, Message, Request
 
 ```cpp
 namespace sp {
 enum class Role { System, Developer, User, Assistant, Tool };
-struct Text       { std::string value; };
-struct Media      { std::string mime; std::variant<Url, FileId, SharedBytes> data; };
-struct ToolCall   { std::string id; std::string name; JsonValue arguments; }; // sealed args only
-struct ToolResult { std::string call_id; std::string name; JsonValue value; bool is_error; };
+struct Url { std::string value; };
+struct FileId { std::string value; };
+struct SharedBytes { std::shared_ptr<const std::vector<std::byte>> data; };
+struct Text  { std::string value; };
+struct Media { std::string mime; std::variant<Url, FileId, SharedBytes> data; };
+
+enum class ToolCallKind { ClientExecuted, ServerExecuted, ApprovalRequest };
+struct FreeformText { std::string value; };            // raw (non-JSON) tool input, e.g. custom/freeform tools
+enum class InvalidReason { Truncated, NotJson, DuplicateKey, DepthExceeded, Empty, Other };
+
+// Executable only when sealed. ServerExecuted calls are records of vendor-side work, never executed by the host.
+struct ToolCall {
+  std::string id; std::string name; ToolCallKind kind = ToolCallKind::ClientExecuted;
+  std::variant<std::shared_ptr<const JsonValue>, FreeformText> input;
+};
+// A call whose arguments did not seal (for example cut by max tokens, or model-invalid JSON).
+struct InvalidToolCall {
+  std::string id; std::string name; ToolCallKind kind = ToolCallKind::ClientExecuted;
+  std::string raw_fragment; InvalidReason reason = InvalidReason::Other;
+};
+struct ToolResult { std::string call_id; std::string name; std::shared_ptr<const JsonValue> value; bool is_error = false; };
 struct Reasoning  { std::optional<std::string> visible; NativeState native; };
 struct Refusal    { std::string text; std::string raw_code; };
 struct Opaque     { std::string wire_type; NativeState native; }; // unknown optional item kept, not a JSON escape hatch
-using Part = std::variant<Text, Media, ToolCall, ToolResult, Reasoning, Refusal, Opaque>;
+using Part = std::variant<Text, Media, ToolCall, InvalidToolCall, ToolResult, Reasoning, Refusal, Opaque>;
 
-struct Message {
-  std::string id;                       // vendor item id when one exists
-  Role role;
-  std::vector<Part> parts;              // order is semantic
-  std::optional<std::string> phase;     // e.g. commentary / final answer; open string
+class Message {
+ public:
+  const std::string& id() const { return id_; }                  // vendor item id when one exists
+  Role role() const { return role_; }
+  const std::vector<Part>& parts() const { return parts_; }      // order is semantic
+  const std::optional<std::string>& phase() const { return phase_; } // open string, per item
+ private:
+  friend class MessageBuilder; friend class Accumulator;
+  std::string id_; Role role_ = Role::User; std::vector<Part> parts_; std::optional<std::string> phase_;
 };
+using MessagePtr = std::shared_ptr<const Message>;
+class History;                                    // persistent list of MessagePtr; append is O(1)
+
+struct ToolDefinition { std::string name, description; std::shared_ptr<const JsonValue> parameters; };
+struct Sampling { std::optional<double> temperature, top_p; };
+struct BoundOption { std::string key; std::shared_ptr<const JsonValue> value; };   // made only by Client::option
+enum class ForeignReasoning { Reject, DemoteReference, Drop };
+
+enum class ContinuationLifetime { Persisted, ConnectionBound };
+struct Continuation {                                              // origin-bound server-side state reference
+  Origin origin; std::string reference; int representation_version = 1;
+  ContinuationLifetime lifetime = ContinuationLifetime::Persisted;
+  std::string connection_epoch;                                    // set only when ConnectionBound
+};
+
+struct StructuredOutput { std::string name; std::shared_ptr<const JsonValue> schema; bool strict = false; };
+struct ReasoningRequest;                                           // section 3.7
 
 struct Request {
   std::string model;
-  std::vector<Message> messages;
-  std::vector<ToolDefinition> tools;    // name, description, JsonValue parameters
-  Sampling sampling;                    // optional temperature, top_p
+  std::shared_ptr<const History> history;
+  std::vector<ToolDefinition> tools;
+  Sampling sampling;
   std::optional<uint64_t> max_output_tokens;
   std::optional<StructuredOutput> output;
-  std::optional<Continuation> continuation; // origin-bound server-side state reference
-  std::vector<BoundOption> options;     // validated namespaced keys; not a raw body merge
+  std::shared_ptr<const ReasoningRequest> reasoning;
+  std::optional<Continuation> continuation;
+  std::vector<BoundOption> options;                                // validated namespaced keys; not a raw body merge
   ForeignReasoning foreign_reasoning = ForeignReasoning::Reject;
 };
 }
@@ -165,56 +243,71 @@ struct Request {
 Contracts:
 
 - Part order inside a message and message order inside a completion follow the family's explicit item order or key, not network arrival order. Local ids are allocated canonically and are not identity.
-- A tool call becomes executable only when its arguments are sealed: complete and validated JSON, with name and id present. An explicit empty object is distinct from missing arguments.
-- `Continuation` is `(origin, opaque reference, representation version)`; a reference is never usable from a different origin even within the same family. Combining explicit history with a server continuation is allowed only in combinations the codec documents.
+- **A tool call is executable only as a sealed `ToolCall` with `kind == ClientExecuted`**, name and id present, arguments complete and validated (an explicit empty object is distinct from missing). The decoder never promotes server-executed work to a host call: Anthropic `server_tool_use`, Responses web-search / code-interpreter / MCP call items and Gemini executable-code parts become `ToolCall{kind=ServerExecuted}` (kept for replay and display, not counted for `ToolUse`) (property `ServerToolNotExecuted`). Vendor approval requests (for example an MCP approval item) are `ApprovalRequest`; the host must answer them. A paused turn (`PauseTurn`) is replayed by resending the assistant content as produced; the codec defines what a resume request contains.
+- **Tool input is `variant<JsonValue, FreeformText>`**: OpenAI custom/freeform tool input is a raw string and is never parsed or JSON-wrapped.
+- **An unsealed call is a value, not a loss.** When a terminal arrives while arguments are incomplete (typically `MaxTokens` cutting a tool use), or the sealed text is invalid JSON or has a duplicate key, the completion carries an `InvalidToolCall` (kind, id, name, bounded raw fragment, reason); text, usage and stop survive and the host can feed back an error result. Model-invalid JSON is classified separately from wire corruption: it is `InvalidToolCall`, not `ProtocolCorrupt`. Never repaired or guessed (property `InvalidToolCallRepresentation`). The fixture that injects a cut tool use with `MaxTokens` expects `Completion{stop=MaxTokens, InvalidToolCall{Truncated}}`, not `Failure`.
+- `Continuation` is `(origin, opaque reference, representation version, lifetime)`. A `Persisted` reference may be resumed later; a `ConnectionBound` one (Responses over WebSocket with `store=false`) is valid only on the connection epoch that produced it and is never persisted in a journal. A reference is never usable from a different origin, and combining explicit history with a continuation is allowed only in combinations the codec documents. The library never silently falls back to full input when a continuation fails (section 4.6).
 - One generation, one candidate. `n != 1` is `Unsupported`. Several ordered messages inside one generation (for example commentary, function call, final answer) are normal.
-- `BoundOption` is obtained from `Client::option(key, value)`, which validates the key against the descriptor. A key that is not declared, or that collides with a typed field or a reserved path, is an error before any network I/O (`IntentOrError`).
+- `BoundOption` is obtained from `Client::option(key, value)` (a `Result`), which validates the key against the descriptor. A key that is not declared, or that collides with a typed field or a reserved path, is an error before any network I/O (`IntentOrError`).
 
 ### 3.4 Events
 
-Ten semantic events, response-scoped, one-way. Attempt lifecycle, retries, acceptance, diagnostics and job polling are NOT events.
+Ten semantic events, response-scoped, one-way. Attempt lifecycle, retries, acceptance and diagnostics are NOT events. (Polling of long-running operations is out of scope, D2.)
 
 ```cpp
 namespace sp {
+struct LocalId { uint32_t value = 0; friend bool operator==(LocalId, LocalId) = default; };
+enum class PartKind { Text, Media, ToolCall, ToolResult, Reasoning, Refusal, Opaque };
+struct PartHeader { std::string wire_id, name; ToolCallKind tool_kind = ToolCallKind::ClientExecuted; };
+struct DeltaPayload { PartKind kind; std::string_view bytes; };    // view valid only during the callback
+struct SealedPart { Part part; };
+struct TerminalEvidence { std::string kind; };                     // family-defined tag, see 4.2
+struct ConversionLoss { std::string kind, detail; };
+struct UsageConflict { std::string counter, detail; };
+struct Usage;                                                      // section 3.5
+struct Error;                                                      // section 3.6
+struct StopReason;
+
 struct Begin        { std::string generation; Origin origin; };
-struct MessageBegin { LocalId message; std::optional<std::string> vendor_id; Role role; std::optional<std::string> phase; };
-struct PartBegin    { LocalId message, part; PartKind kind; PartHeader header; };
-struct PartDelta    { LocalId part; DeltaPayload payload; }; // text bytes | visible reasoning bytes | tool-args JSON fragment
-struct PartSeal     { LocalId part; SealedPart value; };     // authoritative final snapshot: reconcile, never append
+struct MessageBegin { LocalId message; std::optional<std::string> vendor_id; Role role = Role::Assistant; std::optional<std::string> phase; };
+struct PartBegin    { LocalId message, part; PartKind kind = PartKind::Text; PartHeader header; };
+struct PartDelta    { LocalId part; DeltaPayload payload; };       // text | visible reasoning | tool-args fragment
+struct PartSeal     { LocalId part; SealedPart value; };           // authoritative final snapshot: reconcile, never append
 struct MessageSeal  { LocalId message; };
-struct UsageUpdate  { Usage snapshot; };                     // full normalized absolute snapshot
-struct Stop         { StopReason reason; };
-struct Commit       { TerminalEvidence evidence; };          // family terminal evidence verified
-struct Fail         { Error error; };
+struct UsageUpdate  { std::shared_ptr<const Usage> snapshot; };    // full normalized absolute snapshot
+struct Stop         { std::shared_ptr<const StopReason> reason; };
+struct Commit       { TerminalEvidence evidence; };                // family terminal evidence verified
+struct Fail         { std::shared_ptr<const Error> error; };
 using Event = std::variant<Begin, MessageBegin, PartBegin, PartDelta, PartSeal,
                            MessageSeal, UsageUpdate, Stop, Commit, Fail>;
 }
 ```
 
-Delta payload views are valid only for the callback duration. Retaining requires an explicit copy. Opaque reasoning bytes are never placed in delta events or logs.
+Delta payload views are valid only for the callback duration. Retaining requires an explicit copy. Opaque reasoning bytes are never placed in delta events or logs. Every vendor delta kind that the codec knows but cannot map (annotations, citations, refusal deltas, stop details, server-side fallback blocks) is either mapped to a part or recorded as a `ConversionLoss`; none vanishes silently. The codec defines, per kind, the replay projection including what is dropped.
 
 ### 3.5 Usage: unknown is not zero
 
 ```cpp
 namespace sp {
 enum class Evidence { Reported, Derived };
-struct Count { uint64_t value; Evidence evidence; };
+struct Count { uint64_t value = 0; Evidence evidence = Evidence::Reported; };
 enum class UsageStage   { Missing, Partial, Final };       // independent axis
 enum class UsageQuality { Consistent, Inconsistent };      // independent axis
 struct Usage {
   std::optional<Count> input_total, output_total, total;   // total = known input+output
   std::optional<Count> provider_reported_total;            // kept verbatim, separate from `total`
   std::optional<Count> input_uncached, cache_read, cache_write, reasoning;
-  UsageStage stage; UsageQuality quality;
+  std::map<std::string, Count> extra;                      // vendor counters without a typed slot, e.g. "cache_write:5m", "cache_write:1h", "tool_use_prompt"
+  UsageStage stage = UsageStage::Missing; UsageQuality quality = UsageQuality::Consistent;
   std::vector<UsageConflict> conflicts;                    // raw observations kept
 };
 }
 ```
 
 - `nullopt` means unknown/unobserved. An explicit zero is a value. A consumer MUST NOT settle unknown as zero.
-- The public `UsageUpdate` is a complete snapshot. The accumulator replaces its usage with it, so a `nullopt` in a later snapshot turns a previously known value back into unknown. This is how a late contradiction invalidates a stale number.
-- Vendor counter semantics (a counter that is `Set` vs `Add`ed across frames, start-frame vs delta-frame usage) are handled privately by one shared `UsageMapper` that keeps a per-attempt source ledger. The public event never exposes source counters.
-- Algebra: `input_total` includes cached tokens; `output_total` includes reasoning tokens; `cache_read`/`cache_write` decompose input; `reasoning` is a subset of output. Impossible relations make the affected derived counts unknown and record a `UsageConflict`; values are never clamped. Wrong types, negative values and overflow are `Corrupt`.
+- The public `UsageUpdate` is a complete snapshot. The accumulator replaces its usage with it, so a snapshot in which a contradicted counter is `nullopt` turns a previously known value back into unknown. This is how a late contradiction invalidates a stale number.
+- Vendor counter semantics are handled privately by one shared `UsageMapper` with a per-attempt source ledger (rules in 4.5). The public event never exposes source counters. `extra` carries counters that have no typed slot (for example cache-write by TTL tier) so they are not lost; cost tables stay outside.
+- Algebra: `input_total` includes cached tokens; `output_total` includes reasoning tokens; `cache_read`/`cache_write` decompose input; `reasoning` is a subset of output. Impossible relations make the affected derived counts unknown and record a `UsageConflict`; values are never clamped. Wrong types, negative values and overflow are `ProtocolCorrupt`.
 - Repeating the same final snapshot changes nothing. Estimated values are never labelled `Reported`. After a failure, usage is the last known partial snapshot.
 - Cost tables, tool fees and retry-attempt billing are outside `Usage` (host metering).
 
@@ -224,15 +317,17 @@ Tested by `UsageKnowledgeTransitions` and `SnapshotNotAppend`.
 
 ```cpp
 namespace sp {
-enum class Stop { EndTurn, ToolUse, MaxTokens, StopSequence, ContentFilter,
-                  Refusal, PauseTurn, ContextLimit, Unknown };
-struct StopReason { Stop kind; std::string raw; };
+enum class StopKind { EndTurn, ToolUse, MaxTokens, StopSequence, ContentFilter,
+                      Refusal, PauseTurn, ContextLimit, MalformedCall, Unknown };
+struct StopReason { StopKind kind = StopKind::Unknown; std::string raw; };
 
+struct Artifact { Media media; std::string source; };             // arrives inside a chat response
+struct Usage;
 struct Completion {
-  std::vector<Message> messages;         // ordered; Responses item ids/phases survive
-  std::vector<Media> artifacts;
+  std::vector<MessagePtr> messages;      // ordered; Responses item ids/phases survive
+  std::vector<Artifact> artifacts;
   StopReason stop;
-  Usage usage;
+  std::shared_ptr<const Usage> usage;
   std::optional<Continuation> continuation;
   std::string request_id;                // vendor request id when the wire gives one
   std::vector<ConversionLoss> losses;    // reporting only; not part of completion identity
@@ -241,29 +336,51 @@ struct Completion {
 enum class ErrorKind { InvalidConfig, InvalidRequest, Unsupported, Authentication,
   Permission, NotFound, RateLimited, QuotaExhausted, LimitUnknown, Overloaded,
   Transport, ProtocolCorrupt, Truncated, RemoteFailure, ReplayIneligible,
-  Cancelled, DeadlineExceeded, ResourceLimit };
+  Cancelled, DeadlineExceeded, ResourceLimit, Misuse };
 enum class RetryClass  { Never, Transient, AfterReset, Unknown };
-enum class RetrySafety { NotSent, PossiblyAccepted, OutputObserved };
+enum class RetrySafety { NotSent, PossiblyAccepted, RejectedBeforeOutput, OutputObserved };
+struct AttemptObservation {
+  bool request_bytes_flushed = false; bool response_headers_seen = false;
+  int transport_internal_resends = 0; std::string close_kind;
+};
 struct Error {
-  ErrorKind kind; RetryClass retry_class; RetrySafety retry_safety;
-  int http_status; std::optional<int> websocket_close;
+  ErrorKind kind = ErrorKind::Transport; RetryClass retry_class = RetryClass::Never;
+  RetrySafety retry_safety = RetrySafety::PossiblyAccepted;
+  int http_status = 0; std::optional<int> websocket_close;
   std::string vendor_code, request_id, safe_message;
   std::optional<std::chrono::milliseconds> retry_after;
   AttemptObservation attempt;            // what was sent/seen; a failed attempt is never assumed free
 };
+struct PartialCompletion { std::vector<MessagePtr> messages; std::shared_ptr<const Usage> usage; };
 struct Failure { Error error; PartialCompletion partial; };
 using Outcome = std::variant<Completion, Failure>;
 }
 ```
 
-Stop semantics (`StopMeaning`): when a completion contains a tool call, `end_turn`/STOP is normalised to `ToolUse`; `MaxTokens`, `ContentFilter`, `PauseTurn`, `ContextLimit`, `Refusal` are valid terminals and MUST NOT be reported as `EndTurn`; an unmapped raw value is `Unknown` (never `EndTurn`) and only appears when terminal evidence exists. Transport truncation is `Failure(Truncated)`, never a stop reason.
+**Stop semantics (`StopMeaning`).** When a completion contains a sealed `ClientExecuted` or `ApprovalRequest` tool call, `end_turn`/STOP is normalised to `ToolUse`. `MaxTokens`, `ContentFilter`, `PauseTurn`, `ContextLimit`, `Refusal` are valid terminals and MUST NOT be reported as `EndTurn`. Server-executed calls alone never produce `ToolUse`.
 
-Retry classification:
+**Failure-class terminals (`FailureClassTerminal`).** A terminal that names a failure is not a stop reason to be committed as success. Each family has a C++ table:
 
-- `RetryClass` says whether the failure kind could clear up (status/code tables from the descriptor, checked with quota/rate codes first). `RetrySafety` says whether repeating the request could duplicate billable work or output; it is derived from transport evidence, never from descriptor data.
-- `RetrySafety` values: `NotSent` (transport proves no request bytes were accepted), `PossiblyAccepted` (bytes sent, no output observed; includes timeouts after send and 5xx without a documented "rejected before generation" contract), `OutputObserved` (any semantic output was delivered).
-- Quota vs rate limit: `QuotaExhausted` (for example an insufficient-quota code, a documented tier exhaustion) is `Never`. `RateLimited` with a transient reset is `AfterReset`. A 429 that cannot be told apart is `LimitUnknown` with class `Unknown`: not retried automatically. The absence of `Retry-After` alone never turns a 429 into quota.
-- `request_id` is taken from the response header/body by a descriptor-declared priority list; the library never invents one. A local correlation id, prompt hash, or seed is not an idempotency key.
+| Raw terminal | Result |
+|---|---|
+| Gemini `MALFORMED_FUNCTION_CALL` | `Completion` with `StopKind::MalformedCall` and the `InvalidToolCall` if any text of it arrived |
+| Gemini `MALFORMED_RESPONSE`, `MISSING_THOUGHT_SIGNATURE`, `TOO_MANY_TOOL_CALLS`, `OTHER` | `Failure(RemoteFailure)` with vendor code and partial |
+| OpenRouter `finish_reason: "error"` (and an in-band top-level `error`) | `Failure(RemoteFailure)` |
+| Anthropic refusal terminal, including one after streamed content | `Completion` with `StopKind::Refusal`; the partial content is kept and labelled |
+| Raw value not in the table | `StopKind::Unknown`, raw preserved, only when terminal evidence exists. A consumer MUST treat `Unknown` as not-success (NeoGraph's adapter maps it to an error by default); it is never `EndTurn` |
+
+**Retry classification:**
+
+- `RetryClass` says whether the failure kind could clear up (status/code tables from the descriptor, quota/rate codes first). `RetrySafety` says whether repeating could duplicate billable work or output; it is derived from transport and runtime evidence and from a **family-specific C++ table**, never from descriptor data.
+- `NotSent`: the transport proves no request byte was flushed (DNS/connect/TLS failure). `PossiblyAccepted`: bytes were sent and nothing is known; this is the default for every HTTP status and for timeouts after send. **`RejectedBeforeOutput`: the family table lists this exact status/code as a rejection that precedes generation.** It is granted only by the family table, never by a descriptor, and the table starts empty: an entry needs a vendor page citation and a fixture (section 7 table). `OutputObserved`: the accumulator has delivered any event after `Begin` to the consumer (a runtime judgment; transport heartbeats and SSE comments are liveness, not output).
+- Quota vs rate limit: `QuotaExhausted` is `Never`. `RateLimited` with a transient reset is `AfterReset`. A 429 that cannot be told apart is `LimitUnknown`, class `Unknown`: not retried automatically. Absence of `Retry-After` alone never turns a 429 into quota.
+- Retry hints may come from headers or from the body (Gemini `RetryInfo`, OpenAI `retry-after-ms` / rate-limit reset headers); the family code reads them through fixed machine readers.
+- `request_id` is taken from the response header/body by a descriptor-declared priority list; the library never invents one. A local correlation id, prompt hash or seed is not an idempotency key.
+
+### 3.7 Structured output and reasoning request options
+
+- **Structured output.** `StructuredOutput{name, schema, strict}` is forwarded to the vendor in the family's own shape. The library does NOT validate the response against the schema (no general JSON Schema validator; section 2.3). The result is ordinary text or an `InvalidToolCall`-style failure to parse; a caller that needs validation validates with its own library. A vendor refusal arrives as a `Refusal` part. Support per model is a descriptor capability (Supported / Unsupported / Unverified).
+- **Reasoning request.** `ReasoningRequest{mode (Default|Off|On), effort (open string validated against the model's descriptor enum), budget_tokens}`. Each model's descriptor states, per field, `Required`, `Optional` or `Ignored` (the vendor silently ignores it; sending it records a `ConversionLoss`). Cross-field validity (for example budget below max tokens unless the documented interleaved exemption applies) is a rule-ledger item (section 5.1). Toggling reasoning between tool-loop turns is a pre-dispatch check (`ReplayIneligible`) where the vendor documents that it silently disables reasoning.
 
 ## 4. Streaming
 
@@ -274,24 +391,26 @@ A family decoder turns transport frames into one of three classes (`KnownCorrupt
 | Class | Definition | Effect |
 |---|---|---|
 | Known | recognised tag with a valid payload | mapped to events |
-| Unknown | unrecognised tag or property that the family explicitly marks optional | ignored or preserved as a bounded `Opaque` part; never contributes terminal, usage, or text |
-| Corrupt | recognised tag with wrong type or missing required field, or an unrecognised item whose criticality is unknown | run fails with `ProtocolCorrupt` (or `Unsupported` when criticality is unknown) |
+| Unknown | unrecognised event/item/block *tag* that the family explicitly marks optional, or an unrecognised *property* (below) | ignored or preserved as a bounded `Opaque` part; never contributes terminal, usage, or text |
+| Corrupt | recognised tag with wrong type or missing required field, or an unrecognised tag whose criticality is unknown | run fails with `ProtocolCorrupt` (or `Unsupported` when criticality is unknown) |
+
+**Unknown-property rule.** An unrecognised *property* on a known object, not marked optional by the family, is **ignorable by default** (examples seen on live APIs: OpenAI `obfuscation`, `service_tier`, `system_fingerprint`; Gemini `modelVersion`, `responseId`, `avgLogprobs`, `groundingMetadata`; OpenRouter `provider`, `native_finish_reason`), with two exceptions: a top-level in-band `error` object is always critical, and a family may list a property as critical (for example one that changes the meaning of a terminal). Unknown *tags* keep the stricter rule above. Ignored properties are counted in diagnostics so drift is visible.
 
 Unknown is never a silent fallback for Corrupt. Unknown items are never guessed into empty text, usage, or a terminal.
 
-Framing details owned by the SSE framer: UTF-8 and BOM handling, CR/LF/CRLF, multi-`data:` lines joined with LF, dispatch on blank line, comments/heartbeats are liveness only, and a pending event without its blank line at EOF is discarded and left to the terminal check. WebSocket control frames never reach a codec. Splitting the byte stream at any position MUST NOT change frames or the outcome (`ChunkPartitionInvariant`).
+Framing owned by the SSE framer: UTF-8 and BOM handling, CR/LF/CRLF, multi-`data:` lines joined with LF, dispatch on blank line, comments/heartbeats are liveness only, and a pending event without its blank line at EOF is discarded and left to the terminal check (conservative policy; W22: a Gemini stream whose last chunk lacks the trailing blank line is therefore `Truncated` unless an earlier chunk carried the finish reason; a captured fixture decides whether a Gemini-specific exception is justified, and until then this is an unverified policy). WebSocket control frames never reach a codec. Splitting the byte stream at any position MUST NOT change frames or the outcome (`ChunkPartitionInvariant`).
 
 ### 4.2 Terminal evidence
 
-`Commit` requires family terminal evidence; EOF alone is never evidence (`NoTerminalNoSuccess`):
+`Commit` requires family terminal evidence; EOF alone is never evidence (`NoTerminalNoSuccess`). **Normal EOF** is defined per framing: HTTP/1.1 chunked body ended by the zero-length terminator chunk; `Content-Length` bytes all received; a body delimited only by connection close is NOT a normal EOF (the body may be cut); HTTP/2 (only if transport flips to B, section 12) `END_STREAM` is normal, `RST_STREAM` or a connection error is not; a TLS close without `close_notify` on a length-less body is not normal. For WebSocket, a close frame is never a response terminal.
 
-| Family | Terminal evidence |
-|---|---|
-| Chat Completions | chosen candidate has a finish reason, and the `[DONE]` marker for standard SSE (a usage-only trailer before it is accepted); a compatible variant without the marker needs a reviewed terminal profile in the codec |
-| Messages | stop reason delivered and `message_stop`, all content blocks closed; start-frame and delta-frame usage merged |
-| Responses (HTTP, SSE, WS) | completed / incomplete / failed / cancelled statuses are distinguished; completed and incomplete reconcile the full snapshot then commit; failed and cancelled are `Failure`; a WS socket close is not a response terminal |
-| Gemini generate | candidate finish reason or an explicit prompt block, all parts and usage processed, normal EOF; EOF without finish reason is `Truncated` |
-| Interactions | interaction terminal discriminator and item lifecycle verified by its own codec; rules are not inferred from the other families |
+| Family | Buffered HTTP | SSE | WebSocket |
+|---|---|---|---|
+| Chat Completions | body complete; chosen choice has a finish reason | finish reason on the chosen choice, then `[DONE]` (a usage-only trailer before it is accepted); a variant without the marker needs a reviewed terminal profile | not a Chat transport: `Unsupported` |
+| Messages | body complete; stop reason non-null; all blocks present | stop reason in the message delta and `message_stop`; all blocks closed; an error event is `Failure` | not a Messages transport: `Unsupported` |
+| Responses | body complete; status `completed`/`incomplete` reconcile and commit; `failed`/`cancelled` are `Failure` | terminal response event (`completed`/`incomplete`/`failed`), then normal EOF | terminal response event for that lane (`stream_id`); socket close is not a terminal; lane-scoped error fails only that lane |
+| Gemini generate | body complete; candidate finish reason or an explicit prompt block | chunk with finish reason then normal EOF. There is no `[DONE]` marker; EOF without a finish reason is `Truncated` | Live/bidirectional API not in scope: `Unsupported` |
+| Interactions | body complete; status per 4.7 | `interaction.completed` per 4.7 | not in scope: `Unsupported` |
 
 A 200 status with an error body, an in-band error event, a failed Responses status, and an early WS close are all failures.
 
@@ -304,13 +423,13 @@ One accumulator, no per-transport finalizer, single completion notification (`No
 | `Created` | `Begin` -> `Receiving`; request or transport failure -> `Failed` |
 | `Receiving` | message/part begin, delta, seal; `UsageUpdate`; `Stop` -> `Draining`; `Fail` -> `Failed` |
 | `Draining` | only part/message seals and usage trailers the codec allows; a new text/tool delta is an error; `Commit` -> `Succeeded` |
-| `Succeeded` | all required parts sealed, stop present, terminal evidence verified; exactly one completion notification |
+| `Succeeded` | all required parts sealed or explicitly invalid (`InvalidToolCall`), stop present, terminal evidence verified; exactly one completion notification |
 | `Failed`, `Cancelled`, `DeadlineExceeded` | partial data is observation only; later events are ignored |
 | EOF or close in a non-terminal state | consult the family close contract; otherwise `Truncated`; EOF never synthesises `Commit` |
 
 Per-part state is `Unseen -> Open -> Sealed`. Delta before begin, delta after seal, and an id reused with a contradictory header are errors. A codec may synthesise begin/seal only where the wire protocol defines them implicitly.
 
-Ownership of text and argument accumulation belongs to the accumulator; codecs keep only wire-id-to-local-id maps, signature fragment assembly, and their private usage source state. This avoids a second buffer implementation. The accumulator is an owned mutable cursor with a borrowed emission sink; it does not copy whole state per frame. Per-delta heap allocation is avoided.
+Ownership of text and argument accumulation belongs to the accumulator; codecs keep only wire-id-to-local-id maps, signature fragment assembly, and private usage source state. The accumulator is an owned mutable cursor with a borrowed emission sink; it does not copy whole state per frame. Per-delta heap allocation is avoided.
 
 `PartSeal` is a reconcile step: a final snapshot that contradicts observed deltas is `ProtocolCorrupt`; a snapshot that only extends an unsealed prefix is accepted. Final snapshots are never appended to what was already streamed (`SnapshotNotAppend`).
 
@@ -318,15 +437,22 @@ Bounds: frame bytes, total bytes, part count, tool argument bytes, opaque bytes,
 
 ### 4.4 Tool-call assembly and interleaving
 
-- Tool key is `(generation, message/item/block index)`. The vendor call id is a separate binding on that key. Fragments for calls A and B may interleave arbitrarily; each is appended to its own part buffer in order (`InterleavedToolOwnership`).
-- Name and id fragments assemble per key. A "last tool" pointer or index-only association is not acceptable when two calls are open.
-- Where the wire has no call id (Gemini), the library assigns an operation-local stable id and keeps the wire name/part association. It never generates a new random id per chunk.
-- Arguments are not parsed per fragment. They are validated once at seal. An initial `""` is not repaired to `{}`; `{}` is accepted as complete only where the protocol defines it as the no-argument value. A call with unsealed arguments is partial data, never an executable call.
+- The tool key is what the family's wire uses to address a call: Chat Completions `choices[].delta.tool_calls[].index` (the id and name appear only in the first fragment of that index); Messages content block index; Responses `item_id`/`output_index`; Gemini part position. The vendor call id is a separate binding on that key. Fragments for calls A and B may interleave arbitrarily; each goes to its own part buffer in order (`InterleavedToolOwnership`).
+- **Chat compat rules.** Index is the key. If a server omits `index`, or sends every call with index 0 and distinct ids, a **changed non-empty id starts a new call**. A fragment with neither index nor id attaches to the single open call if exactly one is open, and is otherwise `ProtocolCorrupt`. Only vendors that pass the strict-compat qualification (section 5.6) are accepted without a dedicated profile.
+- **Gemini.** Function calls may carry an `id` (current models send one and require the exact id in the matching `functionResponse`): the id is bound to the call and NEVER overwritten. Only when the wire has no id does the library synthesise an operation-local stable id (flagged `synthesized`, not sent back to the vendor, never regenerated per chunk).
+- **Gemini part boundaries carry meaning** (where a thought signature sits). The codec preserves the model's part structure: a part with a signature is never merged with one without, two signature-bearing parts are never combined, and a signature may sit on an empty text part. A network chunk boundary is not a part boundary. `TransportProjectionParity` for Gemini is defined on parts, not on coalesced text.
+- Arguments are not parsed per fragment; they are validated once at seal. An initial `""` is not repaired to `{}`. **No-argument table (golden per row):** Messages: start-frame `input: {}` with an empty or absent `partial_json` accumulation seals as `{}` (the normal wire); non-empty accumulation must be one valid JSON object. Chat/Responses: argument string `"{}"` seals as `{}`; an empty string is `InvalidToolCall{Empty}` unless the vendor's reviewed profile says empty means no arguments. Freeform tools bypass this table.
+- A call with unsealed or invalid arguments is represented as `InvalidToolCall` (3.3), never an executable call.
 - Signatures attach to the owning call or block by key, not by parallel lists. OpenRouter reasoning fragments merge by `(type, index)`; entries without an index stay independent and are not de-duplicated by guesswork.
+- **Responses replay with `store=false`.** A reasoning item (`rs_...`) is sent together with its required following item; a function call needs both its item id (`fc_...`) and its `call_id`; `phase` is per item. The capsule for a reasoning item is an ordered group with the items it depends on; dropping part of the group invalidates all of it.
 
 ### 4.5 Usage during streaming
 
-The family decoder feeds source observations to the `UsageMapper` (start-frame input and cache, delta-frame output, final totals). The mapper emits absolute snapshots; the accumulator replaces. A source counter that is absent stays as previously observed; an explicit zero overwrites; final snapshot precedence is decided by family code. Anthropic-style input arriving in an earlier frame than output is therefore not lost, and a repeated final snapshot does not double count (`UsageKnowledgeTransitions`, `SnapshotNotAppend`).
+The family decoder feeds source observations to the `UsageMapper`; the mapper emits absolute snapshots; the accumulator replaces.
+
+- Per-counter cumulative rule: a counter absent from a later frame keeps its previous value; a value in a later frame replaces the earlier one when it is greater or equal. A later value that is **smaller than an earlier positive value** (for example a gateway that sends `0` in the final frame) does NOT erase it: the earlier value stays and a `UsageConflict` is recorded (quality `Inconsistent`).
+- **Messages.** `message_start` carries input and cache counters and an initial `output_tokens`; each `message_delta` usage is cumulative, and its input and cache fields may reappear and differ (server-tool use is an example); the last `message_delta` before `message_stop` is final. `output_tokens_details.thinking_tokens`, when present, feeds `reasoning`. Array-shaped sub-usage (`iterations[]`) is read only by the fixed Messages reader (5.1).
+- A repeated final snapshot does not double count (`UsageKnowledgeTransitions`, `SnapshotNotAppend`).
 
 ### 4.6 How buffered, SSE and WebSocket converge
 
@@ -336,9 +462,30 @@ SSE bytes -> framer ─┼─> same family decoder -> Event -> same accumulator
 WS messages ─────────┘
 ```
 
-A buffered body is walked item by item through the same `interpret_item` routine that streaming uses, producing the same begin/seal/usage/stop/commit events; no artificial byte-level deltas are invented. `complete()` has no parser of its own. For one scripted logical reply, buffered, SSE and WS produce equal messages, usage, stop, native state and journal projection (`TransportProjectionParity`). A change to semantic decoding touches a codec file, not a transport file.
+A buffered body is walked item by item through the same `interpret_item` routine that streaming uses, producing the same begin/seal/usage/stop/commit events; no artificial byte-level deltas are invented. `complete()` has no parser of its own. For one scripted logical reply, buffered, SSE and WS produce equal messages, usage, stop, native state and canonical replay projection (`TransportProjectionParity`; parity statement in section 8). A change to semantic decoding touches a codec file, not a transport file.
 
-Responses WebSocket: one in-flight generation per session by default; frames are dispatched by response id; a stray frame after a terminal is a connection protocol violation that discards the session and does not alter the delivered outcome; reconnect is transport recovery, never automatic resume of a half-finished generation.
+**Responses over WebSocket** `[read docs]` (OpenAI "WebSocket Mode" guide, sections on continuing with incremental inputs, multiplexing with `stream_id`, limits per connection, and reconnect/recover):
+
+| Fact | Consequence in this design |
+|---|---|
+| A `stream_id` names an ordered lane; same-lane requests are first-in-first-out and do not overlap; different lanes run concurrently and their events interleave on one connection | The WS reader is one loop routing every event by `stream_id`; delta events are keyed by `item_id`/`output_index` within a response, not by a connection-wide response id |
+| A connection may have up to 16 in-flight responses and 32 named lanes; connections last up to 60 minutes | The first release supports exactly **one lane** (a fixed `stream_id`) per connection but must not assume that is the protocol; limits are configuration, not constants in the decoder |
+| With `store=false`, previous-response state lives only in a connection-local in-memory cache; after a close or the 60-minute limit an old `previous_response_id` returns `previous_response_not_found` | Such a `Continuation` is `ConnectionBound` and is never journaled as resumable |
+| A 4xx/5xx on a same-lane continuation evicts that `previous_response_id` from the cache | A blind retry of the same continuation fails deterministically: no automatic retry of a ConnectionBound continuation; recovery is a caller decision to send full input with a null `previous_response_id`. The library does not fall back by itself |
+| Errors can be lane-scoped or connection-scoped | A lane error fails that operation only; a connection error or unexpected frame after a terminal discards the session and fails every open lane with `Transport`; reconnect is transport recovery, never automatic resume of a half-finished generation |
+
+### 4.7 Interactions family specification
+
+The family is specified here so its codec can be reviewed, but it is **not in the first release stage** (see ROADMAP); this section is drawn from a reviewer's reading of the vendor documentation and MUST be re-read against the current Interactions pages before any codec work (`[INFERENCE]` until then).
+
+| Element | Rule |
+|---|---|
+| Lifecycle | `interaction.created` -> per step `step.start` / `step.delta` / `step.stop` -> `interaction.completed` |
+| Terminal | `interaction.completed` is the terminal event for every final status (completed, failed, cancelled, incomplete, requires_action); the **status field, not the event name, decides** success vs `Failure` vs `ToolUse` |
+| `requires_action` | a client tool call is pending: `ToolUse` with sealed calls, or `InvalidToolCall` |
+| Errors | an `error` event is a `Failure`; `interaction.status_update` updates state but is not a terminal |
+| Resume | `event_id` supports resuming a stream; resume is a transport-recovery feature and not enabled in the first implementation |
+| Buffered | same discriminators on the final body |
 
 ## 5. Data vs code boundary
 
@@ -349,22 +496,26 @@ Descriptors are trusted deployment input (no remote refresh, no external `$ref`)
 | Key | Content and limits |
 |---|---|
 | `descriptor_version`, `revision`, `id`, `family`, `evidence` | integers, stable vendor id, an installed family id, documentation URLs and verification date (non-executable metadata) |
-| `connection` | HTTPS base URL, relative paths per mode, fixed slots `{model}` and `{operation_id}`, auth header/query name and prefix, credential binding name, literal / required-env / optional-env headers, request-id header priority |
-| `models` | exact or terminal-`*` prefix selectors, API-version and account-scope conditions, capability Supported / Unsupported / Unverified with verification date, numeric limits; resolution order exact, longest prefix, default; equal-rank conflict is an error |
-| `bindings` | member names and paths for slots the codec declared (for example a request field name, a reasoning text path, a usage root). A path is a list of escaped object-member segments: no wildcard, filter, array iteration or computation |
-| `options` | `namespace:key`, type scalar / list / closed record, enum or range, default, destination slot, model selector; closed records do not recurse and have no union or `$ref` |
-| `usage` | per-counter source path, unit, meaning of absence (unknown, or zero when the vendor documents it); disjoint finite source sums per destination; subset relations. No constants, products, or expressions |
-| `errors` | code/type to kind and retry class; retryable status and code lists; quota and rate code lists; fixed machine-field readers. Quota codes outrank status. `RetrySafety` cannot be set by data |
-| `stop_reasons` | raw string to an existing `Stop`; default is `Unknown`, never `EndTurn` |
-| `constraints` | exactly three rule kinds (below) and exact/prefix lists for temperature exclusion |
+| `connection` | `https` base URL (`http` only for loopback hosts, 5.5), relative paths per mode, fixed slot `{model}`, auth header/query name and prefix, credential binding name, literal / required-env / optional-env headers, request-id header priority |
+| `models` | exact or terminal-`*` prefix selectors, API-version and account-scope conditions, capability Supported / Unsupported / Unverified with verification date, per-feature `Required`/`Optional`/`Ignored` for request fields, numeric limits; resolution order exact, longest prefix, default; equal-rank conflict is an error |
+| `bindings` | member names and paths for slots the codec declared (a request field name, a reasoning text path, a usage root). A path is a list of escaped object-member segments: no wildcard, filter, array iteration or computation |
+| `options` | `namespace:key`, type scalar / list / closed record of scalars, enum or range, default, destination slot, model selector. Records are one level deep and do not recurse; a two-level vendor shape is either flattened into namespaced scalar options with slot destinations or becomes a typed request member |
+| `usage` | per-counter scalar source path, unit, meaning of absence (unknown, or zero when the vendor documents it); disjoint finite source sums per destination; subset relations. No constants, products, or expressions |
+| `errors` | code/type to kind and retry class; retryable status and code lists; quota and rate code lists; selection among the family's fixed machine-field readers. Quota codes outrank status. `RetrySafety` cannot be set by data |
+| `stop_reasons` | raw string to an existing `StopKind`; default is `Unknown`, never `EndTurn`. Failure-class terminals (3.6) are C++ and cannot be remapped by data |
+| `constraints` | exactly two rule kinds, recorded in the ledger (below), and exact/prefix lists for temperature exclusion |
 
-The three closed rules: `RequireGreater(lhs_slot, rhs_slot)`, `RequireEqualWhen(target_slot, literal, selector_slot, enum_set)`, `OmitDefaultWhen(target_slot, selector_slot, enum_set)`. A selector reads one enum slot of the original validated request; there is no nesting or boolean composition. Rules read the same original and are order independent; contradictory rules on one destination are a load error; omitting a caller-supplied value is an error (only library defaults may be omitted).
+**Arrays and machine fields.** A descriptor path cannot iterate arrays. Vendor facts that live in arrays (Messages `usage.iterations[]`, Gemini 429 `details[]` with `RetryInfo`) are read by **fixed C++ machine-field readers per family**; the descriptor can only choose among the readers the family exposes and supply scalar paths. So "descriptor-only" never covers array-shaped fields.
 
-A descriptor cannot: template message content, loop or branch, dispatch on events, register callbacks or named rewrite hooks, script, merge arbitrary body fragments, merge roles, correlate items, assemble signature fragments, choose terminals, perform retry, run token commands, fetch anything, or carry vendor-name conditionals. Those are C++.
+**Rules (D5, FIRM).** v1 ships only rules with a real case in current NeoGraph behaviour: `Omit(target_slot, selector_slot, enum_set)` — omit a library-default value when a selector enum is in the set (`omit` + `when.in`) — and `RequireGreater(lhs_slot, rhs_slot, unless_selector, enum_set)`, which needs the selector exemption because one vendor documents a thinking budget that may exceed max tokens with interleaved thinking. `RequireEqualWhen` is **removed** (no real case). A selector reads one enum slot of the original validated request; there is no nesting or boolean composition. Rules read the same original and are order independent; contradictory rules on one destination are a load error; omitting a caller-supplied value is an error (only library defaults may be omitted). Every admitted rule is a row of the machine-readable ledger `decisions/rules.json`; CI fails when the loader's rule-kind enumeration differs from the ledger (property `DescriptorRuleAdmission`). A rule shape seen in a current vendor doc that these two cannot express (for example a mutual exclusion between two thinking-related options on one model family, which returns a 400) is checked in the family codec's request validation, not added as a rule. The rule set must be re-validated against current vendor docs before the grammar is frozen.
+
+**Conditional and ordering constructs are counted across the whole grammar**, not only in `constraints`. Current list (each is part of the growth budget in 5.4): model-selector resolution order; model `api-version`/`account-scope` conditions; error precedence (quota outranks status); usage absence meaning; usage subset relations; the two rules and their selectors; stop-reason default. Adding a construct to this list is a descriptor major version.
+
+A descriptor cannot: template message content, loop or branch, dispatch on events, register callbacks or named rewrite hooks, script, merge arbitrary body fragments, merge roles, correlate items, assemble signature fragments, choose terminals, declare equivalence classes, perform retry, run token commands, fetch anything, or carry vendor-name conditionals. Those are C++.
 
 ### 5.2 Load-time validation
 
-Loading is: strict JSON parse (duplicate keys rejected, size and depth bounded) -> closed type and unknown-key check -> match against the family's slot inventory -> checks for path collisions, reserved destinations, model-selector priority, rule contradictions, and usage source overlap -> `ValidatedDescriptor`. Errors carry the JSON pointer, expected type and revision, and never a secret. There is no coercion or migration on load; a future `descriptor_version` or an unknown key is an error. A changed endpoint changes where credentials are sent, so the factory applies an endpoint allow-policy. Clients are immutable: a new descriptor means a new `Client`, so an in-flight request never changes revision or origin.
+Loading is: strict JSON parse (duplicate keys rejected, size and depth bounded) -> closed type and unknown-key check -> match against the family's slot inventory -> checks for path collisions, reserved destinations, model-selector priority, rule contradictions, and usage source overlap -> `ValidatedDescriptor`. Errors carry the JSON pointer, expected type and revision, and never a secret. There is no coercion or migration on load; a future `descriptor_version` or an unknown key is an error. A changed endpoint changes where credentials are sent, so the factory applies an endpoint allow-policy. Clients are immutable: a new descriptor means a new `Client`, so an in-flight request never changes revision or origin. The loader returns `Result<ValidatedDescriptor>`.
 
 ### 5.3 Schema is generated from the C++ inventory
 
@@ -372,170 +523,203 @@ The typed common field inventory plus each family's slot inventory is the single
 
 ### 5.4 Growth-cap rule
 
-Never, regardless of the number of use cases: stateful rules, ordered or chained rules, fragment correlation or merging, event dispatch, callbacks or named hooks, side effects, dynamic paths, vendor-name inspection. If a new key would need an execution order, a new state, or a dynamic reference, it is rejected and goes to family C++ (or a small typed sub-codec). A new stateless rule kind is admissible only through the process in D5. Descriptor coverage percentage is not a target. The hardest judgment in this design is classifying "same family, different values" versus "new wire semantics"; that is why the extension walkthroughs (section 9) list exact touch sets and record the actual set for each real change.
+Never, regardless of the number of use cases: stateful rules, ordered or chained rules, fragment correlation or merging, event dispatch, callbacks or named hooks, side effects, dynamic paths, vendor-name inspection, I/O, message reordering, event-meaning changes. A new stateless rule kind is admissible only through D5: three independent real cases (different vendor, source doc or reproduction log, model family; two models from one vendor doc count as one), each with a fixture that fails when the rule is removed; a full truth table over semantic equivalence classes; permutation/idempotence tests; a mutant check; and a prototype showing no increase in production C++ files touched and at least 30% less duplicated semantic code (a policy choice, not a natural constant). Every admitted rule bumps the descriptor major version. Descriptor coverage percentage is not a target. Classifying "same family, different values" versus "new wire semantics" is the hardest judgment here, which is why section 9 lists exact touch sets.
+
+### 5.5 HTTP versus HTTPS and the test trust anchor
+
+Descriptors are HTTPS-only with one exception: `http` is allowed when the host is loopback (`localhost`, `127.0.0.0/8`, `::1`), so a local vendor or a loopback test server can be described. For loopback HTTPS tests the client configuration (not a descriptor) accepts an extra trust-anchor file. Credentials are never sent over plain http to a non-loopback host. The OS trust store question for Windows/macOS is a flip condition of D1, not assumed solved.
+
+### 5.6 What "zero C++" means
+
+Adding a vendor with a descriptor and fixtures needs no edit to any C++ source file, **but only for a strict-compatible vendor** and only as a *source-tree contributor*: the descriptor is embedded at configure time, so the library is rebuilt and released. There is no runtime descriptor injection in the installed API of the first release. **Strict-compat qualification test** (run on recordings before a vendor is accepted under an existing family): terminal profile matches the family (finish reason and `[DONE]` present); tool-call fragments carry an `index`; the finish reason after a streamed tool call is the tool-call finish reason, not `stop`; usage arrives in the documented shape. A vendor that fails any item (for example an OpenAI-compatible endpoint that omits the tool-call index and reports `stop` for streamed tool calls) needs a codec profile: that is C++ (section 9, case c).
 
 ## 6. Reasoning carry
 
-Vendor reasoning state (signed thinking blocks, encrypted reasoning items, thought signatures) is opaque, origin-bound, and not portable.
+Vendor reasoning state (signed thinking blocks, encrypted reasoning items, thought signatures) is opaque, origin-bound, and not portable across vendors.
 
-**Capture.** Decoders capture reasoning by default, separately from visible text: Messages thinking and redacted blocks with order and signature; Responses reasoning items with id, encrypted content and summary; Gemini thought parts and signatures with the function-call association; OpenRouter `reasoning_details` as a whole. A gateway's `format` field is an internal provenance hint, not a replay permission. Capturing a signature is independent of whether the caller asked for visible thoughts.
+### 6.1 Threat model
 
-**Replay gate.** Native replay requires an exactly equal `Origin` (family, vendor, authority, route_scope), a complete capsule, and the codec's binding checks (for example the surrounding context has not changed where the vendor binds signatures to it).
+| Item | Statement |
+|---|---|
+| Assets | opaque reasoning bytes; credentials; conversation content; the integrity of replay (what is sent as the assistant's own past) |
+| Actors | a remote vendor or gateway (honest-but-buggy, or hostile); a tampered or attacker-supplied history file; other local processes reading logs or stores; an untrusted end user of the host app |
+| Not claimed | `sealed` is not authentication: it proves C++ immutability and provenance inside one process, not that the vendor issued the bytes. Origin is an observed label, not a proof of issuer |
+| Importer | an explicit history importer is a trust boundary; its input is untrusted. It can produce only capsules with `complete=false` unless the host supplies a verified envelope |
+| Persistence | a persisted capsule needs a host-held AEAD or HMAC envelope binding (origin, binding facts, representation version) or it is not replayed natively (6.4). The library does not implement cryptography |
+| Stored-block risk | stored reasoning can be decrypted by anyone with the key and may contain attacker-influenced content; there is published work on risks of stored and replayed reasoning blocks (see RESEARCH); it is treated as untrusted data on demotion (6.3) |
+| Not defended | a hostile vendor producing a valid-looking block; a host that logs bytes despite redaction; side channels |
+
+### 6.2 Capture and replay gate
+
+**Capture.** Decoders capture reasoning by default, separately from visible text: Messages thinking and redacted blocks with order and signature; Responses reasoning items with id, encrypted content and summary (ordered group, 4.4); Gemini thought parts and signatures with the function-call association; OpenRouter `reasoning_details` as a whole. A gateway's `format` field is a provenance hint, not a replay permission.
+
+**Replay gate.** Native replay requires exactly equal `Origin` (or an activated `Documented-Unverified` class, 3.1), equal `BindingFacts` checks (model, context fingerprint, account scope), a complete capsule, and the codec's binding checks.
+
+**Canary (`CanaryNegativeControl`).** A live same-origin canary runs a real second request. Its record carries `negative_control: rejected|accepted|not_run` and three evidence fields: `client_retention_verified`, `request_accepted`, `native_validation_evidenced` (presence of thinking, usage or cache evidence). A cell whose negative control (a tampered signature must be rejected) is `accepted` or `not_run` is `ReplayAcceptanceUnobservable` and is never reported as "replay verified": acceptance alone is vacuous because the vendor degrades gracefully by dropping unreadable blocks. Results are N-run acceptance rates with a lower confidence bound, not a boolean. Canary keys, cost, fork-PR secret exposure and terms of service are handled in the pre-mortem (section 11).
+
+### 6.3 Treatments
 
 | Treatment | When | Result |
 |---|---|---|
-| Native | same origin, complete capsule, gate passed | replay verbatim. Unsigned, empty, or redacted blocks are replayed as they were captured. Invalid or incomplete capsule: `ReplayIneligible`, no silent demotion |
-| Explicit demotion | foreign origin, and the caller set `ForeignReasoning::DemoteReference` | only public visible text or summary, as clearly labelled reference context in a user-level message; a `ConversionLoss` is recorded. Signature, encrypted and redacted bytes are never exposed as text |
-| Drop | foreign origin, and the caller set `ForeignReasoning::Drop` | reasoning removed; `ConversionLoss` recorded. Not a claim of continuity |
+| Native | gate passed | replay verbatim. Unsigned, empty, or redacted blocks are replayed as captured. Invalid or incomplete capsule: `ReplayIneligible`, no silent demotion |
+| Explicit demotion | foreign origin, caller set `ForeignReasoning::DemoteReference` | public visible text or summary only, rendered as an **assistant-role quoted block inside an explicit untrusted delimiter** (for example `<foreign_reasoning untrusted origin="...">`), with delimiter sequences in the content escaped; NEVER in a user-, system- or developer-role instruction position; a `ConversionLoss` is recorded. Signature, encrypted and redacted bytes are never exposed as text |
+| Drop | foreign origin, caller set `ForeignReasoning::Drop` | reasoning removed; `ConversionLoss` recorded. Not a claim of continuity |
 
-Default for a foreign capsule is **Reject** (request fails before dispatch with `ReplayIneligible`). Drop and Demote are opt-in only.
+Default for a foreign capsule is **Reject** (fails before dispatch with `ReplayIneligible`). Drop and Demote are opt-in only.
 
 Rules that are not relaxed:
 
 - **Same-origin unsigned blocks are never demoted or dropped** (a missing signature is not evidence of a foreign origin).
-- A tool loop (outstanding call, result, and the same vendor's follow-up) cannot cross origins; a mid-loop vendor switch is refused. Imported history without provenance needs a verified continuation envelope.
+- A tool loop (outstanding call, result, and the same vendor's follow-up) cannot cross origins; a mid-loop vendor switch is refused. Imported history without provenance needs a verified envelope.
 - The library never strips reasoning and retries after an error, and never silently rewrites history to make a request pass.
-- Gemini's documented sentinel for missing signatures is only usable under an explicit `AllowDocumentedSentinel` approval for completed foreign history, with a recorded quality loss; otherwise a missing required signature is a pre-dispatch error.
-- Editing visible text, compacting history, or changing system/tools can invalidate vendor-side bindings. The builder drops the affected seal; the caller must resend without native state or satisfy the codec binding rule.
+- Gemini's documented sentinel for missing signatures is usable only under an explicit `AllowDocumentedSentinel` approval for completed foreign history, with a recorded quality loss; otherwise a missing required signature is a pre-dispatch error.
+- Editing visible text, compacting history, or changing system/tools can invalidate vendor-side bindings (the context fingerprint detects this before dispatch). The builder drops the affected seal.
 
-**Sensitivity.** Opaque reasoning is redacted by default in logs, errors, telemetry and exceptions. Storage is opt-in and the host is responsible for encryption, access control, and retention. Portable export excludes reasoning secrets; a continuation archive export needs an explicit secret-bearing warning and an integrity/provenance envelope. Public test fixtures replace opaque payloads with synthetic ones and are marked as not proving native acceptance.
+### 6.4 Storage policy (resolves opt-in versus journal)
 
-Tested by `NativeRetentionForeignGate`. A same-origin live canary (a real second request accepted by the vendor) complements the synthetic tests.
+Capture is always in memory. **Persistence is never implicit.** A run that is journaled and meant to be resumable must choose exactly one mode, recorded in the journal record:
+
+| Mode | Behaviour |
+|---|---|
+| `SealedStore` | the host supplies a sink that stores each capsule under a host-held AEAD/HMAC envelope (binding origin, binding facts, representation version as associated data); resume may replay natively if the gate passes |
+| `Capsuleless` | no capsule is persisted; on resume reasoning is dropped as if `ForeignReasoning::Drop`, and the mode is part of the run's identity so it is never mistaken for a native-continuous run |
+
+There is no third mode where payloads are silently not retained while the journal claims native resume. Opaque reasoning is redacted by default in logs, errors, telemetry and exceptions. Portable export excludes reasoning secrets. Public test fixtures replace opaque payloads with synthetic ones and are marked as not proving native acceptance.
+
+Tested by `NativeRetentionForeignGate` (with `OriginBindingFacts` and `CanaryNegativeControl`).
 
 ## 7. Resilience
 
-**One retry layer.** Default is one attempt per logical request and zero automatic retries. Retry exists only in the client runtime's single `RetryController`, only when enabled. Transport and codec never retry. If the host (for example NeoGraph) owns retry, the library's retry stays off. Gateway-side retries are documented as operational facts, not controlled by the client.
+**One retry layer.** Default is one attempt per logical request and zero automatic retries. Retry exists only in the client runtime's single `RetryController`, only when enabled. Transport and codec never retry. If the host (for example NeoGraph) owns retry, the library's retry stays off. Gateway-side retries are operational facts the client does not control.
 
-**Retry condition.** A retry happens only if all hold: `RetryClass` is Transient or AfterReset; `RetrySafety` permits (NotSent, or a documented safe-by-contract rejection; never `OutputObserved`; `PossiblyAccepted` only when the endpoint documents idempotency-key consistency and the same key is reused, or when the caller sets an explicit duplicate-billing-risk policy); budget and deadline remain; no semantic output has been delivered. A new attempt is never appended to the previous attempt's partial output. Absence of a stream callback is not a safety argument (`RetrySafetyBudgetDeadline`).
+**Transport one-attempt rule.** One logical attempt is one request write on one connection. A transport-internal automatic resend (for example re-sending on a reused keep-alive connection that turned out to be dead) counts as an attempt and is reported in `AttemptObservation.transport_internal_resends`; the default runtime refuses it. The oracle is the server-observed application request count: at most 1 per attempt unless retry is enabled. Redirects are not followed with credentials.
+
+**Retry condition.** All must hold: `RetryClass` is Transient or AfterReset; `RetrySafety` is `NotSent` or `RejectedBeforeOutput` (or `PossiblyAccepted` only when the endpoint documents idempotency-key semantics and the same key is reused, or the caller sets an explicit duplicate-billing-risk policy); never `OutputObserved`; budget and deadline remain. A new attempt is never appended to a previous attempt's partial output. Absence of a stream callback is not a safety argument (`RetrySafetyBudgetDeadline`).
+
+**Retry-safety table by family** (defaults; a `RejectedBeforeOutput` grant needs a citation and fixture before it is added; none is granted in this draft):
+
+| Situation | Safety |
+|---|---|
+| DNS/connect/TLS failure, nothing flushed | `NotSent` |
+| Failure while writing the request, or timeout after send | `PossiblyAccepted` |
+| Reused connection reset before any response byte | `PossiblyAccepted` (the resend is an attempt, see above) |
+| 429 / 503 / 529 (Anthropic overloaded) / Gemini 429 or 503, all families | `PossiblyAccepted` by default: the body was already sent; only a family table entry can change this |
+| OpenRouter error delivered as HTTP 200 with an in-band error before any output | `PossiblyAccepted`, class from the error code; after output, `OutputObserved` |
+| Any event after `Begin` delivered to the consumer | `OutputObserved` (heartbeat bytes and SSE comments do not count) |
+| Cancelled locally after send | `PossiblyAccepted` (the vendor may keep generating and billing) |
 
 **Budget.** Logical attempt cap, one absolute monotonic deadline, and a shared retry token bucket per runtime and credential-origin. Opt-in example defaults: at most 3 attempts (a proposal, to be validated against workloads). Cross-process budgets belong to the host.
 
-**Backoff.** Capped exponential with full jitter: `Uniform(0, min(cap, base * 2^n))`. `Retry-After` (seconds, HTTP date, or a supported millisecond header) is a minimum: wait `max(server_minimum, jitter)`. If that wait exceeds the remaining deadline or budget, stop with the error; do not shorten the wait. Dates are converted to monotonic remaining time at receipt. Clock and RNG are injectable.
+**Backoff.** Capped exponential with full jitter: `Uniform(0, min(cap, base * 2^n))`. `Retry-After` (seconds, HTTP date, or a supported millisecond header or body hint) is a minimum: wait `max(server_minimum, jitter)`. If that wait exceeds the remaining deadline or budget, stop with the error; do not shorten the wait. Dates are converted to monotonic remaining time at receipt. Clock and RNG are injectable.
 
-**Deadlines and cancellation.** One absolute deadline and one `std::stop_token` reach connect, DNS, TLS, request write, response read, WS handshake, stream read, and backoff. Idle timeout supplements but does not replace the deadline. Cancellation stops local waits, sockets and queued callbacks and yields exactly one `Failure(Cancelled)`; it does not promise that the vendor stops generating or billing.
+**Deadlines and cancellation.** One absolute deadline and one `std::stop_token` reach connect, DNS, TLS, request write, response read, WS handshake, stream read, and backoff. Idle timeout supplements but does not replace the deadline. Cancellation stops local waits, sockets and queued callbacks and yields exactly one `Failure(Cancelled)`; it does not promise that the vendor stops generating or billing. It must complete when the peer makes no further progress, in every waiting state (DNS/connect, TLS handshake, header wait, partial SSE body then stall, partial WS frame, backoff wait) (`CancelWithoutPeerProgress`); a 1 s test timeout is only an anti-hang guard. **Race rule: the terminal wins.** If `Commit` (or a failure) was decided before the stop request was observed, the outcome is that completion; a later stop request does nothing. Toolchain floor for `std::stop_token`: GCC/libstdc++ 11 or later, libc++ 18 or later `[INFERENCE: pin by a compile check in the CI matrix]`.
 
-**Threads and API shape.** Async-native private core with a blocking `complete()` facade (`Outcome complete(Request, RunOptions)`) that waits on the same operation as `start(Request, RunOptions, Callbacks)`. The runtime owns a bounded set of I/O threads; there is no thread per request; no Asio, coroutine, or executor type is public. Whether async-native is required at all is D3.
+**Threads and API shape (D3, FIRM).** Async-native private core with a blocking `complete()` facade (`Outcome complete(Request, RunOptions)`) that waits on the same operation as `start(Request, RunOptions, Callbacks)`. The runtime owns a bounded set of T I/O threads; no thread per request; no Asio, coroutine or executor type is public. There are no blocking-vs-async switching thresholds. Admission must not depend on held streams: with T I/O threads and K = 4T+64 streams held open, a short call still completes and the process thread count stays at most T + a constant, independent of K (`AdmissionIndependentOfHeldStreams`).
 
-**Callback and lifetime contract** (`OwnershipAndBounds`):
+**Callback, outcome and handle contract** (`OwnershipAndBounds`):
 
-- The operation state owns the callback closure; there is no borrowed observer.
-- Callbacks are serialized per operation; event views are valid only for the call.
-- The destructor of the operation handle performs a non-blocking cancel and blocks further callback admissions. It does not wait for a running callback.
-- `join()` is an explicit fence that waits until no callback is running; calling it from the callback thread is an error, not a deadlock.
-- A callback may drop the last reference to its own handle without deadlock or use-after-free; the operation state outlives the running callback.
-- Exactly one outcome is delivered, and no callback runs after the fence completes. Cancel/error/terminal races produce one outcome.
-- Blocking `complete()` and `join()` are rejected when called from an I/O callback.
+- `start()` returns `Operation`, a **move-only unique handle** over shared operation state; the state owns the callback closure (no borrowed observer).
+- **Dropped handle.** Destroying (or resetting) an `Operation` whose run is not terminal performs a non-blocking cancel and the state STILL delivers exactly one outcome (`Cancelled`) to the owned callbacks; it does not wait for a running callback. To detach without cancel, the caller calls `detach()` explicitly; there is never zero outcomes.
+- Callbacks are serialized per operation; event views are valid only for the call. No callback runs after `join()` returns.
+- `join()` returns `Status`; calling it from a callback of the same operation is `Misuse`, not a deadlock. Blocking `complete()`/`join()` from any I/O thread is `Misuse`. A callback handing the operation to another thread that then joins cannot be detected by self-join checks; that cycle is the caller's bug and the contract says so (`join()` from a thread that is itself waited on by a running callback is undefined-in-effect and is documented, not prevented).
+- A callback may drop the last reference to its own handle without deadlock or use-after-free; the state outlives the running callback.
+- Exactly one outcome; cancel/error/terminal races produce one outcome.
+
+**Backpressure and callback exceptions.** Each operation has a bounded event queue; when it is full the transport stops reading that socket (TCP backpressure), it never drops events. A callback that throws is caught on the I/O thread, the operation is cancelled, and the outcome is `Failure(Misuse)` with a safe message; exceptions never cross into the I/O pool. **Accepted constraint:** callbacks run on the shared I/O threads, so a callback that blocks starves other operations (up to T callers); the contract forbids blocking in callbacks, and the diagnostics counter `slow_callbacks` is the only detection. A consumer needing slow work hands events to its own queue.
 
 Public logs and errors never contain secrets, opaque reasoning, or raw bodies; headers are exposed through a bounded allow-list; raw body capture is opt-in.
 
 ## 8. Consumer contract: NeoGraph adapter and journal
 
-The library never computes a NeoGraph digest. It provides a lossless, versioned `completion-envelope` serialization; NeoGraph owns the digest.
+The library never computes a NeoGraph digest. It provides a **canonical replay projection** (`projection_version`) of a `Completion` and of each capsule, and NeoGraph owns the digest. There is no separate `completion-envelope`: the projection is the only serialization, specified below and tested by `JournalVersionAndCanonicalOrder`.
 
-**NeoGraph adapter (in the NeoGraph repo).** Bridges the library to NeoGraph's coroutine model and its cancellation token (converted to `std::stop_token`), and maps `Completion` to NeoGraph's own types. The library knows nothing of graphs, journals, or tool executors.
+**NeoGraph adapter (in the NeoGraph repo).** Bridges the library to NeoGraph's coroutine model and cancellation token (converted to `std::stop_token`), maps `Completion` to NeoGraph types, and maps `StopKind::Unknown` and `MalformedCall` to errors or tool-error results per its policy. The library knows nothing of graphs, journals or tool executors.
 
-**`provider-completion/v2` is an explicit cutover.** The existing `provider-completion/v1` digest is computed over message, stop reason, and three usage numbers (as observed in the current implementation, per RESEARCH.md); it cannot express unknown-vs-zero usage, several ordered messages, origin, or continuation without inventing values. Therefore no fake zeros are written to keep v1 alive, and v1 is not reinterpreted.
+**`provider-completion/v2` is an explicit cutover.** The existing `provider-completion/v1` digest is computed over message, stop reason, and three usage numbers (per RESEARCH.md); it cannot express unknown-vs-zero usage, several ordered messages, origin, invalid tool calls or continuation without inventing values. No fake zeros keep v1 alive and v1 is not reinterpreted.
 
-| Included in the v2 canonical record | Excluded |
+| Included in the canonical projection | Excluded |
 |---|---|
-| semantic version; ordered messages and parts with part boundaries, vendor ids and phase; tool ids/names/sealed arguments; stop raw value and normalised kind; nullable usage with per-count provenance, stage, quality, `provider_reported_total`; native state identity (origin, representation version, canonical native projection); continuation (origin, reference, representation version); artifact identity | chunk boundaries, transport mode, local ids (canonically remapped from semantic order), timestamps, `request_id`, `losses` and other diagnostics, retry attempt facts |
+| projection version; ordered messages and parts with part boundaries, vendor ids and phase; tool ids/names/kinds/sealed input, `InvalidToolCall` reason and bounded fragment; stop raw value and kind; nullable usage with provenance, stage, quality, `provider_reported_total`, `extra`; native state identity (origin, binding facts, representation version, replay projection); continuation (origin, reference, lifetime, representation version); artifact identity | chunk boundaries, transport mode, local ids (remapped canonically), timestamps, `request_id`, `losses` and diagnostics, retry attempt facts |
 
-- **Projection vs raw bytes.** Digest input is a versioned canonical projection: JSON structure is compared semantically (member order and whitespace are not identity) while opaque string values and any leaf a vendor binds as raw representation are exact bytes. Raw capture bytes are an archive-integrity concern, separate from semantic identity. Parity across transports is required only for fixtures with the same replay representation.
-- **Conversion receipts.** Explicit demotion/drop approvals and loss notices are kept in a dispatch/conversion receipt outside completion identity. Text produced by demotion is part of the following request's identity because it is part of what is sent.
-- **Pre-dispatch version gate.** NeoGraph checks the journal version, and the version of the provider-call record, before sending the request. A mismatch stops the run with no billable call, not after.
-- **v1 reader stays immutable.** Old records are verified with their stored original serializer; digests are never overwritten or rehashed in bulk. A paused v1 program is not resumed on the new library; migration is an explicit checkpoint that creates a new v2 run whose parent provenance is the v1 digest. Imported reasoning is never auto-promoted to native-eligible, and no unknown origin is invented.
-- **Storage.** Whether opaque payloads are stored inline or by content hash is a host policy. The canonical payload identity, retrievability, and representation version are fixed; the library does not require a content-addressed store.
-
-Tested by `JournalVersionAndCanonicalOrder` (pinned v1 bytes and hashes, v2 null-vs-zero, origin and native-byte change detection, invariance under partition and local-id changes).
+- **Projection versus raw bytes.** Native bytes of a streamed reasoning block are **library-assembled, not vendor bytes**: a stream delivers fragments, and the captured block is built from them. The replay projection is the versioned, per-codec definition of what is sent back: JSON structure is compared semantically (member order and whitespace are not identity), while opaque leaves the vendor supplied whole (signatures, encrypted content, ids) are exact bytes and assembled leaves (concatenated thinking text, argument text) are exact over their assembled value. Which leaves are exact is listed per codec. If a leaf is replay-relevant and cannot be reproduced identically in one mode, the capsule is marked `complete=false` in that mode and that fixture is excluded from the parity set as a recorded known gap.
+- **Unified parity statement.** `TransportProjectionParity`: for every fixture in the parity corpus, buffered, SSE and WS produce equal messages, usage, stop, binding facts and canonical replay projection. It is defined on the projection, never on raw wire bytes, and holds unconditionally over that corpus; fixtures outside the corpus are documented gaps, not exceptions to the statement.
+- **Library-side golden plus consumer kit.** The library's own release gate includes a journal-projection golden (Completion fixture -> projection bytes) that does not depend on any consumer repository. It also ships a consumer conformance kit: the same golden pairs plus a runner description so NeoGraph (or any consumer) can prove its digest is invariant under partition and local-id changes and changes under origin, binding-fact or native-byte changes.
+- **Conversion receipts.** Demotion/drop approvals and loss notices live in a receipt outside completion identity. Text produced by demotion is part of the following request's identity because it is sent.
+- **Pre-dispatch version gate.** NeoGraph checks the journal version and the provider-call record version before sending; a mismatch stops the run with no billable call.
+- **v1 reader stays immutable.** Old records verify with their stored serializer; digests are never rehashed in bulk. **Limits:** a paused v1 run cannot resume natively on the new library; a run paused in the middle of a tool loop cannot be migrated at all (tool loops cannot cross origins and v1 holds no capsule). Migration is possible only at a turn boundary, as an explicit checkpoint creating a new v2 run whose parent provenance is the v1 digest, in `Capsuleless` mode (6.4). Imported reasoning is never auto-promoted to native-eligible and no unknown origin is invented.
 
 ## 9. Extension walkthroughs
 
-Paths are the proposed layout; none exist yet. A fixture is one JSON case file (request, transport schedule, expected, provenance); only large binary wire data goes to a sibling file. Docs capability tables are generated from descriptors, so no shared test C++ changes when a vendor is added. Every change also touches `CHANGELOG.md`.
+Paths are the proposed layout; none exist yet. A fixture is one JSON case file (request, transport schedule, expected, provenance); only large binary wire data goes to a sibling file. Capability tables are generated from descriptors. Every change also touches `CHANGELOG.md`. "Zero C++" below means *no C++ source edit by the contributor*; the library is still rebuilt and released (5.6).
 
-**(a) Add an OpenAI-compatible vendor `acme` (Chat Completions shape). Zero C++.**
-- `descriptors/vendors/acme.json`
-- `descriptors/manifest.json`
-- `fixtures/chat_completions/acme-basic.json` (and a tool-stream case)
+**(a) Add a strict-compatible OpenAI-style vendor `acme` (Chat Completions shape).** Applies only to a vendor that passes the qualification test of 5.6. No C++ source edit.
+- `descriptors/vendors/acme.json`, `descriptors/manifest.json`
+- `fixtures/chat_completions/acme-basic.json` (and a tool-stream case, plus the qualification recording)
 - `docs/providers/acme.md`, `CHANGELOG.md`
 
-The fixture proves the request body (including semantic headers) and the response mapping. If `acme` needs different stream lifecycle or new state semantics, it is not case (a): reclassify as (c) or (d) rather than trusting the word "compatible".
+The fixture proves the request body and the response mapping. If `acme` fails the qualification (missing tool-call index, different finish reason, a different stream lifecycle), it is case (c) or (d), not (a). Expect this to be common, not exceptional; the measured touch set of each real addition is recorded, and the target "0 C++ files" is judged on those records, not assumed.
 
-**(b) Add an optional request field to an existing vendor (for example a Responses `service_tier` scalar). Zero C++ when an existing scalar / list / closed-record option slot can carry it.**
-- `descriptors/vendors/openai-responses.json`
-- `fixtures/responses/service-tier.json`
-- `docs/providers/openai-responses.md`, `CHANGELOG.md`
+**(b) Add an optional request field to an existing vendor (for example a Responses `service_tier` scalar).** No C++ edit when an existing scalar / list / flat-record option slot can carry it.
+- `descriptors/vendors/openai-responses.json`, `fixtures/responses/service-tier.json`, `docs/providers/openai-responses.md`, `CHANGELOG.md`
 
-Callers use `client.option("openai:service_tier", value)`. If the field needs a portable typed `Request` member, or changes continuation, prompt ordering, response interpretation, or tool lifecycle, it is C++: `include/schemaprovider/types.h`, `src/codecs/responses.cpp`, plus tests. It is then not advertised as data-only.
+Callers use `client.option("openai:service_tier", value)`. If the field needs a typed `Request` member, or changes continuation, prompt ordering, response interpretation, or tool lifecycle, it is C++ (`types.h`, `src/codecs/responses.cpp`, tests) and is not advertised as data-only.
 
-**(c) A vendor changes a stream event meaning (for example a new tool-argument event in Responses). C++ required; transport files untouched.**
-- `src/codecs/responses.cpp`
-- `fixtures/responses/tool-args-new-event.json`
-- `docs/protocols/responses.md`, `CHANGELOG.md`
+**(c) A vendor changes a stream event meaning, or a compat vendor needs a profile.** C++ required; transport files untouched.
+- `src/codecs/<family>.cpp`, a fixture, `docs/protocols/<family>.md`, `CHANGELOG.md`
 
-The same decoder serves buffered, SSE and WS, so the generic parity suite covers all transports. A new raw stop string alone is not (c); it is a descriptor `stop_reasons` edit. A new kind of part that the ten events cannot express is a core change with a major release: `types.h`, `event.h`, the accumulator, the reference model in tests, and contract docs.
+The same decoder serves buffered, SSE and WS, so the parity suite covers all transports. A new raw stop string alone is a descriptor `stop_reasons` edit, unless it is a failure-class terminal (3.6), which is C++. A new kind of part the ten events cannot express is a core change with a major release.
 
-**(d) A genuinely new wire family `acme-dialog`. C++ required.**
-- `src/codecs/acme_dialog.h` (declares its descriptor slot inventory), `src/codecs/acme_dialog.cpp`, `src/codecs/registry.cpp`, `CMakeLists.txt`
-- `descriptors/vendors/acme-dialog.json`, `descriptors/manifest.json`
-- `fixtures/acme_dialog/basic.json`, `fixtures/acme_dialog/tool-loop.json`
-- `docs/protocols/acme-dialog.md`, `CHANGELOG.md`
+**(d) A genuinely new wire family `acme-dialog`.** C++ required.
+- `src/codecs/acme_dialog.{h,cpp}` (declares its descriptor slot inventory), `src/codecs/registry.cpp`, `CMakeLists.txt`, `descriptors/vendors/acme-dialog.json`, `descriptors/manifest.json`, two fixtures, `docs/protocols/acme-dialog.md`, `CHANGELOG.md`
 
 Goal: the common loader, accumulator and transport stay untouched. A new transport is a further `src/transport/<name>.cpp` and is not data-only.
 
-Summary: (a) and (b, simple scalar) need zero C++; (c) and (d) need C++. The measurable target: cases (a)/(b) touch no C++ file; a semantic stream fix touches no transport file.
+Summary: (a) and (b, simple scalar) need no C++ source edit for strict-compatible shapes; (c) and (d) need C++. The measurable target: (a)/(b) additions touch no C++ file; a semantic stream fix touches no transport file. A prototype must show the target before it is claimed.
 
 ## 10. Versioning and stability
 
-- **Source API.** SemVer for the C++ source API. Changes that affect exhaustive visitors over `Event`/`Part`/`ErrorKind` or any specified meaning are major. A new option slot entry or a new source-level codec is minor. A fix to violated behaviour is a patch with a semantic release note.
-- **ABI.** No stable cross-compiler ABI is promised. Shared builds are supported only with the same toolchain, standard library and flags; consumers rebuild per release. SONAME and symbol diffs are evidence but do not replace behavioural checks.
-- **Descriptor.** `descriptor_version` (grammar) and `revision` (vendor facts) are separate. Grammar growth or meaning change bumps the descriptor major; correcting a fact bumps `revision` and must add fixture evidence. Exact-version support: newer versions and unknown keys are rejected. Changing a retention or usage-inclusion rule in data is still a semantic release even if it is one line.
-- **Fixtures and envelopes.** `fixture_version`, `completion-envelope` version, and NeoGraph `provider-completion` version are independent. Changing a fixture's expected meaning needs a justification and a reviewed old/new diff; expected files are never regenerated and approved unread. Old serialized artifacts are read by version-specific readers; there are no aliases or shims to the live API.
+- **Source API.** SemVer for the C++ source API. Changes that affect exhaustive visitors over `Event`/`Part`/`ErrorKind`/`StopKind` or any specified meaning are major. A new option slot entry or source-level codec is minor. A fix to violated behaviour is a patch with a semantic release note.
+- **ABI.** No stable cross-compiler ABI is promised. Shared builds are supported only with the same toolchain, standard library and flags; consumers rebuild per release.
+- **Descriptor.** `descriptor_version` (grammar) and `revision` (vendor facts) are separate. Grammar growth or any new rule bumps the descriptor major; correcting a fact bumps `revision` and must add fixture evidence. Exact-version support: newer versions and unknown keys are rejected. Changing a retention or usage-inclusion rule in data is still a semantic release.
+- **Fixtures and projection.** `fixture_version`, `projection_version` and NeoGraph `provider-completion` version are independent. Changing a fixture's expected meaning needs a justification and a reviewed old/new diff; expected files are never regenerated and approved unread. Old serialized artifacts are read by version-specific readers; no aliases or shims to the live API.
 - **Runtime reload.** No live reload. New descriptors mean a new immutable client.
 
 ## 11. Pre-mortem: likely two-year failure modes
 
 | Failure | Early warning | Response |
 |---|---|---|
-| Descriptors turn into a programming language again | a rule used by one vendor only; a proposed hook; ordering dependence between slots | section 5.4 review and CI check; state goes to typed sub-codecs; track semantic modules touched per change rather than opcode count |
-| "Compatible" differences eat the Chat family | vendor-name `if` in shared code; giant switch with 3+ vendors; a forked parser | absorb only what value slots express; structural differences become a separate typed family or sub-codec; never fork the accumulator |
-| Opaque preservation and the public model drift apart | replay 400s increase after text edits; unknown critical items; signature mismatch | keep whole block with owner and order; same-origin unsigned regression; strengthen origin and context binding; never auto strip-and-retry |
-| The single accumulator becomes over-abstract | each new family adds special cases or flags to common events | new event meaning requires major review; family causality stays in the codec; keep the small independent reference model current |
-| Fixtures are green while live behaviour drifts | stale `evidence` dates; skipped canaries; rising unknown-tag counts; manual re-record spikes | per-model/host canary budget; immutable reviewed recordings; Unverified never auto-promoted to Supported; a skipped canary is not green |
-| Retry and usage models under-report real cost | retries after `OutputObserved`/`PossiblyAccepted`; unknown settled as zero; early calls despite `Retry-After` | single retry owner; attempt evidence separate from final usage; conservative handling of unknown; overload-recovery scenario in tests |
+| Descriptors turn into a programming language again | a rule used by one vendor only; a proposed hook; ordering dependence between slots | section 5.4 and D5 gate; ledger equality in CI; state goes to typed sub-codecs |
+| "Compatible" differences eat the Chat family | vendor-name `if` in shared code; giant switch with 3+ vendors; qualification failures rising | qualification test (5.6); structural differences become a profile or sub-codec; never fork the accumulator |
+| Opaque preservation and the public model drift apart | replay 400s increase after text edits; unknown critical items; signature mismatch | whole block with owner and order; binding facts; same-origin unsigned regression; never auto strip-and-retry |
+| The single accumulator becomes over-abstract | each family adds flags to common events | new event meaning requires major review; family causality stays in the codec; keep the small reference model |
+| Fixtures green while live behaviour drifts | stale `evidence` dates; skipped canaries; rising unknown-property counts | per-model canary budget; immutable reviewed recordings; Unverified never auto-promoted; a skipped canary is not green |
+| Retry and usage models under-report real cost | retries after `OutputObserved`/`PossiblyAccepted`; unknown settled as zero | single retry owner; attempt evidence separate from usage; overload-recovery scenario |
+| **A vendor changes binding rules silently** | sudden 400s on previously accepted replays; a dated default-enforcement change (one vendor made prefix-mismatch enforcement the default for accounts created after 2026-08-31) | binding facts checked before dispatch; scheduled canary with negative control; descriptor facts dated; changes are revision bumps with fixtures |
+| **Gateway multi-backend nondeterminism** | same request behaves differently between runs (OpenRouter-style routing to different backends); flaky parity | record the routed backend when the wire exposes it; gateways never in an equivalence class; canary reports rates, not booleans |
+| **Canary keys, cost, fork-PR secrets, terms of service** | cost spikes; secrets in PR logs; vendor ToS on automated calls | canaries run only on protected branches/scheduled jobs with budgets; fork PRs get recordings only; per-cell spending cap; ToS reviewed before enabling a cell |
+| **Dual-implementation migration period** | NeoGraph carries old and new paths for long; parity drift | staged ROADMAP with a cutover gate; half-migration test in section 13; old path deleted at cutover |
+| **Bus factor** (a two-person team) | one person reviews all codec changes; stale ownership | each family has two named reviewers (may be one author plus an external vendor-doc cross-check); properties are machine-checked so review is not the only gate |
+| **Proxy, CA, HTTP/2, pool** | enterprise users need CONNECT proxies or OS trust; HTTP/2 demanded; connection-pool resets | D1 flip conditions; explicit non-support until then; the pool is the library's single reused-connection owner |
+| **Credential refresh and binary framing** (Vertex OAuth, Azure AD, SigV4, AWS event-stream) | requests for Bedrock/Vertex native access | declared out of scope (section 1) until separately designed |
 
-## 12. Open decisions
+## 12. Decisions and remaining open questions
 
-None of these is decided by this document. Each must be resolved (and recorded in `docs/decisions/`) before the affected area is implemented.
+Decided items, with status and the record. Nothing in this table is open unless it says so below the table.
 
-### D1. Transport backend (single choice; must not leak into public API/ABI)
+| ID | Decision | Status | Record |
+|---|---|---|---|
+| D1 | Transport: one private transport on standalone Asio + OpenSSL extracted from what NeoGraph already runs (HTTP/1.1 pool, SSE, WebSocket); no libcurl/httplib, no backend flag. Flip to a single libcurl stack if ANY holds: (1) live transport parity fails persistently for a required direct-vendor HTTP/1.1 SSE cell or the OpenAI WSS cell (60 runs per cell, transport-caused failures only); (2) Windows/macOS become first-release cells and adding OS trust to the OpenSSL store exceeds about 150 LOC or fails the trust matrix (expired, wrong host, self-signed rejected); (3) an enterprise HTTP CONNECT proxy becomes a first-release requirement; (4) the owner confirms HTTP/2 as a first-release requirement. A hybrid (Asio WS plus curl HTTP) is rejected as a permanent state | GATED (default A) | [D1-transport](decisions/D1-transport.md) |
+| D2 | Non-chat scope: the first release is chat plus artifacts in chat responses. Images, Veo operations and the OpenRouter decisions endpoint are out, and the Event set does not cover them. NeoGraph's cutover deletes its old interpreter for those features; any feature the owner keeps is rewritten there as a typed client (never interpreting the old grammar) in the same cutover. No feature is deleted without owner approval | FIRM | [D2-non-chat-scope](decisions/D2-non-chat-scope.md) |
+| D3 | Async-native private core plus blocking facade; no switching thresholds; gated by `CancelWithoutPeerProgress` and `AdmissionIndependentOfHeldStreams`; a non-gating scheduled benchmark for the first three releases | FIRM | [D3-async-native](decisions/D3-async-native.md) |
+| D4 | Exact-origin default, per-capsule binding facts, C++ allow-list equivalence class (`Documented-Unverified`) activated only after a negative-control canary; OpenRouter never in a class | FIRM | [D4-origin-and-binding](decisions/D4-origin-and-binding.md) |
+| D5 | Rule admission: three independent real cases, truth table, permutation tests, mutant check, prototype; v1 ships only omit(+when.in) and require_greater; ledger file; forbidden forever list | FIRM | [D5-rule-admission](decisions/D5-rule-admission.md) |
 
-- **Options.** (A) Private Asio + OpenSSL, extracting the working parts of what NeoGraph already uses. (B) libcurl with platform TLS as the only transport.
-- **Evidence so far.** NeoGraph's existing engine already uses Asio + OpenSSL, and its async contract is built on it; reusing it avoids swapping dependency and async model at the same time. The current implementation has several HTTP/SSE/WS paths with split ownership (per the RESEARCH.md measurements), so reuse must be extracted, not copied. libcurl is mature for HTTP and TLS and would remove hand-written HTTP; its WebSocket support, footprint, cancellation semantics, and shutdown behaviour for this workload have not been measured. No comparative footprint or performance data exists.
-- **What would decide.** Run the same conformance suite, cancellation/shutdown scenarios, WS scenario, and a footprint report (installed size, shared libraries, idle threads, per-stream memory) against both, for equal feature scope. Pick one; do not ship both.
+**Remaining open questions (only these four):**
 
-### D2. Scope of non-chat features
-
-- **Options.** (A) Chat-family generation only for the first release; existing image, Veo/long-running operation, and routing-decision consumers stay in NeoGraph until an explicit migration decision. (B) Include typed image/operation/decision codecs with a private operation driver for polling. (C) Include a subset.
-- **Evidence so far.** The current NeoGraph tree has schemas for video generation submit/poll, image generation, and an OpenRouter decisions endpoint (RESEARCH.md), so these consumers exist. Long-running operations need lifecycle (polling, cancel, artifact) that the ten events deliberately do not carry; adding a public pending event would ripple into every chat consumer's visitor. No decision on whether the existing consumers migrate exists.
-- **What would decide.** The NeoGraph owner's inventory of live non-chat users; whether they can stay on the old code path; a prototype showing the operation driver can converge on `Completion`/`Failure` without widening `Event`.
-
-### D3. Justification threshold for the async-native core
-
-- **Options.** (A) Async-native private core plus blocking facade (current converged direction). (B) Blocking-only calls, with the host scheduling on its own bounded blocking pool.
-- **Evidence so far.** Long-lived streams occupying host workers can delay short calls (a scenario argued from design; no measurement). NeoGraph's existing async contract sits on Asio (RESEARCH.md). NeoGraph's real target concurrency is unknown, so the threshold cannot be evaluated.
-- **What would decide.** First fix target peak concurrency C. Proposed (unvalidated) thresholds for switching to blocking-only: with C and 2C mixed long SSE/WS plus short calls, worker-bridge admission delay p99 below 5% of baseline time to first token, cancellation completion p99 within 100 ms, within agreed thread and memory budgets, and shutdown/self-destruction scenarios pass, with fewer production ownership and cancellation paths than the async prototype.
-
-### D4. Origin granularity: is host / route_scope required?
-
-- **Options.** (A) Origin includes normalized authority and route_scope (converged default). (B) Origin is `(family, vendor)` only, with host equivalence classes added later. (C) Explicit, narrowly scoped equivalence classes per documented interoperability.
-- **Evidence so far.** Failures in other projects came from lax provider matching and dropping same-provider unsigned thinking (issue references in RESEARCH.md). Whether a signature produced by Anthropic direct is accepted through Bedrock, Vertex, or OpenRouter is unverified, as is the reverse. Exact-origin equality is the safe default and can be relaxed without breaking callers; relaxing later is cheaper than tightening.
-- **What would decide.** Vendor documentation of interoperability for a scoped host/tenant/model, plus a passing signed, encrypted, unsigned and tool-loop canary for that class. A successful canary alone does not justify universal portability.
-
-### D5. Admission rule for new descriptor rule kinds
-
-- **Options.** (A) Freeze at the three rules; anything else is C++. (B) Admit a new stateless rule only when it repeats across independent real cases (a number to choose: two or three) with a full truth table, permutation tests showing order independence, and a prototype that reduces duplicated semantic code without increasing touched production files. (C) Case-by-case review without a numeric bar.
-- **Evidence so far.** Declarative gateways in the research accumulated conditional labels and named special handling, and then hooks; the current NeoGraph interpreter already carries 21 closed strategies (RESEARCH.md). The design authors agreed on "no state, ordering, or side effects ever" but not on the number of independent cases (two vs three) or the size of the prototype improvement.
-- **What would decide.** The first three real descriptor-only vendor additions and the first proposal that hits the boundary; measure semantic duplication and touch counts on about ten recent changes replayed against both designs.
+- **O1. Owner confirmation of the HTTP/2 retirement (attached to D1 flip 4).** Choosing default A retires the existing opt-in HTTP/2 capability of the current NeoGraph implementation, where it has been measured slower than the HTTP/1.1 pool at the median (bindings example and measurements in RESEARCH.md). That is a capability removal the owner must approve explicitly; until then it is an open question, not a done deal. Whether NeoGraph later drops its own libcurl option is a NeoGraph decision independent of this library.
+- **O2. Direct credentials for Bedrock/Vertex** to run the equivalence-class canary. Without them the class stays inert (3.1).
+- **O3. NeoGraph's target concurrency** for the scheduled held-stream benchmark; capacity numbers in the decision are proposals, not measurements.
+- **O4. The owner's usage inventory of Images / Veo / Decisions** in NeoGraph, which decides whether a later optional `Endpoints` target is opened in this repository or NeoGraph keeps typed clients. The library's first release is not blocked on it; NeoGraph's cutover completion is.
 
 ## 13. Keep from the current NeoGraph implementation, and drop
 
@@ -549,6 +733,7 @@ None of these is decided by this document. Each must be resolved (and recorded i
 | Whole-block reasoning preservation and `(type, index)` merging | Prevents signature loss and fragment mix-up |
 | tool + STOP normalised to `ToolUse`; length/filter preserved | Correct stop meaning is a consumer contract |
 | Opt-in total-wait budget, retryable classification | Basis of the single retry layer |
+| The Asio HTTP/1.1 pool, SSE parser and WebSocket client, extracted into a private transport | D1 default A |
 | Existing assertions on wire contract, reasoning carry, and usage that reflect real requirements | Moved as reviewed goldens; expected values checked against the requirement, not the old output |
 
 | Drop | Why |
@@ -556,8 +741,58 @@ None of these is decided by this document. Each must be resolved (and recorded i
 | Parallel `OpenAIProvider` request path beside the descriptor-driven one | One factory and one codec per family |
 | Catch-all skip of malformed stream frames; opt-in terminal validation | Corrupt must fail; terminal evidence is mandatory |
 | Separate SSE and WS usage/finalizer logic; positive-only usage merge; missing or non-numeric coerced to 0 | One accumulator; unknown is not zero |
-| Provider-name string checks in shared mapping code (for example merging by provider name) | Move to the family codec's wire rules |
+| Provider-name string checks in shared mapping code | Move to the family codec's wire rules |
 | Guessing foreign origin from a missing Gemini signature; direct replay of `reasoning_details`; prepending carry blocks | Replaced by the origin gate and original block order |
 | Public exposure of asio, graph cancellation types, raw yyjson, mutable schema lock, free-form `extra_fields` | Standalone contract, `std::stop_token`, descriptor-validated options |
 | Expectation that a cut stream without a callback is retry-safe; EOF treated as success | Replaced by RetrySafety and terminal evidence |
 | Multiple HTTP stacks in the new library | One private transport, D1 |
+
+**Not carried into the first release (D2), and owned by NeoGraph at cutover:** the old descriptor-grammar interpreter for `operation`, `artifacts`, `prompt_template` and `prompt_field`, `request_json`, and `SchemaPrimitiveRegistry`. NeoGraph's cutover deletes that interpreter; any of the three non-chat features the owner decides to keep is rewritten in NeoGraph as a typed client on NeoGraph's own async HTTP layer in the same cutover, without interpreting the old grammar. Half-migration test: after cutover NeoGraph contains no code that interprets the old descriptor grammar. The library's first release does not wait for this; NeoGraph's cutover completion does. The staged release ladder (first cell, extension order, property subset per stage) is in [ROADMAP.md](ROADMAP.md).
+
+## Appendix: Review disposition
+
+Two independent reviews (wire-level W01-W24, architecture F01-F27) were triaged. "Accepted constraint" means the limit is written into the text instead of solved.
+
+| Id | Addressed in |
+|---|---|
+| W01, F13 | 3.3 `InvalidToolCall`, 4.4; property `InvalidToolCallRepresentation` |
+| W02 | 3.3 tool kinds; property `ServerToolNotExecuted` |
+| W03 | 3.3 `FreeformText` |
+| W04, F10 | 3.6 `RetrySafety` + `RejectedBeforeOutput`, 7 retry table (accepted constraint: the grant table starts empty until evidence) |
+| W05, F24, W17 | 3.6 failure-class terminals; property `FailureClassTerminal` |
+| F01, W16, W15 | 3.1 binding facts, 6.2 canary, D4; `OriginBindingFacts`, `CanaryNegativeControl` |
+| F04 | 6.4 storage modes; 8 v1 limits |
+| W06, W07 | 4.6 WS lanes and `ConnectionBound`, 3.3 `Continuation` |
+| W08 | 4.7 Interactions spec; not in the first stage |
+| W09, F15 | 4.2 terminal table and normal-EOF definition |
+| W10 | 4.1 unknown-property rule |
+| W11, F03 | 5.1 arrays/machine fields, construct list, 4th rule shape |
+| W12 | 4.5 usage rule |
+| W13 | 4.4 Chat compat and Gemini ids |
+| W14 | 4.4 Gemini part boundaries |
+| W18 | 4.4 no-argument table |
+| W19 | 4.4 Responses ordered groups, 3.2 |
+| F02 | 5.5, 5.6, 9(a) |
+| F05 | 6.1 threat model |
+| F06 | 6.3 demotion (RESEARCH wording aligned by its owner) |
+| F07 | 3.2 type-system immutability, binding facts |
+| F08 | 7 handle/outcome contract (accepted constraint: cross-thread join cycle not detectable) |
+| F09 | 3 error model, `ErrorKind::Misuse`, 7 callback policy (accepted constraint: blocking callbacks starve the pool) |
+| F11, F12 | 8 projection, parity statement, golden + kit, envelope dropped |
+| F14 | 3.7 (RESEARCH claim about schema re-validation aligned by its owner) |
+| F16 | mutant catalog and deterministic scheduler seam live in CONFORMANCE |
+| F17 | ROADMAP; 12 and 13 |
+| F18 | 11 pre-mortem rows; 1 non-goals (Bedrock/Vertex native out of scope) |
+| W20 | 3.5 `extra` map |
+| W21 | 3.6 body-source retry hints |
+| W22 | 4.1 (unverified policy; fixture decides) |
+| W23 | 3.4 no silent drop of known deltas |
+| W24 | 3.4 codec-defined replay projection |
+| F19 | 3 sketches and `sketch-compile` step |
+| F20 | `decisions/` exists; 12 (no "converged" wording) |
+| F21 | 2.4 single forbidden-edge list and proxies |
+| F22 | 3.2 persistent history |
+| F23 | 7 terminal-wins race rule and toolchain floor |
+| F25 | RESEARCH (`[read docs]` marks) |
+| F26 | 3.7, 5.1 per-model `Required`/`Optional`/`Ignored` |
+| F27 | 2.3, 5.6 embedded at configure time |

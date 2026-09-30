@@ -1,0 +1,59 @@
+{
+  "schema": "rules-ledger/1",
+  "descriptor_major_version": 1,
+  "admission_policy": "docs/decisions/D5-rule-admission.md",
+  "rules": [
+    {
+      "kind": "omit",
+      "variants": ["omit", "omit+when.in"],
+      "status": "admitted_v1",
+      "admission": "bootstrap_waiver",
+      "waiver_reason": "bootstrap: ported from existing behaviour",
+      "cases": [
+        {
+          "vendor": "<vendor placeholder>",
+          "source_kind": "<vendor_doc_url_date | reproduction_log>",
+          "model_family": "<model family placeholder>",
+          "fixture_path": "<fixtures/rules/omit/case-1 placeholder>",
+          "fails_without_rule": null
+        }
+      ]
+    },
+    {
+      "kind": "require_greater",
+      "status": "admitted_v1",
+      "admission": "bootstrap_waiver",
+      "waiver_reason": "bootstrap: ported from existing behaviour",
+      "selector": {
+        "required": true,
+        "reason": "budget_tokens may exceed max_tokens with interleaved thinking; rule is conditional on a selector slot"
+      },
+      "cases": [
+        {
+          "vendor": "<vendor placeholder>",
+          "source_kind": "<vendor_doc_url_date | reproduction_log>",
+          "model_family": "<model family placeholder>",
+          "fixture_path": "<fixtures/rules/require_greater/case-1 placeholder>",
+          "fails_without_rule": null
+        }
+      ]
+    },
+    {
+      "kind": "RequireEqualWhen",
+      "status": "removed_from_v1",
+      "removed_from_v1": true,
+      "reason": "No real case: the current NeoGraph interpreter parses only omit and require_greater. May return only through the D5 admission procedure (3 independent real cases) with a descriptor major version bump.",
+      "cases": []
+    }
+  ],
+  "forbidden_forever": [
+    "state",
+    "ordering_or_chaining",
+    "dynamic_paths",
+    "callbacks_or_hooks",
+    "io",
+    "vendor_name_conditions",
+    "message_reordering",
+    "event_meaning_changes"
+  ]
+}
