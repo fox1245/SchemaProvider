@@ -1,6 +1,6 @@
 # Roadmap: staged release ladder
 
-Design proposal for a two-person team; nothing is implemented. Stage order is fixed; each stage ships only if its exit criteria pass. Property names are defined in CONFORMANCE.md section 5; decisions in decisions/README.md. A reviewer requirement is one independent reviewer per stage (may be a different model family), not a standing panel.
+Design proposal for a two-person team; only the transport spike exists (see POC_PLAN.md, milestone M1). Stage order is fixed; each stage ships only if its exit criteria pass. Property names are defined in CONFORMANCE.md section 5; decisions in decisions/README.md. The proof-of-concept plan (POC_PLAN.md) runs ahead of Stage 0 and de-risks Stage 1; it is not a release stage. A reviewer requirement is one independent reviewer per stage (may be a different model family), not a standing panel.
 
 ## Stage 0 — Foundations (docs and gates)
 - Entry: DESIGN, CONFORMANCE, RESEARCH and decisions accepted by the maintainer.
@@ -11,10 +11,10 @@ Design proposal for a two-person team; nothing is implemented. Stage order is fi
 - Cut line: no network code merges before Stage 0 exits.
 
 ## Stage 1 — Minimum shipping cell
-- Scope: Chat Completions + Messages over HTTP/SSE, two vendors, single transport A (D1), async core (D3). No WebSocket, no Responses.
+- Scope: Chat Completions + Messages over HTTP/SSE, two vendors, one transport: libcurl on a private Asio loop (D1), async core (D3). No WebSocket, no Responses.
 - Entry: Stage 0 exit.
 - Required properties: `ChunkPartitionInvariant`, `NoTerminalNoSuccess`, `KnownCorruptNeverIgnored`, `InterleavedToolOwnership`, `SnapshotNotAppend`, `UsageKnowledgeTransitions`, `StopMeaning`, `TransportProjectionParity` (SSE vs buffered), `RetrySafetyBudgetDeadline`, `IntentOrError`, `OwnershipAndBounds`, `CancelWithoutPeerProgress` (HTTP states), `AdmissionIndependentOfHeldStreams`, `InvalidToolCallRepresentation`, `ServerToolNotExecuted` (Messages), `FailureClassTerminal`, `OriginBindingFacts`, `DescriptorRuleAdmission`.
-- Canary minimum: one live cell per vendor (Chat Completions vendor, Anthropic direct Messages) run nightly on the maintainers' own keys, never on fork PRs; `CanaryNegativeControl` run for Anthropic signed thinking (negative control must be rejected, otherwise the cell reports `ReplayAcceptanceUnobservable`); 60-run transport parity per D1 flip (1).
+- Canary minimum: one live cell per vendor (Chat Completions vendor, Anthropic direct Messages) run nightly on the maintainers' own keys, never on fork PRs; `CanaryNegativeControl` run for Anthropic signed thinking (negative control must be rejected, otherwise the cell reports `ReplayAcceptanceUnobservable`); 60-run transport parity per D1 reconsideration condition 5.
 - Exit: all listed properties green including sanitizers; both canary cells pass or are reported with cause; README states supported cells only.
 - Cut line (drop first if late): second Chat Completions vendor -> cut to one; reasoning replay -> Drop mode only (capsule-less resume with its own identity).
 
@@ -22,7 +22,7 @@ Design proposal for a two-person team; nothing is implemented. Stage order is fi
 - Scope: OpenAI Responses over HTTP/SSE and WebSocket, single lane only (the protocol supports several stream_id lanes; the library must not misstate that); OpenRouter `reasoning_details`.
 - Entry: Stage 1 exit; WS facts re-verified against the current vendor documentation.
 - Required properties: Stage 1 set plus `NativeRetentionForeignGate`, `TransportProjectionParity` (WS), `CancelWithoutPeerProgress` (WS partial frame), `ServerToolNotExecuted` (Responses), `FailureClassTerminal` (OpenRouter in-band errors delivered as HTTP 200).
-- Canary cells: OpenAI Responses SSE and WSS (60 runs each for D1 flip (1)); OpenRouter cell with `negative_control` recorded; OpenRouter never in an equivalence class.
+- Canary cells: OpenAI Responses SSE and WSS (60 runs each as the transport-parity canary of D1's reconsideration condition 5); OpenRouter cell with `negative_control` recorded; OpenRouter never in an equivalence class. Entry also needs the WebSocket transport decision D1b.
 - Exit: Continuation has an explicit lifetime (Persisted | ConnectionBound) with full-input fallback or no-retry rule; previous_response_not_found path tested.
 - Cut line: WS lane may slip to a later release while Responses over SSE ships.
 
@@ -45,9 +45,9 @@ Design proposal for a two-person team; nothing is implemented. Stage order is fi
 ## Explicitly deferred
 - Python bindings.
 - Bedrock and Vertex native access (SigV4, OAuth, binary event stream, credential refresh): out of scope unless designed; equivalence canary for them needs direct credentials (open item D4).
-- Proxy (HTTP CONNECT) support.
-- HTTP/2, unless the owner confirms it as a requirement (D1 flip (4); retirement of the opt-in capability needs owner approval).
-- Windows/macOS trust stores (D1 flip (2)).
+- Enterprise HTTP CONNECT proxy configuration and testing (libcurl can proxy; the library does not promise it before it is tested).
+- HTTP/2 beyond libcurl's defaults: stream caps and per-stream backpressure with live sibling streams, until POC_PLAN risk R3 (M1b) is closed. HTTP/2 itself is available through libcurl.
+- Windows and macOS: POSIX descriptor model and trust stores (POC_PLAN risks R4 and R5).
 - Non-chat endpoints (D2): Veo, image endpoints, Decisions.
 - Multi-lane Responses WebSocket.
 

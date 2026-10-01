@@ -1,6 +1,6 @@
 # Conformance plan
 
-Status: this is the acceptance plan for a library that does not exist yet. No property below has been implemented or run. Wherever this document says "must", it states a requirement for the release stage named in `ROADMAP.md`. Defect classes come from a single NeoGraph audit and from surveys of other projects (see `RESEARCH.md`). They are observations, not incidence rates. Design rules are stated in `DESIGN.md` and are cited here by section number, not restated; where a cell table below and `DESIGN.md` disagree, `DESIGN.md` is authoritative and the disagreement is a defect in this file. Decisions D1 to D5 are recorded in `decisions/`.
+Status: this is the acceptance plan for a library that does not exist yet. The only properties that have been run are the transport-level parts of `NoTerminalNoSuccess` (5.2), `OwnershipAndBounds` (5.12), `CancelWithoutPeerProgress` (5.15, without the WebSocket and backoff states), `AdmissionIndependentOfHeldStreams` (5.21) and the one-attempt rule of `RetrySafetyBudgetDeadline` (5.10), in the transport spike reported in `POC_PLAN.md` section 5; no codec, accumulator or fixture property has been implemented or run. Wherever this document says "must", it states a requirement for the release stage named in `ROADMAP.md`. Defect classes come from a single NeoGraph audit and from surveys of other projects (see `RESEARCH.md`). They are observations, not incidence rates. Design rules are stated in `DESIGN.md` and are cited here by section number, not restated; where a cell table below and `DESIGN.md` disagree, `DESIGN.md` is authoritative and the disagreement is a defect in this file. Decisions D1 to D5 are recorded in `decisions/`.
 
 Scope (decision D2): chat completion APIs and the artifacts that arrive inside chat responses. Long-running operations, standalone image endpoints and the OpenRouter decisions endpoint have no cell, no property and no fixture here, and none may be advertised as supported. The earlier operation-lifecycle property is dropped for that reason.
 
@@ -478,9 +478,9 @@ Release criteria are stage gates, defined with their dates, cells and property s
 
 ## 13. Open decisions that touch conformance
 
-Decided (see `decisions/`): D1 transport (gated default: one private Asio with OpenSSL stack; flip conditions in the ADR and evidence via the loopback suite), D2 scope (chat only), D3 async core (gates 5.15 and 5.21), D4 exact origin plus recorded binding facts and a documented equivalence class, D5 rule admission. Still open:
+Decided (see `decisions/`): D1 transport (libcurl `multi_socket` on a private Asio loop, FIRM, revised 2026-10-01; the transport-level properties 5.2, 5.12, 5.15 and 5.21 already run in the M1 spike, see `POC_PLAN.md` section 5), D2 scope (chat only), D3 async core (gates 5.15 and 5.21), D4 exact origin plus recorded binding facts and a documented equivalence class, D5 rule admission. Still open:
 
-- Owner confirmation of the retirement of the existing opt-in HTTP/2 capability that decision D1 implies.
+- D1b: the WebSocket transport for the Responses lane (decides how 5.15's WebSocket partial-frame state and the WSS canary cells are run).
 - Direct Bedrock and Vertex credentials for the equivalence-class canary; without them those cells stay `Documented-Unverified`.
 - NeoGraph's target concurrency for the scheduled D3 benchmark.
 - Owner usage inventory for image, long-running operation and decisions features (affects NeoGraph's cutover, not this suite).

@@ -1,10 +1,10 @@
 # Decision records
 
-Design proposals only; nothing is implemented yet. Each record lists flip/reconsideration conditions, falsifiers and enforcement names.
+Design records. D1 was revised on 2026-10-01 after a measurement and a transport spike (see ../POC_PLAN.md); the other records are proposals that no implementation has exercised yet. Each record lists reconsideration conditions, falsifiers and enforcement names.
 
 | ID | Title | Status | Date | Decision | Open item |
 |---|---|---|---|---|---|
-| [D1](D1-transport.md) | Transport | GATED | 2026-10-01 | One private Asio + OpenSSL transport (HTTP/1.1, SSE, WS); no httplib/libcurl; flip to libcurl only on measured conditions | Owner confirmation that retiring opt-in HTTP/2 is acceptable; OS trust store |
+| [D1](D1-transport.md) | Transport | FIRM (revised) | 2026-10-01 | libcurl `multi_socket` driven by a private Asio loop; the transport owns cancel, deadline, one attempt, HTTP/1.x backpressure and name resolution; HTTP/2 comes from libcurl; no httplib, no hand-written HTTP/1.1 client | WebSocket transport (D1b); libcurl floor and deployment; HTTP/2 pause with live siblings, TLS matrix, Windows (POC_PLAN R3 to R5) |
 | [D2](D2-non-chat-scope.md) | Non-chat scope | FIRM | 2026-10-01 | First release is chat + chat artifacts only; cutover gated on typed clients or approved deletion for Images/Veo/Decisions | Owner usage inventory |
 | [D3](D3-async-native.md) | Async-native core | FIRM | 2026-10-01 | Bounded I/O workers, blocking facade over the same operation; gated by cancel and admission properties | NeoGraph target concurrency for the scheduled benchmark |
 | [D4](D4-origin-and-binding.md) | Origin and binding facts | FIRM | 2026-10-01 | Exact-origin default gate plus recorded binding facts; documented equivalence class only after negative-control canary | Bedrock/Vertex direct credentials; OpenRouter invalid-signature cause |

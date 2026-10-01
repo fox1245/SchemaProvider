@@ -2,8 +2,8 @@
 
 A multi-vendor LLM client library for C++20.
 
-> **Status: early design stage. There is no usable code here yet.**
-> This repository is being set up as the future home of `SchemaProvider`, which currently lives inside [NeoGraph](https://github.com/fox1245/NeoGraph). The direction is still under discussion in [fox1245/NeoGraph#321](https://github.com/fox1245/NeoGraph/issues/321); nothing below is a promise.
+> **Status: design stage with a transport proof of concept. There is no usable library here yet.**
+> This repository is being set up as the future home of `SchemaProvider`, which currently lives inside [NeoGraph](https://github.com/fox1245/NeoGraph). The only code is a private libcurl-on-Asio transport spike with its property tests (see [docs/POC_PLAN.md](docs/POC_PLAN.md)); no installed header, no vendor codec, no stable interface. The direction is still under discussion in [fox1245/NeoGraph#321](https://github.com/fox1245/NeoGraph/issues/321); nothing below is a promise.
 
 ## What it is meant to be
 One C++20 client over the chat API families the major vendors expose (Chat Completions, Responses, Messages, Gemini generate; Interactions later), usable on its own and as the LLM layer of NeoGraph. The first release is chat completion plus artifacts that arrive inside chat responses; image endpoints, long-running video operations and the OpenRouter decisions endpoint are not part of it.
@@ -19,12 +19,13 @@ One C++20 client over the chat API families the major vendors expose (Chat Compl
 - A portable conversation history plus an opaque, origin-bound sidecar for vendor reasoning state (signed or encrypted reasoning cannot be translated between vendors, and is rejected by default when the origin differs). Replay is also checked against binding facts (model, context fingerprint, account scope); origin is a replay boundary, not proof of who issued a block.
 
 ## Documentation
-All of these describe a proposal; nothing is implemented.
-- [docs/DESIGN.md](docs/DESIGN.md): proposed architecture, vocabulary, streaming model, threat model, extension walkthroughs, decisions and the four remaining open questions.
+All of these describe a proposal except where a document says it reports a measurement.
+- [docs/POC_PLAN.md](docs/POC_PLAN.md): the proof-of-concept plan, its milestones, the transport spike results and the risk register.
+- [docs/DESIGN.md](docs/DESIGN.md): proposed architecture, vocabulary, streaming model, threat model, extension walkthroughs, decisions and the open questions.
 - [docs/ROADMAP.md](docs/ROADMAP.md): the staged release plan (what ships first and the extension order).
 - [docs/CONFORMANCE.md](docs/CONFORMANCE.md): the properties a release must pass and how they are tested.
 - [docs/RESEARCH.md](docs/RESEARCH.md): the measurements and surveys the design is based on.
-- [docs/decisions/](docs/decisions/): the decision records D1-D5 (status FIRM or GATED) and the descriptor rule ledger.
+- [docs/decisions/](docs/decisions/): the decision records D1-D5 (all FIRM; D1 revised to libcurl on 2026-10-01) and the descriptor rule ledger.
 
 ## Not goals for now
 - Image, video-operation and routing-decision endpoints in the first release: NeoGraph keeps ownership of them and of the cutover.

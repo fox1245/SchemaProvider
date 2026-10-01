@@ -2,7 +2,7 @@
 
 ## 0. Status
 
-**This is a design proposal. Nothing described here is implemented.** The repository contains no code. Every sketch below is a contract to be built and tested, not observed behaviour. Statements about other projects or about the current NeoGraph implementation are labelled as such and are summarised in [RESEARCH.md](RESEARCH.md). Testable requirements are tied to the named properties in [CONFORMANCE.md](CONFORMANCE.md) (written like `ChunkPartitionInvariant`). Decisions are recorded in [decisions/](decisions/README.md) with a status (FIRM or GATED); only the four items listed at the end of section 12 are still open. The staged release plan is in [ROADMAP.md](ROADMAP.md); this document describes the full target, not what ships first.
+**This is a design proposal. Nothing described here is implemented except the private transport of section 2.1, which exists only as a proof-of-concept spike (see [POC_PLAN.md](POC_PLAN.md)).** The repository contains no vendor codec, no accumulator and no installed header. Every sketch below is a contract to be built and tested, not observed behaviour. Statements about other projects or about the current NeoGraph implementation are labelled as such and are summarised in [RESEARCH.md](RESEARCH.md). Testable requirements are tied to the named properties in [CONFORMANCE.md](CONFORMANCE.md) (written like `ChunkPartitionInvariant`). Decisions are recorded in [decisions/](decisions/README.md) with a status; the items listed at the end of section 12 are still open. The staged release plan is in [ROADMAP.md](ROADMAP.md); this document describes the full target, not what ships first.
 
 Words: MUST, SHOULD, MAY are used as in RFC 2119. "Family" means a wire protocol shape (Chat Completions, Responses, Messages, Gemini generate, Interactions). "Vendor" means an endpoint operator speaking a family. "Descriptor" means a JSON file of vendor values. Labels: `[read docs]` = a primary vendor page was read while writing; `[INFERENCE]` = not observed, reasoned; "unverified" = a claim that a fixture or canary must still establish.
 
@@ -43,7 +43,7 @@ graph TD
   Desc --> Core
   Desc --> Json[sp_json: private JSON wrapper]
   Codecs --> Json
-  Transport --> TP[Asio + OpenSSL, D1 default A]
+  Transport --> TP[libcurl multi_socket + private Asio loop, D1]
   Core --> Std[C++20 standard library only]
 ```
 
@@ -70,11 +70,11 @@ Private (not installed, no stability promise): all `sp_*` object targets, codec 
 | `sp_core` | C++20 standard library |
 | `sp_json` | yyjson (private; never in a public header) |
 | `sp_descriptor`, `sp_codecs` | `sp_core`, `sp_json` |
-| `sp_transport` | standalone Asio + OpenSSL (D1 default A, GATED; flip conditions in section 12) |
+| `sp_transport` | libcurl (`multi_socket`) driven by a private standalone Asio loop; TLS through libcurl's backend (D1, FIRM) |
 | `sp_runtime` | the above, standard threads, `std::stop_token` |
 | public headers | standard library only |
 
-No language runtimes, no general JSON Schema validator, no second HTTP stack, no `httplib`, no libcurl, no runtime backend flag. `SP_ENABLE_WEBSOCKET` selects a transport implementation only; it does not change the semantic contract. The default descriptors are embedded at configure time (a generated index; no runtime directory globbing, no fetch).
+No language runtimes, no general JSON Schema validator, no second HTTP stack, no `httplib`, no hand-written HTTP/1.1 client, no runtime backend flag: libcurl is the single HTTP stack and is private to `sp_transport`. `SP_ENABLE_WEBSOCKET` selects a transport implementation only; it does not change the semantic contract (the WebSocket transport itself is the undecided D1b). The default descriptors are embedded at configure time (a generated index; no runtime directory globbing, no fetch).
 
 ### 2.4 Include-direction gate
 
@@ -402,7 +402,7 @@ Framing owned by the SSE framer: UTF-8 and BOM handling, CR/LF/CRLF, multi-`data
 
 ### 4.2 Terminal evidence
 
-`Commit` requires family terminal evidence; EOF alone is never evidence (`NoTerminalNoSuccess`). **Normal EOF** is defined per framing: HTTP/1.1 chunked body ended by the zero-length terminator chunk; `Content-Length` bytes all received; a body delimited only by connection close is NOT a normal EOF (the body may be cut); HTTP/2 (only if transport flips to B, section 12) `END_STREAM` is normal, `RST_STREAM` or a connection error is not; a TLS close without `close_notify` on a length-less body is not normal. For WebSocket, a close frame is never a response terminal.
+`Commit` requires family terminal evidence; EOF alone is never evidence (`NoTerminalNoSuccess`). **Normal EOF** is defined per framing: HTTP/1.1 chunked body ended by the zero-length terminator chunk; `Content-Length` bytes all received; a body delimited only by connection close is NOT a normal EOF (the body may be cut); HTTP/2 `END_STREAM` is normal, `RST_STREAM` or a connection error is not; a TLS close without `close_notify` on a length-less body is not normal. For WebSocket, a close frame is never a response terminal. The transport applies this table itself and reports `Failed/Truncated` for every abnormal end (verified for the HTTP/1.x rows by the M1 tests; the HTTP/2 and TLS rows are M1b).
 
 | Family | Buffered HTTP | SSE | WebSocket |
 |---|---|---|---|
@@ -527,7 +527,7 @@ Never, regardless of the number of use cases: stateful rules, ordered or chained
 
 ### 5.5 HTTP versus HTTPS and the test trust anchor
 
-Descriptors are HTTPS-only with one exception: `http` is allowed when the host is loopback (`localhost`, `127.0.0.0/8`, `::1`), so a local vendor or a loopback test server can be described. For loopback HTTPS tests the client configuration (not a descriptor) accepts an extra trust-anchor file. Credentials are never sent over plain http to a non-loopback host. The OS trust store question for Windows/macOS is a flip condition of D1, not assumed solved.
+Descriptors are HTTPS-only with one exception: `http` is allowed when the host is loopback (`localhost`, `127.0.0.0/8`, `::1`), so a local vendor or a loopback test server can be described. For loopback HTTPS tests the client configuration (not a descriptor) accepts an extra trust-anchor file. Credentials are never sent over plain http to a non-loopback host. Trust stores follow libcurl's TLS backend per platform; that is not assumed solved (risk R4 in POC_PLAN.md).
 
 ### 5.6 What "zero C++" means
 
@@ -699,7 +699,7 @@ Summary: (a) and (b, simple scalar) need no C++ source edit for strict-compatibl
 | **Canary keys, cost, fork-PR secrets, terms of service** | cost spikes; secrets in PR logs; vendor ToS on automated calls | canaries run only on protected branches/scheduled jobs with budgets; fork PRs get recordings only; per-cell spending cap; ToS reviewed before enabling a cell |
 | **Dual-implementation migration period** | NeoGraph carries old and new paths for long; parity drift | staged ROADMAP with a cutover gate; half-migration test in section 13; old path deleted at cutover |
 | **Bus factor** (a two-person team) | one person reviews all codec changes; stale ownership | each family has two named reviewers (may be one author plus an external vendor-doc cross-check); properties are machine-checked so review is not the only gate |
-| **Proxy, CA, HTTP/2, pool** | enterprise users need CONNECT proxies or OS trust; HTTP/2 demanded; connection-pool resets | D1 flip conditions; explicit non-support until then; the pool is the library's single reused-connection owner |
+| **Proxy, CA, HTTP/2, pool** | enterprise users need CONNECT proxies or OS trust; HTTP/2 demanded; connection-pool resets | libcurl provides proxying, HTTP/2 and pooling, but TLS trust per platform, HTTP/2 pause with live sibling streams and proxy behaviour are untested here (POC_PLAN risks R3, R4); libcurl's pool is the single reused-connection owner |
 | **Credential refresh and binary framing** (Vertex OAuth, Azure AD, SigV4, AWS event-stream) | requests for Bedrock/Vertex native access | declared out of scope (section 1) until separately designed |
 
 ## 12. Decisions and remaining open questions
@@ -708,15 +708,15 @@ Decided items, with status and the record. Nothing in this table is open unless 
 
 | ID | Decision | Status | Record |
 |---|---|---|---|
-| D1 | Transport: one private transport on standalone Asio + OpenSSL extracted from what NeoGraph already runs (HTTP/1.1 pool, SSE, WebSocket); no libcurl/httplib, no backend flag. Flip to a single libcurl stack if ANY holds: (1) live transport parity fails persistently for a required direct-vendor HTTP/1.1 SSE cell or the OpenAI WSS cell (60 runs per cell, transport-caused failures only); (2) Windows/macOS become first-release cells and adding OS trust to the OpenSSL store exceeds about 150 LOC or fails the trust matrix (expired, wrong host, self-signed rejected); (3) an enterprise HTTP CONNECT proxy becomes a first-release requirement; (4) the owner confirms HTTP/2 as a first-release requirement. A hybrid (Asio WS plus curl HTTP) is rejected as a permanent state | GATED (default A) | [D1-transport](decisions/D1-transport.md) |
+| D1 | Transport: one private stack, libcurl `multi_socket` driven by a private standalone-Asio loop; HTTP/2 included. The transport owns cancel and deadline, the one-attempt rule, HTTP/1.x backpressure and name resolution (single-flight, TTL, bounded threads), because libcurl 8.5.0 needs those workarounds (POC_PLAN section 5). No httplib, no hand-written HTTP/1.1 client, no backend flag. Reopen on the conditions in the record: unbounded HTTP/2 pause buffering, a failed TLS matrix, an unmeetable property, D1b forcing a permanent second stack, persistent live transport failures. The WebSocket transport (D1b) is undecided | FIRM | [D1-transport](decisions/D1-transport.md) |
 | D2 | Non-chat scope: the first release is chat plus artifacts in chat responses. Images, Veo operations and the OpenRouter decisions endpoint are out, and the Event set does not cover them. NeoGraph's cutover deletes its old interpreter for those features; any feature the owner keeps is rewritten there as a typed client (never interpreting the old grammar) in the same cutover. No feature is deleted without owner approval | FIRM | [D2-non-chat-scope](decisions/D2-non-chat-scope.md) |
 | D3 | Async-native private core plus blocking facade; no switching thresholds; gated by `CancelWithoutPeerProgress` and `AdmissionIndependentOfHeldStreams`; a non-gating scheduled benchmark for the first three releases | FIRM | [D3-async-native](decisions/D3-async-native.md) |
 | D4 | Exact-origin default, per-capsule binding facts, C++ allow-list equivalence class (`Documented-Unverified`) activated only after a negative-control canary; OpenRouter never in a class | FIRM | [D4-origin-and-binding](decisions/D4-origin-and-binding.md) |
 | D5 | Rule admission: three independent real cases, truth table, permutation tests, mutant check, prototype; v1 ships only omit(+when.in) and require_greater; ledger file; forbidden forever list | FIRM | [D5-rule-admission](decisions/D5-rule-admission.md) |
 
-**Remaining open questions (only these four):**
+**Open questions (O1 was closed by the revised D1; D1b was added):**
 
-- **O1. Owner confirmation of the HTTP/2 retirement (attached to D1 flip 4).** Choosing default A retires the existing opt-in HTTP/2 capability of the current NeoGraph implementation, where it has been measured slower than the HTTP/1.1 pool at the median (bindings example and measurements in RESEARCH.md). That is a capability removal the owner must approve explicitly; until then it is an open question, not a done deal. Whether NeoGraph later drops its own libcurl option is a NeoGraph decision independent of this library.
+- **D1b. WebSocket transport for the Responses lane.** libcurl WebSocket support is official from 8.11 and the masking fix is in 8.16, while the libcurl on current LTS distributions is older. Options: a newer libcurl (vendored), or a separate WebSocket client with its own socket and cancel proof. Not needed before ROADMAP Stage 2.
 - **O2. Direct credentials for Bedrock/Vertex** to run the equivalence-class canary. Without them the class stays inert (3.1).
 - **O3. NeoGraph's target concurrency** for the scheduled held-stream benchmark; capacity numbers in the decision are proposals, not measurements.
 - **O4. The owner's usage inventory of Images / Veo / Decisions** in NeoGraph, which decides whether a later optional `Endpoints` target is opened in this repository or NeoGraph keeps typed clients. The library's first release is not blocked on it; NeoGraph's cutover completion is.
@@ -733,7 +733,7 @@ Decided items, with status and the record. Nothing in this table is open unless 
 | Whole-block reasoning preservation and `(type, index)` merging | Prevents signature loss and fragment mix-up |
 | tool + STOP normalised to `ToolUse`; length/filter preserved | Correct stop meaning is a consumer contract |
 | Opt-in total-wait budget, retryable classification | Basis of the single retry layer |
-| The Asio HTTP/1.1 pool, SSE parser and WebSocket client, extracted into a private transport | D1 default A |
+| The SSE framing rules and the ownership, cancel and deadline test scenarios of the existing Asio pool and its tests; the HTTP/1.1 client itself is replaced by libcurl | D1 |
 | Existing assertions on wire contract, reasoning carry, and usage that reflect real requirements | Moved as reviewed goldens; expected values checked against the requirement, not the old output |
 
 | Drop | Why |
