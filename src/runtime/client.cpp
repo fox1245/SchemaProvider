@@ -1,6 +1,7 @@
 #include "runtime/client.h"
 #include "runtime/testing.h"
 #include "codecs/messages.h"
+#include "codecs/responses.h"
 
 #include <algorithm>
 #include <atomic>
@@ -278,7 +279,9 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
   SteadyTime deadline;
   transport::HttpRequest request;
   std::shared_ptr<const NativeContext> native_context;
-  bool chat = true, admitted = false;
+  enum class Family { Chat, Messages, Responses };
+  Family family = Family::Chat;
+  bool admitted = false;
 
   mutable std::mutex mutex;
   std::condition_variable joined;
@@ -309,6 +312,7 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
   std::unique_ptr<Accumulator> accumulator;
   std::unique_ptr<chat::Codec> chat_codec;
   std::unique_ptr<messages::Codec> messages_codec;
+  std::unique_ptr<responses::Codec> responses_codec;
   std::unique_ptr<transport::SseFramer> framer;
   std::optional<Head> response;
   ResponseInfo response_info;
@@ -466,12 +470,16 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
   void fresh_codec() {
     chat_codec.reset();
     messages_codec.reset();
+    responses_codec.reset();
     accumulator = std::make_unique<Accumulator>(client->options.limits.semantic,
         [this](const Event& event) { semantic(event); });
-    if (chat) chat_codec = std::make_unique<chat::Codec>(client->descriptor,
+    if (family == Family::Chat) chat_codec = std::make_unique<chat::Codec>(client->descriptor,
         options.streaming ? chat::Mode::Sse : chat::Mode::Buffered, *accumulator, client->options.limits.semantic);
-    else messages_codec = std::make_unique<messages::Codec>(client->descriptor,
+    else if (family == Family::Messages) messages_codec = std::make_unique<messages::Codec>(client->descriptor,
         options.streaming ? messages::Mode::Sse : messages::Mode::Buffered, *accumulator,
+        native_context, client->options.limits.semantic);
+    else responses_codec = std::make_unique<responses::Codec>(client->descriptor,
+        options.streaming ? responses::Mode::Sse : responses::Mode::Buffered, *accumulator,
         native_context, client->options.limits.semantic);
     framer = options.streaming ? std::make_unique<transport::SseFramer>(client->options.limits.sse) : nullptr;
     response.reset();
@@ -589,7 +597,9 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
       return;
     }
     framer->feed(bytes, [this](const transport::SseFrame& frame) {
-      const bool accepted = chat_codec ? chat_codec->frame(frame.event, frame.data) : messages_codec->frame(frame.event, frame.data);
+      const bool accepted = chat_codec ? chat_codec->frame(frame.event, frame.data) :
+          messages_codec ? messages_codec->frame(frame.event, frame.data) :
+          responses_codec->frame(frame.event, frame.data);
       if (accumulator->terminal()) {
         const auto* failed = std::get_if<Failure>(&*accumulator->outcome());
         if (failed && failed->error.kind == ErrorKind::RemoteFailure) inspect(frame.data);
@@ -632,10 +642,12 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
         if (framer->error() != transport::SseError::None)
           fail_semantic(framer->error() == transport::SseError::ResourceLimit ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt);
         else if (chat_codec) chat_codec->finish({normal, close_error.kind});
-        else messages_codec->finish({normal, close_error.kind});
+        else if (messages_codec) messages_codec->finish({normal, close_error.kind});
+        else responses_codec->finish({normal, close_error.kind});
       } else {
         if (chat_codec) chat_codec->buffered(buffered, {normal, close_error.kind});
-        else messages_codec->buffered(buffered, {normal, close_error.kind});
+        else if (messages_codec) messages_codec->buffered(buffered, {normal, close_error.kind});
+        else responses_codec->buffered(buffered, {normal, close_error.kind});
         if (accumulator->terminal()) {
           const auto* failure = std::get_if<Failure>(&*accumulator->outcome());
           if (failure && (failure->error.kind == ErrorKind::RemoteFailure ||
@@ -662,7 +674,7 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
       if (at) {
         pending_failure = std::move(outcome);
         stage = Stage::Backoff;
-        chat_codec.reset(); messages_codec.reset(); accumulator.reset(); framer.reset();
+        chat_codec.reset(); messages_codec.reset(); responses_codec.reset(); accumulator.reset(); framer.reset();
         terminal_wire.reset();
         buffered.clear(); response.reset();
         retry_timer.arm(*executor, *at, [weak = weak_from_this()] { if (auto self = weak.lock()) self->timer(true); });
@@ -694,7 +706,7 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
       if (client) note_callback(before, threw);
     }
     callbacks = {};
-    chat_codec.reset(); messages_codec.reset(); accumulator.reset(); framer.reset();
+    chat_codec.reset(); messages_codec.reset(); responses_codec.reset(); accumulator.reset(); framer.reset();
     pending_failure.reset(); response.reset(); terminal_wire.reset();
     std::string{}.swap(buffered);
     request = {}; native_context.reset();
@@ -957,10 +969,13 @@ Operation Client::start(Request request, RunOptions options, Callbacks callbacks
   try {
     if (!error) std::visit([&](const auto& typed) {
       using T = std::decay_t<decltype(typed)>;
-      operation->chat = std::is_same_v<T, chat::Request>;
+      operation->family = std::is_same_v<T, chat::Request> ? detail::OperationState::Family::Chat :
+          std::is_same_v<T, messages::Request> ? detail::OperationState::Family::Messages :
+          detail::OperationState::Family::Responses;
       auto encoded = [&] {
         if constexpr (std::is_same_v<T, chat::Request>) return chat::encode(client->descriptor, typed, operation->options.streaming);
-        else return messages::encode(client->descriptor, typed, operation->options.streaming);
+        else if constexpr (std::is_same_v<T, messages::Request>) return messages::encode(client->descriptor, typed, operation->options.streaming);
+        else return responses::encode(client->descriptor, typed, operation->options.streaming);
       }();
       if (auto* failure = std::get_if<Error>(&encoded)) { error = std::move(*failure); return; }
       auto& value = std::get<0>(encoded);
@@ -971,13 +986,14 @@ Operation Client::start(Request request, RunOptions options, Callbacks callbacks
       wire.headers.reserve(value.headers.size() + (client->options.api_key.empty() ? 0 : 1));
       for (auto& header : value.headers) wire.headers.push_back({std::move(header.first), std::move(header.second)});
       if (!client->options.api_key.empty()) {
-        if (operation->chat) wire.headers.push_back({"Authorization", "Bearer " + client->options.api_key});
-        else wire.headers.push_back({"x-api-key", client->options.api_key});
+        if (operation->family == detail::OperationState::Family::Messages)
+          wire.headers.push_back({"x-api-key", client->options.api_key});
+        else wire.headers.push_back({"Authorization", "Bearer " + client->options.api_key});
       }
       wire.deadline = deadline;
       wire.http_version = client->options.http_version;
       wire.ca_file = client->options.ca_file;
-      if constexpr (std::is_same_v<T, messages::Request>) operation->native_context = std::move(value.context);
+      if constexpr (!std::is_same_v<T, chat::Request>) operation->native_context = std::move(value.context);
     }, request);
   } catch (...) { error = detail::error_for(ErrorKind::ResourceLimit); }
   if (error) {

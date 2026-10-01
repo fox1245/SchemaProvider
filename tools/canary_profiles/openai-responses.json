@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "provider": "openai_responses",
+  "model": "gpt-5-nano-2025-08-07",
+  "origin": "https://api.openai.com",
+  "input_bound_kind": "model_context_window",
+  "max_input_tokens": 400000,
+  "max_output_tokens": 8192,
+  "input_micro_usd_per_million": 50000,
+  "output_micro_usd_per_million": 400000,
+  "call_cap": 8,
+  "token_cap": 3265536,
+  "micro_usd_cap": 1000000,
+  "provenance": {
+    "model_url": "https://developers.openai.com/api/docs/models/gpt-5-nano",
+    "pricing_url": "https://developers.openai.com/api/docs/models/gpt-5-nano",
+    "verified_at": "2026-10-01"
+  }
+}

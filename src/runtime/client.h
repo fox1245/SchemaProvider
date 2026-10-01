@@ -2,6 +2,7 @@
 
 #include "codecs/chat.h"
 #include "codecs/messages_request.h"
+#include "codecs/responses_request.h"
 #include "runtime/policy.h"
 #include "transport/sse_framer.h"
 
@@ -13,7 +14,7 @@
 
 namespace sp::runtime {
 
-using Request = std::variant<chat::Request, messages::Request>;
+using Request = std::variant<chat::Request, messages::Request, responses::Request>;
 using Result = std::shared_ptr<const Outcome>;
 
 struct RunOptions {

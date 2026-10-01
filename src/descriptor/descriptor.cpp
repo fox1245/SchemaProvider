@@ -210,14 +210,20 @@ public:
             value_.id_ = string(root.get("id"), "/id", 128);
             if (!std::all_of(value_.id_.begin(), value_.id_.end(), [](char c) { return ascii_alpha(c) || digit(c) || c == '-' || c == '_' || c == '.'; })) fail("/id", "stable ASCII identifier");
             value_.family_ = string(root.get("family"), "/family", 64);
-            if (value_.family_ != "openai.chat" && value_.family_ != "anthropic.messages")
-                fail("/family", "installed family openai.chat or anthropic.messages");
+            if (value_.family_ != "openai.chat" && value_.family_ != "anthropic.messages" && value_.family_ != "openai.responses")
+                fail("/family", "supported family openai.chat, anthropic.messages or openai.responses");
             if (value_.family_ == "anthropic.messages") {
                 value_.stop_reasons_ = {
                     {"end_turn", StopKind::EndTurn}, {"max_tokens", StopKind::MaxTokens},
                     {"tool_use", StopKind::ToolUse}, {"stop_sequence", StopKind::StopSequence},
                     {"pause_turn", StopKind::PauseTurn}, {"refusal", StopKind::Refusal},
                     {"model_context_window_exceeded", StopKind::ContextLimit}};
+            }
+            if (value_.family_ == "openai.responses") {
+                value_.messages_member_ = "input";
+                value_.max_output_tokens_member_ = "max_output_tokens";
+                value_.stop_reasons_ = {{"completed", StopKind::EndTurn},
+                    {"max_output_tokens", StopKind::MaxTokens}, {"content_filter", StopKind::ContentFilter}};
             }
             connection(root.get("connection"));
             if (auto item = root.get("evidence"); item.valid()) evidence(item);
@@ -297,6 +303,12 @@ private:
             for (const auto* reserved : {"system", "thinking", "metadata", "stop_sequences", "top_k", "output_config", "service_tier", "context_management", "container", "mcp_servers"})
                 destinations.insert(reserved);
         }
+        if (value_.family_ == "openai.responses") {
+            for (const auto* reserved : {"reasoning", "include", "store", "instructions", "conversation",
+                    "previous_response_id", "parallel_tool_calls", "background", "truncation", "text",
+                    "metadata", "service_tier", "prompt_cache_key", "context_management", "access_programs"})
+                destinations.insert(reserved);
+        }
         for (auto [name, target] : slots) {
             const std::string pointer = std::string("/bindings/") + name;
             if (auto field = item.get(name); field.valid()) *target = string(field, pointer, 128);
@@ -334,6 +346,11 @@ private:
             if (std::find(message_fields.begin(), message_fields.end(), value_.usage_path_.front()) != message_fields.end())
                 fail("/bindings/usage", "usage root disjoint from Messages response fields", "response path collision");
         }
+        if (value_.family_ == "openai.responses") {
+            constexpr std::array response_fields{"created_at", "status", "output", "incomplete_details", "reasoning", "instructions"};
+            if (std::find(response_fields.begin(), response_fields.end(), value_.usage_path_.front()) != response_fields.end())
+                fail("/bindings/usage", "usage root disjoint from Responses response fields", "response path collision");
+        }
     }
     void stops(Value item) {
         if (!item.is_object() || item.size() > 64) fail("/stop_reasons", "object with at most 64 stop mappings");
@@ -355,8 +372,9 @@ private:
             else if (mapped == "MalformedCall") kind = StopKind::MalformedCall;
             else fail(pointer, "existing StopKind");
             auto found = std::find_if(value_.stop_reasons_.begin(), value_.stop_reasons_.end(), [&](const auto& entry) { return entry.first == member.key; });
-            if (value_.family_ == "anthropic.messages" && found != value_.stop_reasons_.end() && found->second != kind)
-                fail(pointer, "unchanged standard Messages stop meaning");
+            if ((value_.family_ == "anthropic.messages" || value_.family_ == "openai.responses") &&
+                found != value_.stop_reasons_.end() && found->second != kind)
+                fail(pointer, "unchanged standard family stop meaning");
             if (found == value_.stop_reasons_.end()) value_.stop_reasons_.emplace_back(member.key, kind);
             else found->second = kind;
         }

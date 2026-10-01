@@ -60,14 +60,20 @@ class LockedLedger {
       }
       if (values[0] >= totals_.size()) fail();
       auto& total = totals_[values[0]];
-      const auto calls = values[0] == 2 ? 4U : 16U;
-      const auto cost = values[0] == 2 ? 1000000U : 10000000U;
+      const auto calls = values[0] == 2 ? 4U : values[0] == 3 ? 8U : 16U;
+      const auto cost = values[0] == 2 || values[0] == 3 ? 1000000U : 10000000U;
       if (values[1] != add(total.calls, 1) || values[1] > calls || values[2] <= total.tokens ||
           values[3] <= total.micro_usd || values[3] > cost) fail();
       total = {values[1], values[2], values[3]};
+      const auto combined = openai_totals();
+      if (combined.calls > 16 || combined.micro_usd > 10000000) fail();
     }
   }
   Totals get(Provider provider) const { return totals_[index(provider)]; }
+  Totals openai_totals() const {
+    return {add(totals_[0].calls, totals_[3].calls), add(totals_[0].tokens, totals_[3].tokens),
+        add(totals_[0].micro_usd, totals_[3].micro_usd)};
+  }
   void append(Provider provider, Totals value) {
     std::string row = std::to_string(index(provider)) + ' ' + std::to_string(value.calls) + ' ' +
         std::to_string(value.tokens) + ' ' + std::to_string(value.micro_usd) + '\n';
@@ -88,12 +94,13 @@ class LockedLedger {
       case Provider::OpenAI: return 0;
       case Provider::Anthropic: return 1;
       case Provider::Gemini: return 2;
+      case Provider::OpenAIResponses: return 3;
     }
     fail();
   }
   bool created_ = false;
   detail::Fd fd_;
-  std::array<Totals, 3> totals_{};
+  std::array<Totals, 4> totals_{};
 };
 } // namespace
 std::uint64_t reserved_cost(const Bounds& b) {
@@ -104,6 +111,12 @@ Debit reserve(const Profile& profile, const std::string& path) {
   const auto old = ledger.get(profile.provider());
   const auto& b = profile.bounds();
   const auto tokens = add(b.input_tokens, b.output_tokens), cost = reserved_cost(b);
+  if (profile.provider() == Provider::OpenAI || profile.provider() == Provider::OpenAIResponses) {
+    const auto combined = ledger.openai_totals();
+    if (combined.calls >= 16) return {Reservation::Calls, old};
+    if (combined.micro_usd > 10000000 || cost > 10000000 - combined.micro_usd)
+      return {Reservation::Cost, old};
+  }
   if (old.calls >= b.calls) return {Reservation::Calls, old};
   if (old.tokens > b.tokens || tokens > b.tokens - old.tokens) return {Reservation::Tokens, old};
   if (old.micro_usd > b.micro_usd || cost > b.micro_usd - old.micro_usd) return {Reservation::Cost, old};

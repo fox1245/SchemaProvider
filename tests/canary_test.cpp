@@ -33,7 +33,7 @@ void save(const std::string& path, std::string_view value) {
 std::string load(const std::string& path) { return sp::canary::detail::read_file(path, 65536, true); }
 void private_text(std::string_view text) {
   for (auto marker : {secret, "CANARY_SIGNATURE_MARKER", "CANARY_THINKING_MARKER", "CANARY_REDACTED_MARKER",
-      "CANARY_RESPONSE_MARKER", "CANARY_ACCOUNT_ID_MARKER", "PRIVATE_PATH_MARKER"})
+      "CANARY_RESPONSE_MARKER", "CANARY_ACCOUNT_ID_MARKER", "CANARY_CIPHER_MARKER", "PRIVATE_PATH_MARKER"})
     require(text.find(marker) == std::string_view::npos, "private marker leaked");
 }
 std::string source(std::string_view model, std::uint64_t port, bool anthropic = true,
@@ -60,6 +60,13 @@ std::string gemini_source(std::string_view model, std::uint64_t port, std::uint6
   value = replace(value, "\"output_micro_usd_per_million\":2000000", "\"output_micro_usd_per_million\":400000");
   value = replace(value, "https://developers.openai.com/api/docs/models/gpt-4.1-mini.md", "https://ai.google.dev/gemini-api/docs/pricing");
   return replace(value, "https://developers.openai.com/api/docs/models/gpt-4.1-mini.md", "https://ai.google.dev/gemini-api/docs/pricing");
+}
+std::string responses_source(std::string_view model, std::uint64_t port, std::uint64_t calls = 6,
+    std::uint64_t tokens = 100000, std::uint64_t cost = 1000000) {
+  auto value = source(model, port, false, calls, tokens, cost);
+  value = replace(value, "\"provider\":\"openai\"", "\"provider\":\"openai_responses\"");
+  value = replace(value, "\"input_micro_usd_per_million\":1000000", "\"input_micro_usd_per_million\":50000");
+  return replace(value, "\"output_micro_usd_per_million\":2000000", "\"output_micro_usd_per_million\":400000");
 }
 template<class F> void rejects(F&& f) {
   bool rejected = false;
@@ -407,6 +414,111 @@ void gemini_smoke(runtime_test::Peer& peer, const char* executable) {
       "CLI claimed native Gemini or mislabelled provider");
   peer.count(cli_model, 2);
 }
+void responses_reasoning(runtime_test::Peer& peer, const char* executable) {
+  auto live = responses_source("gpt-5-nano-2025-08-07", 18080);
+  live = replace(live, "http://127.0.0.1:18080", "https://api.openai.com");
+  live = replace(live, "\"max_input_tokens\":4096", "\"max_input_tokens\":400000");
+  live = replace(live, "\"max_output_tokens\":2048", "\"max_output_tokens\":8192");
+  const auto admitted = parse_profile(live);
+  require(reserved_cost(admitted.bounds()) == 23277, "Responses inclusive whole-window reservation wrong");
+  for (auto invalid : {
+      replace(live, "gpt-5-nano-2025-08-07", "gpt-5-mini"),
+      replace(live, "\"call_cap\":6", "\"call_cap\":9"),
+      replace(live, "\"micro_usd_cap\":1000000", "\"micro_usd_cap\":1000001"),
+      replace(live, "\"max_output_tokens\":8192", "\"max_output_tokens\":8193"),
+      replace(live, "\"max_input_tokens\":400000", "\"max_input_tokens\":399999"),
+      replace(live, "\"input_micro_usd_per_million\":50000", "\"input_micro_usd_per_million\":49999"),
+      replace(live, "\"output_micro_usd_per_million\":400000", "\"output_micro_usd_per_million\":399999"),
+      replace(live, "https://api.openai.com", "https://api.anthropic.com") })
+    rejects([&] { parse_profile(invalid); });
+  for (auto scenario : {"reject", "responses-accept", "responses-unrelated", "responses-omit-reject", "responses-misleading"}) {
+    Directory directory;
+    const auto model = peer.arm(scenario);
+    const auto profile = parse_profile(responses_source(model, peer.port), true);
+    const auto ledger = directory.file("ledger");
+    // Keep every prior provider's spent counters and cost, not only call counts.
+    const std::string old = "SPCANARY1\n0 1 1051672 425585\n1 1 204096 420480\n2 1 1048704 104910\n";
+    save(ledger, old);
+    runtime_test::LogCapture diagnostics;
+    const auto result = run(profile, ledger, secret);
+    private_text(diagnostics.finish()); private_text(report_json(result)); private_text(load(ledger));
+    require(result.cases.size() == 6 && result.positive_retained && result.reasoning_removed && result.ciphertext_mutated,
+        "Responses native/control wire evidence lost");
+    require(result.replay == Replay::ReplayAcceptanceUnobservable, "synthetic peer claimed vendor replay verification");
+    for (size_t i = 0; i < 4; ++i)
+      require(result.cases[i].state == State::Passed && result.cases[i].attempts == 1 &&
+          result.cases[i].reasoning_items == 1 && result.cases[i].encrypted_present &&
+          result.cases[i].native_complete && result.cases[i].reasoning == 1,
+          "Responses reasoning/usage was lost or double-counted");
+    const bool accepted = std::string_view(scenario) == "responses-accept";
+    const bool unrelated = std::string_view(scenario) == "responses-unrelated" || std::string_view(scenario) == "responses-misleading";
+    const bool omitted = std::string_view(scenario) == "responses-omit-reject";
+    require(result.cases[4].state == State::Passed &&
+        result.cases[4].reason == (omitted ? Reason::OmissionRejected : Reason::OmissionAccepted),
+        "missing reasoning observation was misclassified");
+    require(result.cases[5].state == (accepted || unrelated ? State::Failed : State::Passed) &&
+        result.cases[5].reason == (accepted ? Reason::NegativeAccepted :
+            unrelated ? Reason::NegativeInconclusive : Reason::CiphertextRejected),
+        "unrelated failure became native validation");
+    require(result.reserved.calls == 6 && result.reserved.tokens == 36864 && result.reserved.micro_usd == 6150,
+        "Responses controls/failures were refunded or charged twice for reasoning");
+    const auto a = ledger_totals(parse_profile(source("old", peer.port, false), true), ledger);
+    const auto b = ledger_totals(parse_profile(source("old", peer.port), true), ledger);
+    const auto g = ledger_totals(parse_profile(gemini_source("old", peer.port), true), ledger);
+    require(a.calls == 1 && a.tokens == 1051672 && a.micro_usd == 425585 &&
+        b.calls == 1 && b.tokens == 204096 && b.micro_usd == 420480 &&
+        g.calls == 1 && g.tokens == 1048704 && g.micro_usd == 104910,
+        "Responses lane reset or cross-charged existing reservations");
+    const auto exhausted = run(profile, ledger, secret);
+    require(exhausted.cases[0].state == State::NotRun && exhausted.cases[0].reason == Reason::CallBudget &&
+        exhausted.reserved.calls == 6, "Responses restart renewed the six-call allowance");
+    peer.count(model, 6, accepted ? 0 : omitted ? 2 : 1);
+    const auto stats = peer.stats(model);
+    require(stats.root().get("retained").as_uint() == 1 && stats.root().get("negative").as_uint() == 1 &&
+        stats.root().get("omitted").as_uint() == 1 && stats.root().get("differences").as_uint() == 1,
+        "control was not original native replay with exactly one intended mutation");
+  }
+  for (unsigned axis = 0; axis != 2; ++axis) {
+    Directory directory;
+    const auto model = peer.arm("reject");
+    const auto profile = parse_profile(responses_source(model, peer.port, 6,
+        axis == 0 ? 6144 : 100000, axis == 1 ? 1025 : 1000000), true);
+    const auto result = run(profile, directory.file("ledger"), secret);
+    require(result.cases[0].state == State::Passed && result.cases[1].state == State::NotRun &&
+        result.cases[1].reason == (axis == 0 ? Reason::TokenBudget : Reason::CostBudget),
+        "Responses sublimit budget axis ignored");
+    peer.count(model, 1);
+  }
+  for (unsigned axis = 0; axis != 2; ++axis) {
+    Directory directory;
+    const auto model = peer.arm("reject");
+    const auto ledger = directory.file("ledger");
+    std::string existing = "SPCANARY1\n";
+    const auto n = axis == 0 ? 16U : 1U;
+    for (unsigned i = 1; i <= n; ++i)
+      existing += "0 " + std::to_string(i) + ' ' + std::to_string(i * 6144) + ' ' +
+          std::to_string(axis == 0 ? i * 8192 : 9999999) + '\n';
+    save(ledger, existing);
+    const auto result = run(parse_profile(responses_source(model, peer.port), true), ledger, secret);
+    require(result.cases[0].state == State::NotRun &&
+        result.cases[0].reason == (axis == 0 ? Reason::CallBudget : Reason::CostBudget) &&
+        result.reserved.calls == 0, "Responses bypassed existing cumulative OpenAI limit");
+    peer.count(model, 0);
+  }
+  Directory cli_directory;
+  const auto model = peer.arm("reject");
+  const auto profile = cli_directory.file("profile"), key = cli_directory.file("keys");
+  save(profile, responses_source(model, peer.port)); save(key, "OPENAI_API_KEY=CANARY_SECRET_KEY_MARKER\n");
+  const auto observed = cli(executable, {"--profile", profile, "--ledger", cli_directory.file("ledger"),
+      "--env-file", key, "--execute", "--test-loopback"});
+  const auto parsed = runtime_test::parse(observed.text);
+  require(observed.code == 0 && parsed.root().get("provider").as_string() == "openai" &&
+      parsed.root().get("api_family").as_string() == "openai.responses" &&
+      parsed.root().get("verification_scope").as_string() == "stateless_reasoning_poc" &&
+      parsed.root().get("replay").as_string() == "ReplayAcceptanceUnobservable",
+      "CLI mislabeled native protocol or simulated vendor validation");
+  peer.count(model, 6, 1); private_text(observed.text);
+}
 } // namespace
 int main(int argc, char** argv) {
   try {
@@ -416,6 +528,7 @@ int main(int argc, char** argv) {
     adversarial_guards(peer);
     replay_cases(peer); budget_axes(peer); shared_race(peer); cli_paths(peer, argv[3]);
     gemini_smoke(peer, argv[3]);
+    responses_reasoning(peer, argv[3]);
     std::cout << "canary behavior passed\n";
     return 0;
   } catch (const std::exception& error) {

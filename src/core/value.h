@@ -42,12 +42,24 @@ struct ServerToolResult {
   std::shared_ptr<const json::Document> content;
 };
 struct ToolResult { std::string tool_use_id, content; bool is_error = false; };
-using Part = std::variant<Text, Refusal, ToolCall, InvalidToolCall, Thinking, RedactedThinking, ServerToolResult, ToolResult>;
+struct Reasoning {
+  std::string id;
+  std::vector<std::string> summary;
+  std::optional<std::string> encrypted_content{}, status{};
+  std::vector<std::string> content{};
+};
+struct Opaque {
+  std::string wire_type;
+  std::shared_ptr<const json::Document> wire_metadata;
+};
+using Part = std::variant<Text, Refusal, ToolCall, InvalidToolCall, Thinking, RedactedThinking, ServerToolResult, ToolResult, Reasoning, Opaque>;
 struct Message {
   std::string id;
   Role role = Role::Assistant;
   std::vector<Part> parts;
   std::shared_ptr<const NativeReplay> native{};
+  // Responses output is one atomic ordered replay group, not imported JSON authority.
+  std::shared_ptr<const json::Document> wire_output{};
 };
 enum class Evidence { Reported, Derived };
 struct Count { uint64_t value = 0; Evidence evidence = Evidence::Reported; };
@@ -94,7 +106,7 @@ struct PartialCompletion { std::vector<Message> messages; Usage usage; std::opti
 struct Failure { Error error; PartialCompletion partial; };
 using Outcome = std::variant<Completion, Failure>;
 struct LocalId { uint32_t value = 0; friend bool operator==(LocalId, LocalId) = default; };
-enum class PartKind { Text, Refusal, ToolCall, Thinking, RedactedThinking, ServerToolResult };
+enum class PartKind { Text, Refusal, ToolCall, Thinking, RedactedThinking, ServerToolResult, Reasoning, Opaque };
 struct PartHeader {
   std::string wire_id, name;
   ToolCallKind tool_kind = ToolCallKind::ClientExecuted;
@@ -114,8 +126,15 @@ struct PartBegin { LocalId message, part; PartKind kind = PartKind::Text; PartHe
 struct PartDelta { LocalId part; DeltaPayload payload; };
 // No snapshot means seal the accumulator-owned bytes. A snapshot reconciles a prefix,
 // never appends it. Tool snapshots are raw argument strings, parsed only at seal.
-struct PartSeal { LocalId part; std::optional<std::string_view> snapshot; };
-struct MessageSeal { LocalId message; };
+struct PartSeal {
+  LocalId part;
+  std::optional<std::string_view> snapshot;
+  std::shared_ptr<const json::Document> wire_metadata{};
+};
+struct MessageSeal {
+  LocalId message;
+  std::shared_ptr<const json::Document> wire_output{};
+};
 struct UsageUpdate { Usage snapshot; };
 struct Stop { StopReason reason; };
 struct Commit { std::string evidence; };

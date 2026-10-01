@@ -71,8 +71,17 @@ class Hash {
         } else if constexpr (std::is_same_v<P, RedactedThinking>) text(p.data);
         else if constexpr (std::is_same_v<P, ServerToolResult>) { text(p.tool_use_id); text(p.wire_type); document(p.content); }
         else if constexpr (std::is_same_v<P, ToolResult>) { text(p.tool_use_id); text(p.content); number(p.is_error); }
+        else if constexpr (std::is_same_v<P, Reasoning>) {
+          text(p.id); number(p.summary.size()); for (const auto& s : p.summary) text(s);
+          number(p.encrypted_content.has_value()); if (p.encrypted_content) text(*p.encrypted_content);
+          number(p.status.has_value()); if (p.status) text(*p.status);
+          number(p.content.size()); for (const auto& s : p.content) text(s);
+        } else if constexpr (std::is_same_v<P, Opaque>) { text(p.wire_type); document(p.wire_metadata); }
+        else valid_ = false;
       }, part);
     }
+    // Absent Responses data leaves the established Messages content domain intact.
+    if (message.wire_output) { text("sp.responses.output.v1"); document(message.wire_output); }
   }
   bool finish(Digest& digest) {
     unsigned size = 0;
@@ -89,7 +98,9 @@ std::string lower(std::string_view text) {
   return result;
 }
 bool origin_digest(const descriptor::ValidatedDescriptor& descriptor, Digest& digest) {
-  Hash hash; hash.text("sp.messages.origin.v1");
+  const bool responses = descriptor.family() == "openai.responses";
+  if (!responses && descriptor.family() != "anthropic.messages") return false;
+  Hash hash; hash.text(responses ? "sp.responses.origin.v1" : "sp.messages.origin.v1");
   hash.text(descriptor.family()); hash.text(descriptor.id()); hash.text(descriptor.base_url());
   hash.text(descriptor.request_model_member()); hash.text(descriptor.request_messages_member());
   hash.text(descriptor.request_stream_member()); hash.text(descriptor.max_output_tokens_member());
@@ -97,12 +108,12 @@ bool origin_digest(const descriptor::ValidatedDescriptor& descriptor, Digest& di
   headers.reserve(descriptor.headers().size());
   for (const auto& [name, value] : descriptor.headers()) {
     auto key = lower(name);
-    if (key != "accept" && key != "content-type" && key != "anthropic-version") headers.emplace_back(std::move(key), value);
+    if (key != "accept" && key != "content-type" && (responses || key != "anthropic-version")) headers.emplace_back(std::move(key), value);
   }
   std::sort(headers.begin(), headers.end());
   hash.number(headers.size());
   for (const auto& [key, value] : headers) { hash.text(key); hash.text(value); }
-  hash.text("anthropic-version"); hash.text("2023-06-01");
+  if (!responses) { hash.text("anthropic-version"); hash.text("2023-06-01"); }
   return hash.finish(digest);
 }
 bool configuration_digest(const messages::Request& request, Digest& digest) {
@@ -116,33 +127,57 @@ bool configuration_digest(const messages::Request& request, Digest& digest) {
   }
   return hash.finish(digest);
 }
-bool content_digest(const Message& message, Digest& digest) {
-  Hash hash; hash.text("sp.messages.content.v1"); hash.message(message); return hash.finish(digest);
+bool configuration_digest(const responses::Request& request, Digest& digest) {
+  Hash hash; hash.text("sp.responses.configuration.v1");
+  hash.text(request.model); hash.text(request.account_scope); hash.text(request.instructions);
+  hash.number(request.max_output_tokens.has_value()); if (request.max_output_tokens) hash.number(*request.max_output_tokens);
+  hash.number(request.reasoning.has_value());
+  if (request.reasoning) { hash.text(request.reasoning->effort); hash.text(request.reasoning->summary); }
+  // Per-turn tool selection can be cleared after the forced client call.
+  hash.number(request.tools.size());
+  for (const auto& tool : request.tools) {
+    hash.text(tool.name); hash.text(tool.description); hash.document(tool.parameters); hash.number(tool.strict);
+  }
+  return hash.finish(digest);
 }
-bool append_prefix(Digest& prefix, const Digest& content, size_t index) {
-  Hash hash; hash.text("sp.messages.prefix.v1"); hash.number(index);
+bool content_digest(const Message& message, Digest& digest, bool responses) {
+  Hash hash; hash.text(responses ? "sp.responses.content.v1" : "sp.messages.content.v1");
+  hash.message(message); return hash.finish(digest);
+}
+bool append_prefix(Digest& prefix, const Digest& content, size_t index, bool responses) {
+  Hash hash; hash.text(responses ? "sp.responses.prefix.v1" : "sp.messages.prefix.v1"); hash.number(index);
   hash.bytes(prefix.data(), prefix.size()); hash.bytes(content.data(), content.size());
   return hash.finish(prefix);
 }
 } // namespace
 NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, const messages::Request& request, bool streaming)
-    : model_(request.model), route_(descriptor.path(streaming)), prefix_count_(request.messages.size()) {
-  valid_ = origin_digest(descriptor, origin_) && configuration_digest(request, prefix_);
-  if (!valid_) return;
+    : responses_(false), model_(request.model), route_(descriptor.path(streaming)), prefix_count_(request.messages.size()) {
+  valid_ = descriptor.family() == "anthropic.messages" && origin_digest(descriptor, origin_) && configuration_digest(request, prefix_);
+  if (valid_) bind_history(request.messages);
+}
+NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, const responses::Request& request, bool streaming)
+    : responses_(true), model_(request.model), route_(descriptor.path(streaming)), prefix_count_(request.messages.size()) {
+  valid_ = descriptor.family() == "openai.responses" && origin_digest(descriptor, origin_) && configuration_digest(request, prefix_);
+  if (valid_) bind_history(request.messages);
+}
+void NativeContext::bind_history(const std::vector<Message>& messages) {
   std::map<std::string, std::string> pending;
-  for (size_t index = 0; index < request.messages.size(); ++index) {
-    const auto& message = request.messages[index];
+  for (size_t index = 0; index < messages.size(); ++index) {
+    const auto& message = messages[index];
+    if (!responses_ && (message.wire_output || std::any_of(message.parts.begin(), message.parts.end(), [](const Part& part) {
+          return std::holds_alternative<Reasoning>(part) || std::holds_alternative<Opaque>(part);
+        }))) { history_valid_ = false; return; }
     Digest content{};
-    if (!content_digest(message, content)) { valid_ = false; return; }
+    if (!content_digest(message, content, responses_)) { valid_ = false; return; }
     if (message.native) {
       const auto& seal = *message.native;
       if (!seal.complete_ || !seal.context_ || !seal.context_->valid_ ||
-          seal.context_->prefix_count_ != index || seal.context_->route_ != route_ ||
+          seal.context_->responses_ != responses_ || seal.context_->prefix_count_ != index || seal.context_->route_ != route_ ||
           seal.context_->origin_ != origin_ || seal.context_->prefix_ != prefix_ ||
           seal.content_ != content) { history_valid_ = false; return; }
     }
     // One bounded content hash per history message, not one rehash per capsule.
-    if (!append_prefix(prefix_, content, index)) { valid_ = false; return; }
+    if (!append_prefix(prefix_, content, index, responses_)) { valid_ = false; return; }
     for (const auto& part : message.parts) {
       if (const auto* call = std::get_if<ToolCall>(&part); call && call->kind == ToolCallKind::ServerExecuted) pending.emplace(call->id, call->name);
       if (const auto* result = std::get_if<ServerToolResult>(&part)) pending.erase(result->tool_use_id);
@@ -163,6 +198,10 @@ std::optional<std::string_view> NativeContext::server_tool_name(std::string_view
 }
 NativeReplay::NativeReplay(std::shared_ptr<const NativeContext> context, const Message& message, const StopReason* stop, bool complete)
     : context_(std::move(context)), stop_(stop ? stop->kind : StopKind::Unknown) {
-  complete_ = complete && context_ && stop && content_digest(message, content_);
+  const bool responses = context_ && context_->responses_;
+  const bool eligible = !responses || (message.wire_output && message.wire_output->root().is_array() &&
+      stop && (stop->kind == StopKind::EndTurn || stop->kind == StopKind::ToolUse || stop->kind == StopKind::Refusal));
+  complete_ = complete && eligible && context_ && context_->valid_ && context_->history_valid_ && stop &&
+      content_digest(message, content_, responses);
 }
 } // namespace sp

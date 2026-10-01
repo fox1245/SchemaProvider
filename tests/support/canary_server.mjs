@@ -7,6 +7,7 @@ const secret = 'CANARY_SECRET_KEY_MARKER';
 const signature = 'CANARY_SIGNATURE_MARKER';
 const thinking = 'CANARY_THINKING_MARKER';
 const redacted = 'CANARY_REDACTED_MARKER';
+const ciphertext = 'CANARY_CIPHER_MARKER';
 const text = 'CANARY_RESPONSE_MARKER';
 let unexpected = 0;
 const reply = value => process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -42,6 +43,87 @@ function sse(model, messages, includeUsage) {
     + frame('message_delta', { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 3 } }, true)
     + frame('message_stop', { type: 'message_stop' }, true);
 }
+function response(model, output) {
+  return { id: 'CANARY_ACCOUNT_ID_MARKER', object: 'response', model, created_at: 1, status: 'completed',
+    error: null, incomplete_details: null, output, usage: { input_tokens: 2, output_tokens: 3, total_tokens: 5,
+      input_tokens_details: { cached_tokens: 0 }, output_tokens_details: { reasoning_tokens: 1 } } };
+}
+function responseReasoning(c) {
+  return { id: 'rs_canary', type: 'reasoning', status: 'completed',
+    summary: [{ type: 'summary_text', text: thinking }],
+    ...(c.scenario === 'responses-no-encrypted' ? {} : { encrypted_content: ciphertext }) };
+}
+function responseText() {
+  return { id: 'msg_canary', type: 'message', status: 'completed', role: 'assistant', phase: 'final_answer',
+    content: [{ type: 'output_text', text, annotations: [] }] };
+}
+function responsesSse(model, output) {
+  let sequence = 0;
+  const event = (type, fields) => frame(type, { type, sequence_number: sequence++, ...fields }, true);
+  let stream = event('response.created', { response: { ...response(model, []), status: 'in_progress', usage: null } });
+  for (let output_index = 0; output_index < output.length; ++output_index) {
+    const item = output[output_index];
+    stream += event('response.output_item.added', { output_index, item: item.type === 'reasoning'
+      ? { ...item, status: 'in_progress', summary: [], encrypted_content: 'PROVISIONAL_ONLY' }
+      : { ...item, status: 'in_progress', content: [] } });
+    stream += event('response.output_item.done', { output_index, item });
+  }
+  return stream + event('response.completed', { response: response(model, output) });
+}
+function responsesRequest(req, res, body, raw, c) {
+  if (req.method !== 'POST' || req.headers.authorization !== `Bearer ${secret}` || req.headers['x-api-key'] ||
+      req.headers['anthropic-version'] || req.headers['anthropic-beta'] || typeof body.stream !== 'boolean' ||
+      !Array.isArray(body.input) || body.max_output_tokens !== 2048 || body.store !== false ||
+      JSON.stringify(body.include) !== '["reasoning.encrypted_content"]' || body.reasoning?.effort !== 'low' ||
+      body.reasoning?.summary !== 'auto' || body.service_tier !== 'default' || body.background || body.conversation ||
+      body.previous_response_id || body.extra_body) ++c.invalid;
+  const tools = Array.isArray(body.tools) && body.tools.length > 0;
+  if (tools && (body.tools.length !== 1 || body.tools[0].type !== 'function' || body.tools[0].name !== 'canary_echo' ||
+      body.tools[0].strict !== true || body.tools[0].parameters?.additionalProperties !== false)) ++c.invalid;
+  if (tools && body.input.length === 1) {
+    if (body.tool_choice?.type !== 'function' || body.tool_choice?.name !== 'canary_echo') ++c.invalid;
+    c.original = [responseReasoning(c), { id: 'fc_canary', type: 'function_call', status: 'completed',
+      call_id: 'canary_call', name: 'canary_echo', arguments: '{"value":7}' }];
+    send(res, 200, JSON.stringify(response(body.model, c.original))); return;
+  }
+  if (tools) {
+    const result = body.input.at(-1);
+    if (body.tool_choice || result?.type !== 'function_call_output' || result.call_id !== 'canary_call' ||
+        result.output !== '{"value":7}') ++c.invalid;
+    const native = body.input.slice(1, -1);
+    if (JSON.stringify(native) === JSON.stringify(c.original)) {
+      ++c.positive; ++c.retained; c.positiveWire = raw;
+    } else if (JSON.stringify(native) === JSON.stringify(c.original.filter(item => item.type !== 'reasoning'))) {
+      ++c.omitted;
+      if (c.scenario === 'responses-omit-reject') {
+        ++c.faults;
+        send(res, 400, JSON.stringify({ error: { type: 'invalid_request_error', code: null,
+          message: "Item 'fc_canary' was provided without its required 'reasoning' item: 'rs_canary'." } })); return;
+      }
+    } else {
+      ++c.negative;
+      let differences = Math.abs(raw.length - (c.positiveWire?.length ?? 0));
+      for (let i = 0; i < Math.min(raw.length, c.positiveWire?.length ?? 0); ++i)
+        if (raw[i] !== c.positiveWire[i]) ++differences;
+      c.differences += differences;
+      const changed = structuredClone(c.original);
+      changed[0].encrypted_content = 'A' + ciphertext.slice(1);
+      if (differences !== 1 || JSON.stringify(native) !== JSON.stringify(changed)) ++c.invalid;
+      if (c.scenario !== 'responses-accept') {
+        ++c.faults;
+        send(res, 400, JSON.stringify({ error: { type: 'invalid_request_error',
+          code: c.scenario === 'responses-unrelated' ? 'invalid_tool_output' :
+            c.scenario === 'responses-misleading' ? 'invalid_parameter' : 'invalid_encrypted_content',
+          message: c.scenario === 'responses-unrelated' ? 'Invalid tool output; encrypted content was not examined.' :
+            c.scenario === 'responses-misleading' ? 'The input parameter could not be verified; encrypted content was not evaluated.'
+            : 'The encrypted content could not be verified.' } })); return;
+      }
+    }
+  }
+  const output = [responseReasoning(c), responseText()];
+  if (body.stream) { ++c.sse; send(res, 200, responsesSse(body.model, output), true); }
+  else send(res, 200, JSON.stringify(response(body.model, output)));
+}
 const server = http.createServer(async (req, res) => {
   let c;
   try {
@@ -51,6 +133,7 @@ const server = http.createServer(async (req, res) => {
     const body = JSON.parse(raw); c = cases.get(body.model);
     if (!c) { ++unexpected; send(res, 400, '{}'); return; }
     ++c.count;
+    if (req.url === '/v1/responses') { responsesRequest(req, res, body, raw, c); return; }
     const messages = req.url === '/v1/messages';
     const gemini = req.url === '/v1beta/openai/chat/completions';
     if (req.method !== 'POST' || (!messages && !gemini && req.url !== '/v1/chat/completions') ||
@@ -124,12 +207,12 @@ input.on('line', line => {
   try {
     const command = JSON.parse(line);
     if (command.arm) {
-      cases.set(command.arm, { scenario: command.scenario, count: 0, invalid: 0, faults: 0, positive: 0, negative: 0, retained: 0, differences: 0, sse: 0 });
+      cases.set(command.arm, { scenario: command.scenario, count: 0, invalid: 0, faults: 0, positive: 0, negative: 0, omitted: 0, retained: 0, differences: 0, sse: 0 });
       reply({ ok: true });
     } else {
       const c = cases.get(command.model); if (!c) throw Error();
       reply({ count: c.count, invalid: c.invalid, faults: c.faults, positive: c.positive, negative: c.negative,
-        retained: c.retained, differences: c.differences, sse: c.sse, unexpected });
+        retained: c.retained, differences: c.differences, omitted: c.omitted, sse: c.sse, unexpected });
     }
   } catch { reply({ error: 'invalid control' }); }
 });

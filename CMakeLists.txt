@@ -67,7 +67,8 @@ target_link_libraries(sp_descriptor PRIVATE sp_json)
 
 add_library(sp_codecs STATIC src/core/native.cpp src/codecs/accumulator.cpp
             src/codecs/chat.cpp src/codecs/chat_request.cpp
-            src/codecs/messages.cpp src/codecs/messages_request.cpp)
+            src/codecs/messages.cpp src/codecs/messages_request.cpp
+            src/codecs/responses.cpp src/codecs/responses_request.cpp)
 target_compile_options(sp_codecs PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(sp_codecs PUBLIC sp_core PRIVATE sp_json sp_descriptor OpenSSL::Crypto)
 
@@ -142,6 +143,12 @@ if(SP_BUILD_TESTS)
   target_link_libraries(sp_messages_replay_tests PRIVATE sp_codecs sp_descriptor sp_json)
   add_executable(sp_native_continuation_tests tests/native_continuation_bounds_test.cpp)
   target_link_libraries(sp_native_continuation_tests PRIVATE sp_codecs sp_descriptor sp_json)
+  add_executable(sp_responses_tests tests/responses_semantic_test.cpp)
+  target_link_libraries(sp_responses_tests PRIVATE sp_codecs sp_descriptor sp_json sp_transport)
+  target_compile_options(sp_responses_tests PRIVATE -Wall -Wextra -Wpedantic)
+  add_executable(sp_responses_runtime_tests tests/responses_runtime_test.cpp)
+  target_link_libraries(sp_responses_runtime_tests PRIVATE sp_runtime sp_codecs sp_descriptor sp_json sp_transport)
+  target_compile_options(sp_responses_runtime_tests PRIVATE -Wall -Wextra -Wpedantic)
   add_executable(sp_fixture_runner tests/fixture_runner.cpp)
   target_link_libraries(sp_fixture_runner PRIVATE sp_codecs sp_descriptor sp_json sp_transport)
   add_executable(sp_runtime_policy_tests tests/runtime_policy_test.cpp)
@@ -180,6 +187,10 @@ if(SP_BUILD_TESTS)
   add_test(NAME messages_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_messages_tests>)
   add_test(NAME messages_replay COMMAND ${sp_test_runner} $<TARGET_FILE:sp_messages_replay_tests>)
   add_test(NAME native_continuation_bounds COMMAND ${sp_test_runner} $<TARGET_FILE:sp_native_continuation_tests>)
+  add_test(NAME responses_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_responses_tests>)
+  add_test(NAME responses_runtime COMMAND ${sp_test_runner} $<TARGET_FILE:sp_responses_runtime_tests>
+           ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/responses_server.mjs)
+  set_tests_properties(responses_properties responses_runtime PROPERTIES TIMEOUT 300)
   add_test(NAME chat_fixtures COMMAND ${sp_test_runner} $<TARGET_FILE:sp_fixture_runner> ${SP_NODE}
            ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/fixture_server.mjs
            ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/chat

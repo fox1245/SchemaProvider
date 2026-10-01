@@ -144,6 +144,7 @@ ResponseInfo inspect_response(std::string_view family, int status,
     const std::vector<transport::Header>& headers, std::string_view body,
     SteadyTime received, WallTime wall_received) {
   ResponseInfo info;
+  const bool openai = family == "openai.chat" || family == "openai.responses";
   switch (status) {
     case 400: case 413: case 422: info.kind = ErrorKind::InvalidRequest; info.retry_class = RetryClass::Never; break;
     case 401: info.kind = ErrorKind::Authentication; info.retry_class = RetryClass::Never; break;
@@ -154,10 +155,14 @@ ResponseInfo inspect_response(std::string_view family, int status,
       info.kind = ErrorKind::Overloaded; info.retry_class = RetryClass::Transient; break;
     default: break;
   }
-  if (!body.empty() && (family == "openai.chat" || family == "anthropic.messages")) {
+  if (!body.empty() && (openai || family == "anthropic.messages")) {
     auto parsed = json::parse(body, {body.size(), 32});
     if (auto* document = std::get_if<json::Document>(&parsed)) {
       auto error = document->root().get("error");
+      if (family == "openai.responses" && !error.is_object()) {
+        error = document->root().get("response").get("error");
+        if (!error.is_object() && document->root().get("type").as_string() == "error") error = document->root();
+      }
       if (error.is_object()) {
         auto admit = [&](json::Value field, const auto& codes) {
           if (!field.is_string()) return;
@@ -166,7 +171,7 @@ ResponseInfo inspect_response(std::string_view family, int status,
             info.kind = code.kind; info.retry_class = code.retry; info.vendor_code = code.value;
           }
         };
-        if (family == "openai.chat") {
+        if (openai) {
           admit(error.get("type"), chat_codes);
           admit(error.get("code"), chat_codes);
         } else admit(error.get("type"), messages_codes);
@@ -180,8 +185,8 @@ ResponseInfo inspect_response(std::string_view family, int status,
       std::int64_t seconds;
       if (digits(value, seconds) && seconds <= max_ms / 1000) delay = Ms(seconds * 1000);
       else delay = http_date(value, wall_received);
-    } else if (family == "openai.chat" && iequal(header.name, "retry-after-ms")) delay = decimal_ms(value, 1);
-    else if (family == "openai.chat" && (iequal(header.name, "x-ratelimit-reset-requests") || iequal(header.name, "x-ratelimit-reset-tokens"))) {
+    } else if (openai && iequal(header.name, "retry-after-ms")) delay = decimal_ms(value, 1);
+    else if (openai && (iequal(header.name, "x-ratelimit-reset-requests") || iequal(header.name, "x-ratelimit-reset-tokens"))) {
       if (!value.empty()) delay = reset_duration(value);
     } else continue;
     const auto minimum = delay ? add(received, *delay) : SteadyTime::max();

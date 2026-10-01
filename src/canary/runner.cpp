@@ -13,6 +13,7 @@ struct WireState {
   Totals total;
   bool total_known{};
   const Message* expected{};
+  bool omission{}, removed{};
   bool negative{}, retained{}, mutated{}, rejected{};
   std::string positive_wire;
 };
@@ -58,6 +59,83 @@ bool mutate(std::string& body, const Message& expected) {
     return true;
   }
   return false;
+}
+bool responses_retained(std::string_view body, const Message& expected) {
+  if (!expected.wire_output || !expected.wire_output->root().is_array()) return false;
+  auto parsed = json::parse(body, {16U << 20, 64});
+  auto* doc = std::get_if<json::Document>(&parsed);
+  if (!doc) return false;
+  const auto input = doc->root().get("input"), output = expected.wire_output->root();
+  if (!input.is_array() || input.size() <= output.size()) return false;
+  for (size_t i = 0; i < output.size(); ++i)
+    if (!json::equal(input.at(i + 1), output.at(i))) return false;
+  return true;
+}
+bool mutate_ciphertext(std::string& body, const Message& expected) {
+  for (const auto& part : expected.parts) {
+    const auto* reasoning = std::get_if<Reasoning>(&part);
+    if (!reasoning || !reasoning->encrypted_content || reasoning->encrypted_content->empty()) continue;
+    const auto& encrypted = *reasoning->encrypted_content;
+    const auto byte = encrypted.find_first_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=_-");
+    const auto quoted = json::quote(encrypted);
+    if (byte == std::string::npos || quoted.size() != encrypted.size() + 2) continue;
+    const auto needle = "\"encrypted_content\":" + quoted;
+    auto pos = body.find(needle);
+    if (pos == std::string::npos || body.find(needle, pos + 1) != std::string::npos) continue;
+    pos += std::string_view("\"encrypted_content\":\"").size() + byte;
+    body[pos] = body[pos] == 'A' ? 'B' : 'A';
+    return true;
+  }
+  return false;
+}
+bool omit_reasoning(std::string& body) {
+  auto parsed = json::parse(body, {16U << 20, 64});
+  auto* doc = std::get_if<json::Document>(&parsed);
+  if (!doc || !doc->root().get("input").is_array()) return false;
+  size_t removed = 0;
+  auto build = [&](json::BoundedWriter& writer) {
+    writer.raw("{");
+    bool comma = false;
+    removed = 0;
+    for (auto member : doc->root().members()) {
+      if (comma) writer.raw(",");
+      comma = true;
+      writer.quoted(member.key).raw(":");
+      if (member.key != "input") { writer.value(member.value, 1); continue; }
+      writer.raw("[");
+      bool item_comma = false;
+      for (auto item : member.value.elements()) {
+        if (item.get("type").as_string() == "reasoning") { ++removed; continue; }
+        if (item_comma) writer.raw(",");
+        item_comma = true;
+        writer.value(item, 2);
+      }
+      writer.raw("]");
+    }
+    writer.raw("}");
+  };
+  json::BoundedWriter measure({16U << 20, 64});
+  build(measure);
+  if (!measure.ok() || !removed) return false;
+  std::string changed; changed.reserve(measure.size());
+  json::BoundedWriter writer({measure.size(), 64}, &changed);
+  build(writer);
+  if (!writer.ok()) return false;
+  body = std::move(changed);
+  return true;
+}
+bool native_rejection(int status, std::string_view body, bool omission) {
+  if (status != 400) return false;
+  auto parsed = json::parse(body, {65536, 16});
+  const auto* doc = std::get_if<json::Document>(&parsed);
+  if (!doc) return false;
+  const auto error = doc->root().get("error");
+  if (!error.is_object() || error.get("type").as_string() != "invalid_request_error") return false;
+  if (!omission) return error.get("code").as_string() == "invalid_encrypted_content";
+  if (!error.get("message").is_string()) return false;
+  std::string message(error.get("message").as_string());
+  for (auto& c : message) if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+  return message.find("was provided without its required 'reasoning' item") != std::string::npos;
 }
 bool signature_rejection(int status, std::string_view body) {
   if (status != 400) return false;
@@ -111,7 +189,8 @@ class GuardedTransport final : public runtime::detail::AttemptTransport {
   std::unique_ptr<runtime::detail::Attempt> start(transport::HttpRequest request, transport::Callbacks callbacks) override {
     auto& state = *state_;
     auto& result = *state.result;
-    if (profile_.provider() == Provider::OpenAI) {
+    const bool responses = profile_.provider() == Provider::OpenAIResponses;
+    if (profile_.provider() == Provider::OpenAI || responses) {
       // An omitted tier inherits a project's premium setting. This campaign
       // uses only standard pricing, independently of that account default.
       if (request.body.empty() || request.body.back() != '}') detail::fail();
@@ -126,13 +205,15 @@ class GuardedTransport final : public runtime::detail::AttemptTransport {
       request.body.append(",\"reasoning_effort\":\"none\"}");
     }
     if (state.expected) {
-      state.retained = retained(request.body, *state.expected);
+      state.retained = responses ? responses_retained(request.body, *state.expected) : retained(request.body, *state.expected);
       if (!state.retained) { result.reason = Reason::RetentionMismatch; detail::fail(); }
       if (state.negative) {
-        if (state.positive_wire != request.body || !mutate(request.body, *state.expected)) {
-          result.reason = Reason::MutationUnavailable; detail::fail();
-        }
-        state.mutated = true;
+        if (state.positive_wire != request.body) { result.reason = Reason::RetentionMismatch; detail::fail(); }
+        const bool changed = state.omission ? omit_reasoning(request.body) :
+            responses ? mutate_ciphertext(request.body, *state.expected) : mutate(request.body, *state.expected);
+        if (!changed) { result.reason = Reason::MutationUnavailable; detail::fail(); }
+        state.removed = state.omission;
+        state.mutated = !state.omission;
       } else state.positive_wire = request.body;
     }
     Debit debit;
@@ -168,10 +249,11 @@ class GuardedTransport final : public runtime::detail::AttemptTransport {
         }
         return true;
       };
-      callbacks.on_done = [response, done = std::move(done), state = state_](const transport::Result& r) {
+      callbacks.on_done = [response, done = std::move(done), state = state_, responses](const transport::Result& r) {
         try {
           if (r.status == transport::Status::Completed && !response->overflow)
-            state->rejected = signature_rejection(response->status, response->body);
+            state->rejected = responses ? native_rejection(response->status, response->body, state->omission) :
+                signature_rejection(response->status, response->body);
         } catch (...) { state->rejected = false; }
         response->body.clear();
         if (done) done(r);
@@ -189,11 +271,12 @@ class GuardedTransport final : public runtime::detail::AttemptTransport {
   std::unique_ptr<transport::Transport> backend_;
 };
 descriptor::ValidatedDescriptor descriptor_for(const Profile& profile) {
+  const bool responses = profile.provider() == Provider::OpenAIResponses;
   const bool chat = profile.provider() != Provider::Anthropic;
-  auto path = profile.provider() == Provider::Gemini ? "/v1beta/openai/chat/completions" :
+  auto path = responses ? "/v1/responses" : profile.provider() == Provider::Gemini ? "/v1beta/openai/chat/completions" :
       chat ? "/v1/chat/completions" : "/v1/messages";
   std::string source = "{\"descriptor_version\":1,\"revision\":1,\"id\":\"canary\",\"family\":" +
-      json::quote(chat ? "openai.chat" : "anthropic.messages") + ",\"connection\":{\"base_url\":" +
+      json::quote(responses ? "openai.responses" : chat ? "openai.chat" : "anthropic.messages") + ",\"connection\":{\"base_url\":" +
       json::quote(profile.origin()) + ",\"paths\":{\"buffered\":" + json::quote(path) + ",\"streaming\":" + json::quote(path) + '}';
   if (!chat) source += ",\"headers\":{\"anthropic-version\":\"2023-06-01\"}";
   source += "}}";
@@ -232,12 +315,17 @@ Reason blocked_reason(Reason value) {
 Report run(const Profile& profile, const std::string& ledger_path, std::string api_key) {
   Report report;
   report.provider = profile.provider(); report.test_only = profile.loopback();
-  report.replay = profile.provider() == Provider::Anthropic ? Replay::ReplayAcceptanceUnobservable : Replay::NotApplicable;
-  report.cases.reserve(profile.provider() == Provider::Gemini ? 2 : profile.provider() == Provider::Anthropic ? 5 : 4);
+  const bool responses = profile.provider() == Provider::OpenAIResponses;
+  report.replay = profile.provider() == Provider::Anthropic || responses ? Replay::ReplayAcceptanceUnobservable : Replay::NotApplicable;
+  report.cases.reserve(responses ? 6 : profile.provider() == Provider::Gemini ? 2 : profile.provider() == Provider::Anthropic ? 5 : 4);
   for (auto name : {"text_buffered", "text_sse"}) report.cases.push_back(Case{name});
   if (profile.provider() != Provider::Gemini)
     for (auto name : {"tool_first", "tool_positive"}) report.cases.push_back(Case{name});
   if (profile.provider() == Provider::Anthropic) report.cases.push_back(Case{"signature_negative"});
+  if (responses) {
+    report.cases.push_back(Case{"reasoning_missing"});
+    report.cases.push_back(Case{"ciphertext_negative"});
+  }
   if (api_key.empty()) {
     for (auto& item : report.cases) item.reason = Reason::MissingCredential;
     return report;
@@ -246,6 +334,7 @@ Report run(const Profile& profile, const std::string& ledger_path, std::string a
   for (unsigned char c : api_key) if (c < 0x21 || c > 0x7e) detail::fail();
   auto wire = std::make_shared<WireState>();
   runtime::Options options; options.api_key = std::move(api_key); options.retry_tokens = 0;
+  if (responses) options.default_timeout = std::chrono::seconds(120);
   auto transport = std::make_shared<GuardedTransport>(profile, ledger_path, wire);
   auto client = runtime::detail::ClientAccess::make(descriptor_for(profile), std::move(options), {}, transport);
   auto call = [&](runtime::Request request, std::size_t index, bool streaming) {
@@ -257,6 +346,15 @@ Report run(const Profile& profile, const std::string& ledger_path, std::string a
     report.reserved_known = wire->total_known;
     if (const auto* good = completion(value)) {
       item.state = State::Passed; item.reason = Reason::None; usage(item, good->usage, profile.bounds());
+      for (const auto& message : good->messages) {
+        item.native_complete = item.native_complete || (message.native && message.native->complete());
+        for (const auto& part : message.parts) if (const auto* reasoning = std::get_if<Reasoning>(&part)) {
+          ++item.reasoning_items;
+          item.summary_items += reasoning->summary.size();
+          item.encrypted_present = item.encrypted_present ||
+              (reasoning->encrypted_content && !reasoning->encrypted_content->empty());
+        }
+      }
       if (good->usage.stage != UsageStage::Final || good->usage.quality != UsageQuality::Consistent) {
         item.state = State::Failed; item.reason = Reason::InvalidUsage;
       }
@@ -284,6 +382,80 @@ Report run(const Profile& profile, const std::string& ledger_path, std::string a
   const auto schema = document(R"({"type":"object","properties":{"value":{"type":"integer"}},"required":["value"],"additionalProperties":false})");
   const std::string text_prompt = "Reply with the single word OK.";
   const std::string tool_prompt = "Call canary_echo exactly once with value 7. After its result, reply OK. This is a synthetic tool protocol check.";
+  if (responses) {
+    responses::Request request;
+    request.model = profile.model(); request.account_scope = "canary-process";
+    request.max_output_tokens = profile.bounds().output_tokens;
+    request.reasoning = responses::ReasoningOptions{"low", "auto"};
+    request.messages.push_back(Message{{}, Role::User, {Text{text_prompt}}});
+    for (size_t i = 0; i < 2; ++i) {
+      auto outcome = call(request, i, i == 1);
+      if (const auto* good = completion(outcome)) {
+        auto& item = report.cases[i];
+        if (!has_text(*good)) { item.state = State::Failed; item.reason = Reason::MissingText; }
+        else if (!item.reasoning_items || !item.encrypted_present || !item.native_complete) {
+          item.state = State::Failed; item.reason = Reason::MissingReasoning;
+        }
+      }
+    }
+    request.messages[0].parts = {Text{tool_prompt}};
+    request.tools.push_back({"canary_echo", "Return an inert synthetic value; no code is executed.", schema});
+    request.required_tool = "canary_echo";
+    auto first = call(request, 2, false);
+    const auto* good = completion(first);
+    if (!good) return report;
+    const auto& item = report.cases[2];
+    if (good->messages.size() != 1 || !item.native_complete || !item.reasoning_items || !item.encrypted_present) {
+      report.cases[2].state = State::Failed; report.cases[2].reason = Reason::MissingReasoning; return report;
+    }
+    const auto& original = good->messages.front();
+    const ToolCall* tool = nullptr;
+    bool invalid = false;
+    for (const auto& part : original.parts) {
+      if (const auto* call = std::get_if<ToolCall>(&part)) {
+        if (tool || call->kind != ToolCallKind::ClientExecuted || call->name != "canary_echo") invalid = true;
+        tool = call;
+      } else if (std::holds_alternative<InvalidToolCall>(part)) invalid = true;
+      else if (std::holds_alternative<Reasoning>(part)) ++report.native_leaves;
+    }
+    if (!tool || invalid) {
+      report.cases[2].state = State::Failed;
+      report.cases[2].reason = invalid ? Reason::InvalidTool : Reason::MissingTool;
+      return report;
+    }
+    request.required_tool.reset();
+    request.messages.push_back(original);
+    request.messages.push_back(Message{{}, Role::Tool, {ToolResult{tool->id, R"({"value":7})", false}}});
+    wire->expected = &original;
+    auto positive = call(request, 3, false);
+    report.positive_retained = wire->retained && report.cases[3].dispatched;
+    if (const auto* done = completion(positive); done && !has_text(*done)) {
+      report.cases[3].state = State::Failed; report.cases[3].reason = Reason::MissingText;
+    }
+    if (!report.positive_retained || report.cases[3].state != State::Passed) return report;
+    // Controls alter only transport-owned copies AFTER ordinary native admission.
+    wire->negative = true; wire->omission = true; wire->rejected = false;
+    auto missing = call(request, 4, false);
+    report.reasoning_removed = wire->removed && report.cases[4].dispatched;
+    if (report.cases[4].dispatched && report.reasoning_removed) {
+      auto& control = report.cases[4];
+      if (wire->rejected) { control.state = State::Passed; control.reason = Reason::OmissionRejected; }
+      else if (completion(missing)) { control.state = State::Passed; control.reason = Reason::OmissionAccepted; }
+      else { control.state = State::Failed; control.reason = Reason::NegativeInconclusive; }
+    }
+    wire->omission = false; wire->mutated = false; wire->rejected = false;
+    auto negative = call(request, 5, false);
+    report.ciphertext_mutated = wire->mutated && report.cases[5].dispatched;
+    if (report.cases[5].dispatched) {
+      auto& control = report.cases[5];
+      if (wire->rejected && report.ciphertext_mutated) {
+        control.state = State::Passed; control.reason = Reason::CiphertextRejected;
+        if (!profile.loopback()) report.replay = Replay::ReplayVerified;
+      } else if (completion(negative)) { control.state = State::Failed; control.reason = Reason::NegativeAccepted; }
+      else { control.state = State::Failed; control.reason = Reason::NegativeInconclusive; }
+    }
+    return report;
+  }
   if (profile.provider() == Provider::OpenAI) {
     chat::Request request; request.model = profile.model(); request.max_output_tokens = profile.bounds().output_tokens;
     request.messages.push_back({Role::User, text_prompt});

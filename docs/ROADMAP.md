@@ -33,6 +33,7 @@ The existing consumer result/request ABI is a strict lossless **NO-GO**: five ze
 - Canary cells: OpenAI Responses SSE and WSS (60 runs each as the transport-parity canary of D1's reconsideration condition 5); OpenRouter cell with `negative_control` recorded; OpenRouter never in an equivalence class. Entry also needs the WebSocket transport decision D1b.
 - Exit: Continuation has an explicit lifetime (Persisted | ConnectionBound) with full-input fallback or no-retry rule; previous_response_not_found path tested.
 - Cut line: WS lane may slip to a later release while Responses over SSE ships.
+- Private post-M5 HTTP/SSE Responses reasoning PoC now exists (POC_PLAN5.7). Final16/16 plain/ASan+UBSan/TSan groups pass; one buffered encrypted tool continuation is N=1 ReplayVerified, while omission was accepted. Initial live5/6 included a real SSE ciphertext-authority failure; two explicitly additive calls diagnosed it and confirmed corrected SSE, retaining8/US$0.186216 reservations. This is not a fresh6/6 run, live SSE tool replay or Stage2 exit. WebSocket, OpenRouter, server-state continuation and60-run qualification remain absent.
 
 ## Stage 3 — Gemini
 - Scope: Gemini generate (buffered + SSE), part-structure-preserving codec. Interactions ONLY if a complete spec (event order, terminal semantics, resume) is written and reviewed first; otherwise not in this ladder.

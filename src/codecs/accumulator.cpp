@@ -16,6 +16,34 @@ bool incomplete(std::string_view s) {
   }
   return quoted || depth != 0;
 }
+bool metadata_size(json::Value value, size_t depth, size_t maximum, size_t max_depth, size_t& size) {
+  auto claim = [&](size_t bytes) {
+    if (bytes > maximum - std::min(size, maximum)) return false;
+    size += bytes; return true;
+  };
+  if (depth > max_depth || !value.valid() || !claim(8)) return false;
+  if (value.is_string()) return claim(value.as_string().size());
+  if (value.is_object()) for (auto member : value.members())
+    if (!claim(member.key.size()) || !metadata_size(member.value, depth + 1, maximum, max_depth, size)) return false;
+  if (value.is_array()) for (auto element : value.elements())
+    if (!metadata_size(element, depth + 1, maximum, max_depth, size)) return false;
+  return true;
+}
+bool reasoning_metadata(json::Value value, std::string_view id) {
+  if (!value.is_object() || value.get("type").as_string() != "reasoning" ||
+      !value.get("id").is_string() || value.get("id").as_string() != id) return false;
+  auto strings = [](json::Value values, std::string_view type) {
+    if (!values.is_array()) return false;
+    for (auto item : values.elements())
+      if (!item.is_object() || item.get("type").as_string() != type || !item.get("text").is_string()) return false;
+    return true;
+  };
+  if (!strings(value.get("summary"), "summary_text")) return false;
+  const auto content = value.get("content"), encrypted = value.get("encrypted_content"), status = value.get("status");
+  return (!content.valid() || strings(content, "reasoning_text")) &&
+      (!encrypted.valid() || encrypted.is_null() || encrypted.is_string()) &&
+      (!status.valid() || status.is_null() || status.is_string());
+}
 }
 Accumulator::Accumulator(SemanticLimits limits, Sink sink) : limits_(limits), sink_(std::move(sink)) {}
 bool Accumulator::accept(const Event& event, const Error* failure_override) {
@@ -93,6 +121,39 @@ bool Accumulator::apply(const PartSeal& e) {
   auto p = parts_.find(e.part.value);
   if ((state_ != State::Receiving && state_ != State::Draining) || p == parts_.end()) return reject(ErrorKind::ProtocolCorrupt, "invalid part seal");
   auto& c = p->second;
+  if (e.wire_metadata) {
+    const auto metadata = e.wire_metadata->root();
+    if (!metadata.is_object() ||
+        (c.kind != PartKind::Reasoning && c.kind != PartKind::Opaque && c.kind != PartKind::ToolCall))
+      return reject(ErrorKind::ProtocolCorrupt, "invalid native part metadata");
+    if (c.sealed) {
+      if (!c.header.wire_metadata || !json::equal(c.header.wire_metadata->root(), metadata))
+        return reject(ErrorKind::ProtocolCorrupt, "contradictory native part snapshot");
+    } else {
+      size_t bytes = 0;
+      if (!metadata_size(metadata, 0, limits_.max_content_bytes - std::min(content_bytes_, limits_.max_content_bytes),
+                         limits_.max_json_depth, bytes))
+        return reject(ErrorKind::ResourceLimit, "native part metadata limit");
+      content_bytes_ += bytes;
+      c.header.wire_metadata = e.wire_metadata;
+    }
+  }
+  if (!c.sealed && c.kind == PartKind::Reasoning) {
+    if (!c.header.wire_metadata || !reasoning_metadata(c.header.wire_metadata->root(), c.header.wire_id))
+      return reject(ErrorKind::ProtocolCorrupt, "invalid completed reasoning item");
+    std::string_view prefix(c.bytes);
+    for (auto item : c.header.wire_metadata->root().get("summary").elements()) {
+      const auto text = item.get("text").as_string();
+      const auto size = std::min(prefix.size(), text.size());
+      if (prefix.substr(0, size) != text.substr(0, size))
+        return reject(ErrorKind::ProtocolCorrupt, "contradictory reasoning summary snapshot");
+      prefix.remove_prefix(size);
+    }
+    if (!prefix.empty()) return reject(ErrorKind::ProtocolCorrupt, "incomplete reasoning summary snapshot");
+  }
+  if (!c.sealed && c.kind == PartKind::Opaque &&
+      (!c.header.wire_metadata || c.header.wire_metadata->root().get("type").as_string() != c.header.wire_type))
+    return reject(ErrorKind::ProtocolCorrupt, "invalid opaque item metadata");
   if (c.sealed) {
     if (!e.snapshot) return true;
     if (e.snapshot->size() > limits_.max_content_bytes ||
@@ -132,6 +193,24 @@ Part Accumulator::seal_value(Cursor& c, bool partial) {
   if (c.kind == PartKind::Refusal) return Refusal{std::move(c.bytes), {}};
   if (c.kind == PartKind::Thinking) return Thinking{std::move(c.bytes), std::move(c.signature)};
   if (c.kind == PartKind::RedactedThinking) return RedactedThinking{std::move(c.bytes)};
+  if (c.kind == PartKind::Reasoning) {
+    Reasoning result;
+    result.id = c.header.wire_id;
+    if (!c.header.wire_metadata) {
+      if (!c.bytes.empty()) result.summary.push_back(std::move(c.bytes));
+      return result;
+    }
+    const auto item = c.header.wire_metadata->root();
+    result.summary.reserve(item.get("summary").size());
+    for (auto value : item.get("summary").elements()) result.summary.emplace_back(value.get("text").as_string());
+    result.content.reserve(item.get("content").size());
+    for (auto value : item.get("content").elements()) result.content.emplace_back(value.get("text").as_string());
+    if (item.get("encrypted_content").is_string()) result.encrypted_content = item.get("encrypted_content").as_string();
+    if (item.get("status").is_string()) result.status = item.get("status").as_string();
+    std::string{}.swap(c.bytes);
+    return result;
+  }
+  if (c.kind == PartKind::Opaque) return Opaque{c.header.wire_type, c.header.wire_metadata};
   if (c.kind == PartKind::ServerToolResult) {
     auto parsed = json::parse(c.bytes, {limits_.max_content_bytes, limits_.max_json_depth});
     std::shared_ptr<const json::Document> content;
@@ -144,7 +223,9 @@ Part Accumulator::seal_value(Cursor& c, bool partial) {
     return ServerToolResult{c.header.wire_id, c.header.wire_type, std::move(content)};
   }
   auto invalid = [&](InvalidReason reason) -> Part { return InvalidToolCall{c.header.wire_id, c.header.name, c.header.tool_kind, std::move(c.bytes), reason, c.header.wire_type, c.header.wire_metadata}; };
-  if (partial) return invalid(InvalidReason::Truncated);
+  if (partial || (c.header.wire_type == "function_call" && c.header.wire_metadata &&
+      c.header.wire_metadata->root().get("status").as_string() == "incomplete"))
+    return invalid(InvalidReason::Truncated);
   if (c.bytes.empty()) return invalid(InvalidReason::Empty);
   auto parsed = json::parse(c.bytes, {limits_.max_tool_bytes, limits_.max_json_depth});
   if (auto* error = std::get_if<json::ParseError>(&parsed)) {
@@ -166,6 +247,16 @@ bool Accumulator::apply(const MessageSeal& e) {
   for (const auto& [order, id] : m->second.parts_by_order) {
     (void)order;
     if (!parts_.at(id).sealed) return reject(ErrorKind::ProtocolCorrupt, "unsealed message part");
+  }
+  if (e.wire_output) {
+    if (!e.wire_output->root().is_array()) return reject(ErrorKind::ProtocolCorrupt, "native output must be ordered array");
+    size_t bytes = 0;
+    if (!metadata_size(e.wire_output->root(), 0,
+                       limits_.max_content_bytes - std::min(content_bytes_, limits_.max_content_bytes),
+                       limits_.max_json_depth, bytes))
+      return reject(ErrorKind::ResourceLimit, "native output metadata limit");
+    content_bytes_ += bytes;
+    m->second.message.wire_output = e.wire_output;
   }
   m->second.sealed = true; return true;
 }

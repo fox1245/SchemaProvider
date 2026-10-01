@@ -8,7 +8,7 @@
 #include <vector>
 
 namespace sp::canary {
-enum class Provider { OpenAI, Anthropic, Gemini };
+enum class Provider { OpenAI, Anthropic, Gemini, OpenAIResponses };
 struct Bounds {
   std::uint64_t input_tokens{}, output_tokens{}, input_rate{}, output_rate{};
   std::uint64_t calls{}, tokens{}, micro_usd{};
@@ -49,7 +49,8 @@ enum class Reason {
   None, MissingCredential, CallBudget, TokenBudget, CostBudget, LedgerFailure,
   RuntimeFailure, MissingText, MissingTool, InvalidTool, MissingSignature,
   PrerequisiteFailed, RetentionMismatch, MutationUnavailable,
-  SignatureRejected, NegativeAccepted, NegativeInconclusive, InvalidUsage
+  SignatureRejected, NegativeAccepted, NegativeInconclusive, InvalidUsage,
+  MissingReasoning, CiphertextRejected, OmissionAccepted, OmissionRejected
 };
 enum class Replay { NotApplicable, ReplayVerified, ReplayAcceptanceUnobservable };
 struct Case {
@@ -65,12 +66,15 @@ struct Case {
   UsageQuality usage_quality = UsageQuality::Consistent;
   std::optional<ErrorKind> failure_kind{};
   int http_status = 0;
+  std::uint64_t reasoning_items = 0, summary_items = 0;
+  bool encrypted_present = false, native_complete = false;
 };
 struct Report {
   Provider provider{};
   bool test_only = false;
   Replay replay = Replay::NotApplicable;
   bool positive_retained = false, signature_mutated = false;
+  bool ciphertext_mutated = false, reasoning_removed = false;
   std::uint64_t native_leaves = 0;
   Totals reserved;
   bool reserved_known = false;

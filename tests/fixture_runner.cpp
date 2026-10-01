@@ -162,6 +162,24 @@ std::string part_projection(const sp::Part& part) {
       return "{\"type\":\"thinking\",\"text\":" + sp::json::quote(p.text) + ",\"signature\":" + (p.signature ? sp::json::quote(*p.signature) : "null") + '}';
     else if constexpr (std::is_same_v<T, sp::RedactedThinking>)
       return "{\"type\":\"redacted_thinking\",\"data\":" + sp::json::quote(p.data) + '}';
+    else if constexpr (std::is_same_v<T, sp::Reasoning>) {
+      std::string out = "{\"type\":\"reasoning\",\"id\":" + sp::json::quote(p.id) + ",\"summary\":[";
+      for (size_t i = 0; i < p.summary.size(); ++i) {
+        if (i) out += ',';
+        out += sp::json::quote(p.summary[i]);
+      }
+      out += "],\"content\":[";
+      for (size_t i = 0; i < p.content.size(); ++i) {
+        if (i) out += ',';
+        out += sp::json::quote(p.content[i]);
+      }
+      return out + "],\"encrypted_content\":" + (p.encrypted_content ? sp::json::quote(*p.encrypted_content) : "null") +
+          ",\"status\":" + (p.status ? sp::json::quote(*p.status) : "null") + '}';
+    } else if constexpr (std::is_same_v<T, sp::Opaque>) {
+      require(p.wire_metadata != nullptr, "opaque output has no native metadata");
+      return "{\"type\":\"opaque\",\"wire_type\":" + sp::json::quote(p.wire_type) +
+          ",\"wire_metadata\":" + p.wire_metadata->root().dump() + '}';
+    }
     else if constexpr (std::is_same_v<T, sp::ServerToolResult>) {
       require(p.content != nullptr, "server result has no native block");
       return "{\"type\":\"server_tool_result\",\"tool_use_id\":" + sp::json::quote(p.tool_use_id)
