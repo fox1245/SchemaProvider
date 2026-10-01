@@ -1,17 +1,20 @@
-// Transport property tests (docs/POC_PLAN.md milestone M1). Each test names the CONFORMANCE.md
+// Transport property tests (docs/POC_PLAN.md milestones M1 and M1b). Each test names the CONFORMANCE.md
 // property or POC_PLAN experiment it exercises. The oracle is server-side evidence from the
 // separate sp_loopback_server process wherever the property is about what reached the wire.
 //
-// Usage: sp_transport_tests <path-to-sp_loopback_server> [test-name-substring]
+// Usage: sp_transport_tests <path-to-sp_loopback_server> <fixture-directory> [test-name-substring]
 #include "transport/http_transport.h"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <array>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <cstdarg>
@@ -1098,10 +1101,22 @@ struct NodeServer {
   pid_t pid = -1;
   int stdin_fd = -1;
   unsigned h2 = 0, stats = 0;
+  std::map<std::string, std::string> fields;
+
+  ~NodeServer() { stop(); }
+
+  unsigned port(const char* key) const {
+    const auto it = fields.find(key);
+    return it == fields.end() ? 0 : static_cast<unsigned>(std::strtoul(it->second.c_str(), nullptr, 10));
+  }
 
   bool start(const std::string& script) {
     int in_pipe[2], out_pipe[2];
-    if (pipe(in_pipe) != 0 || pipe(out_pipe) != 0) return false;
+    if (pipe2(in_pipe, O_CLOEXEC) != 0) return false;
+    if (pipe2(out_pipe, O_CLOEXEC) != 0) {
+      close(in_pipe[0]); close(in_pipe[1]);
+      return false;
+    }
     pid = fork();
     if (pid == 0) {
       dup2(in_pipe[0], 0);
@@ -1112,46 +1127,83 @@ struct NodeServer {
     }
     close(in_pipe[0]);
     close(out_pipe[1]);
+    if (pid < 0) {
+      close(in_pipe[1]); close(out_pipe[0]);
+      return false;
+    }
     stdin_fd = in_pipe[1];
     std::string line;
     pollfd pfd{out_pipe[0], POLLIN, 0};
-    while (line.find('\n') == std::string::npos) {
-      if (poll(&pfd, 1, 5000) <= 0) break;
+    const auto deadline = steady_clock::now() + std::chrono::seconds(20);
+    while (line.find('\n') == std::string::npos && line.size() < 8192) {
+      const auto remaining = std::chrono::duration_cast<milliseconds>(deadline - steady_clock::now()).count();
+      if (remaining <= 0 || poll(&pfd, 1, static_cast<int>(remaining)) <= 0) break;
       char c;
       if (read(out_pipe[0], &c, 1) != 1) break;
       line.push_back(c);
     }
     close(out_pipe[0]);
-    return std::sscanf(line.c_str(), "PORTS h2=%u stats=%u", &h2, &stats) == 2;
+    std::istringstream tokens(line);
+    std::string token;
+    if (!(tokens >> token) || token != "PORTS") return false;
+    while (tokens >> token) {
+      const auto equal = token.find('=');
+      if (equal != std::string::npos)
+        fields.emplace(token.substr(0, equal), token.substr(equal + 1));
+    }
+    h2 = port("h2");
+    stats = port("stats");
+    return stats != 0 && (h2 != 0 || port("good") != 0);
   }
   void stop() {
-    if (stdin_fd >= 0) close(stdin_fd);
-    if (pid > 0) waitpid(pid, nullptr, 0);
+    if (stdin_fd >= 0) {
+      close(stdin_fd);
+      stdin_fd = -1;
+    }
+    if (pid > 0) {
+      while (waitpid(pid, nullptr, 0) < 0 && errno == EINTR) {}
+      pid = -1;
+    }
   }
-  long stat(const char* key) const {
-    const int fd = socket(AF_INET, SOCK_STREAM, 0);
+  Stats stats_request(const char* path = "/") const {
+    const int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return {};
+    timeval timeout{3, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof timeout);
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof timeout);
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = htons(static_cast<uint16_t>(stats));
-    if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0) return -1;
-    const char req[] = "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
-    if (write(fd, req, sizeof req - 1) < 0) return -1;
+    if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0) {
+      close(fd);
+      return {};
+    }
+    const std::string req = std::string("GET ") + path + " HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+    if (send(fd, req.data(), req.size(), MSG_NOSIGNAL) != static_cast<ssize_t>(req.size())) {
+      close(fd);
+      return {};
+    }
     std::string resp;
-    char buf[1024];
+    char buf[2048];
     ssize_t n;
     while ((n = read(fd, buf, sizeof buf)) > 0) resp.append(buf, static_cast<size_t>(n));
     close(fd);
     const auto body = resp.find("\r\n\r\n");
     std::istringstream in(body == std::string::npos ? "" : resp.substr(body + 4));
-    std::string k;
-    long v;
-    while (in >> k >> v)
-      if (k == key) return v;
-    return -1;
+    Stats result;
+    std::string key;
+    long value;
+    while (in >> key >> value) result.v[key] = value;
+    return result;
+  }
+  long stat(const char* key) const {
+    const Stats snapshot = stats_request();
+    const auto it = snapshot.v.find(key);
+    return it == snapshot.v.end() ? -1 : it->second;
   }
 };
-std::string g_h2c_script;
+std::string g_h2c_script, g_tls_script, g_h2_adversarial_script;
 
 TEST(backpressure_http2_paused_stream_buffering_is_bounded) {
   NodeServer node;
@@ -1196,14 +1248,282 @@ TEST(backpressure_http2_paused_stream_buffering_is_bounded) {
   node.stop();
 }
 
+// M1b R4: a custom CA permits TLS without weakening certificate or hostname verification.
+// Every rejection must occur before HTTP request bytes reach the peer, even after a trusted call.
+TEST(tls_trust_matrix_and_http2_alpn) {
+  NodeServer node;
+  const bool started = node.start(g_tls_script);
+  CHECK(started);
+  if (!started) return;
+  const std::string ca = node.fields.at("ca");
+  const auto url = [&](const char* endpoint) {
+    return "https://127.0.0.1:" + std::to_string(node.port(endpoint)) + "/echo";
+  };
+  const std::string payload("tls-body\0binary", 15);
+  for (const auto version : {HttpVersion::Http1_1, HttpVersion::Auto}) {
+    Transport t;
+    CHECK(t.runtime_info().http2);
+    for (int i = 0; i < 2; ++i) {
+      auto c = std::make_shared<Collector>();
+      HttpRequest req = post(url("good"), payload);
+      req.http_version = version;
+      req.ca_file = ca;
+      const Result r = t.start(std::move(req), c->callbacks()).join();
+      const auto expected = version == HttpVersion::Auto ? ResponseVersion::Http2 : ResponseVersion::Http1_1;
+      CHECK_MSG(r.status == Status::Completed, "%s/%s curl=%d", name_of(r.status), name_of(r.failure), r.curl_code);
+      CHECK(r.attempt.version == expected);
+      CHECK(r.attempt.connection_reused == (i != 0));
+      CHECK(r.attempt.transport_internal_resends == 0);
+      CHECK(c->head && c->head->version == expected);
+      CHECK(c->body == payload);
+      CHECK(c->outcomes == 1 && c->late_callbacks == 0);
+    }
+    // A pooled connection validated against the custom CA cannot grant trust to a request
+    // which deliberately uses only the system trust store.
+    auto c = std::make_shared<Collector>();
+    HttpRequest req = post(url("good"), payload);
+    req.http_version = version;
+    const Result r = t.start(std::move(req), c->callbacks()).join();
+    CHECK(r.status == Status::Failed && r.failure == FailureKind::Tls);
+    CHECK(r.attempt.reached < Stage::RequestStarted);
+    CHECK(r.attempt.request_body_bytes == 0 && !r.attempt.response_head_seen);
+    CHECK(c->body.empty() && c->outcomes == 1 && c->late_callbacks == 0);
+  }
+  struct Row { const char* name; const char* endpoint; bool missing_ca; };
+  for (const Row row : {Row{"wrong-host", "wrong", false},
+                        Row{"expired", "expired", false},
+                        Row{"self-signed", "untrusted", false},
+                        Row{"missing-ca-file", "good", true}}) {
+    Transport t;
+    auto c = std::make_shared<Collector>();
+    HttpRequest req = post(url(row.endpoint), payload);
+    req.ca_file = row.missing_ca ? ca + ".missing" : ca;
+    const Result r = t.start(std::move(req), c->callbacks()).join();
+    note("TLS %s: %s/%s, curl=%d, request bytes=%lld", row.name, name_of(r.status), name_of(r.failure),
+         r.curl_code, static_cast<long long>(r.attempt.request_body_bytes));
+    CHECK(r.status == Status::Failed && r.failure == FailureKind::Tls);
+    CHECK(r.attempt.reached < Stage::RequestStarted);
+    CHECK(r.attempt.request_body_bytes == 0 && !r.attempt.response_head_seen);
+    CHECK(c->body.empty() && c->outcomes == 1 && c->late_callbacks == 0);
+  }
+  const Stats stats = node.stats_request();
+  CHECK(stats["good_requests"] == 4);
+  CHECK(stats["good_h1"] == 2 && stats["good_h2"] == 2);
+  CHECK(stats["wrong_requests"] == 0);
+  CHECK(stats["expired_requests"] == 0);
+  CHECK(stats["untrusted_requests"] == 0);
+  note("TLS oracle: trusted requests=%ld (h1=%ld h2=%ld); invalid peers saw %ld HTTP requests",
+       stats["good_requests"], stats["good_h1"], stats["good_h2"],
+       stats["wrong_requests"] + stats["expired_requests"] + stats["untrusted_requests"]);
+}
+
+HttpRequest h2_post(const NodeServer& node, const std::string& path, int deadline_ms = 15000,
+                    const char* host = "127.0.0.1") {
+  HttpRequest req = post("http://" + std::string(host) + ":" + std::to_string(node.h2) + path, "{}", deadline_ms);
+  req.http_version = HttpVersion::Http2PriorKnowledge;
+  return req;
+}
+
+// Count bytes without retaining them, so RSS measures the transport rather than the consumer.
+struct FloodCollector {
+  Collector result;
+  std::atomic<bool> paused{false}, released{false}, valid{true};
+  std::atomic<long> bytes{0};
+  long accept_before_pause = 0;
+
+  Callbacks callbacks() {
+    Callbacks cb = result.callbacks();
+    cb.on_body = [this](std::string_view data) {
+      if (!released && bytes + static_cast<long>(data.size()) > accept_before_pause) {
+        paused = true;
+        return false;
+      }
+      if (result.done) ++result.late_callbacks;
+      if (data.find_first_not_of('z') != std::string_view::npos) valid = false;
+      bytes += static_cast<long>(data.size());
+      return true;
+    };
+    return cb;
+  }
+};
+
+// M1b R3: the oracle proves all transfers share one connection; paused-stream buffering must
+// remain bounded while active siblings progress, and resume must deliver every byte exactly once.
+TEST(http2_paused_stream_has_live_multiplexed_siblings) {
+  NodeServer node;
+  const bool started = node.start(g_h2_adversarial_script);
+  CHECK(started);
+  if (!started) return;
+  TransportOptions options;
+  options.max_host_connections = 1;
+  Transport t(options);
+  auto warm = std::make_shared<Collector>();
+  CHECK(t.start(h2_post(node, "/ok?key=warm"), warm->callbacks()).join().status == Status::Completed);
+  constexpr long total = 64L << 20, sibling_total = 4L << 20;
+  FloodCollector held;
+  held.accept_before_pause = 1L << 20;
+  const long rss_before = rss_bytes();
+  Operation paused = t.start(h2_post(node, "/flood?key=held&total=" + std::to_string(total), 60000), held.callbacks());
+  CHECK(wait_until([&] { return held.paused.load(); }, 5000));
+  const long consumed_at_pause = held.bytes.load();
+  std::array<FloodCollector, 3> siblings;
+  std::vector<Operation> operations;
+  for (std::size_t i = 0; i < siblings.size(); ++i) {
+    siblings[i].released = true;
+    operations.push_back(t.start(h2_post(node, "/flood?key=s" + std::to_string(i) +
+                                              "&total=" + std::to_string(sibling_total)), siblings[i].callbacks()));
+  }
+  for (std::size_t i = 0; i < operations.size(); ++i) {
+    const Result r = operations[i].join();
+    CHECK_MSG(r.status == Status::Completed, "sibling %zu: %s/%s", i, name_of(r.status), name_of(r.failure));
+    CHECK(r.attempt.version == ResponseVersion::Http2);
+    CHECK(siblings[i].bytes == sibling_total && siblings[i].valid);
+    CHECK(siblings[i].result.outcomes == 1 && siblings[i].result.late_callbacks == 0);
+  }
+  std::this_thread::sleep_for(milliseconds(200));
+  const long written1 = node.stat("held_written");
+  std::this_thread::sleep_for(milliseconds(200));
+  const long written2 = node.stat("held_written");
+  const long growth = rss_bytes() - rss_before;
+  const Stats stats = node.stats_request();
+  CHECK(stats["sessions"] == 1);
+  CHECK(stats["held_requests"] == 1 && stats["held_done"] == 0);
+  CHECK(stats["held_session"] == stats["warm_session"]);
+  for (std::size_t i = 0; i < siblings.size(); ++i) {
+    const std::string key = "s" + std::to_string(i);
+    CHECK(stats[key + "_session"] == stats["held_session"]);
+    CHECK(stats[key + "_stream"] != stats["held_stream"]);
+    CHECK(stats[key + "_requests"] == 1 && stats[key + "_done"] == 1);
+  }
+  CHECK(written1 == written2);
+  CHECK(written2 > consumed_at_pause && written2 < (32L << 20));
+  CHECK_MSG(growth < (32L << 20), "multiplexed pause grew RSS by %ld B", growth);
+  CHECK(held.bytes == consumed_at_pause && !held.result.done);
+  note("shared h2 session: 3 siblings completed %ld B each; paused received=%ld written=%ld->%ld RSS +%ld",
+       sibling_total, consumed_at_pause, written1, written2, growth);
+  held.released = true;
+  paused.resume();
+  const Result r = paused.join();
+  CHECK(r.status == Status::Completed);
+  CHECK(held.bytes == total && held.valid);
+  CHECK(held.result.outcomes == 1 && held.result.late_callbacks == 0);
+}
+
+TEST(http2_cancelling_paused_stream_preserves_sibling) {
+  NodeServer node;
+  const bool started = node.start(g_h2_adversarial_script);
+  CHECK(started);
+  if (!started) return;
+  TransportOptions options;
+  options.max_host_connections = 1;
+  Transport t(options);
+  auto warm = std::make_shared<Collector>();
+  CHECK(t.start(h2_post(node, "/ok?key=warm"), warm->callbacks()).join().status == Status::Completed);
+  FloodCollector cancelled, survivor;
+  Operation a = t.start(h2_post(node, "/flood?key=cancelled&total=67108864"), cancelled.callbacks());
+  CHECK(wait_until([&] { return cancelled.paused.load(); }, 5000));
+  Operation b = t.start(h2_post(node, "/flood?key=survivor&total=4194304"), survivor.callbacks());
+  CHECK(wait_until([&] { return survivor.paused.load(); }, 5000));
+  const auto before_cancel = steady_clock::now();
+  a.cancel();
+  const Result stopped = a.join();
+  CHECK(stopped.status == Status::Cancelled);
+  CHECK_MSG(ms_since(before_cancel) < 500, "HTTP/2 cancellation waited for peer progress");
+  CHECK(!survivor.result.done);
+  survivor.released = true;
+  b.resume();
+  CHECK(b.join().status == Status::Completed);
+  CHECK(survivor.bytes == (4L << 20) && survivor.valid);
+  CHECK(cancelled.result.outcomes == 1 && cancelled.result.late_callbacks == 0);
+  CHECK(survivor.result.outcomes == 1 && survivor.result.late_callbacks == 0);
+  const Stats stats = node.stats_request();
+  CHECK(stats["sessions"] == 1);
+  CHECK(stats["cancelled_session"] == stats["survivor_session"]);
+}
+
+// M1b R1: GOAWAY and REFUSED_STREAM can make libcurl resend internally. The independent peer
+// must see precisely one request, regardless of whether this curl version tries that resend.
+TEST(http2_one_attempt_survives_goaway_and_refused_stream) {
+  NodeServer node;
+  const bool started = node.start(g_h2_adversarial_script);
+  CHECK(started);
+  if (!started) return;
+  for (const char* mode : {"goaway", "refused"}) {
+    TransportOptions options;
+    options.max_host_connections = 1;
+    Transport t(options);
+    auto warm = std::make_shared<Collector>();
+    CHECK(t.start(h2_post(node, "/ok?key=warm"), warm->callbacks()).join().status == Status::Completed);
+    auto c = std::make_shared<Collector>();
+    const std::string key(mode);
+    const Result r = t.start(h2_post(node, "/" + key + "?key=" + key), c->callbacks()).join();
+    const long requests = node.stat((key + "_requests").c_str());
+    note("h2 %s: %s/%s, curl=%d, internal resends=%u, peer requests=%ld", mode,
+         name_of(r.status), name_of(r.failure), r.curl_code, r.attempt.transport_internal_resends, requests);
+    CHECK(r.status == Status::Failed);
+    CHECK(r.attempt.reached >= Stage::RequestStarted);
+    CHECK(r.attempt.connection_reused);
+    CHECK(requests == 1);
+    CHECK(!r.attempt.response_head_seen && c->body.empty());
+    if (r.attempt.transport_internal_resends != 0) CHECK(r.failure == FailureKind::ResendRefused);
+    CHECK(c->outcomes == 1 && c->late_callbacks == 0);
+  }
+}
+
+// M1b R2: refreshed addresses may leave a healthy pooled connection alive, but any newly
+// established connection must use the fresh resolver answer rather than curl's stale DNS entry.
+TEST(http2_dns_refresh_and_connection_retirement) {
+  NodeServer node;
+  const bool started = node.start(g_h2_adversarial_script);
+  CHECK(started);
+  if (!started) return;
+  std::atomic<int> lookups{0};
+  std::atomic<bool> second_address{false};
+  TransportOptions options;
+  options.dns_ttl = std::chrono::seconds(0);
+  options.max_host_connections = 1;
+  options.resolve = [&](const std::string&) {
+    ++lookups;
+    return std::vector<std::string>{second_address ? "127.0.0.2" : "127.0.0.1"};
+  };
+  Transport t(options);
+  auto a = std::make_shared<Collector>();
+  const Result first = t.start(h2_post(node, "/ok?key=first", 15000, "protocol-peer.invalid"), a->callbacks()).join();
+  CHECK(first.status == Status::Completed && a->body == "peer A\n");
+  CHECK(!first.attempt.connection_reused);
+  second_address = true;
+  auto reused = std::make_shared<Collector>();
+  const Result second = t.start(h2_post(node, "/ok?key=second", 15000, "protocol-peer.invalid"), reused->callbacks()).join();
+  CHECK(second.status == Status::Completed);
+  CHECK(reused->body == (second.attempt.connection_reused ? "peer A\n" : "peer B\n"));
+  const Stats retirement = node.stats_request("/close");
+  CHECK(retirement["retired"] >= 1);
+  CHECK(wait_until([&] { return node.stat("active_sessions") == 0; }, 5000));
+  auto b = std::make_shared<Collector>();
+  const Result third = t.start(h2_post(node, "/ok?key=third", 15000, "protocol-peer.invalid"), b->callbacks()).join();
+  CHECK_MSG(third.status == Status::Completed, "%s/%s", name_of(third.status), name_of(third.failure));
+  CHECK(b->body == "peer B\n");
+  CHECK(!third.attempt.connection_reused && third.attempt.transport_internal_resends == 0);
+  CHECK(lookups == 3);
+  CHECK(a->outcomes == 1 && reused->outcomes == 1 && b->outcomes == 1);
+  const Stats stats = node.stats_request();
+  CHECK(stats["first_requests"] == 1 && stats["second_requests"] == 1 && stats["third_requests"] == 1);
+  CHECK(stats["third_session"] != stats["first_session"]);
+  note("DNS refresh: %d lookups, second reused=%d; retired=%ld; fresh connection reached peer B",
+       lookups.load(), second.attempt.connection_reused, retirement["retired"]);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   if (argc < 3) {
-    std::fprintf(stderr, "usage: %s <sp_loopback_server> <h2c_flood_server.mjs> [filter]\n", argv[0]);
+    std::fprintf(stderr, "usage: %s <sp_loopback_server> <fixture-directory> [filter]\n", argv[0]);
     return 2;
   }
-  g_h2c_script = argv[2];
+  const std::string fixtures = argv[2];
+  g_h2c_script = fixtures + "/h2c_flood_server.mjs";
+  g_tls_script = fixtures + "/tls_test_server.mjs";
+  g_h2_adversarial_script = fixtures + "/h2_adversarial_server.mjs";
   g_server.start(argv[1]);
   const std::string filter = argc > 3 ? argv[3] : "";
   int ran = 0, failed_tests = 0;

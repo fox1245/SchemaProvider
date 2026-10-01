@@ -1,6 +1,6 @@
 # Roadmap: staged release ladder
 
-Design proposal for a two-person team; only the transport spike exists (see POC_PLAN.md, milestone M1). Stage order is fixed; each stage ships only if its exit criteria pass. Property names are defined in CONFORMANCE.md section 5; decisions in decisions/README.md. The proof-of-concept plan (POC_PLAN.md) runs ahead of Stage 0 and de-risks Stage 1; it is not a release stage. A reviewer requirement is one independent reviewer per stage (may be a different model family), not a standing panel.
+Design proposal for a two-person team; only the transport spike exists (see POC_PLAN.md, measured milestones M1 and M1b). Stage order is fixed; each stage ships only if its exit criteria pass. Property names are defined in CONFORMANCE.md section 5; decisions in decisions/README.md. The proof-of-concept plan (POC_PLAN.md) runs ahead of Stage 0 and de-risks Stage 1; it is not a release stage. A reviewer requirement is one independent reviewer per stage (may be a different model family), not a standing panel.
 
 ## Stage 0 — Foundations (docs and gates)
 - Entry: DESIGN, CONFORMANCE, RESEARCH and decisions accepted by the maintainer.
@@ -12,6 +12,7 @@ Design proposal for a two-person team; only the transport spike exists (see POC_
 
 ## Stage 1 — Minimum shipping cell
 - Scope: Chat Completions + Messages over HTTP/SSE, two vendors, one transport: libcurl on a private Asio loop (D1), async core (D3). No WebSocket, no Responses.
+- Validation starts with hosted APIs: OpenAI Chat Completions and Anthropic direct Messages. Ollama/llama.cpp setup and local model runs are excluded from the current campaign. Model-free HTTP/TLS fixtures are transport oracles, not substitutes for the budgeted live canary.
 - Entry: Stage 0 exit.
 - Required properties: `ChunkPartitionInvariant`, `NoTerminalNoSuccess`, `KnownCorruptNeverIgnored`, `InterleavedToolOwnership`, `SnapshotNotAppend`, `UsageKnowledgeTransitions`, `StopMeaning`, `TransportProjectionParity` (SSE vs buffered), `RetrySafetyBudgetDeadline`, `IntentOrError`, `OwnershipAndBounds`, `CancelWithoutPeerProgress` (HTTP states), `AdmissionIndependentOfHeldStreams`, `InvalidToolCallRepresentation`, `ServerToolNotExecuted` (Messages), `FailureClassTerminal`, `OriginBindingFacts`, `DescriptorRuleAdmission`.
 - Canary minimum: one live cell per vendor (Chat Completions vendor, Anthropic direct Messages) run nightly on the maintainers' own keys, never on fork PRs; `CanaryNegativeControl` run for Anthropic signed thinking (negative control must be rejected, otherwise the cell reports `ReplayAcceptanceUnobservable`); 60-run transport parity per D1 reconsideration condition 5.
@@ -46,7 +47,7 @@ Design proposal for a two-person team; only the transport spike exists (see POC_
 - Python bindings.
 - Bedrock and Vertex native access (SigV4, OAuth, binary event stream, credential refresh): out of scope unless designed; equivalence canary for them needs direct credentials (open item D4).
 - Enterprise HTTP CONNECT proxy configuration and testing (libcurl can proxy; the library does not promise it before it is tested).
-- HTTP/2 beyond libcurl's defaults: stream caps and per-stream backpressure with live sibling streams, until POC_PLAN risk R3 (M1b) is closed. HTTP/2 itself is available through libcurl.
+- HTTP/2 beyond the measured M1b case: stream caps, many paused streams, TLS multiplexing and other peer/libcurl combinations. One paused h2c stream with three live siblings, cancellation isolation, GOAWAY/REFUSED_STREAM and resolver refresh now pass (POC_PLAN section 5.1); this is not an arbitrary-concurrency memory guarantee.
 - Windows and macOS: POSIX descriptor model and trust stores (POC_PLAN risks R4 and R5).
 - Non-chat endpoints (D2): Veo, image endpoints, Decisions.
 - Multi-lane Responses WebSocket.

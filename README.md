@@ -4,6 +4,7 @@ A multi-vendor LLM client library for C++20.
 
 > **Status: design stage with a transport proof of concept. There is no usable library here yet.**
 > This repository is being set up as the future home of `SchemaProvider`, which currently lives inside [NeoGraph](https://github.com/fox1245/NeoGraph). The only code is a private libcurl-on-Asio transport spike with its property tests (see [docs/POC_PLAN.md](docs/POC_PLAN.md)); no installed header, no vendor codec, no stable interface. The direction is still under discussion in [fox1245/NeoGraph#321](https://github.com/fox1245/NeoGraph/issues/321); nothing below is a promise.
+> M1/M1b transport verification: 32 tests pass under plain, ASan+UBSan and TSan on Linux, including TLS certificate rejection and HTTP/2 multiplexing. Validation targets hosted APIs first; Ollama/llama.cpp setup is excluded. No live provider compatibility is claimed by these model-free loopback tests.
 
 ## What it is meant to be
 One C++20 client over the chat API families the major vendors expose (Chat Completions, Responses, Messages, Gemini generate; Interactions later), usable on its own and as the LLM layer of NeoGraph. The first release is chat completion plus artifacts that arrive inside chat responses; image endpoints, long-running video operations and the OpenRouter decisions endpoint are not part of it.

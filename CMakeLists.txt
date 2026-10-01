@@ -42,6 +42,9 @@ target_link_libraries(sp_transport PUBLIC Threads::Threads PRIVATE CURL::libcurl
 
 if(SP_BUILD_TESTS)
   enable_testing()
+  # Model-free peers are required for the TLS and HTTP/2 gates, never silently skipped.
+  find_program(SP_NODE node REQUIRED)
+  find_program(SP_OPENSSL openssl REQUIRED)
 
   add_executable(sp_loopback_server tests/support/loopback_server.cpp)
   target_include_directories(sp_loopback_server PRIVATE ${SP_ASIO_INCLUDE_DIR})
@@ -65,6 +68,6 @@ if(SP_BUILD_TESTS)
 
   add_test(NAME transport_properties
            COMMAND ${sp_test_runner} $<TARGET_FILE:sp_transport_tests> $<TARGET_FILE:sp_loopback_server>
-                   ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/h2c_flood_server.mjs)
+                   ${CMAKE_CURRENT_SOURCE_DIR}/tests/support)
   set_tests_properties(transport_properties PROPERTIES TIMEOUT 300)
 endif()

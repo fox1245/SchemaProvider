@@ -27,6 +27,7 @@ The library needs HTTP/1.1 and HTTP/2, SSE for streamed responses, cancellation 
   - Not covered: real vendors, proxies, WebSocket, the full NeoGraph call path. That benchmark polled in a worker thread; it did not use the Asio integration.
 - `[read source]` At NeoGraph commit 60b795aa the hand-written HTTP/1.1 exchange code is 2,287 lines (`src/async/conn_pool.cpp` 482, `src/async/http_client.cpp` 526, `src/async/http_exchange_detail.h` 1,279, counted with `wc -l`); the existing libcurl HTTP/2 wrapper `src/async/curl_h2_pool.cpp` is 686 lines.
 - `[live observation]` M1 transport spike, 27 tests green under plain, ASan+UBSan and TSan builds, plus a read-only review by a model of another family whose confirmed findings were fixed with regression tests (POC_PLAN section 5): the libcurl 8.5.0 pause behaviour under `multi_socket`, the resend refusal, the per-lookup resolver threads, framing that EOF could turn into success, a destructor deadlock on an I/O thread, and an AddressSanitizer use-after-free in the spike's own code.
+- `[live observation]` M1b extends this to 32 tests passing under plain, ASan+UBSan and TSan without a production transport change. Custom-CA TLS succeeds with HTTP/1.1 and ALPN HTTP/2; wrong-host, expired and self-signed certificates fail before any HTTP request. One paused h2c stream remains bounded while three siblings complete on the same session; cancellation preserves the sibling. GOAWAY and REFUSED_STREAM both trigger a refused resend with exactly one request seen by the peer. Resolver refresh affects fresh connections after idle retirement, not the lifetime of healthy pooled connections. Exact measurements and oracle corrections: POC_PLAN section 5.1.
 
 ## Options considered
 - **A, one private Asio + OpenSSL stack (previous default):** rejected by the owner after the A/B result removed the performance argument, and because it keeps the maintenance of an HTTP/1.1 client, a connection pool and (later) an HTTP/2 path in this library.
@@ -35,7 +36,7 @@ The library needs HTTP/1.1 and HTTP/2, SSE for streamed responses, cancellation 
 
 ## Consequences
 - libcurl becomes a required dependency with a version floor (open item C1: proposed 7.88.0, tested 8.5.0) and packaging questions per platform.
-- TLS trust and verification follow libcurl's TLS backend; the certificate-failure matrix is an M1b test (risk R4).
+- TLS trust and verification follow libcurl's TLS backend. The custom-CA and certificate-failure matrix passes on the tested OpenSSL backend (M1b, risk R4); public OS trust stores and other platforms/backends remain unmeasured.
 - The spike is POSIX-only (`asio::posix::stream_descriptor`); a Windows socket path is a later task (risk R5).
 - libcurl 8.5.0 specifics found by the PoC (pause under `multi_socket`, resend, resolver threads) are workarounds in the transport and must be re-verified when the supported libcurl range changes.
 - Proxies are not supported: the transport sets an empty `CURLOPT_PROXY` so that environment proxy variables cannot redirect traffic or start libcurl resolver threads outside the bounded pool.
@@ -57,4 +58,4 @@ Properties `OwnershipAndBounds`, `CancelWithoutPeerProgress`, `AdmissionIndepend
 ## Open items
 - C1 libcurl floor and feature requirements; C5 deployment (system libcurl versus vendoring).
 - D1b WebSocket transport.
-- Risks R3 (HTTP/2 pause), R4 (TLS and trust), R5 (Windows) of POC_PLAN section 6.
+- R3's broader HTTP/2 stream-count/TLS/peer/version matrix, R4's public trust stores and other TLS backends, and R5's non-Linux socket/platform support (POC_PLAN section 6). M1b closes only the measured scenarios, not universal compatibility.

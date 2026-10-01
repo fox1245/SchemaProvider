@@ -1,12 +1,14 @@
 # Proof-of-concept plan
 
-Status: M0 and M1 are done and measured on this branch; M1b to M5 are planned and not started. Everything about M2 and later is a plan, not a result. Evidence labels as in DESIGN.md: `[live observation]` (run here, local loopback, libcurl 8.5.0 with OpenSSL 3.0.13, Linux on WSL2), `[read source]`, `[read docs]`, `[inference]`.
+Status: M0, M1 and M1b are done and measured on this branch; M2 to M5 are planned and not started. Everything about M2 and later is a plan, not a result. Evidence labels as in DESIGN.md: `[live observation]` (run here, local loopback, libcurl 8.5.0 with OpenSSL 3.0.13, Linux on WSL2), `[read source]`, `[read docs]`, `[inference]`.
 
 ## 1. Purpose and non-purpose
 
 The PoC answers one question before any large investment: **can libcurl driven by a private Asio loop carry the transport contract of DESIGN.md sections 2, 4.2, 7 and the properties of CONFORMANCE.md 5.2, 5.12, 5.15, 5.21, and can one semantic event model and accumulator then be built on top of it for two API families?**
 
 It is not a release, not a public API, and not a replacement of NeoGraph's provider yet. Nothing in `src/` is installed or stable. No live vendor call is made before the owner sets a call and cost budget (open decision C3).
+
+Validation prioritizes **hosted API providers**: OpenAI Chat Completions and Anthropic direct Messages are the first target cells. Ollama and llama.cpp environment setup, model downloads and local inference runs are excluded from this PoC campaign. The localhost HTTP/TLS peers below are model-free, independent transport oracles; passing them is not evidence of live provider compatibility. Live calls remain gated by C3.
 
 ## 2. Decisions this plan rests on
 
@@ -15,7 +17,7 @@ It is not a release, not a public API, and not a replacement of NeoGraph's provi
 | HTTP transport | libcurl `multi_socket`, one private stack | [D1](decisions/D1-transport.md) (revised 2026-10-01, FIRM) |
 | Event loop | the existing standalone Asio, private to the transport, never in a public header | D1, D3 |
 | Public API shape | async core with a blocking facade, no Asio type public | D3 |
-| First cells | Chat Completions and Messages over HTTP and SSE, two vendors | ROADMAP Stage 1 |
+| First cells | OpenAI Chat Completions and Anthropic direct Messages over HTTP and SSE; hosted APIs, fixtures first | ROADMAP Stage 1; live budget C3 |
 | Out of the PoC | WebSocket and Responses, Gemini, Interactions, Python bindings, non-chat endpoints, Bedrock and Vertex | ROADMAP, D2 |
 
 ## 3. Milestones
@@ -26,8 +28,8 @@ Each milestone has an exit that is checked by running something, and a stop rule
 |---|---|---|---|
 | M0 | Align D1, DESIGN, ROADMAP, CONFORMANCE, README with the libcurl decision; this plan | docs consistent; no document still says "no libcurl" | done |
 | M1 | Transport spike: libcurl `multi_socket` on Asio with cancel, deadline, bounded threads, backpressure, one attempt | the experiments of section 4 pass under plain, ASan+UBSan and TSan builds | done (section 5) |
-| M1b | Remaining transport unknowns: TLS success and certificate-failure matrix, ALPN HTTP/2 over TLS, HTTP/2 pause with live sibling streams, `ca_file`, POSIX-only socket model, WebSocket decision D1b | each risk R3 to R6 in section 6 either closed by a test or turned into a documented limit | next |
-| M2 | First vertical slice: SSE framer, `Event`, one accumulator, strict descriptor loader (unknown keys rejected), Chat Completions codec buffered and SSE, fixture runner | `ChunkPartitionInvariant`, `NoTerminalNoSuccess`, `TransportProjectionParity` (buffered vs SSE), `KnownCorruptNeverIgnored` on scripted fixtures | planned |
+| M1b | TLS success and certificate-failure matrix, ALPN HTTP/2 over TLS, HTTP/2 pause/cancel with live sibling streams, GOAWAY/REFUSED_STREAM resend refusal, resolver address refresh; POSIX and WebSocket limits | R1 to R4 exercised; R5 and R6 explicit limits rather than implied support | done (section 5.1) |
+| M2 | First vertical slice: SSE framer, `Event`, one accumulator, strict descriptor loader (unknown keys rejected), Chat Completions codec buffered and SSE, fixture runner | `ChunkPartitionInvariant`, `NoTerminalNoSuccess`, `TransportProjectionParity` (buffered vs SSE), `KnownCorruptNeverIgnored` on scripted fixtures | next |
 | M3 | Messages codec: thinking capsules with origin, cumulative usage, server tools, stop meanings | `InterleavedToolOwnership`, `SnapshotNotAppend`, `UsageKnowledgeTransitions`, `StopMeaning`, `InvalidToolCallRepresentation`, `ServerToolNotExecuted` | planned |
 | M4 | Runtime: `Operation` over the transport, `std::stop_token`, blocking `complete()`, typed `Failure` from `AttemptObservation`, one retry controller (off by default) | `RetrySafetyBudgetDeadline`, `OwnershipAndBounds` at the client level, secret-marker scan | planned |
 | M5 | Budgeted live canary on one cell per family, NeoGraph adapter spike, the conformance corpus run against the current NeoGraph implementation, independent review by a different model family | go or no-go record: what stays, what is cut, what the NeoGraph cutover costs | planned |
@@ -79,15 +81,35 @@ Independent review. A read-only review by a model of a different family (Codex, 
 
 Not covered by M1 (each is a named item below, never implied done): TLS success and certificate verification, HTTP/2 over TLS, real vendor endpoints, Windows and macOS, WebSocket, proxy support (it is disabled, not tested), throughput sharding of the single curl multi handle, the deterministic executor seam of CONFORMANCE 5.24, exhaustive enumeration of interleavings (the race test is randomized, not exhaustive), a send failure at the very start of the request (the `NotSent` latch is not exercised), and the two untested association paths of finding 16.
 
+### 5.1 M1b results `[live observation]`
+
+Five added transport property tests bring the total to **32, all passing under plain, ASan+UBSan and TSan**. Full-suite runs took 19.32 s, 19.96 s and 21.45 s respectively. The M1 ASan quarantine exception remains unchanged; no M1b assertion is skipped. No production transport change was needed for these scenarios.
+
+The new independent peers are `tests/support/tls_test_server.mjs` and `tests/support/h2_adversarial_server.mjs`. They use Node built-ins, loopback sockets and an OpenSSL CLI; no npm packages, model runtime, credentials or vendor call. TLS certificates and private keys are generated in a private temporary directory and removed when the fixture exits. Tested fixture tools: Node 22.14.0 and OpenSSL 3.0.13.
+
+| Scenario | Observed result |
+|---|---|
+| Trusted CA, forced HTTP/1.1 and automatic HTTP/2 ALPN | Two successful requests per protocol, second connection reused, binary body intact; peer counters prove 2 HTTP/1.1 and 2 HTTP/2 requests. |
+| Wrong host, expired certificate, self-signed certificate | `Failed/Tls`, curl code 60, no request body sent, no HTTP request reached an invalid peer. |
+| Missing CA file; system trust after warming a custom-CA connection | `Failed/Tls` (missing file: code 77); no HTTP request sent. Connection reuse did not leak custom-CA trust into a system-trust-only request. |
+| One paused 64 MiB stream plus three active 4 MiB siblings | One peer session for all streams; all siblings completed while the first stayed paused. Server writes plateaued at 10,551,296 B; plain client RSS grew 4,444,160 B. Resume delivered all 64 MiB exactly once. Both write-buffer and RSS assertions stay below 32 MiB in this scenario. |
+| Cancel one paused stream while a sibling is paused | Cancellation completed without peer progress; resuming the sibling delivered all its 4 MiB on the same connection, with one outcome each. |
+| GOAWAY below the current stream ID; REFUSED_STREAM | Each prompted one libcurl internal resend attempt, refused at the prerequisite callback: `Failed/ResendRefused`, code 42. The independent peer saw exactly one request for each operation. |
+| Expired resolver cache, changed address, idle connection retirement | With TTL zero, three calls caused three lookups. The second reused the healthy connection to peer A despite the new answer; after the peer closed that idle connection, a fresh connection reached peer B at the new address with no resend. DNS TTL is not a connection lifetime limit. |
+
+The GOAWAY oracle initially passed zero to Node's API, which actually emitted the current stream ID (3), not wire zero; that correctly left the accepted request waiting until its deadline. A separate Node client observed the frame. The corrected oracle warms a connection and sends last-stream ID 1 for request stream 3; the same observer confirmed that frame before the final runs. Idle-session retirement explicitly closes the socket: a connection cache need not watch an idle socket or immediately reciprocate a graceful GOAWAY.
+
+Limits remain explicit: HTTP/2 multiplexing/backpressure was measured with cleartext HTTP/2, while TLS/ALPN was exercised separately. One paused stream plus three siblings is not a universal memory bound for arbitrary stream counts, peers or libcurl versions. Real provider behavior, public OS trust stores, Windows/macOS, proxies and WebSocket are not verified here. Linux/POSIX is the PoC platform (R5); D1b stays deferred until before ROADMAP Stage 2 (R6), not implemented or silently replaced with a second HTTP stack.
+
 ## 6. Risk register
 
 | Id | Risk | State | Next step |
 |---|---|---|---|
-| R1 | libcurl resends silently on a fresh connection | closed for HTTP/1.x by test (finding 2) | repeat for HTTP/2 GOAWAY in M1b |
-| R2 | threaded resolver threads scale with lookups | closed by the transport-owned resolver (finding 5) | revisit if `CURLOPT_RESOLVE` interacts badly with HTTP/2 connection reuse across address changes (M1b) |
-| R3 | HTTP/2 pause buffers inside libcurl while the socket is shared | open: single-stream measured bounded, sibling streams not | M1b: pause one stream while others stream; measure RSS against the stream window; if unbounded, cap concurrent streams per connection or refuse backpressure on HTTP/2 and say so |
-| R4 | TLS trust and verification | open | M1b: `ca_file` loopback HTTPS, expired, wrong host, self-signed must be rejected; OS trust store per platform stays a documented limit until measured |
-| R5 | POSIX descriptor model (`asio::posix::stream_descriptor`) | known limit: Linux only | M1b or later: a Windows socket path; not a PoC blocker |
+| R1 | libcurl resends silently on a fresh connection | closed on tested libcurl for HTTP/1.x and HTTP/2 GOAWAY/REFUSED_STREAM | re-run the one-request oracle for every supported libcurl version |
+| R2 | threaded resolver threads scale with lookups; stale addresses in curl's cache | bounded resolver tested; HTTP/2 fresh connection uses refreshed addresses after idle retirement | healthy pooled connections can outlive DNS TTL; changing that policy requires a separate decision |
+| R3 | HTTP/2 pause buffers inside libcurl while the socket is shared | bounded in the one-paused/three-active h2c scenario; resume and cancellation isolation pass | remeasure TLS multiplexing, other peers, stream counts and libcurl versions before claiming a general bound |
+| R4 | TLS trust and verification | custom-CA success, ALPN and certificate rejection matrix pass on OpenSSL 3.0.13/libcurl 8.5.0 | public OS trust stores and other TLS backends/platforms remain unmeasured |
+| R5 | POSIX descriptor model (`asio::posix::stream_descriptor`) | explicit PoC limit: Linux only | Windows socket path and macOS verification are later work, not M1b blockers |
 | R6 | WebSocket for the Responses lane | undecided (D1b): libcurl WebSocket is official from 8.11 and the CVE fix is in 8.16, while the distribution libcurl here is 8.5.0 | decide before ROADMAP Stage 2, not before Stage 1 |
 | R7 | single `CURLM` on one strand limits CPU throughput | unmeasured at scale; the earlier A/B (one worker thread polling, not this integration) had libcurl within about 4% of the Asio pool at 128 concurrent POSTs | measure at M4 with the real codec cost; shard the multi handle only if the number says so |
 | R8 | resolver pool threads stuck in `getaddrinfo` delay uncached hosts | accepted and bounded by pool size | document; the deadline still ends every operation |
@@ -110,7 +132,7 @@ cmake -S . -B build-asan -G Ninja -DSP_SANITIZE=address && cmake --build build-a
 cmake -S . -B build-tsan -G Ninja -DSP_SANITIZE=thread  && cmake --build build-tsan && ctest --test-dir build-tsan
 ```
 
-Requirements: C++20 compiler, libcurl 7.88 or newer with TLS, standalone Asio headers (`libasio-dev` or `-DASIO_ROOT=`), and `node` for the HTTP/2 experiment (without it that one test reports itself as skipped). A single test: `sp_transport_tests <loopback_server> <h2c_flood_server.mjs> <name-substring>`.
+Requirements: Linux, C++20 compiler, libcurl 7.88 or newer with TLS and HTTP/2, standalone Asio headers (`libasio-dev` or `-DASIO_ROOT=`), `node` and the `openssl` CLI. CMake requires both fixture executables when tests are enabled; M1b peer startup failure fails the test. A single scenario: `build/sp_transport_tests build/sp_loopback_server tests/support <name-substring>`; `http2_` exercises the HTTP/2 scenarios, including TLS/ALPN. No local inference server or API key is required.
 
 ## 9. Working rules
 
