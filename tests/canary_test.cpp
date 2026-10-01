@@ -51,6 +51,16 @@ std::string source(std::string_view model, std::uint64_t port, bool anthropic = 
 std::string replace(std::string value, std::string_view old, std::string_view next) {
   auto at = value.find(old); require(at != std::string::npos, "test mutation missing"); value.replace(at, old.size(), next); return value;
 }
+std::string gemini_source(std::string_view model, std::uint64_t port, std::uint64_t calls = 4,
+    std::uint64_t tokens = 100000, std::uint64_t cost = 1000000) {
+  auto value = source(model, port, false, calls, tokens, cost);
+  value = replace(value, "\"provider\":\"openai\"", "\"provider\":\"gemini\"");
+  value = replace(value, "\"max_output_tokens\":2048", "\"max_output_tokens\":128");
+  value = replace(value, "\"input_micro_usd_per_million\":1000000", "\"input_micro_usd_per_million\":100000");
+  value = replace(value, "\"output_micro_usd_per_million\":2000000", "\"output_micro_usd_per_million\":400000");
+  value = replace(value, "https://developers.openai.com/api/docs/models/gpt-4.1-mini.md", "https://ai.google.dev/gemini-api/docs/pricing");
+  return replace(value, "https://developers.openai.com/api/docs/models/gpt-4.1-mini.md", "https://ai.google.dev/gemini-api/docs/pricing");
+}
 template<class F> void rejects(F&& f) {
   bool rejected = false;
   try { f(); } catch (const std::exception& error) { rejected = true; private_text(error.what()); }
@@ -87,9 +97,11 @@ void profiles_and_credentials() {
   rejects([&] { parse_profile(replace(live, "\"input_micro_usd_per_million\":2000000", "\"input_micro_usd_per_million\":1999999")); });
   rejects([&] { parse_profile(replace(live, "claude-haiku-4-5-20251001", "unreviewed-model")); });
   auto env = directory.file("PRIVATE_PATH_MARKER");
-  save(env, "# synthetic only\nOPENAI_API_KEY=CANARY_SECRET_KEY_MARKER\nANTHROPIC_API_KEY=other\n");
-  require(credential(Provider::OpenAI, env) == secret && credential(Provider::Anthropic, env) == "other", "credential selection failed");
+  save(env, "# synthetic only\nOPENAI_API_KEY=CANARY_SECRET_KEY_MARKER\nANTHROPIC_API_KEY=other\nGEMINI_API_KEY=gemini-key\n");
+  require(credential(Provider::OpenAI, env) == secret && credential(Provider::Anthropic, env) == "other" &&
+      credential(Provider::Gemini, env) == "gemini-key", "credential selection crossed provider boundaries");
   save(env, "ANTHROPIC_API_KEY=other\n"); require(credential(Provider::OpenAI, env).empty(), "missing credential not empty");
+  require(credential(Provider::Gemini, env).empty(), "missing Gemini credential fell back to another provider");
   save(env, "OPENAI_API_KEY=one\nOPENAI_API_KEY=two\n"); rejects([&] { credential(Provider::OpenAI, env); });
   save(env, "OPENAI_API_KEY=$(echo private)\n"); rejects([&] { credential(Provider::OpenAI, env); });
   save(env, "OPENAI_API_KEY=secret\n"); require(::chmod(env.c_str(), 0644) == 0, "chmod failed");
@@ -309,6 +321,92 @@ void cli_paths(runtime_test::Peer& peer, const char* executable) {
   require(live.code == 0 && runtime_test::parse(live.text).root().get("replay").as_string() == "ReplayVerified", "CLI wire execution failed");
   peer.count(model, 5, 1); private_text(load(ledger));
 }
+
+void gemini_smoke(runtime_test::Peer& peer, const char* executable) {
+  auto live = gemini_source("gemini-2.5-flash-lite", 18080);
+  live = replace(live, "http://127.0.0.1:18080", "https://generativelanguage.googleapis.com");
+  live = replace(live, "\"max_input_tokens\":4096", "\"max_input_tokens\":1048576");
+  const auto admitted = parse_profile(live);
+  require(admitted.provider() == Provider::Gemini && reserved_cost(admitted.bounds()) == 104910,
+      "Gemini whole-window reservation was wrong");
+  for (auto invalid : {
+      replace(live, "gemini-2.5-flash-lite", "gemini-2.5-pro"),
+      replace(live, "\"call_cap\":4", "\"call_cap\":5"),
+      replace(live, "\"micro_usd_cap\":1000000", "\"micro_usd_cap\":1000001"),
+      replace(live, "\"max_output_tokens\":128", "\"max_output_tokens\":129"),
+      replace(live, "\"max_input_tokens\":1048576", "\"max_input_tokens\":1048575"),
+      replace(live, "\"input_micro_usd_per_million\":100000", "\"input_micro_usd_per_million\":99999"),
+      replace(live, "\"output_micro_usd_per_million\":400000", "\"output_micro_usd_per_million\":399999"),
+      replace(live, "https://generativelanguage.googleapis.com", "https://api.openai.com"),
+      replace(live, "\"version\":1", "\"version\":1,\"thinking_budget\":1024") })
+    rejects([&] { parse_profile(invalid); });
+  Directory directory;
+  const auto model = peer.arm("reject");
+  const auto profile = parse_profile(gemini_source(model, peer.port), true);
+  const auto ledger = directory.file("ledger");
+  // A new provider must not reset or borrow the already spent legacy balances.
+  std::string old = "SPCANARY1\n";
+  for (std::uint64_t i = 1; i <= 4; ++i)
+    old += "0 " + std::to_string(i) + ' ' + std::to_string(i * 1051672) + ' ' + std::to_string(i * 425585) + '\n';
+  for (std::uint64_t i = 1; i <= 11; ++i)
+    old += "1 " + std::to_string(i) + ' ' + std::to_string(i * 204096) + ' ' + std::to_string(i * 420480) + '\n';
+  save(ledger, old);
+  auto first = run(profile, ledger, secret);
+  require(first.cases.size() == 2 && first.replay == Replay::NotApplicable && first.reserved.calls == 2 &&
+      first.reserved.tokens == 8448 && first.reserved.micro_usd == 924, "Gemini ran tools or borrowed legacy budget");
+  for (const auto& item : first.cases)
+    require(item.state == State::Passed && item.attempts == 1 && item.input_tokens == 2 && item.output_tokens == 3,
+        "Gemini compatibility result or usage was lost");
+  const auto old_openai = ledger_totals(parse_profile(source("old", peer.port, false), true), ledger);
+  const auto old_anthropic = ledger_totals(parse_profile(source("old", peer.port), true), ledger);
+  require(old_openai.calls == 4 && old_openai.tokens == 4206688 && old_openai.micro_usd == 1702340 &&
+      old_anthropic.calls == 11 && old_anthropic.tokens == 2245056 && old_anthropic.micro_usd == 4625280,
+      "legacy call/token/cost balance reset or cross-charged");
+  auto second = run(profile, ledger, secret);
+  require(second.cases[0].state == State::Passed && second.reserved.calls == 4, "Gemini restart lost balance");
+  auto blocked = run(profile, ledger, secret);
+  require(blocked.cases[0].state == State::NotRun && blocked.cases[0].reason == Reason::CallBudget,
+      "Gemini exceeded hard call allowance");
+  peer.count(model, 4); private_text(load(ledger)); private_text(report_json(first));
+  const auto restarted_openai = ledger_totals(parse_profile(source("old", peer.port, false), true), ledger);
+  const auto restarted_anthropic = ledger_totals(parse_profile(source("old", peer.port), true), ledger);
+  require(restarted_openai.calls == old_openai.calls && restarted_openai.tokens == old_openai.tokens &&
+      restarted_openai.micro_usd == old_openai.micro_usd && restarted_anthropic.calls == old_anthropic.calls &&
+      restarted_anthropic.tokens == old_anthropic.tokens && restarted_anthropic.micro_usd == old_anthropic.micro_usd,
+      "restart/exhaustion changed another provider balance");
+  for (unsigned axis = 0; axis != 2; ++axis) {
+    Directory cap;
+    const auto limited_model = peer.arm("reject");
+    const auto limited = parse_profile(gemini_source(limited_model, peer.port, 4,
+        axis == 0 ? 4224 : 100000, axis == 1 ? 462 : 1000000), true);
+    auto result = run(limited, cap.file("ledger"), secret);
+    require(result.cases[0].state == State::Passed && result.cases[1].state == State::NotRun &&
+        result.cases[1].reason == (axis == 0 ? Reason::TokenBudget : Reason::CostBudget), "Gemini cap ignored");
+    peer.count(limited_model, 1);
+  }
+  for (auto scenario : {"gemini-auth-error", "gemini-corrupt"}) {
+    Directory errors;
+    const auto failure_model = peer.arm(scenario);
+    const auto result = run(parse_profile(gemini_source(failure_model, peer.port), true), errors.file("ledger"), secret);
+    const bool authentication = std::string_view(scenario) == "gemini-auth-error";
+    require(result.cases[0].state == State::Failed &&
+        result.cases[0].failure_kind == (authentication ? sp::ErrorKind::Permission : sp::ErrorKind::ProtocolCorrupt) &&
+        result.cases[0].http_status == (authentication ? 403 : 200), "Gemini failure was masked or defaulted to success");
+    require(result.reserved.calls == 2, "Gemini failure reservation refunded");
+    peer.count(failure_model, 2, authentication ? 2 : 1); private_text(report_json(result));
+  }
+  const auto cli_model = peer.arm("reject");
+  const auto profile_path = directory.file("profile"), key_path = directory.file("keys");
+  save(profile_path, gemini_source(cli_model, peer.port)); save(key_path, "GEMINI_API_KEY=CANARY_SECRET_KEY_MARKER\n");
+  auto observed = cli(executable, {"--profile", profile_path, "--ledger", directory.file("cli-ledger"),
+      "--env-file", key_path, "--execute", "--test-loopback"});
+  auto parsed = runtime_test::parse(observed.text);
+  require(observed.code == 0 && parsed.root().get("provider").as_string() == "gemini" &&
+      parsed.root().get("api_family").as_string() == "openai.chat" &&
+      parsed.root().get("verification_scope").as_string() == "text_only_compatibility_smoke",
+      "CLI claimed native Gemini or mislabelled provider");
+  peer.count(cli_model, 2);
+}
 } // namespace
 int main(int argc, char** argv) {
   try {
@@ -317,6 +415,7 @@ int main(int argc, char** argv) {
     runtime_test::Peer peer(argv[1], argv[2]);
     adversarial_guards(peer);
     replay_cases(peer); budget_axes(peer); shared_race(peer); cli_paths(peer, argv[3]);
+    gemini_smoke(peer, argv[3]);
     std::cout << "canary behavior passed\n";
     return 0;
   } catch (const std::exception& error) {

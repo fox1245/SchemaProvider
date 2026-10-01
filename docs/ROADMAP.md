@@ -40,7 +40,7 @@ The existing consumer result/request ABI is a strict lossless **NO-GO**: five ze
 - Required properties: Stage 1 set with `TransportProjectionParity` defined on parts, `FailureClassTerminal` (Gemini failure finish reasons).
 - Canary cells: Gemini generate live cell; Interactions cell only if specified.
 - Exit: terminal-evidence table covers Gemini x {buffered, SSE}; EOF-without-trailing-blank-line policy has a captured fixture.
-- For the next authorized Gemini validation, prefer a low-cost model after checking current prices and required features; set a separate call/cost budget first. Credential availability does not establish API validity or model support, and this M5 campaign made no Gemini call.
+- A separate cheap `gemini-2.5-flash-lite` OpenAI-compatibility text smoke now passed one buffered/SSE pair under a4-attempt/US$1 ceiling (POC_PLAN5.6). It is **not** this native Gemini stage's exit, tool/signature/replay support or broader model qualification. Future Gemini runs still prefer a low-cost model after checking current prices/features and explicit remaining/new budget.
 - Cut line: Interactions.
 
 ## Stage 4 — NeoGraph adapter, journal v2, cutover

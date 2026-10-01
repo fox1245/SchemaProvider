@@ -118,6 +118,13 @@ class GuardedTransport final : public runtime::detail::AttemptTransport {
       request.body.pop_back();
       request.body.append(",\"service_tier\":\"default\"}");
     }
+    if (profile_.provider() == Provider::Gemini) {
+      // Standard is Google's documented omitted tier. Explicitly disable
+      // thinking on this 2.5 text-only smoke; never enable tools or caching.
+      if (request.body.empty() || request.body.back() != '}') detail::fail();
+      request.body.pop_back();
+      request.body.append(",\"reasoning_effort\":\"none\"}");
+    }
     if (state.expected) {
       state.retained = retained(request.body, *state.expected);
       if (!state.retained) { result.reason = Reason::RetentionMismatch; detail::fail(); }
@@ -182,8 +189,9 @@ class GuardedTransport final : public runtime::detail::AttemptTransport {
   std::unique_ptr<transport::Transport> backend_;
 };
 descriptor::ValidatedDescriptor descriptor_for(const Profile& profile) {
-  const bool chat = profile.provider() == Provider::OpenAI;
-  auto path = chat ? "/v1/chat/completions" : "/v1/messages";
+  const bool chat = profile.provider() != Provider::Anthropic;
+  auto path = profile.provider() == Provider::Gemini ? "/v1beta/openai/chat/completions" :
+      chat ? "/v1/chat/completions" : "/v1/messages";
   std::string source = "{\"descriptor_version\":1,\"revision\":1,\"id\":\"canary\",\"family\":" +
       json::quote(chat ? "openai.chat" : "anthropic.messages") + ",\"connection\":{\"base_url\":" +
       json::quote(profile.origin()) + ",\"paths\":{\"buffered\":" + json::quote(path) + ",\"streaming\":" + json::quote(path) + '}';
@@ -225,7 +233,10 @@ Report run(const Profile& profile, const std::string& ledger_path, std::string a
   Report report;
   report.provider = profile.provider(); report.test_only = profile.loopback();
   report.replay = profile.provider() == Provider::Anthropic ? Replay::ReplayAcceptanceUnobservable : Replay::NotApplicable;
-  for (auto name : {"text_buffered", "text_sse", "tool_first", "tool_positive"}) report.cases.push_back(Case{name});
+  report.cases.reserve(profile.provider() == Provider::Gemini ? 2 : profile.provider() == Provider::Anthropic ? 5 : 4);
+  for (auto name : {"text_buffered", "text_sse"}) report.cases.push_back(Case{name});
+  if (profile.provider() != Provider::Gemini)
+    for (auto name : {"tool_first", "tool_positive"}) report.cases.push_back(Case{name});
   if (profile.provider() == Provider::Anthropic) report.cases.push_back(Case{"signature_negative"});
   if (api_key.empty()) {
     for (auto& item : report.cases) item.reason = Reason::MissingCredential;
@@ -251,10 +262,25 @@ Report run(const Profile& profile, const std::string& ledger_path, std::string a
       }
     } else {
       item.state = blocked_reason(item.reason) != Reason::None ? State::NotRun : State::Failed;
-      if (value) if (const auto* failure = std::get_if<Failure>(value.get())) usage(item, failure->partial.usage, profile.bounds());
+      if (value) if (const auto* failure = std::get_if<Failure>(value.get())) {
+        item.failure_kind = failure->error.kind;
+        item.http_status = failure->error.http_status;
+        usage(item, failure->partial.usage, profile.bounds());
+      }
     }
     return value;
   };
+  if (profile.provider() == Provider::Gemini) {
+    chat::Request request; request.model = profile.model(); request.max_output_tokens = profile.bounds().output_tokens;
+    request.messages.push_back({Role::User, "Reply with the single word OK."});
+    for (std::size_t i = 0; i < 2; ++i) {
+      auto outcome = call(request, i, i == 1);
+      if (auto* good = completion(outcome); good && !has_text(*good)) {
+        report.cases[i].state = State::Failed; report.cases[i].reason = Reason::MissingText;
+      }
+    }
+    return report;
+  }
   const auto schema = document(R"({"type":"object","properties":{"value":{"type":"integer"}},"required":["value"],"additionalProperties":false})");
   const std::string text_prompt = "Reply with the single word OK.";
   const std::string tool_prompt = "Call canary_echo exactly once with value 7. After its result, reply OK. This is a synthetic tool protocol check.";

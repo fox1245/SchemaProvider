@@ -28,11 +28,12 @@ function chat(model, tool = false) {
     finish_reason: tool ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 2, completion_tokens: 3, total_tokens: 5,
       ...(cases.get(model)?.scenario === 'inconsistent-usage' ? { prompt_tokens_details: { cached_tokens: 3 } } : {}) } };
 }
-function sse(model, messages) {
+function sse(model, messages, includeUsage) {
   if (!messages) return frame('', { id: 'canary-chat', object: 'chat.completion.chunk', created: 1, model,
     choices: [{ index: 0, delta: { role: 'assistant', content: text }, finish_reason: null }] }, false)
     + frame('', { id: 'canary-chat', object: 'chat.completion.chunk', created: 1, model,
-      choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 2, completion_tokens: 3, total_tokens: 5 } }, false)
+      choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+      ...(includeUsage ? { usage: { prompt_tokens: 2, completion_tokens: 3, total_tokens: 5 } } : {}) }, false)
     + 'data: [DONE]\n\n';
   return frame('message_start', { type: 'message_start', message: { ...message(model, []), stop_reason: null, usage: { input_tokens: 2, output_tokens: 0 } } }, true)
     + frame('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }, true)
@@ -51,16 +52,26 @@ const server = http.createServer(async (req, res) => {
     if (!c) { ++unexpected; send(res, 400, '{}'); return; }
     ++c.count;
     const messages = req.url === '/v1/messages';
-    if (req.method !== 'POST' || (!messages && req.url !== '/v1/chat/completions') ||
+    const gemini = req.url === '/v1beta/openai/chat/completions';
+    if (req.method !== 'POST' || (!messages && !gemini && req.url !== '/v1/chat/completions') ||
         (messages ? req.headers['x-api-key'] !== secret || req.headers['anthropic-version'] !== '2023-06-01'
           : req.headers.authorization !== `Bearer ${secret}`) ||
         typeof body.stream !== 'boolean' || !Array.isArray(body.messages) ||
-        body.max_tokens !== 2048 || req.headers['anthropic-beta'] || body.cache_control ||
-        (messages ? body.service_tier !== undefined : body.service_tier !== 'default')) ++c.invalid;
+        body.max_tokens !== (gemini ? 128 : 2048) || req.headers['anthropic-beta'] || body.cache_control ||
+        (messages || gemini ? body.service_tier !== undefined : body.service_tier !== 'default') ||
+        (gemini && (body.reasoning_effort !== 'none' || body.tools || body.extra_body || req.headers['x-api-key'] ||
+                    req.headers['anthropic-version']))) ++c.invalid;
     if (c.scenario === 'remote-error') {
       ++c.faults; send(res, 503, JSON.stringify({ type: 'error', error: { type: 'api_error', message: secret + thinking + text } })); return;
     }
-    if (body.stream) { ++c.sse; send(res, 200, sse(body.model, messages), true); return; }
+    if (c.scenario === 'gemini-auth-error') {
+      ++c.faults;
+      send(res, 403, JSON.stringify({ error: { code: 403, status: 'PERMISSION_DENIED', message: secret + text } }));
+      return;
+    }
+    if (body.stream) {
+      ++c.sse; send(res, 200, sse(body.model, messages, body.stream_options?.include_usage === true), true); return;
+    }
     const tools = Array.isArray(body.tools) && body.tools.length > 0;
     if (tools && (body.tools.length !== 1 || (messages ? body.tools[0].name : body.tools[0].function?.name) !== 'canary_echo' ||
         (messages && (body.thinking?.type !== 'enabled' || body.thinking?.budget_tokens !== 1024)))) ++c.invalid;
@@ -98,6 +109,10 @@ const server = http.createServer(async (req, res) => {
           }
         }
       }
+    }
+    if (c.scenario === 'gemini-corrupt') {
+      const invalid = chat(body.model); delete invalid.created; ++c.faults;
+      send(res, 200, JSON.stringify(invalid)); return;
     }
     send(res, 200, JSON.stringify(messages ? message(body.model, [{ type: 'text', text }]) : chat(body.model)));
   } catch { if (c) ++c.invalid; else ++unexpected; if (!res.headersSent) send(res, 500, '{}'); else res.destroy(); }

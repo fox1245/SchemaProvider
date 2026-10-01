@@ -58,10 +58,12 @@ class LockedLedger {
         if (i + 1 == values.size()) { if (space != std::string_view::npos) fail(); }
         else { if (space == std::string_view::npos) fail(); row.remove_prefix(space + 1); }
       }
-      if (values[0] > 1) fail();
+      if (values[0] >= totals_.size()) fail();
       auto& total = totals_[values[0]];
-      if (values[1] != add(total.calls, 1) || values[1] > 16 || values[2] <= total.tokens ||
-          values[3] <= total.micro_usd || values[3] > 10000000) fail();
+      const auto calls = values[0] == 2 ? 4U : 16U;
+      const auto cost = values[0] == 2 ? 1000000U : 10000000U;
+      if (values[1] != add(total.calls, 1) || values[1] > calls || values[2] <= total.tokens ||
+          values[3] <= total.micro_usd || values[3] > cost) fail();
       total = {values[1], values[2], values[3]};
     }
   }
@@ -81,10 +83,17 @@ class LockedLedger {
     if (errno != EEXIST) fail();
     return ::open(path.c_str(), O_RDWR | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
   }
-  static std::size_t index(Provider provider) { return provider == Provider::OpenAI ? 0 : 1; }
+  static std::size_t index(Provider provider) {
+    switch (provider) {
+      case Provider::OpenAI: return 0;
+      case Provider::Anthropic: return 1;
+      case Provider::Gemini: return 2;
+    }
+    fail();
+  }
   bool created_ = false;
   detail::Fd fd_;
-  std::array<Totals, 2> totals_{};
+  std::array<Totals, 3> totals_{};
 };
 } // namespace
 std::uint64_t reserved_cost(const Bounds& b) {

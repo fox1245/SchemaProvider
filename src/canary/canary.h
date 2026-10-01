@@ -8,7 +8,7 @@
 #include <vector>
 
 namespace sp::canary {
-enum class Provider { OpenAI, Anthropic };
+enum class Provider { OpenAI, Anthropic, Gemini };
 struct Bounds {
   std::uint64_t input_tokens{}, output_tokens{}, input_rate{}, output_rate{};
   std::uint64_t calls{}, tokens{}, micro_usd{};
@@ -63,6 +63,8 @@ struct Case {
   std::optional<std::uint64_t> input_uncached{}, cache_read{}, cache_write{}, reasoning{};
   UsageStage usage_stage = UsageStage::Missing;
   UsageQuality usage_quality = UsageQuality::Consistent;
+  std::optional<ErrorKind> failure_kind{};
+  int http_status = 0;
 };
 struct Report {
   Provider provider{};

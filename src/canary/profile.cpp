@@ -57,12 +57,14 @@ Profile parse_profile(std::string_view source, bool allow_test_loopback) {
   auto provider = text(root, "provider", 16);
   if (provider == "openai") result.provider_ = Provider::OpenAI;
   else if (provider == "anthropic") result.provider_ = Provider::Anthropic;
+  else if (provider == "gemini") result.provider_ = Provider::Gemini;
   else fail();
   result.model_ = text(root, "model", 128);
   for (unsigned char c : result.model_)
     if (!key_character(c) && c != '-' && c != '.') fail();
   result.origin_ = text(root, "origin", 128);
-  const auto expected = result.provider_ == Provider::OpenAI ? "https://api.openai.com" : "https://api.anthropic.com";
+  const auto expected = result.provider_ == Provider::OpenAI ? "https://api.openai.com" :
+      result.provider_ == Provider::Anthropic ? "https://api.anthropic.com" : "https://generativelanguage.googleapis.com";
   result.loopback_ = loopback(result.origin_);
   if (result.origin_ != expected && !(allow_test_loopback && result.loopback_)) fail();
   if (text(root, "input_bound_kind", 32) != "model_context_window") fail();
@@ -74,6 +76,8 @@ Profile parse_profile(std::string_view source, bool allow_test_loopback) {
   b.calls = number(root, "call_cap"); b.tokens = number(root, "token_cap"); b.micro_usd = number(root, "micro_usd_cap");
   if (b.calls > 16 || b.micro_usd > 10000000 || b.output_tokens > b.input_tokens ||
       b.output_tokens > std::numeric_limits<std::uint64_t>::max() - b.input_tokens) fail();
+  if (result.provider_ == Provider::Gemini &&
+      (b.calls > 4 || b.micro_usd > 1000000 || b.output_tokens > 128)) fail();
   if (result.provider_ == Provider::Anthropic) {
     result.thinking_budget_ = number(root, "thinking_budget");
     if (result.thinking_budget_ < 1024 || result.thinking_budget_ >= b.output_tokens) fail();
@@ -84,9 +88,12 @@ Profile parse_profile(std::string_view source, bool allow_test_loopback) {
     if (result.provider_ == Provider::OpenAI) {
       if (result.model_ != "gpt-4.1-mini-2025-04-14" || b.input_tokens < 1047576 ||
           b.output_tokens > 32768 || b.input_rate < 400000 || b.output_rate < 1600000) fail();
-    } else {
+    } else if (result.provider_ == Provider::Anthropic) {
       if (result.model_ != "claude-haiku-4-5-20251001" || b.input_tokens < 200000 ||
           b.output_tokens > 64000 || b.input_rate < 2000000 || b.output_rate < 5000000) fail();
+    } else {
+      if (result.model_ != "gemini-2.5-flash-lite" || b.input_tokens < 1048576 ||
+          b.input_rate < 100000 || b.output_rate < 400000) fail();
     }
   }
   auto provenance = root.get("provenance");
@@ -95,7 +102,9 @@ Profile parse_profile(std::string_view source, bool allow_test_loopback) {
     auto url = text(provenance, key, 2048);
     const bool openai = url.starts_with("https://developers.openai.com/") || url.starts_with("https://platform.openai.com/");
     const bool anthropic = url.starts_with("https://platform.claude.com/") || url.starts_with("https://docs.anthropic.com/");
-    if (!(result.provider_ == Provider::OpenAI ? openai : anthropic)) fail();
+    const bool google = url.starts_with("https://ai.google.dev/");
+    if (!(result.provider_ == Provider::OpenAI ? openai :
+          result.provider_ == Provider::Anthropic ? anthropic : google)) fail();
   }
   auto date = text(provenance, "verified_at", 10);
   if (date.size() != 10 || date[4] != '-' || date[7] != '-') fail();
@@ -113,7 +122,8 @@ Profile parse_profile(std::string_view source, bool allow_test_loopback) {
 }
 std::string read_profile_file(const std::string& path) { return detail::read_file(path, 16384, false); }
 std::string credential(Provider provider, const std::optional<std::string>& env_file) {
-  const char* name = provider == Provider::OpenAI ? "OPENAI_API_KEY" : "ANTHROPIC_API_KEY";
+  const char* name = provider == Provider::OpenAI ? "OPENAI_API_KEY" :
+      provider == Provider::Anthropic ? "ANTHROPIC_API_KEY" : "GEMINI_API_KEY";
   if (!env_file) {
     auto* value = std::getenv(name);
     if (!value) return {};

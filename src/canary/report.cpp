@@ -1,5 +1,6 @@
 #include "canary/canary.h"
 #include "json/json.h"
+#include "runtime/policy.h"
 
 namespace sp::canary {
 namespace {
@@ -45,7 +46,11 @@ std::string report_json(const Report& report) {
       ? "{\"calls\":" + std::to_string(report.reserved.calls) + ",\"tokens\":" + std::to_string(report.reserved.tokens) +
         ",\"micro_usd\":" + std::to_string(report.reserved.micro_usd) + '}'
       : std::string("null");
-  std::string out = "{\"version\":1,\"provider\":" + json::quote(report.provider == Provider::OpenAI ? "openai" : "anthropic") +
+  const auto provider = report.provider == Provider::OpenAI ? "openai" :
+      report.provider == Provider::Anthropic ? "anthropic" : "gemini";
+  std::string out = "{\"version\":1,\"provider\":" + json::quote(provider) +
+      ",\"api_family\":" + json::quote(report.provider == Provider::Anthropic ? "anthropic.messages" : "openai.chat") +
+      ",\"verification_scope\":" + json::quote(report.provider == Provider::Gemini ? "text_only_compatibility_smoke" : "canary") +
       ",\"test_only\":" + (report.test_only ? "true" : "false") + ",\"replay\":" + json::quote(replay(report.replay)) +
       ",\"positive_retained\":" + (report.positive_retained ? "true" : "false") +
       ",\"signature_mutated\":" + (report.signature_mutated ? "true" : "false") +
@@ -69,12 +74,14 @@ std::string report_json(const Report& report) {
         ",\"cache_write\":" + nullable(item.cache_write) + ",\"reasoning\":" + nullable(item.reasoning) +
         ",\"usage_stage\":" + json::quote(item.usage_stage == UsageStage::Final ? "final" :
             item.usage_stage == UsageStage::Partial ? "partial" : "missing") +
-        ",\"usage_quality\":" + json::quote(item.usage_quality == UsageQuality::Consistent ? "consistent" : "inconsistent") + '}';
+        ",\"usage_quality\":" + json::quote(item.usage_quality == UsageQuality::Consistent ? "consistent" : "inconsistent") +
+        ",\"safe_error\":" + (item.failure_kind ? json::quote(runtime::detail::safe_message(*item.failure_kind)) : "null") +
+        ",\"http_status\":" + std::to_string(item.http_status) + '}';
   }
   return out + "]}";
 }
 std::string_view plan_json() {
-  return R"({"version":1,"mode":"plan","state":"not_run","io_performed":false,"scenarios":["text_buffered","text_sse","tool_first","tool_positive","anthropic_signature_negative"],"maximum_calls":{"openai":4,"anthropic":5},"credentials":["OPENAI_API_KEY","ANTHROPIC_API_KEY"],"billing":"conditional_conservative_exposure_not_invoice; provider_spending_control_required","equivalence_admission":false})";
+  return R"({"version":1,"mode":"plan","state":"not_run","io_performed":false,"scenarios":["text_buffered","text_sse","tool_first","tool_positive","anthropic_signature_negative"],"maximum_calls":{"openai":4,"anthropic":5,"gemini_text_compatibility":2},"credentials":["OPENAI_API_KEY","ANTHROPIC_API_KEY","GEMINI_API_KEY"],"billing":"conditional_conservative_exposure_not_invoice; provider_spending_control_required","equivalence_admission":false})";
 }
 std::string_view help_text() {
   return "Usage: sp_canary [--profile FILE] [--ledger FILE] [--env-file FILE] [--execute] [--test-loopback]\n"
@@ -83,6 +90,7 @@ std::string_view help_text() {
       "Private env file: NAME=value, optional blank/comment lines; owner-only regular file.\n"
       "--test-loopback permits only literal http://127.0.0.1:PORT or http://[::1]:PORT test origins.\n"
       "Live origins are exact first-party HTTPS origins; no gateway or extra endpoints.\n"
+      "Gemini is a two-request text-only OpenAI-compatibility smoke, not native Gemini support.\n"
       "Exit 0: all cases passed; 2: failed/invalid; 3: at least one not_run.\n"
       "Reservations are durable, shared per provider, never refunded; preserve the ledger across restarts.\n"
       "Provider-side spending controls are required for invoice hard caps. A run is not equivalence admission.\n";

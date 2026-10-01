@@ -20,7 +20,7 @@ Validation prioritizes **hosted API providers**: OpenAI Chat Completions and Ant
 | Event loop | the existing standalone Asio, private to the transport, never in a public header | D1, D3 |
 | Public API shape | async core with a blocking facade, no Asio type public | D3 |
 | First cells | OpenAI Chat Completions and Anthropic direct Messages over HTTP and SSE; hosted APIs, fixtures first | ROADMAP Stage 1; live budget C3 |
-| Out of the PoC | WebSocket and Responses, Gemini, Interactions, Python bindings, non-chat endpoints, Bedrock and Vertex | ROADMAP, D2 |
+| Out of the native-family PoC | WebSocket and Responses, native Gemini generate, Interactions, Python bindings, non-chat endpoints, Bedrock and Vertex; section 5.6 separately exercises a narrow Gemini OpenAI-compatibility text route | ROADMAP, D2 |
 
 ## 3. Milestones
 
@@ -222,6 +222,27 @@ Codex code reviews and a distinct Astra model-route assessment support recording
 
 **Limits.** One run per selected cell, no live buffered/SSE equality-rate study, no 60-run admission, no live redacted-thinking probe, no account-age generalization and no independent packet capture. Raw native material stayed in process memory; public reports contain only structural states/counters. The designated key source was read-only, but observed Windows broad-group read permission means owner-only confidentiality was not established; POSIX/DrvFS mode bits alone are not ACL proof. Key values were supplied only in selected child environment variables with core dumps disabled, not copied to repository files or arguments. Sanitizers do not instrument prebuilt libcurl/OpenSSL; GCC's Asio fence warnings and inherited httplib deprecations remain explicit. Windows/macOS, HTTP/3, local inference, Gemini and Python bindings remain unimplemented/unrun in this campaign.
 
+### 5.6 Cheap Gemini compatibility smoke `[live observation]`
+
+This post-M5 experiment answers **whether the newly designated key and selected cheap model can complete two bounded text requests through Google's OpenAI-compatible route**. It does not implement or qualify the native Gemini family. The existing transport/runtime and `openai.chat` codec were reused without inserting missing provider metadata or relaxing terminal requirements.
+
+| Contract/check | Observed result |
+|---|---|
+| Model/route | Stable `gemini-2.5-flash-lite`; exact first-party `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions`, Bearer authentication. Synthetic one-word prompt; no response prose/identifiers were published. |
+| Scope and cost controls | Owner selected **at most 4 attempts / US$1 conditional reservation**. Request output cap **128**, explicit `reasoning_effort: "none"` for 2.5, no tools/grounding/cache/beta/premium tier. Google's documented omitted tier is standard. No automatic retry or further review/canary call was added. |
+| Live buffered | **Passed**, one attempt, reported input **8**, output **1**, final/consistent usage, no safe error. |
+| Live SSE | **Passed**, one attempt, reported input **8**, output **1**, final/consistent usage, no safe error. The existing codec's metadata, normal-close, finish-reason and `[DONE]` gates remained intact. Raw framing was not independently packet-captured. |
+| Accounting | Gemini ID2 appended **2 reservations**, **2,097,408** bounded tokens and **209,820 microUSD (US$0.209820)**. Whole-window reserve is `ceil(1048576 × 100000 / 1000000) + ceil(128 × 400000 / 1000000) = 104910` per attempt. Four attempts would reserve US$0.419640; that arithmetic is not authorization to make them. |
+| Reported-usage estimate | Two cases each round separately to **2 microUSD**, sum **US$0.000004**. At unrounded published rates the pair corresponds to 2.4 microUSD; neither value is a verified bill or an account-wide hard cap. Missing cache/reasoning breakdowns remain null, not observed zero. |
+| Existing campaign balances | The same preserved `SPCANARY1` ledger retains OpenAI **4 / US$1.702340** and Anthropic **11 / US$4.625280**. Provider IDs0/1 were not renamed or reset; ID2 has its own 4/$1 ceiling. A previous reader cannot accept new ID2 rows and fails closed; no compatibility alias renews budgets. |
+| Model-free and sanitizer proof | Exact compat path/key/control checks, real buffered/SSE usage, separate legacy call/token/cost balances through restart/exhaustion, all budget axes, permission errors, malformed metadata rejection and safe CLI scope labels pass. All **14/14** groups pass sequentially: plain **28.09 s**, ASan+UBSan **43.45 s**, TSan **45.46 s**. Final strengthened canary probes also pass in all three configurations. |
+
+**Review and limits.** Independent Codex budget and protocol reviews found no blocking implementation defect. They identified test-oracle gaps: the peer now emits streamed Chat usage only when `include_usage` was requested, and legacy token/cost totals are checked alongside calls. An initially wrong per-attempt rounding expectation (104909) was corrected to104910 from independent arithmetic without changing production math. Actual live artifacts were separately reviewed; both conclusions remain limited to the two-request smoke.
+
+The report identifies `provider: gemini`, `api_family: openai.chat`, `verification_scope: text_only_compatibility_smoke`, `replay: not_applicable` and `equivalence_admission: false`. Its successful-case `http_status: 0` is a default **unrecorded failure-status field**, not a captured provider status or proof of HTTP200; failure cases record the actual classified error/status and never raw vendor text. This is N=1 per text mode, not a statistical parity study. Native `generateContent` framing, ordered parts, thinking summaries/signatures, tools and native replay remain unimplemented/unverified. Request-side thinking disablement is not a reported zero reasoning count. The key-source ACL and prebuilt-library/fence instrumentation limits from5.5 remain unresolved; no private path/key/native material was stored in this repository.
+
+`[read docs]` The active [model/limits](https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash-lite), [standard pricing](https://ai.google.dev/gemini-api/docs/pricing), [OpenAI compatibility/thinking/tier contract](https://ai.google.dev/gemini-api/docs/openai) and [Gemini API terms](https://ai.google.dev/gemini-api/terms) were read before execution. This is not an account/legal compliance opinion. No model list or free-tier assumption replaced these dated paid-rate bounds.
+
 ## 6. Risk register
 
 | Id | Risk | State | Next step |
@@ -242,7 +263,7 @@ Codex code reviews and a distinct Astra model-route assessment support recording
 |---|---|---|---|
 | C1 | libcurl floor and required features | 7.88.0 (Debian 12) baseline floor, 8.5.0 tested; TLS and HTTP/2 required, HTTP/3 optional. The HTTP/3 lane needs its own validated libcurl/TLS/QUIC version combination; no baseline floor change is implied | owner, after M1b; HTTP/3 versions before that lane is admitted |
 | C2 | first platforms | Linux; Windows only after R5 | owner |
-| C3 | live call budget | this M5 campaign: OpenAI and Anthropic each at most 16 reservations and US$10 conditional exposure, including failed/control/review attempts; final balances in section 5.5. Preserve the ledger. Future campaigns/providers need new explicit limits | owner |
+| C3 | live call budget | M5: OpenAI/Anthropic each16 attempts/US$10 conditional exposure (section5.5). Separate cheap Gemini compatibility smoke: at most4 attempts/US$1, observed2/US$0.209820 (section5.6). Preserve all balances and get new explicit limits for future campaigns/providers | owner |
 | C4 | target concurrency | scenarios C = 1, 32, 128 and held-stream counts of 4T + 64 and twice that, reported as measurements and never as promised capacity | owner |
 | C5 | libcurl deployment | system libcurl baseline; optional HTTP/3 evaluated through an isolated dependency build, without replacing system libraries. Backend versions, packaging and any vendoring remain undecided; R6 may independently require a newer libcurl | owner |
 
@@ -263,7 +284,7 @@ build/sp_fixture_runner "$(command -v node)" tests/support/fixture_server.mjs te
 
 Requirements: Linux with readable `/proc/self/smaps_rollup`, C/C++20 toolchain, libcurl 7.88 or newer with TLS and HTTP/2, standalone Asio headers (`libasio-dev` or `-DASIO_ROOT=`), yyjson, OpenSSL Crypto development files, `node` and the `openssl` CLI. CMake requires both fixture executables when tests are enabled; peer startup failure fails the test. The measured builds select the system shared libcurl; if another installation shadows it, select the intended library with `CURL_LIBRARY_RELEASE` and matching headers. A single transport scenario: `build/sp_transport_tests build/sp_loopback_server tests/support <name-substring>`; `http2_` exercises the HTTP/2 scenarios, including TLS/ALPN. Append `--offline-only` to either fixture-runner command to omit its socket path; that is not wire evidence. The explicit descriptor argument is required; the old Chat-only invocation is removed. No local inference server or API key is required.
 
-M5 tools are built with the baseline. `build/sp_canary --help` and `build/sp_canary --profile tools/canary_profiles/openai.json --ledger "$CAMPAIGN_LEDGER"` show a no-I/O plan; only explicit `--execute` reads the selected `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` environment or `--env-file` and sends requests. A file credential input must satisfy the documented POSIX owner-only regular-file gate; this does not verify Windows ACLs. Live profiles in `tools/canary_profiles/` are deliberately narrow and dated. Never replace/delete an existing campaign ledger to obtain a fresh allowance.
+Canary tools are built with the baseline. `build/sp_canary --help` and a profile/ledger command without `--execute` show a fixed no-I/O plan; only explicit `--execute` reads the selected `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` or `GEMINI_API_KEY` environment/file credential and sends requests. The shipped Gemini profile `tools/canary_profiles/gemini.json` permits only its two text compatibility scenarios and approved 4/$1 ceiling, not native Gemini. File inputs retain the POSIX owner-only regular-file gate; this does not verify Windows ACLs. Live profiles are deliberately narrow and dated. Never replace/delete the shared campaign ledger to obtain fresh allowances.
 
 The optional integration build adds existing source/header dependencies, not downloads:
 ```sh
