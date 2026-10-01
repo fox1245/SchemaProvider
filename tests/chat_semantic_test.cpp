@@ -478,8 +478,78 @@ void typed_request_encoding() {
   CHECK(completed(*alias_accumulator.outcome()).stop.kind == StopKind::EndTurn);
   CHECK(completed(*alias_accumulator.outcome()).usage.total->value == 5);
   request.temperature = std::numeric_limits<double>::quiet_NaN(); CHECK(std::get<Error>(chat::encode(descriptor_value(), request, true)).kind == ErrorKind::InvalidRequest);
-  request.temperature.reset(); request.messages[0].role = Role::Tool; CHECK(std::get<Error>(chat::encode(descriptor_value(), request, true)).kind == ErrorKind::Unsupported);
-  request.messages[0].role = Role::User; request.messages[0].text = std::string(1, static_cast<char>(0xff)); CHECK(std::get<Error>(chat::encode(descriptor_value(), request, true)).kind == ErrorKind::InvalidRequest);
+  request.temperature.reset(); request.messages[0].text = std::string(1, static_cast<char>(0xff));
+  CHECK(std::get<Error>(chat::encode(descriptor_value(), request, true)).kind == ErrorKind::InvalidRequest);
+}
+
+void tool_history_and_escaped_arguments() {
+  const auto outcome = buffered(body(R"({"role":"assistant","content":"checking","tool_calls":[{"id":"a","type":"function","function":{"name":"f","arguments":"{\"value\":\"quote \\\" slash \\\\ nul \\u0000 snow 雪\",\"nested\":[true,null,7]}"}},{"id":"b","type":"function","function":{"name":"g","arguments":"{}"}}]})", "\"tool_calls\""));
+  chat::Request request; request.model = "fixture-model";
+  request.messages.push_back({Role::User, "Use the two tools."});
+  chat::InputMessage assistant{Role::Assistant, "checking"};
+  for (const auto& part : completed(outcome).messages.front().parts)
+    if (const auto* call = std::get_if<ToolCall>(&part)) assistant.tool_calls.push_back(*call);
+  CHECK(assistant.tool_calls.size() == 2);
+  request.messages.push_back(std::move(assistant));
+  request.messages.push_back({Role::Tool, "second result", {}, "b"});
+  request.messages.push_back({Role::Tool, "first result", {}, "a"});
+  for (bool streaming : {false, true}) {
+    auto encoded = chat::encode(descriptor_value(), request, streaming);
+    CHECK(std::holds_alternative<chat::EncodedRequest>(encoded));
+    auto document = json::parse(std::get<chat::EncodedRequest>(encoded).body);
+    CHECK(std::holds_alternative<json::Document>(document));
+    auto messages = std::get<json::Document>(document).root().get("messages");
+    CHECK(messages.at(2).get("tool_call_id").as_string() == "b");
+    CHECK(messages.at(3).get("tool_call_id").as_string() == "a");
+    auto arguments = json::parse(messages.at(1).get("tool_calls").at(0).get("function").get("arguments").as_string());
+    CHECK(std::holds_alternative<json::Document>(arguments));
+    CHECK(json::equal(std::get<json::Document>(arguments).root(), request.messages[1].tool_calls[0].input->root()));
+    const std::string expected = std::string("quote \" slash \\ nul ") + '\0' + " snow 雪";
+    CHECK(std::get<json::Document>(arguments).root().get("value").as_string() == expected);
+  }
+  auto rejected = [&](chat::Request value) {
+    auto result = chat::encode(descriptor_value(), value, false);
+    CHECK(std::holds_alternative<Error>(result));
+    CHECK(std::get<Error>(result).kind == ErrorKind::InvalidRequest);
+  };
+  auto changed = request; changed.messages[2].tool_call_id = "missing"; rejected(std::move(changed));
+  changed = request; changed.messages[3].tool_call_id = "b"; rejected(std::move(changed));
+  changed = request; changed.messages.pop_back(); rejected(std::move(changed));
+  changed = request; changed.messages[0].tool_call_id = "a"; rejected(std::move(changed));
+  changed = request; changed.messages[1].role = Role::User; rejected(std::move(changed));
+  changed = request; changed.messages[1].tool_calls[1].id = "a"; rejected(std::move(changed));
+  changed = request; changed.messages[2].role = Role::Assistant; rejected(std::move(changed));
+  changed = request; changed.messages[1].tool_calls[0].input.reset(); rejected(std::move(changed));
+  changed = request; changed.messages[1].tool_calls[0].id = std::string(1, static_cast<char>(0xff));
+  changed.messages[3].tool_call_id = changed.messages[1].tool_calls[0].id; rejected(std::move(changed));
+  changed = request; changed.messages[1].tool_calls[0].kind = ToolCallKind::ServerExecuted;
+  CHECK(std::get<Error>(chat::encode(descriptor_value(), changed, false)).kind == ErrorKind::Unsupported);
+}
+
+void quoted_json_and_request_bounds() {
+  const auto parsed = json::parse(R"({"quote\"key":"\u0000\b\f\n\r\t\"\\雪","array":[1,-2,1.25,true,null,{}]})");
+  CHECK(std::holds_alternative<json::Document>(parsed));
+  const auto value = std::get<json::Document>(parsed).root();
+  const auto reference = json::quote(value.dump());
+  for (const auto limit : {reference.size() - 1, reference.size(), reference.size() + 1}) {
+    json::BoundedWriter measure({limit, 64}); measure.quoted_json(value);
+    std::string encoded; encoded.reserve(limit);
+    json::BoundedWriter output({limit, 64}, &encoded); output.quoted_json(value);
+    CHECK(measure.ok() == (limit >= reference.size()) && output.ok() == measure.ok());
+    if (output.ok()) CHECK(encoded == reference && measure.size() == encoded.size());
+  }
+  json::BoundedWriter shallow({1024, 1}); shallow.quoted_json(value); CHECK(!shallow.ok());
+  chat::Request request; request.model = "fixture-model"; request.messages.push_back({Role::User, {}});
+  const auto empty = chat::encode(descriptor_value(), request, false);
+  CHECK(std::holds_alternative<chat::EncodedRequest>(empty));
+  constexpr std::size_t limit = 1U << 20;
+  request.messages[0].text.assign(limit - std::get<chat::EncodedRequest>(empty).body.size(), 'x');
+  const auto exact = chat::encode(descriptor_value(), request, false);
+  CHECK(std::holds_alternative<chat::EncodedRequest>(exact) && std::get<chat::EncodedRequest>(exact).body.size() == limit);
+  request.messages[0].text.push_back('x');
+  CHECK(std::get<Error>(chat::encode(descriptor_value(), request, false)).kind == ErrorKind::InvalidRequest);
+  request.messages[0].text.assign(limit / 6, '\0');
+  CHECK(std::get<Error>(chat::encode(descriptor_value(), request, false)).kind == ErrorKind::InvalidRequest);
 }
 } // namespace
 int main() {
@@ -488,6 +558,7 @@ int main() {
     invalid_tools_and_compatibility(); usage_knowledge(); accumulator_transitions_and_seals(); typed_request_encoding();
     required_metadata_and_identity(); required_usage_and_unknown_cache(); unindexed_tool_order_and_optional_function(); buffered_close_precedence();
     accumulator_interleaved_ordering(); accumulator_order_uniqueness_and_limits();
+    tool_history_and_escaped_arguments(); quoted_json_and_request_bounds();
     std::cout << "chat semantic properties passed\n";
     return 0;
   } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

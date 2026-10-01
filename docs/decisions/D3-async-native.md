@@ -45,6 +45,13 @@ Thread count growing with K, a waiting state where cancel needs peer progress, o
 
 RAII applies to workers, timers, stop registrations, attempt handles and test processes/FDs. A timer wait originally borrowed a map key across an unlock; the actual API smoke reproduced ASan heap-use-after-free, so the wait now takes a deadline value. Injected initial enqueue allocation failure also reproduced a shutdown hang caused by an unreleased admission slot; an RAII publication reservation now rolls back that ownership. A bounded manual-executor test enumerates 298 ready-task schedules and records actual completion/cancel/timer firings; 64 seeded eight-operation schedules exercise the shared retry budget. These are local runtime tests, not exhaustive OS/libcurl scheduling or the future WebSocket gate.
 
+### M5 consumer proof
+
+The opt-in bridge runs the actual runtime through NeoGraph's `CompletionProvider` interface and an owned-result entry. It preserves explicit STREAM without an observer, caller-executor observation, cancellation/deadlines and RAII abandonment without per-request threads; plain/ASan+UBSan/TSan gates pass. Production callbacks retain only owned bounded mailboxes, never an abandoned caller executor. A negative temperature omission sentinel remains omitted on the actual wire.
+
+The old result projection is deliberately refused with owned `BoundaryError` evidence, even for numerically representable text answers: usage provenance and unknown-vs-zero cannot be represented. This is a measured migration boundary, not a mock success or a failed async design. It may reject only after a real request, so it must not become a production capability/billing probe. A new rich request/result and pre-dispatch version gate are needed before lossless cutover; that change belongs to NeoGraph and is not implemented by this experiment. Full evidence and NO-GO are in POC_PLAN section 5.5.
+
+
 
 ## Open items
 - NeoGraph target concurrency C for the scheduled benchmark (owner input).

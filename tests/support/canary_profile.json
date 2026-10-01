@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "provider": "anthropic",
+  "model": "synthetic-canary",
+  "origin": "http://127.0.0.1:18080",
+  "input_bound_kind": "model_context_window",
+  "max_input_tokens": 4096,
+  "max_output_tokens": 2048,
+  "thinking_budget": 1024,
+  "input_micro_usd_per_million": 1000000,
+  "output_micro_usd_per_million": 2000000,
+  "call_cap": 16,
+  "token_cap": 1000000,
+  "micro_usd_cap": 10000000,
+  "provenance": {
+    "model_url": "https://platform.claude.com/docs/en/models/overview",
+    "pricing_url": "https://platform.claude.com/docs/en/about-claude/pricing",
+    "verified_at": "2026-10-01"
+  }
+}

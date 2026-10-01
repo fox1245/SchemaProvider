@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "provider": "anthropic",
+  "model": "claude-haiku-4-5-20251001",
+  "origin": "https://api.anthropic.com",
+  "input_bound_kind": "model_context_window",
+  "max_input_tokens": 200000,
+  "max_output_tokens": 4096,
+  "thinking_budget": 1024,
+  "input_micro_usd_per_million": 2000000,
+  "output_micro_usd_per_million": 5000000,
+  "call_cap": 16,
+  "token_cap": 3265536,
+  "micro_usd_cap": 10000000,
+  "provenance": {
+    "model_url": "https://platform.claude.com/docs/en/models/haiku-4-5/overview",
+    "pricing_url": "https://platform.claude.com/docs/en/about-claude/pricing",
+    "verified_at": "2026-10-01"
+  }
+}

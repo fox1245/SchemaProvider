@@ -260,4 +260,69 @@ BoundedWriter& BoundedWriter::value(Value item, std::size_t enclosing_depth) {
     return raw(item.is_object() ? "}" : "]");
 }
 
+BoundedWriter& BoundedWriter::quoted_json(Value item) {
+    if (!ok_) return *this;
+    // Document strings are already valid UTF-8. Escape their JSON spelling
+    // once more for the enclosing string, copying ordinary runs directly.
+    auto string = [&](std::string_view text) {
+        raw("\\\"");
+        std::size_t start = 0;
+        for (std::size_t i = 0; ok_ && i < text.size(); ++i) {
+            const auto c = static_cast<unsigned char>(text[i]);
+            if (c >= 0x20 && c != '"' && c != '\\') continue;
+            raw(text.substr(start, i - start));
+            char escaped[7]{'\\', '\\', 'u', '0', '0', '0', '0'};
+            std::size_t size = 3;
+            switch (c) {
+                case '"': case '\\': escaped[2] = '\\'; escaped[3] = static_cast<char>(c); size = 4; break;
+                case '\b': escaped[2] = 'b'; break;
+                case '\f': escaped[2] = 'f'; break;
+                case '\n': escaped[2] = 'n'; break;
+                case '\r': escaped[2] = 'r'; break;
+                case '\t': escaped[2] = 't'; break;
+                default: {
+                    constexpr char hex[] = "0123456789abcdef";
+                    escaped[5] = hex[c >> 4]; escaped[6] = hex[c & 15]; size = 7;
+                }
+            }
+            raw({escaped, size});
+            start = i + 1;
+        }
+        if (ok_) raw(text.substr(start)).raw("\\\"");
+    };
+    auto emit = [&](auto&& self, Value value, std::size_t depth) -> void {
+        if (!ok_) return;
+        if (!value.valid()) { ok_ = false; return; }
+        if (value.is_string()) { string(value.as_string()); return; }
+        if (!value.is_object() && !value.is_array()) {
+            const auto scalar = value.dump();
+            if (scalar.empty()) { ok_ = false; return; }
+            raw(scalar);
+            return;
+        }
+        if (depth >= limits_.max_depth) { ok_ = false; return; }
+        bool comma = false;
+        raw(value.is_object() ? "{" : "[");
+        if (value.is_object()) {
+            for (auto member : value.members()) {
+                if (comma) raw(",");
+                comma = true;
+                string(member.key); raw(":"); self(self, member.value, depth + 1);
+                if (!ok_) return;
+            }
+        } else {
+            for (auto element : value.elements()) {
+                if (comma) raw(",");
+                comma = true;
+                self(self, element, depth + 1);
+                if (!ok_) return;
+            }
+        }
+        raw(value.is_object() ? "}" : "]");
+    };
+    raw("\"");
+    emit(emit, item, 0);
+    return raw("\"");
+}
+
 } // namespace sp::json

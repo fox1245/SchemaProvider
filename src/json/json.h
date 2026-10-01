@@ -139,6 +139,8 @@ public:
     BoundedWriter& raw(std::string_view text);
     BoundedWriter& quoted(std::string_view text);
     BoundedWriter& value(Value value, std::size_t enclosing_depth = 0);
+    // Serialize a document as one JSON string without a full intermediate dump.
+    BoundedWriter& quoted_json(Value value);
     bool ok() const { return ok_; }
     std::size_t size() const { return size_; }
 private:

@@ -7,7 +7,12 @@
 namespace sp::descriptor { class ValidatedDescriptor; }
 namespace sp::json { class Value; }
 namespace sp::chat {
-struct InputMessage { Role role = Role::User; std::string text; };
+struct InputMessage {
+  Role role = Role::User;
+  std::string text;
+  std::vector<sp::ToolCall> tool_calls{};
+  std::string tool_call_id{};
+};
 struct ToolDefinition { std::string name, description; std::shared_ptr<const json::Document> parameters; };
 struct Request {
   std::string model;

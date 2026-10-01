@@ -13,6 +13,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 option(SP_BUILD_TESTS "Build the PoC property tests, fixture runner and loopback peers" ON)
+option(SP_BUILD_NEOGRAPH_SPIKE "Build the optional read-only NeoGraph integration experiments" OFF)
 set(SP_SANITIZE "" CACHE STRING "Sanitizer set: address, thread (undefined is added to address)")
 
 if(SP_SANITIZE STREQUAL "address")
@@ -83,6 +84,15 @@ target_include_directories(sp_runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_options(sp_runtime PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(sp_runtime PUBLIC sp_core PRIVATE sp_codecs sp_transport sp_descriptor sp_json)
 
+add_library(sp_canary_core STATIC src/canary/profile.cpp src/canary/ledger.cpp
+            src/canary/runner.cpp src/canary/report.cpp)
+target_include_directories(sp_canary_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_options(sp_canary_core PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(sp_canary_core PRIVATE sp_runtime sp_codecs sp_descriptor sp_json sp_transport)
+add_executable(sp_canary tools/canary_main.cpp)
+target_compile_options(sp_canary PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(sp_canary PRIVATE sp_canary_core)
+
 if(SP_BUILD_TESTS)
   enable_testing()
   # Model-free peers are required for the TLS and HTTP/2 gates, never silently skipped.
@@ -140,6 +150,9 @@ if(SP_BUILD_TESTS)
   target_link_libraries(sp_runtime_scheduler_tests PRIVATE sp_runtime sp_json)
   add_executable(sp_runtime_tests tests/runtime_properties_test.cpp)
   target_link_libraries(sp_runtime_tests PRIVATE sp_runtime sp_json)
+  add_executable(sp_canary_tests tests/canary_test.cpp)
+  target_compile_options(sp_canary_tests PRIVATE -Wall -Wextra -Wpedantic)
+  target_link_libraries(sp_canary_tests PRIVATE sp_canary_core sp_json Threads::Threads)
   foreach(target sp_runtime_policy_tests sp_runtime_scheduler_tests sp_runtime_tests)
     target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
   endforeach()
@@ -180,7 +193,14 @@ if(SP_BUILD_TESTS)
            ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/runtime_server.mjs)
   add_test(NAME runtime_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_runtime_tests>
            ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/runtime_server.mjs)
+  add_test(NAME canary_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_canary_tests>
+           ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/canary_server.mjs $<TARGET_FILE:sp_canary>)
+  set_tests_properties(canary_properties PROPERTIES TIMEOUT 300)
   set_tests_properties(runtime_policy runtime_scheduler runtime_properties PROPERTIES TIMEOUT 300)
   set_tests_properties(sse_properties descriptor_properties chat_properties chat_fixtures
                        messages_properties messages_replay native_continuation_bounds messages_fixtures PROPERTIES TIMEOUT 300)
+endif()
+
+if(SP_BUILD_NEOGRAPH_SPIKE)
+  add_subdirectory(integration/neograph)
 endif()

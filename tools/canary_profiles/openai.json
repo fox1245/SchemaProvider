@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "provider": "openai",
+  "model": "gpt-4.1-mini-2025-04-14",
+  "origin": "https://api.openai.com",
+  "input_bound_kind": "model_context_window",
+  "max_input_tokens": 1047576,
+  "max_output_tokens": 4096,
+  "input_micro_usd_per_million": 400000,
+  "output_micro_usd_per_million": 1600000,
+  "call_cap": 16,
+  "token_cap": 16826752,
+  "micro_usd_cap": 10000000,
+  "provenance": {
+    "model_url": "https://developers.openai.com/api/docs/models/gpt-4.1-mini.md",
+    "pricing_url": "https://developers.openai.com/api/docs/models/gpt-4.1-mini.md",
+    "verified_at": "2026-10-01"
+  }
+}

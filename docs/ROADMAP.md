@@ -1,6 +1,6 @@
 # Roadmap: staged release ladder
 
-Design proposal for a two-person team; the private transport, Chat/Messages buffered/SSE codecs and async-native runtime now exist (see POC_PLAN, measured milestones M1 through M4). Stage order is fixed; each stage ships only if its exit criteria pass. Property names are defined in CONFORMANCE section 5; decisions in decisions/README. The PoC runs ahead of Stage 0 and de-risks Stage 1; it is not an installed release or completion of a release stage. A reviewer requirement is one independent reviewer per stage (may be a different model family), not a standing panel.
+Design proposal for a two-person team; private transport, Chat/Messages codecs, runtime and M5 canary/consumer experiment now exist (see POC_PLAN, measured M1–M5). M5 supports recording a bounded experiment but explicitly rejects strict lossless NeoGraph cutover. Stage order is fixed; each stage ships only after its own exit criteria. The PoC runs ahead of Stage 0 and de-risks Stage 1; it is not an installed release or completed release stage. Property names are in CONFORMANCE and decisions in decisions/README.
 
 ## Stage 0 — Foundations (docs and gates)
 - Entry: DESIGN, CONFORMANCE, RESEARCH and decisions accepted by the maintainer.
@@ -19,6 +19,13 @@ Design proposal for a two-person team; the private transport, Chat/Messages buff
 - Exit: all listed properties green including sanitizers; both canary cells pass or are reported with cause; README states supported cells only.
 - Cut line (drop first if late): second Chat Completions vendor -> cut to one; reasoning replay -> Drop mode only (capsule-less resume with its own identity).
 
+### M5 checkpoint before any engine replacement
+
+One N=1 first-party GPT-4.1 Mini / Haiku 4.5 run passed its text/SSE/tool-loop assertions, with a real signature-negative rejection for that captured Haiku continuation. Full plain/ASan+UBSan/TSan suites pass 14/14. These observations do not satisfy nightly cadence, 60-run parity/equivalence or every release property.
+
+The existing consumer result/request ABI is a strict lossless **NO-GO**: five zero-default integer counters and editable native JSON cannot carry the new owned evidence. Next baseline work is an explicit rich-result/native-capable request contract and pre-dispatch version/capability gate, then reassessment through the same corpus. No lossy success shim, fake zero, engine replacement or journal rewrite is approved by M5.
+
+
 ## Stage 2 — Responses and OpenRouter reasoning
 - Scope: OpenAI Responses over HTTP/SSE and WebSocket, single lane only (the protocol supports several stream_id lanes; the library must not misstate that); OpenRouter `reasoning_details`.
 - Entry: Stage 1 exit; WS facts re-verified against the current vendor documentation.
@@ -33,6 +40,7 @@ Design proposal for a two-person team; the private transport, Chat/Messages buff
 - Required properties: Stage 1 set with `TransportProjectionParity` defined on parts, `FailureClassTerminal` (Gemini failure finish reasons).
 - Canary cells: Gemini generate live cell; Interactions cell only if specified.
 - Exit: terminal-evidence table covers Gemini x {buffered, SSE}; EOF-without-trailing-blank-line policy has a captured fixture.
+- For the next authorized Gemini validation, prefer a low-cost model after checking current prices and required features; set a separate call/cost budget first. Credential availability does not establish API validity or model support, and this M5 campaign made no Gemini call.
 - Cut line: Interactions.
 
 ## Stage 4 — NeoGraph adapter, journal v2, cutover
@@ -45,7 +53,7 @@ Design proposal for a two-person team; the private transport, Chat/Messages buff
 
 ## Optional HTTP/3 transport lane
 
-- Accepted direction, not implemented or verified. [D1](decisions/D1-transport.md#optional-http3-policy) defines the policy; [POC_PLAN section 3.1](POC_PLAN.md#31-optional-http3-workstream) defines the workstream. Baseline stages retain their order; after measured M4, the next PoC milestone is M5, with live calls still budget-gated.
+- Accepted direction, not implemented or verified. [D1](decisions/D1-transport.md#optional-http3-policy) defines the policy; [POC_PLAN section 3.1](POC_PLAN.md#31-optional-http3-workstream) defines the workstream. M5's live/cutover findings do not change baseline stage order or make QUIC the next task.
 - Scope: HTTP/3 preference in capable builds, safe same-origin HTTPS connection-stage fallback to HTTP/2/1.1, and a working non-HTTP/3 build. One libcurl stack, shared provider codecs/events/accumulator, no protocol-specific NeoGraph call path.
 - Safety: only one connection candidate may send a request; possible acceptance is never retried under the name of fallback. One deadline/budget, generation POST 0-RTT disabled by default, and unchanged TLS verification.
 - Exit before advertising HTTP/3: [CONFORMANCE section 12.1](CONFORMANCE.md#121-optional-http3-gate), including actual QUIC negotiation, fallback request counters, cancellation/deadline, reset/truncation, shared-stream bounds/isolation and applicable sanitizer runs. Baseline HTTP/2/1.1 must remain usable without QUIC dependencies.
