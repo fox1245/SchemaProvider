@@ -414,7 +414,8 @@ void OperationState::setup() {
                        [&](const Header& h) { return iequals(h.name, name); });
   };
   for (const Header& h : req.headers) {
-    const std::string line = h.name + ": " + h.value;
+    // A colon with no value suppresses a header in libcurl; a semicolon sends it empty.
+    const std::string line = h.value.empty() ? h.name + ";" : h.name + ": " + h.value;
     curl_slist* next = curl_slist_append(hdrs, line.c_str());
     if (!next) {
       setup_error = "curl_slist_append failed";

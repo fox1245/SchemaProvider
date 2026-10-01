@@ -1,0 +1,37 @@
+{
+  "descriptor_version": 1,
+  "revision": 1,
+  "id": "loopback-chat",
+  "family": "openai.chat",
+  "evidence": {
+    "urls": [
+      "https://developers.openai.com/api/reference/resources/chat"
+    ],
+    "verified_at": "2026-10-01"
+  },
+  "connection": {
+    "base_url": "http://127.0.0.1",
+    "paths": {
+      "buffered": "/v1/chat/completions",
+      "streaming": "/v1/chat/completions"
+    },
+    "headers": {
+      "X-Fixture": "synthetic"
+    }
+  },
+  "bindings": {
+    "model": "model",
+    "messages": "messages",
+    "stream": "stream",
+    "max_output_tokens": "max_tokens",
+    "usage": [
+      "usage"
+    ]
+  },
+  "stop_reasons": {
+    "stop": "EndTurn",
+    "length": "MaxTokens",
+    "tool_calls": "ToolUse",
+    "content_filter": "ContentFilter"
+  }
+}

@@ -2,7 +2,7 @@
 
 ## 0. Status
 
-**This is a design proposal. Nothing described here is implemented except the private transport of section 2.1, which exists only as a proof-of-concept spike (see [POC_PLAN.md](POC_PLAN.md)).** The repository contains no vendor codec, no accumulator and no installed header. Every sketch below is a contract to be built and tested, not observed behaviour. Statements about other projects or about the current NeoGraph implementation are labelled as such and are summarised in [RESEARCH.md](RESEARCH.md). Testable requirements are tied to the named properties in [CONFORMANCE.md](CONFORMANCE.md) (written like `ChunkPartitionInvariant`). Decisions are recorded in [decisions/](decisions/README.md) with a status; the items listed at the end of section 12 are still open. The staged release plan is in [ROADMAP.md](ROADMAP.md); this document describes the full target, not what ships first.
+**This document describes the full target, not an implemented release.** The private PoC now contains the libcurl-on-Asio transport, SSE framer, strict first-cell descriptor loader, Chat Completions buffered/SSE codec, common events and one accumulator. Only the measured scopes in [POC_PLAN.md](POC_PLAN.md) are execution evidence; there is no installed header or stable client runtime. Other sketches remain contracts to build and test. Statements about other projects and the current NeoGraph implementation are summarised in [RESEARCH.md](RESEARCH.md). Named requirements live in [CONFORMANCE.md](CONFORMANCE.md), decisions in [decisions/](decisions/README.md), and release gates in [ROADMAP.md](ROADMAP.md). Section 12's open decisions remain open.
 
 Words: MUST, SHOULD, MAY are used as in RFC 2119. "Family" means a wire protocol shape (Chat Completions, Responses, Messages, Gemini generate, Interactions). "Vendor" means an endpoint operator speaking a family. "Descriptor" means a JSON file of vendor values. Labels: `[read docs]` = a primary vendor page was read while writing; `[INFERENCE]` = not observed, reasoned; "unverified" = a claim that a fixture or canary must still establish.
 
@@ -37,7 +37,7 @@ graph TD
   App[Application or NeoGraph adapter] --> Pub[Installed public headers]
   Pub --> Runtime[sp_runtime: client, retry controller, operation state]
   Runtime --> Codecs[sp_codecs: family codecs, usage mapper, accumulator]
-  Runtime --> Transport[sp_transport: HTTP/1.1, SSE framer, WebSocket]
+  Runtime --> Transport[sp_transport: HTTP, SSE framer, WebSocket]
   Codecs --> Desc[sp_descriptor: strict loader, validated types]
   Codecs --> Core[sp_core: value types, Event, Error]
   Desc --> Core
@@ -76,11 +76,13 @@ Private (not installed, no stability promise): all `sp_*` object targets, codec 
 
 No language runtimes, no general JSON Schema validator, no second HTTP stack, no `httplib`, no hand-written HTTP/1.1 client, no runtime backend flag: libcurl is the single HTTP stack and is private to `sp_transport`. `SP_ENABLE_WEBSOCKET` selects a transport implementation only; it does not change the semantic contract (the WebSocket transport itself is the undecided D1b). The default descriptors are embedded at configure time (a generated index; no runtime directory globbing, no fetch).
 
+**Optional HTTP/3 (accepted direction, not implemented).** [D1's HTTP/3 policy](decisions/D1-transport.md#optional-http3-policy) is authoritative: capable builds can prefer HTTP/3 with same-origin HTTPS connection-stage fallback to HTTP/2/HTTP/1.1; incapable builds keep the existing path. QUIC dependencies stay behind libcurl, not in codecs or installed headers. This protocol preference is not a second backend selector. Provider request/response semantics, SSE framing, events, accumulation and NeoGraph call sites remain shared. Baseline release gates do not require a QUIC-enabled build; advertising HTTP/3 does require the separate conformance gate.
+
 ### 2.4 Include-direction gate
 
 CI MUST fail when any of these hold (property `InstallAndDependencyDAG`). The forbidden edges are listed once here and CONFORMANCE refers to this list:
 
-- an installed header includes yyjson, asio, OpenSSL, `httplib`, curl, or any `src/` header;
+- an installed header includes yyjson, asio, OpenSSL, `httplib`, curl, a QUIC-backend header, or any `src/` header;
 - `sp_core` links or includes anything but the standard library;
 - the CMake target graph has an edge from `sp_core` or `sp_descriptor` to `sp_codecs`, `sp_transport` or `sp_runtime`, or from `sp_codecs` to `sp_transport`;
 - a clean consumer project fails to `find_package`, compile each public header standalone, link, and complete one loopback request against the installed tree.
@@ -400,9 +402,13 @@ Unknown is never a silent fallback for Corrupt. Unknown items are never guessed 
 
 Framing owned by the SSE framer: UTF-8 and BOM handling, CR/LF/CRLF, multi-`data:` lines joined with LF, dispatch on blank line, comments/heartbeats are liveness only, and a pending event without its blank line at EOF is discarded and left to the terminal check (conservative policy; W22: a Gemini stream whose last chunk lacks the trailing blank line is therefore `Truncated` unless an earlier chunk carried the finish reason; a captured fixture decides whether a Gemini-specific exception is justified, and until then this is an unverified policy). WebSocket control frames never reach a codec. Splitting the byte stream at any position MUST NOT change frames or the outcome (`ChunkPartitionInvariant`).
 
+The M2 framer deliberately rejects malformed UTF-8 rather than replacing invalid sequences as a browser EventSource would. It bounds line, event and total bytes, preserves/reset IDs according to SSE framing rules, and never dispatches an unterminated event at EOF. This fail-closed UTF-8 policy is a project choice, not a claim of byte-for-byte browser error recovery.
+
 ### 4.2 Terminal evidence
 
 `Commit` requires family terminal evidence; EOF alone is never evidence (`NoTerminalNoSuccess`). **Normal EOF** is defined per framing: HTTP/1.1 chunked body ended by the zero-length terminator chunk; `Content-Length` bytes all received; a body delimited only by connection close is NOT a normal EOF (the body may be cut); HTTP/2 `END_STREAM` is normal, `RST_STREAM` or a connection error is not; a TLS close without `close_notify` on a length-less body is not normal. For WebSocket, a close frame is never a response terminal. The transport applies this table itself and reports `Failed/Truncated` for every abnormal end (verified for the HTTP/1.x rows by the M1 tests; the HTTP/2 and TLS rows are M1b).
+
+For the planned optional HTTP/3 path, normal transport completion requires complete HTTP message framing and a clean end of the response direction of its QUIC stream. A stream reset or connection failure before that completion is abnormal; neither a QUIC FIN nor a GOAWAY creates family terminal evidence. The same table below still applies to buffered and SSE responses; there is no HTTP/3-specific accumulator or terminal profile. This requirement is unverified until the [HTTP/3 conformance gate](CONFORMANCE.md#121-optional-http3-gate) runs.
 
 | Family | Buffered HTTP | SSE | WebSocket |
 |---|---|---|---|
@@ -450,8 +456,9 @@ Bounds: frame bytes, total bytes, part count, tool argument bytes, opaque bytes,
 
 The family decoder feeds source observations to the `UsageMapper`; the mapper emits absolute snapshots; the accumulator replaces.
 
-- Per-counter cumulative rule: a counter absent from a later frame keeps its previous value; a value in a later frame replaces the earlier one when it is greater or equal. A later value that is **smaller than an earlier positive value** (for example a gateway that sends `0` in the final frame) does NOT erase it: the earlier value stays and a `UsageConflict` is recorded (quality `Inconsistent`).
+- For a **cumulative source only**, a counter absent from a later frame keeps its previous value; a value in a later frame replaces the earlier one when it is greater or equal. A later value smaller than an earlier positive value does not erase it: the earlier value stays and a `UsageConflict` is recorded (quality `Inconsistent`).
 - **Messages.** `message_start` carries input and cache counters and an initial `output_tokens`; each `message_delta` usage is cumulative, and its input and cache fields may reappear and differ (server-tool use is an example); the last `message_delta` before `message_stop` is final. `output_tokens_details.thinking_tokens`, when present, feeds `reasoning`. Array-shaped sub-usage (`iterations[]`) is read only by the fixed Messages reader (5.1).
+- **Chat Completions.** A non-null usage object is a whole-request absolute snapshot, not a cumulative delta ledger; it requires `prompt_tokens`, `completion_tokens` and `total_tokens`. A later valid zero snapshot replaces a positive one, and absent optional details are unknown. Cached and reasoning detail counts are subsets, not additions to those totals. Uncached input is derived only when all required cache components are known; an absent cache-write counter is not an implicit zero.
 - A repeated final snapshot does not double count (`UsageKnowledgeTransitions`, `SnapshotNotAppend`).
 
 ### 4.6 How buffered, SSE and WebSocket converge
@@ -493,6 +500,8 @@ The family is specified here so its codec can be reviewed, but it is **not in th
 
 Descriptors are trusted deployment input (no remote refresh, no external `$ref`). Top level is closed: unknown or duplicate keys are errors.
 
+**Current M2 admission is narrower than this target grammar.** It accepts version/revision/identity/evidence, the `openai.chat` family, origin-only base URL, literal buffered/SSE paths and headers, declared request-member/usage-root bindings, and stop-reason mappings. It rejects unimplemented auth, model selectors, options, error tables and constraints rather than accepting inert configuration. Environment headers, schema generation and D5 execution are not implemented. See the exact inventory and limits in [POC_PLAN section 5.2](POC_PLAN.md#52-m2-results-live-observation).
+
 | Key | Content and limits |
 |---|---|
 | `descriptor_version`, `revision`, `id`, `family`, `evidence` | integers, stable vendor id, an installed family id, documentation URLs and verification date (non-executable metadata) |
@@ -516,6 +525,8 @@ A descriptor cannot: template message content, loop or branch, dispatch on event
 ### 5.2 Load-time validation
 
 Loading is: strict JSON parse (duplicate keys rejected, size and depth bounded) -> closed type and unknown-key check -> match against the family's slot inventory -> checks for path collisions, reserved destinations, model-selector priority, rule contradictions, and usage source overlap -> `ValidatedDescriptor`. Errors carry the JSON pointer, expected type and revision, and never a secret. There is no coercion or migration on load; a future `descriptor_version` or an unknown key is an error. A changed endpoint changes where credentials are sent, so the factory applies an endpoint allow-policy. Clients are immutable: a new descriptor means a new `Client`, so an in-flight request never changes revision or origin. The loader returns `Result<ValidatedDescriptor>`.
+
+In the M2 loader, diagnostic pointers stop at the longest trusted schema ancestor: arbitrary unknown keys, header names, stop-map keys and their control/secret text are not copied into errors. A syntactically valid duplicate-key document retains its unambiguous positive root revision, including the full unsigned range; missing, invalid or duplicated revision remains unknown (`0`). The private yyjson port owns the parse tree and exposes no yyjson types in its headers.
 
 ### 5.3 Schema is generated from the C++ inventory
 
@@ -594,6 +605,8 @@ Tested by `NativeRetentionForeignGate` (with `OriginBindingFacts` and `CanaryNeg
 
 **Transport one-attempt rule.** One logical attempt is one request write on one connection. A transport-internal automatic resend (for example re-sending on a reused keep-alive connection that turned out to be dead) counts as an attempt and is reported in `AttemptObservation.transport_internal_resends`; the default runtime refuses it. The oracle is the server-observed application request count: at most 1 per attempt unless retry is enabled. Redirects are not followed with credentials.
 
+**HTTP/3 connection fallback (planned).** Choosing among QUIC and TCP connection candidates before sending the request is not an extra application attempt. Only one candidate may send the HTTP request, and the same absolute deadline and budget apply. Once headers or body may have left, changing HTTP version and sending again is a retry under the rule below, not a transport escape hatch. Generation POSTs keep TLS 0-RTT early data disabled by default because it can be replayed; optional HTTP/3 does not relax duplicate-billing safety. See [D1](decisions/D1-transport.md#optional-http3-policy).
+
 **Retry condition.** All must hold: `RetryClass` is Transient or AfterReset; `RetrySafety` is `NotSent` or `RejectedBeforeOutput` (or `PossiblyAccepted` only when the endpoint documents idempotency-key semantics and the same key is reused, or the caller sets an explicit duplicate-billing-risk policy); never `OutputObserved`; budget and deadline remain. A new attempt is never appended to a previous attempt's partial output. Absence of a stream callback is not a safety argument (`RetrySafetyBudgetDeadline`).
 
 **Retry-safety table by family** (defaults; a `RejectedBeforeOutput` grant needs a citation and fixture before it is added; none is granted in this draft):
@@ -650,7 +663,7 @@ The library never computes a NeoGraph digest. It provides a **canonical replay p
 
 ## 9. Extension walkthroughs
 
-Paths are the proposed layout; none exist yet. A fixture is one JSON case file (request, transport schedule, expected, provenance); only large binary wire data goes to a sibling file. Capability tables are generated from descriptors. Every change also touches `CHANGELOG.md`. "Zero C++" below means *no C++ source edit by the contributor*; the library is still rebuilt and released (5.6).
+Paths below are the target release layout, not a list of implemented files. M2 uses private `src/` modules and `tests/fixtures/`; its measured scope is in POC_PLAN. A fixture is one JSON case file (request, transport schedule, expected, provenance); the target format uses sidecars for large binary data. Generated capability tables and a release `CHANGELOG.md` belong to the release workflow below. "Zero C++" means *no C++ source edit by the contributor*; the library is still rebuilt and released (5.6).
 
 **(a) Add a strict-compatible OpenAI-style vendor `acme` (Chat Completions shape).** Applies only to a vendor that passes the qualification test of 5.6. No C++ source edit.
 - `descriptors/vendors/acme.json`, `descriptors/manifest.json`
@@ -699,7 +712,7 @@ Summary: (a) and (b, simple scalar) need no C++ source edit for strict-compatibl
 | **Canary keys, cost, fork-PR secrets, terms of service** | cost spikes; secrets in PR logs; vendor ToS on automated calls | canaries run only on protected branches/scheduled jobs with budgets; fork PRs get recordings only; per-cell spending cap; ToS reviewed before enabling a cell |
 | **Dual-implementation migration period** | NeoGraph carries old and new paths for long; parity drift | staged ROADMAP with a cutover gate; half-migration test in section 13; old path deleted at cutover |
 | **Bus factor** (a two-person team) | one person reviews all codec changes; stale ownership | each family has two named reviewers (may be one author plus an external vendor-doc cross-check); properties are machine-checked so review is not the only gate |
-| **Proxy, CA, HTTP/2, pool** | enterprise users need CONNECT proxies or OS trust; HTTP/2 demanded; connection-pool resets | libcurl provides proxying, HTTP/2 and pooling, but TLS trust per platform, HTTP/2 pause with live sibling streams and proxy behaviour are untested here (POC_PLAN risks R3, R4); libcurl's pool is the single reused-connection owner |
+| **Proxy, CA, HTTP/2/3, pool** | enterprise users need CONNECT proxies or OS trust; QUIC may be unavailable or UDP blocked; connection-pool resets | libcurl's pool is the single reused-connection owner. M1b measures the custom-CA and h2c sibling scenarios, not every trust store, peer or platform. Proxies remain unsupported. Optional HTTP/3 is planned, with non-QUIC build compatibility and safe connection-stage fallback gated separately (D1; POC_PLAN R3, R4, R9) |
 | **Credential refresh and binary framing** (Vertex OAuth, Azure AD, SigV4, AWS event-stream) | requests for Bedrock/Vertex native access | declared out of scope (section 1) until separately designed |
 
 ## 12. Decisions and remaining open questions
@@ -708,7 +721,7 @@ Decided items, with status and the record. Nothing in this table is open unless 
 
 | ID | Decision | Status | Record |
 |---|---|---|---|
-| D1 | Transport: one private stack, libcurl `multi_socket` driven by a private standalone-Asio loop; HTTP/2 included. The transport owns cancel and deadline, the one-attempt rule, HTTP/1.x backpressure and name resolution (single-flight, TTL, bounded threads), because libcurl 8.5.0 needs those workarounds (POC_PLAN section 5). No httplib, no hand-written HTTP/1.1 client, no backend flag. Reopen on the conditions in the record: unbounded HTTP/2 pause buffering, a failed TLS matrix, an unmeetable property, D1b forcing a permanent second stack, persistent live transport failures. The WebSocket transport (D1b) is undecided | FIRM | [D1-transport](decisions/D1-transport.md) |
+| D1 | Transport: one private stack, libcurl `multi_socket` driven by standalone Asio; HTTP/2 included and optional HTTP/3 accepted but not implemented. The transport owns cancel/deadline, one attempt, HTTP/1.x backpressure and bounded name resolution (POC_PLAN section 5). HTTP/3-capable builds can prefer QUIC with safe connection-stage fallback; non-capable builds keep HTTP/2/1.1. No second stack or backend selector; generation POST 0-RTT stays off by default. HTTP/3 admission and D1 reconsideration conditions are in the record; WebSocket transport D1b remains undecided | FIRM | [D1-transport](decisions/D1-transport.md) |
 | D2 | Non-chat scope: the first release is chat plus artifacts in chat responses. Images, Veo operations and the OpenRouter decisions endpoint are out, and the Event set does not cover them. NeoGraph's cutover deletes its old interpreter for those features; any feature the owner keeps is rewritten there as a typed client (never interpreting the old grammar) in the same cutover. No feature is deleted without owner approval | FIRM | [D2-non-chat-scope](decisions/D2-non-chat-scope.md) |
 | D3 | Async-native private core plus blocking facade; no switching thresholds; gated by `CancelWithoutPeerProgress` and `AdmissionIndependentOfHeldStreams`; a non-gating scheduled benchmark for the first three releases | FIRM | [D3-async-native](decisions/D3-async-native.md) |
 | D4 | Exact-origin default, per-capsule binding facts, C++ allow-list equivalence class (`Documented-Unverified`) activated only after a negative-control canary; OpenRouter never in a class | FIRM | [D4-origin-and-binding](decisions/D4-origin-and-binding.md) |

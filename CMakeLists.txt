@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(SchemaProvider VERSION 0.0.0 LANGUAGES CXX)
+project(SchemaProvider VERSION 0.0.0 LANGUAGES C CXX)
 
 # Proof-of-concept build. Nothing here is an installed or stable interface yet; see docs/POC_PLAN.md.
 
@@ -12,7 +12,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "" FORCE)
 endif()
 
-option(SP_BUILD_TESTS "Build the transport property tests and the loopback server" ON)
+option(SP_BUILD_TESTS "Build the PoC property tests, fixture runner and loopback peers" ON)
 set(SP_SANITIZE "" CACHE STRING "Sanitizer set: address, thread (undefined is added to address)")
 
 if(SP_SANITIZE STREQUAL "address")
@@ -32,7 +32,42 @@ if(NOT SP_ASIO_INCLUDE_DIR)
   message(FATAL_ERROR "standalone Asio not found: install libasio-dev or pass -DASIO_ROOT=<dir containing include/asio.hpp>")
 endif()
 
-add_library(sp_transport STATIC src/transport/http_transport.cpp)
+# yyjson stays private. Use an installed library or an explicitly supplied source tree;
+# configuration never downloads dependencies or replaces a system package.
+set(YYJSON_ROOT "" CACHE PATH "yyjson installation or source directory")
+find_path(SP_YYJSON_INCLUDE_DIR yyjson.h HINTS "${YYJSON_ROOT}" "${YYJSON_ROOT}/src" "${YYJSON_ROOT}/include")
+if(NOT SP_YYJSON_INCLUDE_DIR)
+  message(FATAL_ERROR "yyjson not found: install yyjson or pass -DYYJSON_ROOT=<source or installation directory>")
+endif()
+find_file(SP_YYJSON_SOURCE yyjson.c PATHS "${SP_YYJSON_INCLUDE_DIR}" NO_DEFAULT_PATH)
+if(SP_YYJSON_SOURCE)
+  add_library(sp_yyjson STATIC "${SP_YYJSON_SOURCE}")
+  target_include_directories(sp_yyjson SYSTEM INTERFACE "${SP_YYJSON_INCLUDE_DIR}")
+else()
+  find_library(SP_YYJSON_LIBRARY yyjson HINTS "${YYJSON_ROOT}/lib" REQUIRED)
+  add_library(sp_yyjson UNKNOWN IMPORTED)
+  set_target_properties(sp_yyjson PROPERTIES IMPORTED_LOCATION "${SP_YYJSON_LIBRARY}"
+                        INTERFACE_INCLUDE_DIRECTORIES "${SP_YYJSON_INCLUDE_DIR}")
+endif()
+
+add_library(sp_core INTERFACE)
+target_include_directories(sp_core INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
+add_library(sp_json STATIC src/json/json.cpp)
+target_include_directories(sp_json PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_options(sp_json PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(sp_json PRIVATE sp_yyjson)
+
+add_library(sp_descriptor STATIC src/descriptor/descriptor.cpp)
+target_include_directories(sp_descriptor PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_options(sp_descriptor PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(sp_descriptor PRIVATE sp_json)
+
+add_library(sp_codecs STATIC src/codecs/accumulator.cpp src/codecs/chat.cpp src/codecs/chat_request.cpp)
+target_compile_options(sp_codecs PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(sp_codecs PUBLIC sp_core PRIVATE sp_json sp_descriptor)
+
+add_library(sp_transport STATIC src/transport/http_transport.cpp src/transport/sse_framer.cpp)
 target_include_directories(sp_transport
   PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/src
   PRIVATE ${SP_ASIO_INCLUDE_DIR})
@@ -56,6 +91,18 @@ if(SP_BUILD_TESTS)
   target_compile_options(sp_transport_tests PRIVATE -Wall -Wextra -Wpedantic)
   target_link_libraries(sp_transport_tests PRIVATE sp_transport)
 
+  add_executable(sp_sse_tests tests/sse_framer_test.cpp)
+  target_link_libraries(sp_sse_tests PRIVATE sp_transport)
+  add_executable(sp_descriptor_tests tests/descriptor_properties_test.cpp)
+  target_link_libraries(sp_descriptor_tests PRIVATE sp_descriptor sp_json)
+  add_executable(sp_chat_tests tests/chat_semantic_test.cpp)
+  target_link_libraries(sp_chat_tests PRIVATE sp_codecs sp_descriptor sp_json sp_transport)
+  add_executable(sp_fixture_runner tests/fixture_runner.cpp)
+  target_link_libraries(sp_fixture_runner PRIVATE sp_codecs sp_descriptor sp_json sp_transport)
+  foreach(target sp_sse_tests sp_descriptor_tests sp_chat_tests sp_fixture_runner)
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+  endforeach()
+
   # ThreadSanitizer's shadow memory needs a fixed address-space layout; kernels with high mmap
   # entropy (this WSL2 kernel) abort with "unexpected memory mapping" unless ASLR is off.
   set(sp_test_runner "")
@@ -70,4 +117,11 @@ if(SP_BUILD_TESTS)
            COMMAND ${sp_test_runner} $<TARGET_FILE:sp_transport_tests> $<TARGET_FILE:sp_loopback_server>
                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/support)
   set_tests_properties(transport_properties PROPERTIES TIMEOUT 300)
+  add_test(NAME sse_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_sse_tests>)
+  add_test(NAME descriptor_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_descriptor_tests>)
+  add_test(NAME chat_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_chat_tests>)
+  add_test(NAME chat_fixtures COMMAND ${sp_test_runner} $<TARGET_FILE:sp_fixture_runner> ${SP_NODE}
+           ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/chat_fixture_server.mjs
+           ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/chat)
+  set_tests_properties(sse_properties descriptor_properties chat_properties chat_fixtures PROPERTIES TIMEOUT 300)
 endif()

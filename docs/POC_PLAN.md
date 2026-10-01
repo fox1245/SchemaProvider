@@ -1,6 +1,8 @@
 # Proof-of-concept plan
 
-Status: M0, M1 and M1b are done and measured on this branch; M2 to M5 are planned and not started. Everything about M2 and later is a plan, not a result. Evidence labels as in DESIGN.md: `[live observation]` (run here, local loopback, libcurl 8.5.0 with OpenSSL 3.0.13, Linux on WSL2), `[read source]`, `[read docs]`, `[inference]`.
+Status: M0, M1, M1b and M2 are done and measured on this branch; M3 to M5 remain planned. M2 is the first private Chat vertical slice, not an installed release or completion of the full descriptor grammar. Evidence labels as in DESIGN.md: `[live observation]` (run here, local loopback, libcurl 8.5.0 with OpenSSL 3.0.13, Linux on WSL2), `[read source]`, `[read docs]`, `[inference]`.
+
+Optional HTTP/3 is an accepted direction with a separate planned workstream (section 3.1); it is not implemented, and none of the M1/M1b/M2 results is HTTP/3 evidence. M3 is the next baseline milestone.
 
 ## 1. Purpose and non-purpose
 
@@ -29,12 +31,26 @@ Each milestone has an exit that is checked by running something, and a stop rule
 | M0 | Align D1, DESIGN, ROADMAP, CONFORMANCE, README with the libcurl decision; this plan | docs consistent; no document still says "no libcurl" | done |
 | M1 | Transport spike: libcurl `multi_socket` on Asio with cancel, deadline, bounded threads, backpressure, one attempt | the experiments of section 4 pass under plain, ASan+UBSan and TSan builds | done (section 5) |
 | M1b | TLS success and certificate-failure matrix, ALPN HTTP/2 over TLS, HTTP/2 pause/cancel with live sibling streams, GOAWAY/REFUSED_STREAM resend refusal, resolver address refresh; POSIX and WebSocket limits | R1 to R4 exercised; R5 and R6 explicit limits rather than implied support | done (section 5.1) |
-| M2 | First vertical slice: SSE framer, `Event`, one accumulator, strict descriptor loader (unknown keys rejected), Chat Completions codec buffered and SSE, fixture runner | `ChunkPartitionInvariant`, `NoTerminalNoSuccess`, `TransportProjectionParity` (buffered vs SSE), `KnownCorruptNeverIgnored` on scripted fixtures | next |
-| M3 | Messages codec: thinking capsules with origin, cumulative usage, server tools, stop meanings | `InterleavedToolOwnership`, `SnapshotNotAppend`, `UsageKnowledgeTransitions`, `StopMeaning`, `InvalidToolCallRepresentation`, `ServerToolNotExecuted` | planned |
+| M2 | First vertical slice: SSE framer, `Event`, one accumulator, strict descriptor loader (unknown keys rejected), Chat Completions codec buffered and SSE, fixture runner | `ChunkPartitionInvariant`, `NoTerminalNoSuccess`, `TransportProjectionParity` (buffered vs SSE), `KnownCorruptNeverIgnored` on scripted fixtures | done (section 5.2) |
+| M3 | Messages codec: thinking capsules with origin, cumulative usage, server tools, stop meanings | `InterleavedToolOwnership`, `SnapshotNotAppend`, `UsageKnowledgeTransitions`, `StopMeaning`, `InvalidToolCallRepresentation`, `ServerToolNotExecuted` | next |
 | M4 | Runtime: `Operation` over the transport, `std::stop_token`, blocking `complete()`, typed `Failure` from `AttemptObservation`, one retry controller (off by default) | `RetrySafetyBudgetDeadline`, `OwnershipAndBounds` at the client level, secret-marker scan | planned |
 | M5 | Budgeted live canary on one cell per family, NeoGraph adapter spike, the conformance corpus run against the current NeoGraph implementation, independent review by a different model family | go or no-go record: what stays, what is cut, what the NeoGraph cutover costs | planned |
 
 Stop rule for every milestone: if a property cannot be met, the finding is written into the relevant decision record with its evidence before work continues; a failing property is never relaxed to make a run green.
+
+### 3.1 Optional HTTP/3 workstream
+
+Status: planned, not started; policy accepted in [D1](decisions/D1-transport.md#optional-http3-policy). This workstream does not reorder M2-M5 or make QUIC a prerequisite for the baseline build. It uses model-free protocol peers; Ollama/llama.cpp setup remains excluded and live provider calls remain subject to C3.
+
+1. **Optional dependency build.** Use an isolated, pinned libcurl + ngtcp2 + nghttp3 + compatible TLS build without replacing system libraries. Prove the linked library's HTTP/3 capability, keep a non-HTTP/3 build in the matrix, and record backend versions. Exact versions/distribution remain C1/C5 decisions.
+2. **Private adapter support.** Add HTTP/3 protocol selection and observation, response-version and stream-framing handling, typed QUIC failures, and shared-connection pause/cancel behavior. Reuse the existing libcurl/Asio integration and semantic boundaries; do not create a second HTTP stack or per-protocol codecs.
+3. **Protocol proof.** Use a real QUIC server and an isolated HTTP/3-only connection; inspect negotiated protocol at both ends. Separately exercise HTTP/3 preference with HTTP/2/1.1 connection fallback, an unsupported peer, UDP blocked/refused, and a build without HTTP/3. A fallback success is not an HTTP/3 success.
+4. **Safety and lifecycle.** Run the [conformance gate](CONFORMANCE.md#121-optional-http3-gate): one HTTP request per permitted attempt across connection candidates, unchanged deadline/budget, generation POST 0-RTT disabled, no resend after possible acceptance, cancel without peer progress, resets/truncation, bounded paused-stream buffering, sibling progress and exactly one outcome. Add buffered/SSE semantic parity when the codecs exist, and run applicable plain/ASan+UBSan/TSan cases.
+5. **Benefit measurement.** Compare HTTP/2 and HTTP/3 with the same peer, payload, concurrency and controlled RTT/loss; separate cold and reused connections. Report first-byte/first-event latency, p95/p99 completion latency, output gaps, timeout rate, CPU and memory. Model inference speedups, universal throughput gains and connection migration are not assumed.
+
+Exit: the advertised HTTP/3 lane passes its applicable gates and the non-HTTP/3 baseline still works. Failure leaves HTTP/3 unadvertised rather than weakening the one-attempt or lifecycle contract.
+
+Current evidence `[live observation]`: a throwaway probe linked to the transport's libcurl 8.5.0/OpenSSL 3.0.13 reported `HTTP2=1`, `HTTP3=0`; both HTTP/3 preference and HTTP/3-only options returned `CURLE_UNSUPPORTED_PROTOCOL`. It made no HTTP request and was removed. This is a capability finding, not a QUIC transfer test.
 
 ## 4. M1 experiments (what was built and what each one proves)
 
@@ -101,6 +117,33 @@ The GOAWAY oracle initially passed zero to Node's API, which actually emitted th
 
 Limits remain explicit: HTTP/2 multiplexing/backpressure was measured with cleartext HTTP/2, while TLS/ALPN was exercised separately. One paused stream plus three siblings is not a universal memory bound for arbitrary stream counts, peers or libcurl versions. Real provider behavior, public OS trust stores, Windows/macOS, proxies and WebSocket are not verified here. Linux/POSIX is the PoC platform (R5); D1b stays deferred until before ROADMAP Stage 2 (R6), not implemented or silently replaced with a second HTTP stack.
 
+### 5.2 M2 results `[live observation]`
+
+The first Chat cell now runs from a typed request through descriptor admission, request encoding, the real libcurl/Asio transport, SSE framing or buffered JSON, common `Event`s and one accumulator to exactly one outcome. No model, API key, live provider or NeoGraph adapter was used.
+
+| Check | Observed result |
+|---|---|
+| Full regression matrix | Five CTest groups pass in each build: transport, SSE, descriptor, Chat semantics and Chat fixtures. Plain: 19.10 s; ASan+UBSan: 23.00 s; TSan: 23.19 s. The existing 32 transport scenarios remain included. |
+| Fixture runner CLI | `M2_FIXTURE_PASS fixtures=35 partitions=9409 parity_groups=5 wire=yes`; every fixture was consumed exactly once by the independent Node HTTP peer. |
+| `ChunkPartitionInvariant` | Every single split through the bounded SSE corpus, bytewise input and deterministic random partitions preserve the golden projection, including UTF-8/BOM, CRLF and event delimiters. Framer tests also exercise multiline data, IDs, bounds and stopped callbacks. |
+| `NoTerminalNoSuccess` | Missing finish reason, missing/undelimited DONE, DONE without finish, error after DONE, delta after finish, short body, unmarked EOF and reset after DONE fail. Normal close plus invalid JSON is corrupt; known cancellation/deadline/truncation outranks deferred buffered JSON or incomplete UTF-8 EOF validation. |
+| `TransportProjectionParity` | Five buffered/SSE pairs agree: text with usage, indexed interleaved tools, refusal/content-filter, token-limit invalid calls, and unindexed tool order. |
+| `KnownCorruptNeverIgnored` | Wrong/missing required envelope and usage fields, changing response identity, corrupt content and unknown critical event types fail. Unknown optional properties remain compatible; an HTTP-200 in-band error is a failure. |
+| Request matcher negative controls | Wrong method, path, semantic header and JSON body are rejected; an unused interaction cannot be replaced and repeat playback is refused. |
+| Empty literal header | A failing-before transport probe observed the header missing. The corrected libcurl representation preserves present-empty `X-Feature`, verified independently on the wire. |
+
+**Implemented boundaries.** `src/core/value.h` defines the ten-event vocabulary and first-cell values; `src/codecs/accumulator.*` alone owns text/argument assembly and finalization. `src/codecs/chat.*` maps buffered and streamed fields into those events; `chat_request.cpp` encodes typed text messages, function definitions, temperature/top-p and output-token limits. Indexed tool order is canonical; unindexed compatibility calls retain response-wide first-seen order, and ambiguous mixed addressing fails. Already-bound metadata-only fragments need not repeat `function`. Refusal and invalid tool arguments survive as typed parts rather than being dropped or executed.
+
+The strict loader accepts only `descriptor_version`, positive `revision`, `id`, family `openai.chat`, documentation `evidence`, `connection` (origin-only URL, literal paths and headers), `bindings` (declared request member names and usage object path), and `stop_reasons`. HTTPS origins and canonical loopback HTTP are admitted; userinfo, URL queries/fragments, path templates/traversal, reserved header overrides, duplicates, unknown keys and wrongly typed values are rejected. Parser byte/depth limits and diagnostic redaction are exercised. Diagnostics report the longest trusted schema ancestor without copying arbitrary keys or control/secret text; duplicate-key errors retain an unambiguous valid revision.
+
+**Review corrections.** Independent semantic and boundary reviews found required metadata/usage validation gaps, inconsistent chunk identity, invented uncached usage when a cache component was unknown, unindexed ordering, metadata-only tool rejection, abnormal-close precedence, unsafe diagnostic pointers, lost revision on duplicates and the empty-header transport bug. Regression cases cover the corrections. All 35 synthetic request/response expectations were independently approved from the primary sources and design rules, not generated by the decoder; provenance records that approval. Index omission is the DESIGN 4.4 compatibility rule, not a claim that OpenAI documents it.
+
+`[read docs]` The [OpenAI Chat reference](https://developers.openai.com/api/reference/resources/chat) defines required response/chunk metadata and whole-request usage snapshots. Chat snapshots replace, including explicit zero; they do not inherit the cumulative Messages rule. Absent cache details stay unknown. The [SSE parsing specification](https://html.spec.whatwg.org/multipage/server-sent-events.html#parsing-an-event-stream) supplies framing expectations; rejecting malformed UTF-8 instead of browser-style replacement is an explicit fail-closed project policy.
+
+**Limits, not support claims.** The C++ fixture runner currently exercises inline UTF-8 schedules over loopback HTTP; the existing transport suite separately covers TLS/HTTP/2. M2 does not implement auth/environment header bindings, model/capability selectors, namespaced options, error tables, constraints/D5 execution or the descriptor schema generator; those descriptor fields are rejected, never accepted as no-ops. Tool-result input, native reasoning/replay, artifacts, the installed runtime, the full mutant/race/journal gates and non-Chat families are not advertised. Known unmapped response features fail explicitly instead of losing data. M3 adds Messages; M4/M5 remain the runtime/canary gates.
+
+The JSON port privately uses yyjson 0.12.0 from an existing source tree; CMake does not download it. Sanitizers cover the compiled PoC and supplied yyjson source, not prebuilt system libcurl/OpenSSL. TSan uses the existing `setarch -R` wrapper on this WSL2 kernel; GCC still warns that Asio's `atomic_thread_fence` is not instrumented by TSan, so a passing run is not proof about every fence.
+
 ## 6. Risk register
 
 | Id | Risk | State | Next step |
@@ -113,26 +156,33 @@ Limits remain explicit: HTTP/2 multiplexing/backpressure was measured with clear
 | R6 | WebSocket for the Responses lane | undecided (D1b): libcurl WebSocket is official from 8.11 and the CVE fix is in 8.16, while the distribution libcurl here is 8.5.0 | decide before ROADMAP Stage 2, not before Stage 1 |
 | R7 | single `CURLM` on one strand limits CPU throughput | unmeasured at scale; the earlier A/B (one worker thread polling, not this integration) had libcurl within about 4% of the Asio pool at 128 concurrent POSTs | measure at M4 with the real codec cost; shard the multi handle only if the number says so |
 | R8 | resolver pool threads stuck in `getaddrinfo` delay uncached hosts | accepted and bounded by pool size | document; the deadline still ends every operation |
+| R9 | HTTP/3 build availability, connection fallback, replay and QUIC lifecycle | accepted direction; current linked libcurl has no HTTP/3; adapter support and QUIC tests are unimplemented | optional workstream 3.1 and conformance 12.1; retain the non-QUIC baseline and do not count fallback as HTTP/3 evidence |
 
 ## 7. Open decisions and defaults
 
 | Id | Question | Default used by the PoC | Who decides |
 |---|---|---|---|
-| C1 | libcurl floor and required features | 7.88.0 (Debian 12) as the floor, 8.5.0 as the tested version; TLS and HTTP/2 required, a threaded or async resolver is irrelevant now that the transport resolves names | owner, after M1b |
+| C1 | libcurl floor and required features | 7.88.0 (Debian 12) baseline floor, 8.5.0 tested; TLS and HTTP/2 required, HTTP/3 optional. The HTTP/3 lane needs its own validated libcurl/TLS/QUIC version combination; no baseline floor change is implied | owner, after M1b; HTTP/3 versions before that lane is admitted |
 | C2 | first platforms | Linux; Windows only after R5 | owner |
 | C3 | live call budget | none authorized; no live call until the owner sets a cap on calls and cost per cell | owner, before M5 |
 | C4 | target concurrency | scenarios C = 1, 32, 128 and held-stream counts of 4T + 64 and twice that, reported as measurements and never as promised capacity | owner |
-| C5 | libcurl deployment | system libcurl first; vendoring only if R6 forces a newer version | owner |
+| C5 | libcurl deployment | system libcurl baseline; optional HTTP/3 evaluated through an isolated dependency build, without replacing system libraries. Backend versions, packaging and any vendoring remain undecided; R6 may independently require a newer libcurl | owner |
 
 ## 8. How to build and run
 
-```
-cmake -S . -B build -G Ninja && cmake --build build && ctest --test-dir build --output-on-failure
-cmake -S . -B build-asan -G Ninja -DSP_SANITIZE=address && cmake --build build-asan && ctest --test-dir build-asan
-cmake -S . -B build-tsan -G Ninja -DSP_SANITIZE=thread  && cmake --build build-tsan && ctest --test-dir build-tsan
+Set `YYJSON_ROOT` to an existing yyjson source or installation directory (unneeded if an installed yyjson is already discoverable):
+
+```sh
+cmake -S . -B build -G Ninja -DYYJSON_ROOT="$YYJSON_ROOT"
+cmake --build build && ctest --test-dir build --output-on-failure
+cmake -S . -B build-asan -G Ninja -DSP_SANITIZE=address -DYYJSON_ROOT="$YYJSON_ROOT"
+cmake --build build-asan && ctest --test-dir build-asan --output-on-failure
+cmake -S . -B build-tsan -G Ninja -DSP_SANITIZE=thread -DYYJSON_ROOT="$YYJSON_ROOT"
+cmake --build build-tsan && ctest --test-dir build-tsan --output-on-failure
+build/sp_fixture_runner "$(command -v node)" tests/support/chat_fixture_server.mjs tests/fixtures/chat
 ```
 
-Requirements: Linux, C++20 compiler, libcurl 7.88 or newer with TLS and HTTP/2, standalone Asio headers (`libasio-dev` or `-DASIO_ROOT=`), `node` and the `openssl` CLI. CMake requires both fixture executables when tests are enabled; M1b peer startup failure fails the test. A single scenario: `build/sp_transport_tests build/sp_loopback_server tests/support <name-substring>`; `http2_` exercises the HTTP/2 scenarios, including TLS/ALPN. No local inference server or API key is required.
+Requirements: Linux, C/C++20 toolchain, libcurl 7.88 or newer with TLS and HTTP/2, standalone Asio headers (`libasio-dev` or `-DASIO_ROOT=`), yyjson, `node` and the `openssl` CLI. CMake requires both fixture executables when tests are enabled; peer startup failure fails the test. The measured builds select the system shared libcurl; if another installation shadows it, select the intended library with `CURL_LIBRARY_RELEASE` and matching headers. A single transport scenario: `build/sp_transport_tests build/sp_loopback_server tests/support <name-substring>`; `http2_` exercises the HTTP/2 scenarios, including TLS/ALPN. Append `--offline-only` to the fixture-runner command to omit its socket path; that is not wire evidence. No local inference server or API key is required.
 
 ## 9. Working rules
 

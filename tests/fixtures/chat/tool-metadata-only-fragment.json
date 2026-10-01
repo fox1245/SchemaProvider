@@ -1,0 +1,120 @@
+{
+  "fixture_version": 2,
+  "case_id": "tool-metadata-only-fragment",
+  "origin": {
+    "family": "openai.chat",
+    "vendor": "synthetic",
+    "authority": "loopback"
+  },
+  "binding_facts": {
+    "model": "fixture-model",
+    "account_scope": "synthetic-no-credentials"
+  },
+  "descriptor_digest": "sha256:5b126b257d4c726240fb1dc86823e7f148143df0f8e0465311cc1509378cb84e",
+  "provenance": {
+    "kind": "synthetic",
+    "api_version": "chat-completions",
+    "model": "fixture-model",
+    "captured_at": null,
+    "doc_reference": "OpenAI Chat Completions: Chat Completion / Chat Completion Chunk; WHATWG HTML 9.2.5 parsing an event stream",
+    "urls": [
+      "https://developers.openai.com/api/reference/resources/chat",
+      "https://html.spec.whatwg.org/multipage/server-sent-events.html#parsing-an-event-stream"
+    ],
+    "reviewer": "SemanticReview",
+    "review_date": "2026-10-01",
+    "review_mode": "independent"
+  },
+  "input": {
+    "model": "fixture-model",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Say hello."
+      }
+    ]
+  },
+  "request": {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "semantic_headers": {
+      "content-type": "application/json",
+      "x-fixture": "synthetic"
+    },
+    "body": {
+      "model": "fixture-model",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Say hello."
+        }
+      ],
+      "stream": true,
+      "stream_options": {
+        "include_usage": true
+      }
+    }
+  },
+  "transport": {
+    "scheme": "http",
+    "mode": "sse",
+    "status": 200,
+    "headers": {
+      "Content-Type": "text/event-stream"
+    },
+    "schedule": [
+      {
+        "kind": "bytes",
+        "utf8": "data: {\"id\":\"chat-fixture\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call-a\",\"type\":\"function\",\"function\":{\"name\":\"weather\",\"arguments\":\"{\"}}]},\"finish_reason\":null,\"logprobs\":null}]}\r\n\r\ndata: {\"id\":\"chat-fixture\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-a\"}]},\"finish_reason\":null,\"logprobs\":null}]}\r\n\r\ndata: {\"id\":\"chat-fixture\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"}\"}}]},\"finish_reason\":null,\"logprobs\":null}]}\r\n\r\ndata: {\"id\":\"chat-fixture\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\",\"logprobs\":null}]}\r\n\r\ndata: [DONE]\n\n"
+      },
+      {
+        "kind": "close",
+        "how": "chunked_terminator"
+      }
+    ]
+  },
+  "expect": {
+    "request_count": 1,
+    "outcome": "completion",
+    "completion": {
+      "messages": [
+        {
+          "role": "assistant",
+          "parts": [
+            {
+              "type": "tool_call",
+              "id": "call-a",
+              "name": "weather",
+              "kind": "ClientExecuted",
+              "input": {}
+            }
+          ]
+        }
+      ],
+      "stop": {
+        "kind": "ToolUse",
+        "raw": "tool_calls"
+      },
+      "usage": {
+        "input_total": null,
+        "output_total": null,
+        "total": null,
+        "provider_reported_total": null,
+        "input_uncached": null,
+        "cache_read": null,
+        "cache_write": null,
+        "reasoning": null,
+        "stage": "Missing",
+        "quality": "Consistent",
+        "extra": {}
+      }
+    }
+  },
+  "scrub": {
+    "version": 1,
+    "id_replacements": {},
+    "removed_fields": [],
+    "replay_eligible": false,
+    "log": []
+  }
+}

@@ -1,0 +1,116 @@
+{
+  "fixture_version": 2,
+  "case_id": "empty-literal-header",
+  "origin": {
+    "family": "openai.chat",
+    "vendor": "synthetic",
+    "authority": "loopback"
+  },
+  "binding_facts": {
+    "model": "fixture-model",
+    "account_scope": "synthetic-no-credentials"
+  },
+  "descriptor_digest": "sha256:330b0911f4f480e06c397af6c1365c749cdf5d0a25a44ae8ede0921e8cfa4f96",
+  "provenance": {
+    "kind": "synthetic",
+    "api_version": "chat-completions",
+    "model": "fixture-model",
+    "captured_at": null,
+    "doc_reference": "OpenAI Chat Completions: Chat Completion / Chat Completion Chunk; WHATWG HTML 9.2.5 parsing an event stream",
+    "urls": [
+      "https://developers.openai.com/api/reference/resources/chat",
+      "https://html.spec.whatwg.org/multipage/server-sent-events.html#parsing-an-event-stream"
+    ],
+    "reviewer": "SemanticReview",
+    "review_date": "2026-10-01",
+    "review_mode": "independent"
+  },
+  "input": {
+    "model": "fixture-model",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Say hello."
+      }
+    ]
+  },
+  "request": {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "semantic_headers": {
+      "content-type": "application/json",
+      "x-fixture": "synthetic",
+      "x-feature": ""
+    },
+    "body": {
+      "model": "fixture-model",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Say hello."
+        }
+      ],
+      "stream": false
+    }
+  },
+  "transport": {
+    "scheme": "http",
+    "mode": "buffered",
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "schedule": [
+      {
+        "kind": "bytes",
+        "utf8": "{\"id\":\"chat-fixture\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\",\"logprobs\":null}]}"
+      },
+      {
+        "kind": "close",
+        "how": "content_length_met"
+      }
+    ]
+  },
+  "expect": {
+    "request_count": 1,
+    "outcome": "completion",
+    "completion": {
+      "messages": [
+        {
+          "role": "assistant",
+          "parts": [
+            {
+              "type": "text",
+              "text": "ok"
+            }
+          ]
+        }
+      ],
+      "stop": {
+        "kind": "EndTurn",
+        "raw": "stop"
+      },
+      "usage": {
+        "input_total": null,
+        "output_total": null,
+        "total": null,
+        "provider_reported_total": null,
+        "input_uncached": null,
+        "cache_read": null,
+        "cache_write": null,
+        "reasoning": null,
+        "stage": "Missing",
+        "quality": "Consistent",
+        "extra": {}
+      }
+    }
+  },
+  "scrub": {
+    "version": 1,
+    "id_replacements": {},
+    "removed_fields": [],
+    "replay_eligible": false,
+    "log": []
+  },
+  "descriptor_source": "{\n  \"descriptor_version\": 1,\n  \"revision\": 1,\n  \"id\": \"loopback-chat\",\n  \"family\": \"openai.chat\",\n  \"evidence\": {\n    \"urls\": [\n      \"https://developers.openai.com/api/reference/resources/chat\"\n    ],\n    \"verified_at\": \"2026-10-01\"\n  },\n  \"connection\": {\n    \"base_url\": \"http://127.0.0.1\",\n    \"paths\": {\n      \"buffered\": \"/v1/chat/completions\",\n      \"streaming\": \"/v1/chat/completions\"\n    },\n    \"headers\": {\n      \"X-Fixture\": \"synthetic\",\n      \"X-Feature\": \"\"\n    }\n  },\n  \"bindings\": {\n    \"model\": \"model\",\n    \"messages\": \"messages\",\n    \"stream\": \"stream\",\n    \"max_output_tokens\": \"max_tokens\",\n    \"usage\": [\n      \"usage\"\n    ]\n  },\n  \"stop_reasons\": {\n    \"stop\": \"EndTurn\",\n    \"length\": \"MaxTokens\",\n    \"tool_calls\": \"ToolUse\",\n    \"content_filter\": \"ContentFilter\"\n  }\n}\n"
+}

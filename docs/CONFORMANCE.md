@@ -1,6 +1,8 @@
 # Conformance plan
 
-Status: this is the acceptance plan for a library that does not exist yet. The only properties that have been run are the transport-level parts of `NoTerminalNoSuccess` (5.2), `OwnershipAndBounds` (5.12), `CancelWithoutPeerProgress` (5.15, without the WebSocket and backoff states), `AdmissionIndependentOfHeldStreams` (5.21) and the one-attempt rule of `RetrySafetyBudgetDeadline` (5.10), in the transport spike reported in `POC_PLAN.md` section 5; no codec, accumulator or fixture property has been implemented or run. Wherever this document says "must", it states a requirement for the release stage named in `ROADMAP.md`. Defect classes come from a single NeoGraph audit and from surveys of other projects (see `RESEARCH.md`). They are observations, not incidence rates. Design rules are stated in `DESIGN.md` and are cited here by section number, not restated; where a cell table below and `DESIGN.md` disagree, `DESIGN.md` is authoritative and the disagreement is a defect in this file. Decisions D1 to D5 are recorded in `decisions/`.
+Status: this is the acceptance plan for a future installed library. The private M1/M1b transport runs cover the transport-level portions of `NoTerminalNoSuccess`, `OwnershipAndBounds`, `CancelWithoutPeerProgress`, `AdmissionIndependentOfHeldStreams` and the one-attempt rule. M2 adds measured Chat buffered/SSE fixture evidence for `ChunkPartitionInvariant`, `NoTerminalNoSuccess`, `TransportProjectionParity` and `KnownCorruptNeverIgnored`: 35 synthetic fixtures, 9,409 partition variants and five parity pairs, also through the real loopback transport. Exact scope is in [POC_PLAN section 5.2](POC_PLAN.md#52-m2-results-live-observation). This is not completion of all 22 properties, all family cells, the mutant catalog or a release gate. Wherever this document says "must", it states a requirement for the release stage in ROADMAP. Defect classes in RESEARCH are observations, not incidence rates. DESIGN is authoritative if a cell table disagrees; decisions D1 to D5 are in `decisions/`.
+
+Optional HTTP/3 is an accepted design direction only. None of the existing transport results proves QUIC support; the additional, unrun gate is [section 12.1](#121-optional-http3-gate).
 
 Scope (decision D2): chat completion APIs and the artifacts that arrive inside chat responses. Long-running operations, standalone image endpoints and the OpenRouter decisions endpoint have no cell, no property and no fixture here, and none may be advertised as supported. The earlier operation-lifecycle property is dropped for that reason.
 
@@ -102,6 +104,10 @@ Field rules:
 
 Directory discovery loads all fixtures and runs them across the properties that apply.
 
+**M2 runner subset and extensions.** `tests/fixtures/chat/*.json` uses format version 2 with an `input` object for the typed caller request, kept separate from the expected outbound `request`; optional `parity_group` names a buffered/SSE pair. Optional `descriptor_source` supplies exact source bytes for a descriptor variant, bound by `descriptor_digest`. The independent Node peer validates the digest and matches method, loopback authority, path, semantic headers and structural JSON body; unused and repeated interactions fail. Wrong-method/path/header/body negative controls exercise the matcher.
+
+The current C++ runner supports inline UTF-8 body schedules, delays and the HTTP close/reset variants used by this corpus, over model-free loopback HTTP. It is not yet the general sidecar/TLS/WebSocket runner illustrated above. M1/M1b exercise TLS and HTTP/2 separately. M2 projections cover ordered text/refusal/tool parts, stop and nullable usage, or failure class/partial text/stop; native replay and the versioned journal projection remain later gates. Provenance records synthetic primary-source expectations and the actual independent review; no production decoder generates goldens.
+
 ## 3. Scrubbing rules
 
 | Material | Rule |
@@ -148,6 +154,7 @@ General rules for every property:
 
 - Statement: no EOF, clean close, reset, in-band error event, HTTP 200 with an error body, failed Responses status or early WebSocket close produces a successful completion. Terminal evidence is what the family defines for that transport (`DESIGN.md` section 4.2). Empty output without terminal evidence is a failure. When terminal, error and cancel race, the caller gets exactly one outcome and no callback fires after it.
 - Normal close, defined once for all cells: HTTP/1.1 response complete when Content-Length bytes arrived, or the chunked zero-length terminator arrived; HTTP/2 when END_STREAM arrived with no earlier RST_STREAM; WebSocket when a close frame with a normal code arrived after the terminal message. EOF on a close-delimited body, a short Content-Length body, a missing chunk terminator, RST_STREAM and an abnormal close code are abnormal close and yield `Failure(Truncated)` even if the received bytes parse as complete JSON. The scripted server expresses each through `close.how` (section 2). Whether the `Failure` keeps the partial content for the caller is a `DESIGN.md` rule; the oracle checks that it is never a `Completion`.
+  - For optional HTTP/3, require complete HTTP message framing and a clean end of the response direction of the QUIC stream. A stream reset or connection failure before completion is abnormal; QUIC FIN or GOAWAY alone never substitutes for family terminal evidence. These rows remain planned until the HTTP/3 lane is run.
 - Oracle matrix: the terminal evidence each cell must show for `Commit` (rows restate fixture expectations and follow `DESIGN.md` section 4.2). Every cell also requires normal close; a cell's fixture set is {complete, cut before terminal, cut after terminal but before a usage trailer, clean close with no terminal, reset, in-band error, terminal plus error}.
 
 | Family | Buffered | SSE | WebSocket |
@@ -226,6 +233,7 @@ General rules for every property:
 ### 5.9 TransportProjectionParity
 
 - Statement: one scripted logical response, expressed as buffered, SSE and (where the family supports it) WebSocket, yields identical messages, usage, stop, tool calls, and the identical canonical replay projection of its native carry (the same projection used by the journal, section 5.13). Parity is unconditional at that level. Raw bytes of assembled native blocks are not compared, because buffered and streamed assembly can differ in whitespace and key order while the projection is equal. For Gemini, parity is defined on the part list (parts, their order and signature positions), never on coalesced text. Callback timing is a separate contract.
+  - In an advertised HTTP/3 lane, also compare the same buffered/SSE response over HTTP/2 and HTTP/3. HTTP version must not change the semantic or replay projection, and this does not imply WebSocket-over-HTTP/3 support.
 - Exercised by: every recorded and synthetic reply decoded through all supported transports and compared, generalizing rig's buffered-versus-stream parity test to the final projection.
 - Fault injected: the same reply with different chunking per transport; native blocks whose whitespace differs between buffered and assembled forms; a Gemini reply whose chunk boundary differs from its part boundary.
 - Mutants: a transport-specific finalizer that normalizes differently; Gemini text coalesced across a signature part; projection that includes raw assembled bytes.
@@ -240,6 +248,7 @@ General rules for every property:
   - `OutputObserved` is judged by the accumulator on semantic output (a begin, part or usage event that reaches the caller), not by the transport. Heartbeat bytes, SSE comments and ping events are not output.
   - A request body already written followed by a timeout or reset is `PossiblyAccepted` and is not retried by default.
   - Transport-internal resend counts as an attempt: a reused connection that resets before a response byte may not be silently resent below the retry layer. The oracle is the scripted server's application request count, which must be at most one per logical request unless the retry layer dispatched more.
+  - HTTP/3 connection-stage fallback may try QUIC and TCP candidates before request dispatch, but only one may send the HTTP request. Changing protocols after request bytes may have left is a retry, not fallback. Count received HTTP requests across all candidate peers; share one deadline and retry budget. Generation POSTs keep TLS 0-RTT early data disabled by default; an HTTP/3 preference never grants replay permission.
   - After `OutputObserved`, no reconnect or retry, and a retry result is never appended to the same accumulator. No dispatch before the server's minimum delay or after the absolute deadline; total attempts stay within the shared budget; cancellation ends a read or a backoff wait.
   - Delay hints are read from every source the family uses: `Retry-After` (seconds or HTTP date), OpenAI `retry-after-ms` and `x-ratelimit-reset-*` durations, and the Gemini error body `RetryInfo` retry delay. The Gemini body hint is `[INFERENCE]`: the vendor page consulted shows other detail types in its example, so the fixture is synthetic until a capture exists.
 - Exercised by: scripted server with a virtual clock and injected RNG, attempt-evidence oracle, server-side dispatch counters.
@@ -475,6 +484,20 @@ Release criteria are stage gates, defined with their dates, cells and property s
 6. The install-tree consumer builds and no forbidden include exists in installed headers.
 7. The support table, release manifest (descriptor verification dates, canary rates, account age classes) and semantic release notes are generated and reviewed under the rules of section 1.1.
 8. Known gaps are in the release notes; nothing untested is described as supported.
+
+### 12.1 Optional HTTP/3 gate
+
+Planned, not run. This gate applies before any release advertises HTTP/3; it is not required to keep the HTTP/2/HTTP/1.1 baseline usable. Policy authority: [D1](decisions/D1-transport.md#optional-http3-policy). Existing property names are reused rather than introducing a second semantic suite.
+
+| Gate | Required evidence |
+|---|---|
+| Capability and install isolation (`InstallAndDependencyDAG`, `IntentOrError`) | Test builds with and without HTTP/3 in the linked libcurl, not just a `curl` executable. The non-capable build uses its normal HTTP/2/1.1 path. QUIC backend headers/types remain private. Missing capability is explicit in an HTTP/3-only verification run. |
+| Actual protocol, not successful fallback | A real QUIC peer and an isolated HTTP/3-only client connection prove HTTP/3 negotiation from both ends. A response served by HTTP/2/1.1 is fallback evidence only, never an HTTP/3 pass. Record the linked libcurl/TLS/QUIC versions and negotiated protocol with the result. |
+| Safe fallback and replay (`RetrySafetyBudgetDeadline`) | Unsupported peer, UDP refusal/blackhole, QUIC handshake failure, raced connection candidates and failures after possible send. At most one HTTP request reaches the peers per permitted application attempt; no timeout/budget reset, silent resend or retry after semantic output. Verify generation POST early data is disabled. |
+| Completion and parity (`NoTerminalNoSuccess`, `TransportProjectionParity`) | Normal HTTP/3 stream end, truncated body, stream reset and connection failure; one outcome, with no EOF-created success. Once codecs exist, HTTP/2 and HTTP/3 yield the same buffered/SSE semantic and replay projections. |
+| Liveness and bounds (`CancelWithoutPeerProgress`, `OwnershipAndBounds`, `AdmissionIndependentOfHeldStreams`) | Cancel/deadline while QUIC handshake, fallback race or response delivery makes no progress; pause/resume one stream beside active siblings, cancel it without aborting siblings, and verify byte completeness and bounded memory. QUIC timers must still run; do not suppress readability for the entire shared connection as for HTTP/1.x. Run the applicable scenarios under plain, ASan+UBSan and TSan. |
+
+TLS verification and origin/credential boundaries apply in both the HTTP/3 and fallback lanes. Capability or loopback success does not establish a provider's HTTP/3 support; provider claims need the relevant budgeted live evidence. Performance comparisons are measurements, not correctness gates or promised speedups.
 
 ## 13. Open decisions that touch conformance
 
