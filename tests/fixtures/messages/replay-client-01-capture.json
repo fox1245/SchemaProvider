@@ -1,0 +1,182 @@
+{
+  "fixture_version": 2,
+  "case_id": "replay-client-01-capture",
+  "origin": {
+    "family": "anthropic.messages",
+    "vendor": "synthetic",
+    "authority": "loopback"
+  },
+  "binding_facts": {
+    "model": "fixture-model",
+    "account_scope": "fixture-account"
+  },
+  "descriptor_digest": "sha256:c1f1675a8bf3f8fc77568e56dbfdc4ef9fe879edd2d9a45c635037c877e76bfe",
+  "provenance": {
+    "kind": "synthetic",
+    "api_version": "2023-06-01",
+    "model": "fixture-model",
+    "captured_at": null,
+    "doc_reference": "Messages API; streaming lifecycle and cumulative usage; thinking preservation; stop reasons. Local stricter policy: CONFORMANCE 5.3-5.8, 5.16-5.19.",
+    "urls": [
+      "https://platform.claude.com/docs/en/api/messages/create",
+      "https://platform.claude.com/docs/en/build-with-claude/streaming",
+      "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons"
+    ],
+    "reviewer": "M3ProtocolReview",
+    "review_date": "2026-10-01",
+    "review_mode": "independent",
+    "expectation_reasoning": "First actual request defines the tool and thinking budget. The actual completion, not imported JSON, supplies the native assistant capsule used by replay-client-02-result. Signed thinking and opaque redacted thinking both precede the tool call and must survive unchanged and in order. Synthetic leaves make no live signature-validation or provider-acceptance claim."
+  },
+  "input": {
+    "model": "fixture-model",
+    "max_tokens": 2048,
+    "account_scope": "fixture-account",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Hello"
+      }
+    ],
+    "thinking_budget": 1024,
+    "tools": [
+      {
+        "name": "weather",
+        "description": "Return synthetic weather.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "city": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "city"
+          ],
+          "additionalProperties": false
+        }
+      }
+    ]
+  },
+  "request": {
+    "method": "POST",
+    "path": "/v1/messages",
+    "semantic_headers": {
+      "accept": "application/json",
+      "content-type": "application/json",
+      "anthropic-version": "2023-06-01",
+      "x-fixture": "synthetic"
+    },
+    "body": {
+      "model": "fixture-model",
+      "max_tokens": 2048,
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Hello"
+            }
+          ]
+        }
+      ],
+      "stream": false,
+      "thinking": {
+        "type": "enabled",
+        "budget_tokens": 1024
+      },
+      "tools": [
+        {
+          "name": "weather",
+          "description": "Return synthetic weather.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ]
+    }
+  },
+  "transport": {
+    "scheme": "http",
+    "mode": "buffered",
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "schedule": [
+      {
+        "kind": "bytes",
+        "utf8": "{\"id\":\"msg_fixture\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"fixture-model\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"Look up the synthetic city.\",\"signature\":\"synthetic-loop-signature==\"},{\"type\":\"redacted_thinking\",\"data\":\"synthetic-loop-redacted==\"},{\"type\":\"tool_use\",\"id\":\"loop-call\",\"name\":\"weather\",\"input\":{\"city\":\"Seoul\"}}],\"stop_reason\":\"tool_use\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":5,\"output_tokens\":6,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}"
+      },
+      {
+        "kind": "close",
+        "how": "content_length_met"
+      }
+    ]
+  },
+  "expect": {
+    "request_count": 1,
+    "outcome": "completion",
+    "completion": {
+      "messages": [
+        {
+          "role": "assistant",
+          "parts": [
+            {
+              "type": "thinking",
+              "text": "Look up the synthetic city.",
+              "signature": "synthetic-loop-signature=="
+            },
+            {
+              "type": "redacted_thinking",
+              "data": "synthetic-loop-redacted=="
+            },
+            {
+              "type": "tool_call",
+              "id": "loop-call",
+              "name": "weather",
+              "kind": "ClientExecuted",
+              "input": {
+                "city": "Seoul"
+              }
+            }
+          ]
+        }
+      ],
+      "stop": {
+        "kind": "ToolUse",
+        "raw": "tool_use"
+      },
+      "usage": {
+        "input_total": 5,
+        "output_total": 6,
+        "total": 11,
+        "provider_reported_total": null,
+        "input_uncached": 5,
+        "cache_read": 0,
+        "cache_write": 0,
+        "reasoning": null,
+        "stage": "Final",
+        "quality": "Consistent",
+        "extra": {}
+      }
+    }
+  },
+  "scrub": {
+    "version": 1,
+    "id_replacements": {},
+    "removed_fields": [],
+    "replay_eligible": false,
+    "log": []
+  }
+}

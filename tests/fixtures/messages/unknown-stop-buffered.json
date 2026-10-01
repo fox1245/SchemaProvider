@@ -1,0 +1,128 @@
+{
+  "fixture_version": 2,
+  "case_id": "unknown-stop-buffered",
+  "origin": {
+    "family": "anthropic.messages",
+    "vendor": "synthetic",
+    "authority": "loopback"
+  },
+  "binding_facts": {
+    "model": "fixture-model",
+    "account_scope": "fixture-account"
+  },
+  "descriptor_digest": "sha256:c1f1675a8bf3f8fc77568e56dbfdc4ef9fe879edd2d9a45c635037c877e76bfe",
+  "provenance": {
+    "kind": "synthetic",
+    "api_version": "2023-06-01",
+    "model": "fixture-model",
+    "captured_at": null,
+    "doc_reference": "Messages API; streaming lifecycle and cumulative usage; thinking preservation; stop reasons. Local stricter policy: CONFORMANCE 5.3-5.8, 5.16-5.19.",
+    "urls": [
+      "https://platform.claude.com/docs/en/api/messages/create",
+      "https://platform.claude.com/docs/en/build-with-claude/streaming",
+      "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons"
+    ],
+    "reviewer": "M3ProtocolReview",
+    "review_date": "2026-10-01",
+    "review_mode": "independent",
+    "expectation_reasoning": "Stop meaning stays Unknown; raw code and any sequence/details survive. A refusal/context/unknown stop must never be relabeled EndTurn."
+  },
+  "input": {
+    "model": "fixture-model",
+    "max_tokens": 1024,
+    "account_scope": "fixture-account",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Hello"
+      }
+    ]
+  },
+  "request": {
+    "method": "POST",
+    "path": "/v1/messages",
+    "semantic_headers": {
+      "accept": "application/json",
+      "content-type": "application/json",
+      "anthropic-version": "2023-06-01",
+      "x-fixture": "synthetic"
+    },
+    "body": {
+      "model": "fixture-model",
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Hello"
+            }
+          ]
+        }
+      ],
+      "stream": false
+    }
+  },
+  "transport": {
+    "scheme": "http",
+    "mode": "buffered",
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "schedule": [
+      {
+        "kind": "bytes",
+        "utf8": "{\"id\":\"msg_fixture\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"fixture-model\",\"content\":[{\"type\":\"text\",\"text\":\"prefix\"}],\"stop_reason\":\"synthetic_future_stop\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}"
+      },
+      {
+        "kind": "close",
+        "how": "content_length_met"
+      }
+    ]
+  },
+  "expect": {
+    "request_count": 1,
+    "outcome": "completion",
+    "completion": {
+      "messages": [
+        {
+          "role": "assistant",
+          "parts": [
+            {
+              "type": "text",
+              "text": "prefix"
+            }
+          ]
+        }
+      ],
+      "stop": {
+        "kind": "Unknown",
+        "raw": "synthetic_future_stop"
+      },
+      "usage": {
+        "input_total": 0,
+        "output_total": 0,
+        "total": 0,
+        "provider_reported_total": null,
+        "input_uncached": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "reasoning": null,
+        "stage": "Final",
+        "quality": "Consistent",
+        "extra": {}
+      }
+    }
+  },
+  "scrub": {
+    "version": 1,
+    "id_replacements": {},
+    "removed_fields": [],
+    "replay_eligible": false,
+    "log": []
+  },
+  "parity_group": "unknown-stop"
+}

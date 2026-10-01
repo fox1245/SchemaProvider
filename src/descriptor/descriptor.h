@@ -28,7 +28,7 @@ class ValidatedDescriptor {
 public:
     std::string_view id() const { return id_; }
     std::uint64_t revision() const { return revision_; }
-    std::string_view family() const { return "openai.chat"; }
+    std::string_view family() const { return family_; }
     std::string_view base_url() const { return base_url_; }
     std::string_view path(bool streaming) const { return streaming ? streaming_path_ : buffered_path_; }
     std::string_view request_model_member() const { return model_member_; }
@@ -42,7 +42,7 @@ public:
 private:
     ValidatedDescriptor() = default;
     std::uint64_t revision_ = 0;
-    std::string id_, base_url_, buffered_path_, streaming_path_;
+    std::string id_, family_, base_url_, buffered_path_, streaming_path_;
     std::string model_member_ = "model", messages_member_ = "messages", stream_member_ = "stream";
     std::string max_output_tokens_member_ = "max_tokens";
     std::vector<std::string> usage_path_{"usage"};

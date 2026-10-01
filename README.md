@@ -2,10 +2,10 @@
 
 A multi-vendor LLM client library for C++20.
 
-> **Status: private M2 proof of concept. There is no installed, stable client library yet.**
-> This repository is the future home of `SchemaProvider`, which currently lives inside [NeoGraph](https://github.com/fox1245/NeoGraph). The PoC has a libcurl-on-Asio transport, strict descriptor loader, SSE framer, Chat Completions buffered/SSE codec, common events and one accumulator. The [measured M2 scope](docs/POC_PLAN.md#52-m2-results-live-observation) is not the full design or a supported vendor release. The direction remains under discussion in [fox1245/NeoGraph#321](https://github.com/fox1245/NeoGraph/issues/321).
+> **Status: private M3 proof of concept. There is no installed, stable client library yet.**
+> This repository is the future home of `SchemaProvider`, which currently lives inside [NeoGraph](https://github.com/fox1245/NeoGraph). The PoC has a libcurl-on-Asio transport, strict descriptor loader, SSE framer, Chat Completions and Messages buffered/SSE codecs, ten common events and one accumulator. The [measured M3 scope](docs/POC_PLAN.md#53-m3-results-live-observation) is not the full design or a supported vendor release. The direction remains under discussion in [fox1245/NeoGraph#321](https://github.com/fox1245/NeoGraph/issues/321).
 > M1/M1b transport verification: 32 tests pass under plain, ASan+UBSan and TSan on Linux, including TLS certificate rejection and HTTP/2 multiplexing. Validation targets hosted APIs first; Ollama/llama.cpp setup is excluded. No live provider compatibility is claimed by these model-free loopback tests.
-> M2 verification: 35 synthetic fixtures traverse the real loopback HTTP path; 9,409 partition variants and five buffered/SSE parity pairs pass. Next baseline milestone: M3, the Messages codec.
+> M3 verification: 62 independently reviewed Messages fixtures, 30,430 partition variants and ten buffered/SSE parity pairs; both client tool-result and server-pause continuation traverse real loopback HTTP. Twenty-two replay mutations are rejected before dispatch. Existing Chat coverage remains 35 fixtures, 9,409 partitions and five parity pairs. These synthetic capsules prove local retention and rejection, not vendor signature validation. Next baseline milestone: M4, the runtime.
 > **HTTP/3: accepted direction, not implemented.** The [D1 policy](docs/decisions/D1-transport.md#optional-http3-policy) adds optional HTTP/3 preference with safe HTTP/2/1.1 connection fallback, while keeping non-QUIC builds usable. Provider semantics stay shared; generation POST 0-RTT is off by default. The current linked libcurl has no HTTP/3 support.
 
 ## What it is meant to be

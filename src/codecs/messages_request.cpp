@@ -1,0 +1,189 @@
+#include "codecs/messages_request.h"
+#include "core/native.h"
+#include "json/json.h"
+#include <charconv>
+#include <cmath>
+#include <map>
+#include <set>
+
+namespace sp::messages {
+namespace {
+constexpr size_t request_limit = 16 << 20;
+std::string lower(std::string_view text) {
+  std::string value(text);
+  for (char& c : value) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + ('a' - 'A'));
+  return value;
+}
+std::string_view server_name(std::string_view type) {
+  if (type == "web_search_20250305" || type == "web_search_20260209" || type == "web_search_20260318") return "web_search";
+  if (type == "web_fetch_20250910" || type == "web_fetch_20260209" || type == "web_fetch_20260309" || type == "web_fetch_20260318") return "web_fetch";
+  if (type == "code_execution_20250522" || type == "code_execution_20250825" || type == "code_execution_20260120" || type == "code_execution_20260521") return "code_execution";
+  if (type == "tool_search_tool_regex_20251119") return "tool_search_tool_regex";
+  if (type == "tool_search_tool_bm25_20251119") return "tool_search_tool_bm25";
+  return {};
+}
+std::string_view result_name(std::string_view type) {
+  if (type == "web_search_tool_result") return "web_search";
+  if (type == "web_fetch_tool_result") return "web_fetch";
+  if (type == "code_execution_tool_result") return "code_execution";
+  if (type == "bash_code_execution_tool_result") return "bash_code_execution";
+  if (type == "text_editor_code_execution_tool_result") return "text_editor_code_execution";
+  if (type == "tool_search_tool_result") return "tool_search";
+  return {};
+}
+bool matching_result(std::string_view name, std::string_view type) {
+  const auto expected = result_name(type);
+  return !expected.empty() && (expected == name || (expected == "tool_search" && (name == "tool_search_tool_regex" || name == "tool_search_tool_bm25")));
+}
+bool native_part(const Part& part) {
+  return !std::holds_alternative<Text>(part) && !std::holds_alternative<ToolResult>(part) && !std::holds_alternative<Refusal>(part);
+}
+} // namespace
+EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request, bool streaming) {
+  auto bad = [](std::string message) -> EncodeResult { return Error{ErrorKind::InvalidRequest, std::move(message)}; };
+  auto replay_bad = []() -> EncodeResult { return Error{ErrorKind::ReplayIneligible, "native replay provenance, binding or content mismatch"}; };
+  if (descriptor.family() != "anthropic.messages") return Error{ErrorKind::InvalidConfig, "Messages encoder requires Messages descriptor"};
+  if (request.model.empty() || request.messages.empty()) return bad("model and messages are required");
+  if (request.messages.size() > 100000) return bad("too many request messages");
+  if (request.temperature && (!std::isfinite(*request.temperature) || *request.temperature < 0 || *request.temperature > 1)) return bad("temperature outside range");
+  if (request.top_p && (!std::isfinite(*request.top_p) || *request.top_p < 0 || *request.top_p > 1)) return bad("top_p outside range");
+  if (request.thinking_budget && (*request.thinking_budget < 1024 || *request.thinking_budget >= request.max_tokens)) return bad("thinking budget must be at least 1024 and below max_tokens");
+  if (request.thinking_budget && (request.temperature || (request.top_p && *request.top_p < 0.95))) return bad("manual thinking sampling parameters are incompatible");
+  // Check seals before encoding or interpreting the edited contents. Removing a seal
+  // never converts native parts or captured tool calls into imported, trusted input.
+  for (size_t i = 0; i < request.messages.size(); ++i) {
+    const auto& message = request.messages[i];
+    if (!message.native) for (const auto& part : message.parts) if (native_part(part)) return replay_bad();
+  }
+  auto context = std::shared_ptr<const NativeContext>(new NativeContext(descriptor, request, streaming));
+  if (!context->history_valid_) return replay_bad();
+  if (!context->valid_) return Error{ErrorKind::ResourceLimit, "native binding could not be captured"};
+  EncodedRequest result{"POST", std::string(descriptor.path(streaming)), {}, {}, {}};
+  for (const auto& header : descriptor.headers()) {
+    auto key = lower(header.first);
+    if (key != "content-type" && key != "accept" && key != "anthropic-version") result.headers.push_back(header);
+  }
+  result.headers.emplace_back("Content-Type", "application/json");
+  result.headers.emplace_back("Accept", streaming ? "text/event-stream" : "application/json");
+  result.headers.emplace_back("anthropic-version", "2023-06-01");
+  auto build = [&](json::BoundedWriter& body) -> std::optional<Error> {
+  auto bad = [](std::string message) { return Error{ErrorKind::InvalidRequest, std::move(message)}; };
+  body.raw("{").quoted(descriptor.request_model_member()).raw(":").quoted(request.model);
+  body.raw(",").quoted(descriptor.max_output_tokens_member()).raw(":").raw(std::to_string(request.max_tokens));
+  body.raw(",").quoted(descriptor.request_stream_member()).raw(streaming ? ":true" : ":false");
+  if (!request.system.empty()) body.raw(",\"system\":").quoted(request.system);
+  if (request.thinking_budget) body.raw(",\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":").raw(std::to_string(*request.thinking_budget)).raw("}");
+  auto number = [&](std::string_view key, double value) {
+    char bytes[64]; const auto converted = std::to_chars(bytes, bytes + sizeof bytes, value);
+    body.raw(",").quoted(key).raw(":").raw(std::string_view(bytes, converted.ptr));
+  };
+  if (request.temperature) number("temperature", *request.temperature);
+  if (request.top_p) number("top_p", *request.top_p);
+  std::set<std::string_view> tool_names;
+  if (!request.tools.empty()) {
+    body.raw(",\"tools\":[");
+    bool comma = false;
+    for (const auto& tool : request.tools) {
+      if (tool.name.empty() || !tool_names.insert(tool.name).second) return bad("tools require unique nonempty names");
+      if (comma) body.raw(",");
+      comma = true;
+      if (tool.type.empty()) {
+        if (!tool.input_schema || !tool.input_schema->root().is_object() || tool.max_uses) return bad("client tools require object schemas and no server fields");
+        body.raw("{\"name\":").quoted(tool.name).raw(",\"description\":").quoted(tool.description).raw(",\"input_schema\":").value(tool.input_schema->root(), 3).raw("}");
+      } else {
+        const auto name = server_name(tool.type);
+        if (name.empty()) return Error{ErrorKind::Unsupported, "unsupported server tool type"};
+        if (tool.name != name || tool.input_schema || !tool.description.empty()) return bad("server tool fields do not match typed schema");
+        if (tool.max_uses && (!*tool.max_uses || (name != "web_search" && name != "web_fetch"))) return bad("max_uses is unsupported or out of range");
+        body.raw("{\"type\":").quoted(tool.type).raw(",\"name\":").quoted(tool.name);
+        if (tool.max_uses) body.raw(",\"max_uses\":").raw(std::to_string(*tool.max_uses));
+        body.raw("}");
+      }
+      if (!body.ok()) return bad("request exceeds JSON limits or encoding");
+    }
+    body.raw("]");
+  }
+  body.raw(",").quoted(descriptor.request_messages_member()).raw(":[");
+  std::set<std::string_view> all_call_ids, client_pending;
+  std::map<std::string_view, std::string_view> server_pending;
+  bool message_comma = false;
+  for (const auto& message : request.messages) {
+    if (message.role != Role::User && message.role != Role::Assistant) return Error{ErrorKind::Unsupported, "Messages history supports only user and assistant roles"};
+    const bool assistant = message.role == Role::Assistant;
+    if (assistant && !client_pending.empty()) return bad("client tool results must immediately follow their assistant message");
+    if (!assistant && client_pending.empty() && !server_pending.empty()) return bad("server continuation requires the captured assistant content");
+    const bool responding_to_tools = !client_pending.empty();
+    const bool server_waiting = !server_pending.empty();
+    bool text_seen = false;
+    if (message_comma) body.raw(",");
+    message_comma = true;
+    body.raw(assistant ? "{\"role\":\"assistant\",\"content\":[" : "{\"role\":\"user\",\"content\":[");
+    bool part_comma = false;
+    for (const auto& part : message.parts) {
+      if (part_comma) body.raw(",");
+      part_comma = true;
+      if (const auto* text = std::get_if<Text>(&part)) {
+        if (!assistant && responding_to_tools && server_waiting) return bad("pending server tools require tool-results-only continuation");
+        text_seen = true;
+        body.raw("{\"type\":\"text\",\"text\":").quoted(text->value).raw("}");
+      } else if (const auto* thinking = std::get_if<Thinking>(&part)) {
+        if (!assistant) return bad("thinking belongs to assistant messages");
+        body.raw("{\"type\":\"thinking\",\"thinking\":").quoted(thinking->text);
+        if (thinking->signature) body.raw(",\"signature\":").quoted(*thinking->signature);
+        body.raw("}");
+      } else if (const auto* redacted = std::get_if<RedactedThinking>(&part)) {
+        if (!assistant) return bad("redacted thinking belongs to assistant messages");
+        body.raw("{\"type\":\"redacted_thinking\",\"data\":").quoted(redacted->data).raw("}");
+      } else if (const auto* call = std::get_if<ToolCall>(&part)) {
+        if (!assistant || call->id.empty() || call->name.empty() || !call->input || !call->input->root().is_object()) return bad("invalid tool call history");
+        if (call->kind == ToolCallKind::ApprovalRequest) return Error{ErrorKind::Unsupported, "approval request replay is unsupported"};
+        const bool server = call->kind == ToolCallKind::ServerExecuted;
+        const std::string_view type = server ? "server_tool_use" : "tool_use";
+        if (call->wire_type != type || !all_call_ids.insert(call->id).second) return bad("tool call type or ownership mismatch");
+        if (server) server_pending.emplace(call->id, call->name);
+        else client_pending.insert(call->id);
+        body.raw("{\"type\":").quoted(type).raw(",\"id\":").quoted(call->id).raw(",\"name\":").quoted(call->name).raw(",\"input\":").value(call->input->root(), 5);
+        if (call->wire_metadata) {
+          if (!call->wire_metadata->root().is_object()) return bad("tool metadata must be object");
+          for (auto member : call->wire_metadata->root().members()) {
+            if (member.key == "input" || member.key == "id" || member.key == "name" || member.key == "type") return bad("tool metadata collides with owned fields");
+            body.raw(",").quoted(member.key).raw(":").value(member.value, 5);
+          }
+        }
+        body.raw("}");
+      } else if (const auto* tool_result = std::get_if<ToolResult>(&part)) {
+        if (assistant || text_seen || client_pending.erase(tool_result->tool_use_id) != 1) return bad("tool result lacks immediate unique client ownership");
+        body.raw("{\"type\":\"tool_result\",\"tool_use_id\":").quoted(tool_result->tool_use_id).raw(",\"content\":").quoted(tool_result->content).raw(",\"is_error\":").raw(tool_result->is_error ? "true}" : "false}");
+      } else if (const auto* server_result = std::get_if<ServerToolResult>(&part)) {
+        const auto found = server_pending.find(server_result->tool_use_id);
+        if (!assistant || found == server_pending.end() || !matching_result(found->second, server_result->wire_type) || !server_result->content) return bad("server result lacks unique server ownership");
+        const auto raw = server_result->content->root();
+        if (!raw.is_object() || !raw.get("type").is_string() || raw.get("type").as_string() != server_result->wire_type || !raw.get("tool_use_id").is_string() || raw.get("tool_use_id").as_string() != server_result->tool_use_id) return bad("server result metadata mismatch");
+        server_pending.erase(found);
+        body.value(raw, 4);
+      } else return Error{ErrorKind::Unsupported, "part cannot be replayed as Messages input"};
+      if (!body.ok()) return bad("request exceeds JSON limits or encoding");
+    }
+    body.raw("]}");
+    if (!assistant && !client_pending.empty()) return bad("all client tool calls need immediate results");
+    if (assistant && !server_pending.empty() && (!message.native || (message.native->stop_ != StopKind::PauseTurn && message.native->stop_ != StopKind::ToolUse))) return bad("unfinished server call lacks continuation stop");
+    if (assistant && message.native && message.native->stop_ == StopKind::PauseTurn && !client_pending.empty()) return bad("pause continuation cannot await client tools");
+  }
+  if (!client_pending.empty()) return bad("client tool results are required before dispatch");
+  body.raw("]}");
+  if (!body.ok()) return bad("request exceeds JSON limits or encoding");
+  return std::nullopt;
+  };
+  // Measure the entire aggregate before allocating its encoded representation.
+  // Both passes use the same writer and syntax, including all document leaves.
+  json::BoundedWriter measured({request_limit, 64});
+  if (auto error = build(measured)) return *error;
+  result.body.reserve(measured.size());
+  json::BoundedWriter body({measured.size(), 64}, &result.body);
+  if (auto error = build(body)) return *error;
+  auto validated = json::parse(result.body, {request_limit, 64});
+  if (std::holds_alternative<json::ParseError>(validated)) return bad("encoded request violates JSON limits or encoding");
+  result.context = std::move(context);
+  return result;
+}
+} // namespace sp::messages

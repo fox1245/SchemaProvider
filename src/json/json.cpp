@@ -2,6 +2,7 @@
 
 #include <yyjson.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <memory>
 #include <new>
@@ -189,6 +190,74 @@ std::string quote(std::string_view input) {
     yyjson_val value{};
     yyjson_set_strn(&value, input.empty() ? "" : input.data(), input.size());
     return serialize(&value);
+}
+
+bool BoundedWriter::claim(std::size_t bytes) {
+    if (!ok_ || bytes > limits_.max_bytes - size_) return ok_ = false;
+    size_ += bytes;
+    return true;
+}
+BoundedWriter& BoundedWriter::raw(std::string_view text) {
+    if (claim(text.size()) && output_) output_->append(text);
+    return *this;
+}
+BoundedWriter& BoundedWriter::quoted(std::string_view text) {
+    if (!claim(2)) return *this;
+    // Count the exact default yyjson escaping before creating any encoded data.
+    // UTF-8 is checked by yyjson when emitting the bounded chunks below.
+    for (const unsigned char c : text) {
+        const std::size_t bytes = c == '"' || c == '\\' || c == '\b' ||
+            c == '\f' || c == '\n' || c == '\r' || c == '\t' ? 2 : c < 0x20 ? 6 : 1;
+        if (!claim(bytes)) return *this;
+    }
+    if (!output_) return *this;
+    output_->push_back('"');
+    while (!text.empty()) {
+        auto length = std::min<std::size_t>(text.size(), 4096);
+        // Never split a valid UTF-8 code point. Malformed sequences are not
+        // repaired: quote rejects them, including overlong/surrogate encodings.
+        if (length < text.size()) {
+            while (length && (static_cast<unsigned char>(text[length]) & 0xc0) == 0x80) --length;
+            if (!length) { ok_ = false; return *this; }
+        }
+        const auto chunk = quote(text.substr(0, length));
+        if (chunk.empty()) { ok_ = false; return *this; }
+        output_->append(chunk.data() + 1, chunk.size() - 2);
+        text.remove_prefix(length);
+    }
+    output_->push_back('"');
+    return *this;
+}
+BoundedWriter& BoundedWriter::value(Value item, std::size_t enclosing_depth) {
+    if (!ok_) return *this;
+    if (!item.valid()) { ok_ = false; return *this; }
+    if (item.is_string()) return quoted(item.as_string());
+    if (!item.is_object() && !item.is_array()) {
+        // Only bounded scalar spellings reach yyjson's allocating serializer,
+        // retaining its exact integer/real formatting and finite-number rules.
+        const auto scalar = item.dump();
+        if (scalar.empty()) { ok_ = false; return *this; }
+        return raw(scalar);
+    }
+    if (enclosing_depth >= limits_.max_depth) { ok_ = false; return *this; }
+    bool comma = false;
+    raw(item.is_object() ? "{" : "[");
+    if (item.is_object()) {
+        for (auto member : item.members()) {
+            if (comma) raw(",");
+            comma = true;
+            quoted(member.key).raw(":").value(member.value, enclosing_depth + 1);
+            if (!ok_) return *this;
+        }
+    } else {
+        for (auto element : item.elements()) {
+            if (comma) raw(",");
+            comma = true;
+            value(element, enclosing_depth + 1);
+            if (!ok_) return *this;
+        }
+    }
+    return raw(item.is_object() ? "}" : "]");
 }
 
 } // namespace sp::json

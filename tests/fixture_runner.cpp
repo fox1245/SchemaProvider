@@ -1,6 +1,9 @@
-// M2 fixture runner: independent golden projections plus a real model-free HTTP peer.
-// Usage: sp_fixture_runner <node> <chat_fixture_server.mjs> <fixture-directory> [--offline-only]
+// Independent family goldens plus a real model-free HTTP peer.
+// Usage: sp_fixture_runner <node> <fixture_server.mjs> <fixture-directory> <descriptor> [--offline-only]
 #include "codecs/chat.h"
+#include "codecs/messages.h"
+#include "codecs/messages_request.h"
+#include "core/native.h"
 #include "descriptor/descriptor.h"
 #include "json/json.h"
 #include "transport/http_transport.h"
@@ -20,6 +23,7 @@
 #include <poll.h>
 #include <random>
 #include <stdexcept>
+#include <set>
 #include <string>
 #include <string_view>
 #include <sys/wait.h>
@@ -56,6 +60,7 @@ const char* error_name(sp::ErrorKind kind) {
     case sp::ErrorKind::InvalidConfig: return "InvalidConfig";
     case sp::ErrorKind::InvalidRequest: return "InvalidRequest";
     case sp::ErrorKind::Unsupported: return "Unsupported";
+    case sp::ErrorKind::ReplayIneligible: return "ReplayIneligible";
     case sp::ErrorKind::Transport: return "Transport";
     case sp::ErrorKind::ProtocolCorrupt: return "ProtocolCorrupt";
     case sp::ErrorKind::Truncated: return "Truncated";
@@ -112,7 +117,10 @@ const char* tool_kind_name(sp::ToolCallKind kind) {
   throw std::runtime_error("unprojected tool kind");
 }
 std::string stop_projection(const sp::StopReason& reason) {
-  return "{\"kind\":" + sp::json::quote(stop_name(reason.kind)) + ",\"raw\":" + sp::json::quote(reason.raw) + "}";
+  std::string out = "{\"kind\":" + sp::json::quote(stop_name(reason.kind)) + ",\"raw\":" + sp::json::quote(reason.raw);
+  if (reason.sequence) out += ",\"sequence\":" + sp::json::quote(*reason.sequence);
+  if (reason.details) out += ",\"details\":" + reason.details->root().dump();
+  return out + '}';
 }
 std::string count_projection(const std::optional<sp::Count>& value) {
   return value ? std::to_string(value->value) : "null";
@@ -143,6 +151,16 @@ std::string part_projection(const sp::Part& part) {
     using T = std::decay_t<decltype(p)>;
     if constexpr (std::is_same_v<T, sp::Text>) return "{\"type\":\"text\",\"text\":" + sp::json::quote(p.value) + "}";
     else if constexpr (std::is_same_v<T, sp::Refusal>) return "{\"type\":\"refusal\",\"text\":" + sp::json::quote(p.text) + ",\"raw_code\":" + sp::json::quote(p.raw_code) + "}";
+    else if constexpr (std::is_same_v<T, sp::Thinking>)
+      return "{\"type\":\"thinking\",\"text\":" + sp::json::quote(p.text) + ",\"signature\":" + (p.signature ? sp::json::quote(*p.signature) : "null") + '}';
+    else if constexpr (std::is_same_v<T, sp::RedactedThinking>)
+      return "{\"type\":\"redacted_thinking\",\"data\":" + sp::json::quote(p.data) + '}';
+    else if constexpr (std::is_same_v<T, sp::ServerToolResult>) {
+      require(p.content != nullptr, "server result has no native block");
+      return "{\"type\":\"server_tool_result\",\"tool_use_id\":" + sp::json::quote(p.tool_use_id)
+           + ",\"wire_type\":" + sp::json::quote(p.wire_type) + ",\"content\":" + p.content->root().dump() + '}';
+    } else if constexpr (std::is_same_v<T, sp::ToolResult>)
+      throw std::runtime_error("request-only tool result in model output");
     else {
       std::string out = std::is_same_v<T, sp::ToolCall> ? "{\"type\":\"tool_call\"" : "{\"type\":\"invalid_tool_call\"";
       out += ",\"id\":" + sp::json::quote(p.id) + ",\"name\":" + sp::json::quote(p.name) + ",\"kind\":" + sp::json::quote(tool_kind_name(p.kind));
@@ -202,9 +220,9 @@ Fixture load_fixture(const std::filesystem::path& path) {
   require(root.get("fixture_version").as_uint() == 2, "fixture version must be 2");
   const auto mode = string(root.get("transport").get("mode"));
   require(mode == "buffered" || mode == "sse", "unsupported fixture transport");
-  require(string(root.get("transport").get("scheme")) == "http", "M2 fixture peer is loopback HTTP only");
-  require(string(root.get("provenance").get("kind")) == "synthetic", "M2 corpus must not masquerade as vendor captures");
-  require(root.get("expect").get("request_count").as_uint() == 1, "each M2 attempt expects one request");
+  require(string(root.get("transport").get("scheme")) == "http", "fixture peer is loopback HTTP only");
+  require(string(root.get("provenance").get("kind")) == "synthetic", "corpus must not masquerade as vendor captures");
+  require(root.get("expect").get("request_count").as_uint() == 1, "each fixture attempt expects one request");
   Fixture fixture{path, std::move(document), string(root.get("case_id")), {}, {}, {}, mode == "sse", {}};
   if (auto source = root.get("descriptor_source"); source.valid()) {
     auto loaded = sp::descriptor::load(string(source));
@@ -218,7 +236,7 @@ Fixture load_fixture(const std::filesystem::path& path) {
     if (kind == "bytes") fixture.body += string(entry.get("utf8"));
     else if (kind == "close") fixture.close = string(entry.get("how"));
     else if (kind == "reset") fixture.close = "rst";
-    else require(kind == "delay_ms", "unsupported M2 fixture entry");
+    else require(kind == "delay_ms", "unsupported fixture entry");
   }
   require(!fixture.close.empty(), "fixture has no explicit close");
   if (root.get("parity_group").valid()) fixture.parity_group = string(root.get("parity_group"));
@@ -241,20 +259,107 @@ sp::chat::Request input_request(const Fixture& fixture) {
   }
   return request;
 }
+using Captures = std::map<std::string, sp::Message>;
+sp::messages::Request messages_request(const Fixture& fixture, const Captures& captures) {
+  const auto input = fixture.root().get("input");
+  sp::messages::Request request;
+  request.model = string(input.get("model"));
+  request.account_scope = string(input.get("account_scope"));
+  if (auto system = input.get("system"); system.valid()) request.system = string(system);
+  if (auto maximum = input.get("max_tokens"); maximum.valid()) {
+    require(maximum.is_uint(), "fixture max_tokens must be unsigned");
+    request.max_tokens = maximum.as_uint();
+  }
+  if (auto budget = input.get("thinking_budget"); budget.valid()) {
+    require(budget.is_uint(), "fixture thinking budget must be unsigned");
+    request.thinking_budget = budget.as_uint();
+  }
+  require(input.get("messages").is_array(), "fixture messages must be an array");
+  for (auto message : input.get("messages").elements()) {
+    const auto role = string(message.get("role"));
+    require(role == "user" || role == "assistant", "unsupported Messages fixture role");
+    request.messages.push_back({{}, role == "user" ? sp::Role::User : sp::Role::Assistant,
+                                {sp::Text{string(message.get("content"))}}});
+  }
+  if (auto tools = input.get("tools"); tools.valid()) {
+    require(tools.is_array(), "fixture tools must be an array");
+    for (auto tool : tools.elements()) {
+      sp::messages::ToolDefinition definition;
+      definition.name = string(tool.get("name"));
+      if (auto description = tool.get("description"); description.valid()) definition.description = string(description);
+      if (auto type = tool.get("type"); type.valid()) definition.type = string(type);
+      if (auto schema = tool.get("input_schema"); schema.valid())
+        definition.input_schema = std::make_shared<const sp::json::Document>(parse(schema.dump()));
+      if (auto maximum = tool.get("max_uses"); maximum.valid()) {
+        require(maximum.is_uint(), "fixture max_uses must be unsigned");
+        definition.max_uses = maximum.as_uint();
+      }
+      request.tools.push_back(std::move(definition));
+    }
+  }
+  if (auto source = fixture.root().get("replay_from"); source.valid()) {
+    const auto found = captures.find(string(source));
+    require(found != captures.end(), "replay source must complete before its continuation");
+    request.messages.push_back(found->second);
+    if (auto results = input.get("tool_results"); results.valid()) {
+      require(results.is_array(), "fixture tool_results must be an array");
+      sp::Message user{{}, sp::Role::User, {}};
+      for (auto result : results.elements()) {
+        const auto error = result.get("is_error");
+        require(!error.valid() || error.is_bool(), "fixture is_error must be boolean");
+        user.parts.push_back(sp::ToolResult{string(result.get("tool_use_id")), string(result.get("content")), error.valid() && error.as_bool()});
+      }
+      if (!user.parts.empty()) request.messages.push_back(std::move(user));
+    }
+  }
+  return request;
+}
+struct PreparedRequest {
+  std::string method, path;
+  std::vector<std::pair<std::string, std::string>> headers;
+  std::string body;
+  std::shared_ptr<const sp::NativeContext> context;
+};
+PreparedRequest prepare_request(const Fixture& fixture, const sp::descriptor::ValidatedDescriptor& descriptor, const Captures& captures) {
+  auto take = [](auto result) {
+    return std::visit([](auto&& request) -> PreparedRequest {
+      using T = std::decay_t<decltype(request)>;
+      if constexpr (std::is_same_v<T, sp::Error>) throw std::runtime_error("request encode failed: " + request.safe_message);
+      else {
+        PreparedRequest prepared{std::move(request.method), std::move(request.path), std::move(request.headers), std::move(request.body), {}};
+        if constexpr (std::is_same_v<T, sp::messages::EncodedRequest>) prepared.context = std::move(request.context);
+        return prepared;
+      }
+    }, std::move(result));
+  };
+  if (descriptor.family() == "anthropic.messages")
+    return take(sp::messages::encode(descriptor, messages_request(fixture, captures), fixture.streaming));
+  return take(sp::chat::encode(descriptor, input_request(fixture), fixture.streaming));
+}
 struct Pipeline {
   size_t terminal_events = 0, events = 0;
   sp::Accumulator accumulator;
-  sp::chat::Codec codec;
+  using Codecs = std::variant<sp::chat::Codec, sp::messages::Codec>;
+  Codecs codec;
   sp::transport::SseFramer framer;
   sp::transport::SseFramer::Sink sink;
   std::string buffered;
   bool streaming;
-  Pipeline(const sp::descriptor::ValidatedDescriptor& descriptor, bool is_streaming)
+  static Codecs make_codec(const sp::descriptor::ValidatedDescriptor& descriptor, bool streaming, sp::Accumulator& accumulator,
+                           std::shared_ptr<const sp::NativeContext> context) {
+    if (descriptor.family() == "anthropic.messages")
+      return Codecs{std::in_place_type<sp::messages::Codec>, descriptor,
+                    streaming ? sp::messages::Mode::Sse : sp::messages::Mode::Buffered, accumulator, std::move(context)};
+    return Codecs{std::in_place_type<sp::chat::Codec>, descriptor,
+                  streaming ? sp::chat::Mode::Sse : sp::chat::Mode::Buffered, accumulator};
+  }
+  Pipeline(const sp::descriptor::ValidatedDescriptor& descriptor, bool is_streaming, std::shared_ptr<const sp::NativeContext> context = {})
       : accumulator({}, [&](const sp::Event& event) {
           ++events;
           if (std::holds_alternative<sp::Commit>(event) || std::holds_alternative<sp::Fail>(event)) ++terminal_events;
-        }), codec(descriptor, is_streaming ? sp::chat::Mode::Sse : sp::chat::Mode::Buffered, accumulator),
-        sink([&](const auto& frame) { return codec.frame(frame.event, frame.data); }), streaming(is_streaming) {}
+        }), codec(make_codec(descriptor, is_streaming, accumulator, std::move(context))),
+        sink([&](const auto& frame) { return std::visit([&](auto& selected) { return selected.frame(frame.event, frame.data); }, codec); }),
+        streaming(is_streaming) {}
   void bytes(std::string_view bytes) {
     if (streaming) {
       framer.feed(bytes, sink);
@@ -271,31 +376,33 @@ struct Pipeline {
       // A failure known from the transport precedes errors discovered only while finalizing EOF.
       if (normal && framer.error() != sp::transport::SseError::None && !accumulator.terminal())
         accumulator.accept(sp::Fail{{sp::ErrorKind::ProtocolCorrupt, "incomplete SSE encoding"}});
-    } else if (!accumulator.terminal()) codec.buffered(buffered, {normal, error});
-    codec.finish({normal, error});
+    } else if (!accumulator.terminal()) std::visit([&](auto& selected) { selected.buffered(buffered, {normal, error}); }, codec);
+    std::visit([&](auto& selected) { selected.finish({normal, error}); }, codec);
     require(accumulator.outcome().has_value(), "missing terminal outcome");
     require(terminal_events == 1, "outcome notification count is not one");
     const size_t before = events;
-    codec.finish({false, sp::ErrorKind::Cancelled});
-    if (streaming) codec.frame("message", "[DONE]");
+    std::visit([&](auto& selected) {
+      selected.finish({false, sp::ErrorKind::Cancelled});
+      if (streaming) selected.frame("message", "[DONE]");
+    }, codec);
     require(events == before, "callbacks after outcome");
   }
 };
 
-void verify_close_precedence(const sp::descriptor::ValidatedDescriptor& descriptor) {
+void verify_close_precedence(const sp::descriptor::ValidatedDescriptor& descriptor, const std::shared_ptr<const sp::NativeContext>& context) {
   for (auto error : {sp::ErrorKind::Cancelled, sp::ErrorKind::DeadlineExceeded, sp::ErrorKind::Truncated}) {
-    Pipeline buffered(descriptor, false);
+    Pipeline buffered(descriptor, false, context);
     buffered.bytes("{\"choices\":[");
     buffered.finish(false, error);
     require(std::get<sp::Failure>(*buffered.accumulator.outcome()).error.kind == error,
             "buffered EOF parsing hid transport failure");
-    Pipeline sse(descriptor, true);
+    Pipeline sse(descriptor, true, context);
     sse.bytes("data: \xe2");
     sse.finish(false, error);
     require(std::get<sp::Failure>(*sse.accumulator.outcome()).error.kind == error,
             "SSE EOF validation hid transport failure");
   }
-  Pipeline normal(descriptor, true);
+  Pipeline normal(descriptor, true, context);
   normal.bytes("data: \xe2");
   normal.finish(true);
   require(std::get<sp::Failure>(*normal.accumulator.outcome()).error.kind == sp::ErrorKind::ProtocolCorrupt,
@@ -314,8 +421,17 @@ std::string verify(const Fixture& fixture, const Pipeline& pipeline) {
     throw std::runtime_error(fixture.id + ": projection mismatch\n expected=" + expected.dump() + "\n actual=" + actual_text);
   return actual_text;
 }
-std::string offline(const Fixture& fixture, const sp::descriptor::ValidatedDescriptor& descriptor, const std::vector<size_t>& cuts) {
-  Pipeline pipeline(descriptor, fixture.streaming);
+void capture(const Fixture& fixture, const Pipeline& pipeline, Captures* captures) {
+  if (!captures) return;
+  const auto* completion = std::get_if<sp::Completion>(&*pipeline.accumulator.outcome());
+  require(completion && completion->messages.size() == 1, "native capture must contain one complete message");
+  const auto& message = completion->messages.front();
+  require(message.native && message.native->complete(), "captured message lacks complete native provenance");
+  require(captures->emplace(fixture.id, message).second, "duplicate capture identity");
+}
+std::string offline(const Fixture& fixture, const sp::descriptor::ValidatedDescriptor& descriptor,
+                    const std::shared_ptr<const sp::NativeContext>& context, const std::vector<size_t>& cuts, Captures* captures = nullptr) {
+  Pipeline pipeline(descriptor, fixture.streaming, context);
   size_t offset = 0;
   for (size_t cut : cuts) {
     require(cut >= offset && cut <= fixture.body.size(), "invalid partition");
@@ -325,7 +441,9 @@ std::string offline(const Fixture& fixture, const sp::descriptor::ValidatedDescr
   pipeline.bytes(std::string_view(fixture.body).substr(offset));
   const bool normal = fixture.close == "content_length_met" || fixture.close == "chunked_terminator";
   pipeline.finish(normal);
-  return verify(fixture, pipeline);
+  auto result = verify(fixture, pipeline);
+  capture(fixture, pipeline, captures);
+  return result;
 }
 
 class Peer {
@@ -406,27 +524,85 @@ class Peer {
   int input_ = -1, output_ = -1;
   std::string pending_;
 };
-sp::transport::HttpRequest wire_request(const Fixture& fixture, const sp::descriptor::ValidatedDescriptor& descriptor, const Peer& peer) {
-  auto encoded = sp::chat::encode(descriptor, input_request(fixture), fixture.streaming);
-  if (auto error = std::get_if<sp::Error>(&encoded)) throw std::runtime_error("request encode failed: " + error->safe_message);
-  auto request = std::get<sp::chat::EncodedRequest>(std::move(encoded));
+template<class Encoded>
+sp::transport::HttpRequest wire_request(const Encoded& request, const Peer& peer) {
   sp::transport::HttpRequest wire;
-  wire.method = std::move(request.method);
+  wire.method = request.method;
   // Test-only peer origin override; descriptor path/headers/body still pass through the encoder.
   wire.url = "http://127.0.0.1:" + std::to_string(peer.port) + request.path;
-  for (auto& [name, value] : request.headers) wire.headers.push_back({std::move(name), std::move(value)});
-  wire.body = std::move(request.body);
+  for (const auto& [name, value] : request.headers) wire.headers.push_back({name, value});
+  wire.body = request.body;
   wire.deadline = Clock::now() + std::chrono::seconds(5);
   return wire;
 }
-void run_wire(const Fixture& fixture, const sp::descriptor::ValidatedDescriptor& descriptor, Peer& peer, sp::transport::Transport& transport) {
+void verify_replay_gates(const Fixture& fixture, const sp::descriptor::ValidatedDescriptor& descriptor,
+                         const Captures& captures, Peer& peer, sp::transport::Transport& transport) {
+  if (!fixture.root().get("replay_from").valid()) return;
+  const auto original = messages_request(fixture, captures);
+  const auto native = std::find_if(original.messages.begin(), original.messages.end(), [](const auto& message) { return !!message.native; });
+  require(native != original.messages.end(), "replay fixture lacks captured native message");
+  const size_t index = static_cast<size_t>(native - original.messages.begin());
+  size_t controls = 0;
+  auto reject = [&](std::string_view name, const sp::messages::Request& changed,
+                    const sp::descriptor::ValidatedDescriptor& selected) {
+    auto encoded = sp::messages::encode(selected, changed, fixture.streaming);
+    if (auto* accepted = std::get_if<sp::messages::EncodedRequest>(&encoded)) {
+      transport.start(wire_request(*accepted, peer), {{}, {}, [](const auto&) {}}).join();
+      throw std::runtime_error("replay mutation reached dispatch: " + std::string(name));
+    }
+    require(std::get<sp::Error>(encoded).kind == sp::ErrorKind::ReplayIneligible, "replay mutation has wrong rejection class: " + std::string(name));
+    auto report = peer.stats();
+    require(report.root().get("request_count").as_uint() == 0 && report.root().get("unexpected_requests").as_uint() == 0,
+            "rejected replay emitted a wire request");
+    ++controls;
+  };
+  auto attempt = [&](std::string_view name, auto mutate) {
+    auto changed = original;
+    mutate(changed);
+    reject(name, changed, descriptor);
+  };
+  attempt("model", [](auto& request) { request.model += "-foreign"; });
+  attempt("account", [](auto& request) { request.account_scope += "-foreign"; });
+  attempt("system", [](auto& request) { request.system += "Changed instructions."; });
+  attempt("prefix", [](auto& request) { std::get<sp::Text>(request.messages.front().parts.front()).value += "Changed prefix."; });
+  attempt("native provenance removed", [&](auto& request) { request.messages[index].native.reset(); });
+  if (!original.tools.empty()) attempt("tool definition", [](auto& request) { request.tools.front().name += "_changed"; });
+  if (native->parts.size() > 1)
+    attempt("native block ordering", [&](auto& request) { std::swap(request.messages[index].parts.front(), request.messages[index].parts.back()); });
+  for (size_t part = 0; part < native->parts.size(); ++part) {
+    if (std::holds_alternative<sp::Thinking>(native->parts[part])) {
+      attempt("thinking text", [&](auto& request) { std::get<sp::Thinking>(request.messages[index].parts[part]).text += "tampered"; });
+      attempt("thinking signature", [&](auto& request) { std::get<sp::Thinking>(request.messages[index].parts[part]).signature = "tampered"; });
+    } else if (std::holds_alternative<sp::RedactedThinking>(native->parts[part])) {
+      attempt("redacted bytes", [&](auto& request) { std::get<sp::RedactedThinking>(request.messages[index].parts[part]).data += "tampered"; });
+    } else if (std::holds_alternative<sp::ToolCall>(native->parts[part])) {
+      attempt("tool input", [&](auto& request) {
+        std::get<sp::ToolCall>(request.messages[index].parts[part]).input =
+            std::make_shared<const sp::json::Document>(parse("{\"tampered\":true}"));
+      });
+    } else if (std::holds_alternative<sp::ServerToolResult>(native->parts[part])) {
+      attempt("server native result", [&](auto& request) {
+        std::get<sp::ServerToolResult>(request.messages[index].parts[part]).content =
+            std::make_shared<const sp::json::Document>(parse("{\"tampered\":true}"));
+      });
+    }
+  }
+  // A second admitted origin is still not allowed to replay this origin's native response.
+  auto foreign = sp::descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"foreign-messages","family":"anthropic.messages","connection":{"base_url":"https://foreign.example.test","paths":{"buffered":"/v1/messages","streaming":"/v1/messages"}}})");
+  require(std::holds_alternative<sp::descriptor::ValidatedDescriptor>(foreign), "foreign-origin control is not admitted");
+  reject("origin", original, std::get<sp::descriptor::ValidatedDescriptor>(foreign));
+  std::cout << "[PASS] replay gates " << fixture.id << " mutations=" << controls << " requests=0\n";
+}
+void run_wire(const Fixture& fixture, const sp::descriptor::ValidatedDescriptor& descriptor, const PreparedRequest& request,
+              Peer& peer, sp::transport::Transport& transport, const Captures& sources, Captures* captures) {
   // The independent peer verifies embedded descriptor digests when loading the corpus.
   if (!fixture.descriptor_override)
     require(string(fixture.root().get("descriptor_digest")) == peer.digest, "descriptor digest does not match corpus");
   peer.arm(fixture);
-  Pipeline pipeline(descriptor, fixture.streaming);
+  verify_replay_gates(fixture, descriptor, sources, peer, transport);
+  Pipeline pipeline(descriptor, fixture.streaming, request.context);
   size_t outcomes = 0;
-  auto operation = transport.start(wire_request(fixture, descriptor, peer), {
+  auto operation = transport.start(wire_request(request, peer), {
     {}, [&](std::string_view bytes) { pipeline.bytes(bytes); return true; },
     [&](const sp::transport::Result& result) {
       ++outcomes;
@@ -441,6 +617,7 @@ void run_wire(const Fixture& fixture, const sp::descriptor::ValidatedDescriptor&
   require(result.failure != sp::transport::FailureKind::CallbackError, fixture.id + ": pipeline callback threw");
   require(outcomes == 1, fixture.id + ": transport outcome count differs from one");
   verify(fixture, pipeline);
+  capture(fixture, pipeline, captures);
   auto report = peer.stats();
   const auto stats = report.root();
   require(stats.get("request_count").as_uint() == 1 && stats.get("consumed").as_bool(), fixture.id + ": missing/extra wire request");
@@ -451,10 +628,10 @@ void run_wire(const Fixture& fixture, const sp::descriptor::ValidatedDescriptor&
   require(stats.get("fault_fired").as_bool() == fault, fixture.id + ": injected framing fault not witnessed");
   std::cout << "[PASS] wire " << fixture.id << " requests=1 close=" << fixture.close << '\n';
 }
-void verify_matcher(const Fixture& fixture, const sp::descriptor::ValidatedDescriptor& descriptor, Peer& peer, sp::transport::Transport& transport) {
+void verify_matcher(const Fixture& fixture, const PreparedRequest& prepared, Peer& peer, sp::transport::Transport& transport) {
   for (std::string_view mutation : {"method", "path", "header:content-type", "body"}) {
     peer.arm(fixture, true);
-    auto request = wire_request(fixture, descriptor, peer);
+    auto request = wire_request(prepared, peer);
     if (mutation == "method") request.method = "PUT";
     else if (mutation == "path") request.url += "/unexpected";
     else if (mutation == "body") request.body = "{\"model\":\"wrong-model\"}";
@@ -469,7 +646,7 @@ void verify_matcher(const Fixture& fixture, const sp::descriptor::ValidatedDescr
   auto unused = peer.command("{\"arm\":" + sp::json::quote(fixture.id) + '}');
   require(unused.root().get("error").is_string(), "unused interaction was silently replaced");
   peer.arm(fixture, true);
-  for (int i = 0; i < 2; ++i) transport.start(wire_request(fixture, descriptor, peer), {{}, {}, [](const auto&) {}}).join();
+  for (int i = 0; i < 2; ++i) transport.start(wire_request(prepared, peer), {{}, {}, [](const auto&) {}}).join();
   auto repeated = peer.stats();
   require(repeated.root().get("request_count").as_uint() == 2 && repeated.root().get("unexpected_requests").as_uint() == 1, "repeat playback was not refused");
   std::cout << "[PASS] wire matcher rejects method/path/semantic-header/body mutations, unused fixtures and repeat playback\n";
@@ -477,15 +654,14 @@ void verify_matcher(const Fixture& fixture, const sp::descriptor::ValidatedDescr
 } // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 4 || argc > 5) { std::cerr << "usage: sp_fixture_runner <node> <peer.mjs> <fixture-dir> [--offline-only]\n"; return 2; }
+  if (argc < 5 || argc > 6) { std::cerr << "usage: sp_fixture_runner <node> <peer.mjs> <fixture-dir> <descriptor> [--offline-only]\n"; return 2; }
   std::signal(SIGPIPE, SIG_IGN);
   try {
     const std::filesystem::path directory = argv[3];
-    const auto descriptor_path = directory.parent_path() / "openai-chat-descriptor.json";
+    const std::filesystem::path descriptor_path = argv[4];
     auto loaded = sp::descriptor::load(read_file(descriptor_path));
     if (const auto* error = std::get_if<sp::descriptor::ConfigError>(&loaded)) throw std::runtime_error("descriptor rejected at " + error->pointer + ": " + error->expected);
     const auto& descriptor = std::get<sp::descriptor::ValidatedDescriptor>(loaded);
-    verify_close_precedence(descriptor);
     std::vector<std::filesystem::path> files;
     for (const auto& entry : std::filesystem::directory_iterator(directory)) if (entry.is_regular_file() && entry.path().extension() == ".json") files.push_back(entry.path());
     std::sort(files.begin(), files.end());
@@ -493,25 +669,33 @@ int main(int argc, char** argv) {
     std::vector<Fixture> fixtures;
     fixtures.reserve(files.size());
     for (const auto& file : files) fixtures.push_back(load_fixture(file));
+    std::set<std::string> replay_sources;
+    for (const auto& fixture : fixtures)
+      if (auto source = fixture.root().get("replay_from"); source.valid()) replay_sources.insert(string(source));
+    Captures offline_captures;
+    const auto first_request = prepare_request(fixtures.front(), fixtures.front().configuration(descriptor), offline_captures);
+    verify_close_precedence(descriptor, first_request.context);
     std::map<std::string, std::pair<std::string, unsigned>> parity;
     size_t partitions = 0;
     for (const auto& fixture : fixtures) {
       const auto& selected_descriptor = fixture.configuration(descriptor);
-      const auto expected = offline(fixture, selected_descriptor, {});
+      const auto prepared = prepare_request(fixture, selected_descriptor, offline_captures);
+      const auto expected = offline(fixture, selected_descriptor, prepared.context, {},
+                                    replay_sources.contains(fixture.id) ? &offline_captures : nullptr);
       if (fixture.streaming) {
         const size_t cap = std::min<size_t>(fixture.body.size(), 4096);
         for (size_t cut = 0; cut <= cap; ++cut) {
-          require(offline(fixture, selected_descriptor, {cut}) == expected, fixture.id + ": single split changed outcome");
+          require(offline(fixture, selected_descriptor, prepared.context, {cut}) == expected, fixture.id + ": single split changed outcome");
           ++partitions;
         }
         std::vector<size_t> bytewise;
         for (size_t i = 0; i < fixture.body.size(); ++i) bytewise.push_back(i);
-        require(offline(fixture, selected_descriptor, bytewise) == expected, fixture.id + ": bytewise partition changed outcome");
+        require(offline(fixture, selected_descriptor, prepared.context, bytewise) == expected, fixture.id + ": bytewise partition changed outcome");
         std::mt19937 random(12345);
         for (unsigned trial = 0; trial < 8; ++trial) {
           std::vector<size_t> cuts;
           for (size_t i = random() % 17; i < fixture.body.size(); i += 1 + random() % 17) cuts.push_back(i);
-          require(offline(fixture, selected_descriptor, cuts) == expected, fixture.id + ": multiway partition changed outcome");
+          require(offline(fixture, selected_descriptor, prepared.context, cuts) == expected, fixture.id + ": multiway partition changed outcome");
           ++partitions;
         }
       }
@@ -523,17 +707,24 @@ int main(int argc, char** argv) {
       std::cout << "[PASS] golden " << fixture.id << '\n';
     }
     for (const auto& [name, value] : parity) require(value.second == 3, name + ": parity group lacks a transport");
-    if (argc == 5) require(std::string_view(argv[4]) == "--offline-only", "unknown runner argument");
+    if (argc == 6) require(std::string_view(argv[5]) == "--offline-only", "unknown runner argument");
     else {
       Peer peer(argv[1], argv[2], directory, descriptor_path);
       sp::transport::Transport transport;
-      for (const auto& fixture : fixtures) run_wire(fixture, fixture.configuration(descriptor), peer, transport);
-      verify_matcher(fixtures.front(), fixtures.front().configuration(descriptor), peer, transport);
+      Captures wire_captures;
+      for (const auto& fixture : fixtures) {
+        const auto& selected = fixture.configuration(descriptor);
+        const auto prepared = prepare_request(fixture, selected, wire_captures);
+        run_wire(fixture, selected, prepared, peer, transport, wire_captures,
+                 replay_sources.contains(fixture.id) ? &wire_captures : nullptr);
+      }
+      verify_matcher(fixtures.front(), first_request, peer, transport);
     }
-    std::cout << "M2_FIXTURE_PASS fixtures=" << fixtures.size() << " partitions=" << partitions << " parity_groups=" << parity.size() << " wire=" << (argc == 4 ? "yes" : "no") << '\n';
+    std::cout << "FIXTURE_PASS family=" << descriptor.family() << " fixtures=" << fixtures.size() << " partitions=" << partitions
+              << " parity_groups=" << parity.size() << " wire=" << (argc == 5 ? "yes" : "no") << '\n';
     return 0;
   } catch (const std::exception& error) {
-    std::cerr << "M2_FIXTURE_FAIL: " << error.what() << '\n';
+    std::cerr << "FIXTURE_FAIL: " << error.what() << '\n';
     return 1;
   }
 }

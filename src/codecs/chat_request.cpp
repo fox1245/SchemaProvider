@@ -8,6 +8,7 @@
 namespace sp::chat {
 EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request, bool streaming) {
   auto bad = [](std::string message) -> EncodeResult { return Error{ErrorKind::InvalidRequest, std::move(message)}; };
+  if (descriptor.family() != "openai.chat") return Error{ErrorKind::InvalidConfig, "descriptor family does not match Chat codec"};
   if (request.model.empty() || request.messages.empty()) return bad("model and messages are required");
   if (request.temperature && (!std::isfinite(*request.temperature) || *request.temperature < 0 || *request.temperature > 2)) return bad("temperature outside range");
   if (request.top_p && (!std::isfinite(*request.top_p) || *request.top_p < 0 || *request.top_p > 1)) return bad("top_p outside range");

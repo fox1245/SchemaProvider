@@ -373,6 +373,81 @@ void accumulator_transitions_and_seals() {
   CHECK(knowledge.accept(UsageUpdate{second})); CHECK(knowledge.accept(UsageUpdate{Usage{}}));
   CHECK(knowledge.accept(Fail{{ErrorKind::Cancelled, "cancel"}})); CHECK(!failed(*knowledge.outcome(), ErrorKind::Cancelled).partial.usage.input_total);
 }
+void accumulator_interleaved_ordering() {
+  constexpr uint32_t message_count = 16, parts_per_message = 128;
+  auto message_id = [](uint32_t message) { return LocalId{7 * (message + 1)}; };
+  auto part_id = [](uint32_t message, uint32_t order) {
+    return LocalId{(parts_per_message - 1 - order) * message_count + message_count - 1 - message};
+  };
+  auto text = [](uint32_t message, uint32_t order) { return std::to_string(message) + ":" + std::to_string(order); };
+  for (bool partial : {false, true}) {
+    SemanticLimits limits; limits.max_parts = message_count * parts_per_message;
+    Accumulator a(limits); CHECK(a.accept(Begin{}));
+    for (uint32_t i = message_count; i-- > 0;)
+      CHECK(a.accept(MessageBegin{message_id(i), std::to_string(i), Role::Assistant}));
+    for (uint32_t order = parts_per_message; order-- > 0;) {
+      for (uint32_t offset = 0; offset < message_count; ++offset) {
+        const uint32_t message = (offset + order) % message_count;
+        CHECK(a.accept(PartBegin{message_id(message), part_id(message, order), PartKind::Text, {}, order}));
+        CHECK(a.accept(PartDelta{part_id(message, order), {PartKind::Text, text(message, order)}}));
+      }
+    }
+    // Sealing and snapshots arrive in a different order from both IDs and begins.
+    for (uint32_t message = 0; message < message_count; ++message) {
+      for (uint32_t order = 0; order < parts_per_message; ++order) {
+        if (partial && order % 2) continue;
+        const auto snapshot = text(message, order) + "|sealed";
+        CHECK(a.accept(PartSeal{part_id(message, order), snapshot}));
+        CHECK(a.accept(PartSeal{part_id(message, order), snapshot}));
+      }
+    }
+    if (partial) CHECK(a.accept(Fail{{ErrorKind::Cancelled, "cancel"}}));
+    else {
+      CHECK(a.accept(Stop{{StopKind::EndTurn, "stop"}}));
+      for (uint32_t message = message_count; message-- > 0;) CHECK(a.accept(MessageSeal{message_id(message)}));
+      CHECK(a.accept(Commit{"evidence"}));
+    }
+    const auto& messages = partial ? failed(*a.outcome(), ErrorKind::Cancelled).partial.messages : completed(*a.outcome()).messages;
+    CHECK(messages.size() == message_count);
+    for (uint32_t message = 0; message < message_count; ++message) {
+      CHECK(messages[message].id == std::to_string(message));
+      CHECK(messages[message].parts.size() == parts_per_message);
+      for (uint32_t order = 0; order < parts_per_message; ++order)
+        CHECK(std::get<Text>(messages[message].parts[order]).value ==
+              text(message, order) + ((!partial || order % 2 == 0) ? "|sealed" : ""));
+    }
+  }
+}
+void accumulator_order_uniqueness_and_limits() {
+  for (bool sealed : {false, true}) {
+    Accumulator a; CHECK(a.accept(Begin{}));
+    CHECK(a.accept(MessageBegin{{9}, "later", Role::Assistant}));
+    CHECK(a.accept(MessageBegin{{2}, "earlier", Role::Assistant}));
+    CHECK(a.accept(PartBegin{{9}, {10}, PartKind::Text, {}, std::numeric_limits<uint64_t>::max()}));
+    CHECK(a.accept(PartDelta{{10}, {PartKind::Text, "later"}}));
+    CHECK(a.accept(PartBegin{{2}, {20}, PartKind::Text, {}, std::numeric_limits<uint64_t>::max()}));
+    CHECK(a.accept(PartSeal{{20}, "earlier"}));
+    // Other messages may remain open when this message is sealed.
+    CHECK(a.accept(MessageSeal{{2}}));
+    if (sealed) CHECK(a.accept(PartSeal{{10}, "later"}));
+    CHECK(!a.accept(PartBegin{{9}, {30}, PartKind::Refusal, {}, std::numeric_limits<uint64_t>::max()}));
+    const auto& messages = failed(*a.outcome(), ErrorKind::ProtocolCorrupt).partial.messages;
+    CHECK(messages.size() == 2 && messages[0].id == "earlier" && messages[1].id == "later");
+    CHECK(messages[0].parts.size() == 1 && messages[1].parts.size() == 1);
+    CHECK(std::get<Text>(messages[0].parts[0]).value == "earlier");
+    CHECK(std::get<Text>(messages[1].parts[0]).value == "later");
+  }
+  SemanticLimits limits; limits.max_parts = 4;
+  Accumulator a(limits); CHECK(a.accept(Begin{})); CHECK(a.accept(MessageBegin{{0}, {}, Role::Assistant}));
+  for (uint32_t order = 4; order-- > 0;) {
+    CHECK(a.accept(PartBegin{{0}, {order}, PartKind::Text, {}, order}));
+    CHECK(a.accept(PartSeal{{order}, std::to_string(order)}));
+  }
+  CHECK(!a.accept(PartBegin{{0}, {4}, PartKind::Text, {}, 4}));
+  const auto& parts = failed(*a.outcome(), ErrorKind::ResourceLimit).partial.messages[0].parts;
+  CHECK(parts.size() == 4);
+  for (uint32_t order = 0; order < 4; ++order) CHECK(std::get<Text>(parts[order]).value == std::to_string(order));
+}
 void typed_request_encoding() {
   chat::Request request; request.model = "fixture-model"; request.messages.push_back({Role::User, "Say hello."});
   auto encoded = chat::encode(descriptor_value(), request, true); CHECK(std::holds_alternative<chat::EncodedRequest>(encoded));
@@ -412,6 +487,7 @@ int main() {
     chunk_partition_invariant(); no_terminal_no_success(); transport_projection_parity(); known_corrupt_never_ignored();
     invalid_tools_and_compatibility(); usage_knowledge(); accumulator_transitions_and_seals(); typed_request_encoding();
     required_metadata_and_identity(); required_usage_and_unknown_cache(); unindexed_tool_order_and_optional_function(); buffered_close_precedence();
+    accumulator_interleaved_ordering(); accumulator_order_uniqueness_and_limits();
     std::cout << "chat semantic properties passed\n";
     return 0;
   } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

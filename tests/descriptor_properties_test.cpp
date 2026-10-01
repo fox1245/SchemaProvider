@@ -136,6 +136,38 @@ void accepted_configuration_is_typed() {
         CHECK(configured->stop_kind("declined") == StopKind::Refusal);
     }
 }
+void messages_family_boundaries() {
+    using namespace sp::descriptor;
+    auto messages = [](std::string_view extra = {}) {
+        auto source = descriptor(extra, "https://api.example.test", "/v1/messages");
+        source.replace(source.find("openai.chat"), std::string_view("openai.chat").size(), "anthropic.messages");
+        return source;
+    };
+    auto valid = load(messages(R"(,"bindings":{"model":"deployment","usage":["metrics","tokens"]},"stop_reasons":{"vendor_pause":"PauseTurn"})"));
+    CHECK(std::holds_alternative<ValidatedDescriptor>(valid));
+    if (const auto* value = std::get_if<ValidatedDescriptor>(&valid)) {
+        CHECK(value->stop_kind("refusal") == StopKind::Refusal);
+        CHECK(value->stop_kind("model_context_window_exceeded") == StopKind::ContextLimit);
+        CHECK(value->stop_kind("vendor_pause") == StopKind::PauseTurn);
+        CHECK(value->stop_kind("stop") == StopKind::Unknown);
+    }
+    for (auto raw : {"end_turn", "max_tokens", "tool_use", "pause_turn", "refusal", "stop_sequence", "model_context_window_exceeded"})
+        rejected(messages(",\"stop_reasons\":{\"" + std::string(raw) + "\":\"Unknown\"}"), "/stop_reasons");
+    for (auto key : {"system", "thinking", "metadata", "stop_sequences", "output_config", "container"})
+        rejected(messages(",\"bindings\":{\"messages\":\"" + std::string(key) + "\"}"), "/bindings/messages");
+    for (auto key : {"content", "type", "role", "stop_reason", "stop_sequence", "stop_details", "input_transformations"})
+        rejected(messages(",\"bindings\":{\"usage\":[\"" + std::string(key) + "\"]}"), "/bindings/usage");
+    for (auto version : {"2023-06-01", "2099-01-01", ""}) {
+        auto source = descriptor({}, "https://api.example.test", "/v1/messages",
+                                 ",\"headers\":{\"Anthropic-Version\":" + sp::json::quote(version) + "}");
+        source.replace(source.find("openai.chat"), std::string_view("openai.chat").size(), "anthropic.messages");
+        if (std::string_view(version) == "2023-06-01") CHECK(std::holds_alternative<ValidatedDescriptor>(load(source)));
+        else rejected(std::move(source), "/connection/headers");
+    }
+    auto unknown = messages();
+    unknown.replace(unknown.find("anthropic.messages"), std::string_view("anthropic.messages").size(), "uninstalled.family");
+    rejected(std::move(unknown), "/family");
+}
 void closed_inventory_and_nested_types() {
     for (auto key : {"models", "options", "usage", "errors", "constraints", "events", "terminal", "request_json", "retry_safety", "hooks"})
         rejected(descriptor(",\"" + std::string(key) + "\":{}"), "");
@@ -239,6 +271,7 @@ void duplicate_errors_retain_only_unambiguous_revision() {
 int main() {
     json_validation_and_ownership();
     accepted_configuration_is_typed();
+    messages_family_boundaries();
     closed_inventory_and_nested_types();
     endpoint_security_and_paths();
     collisions_and_selector_rejection();

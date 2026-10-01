@@ -16,15 +16,20 @@ class Accumulator {
  private:
   enum class State { Created, Receiving, Draining, Terminal };
   struct Cursor {
-    LocalId message;
     PartKind kind;
     PartHeader header;
-    uint64_t order;
     std::string bytes;
+    std::optional<std::string> signature;
     bool sealed = false;
     std::optional<Part> value;
   };
-  struct MessageCursor { Message message; bool sealed = false; };
+  struct MessageCursor {
+    Message message;
+    bool sealed = false;
+    std::shared_ptr<const NativeContext> native_context;
+    // IDs, not cursor pointers, keep this index valid across accumulator copies/moves.
+    std::map<uint64_t, uint32_t> parts_by_order;
+  };
   bool apply(const Begin&); bool apply(const MessageBegin&); bool apply(const PartBegin&);
   bool apply(const PartDelta&); bool apply(const PartSeal&); bool apply(const MessageSeal&);
   bool apply(const UsageUpdate&); bool apply(const Stop&); bool apply(const Commit&); bool apply(const Fail&);

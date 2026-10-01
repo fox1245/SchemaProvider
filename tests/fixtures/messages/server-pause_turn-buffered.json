@@ -1,0 +1,157 @@
+{
+  "fixture_version": 2,
+  "case_id": "server-pause_turn-buffered",
+  "origin": {
+    "family": "anthropic.messages",
+    "vendor": "synthetic",
+    "authority": "loopback"
+  },
+  "binding_facts": {
+    "model": "fixture-model",
+    "account_scope": "fixture-account"
+  },
+  "descriptor_digest": "sha256:c1f1675a8bf3f8fc77568e56dbfdc4ef9fe879edd2d9a45c635037c877e76bfe",
+  "provenance": {
+    "kind": "synthetic",
+    "api_version": "2023-06-01",
+    "model": "fixture-model",
+    "captured_at": null,
+    "doc_reference": "Messages API; streaming lifecycle and cumulative usage; thinking preservation; stop reasons. Local stricter policy: CONFORMANCE 5.3-5.8, 5.16-5.19.",
+    "urls": [
+      "https://platform.claude.com/docs/en/api/messages/create",
+      "https://platform.claude.com/docs/en/build-with-claude/streaming",
+      "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons"
+    ],
+    "reviewer": "M3ProtocolReview",
+    "review_date": "2026-10-01",
+    "review_mode": "independent",
+    "expectation_reasoning": "ServerExecuted never becomes a runnable client call or overrides pause_turn. Preserve the full result object, encrypted content and explicit page_age null. Server IDs are synthetic rather than the documented srvtoolu_ pattern; this is retention coverage, not live acceptance."
+  },
+  "input": {
+    "model": "fixture-model",
+    "max_tokens": 1024,
+    "account_scope": "fixture-account",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Hello"
+      }
+    ]
+  },
+  "request": {
+    "method": "POST",
+    "path": "/v1/messages",
+    "semantic_headers": {
+      "accept": "application/json",
+      "content-type": "application/json",
+      "anthropic-version": "2023-06-01",
+      "x-fixture": "synthetic"
+    },
+    "body": {
+      "model": "fixture-model",
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Hello"
+            }
+          ]
+        }
+      ],
+      "stream": false
+    }
+  },
+  "transport": {
+    "scheme": "http",
+    "mode": "buffered",
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "schedule": [
+      {
+        "kind": "bytes",
+        "utf8": "{\"id\":\"msg_fixture\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"fixture-model\",\"content\":[{\"type\":\"server_tool_use\",\"id\":\"server-a\",\"name\":\"web_search\",\"input\":{\"query\":\"synthetic example\"},\"caller\":{\"type\":\"direct\"}},{\"type\":\"web_search_tool_result\",\"tool_use_id\":\"server-a\",\"content\":[{\"type\":\"web_search_result\",\"title\":\"Synthetic page\",\"url\":\"https://example.org/public\",\"encrypted_content\":\"synthetic-encrypted-result==\",\"page_age\":null}]},{\"type\":\"text\",\"text\":\"Synthetic result\"}],\"stop_reason\":\"pause_turn\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":9,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0,\"output_tokens\":6,\"server_tool_use\":{\"web_search_requests\":1}}}"
+      },
+      {
+        "kind": "close",
+        "how": "content_length_met"
+      }
+    ]
+  },
+  "expect": {
+    "request_count": 1,
+    "outcome": "completion",
+    "completion": {
+      "messages": [
+        {
+          "role": "assistant",
+          "parts": [
+            {
+              "type": "tool_call",
+              "id": "server-a",
+              "name": "web_search",
+              "kind": "ServerExecuted",
+              "input": {
+                "query": "synthetic example"
+              }
+            },
+            {
+              "type": "server_tool_result",
+              "tool_use_id": "server-a",
+              "wire_type": "web_search_tool_result",
+              "content": {
+                "type": "web_search_tool_result",
+                "tool_use_id": "server-a",
+                "content": [
+                  {
+                    "type": "web_search_result",
+                    "title": "Synthetic page",
+                    "url": "https://example.org/public",
+                    "encrypted_content": "synthetic-encrypted-result==",
+                    "page_age": null
+                  }
+                ]
+              }
+            },
+            {
+              "type": "text",
+              "text": "Synthetic result"
+            }
+          ]
+        }
+      ],
+      "stop": {
+        "kind": "PauseTurn",
+        "raw": "pause_turn"
+      },
+      "usage": {
+        "input_total": 9,
+        "output_total": 6,
+        "total": 15,
+        "provider_reported_total": null,
+        "input_uncached": 9,
+        "cache_read": 0,
+        "cache_write": 0,
+        "reasoning": null,
+        "stage": "Final",
+        "quality": "Consistent",
+        "extra": {
+          "server_tool_use.web_search_requests": 1
+        }
+      }
+    }
+  },
+  "scrub": {
+    "version": 1,
+    "id_replacements": {},
+    "removed_fields": [],
+    "replay_eligible": false,
+    "log": []
+  },
+  "parity_group": "server-pause_turn"
+}

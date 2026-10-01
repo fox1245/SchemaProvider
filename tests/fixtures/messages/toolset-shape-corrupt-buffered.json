@@ -1,0 +1,102 @@
+{
+  "fixture_version": 2,
+  "case_id": "toolset-shape-corrupt-buffered",
+  "origin": {
+    "family": "anthropic.messages",
+    "vendor": "synthetic",
+    "authority": "loopback"
+  },
+  "binding_facts": {
+    "model": "fixture-model",
+    "account_scope": "fixture-account"
+  },
+  "descriptor_digest": "sha256:c1f1675a8bf3f8fc77568e56dbfdc4ef9fe879edd2d9a45c635037c877e76bfe",
+  "provenance": {
+    "kind": "synthetic",
+    "api_version": "2023-06-01",
+    "model": "fixture-model",
+    "captured_at": null,
+    "doc_reference": "Messages API; streaming lifecycle and cumulative usage; thinking preservation; stop reasons. Local stricter policy: CONFORMANCE 5.3-5.8, 5.16-5.19.",
+    "urls": [
+      "https://platform.claude.com/docs/en/api/messages/create",
+      "https://platform.claude.com/docs/en/build-with-claude/streaming",
+      "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons"
+    ],
+    "reviewer": "M3ProtocolReview",
+    "review_date": "2026-10-01",
+    "review_mode": "independent",
+    "expectation_reasoning": "Independent known-shape oracle: Messages ToolUseBlock.toolset_name is optional string or null (1..64 ASCII letters/digits/_/-), never an array. Reject the first malformed block before making a client-executable call. No production decoder output used."
+  },
+  "input": {
+    "model": "fixture-model",
+    "max_tokens": 1024,
+    "account_scope": "fixture-account",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Hello"
+      }
+    ]
+  },
+  "request": {
+    "method": "POST",
+    "path": "/v1/messages",
+    "semantic_headers": {
+      "accept": "application/json",
+      "content-type": "application/json",
+      "anthropic-version": "2023-06-01",
+      "x-fixture": "synthetic"
+    },
+    "body": {
+      "model": "fixture-model",
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Hello"
+            }
+          ]
+        }
+      ],
+      "stream": false
+    }
+  },
+  "transport": {
+    "scheme": "http",
+    "mode": "buffered",
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "schedule": [
+      {
+        "kind": "bytes",
+        "utf8": "{\"id\":\"msg_fixture\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"fixture-model\",\"content\":[{\"type\":\"tool_use\",\"id\":\"call-a\",\"name\":\"weather\",\"input\":{\"city\":\"Seoul\"},\"toolset_name\":[]},{\"type\":\"tool_use\",\"id\":\"call-b\",\"name\":\"clock\",\"input\":{}}],\"stop_reason\":\"tool_use\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}"
+      },
+      {
+        "kind": "close",
+        "how": "content_length_met"
+      }
+    ]
+  },
+  "expect": {
+    "request_count": 1,
+    "outcome": "failure",
+    "failure": {
+      "class": "ProtocolCorrupt",
+      "partial_text": [],
+      "stop": null
+    }
+  },
+  "scrub": {
+    "version": 1,
+    "id_replacements": {},
+    "removed_fields": [],
+    "replay_eligible": false,
+    "log": []
+  }
+}

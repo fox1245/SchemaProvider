@@ -19,6 +19,16 @@ Earlier drafts claimed that cross-host signature interoperability is "unverified
 
 Origin is an observed/configured replay boundary, NOT cryptographic proof of issuer. `sealed` means C++ immutability + provenance, not authentication. Importer input is untrusted; persistent capsules need a host-held AEAD/HMAC envelope or are not replayed natively (see DESIGN threat model).
 
+## Measured M3 implementation
+
+`[live observation]` The private Messages path performs actual two-request loopback conversations for client tool results and server pause continuation. The second request uses the first HTTP response's captured completion. Thinking, signature and redacted leaves retain their bytes and order; server calls, caller metadata and complete result objects survive without becoming executable client calls. Twelve client-chain and ten server-chain mutations fail before dispatch, with zero requests observed.
+
+`[read source]` `messages_request.cpp` derives context from the admitted descriptor and actual typed request. The accumulator seals complete content; the gate checks exact origin/route, model, declared non-secret account scope, system/tools/thinking configuration, preceding prefix and sealed message contents. Fingerprints use typed, length-prefixed SHA-256 and key-order-independent JSON object hashing. Callers supply no trusted fingerprint; a changed visible value cannot be legitimized merely by retaining its old immutable capsule.
+
+These are trusted private in-process helpers: a caller controlling raw codec input or synthetic accumulator events is outside the boundary. The account label is not authenticated credentials, SHA-256 is not issuer authentication, and there is no persisted/imported capsule admission. Only exact-origin Native-or-Reject is implemented; no documented-equivalence activation, Drop or Demote. An invalid tool call is retained for inspection but not repaired into replayable input.
+
+The fixture signatures, encrypted leaves and server IDs are synthetic. This is **local client-retention and pre-dispatch rejection evidence**, not a live canary, provider acceptance, cryptographic signature validation or activation of the documented equivalence policy. M5 still owns the budgeted live gate.
+
 ## Evidence
 - [read docs] Anthropic extended-thinking documentation: `signature` values are compatible across the Claude API, Amazon Bedrock and Google Cloud; a thinking block is readable only by the producing model and certain other models (unreadable blocks are silently ignored/dropped); newer models bind blocks to the preceding system/tools/messages prefix (400 when it changes; enforced by default for accounts created on/after 2026-08-31, opt-in through `thinking.block_binding.prefix_mismatch_behavior` for older accounts); Sonnet 5.5 blocks are account-bound; toggling thinking mid-turn silently disables thinking.
 - [live observation] Experiment 2026-09-30, maintainer's keys, claude-haiku-4-5 / anthropic/claude-haiku-4.5; thinking enabled (budget 1024) + one tool; turn 1 captured thinking+tool_use, turn 2 replayed with tool_result. Routes: Anthropic-direct `/v1/messages`; OpenRouter `/v1/chat/completions` with `provider.order=[X]`, `allow_fallbacks=false`, X in {Anthropic, Amazon Bedrock, Google Vertex, Azure}.

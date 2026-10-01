@@ -25,7 +25,9 @@ StopKind stop_kind(descriptor::StopKind kind) {
 }
 }
 Codec::Codec(const descriptor::ValidatedDescriptor& descriptor, Mode mode, Accumulator& accumulator, SemanticLimits limits)
-    : descriptor_(descriptor), mode_(mode), accumulator_(accumulator), limits_(limits) {}
+    : descriptor_(descriptor), mode_(mode), accumulator_(accumulator), limits_(limits) {
+  if (descriptor_.family() != "openai.chat") fail(ErrorKind::InvalidConfig, "descriptor family does not match Chat codec");
+}
 bool Codec::emit(const Event& e) {
   return accumulator_.accept(e, buffered_failure_ ? &*buffered_failure_ : nullptr);
 }

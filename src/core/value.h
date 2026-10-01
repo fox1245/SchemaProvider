@@ -12,6 +12,8 @@
 
 namespace sp::json { class Document; }
 namespace sp {
+class NativeContext;
+class NativeReplay;
 enum class Role { System, Developer, User, Assistant, Tool };
 enum class ToolCallKind { ClientExecuted, ServerExecuted, ApprovalRequest };
 enum class InvalidReason { Truncated, NotJson, DuplicateKey, DepthExceeded, Empty, Other };
@@ -21,15 +23,31 @@ struct ToolCall {
   std::string id, name;
   ToolCallKind kind = ToolCallKind::ClientExecuted;
   std::shared_ptr<const json::Document> input;
+  std::string wire_type{};
+  std::shared_ptr<const json::Document> wire_metadata{};
 };
 struct InvalidToolCall {
   std::string id, name;
   ToolCallKind kind = ToolCallKind::ClientExecuted;
   std::string raw_fragment;
   InvalidReason reason = InvalidReason::Other;
+  std::string wire_type{};
+  std::shared_ptr<const json::Document> wire_metadata{};
 };
-using Part = std::variant<Text, Refusal, ToolCall, InvalidToolCall>;
-struct Message { std::string id; Role role = Role::Assistant; std::vector<Part> parts; };
+struct Thinking { std::string text; std::optional<std::string> signature{}; };
+struct RedactedThinking { std::string data; };
+struct ServerToolResult {
+  std::string tool_use_id, wire_type;
+  std::shared_ptr<const json::Document> content;
+};
+struct ToolResult { std::string tool_use_id, content; bool is_error = false; };
+using Part = std::variant<Text, Refusal, ToolCall, InvalidToolCall, Thinking, RedactedThinking, ServerToolResult, ToolResult>;
+struct Message {
+  std::string id;
+  Role role = Role::Assistant;
+  std::vector<Part> parts;
+  std::shared_ptr<const NativeReplay> native{};
+};
 enum class Evidence { Reported, Derived };
 struct Count { uint64_t value = 0; Evidence evidence = Evidence::Reported; };
 enum class UsageStage { Missing, Partial, Final };
@@ -44,19 +62,35 @@ struct Usage {
   std::vector<UsageConflict> conflicts;
 };
 enum class StopKind { EndTurn, ToolUse, MaxTokens, StopSequence, ContentFilter, Refusal, PauseTurn, ContextLimit, MalformedCall, Unknown };
-struct StopReason { StopKind kind = StopKind::Unknown; std::string raw; };
-enum class ErrorKind { InvalidConfig, InvalidRequest, Unsupported, Transport, ProtocolCorrupt, Truncated, RemoteFailure, Cancelled, DeadlineExceeded, ResourceLimit, Misuse };
+struct StopReason {
+  StopKind kind = StopKind::Unknown;
+  std::string raw;
+  std::optional<std::string> sequence{};
+  std::shared_ptr<const json::Document> details{};
+};
+enum class ErrorKind { InvalidConfig, InvalidRequest, Unsupported, Transport, ProtocolCorrupt, Truncated, RemoteFailure, Cancelled, DeadlineExceeded, ResourceLimit, Misuse, ReplayIneligible };
 struct Error { ErrorKind kind = ErrorKind::ProtocolCorrupt; std::string safe_message; };
 struct Completion { std::vector<Message> messages; StopReason stop; Usage usage; };
 struct PartialCompletion { std::vector<Message> messages; Usage usage; std::optional<StopReason> stop; };
 struct Failure { Error error; PartialCompletion partial; };
 using Outcome = std::variant<Completion, Failure>;
 struct LocalId { uint32_t value = 0; friend bool operator==(LocalId, LocalId) = default; };
-enum class PartKind { Text, Refusal, ToolCall };
-struct PartHeader { std::string wire_id, name; ToolCallKind tool_kind = ToolCallKind::ClientExecuted; };
-struct DeltaPayload { PartKind kind; std::string_view bytes; };
+enum class PartKind { Text, Refusal, ToolCall, Thinking, RedactedThinking, ServerToolResult };
+struct PartHeader {
+  std::string wire_id, name;
+  ToolCallKind tool_kind = ToolCallKind::ClientExecuted;
+  std::string wire_type{};
+  std::shared_ptr<const json::Document> wire_metadata{};
+};
+enum class DeltaChannel { Content, Signature };
+struct DeltaPayload { PartKind kind; std::string_view bytes; DeltaChannel channel = DeltaChannel::Content; };
 struct Begin { std::string generation; };
-struct MessageBegin { LocalId message; std::optional<std::string> vendor_id; Role role = Role::Assistant; };
+struct MessageBegin {
+  LocalId message;
+  std::optional<std::string> vendor_id;
+  Role role = Role::Assistant;
+  std::shared_ptr<const NativeContext> native_context{};
+};
 struct PartBegin { LocalId message, part; PartKind kind = PartKind::Text; PartHeader header; uint64_t order = 0; };
 struct PartDelta { LocalId part; DeltaPayload payload; };
 // No snapshot means seal the accumulator-owned bytes. A snapshot reconciles a prefix,

@@ -69,10 +69,13 @@ Private (not installed, no stability promise): all `sp_*` object targets, codec 
 |---|---|
 | `sp_core` | C++20 standard library |
 | `sp_json` | yyjson (private; never in a public header) |
-| `sp_descriptor`, `sp_codecs` | `sp_core`, `sp_json` |
+| `sp_descriptor` | `sp_core`, `sp_json` |
+| `sp_codecs` | `sp_core`, `sp_json`, `sp_descriptor`; private OpenSSL Crypto for M3 replay fingerprints |
 | `sp_transport` | libcurl (`multi_socket`) driven by a private standalone Asio loop; TLS through libcurl's backend (D1, FIRM) |
 | `sp_runtime` | the above, standard threads, `std::stop_token` |
 | public headers | standard library only |
+
+In the private M3 build, `src/core/native.cpp` belongs to the `sp_codecs` target, not `sp_core`. Its SHA-256 implementation links `OpenSSL::Crypto` privately and exposes no OpenSSL types in a header; `sp_core` remains standard-library-only. This is content/binding integrity inside trusted code, not authentication of the capsule issuer.
 
 No language runtimes, no general JSON Schema validator, no second HTTP stack, no `httplib`, no hand-written HTTP/1.1 client, no runtime backend flag: libcurl is the single HTTP stack and is private to `sp_transport`. `SP_ENABLE_WEBSOCKET` selects a transport implementation only; it does not change the semantic contract (the WebSocket transport itself is the undecided D1b). The default descriptors are embedded at configure time (a generated index; no runtime directory globbing, no fetch).
 
@@ -500,7 +503,7 @@ The family is specified here so its codec can be reviewed, but it is **not in th
 
 Descriptors are trusted deployment input (no remote refresh, no external `$ref`). Top level is closed: unknown or duplicate keys are errors.
 
-**Current M2 admission is narrower than this target grammar.** It accepts version/revision/identity/evidence, the `openai.chat` family, origin-only base URL, literal buffered/SSE paths and headers, declared request-member/usage-root bindings, and stop-reason mappings. It rejects unimplemented auth, model selectors, options, error tables and constraints rather than accepting inert configuration. Environment headers, schema generation and D5 execution are not implemented. See the exact inventory and limits in [POC_PLAN section 5.2](POC_PLAN.md#52-m2-results-live-observation).
+**Current M3 admission is narrower than this target grammar.** It accepts version/revision/identity/evidence, families `openai.chat` and `anthropic.messages`, origin-only base URL, literal buffered/SSE paths and headers, declared request-member/usage-path bindings, and stop-reason mappings. Messages pins `anthropic-version` to `2023-06-01`; another explicit version is rejected, not silently overwritten. It rejects unimplemented auth, model selectors, options, error tables and constraints rather than accepting inert configuration. Environment headers, schema generation and D5 execution remain unimplemented. See [POC_PLAN section 5.3](POC_PLAN.md#53-m3-results-live-observation).
 
 | Key | Content and limits |
 |---|---|
@@ -526,7 +529,7 @@ A descriptor cannot: template message content, loop or branch, dispatch on event
 
 Loading is: strict JSON parse (duplicate keys rejected, size and depth bounded) -> closed type and unknown-key check -> match against the family's slot inventory -> checks for path collisions, reserved destinations, model-selector priority, rule contradictions, and usage source overlap -> `ValidatedDescriptor`. Errors carry the JSON pointer, expected type and revision, and never a secret. There is no coercion or migration on load; a future `descriptor_version` or an unknown key is an error. A changed endpoint changes where credentials are sent, so the factory applies an endpoint allow-policy. Clients are immutable: a new descriptor means a new `Client`, so an in-flight request never changes revision or origin. The loader returns `Result<ValidatedDescriptor>`.
 
-In the M2 loader, diagnostic pointers stop at the longest trusted schema ancestor: arbitrary unknown keys, header names, stop-map keys and their control/secret text are not copied into errors. A syntactically valid duplicate-key document retains its unambiguous positive root revision, including the full unsigned range; missing, invalid or duplicated revision remains unknown (`0`). The private yyjson port owns the parse tree and exposes no yyjson types in its headers.
+In the current loader, diagnostic pointers stop at the longest trusted schema ancestor: arbitrary unknown keys, header names, stop-map keys and their control/secret text are not copied into errors. A syntactically valid duplicate-key document retains its unambiguous positive root revision, including the full unsigned range; missing, invalid or duplicated revision remains unknown (`0`). The private yyjson port owns the parse tree and exposes no yyjson types in its headers.
 
 ### 5.3 Schema is generated from the C++ inventory
 
@@ -565,6 +568,8 @@ Vendor reasoning state (signed thinking blocks, encrypted reasoning items, thoug
 **Capture.** Decoders capture reasoning by default, separately from visible text: Messages thinking and redacted blocks with order and signature; Responses reasoning items with id, encrypted content and summary (ordered group, 4.4); Gemini thought parts and signatures with the function-call association; OpenRouter `reasoning_details` as a whole. A gateway's `format` field is a provenance hint, not a replay permission.
 
 **Replay gate.** Native replay requires exactly equal `Origin` (or an activated `Documented-Unverified` class, 3.1), equal `BindingFacts` checks (model, context fingerprint, account scope), a complete capsule, and the codec's binding checks.
+
+**Measured M3 subset.** Messages captures ordered thinking, absent versus empty signatures, redacted data, and server-tool result leaves. Its encoder derives immutable context from the actual request and admitted descriptor; the accumulator seals the complete message. Replay checks exact origin/route, model, declared non-secret account scope, system/tools/thinking configuration, preceding message prefix and sealed content before building an HTTP request. The account label is caller-supplied scope, not credential verification. The codec, accumulator and context helpers are trusted private in-process components, not an authenticated importer. Loopback continuation and zero-dispatch mutation evidence are in [D4](decisions/D4-origin-and-binding.md#measured-m3-implementation); no equivalence class, persistence/import, Drop/Demote policy or live canary is implemented.
 
 **Canary (`CanaryNegativeControl`).** A live same-origin canary runs a real second request. Its record carries `negative_control: rejected|accepted|not_run` and three evidence fields: `client_retention_verified`, `request_accepted`, `native_validation_evidenced` (presence of thinking, usage or cache evidence). A cell whose negative control (a tampered signature must be rejected) is `accepted` or `not_run` is `ReplayAcceptanceUnobservable` and is never reported as "replay verified": acceptance alone is vacuous because the vendor degrades gracefully by dropping unreadable blocks. Results are N-run acceptance rates with a lower confidence bound, not a boolean. Canary keys, cost, fork-PR secret exposure and terms of service are handled in the pre-mortem (section 11).
 
@@ -663,7 +668,7 @@ The library never computes a NeoGraph digest. It provides a **canonical replay p
 
 ## 9. Extension walkthroughs
 
-Paths below are the target release layout, not a list of implemented files. M2 uses private `src/` modules and `tests/fixtures/`; its measured scope is in POC_PLAN. A fixture is one JSON case file (request, transport schedule, expected, provenance); the target format uses sidecars for large binary data. Generated capability tables and a release `CHANGELOG.md` belong to the release workflow below. "Zero C++" means *no C++ source edit by the contributor*; the library is still rebuilt and released (5.6).
+Paths below are the target release layout, not a list of implemented files. M2/M3 use private `src/` modules and `tests/fixtures/`; their measured scope is in POC_PLAN. A fixture is one JSON case file (request, transport schedule, expected, provenance); the target format uses sidecars for large binary data. Generated capability tables and a release `CHANGELOG.md` belong to the release workflow below. "Zero C++" means *no C++ source edit by the contributor*; the library is still rebuilt and released (5.6).
 
 **(a) Add a strict-compatible OpenAI-style vendor `acme` (Chat Completions shape).** Applies only to a vendor that passes the qualification test of 5.6. No C++ source edit.
 - `descriptors/vendors/acme.json`, `descriptors/manifest.json`

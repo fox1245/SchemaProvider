@@ -27,6 +27,7 @@ endif()
 
 find_package(Threads REQUIRED)
 find_package(CURL 7.88 REQUIRED)
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 find_path(SP_ASIO_INCLUDE_DIR asio.hpp HINTS "${ASIO_ROOT}/include" DOC "standalone Asio headers")
 if(NOT SP_ASIO_INCLUDE_DIR)
   message(FATAL_ERROR "standalone Asio not found: install libasio-dev or pass -DASIO_ROOT=<dir containing include/asio.hpp>")
@@ -63,9 +64,11 @@ target_include_directories(sp_descriptor PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_options(sp_descriptor PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(sp_descriptor PRIVATE sp_json)
 
-add_library(sp_codecs STATIC src/codecs/accumulator.cpp src/codecs/chat.cpp src/codecs/chat_request.cpp)
+add_library(sp_codecs STATIC src/core/native.cpp src/codecs/accumulator.cpp
+            src/codecs/chat.cpp src/codecs/chat_request.cpp
+            src/codecs/messages.cpp src/codecs/messages_request.cpp)
 target_compile_options(sp_codecs PRIVATE -Wall -Wextra -Wpedantic)
-target_link_libraries(sp_codecs PUBLIC sp_core PRIVATE sp_json sp_descriptor)
+target_link_libraries(sp_codecs PUBLIC sp_core PRIVATE sp_json sp_descriptor OpenSSL::Crypto)
 
 add_library(sp_transport STATIC src/transport/http_transport.cpp src/transport/sse_framer.cpp)
 target_include_directories(sp_transport
@@ -97,9 +100,15 @@ if(SP_BUILD_TESTS)
   target_link_libraries(sp_descriptor_tests PRIVATE sp_descriptor sp_json)
   add_executable(sp_chat_tests tests/chat_semantic_test.cpp)
   target_link_libraries(sp_chat_tests PRIVATE sp_codecs sp_descriptor sp_json sp_transport)
+  add_executable(sp_messages_tests tests/messages_semantic_test.cpp)
+  target_link_libraries(sp_messages_tests PRIVATE sp_codecs sp_descriptor sp_json)
+  add_executable(sp_messages_replay_tests tests/messages_replay_test.cpp)
+  target_link_libraries(sp_messages_replay_tests PRIVATE sp_codecs sp_descriptor sp_json)
+  add_executable(sp_native_continuation_tests tests/native_continuation_bounds_test.cpp)
+  target_link_libraries(sp_native_continuation_tests PRIVATE sp_codecs sp_descriptor sp_json)
   add_executable(sp_fixture_runner tests/fixture_runner.cpp)
   target_link_libraries(sp_fixture_runner PRIVATE sp_codecs sp_descriptor sp_json sp_transport)
-  foreach(target sp_sse_tests sp_descriptor_tests sp_chat_tests sp_fixture_runner)
+  foreach(target sp_sse_tests sp_descriptor_tests sp_chat_tests sp_messages_tests sp_messages_replay_tests sp_native_continuation_tests sp_fixture_runner)
     target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
   endforeach()
 
@@ -120,8 +129,17 @@ if(SP_BUILD_TESTS)
   add_test(NAME sse_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_sse_tests>)
   add_test(NAME descriptor_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_descriptor_tests>)
   add_test(NAME chat_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_chat_tests>)
+  add_test(NAME messages_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_messages_tests>)
+  add_test(NAME messages_replay COMMAND ${sp_test_runner} $<TARGET_FILE:sp_messages_replay_tests>)
+  add_test(NAME native_continuation_bounds COMMAND ${sp_test_runner} $<TARGET_FILE:sp_native_continuation_tests>)
   add_test(NAME chat_fixtures COMMAND ${sp_test_runner} $<TARGET_FILE:sp_fixture_runner> ${SP_NODE}
-           ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/chat_fixture_server.mjs
-           ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/chat)
-  set_tests_properties(sse_properties descriptor_properties chat_properties chat_fixtures PROPERTIES TIMEOUT 300)
+           ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/fixture_server.mjs
+           ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/chat
+           ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/openai-chat-descriptor.json)
+  add_test(NAME messages_fixtures COMMAND ${sp_test_runner} $<TARGET_FILE:sp_fixture_runner> ${SP_NODE}
+           ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/fixture_server.mjs
+           ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/messages
+           ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/anthropic-messages-descriptor.json)
+  set_tests_properties(sse_properties descriptor_properties chat_properties chat_fixtures
+                       messages_properties messages_replay native_continuation_bounds messages_fixtures PROPERTIES TIMEOUT 300)
 endif()

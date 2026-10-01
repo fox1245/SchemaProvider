@@ -116,10 +116,20 @@ int thread_count() {
 }
 
 long rss_bytes() {
-  std::ifstream in("/proc/self/statm");
-  long size = 0, resident = 0;
-  in >> size >> resident;
-  return resident * sysconf(_SC_PAGESIZE);
+  // statm/VmRSS are approximate kernel counters. Keep the existing memory gates,
+  // but measure actual resident pages, including sanitizer overhead.
+  std::ifstream in("/proc/self/smaps_rollup");
+  std::string line;
+  while (std::getline(in, line)) {
+    long kib = 0;
+    char unit[3]{};
+    if (std::sscanf(line.c_str(), "Rss: %ld %2s", &kib, unit) == 2 &&
+        kib > 0 && std::strcmp(unit, "kB") == 0) {
+      return kib * 1024;
+    }
+  }
+  CHECK_MSG(false, "cannot read RSS from /proc/self/smaps_rollup");
+  return 0;
 }
 
 // ------------------------------------------------------------------------------------------
@@ -981,13 +991,25 @@ void expect_paused_plateau(Transport& t, const std::string& flood_url, long acce
   const long rss_before = rss_bytes();
   Operation op = t.start(post(flood_url + "?total=" + std::to_string(kTotal), "{}", 60000), std::move(cb));
   CHECK_MSG(wait_until([&] { return refused.load(); }, 5000), "%s: the consumer was never asked to pause", label);
-  std::this_thread::sleep_for(milliseconds(700));
-  const long w1 = fetch_stats()["flood_written"] - before["flood_written"];
-  std::this_thread::sleep_for(milliseconds(500));
-  const long w2 = fetch_stats()["flood_written"] - before["flood_written"];
+  // Pausing the consumer does not instantly stop writes into kernel socket buffers.
+  // Require a measured plateau within a bounded wait, not an assumed 700 ms settle time.
+  long w2 = fetch_stats()["flood_written"] - before["flood_written"];
+  long w1 = w2;
+  bool plateau = false;
+  const auto settle_deadline = steady_clock::now() + milliseconds(5000);
+  while (steady_clock::now() < settle_deadline) {
+    w1 = w2;
+    std::this_thread::sleep_for(milliseconds(500));
+    w2 = fetch_stats()["flood_written"] - before["flood_written"];
+    if (w2 >= kTotal / 2) break;
+    if (w1 == w2) {
+      plateau = w2 > 0;
+      break;
+    }
+  }
   const long growth = rss_bytes() - rss_before;
   note("%s: consumed %ld B; server wrote %ld then %ld of %ld; RSS +%ld B", label, received.load(), w1, w2, kTotal, growth);
-  CHECK_MSG(w1 == w2, "%s: server writes still growing while paused (%ld -> %ld)", label, w1, w2);
+  CHECK_MSG(plateau, "%s: server did not plateau while paused (last samples %ld -> %ld)", label, w1, w2);
   CHECK_MSG(w2 < kTotal / 2, "%s: server pushed %ld bytes into a paused client", label, w2);
   CHECK_MSG(growth < (24L << 20), "%s: client RSS grew %ld B while paused", label, growth);
   unlimited = true;

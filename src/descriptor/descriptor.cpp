@@ -209,7 +209,16 @@ public:
             if (!revision.is_uint() || !revision.as_uint()) fail("/revision", "positive uint64 integer");
             value_.id_ = string(root.get("id"), "/id", 128);
             if (!std::all_of(value_.id_.begin(), value_.id_.end(), [](char c) { return ascii_alpha(c) || digit(c) || c == '-' || c == '_' || c == '.'; })) fail("/id", "stable ASCII identifier");
-            if (string(root.get("family"), "/family", 64) != "openai.chat") fail("/family", "installed family openai.chat");
+            value_.family_ = string(root.get("family"), "/family", 64);
+            if (value_.family_ != "openai.chat" && value_.family_ != "anthropic.messages")
+                fail("/family", "installed family openai.chat or anthropic.messages");
+            if (value_.family_ == "anthropic.messages") {
+                value_.stop_reasons_ = {
+                    {"end_turn", StopKind::EndTurn}, {"max_tokens", StopKind::MaxTokens},
+                    {"tool_use", StopKind::ToolUse}, {"stop_sequence", StopKind::StopSequence},
+                    {"pause_turn", StopKind::PauseTurn}, {"refusal", StopKind::Refusal},
+                    {"model_context_window_exceeded", StopKind::ContextLimit}};
+            }
             connection(root.get("connection"));
             if (auto item = root.get("evidence"); item.valid()) evidence(item);
             if (auto item = root.get("bindings"); item.valid()) bindings(item);
@@ -227,7 +236,7 @@ private:
         const auto keys = schema_keys(pointer);
         for (auto member : item.members())
             if (std::find(keys.begin(), keys.end(), member.key) == keys.end())
-                fail(pointer, "declared M2 field", "unknown or unsupported descriptor member");
+                fail(pointer, "declared family field", "unknown or unsupported descriptor member");
     }
     std::string string(Value item, const std::string& pointer, std::size_t maximum, bool empty = false) const {
         if (!item.is_string()) fail(pointer, "string");
@@ -258,6 +267,8 @@ private:
             if (std::find(reserved.begin(), reserved.end(), name) != reserved.end() || name.starts_with("proxy-") || !names.insert(name).second)
                 fail(pointer, "unique non-reserved literal header name");
             value_.headers_.emplace_back(member.key, string(member.value, pointer, 4096, true));
+            if (value_.family_ == "anthropic.messages" && name == "anthropic-version" && value_.headers_.back().second != "2023-06-01")
+                fail(pointer, "supported Messages API version 2023-06-01");
         }
     }
     void evidence(Value item) {
@@ -282,12 +293,16 @@ private:
             std::pair{"model", &value_.model_member_}, std::pair{"messages", &value_.messages_member_},
             std::pair{"stream", &value_.stream_member_}, std::pair{"max_output_tokens", &value_.max_output_tokens_member_}};
         std::unordered_set<std::string> destinations{"tools", "tool_choice", "temperature", "top_p", "stream_options", "n", "response_format", "stop", "max_completion_tokens"};
+        if (value_.family_ == "anthropic.messages") {
+            for (const auto* reserved : {"system", "thinking", "metadata", "stop_sequences", "top_k", "output_config", "service_tier", "context_management", "container", "mcp_servers"})
+                destinations.insert(reserved);
+        }
         for (auto [name, target] : slots) {
             const std::string pointer = std::string("/bindings/") + name;
             if (auto field = item.get(name); field.valid()) *target = string(field, pointer, 128);
             if (!member_name(*target)) fail(pointer, "literal object member identifier");
             // max_completion_tokens is the family's alternate declared token slot.
-            if (std::string_view(name) == "max_output_tokens" && *target == "max_completion_tokens") destinations.erase(*target);
+            if (value_.family_ == "openai.chat" && std::string_view(name) == "max_output_tokens" && *target == "max_completion_tokens") destinations.erase(*target);
             if (!destinations.insert(*target).second) fail(pointer, "distinct non-reserved request destination", "request destination collision");
         }
         auto usage = item.get("usage");
@@ -314,6 +329,11 @@ private:
         constexpr std::array reserved{"choices", "error", "id", "object", "created", "model", "system_fingerprint", "service_tier"};
         if (std::find(reserved.begin(), reserved.end(), value_.usage_path_.front()) != reserved.end())
             fail("/bindings/usage", "usage root disjoint from family response fields", "response path collision");
+        if (value_.family_ == "anthropic.messages") {
+            constexpr std::array message_fields{"type", "role", "content", "stop_reason", "stop_sequence", "stop_details", "input_transformations", "container"};
+            if (std::find(message_fields.begin(), message_fields.end(), value_.usage_path_.front()) != message_fields.end())
+                fail("/bindings/usage", "usage root disjoint from Messages response fields", "response path collision");
+        }
     }
     void stops(Value item) {
         if (!item.is_object() || item.size() > 64) fail("/stop_reasons", "object with at most 64 stop mappings");
@@ -335,6 +355,8 @@ private:
             else if (mapped == "MalformedCall") kind = StopKind::MalformedCall;
             else fail(pointer, "existing StopKind");
             auto found = std::find_if(value_.stop_reasons_.begin(), value_.stop_reasons_.end(), [&](const auto& entry) { return entry.first == member.key; });
+            if (value_.family_ == "anthropic.messages" && found != value_.stop_reasons_.end() && found->second != kind)
+                fail(pointer, "unchanged standard Messages stop meaning");
             if (found == value_.stop_reasons_.end()) value_.stop_reasons_.emplace_back(member.key, kind);
             else found->second = kind;
         }

@@ -1,4 +1,4 @@
-// Model-free M2 wire oracle. stdin selects one fixture; stdout is a JSON-line control channel.
+// Model-free wire oracle. stdin selects one fixture; stdout is a JSON-line control channel.
 // HTTP requests are matched independently of the C++ encoder/decoder, never recorded on failure.
 import http from 'node:http';
 import fs from 'node:fs';

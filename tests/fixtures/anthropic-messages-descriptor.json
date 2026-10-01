@@ -1,0 +1,24 @@
+{
+  "descriptor_version": 1,
+  "revision": 1,
+  "id": "loopback-messages",
+  "family": "anthropic.messages",
+  "evidence": {
+    "urls": ["https://platform.claude.com/docs/en/build-with-claude/streaming"],
+    "verified_at": "2026-10-01"
+  },
+  "connection": {
+    "base_url": "http://127.0.0.1",
+    "paths": {"buffered": "/v1/messages", "streaming": "/v1/messages"},
+    "headers": {"anthropic-version": "2023-06-01", "X-Fixture": "synthetic"}
+  },
+  "bindings": {
+    "model": "model", "messages": "messages", "stream": "stream",
+    "max_output_tokens": "max_tokens", "usage": ["usage"]
+  },
+  "stop_reasons": {
+    "end_turn": "EndTurn", "max_tokens": "MaxTokens", "tool_use": "ToolUse",
+    "stop_sequence": "StopSequence", "pause_turn": "PauseTurn", "refusal": "Refusal",
+    "model_context_window_exceeded": "ContextLimit"
+  }
+}
