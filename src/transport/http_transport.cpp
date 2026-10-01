@@ -1133,4 +1133,6 @@ RuntimeInfo Transport::runtime_info() const {
 
 unsigned Transport::io_threads() const noexcept { return static_cast<unsigned>(core_->threads.size()); }
 
+bool on_io_thread() noexcept { return tl_io_thread; }
+
 }  // namespace sp::transport

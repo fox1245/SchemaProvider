@@ -69,6 +69,13 @@ const char* error_name(sp::ErrorKind kind) {
     case sp::ErrorKind::DeadlineExceeded: return "DeadlineExceeded";
     case sp::ErrorKind::ResourceLimit: return "ResourceLimit";
     case sp::ErrorKind::Misuse: return "Misuse";
+    case sp::ErrorKind::Authentication: return "Authentication";
+    case sp::ErrorKind::Permission: return "Permission";
+    case sp::ErrorKind::NotFound: return "NotFound";
+    case sp::ErrorKind::RateLimited: return "RateLimited";
+    case sp::ErrorKind::QuotaExhausted: return "QuotaExhausted";
+    case sp::ErrorKind::LimitUnknown: return "LimitUnknown";
+    case sp::ErrorKind::Overloaded: return "Overloaded";
   }
   throw std::runtime_error("unprojected error kind");
 }

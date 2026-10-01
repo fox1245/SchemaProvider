@@ -20,7 +20,7 @@ Non-gating scheduled benchmark for the first 3 releases: C=1024 / 2C=2048 held-s
 ## Evidence
 - [read source] NeoGraph already runs an async streaming path and native `WsClient` (see D1).
 - [inference] Bounded workers make thread count independent of held streams; blocking facade keeps simple callers simple.
-- No capacity measurement exists yet; numbers above are proposals.
+- [live observation] M4's private Chat/Messages runtime exercises 88 and 176 held SSE streams with six configured workers, a short unrelated request, an OS thread-count plateau and at most eight extra threads. This is a bounded-admission observation, not a throughput or supported-capacity claim; the scheduled benchmark above remains unrun.
 
 ## Options considered
 - Blocking-first core with thread pool: rejected (admission depends on held streams, cancel of blocked reads is OS-specific).
@@ -28,7 +28,7 @@ Non-gating scheduled benchmark for the first 3 releases: C=1024 / 2C=2048 held-s
 - Threshold-based mode switching: rejected (needs unmeasurable prototype).
 
 ## Consequences
-Callback/handle contract (exactly one outcome, ownership) is a first-class API concern; a deterministic scheduler/executor seam is required for race tests; slow callbacks must not starve the shared I/O pool (specified in DESIGN).
+Callback/handle contract (exactly one outcome, ownership) is a first-class API concern; a deterministic scheduler/executor seam is required for race tests. Callbacks must not block the shared workers. Slow-callback diagnostics detect misuse, not preemption or a starvation-prevention guarantee (DESIGN section 7).
 
 ## Reconsideration conditions
 Property gates cannot be met with the chosen executor on the supported toolchain floor; or the scheduled benchmark regresses >25% after baseline promotion with no fix.
@@ -38,6 +38,13 @@ Thread count growing with K, a waiting state where cancel needs peer progress, o
 
 ## Enforcement
 `CancelWithoutPeerProgress`, `AdmissionIndependentOfHeldStreams`, `OwnershipAndBounds`; TSan/ASan/UBSan CI jobs; scheduled benchmark job.
+
+### M4 implementation and corrections
+
+`src/runtime/client.h` is private, not installed/stable. `Operation` is move-only; dropping it requests nonblocking cancellation, while `detach()` explicitly relinquishes it without cancellation. `complete()` waits on that same operation. Results are immutable owned values and `join()` fences terminal callback return, closure destruction and admission-slot release. Admitted preflight errors run on the executor. A request that cannot reserve/publish a slot throws `AdmissionError` without calling a callback; the blocking facade returns its `Failure`. This keeps rejection bounded without inline reentrancy.
+
+RAII applies to workers, timers, stop registrations, attempt handles and test processes/FDs. A timer wait originally borrowed a map key across an unlock; the actual API smoke reproduced ASan heap-use-after-free, so the wait now takes a deadline value. Injected initial enqueue allocation failure also reproduced a shutdown hang caused by an unreleased admission slot; an RAII publication reservation now rolls back that ownership. A bounded manual-executor test enumerates 298 ready-task schedules and records actual completion/cancel/timer firings; 64 seeded eight-operation schedules exercise the shared retry budget. These are local runtime tests, not exhaustive OS/libcurl scheduling or the future WebSocket gate.
+
 
 ## Open items
 - NeoGraph target concurrency C for the scheduled benchmark (owner input).

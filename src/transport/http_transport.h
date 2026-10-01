@@ -28,6 +28,9 @@
 
 namespace sp::transport {
 
+// Private runtime guard; no backend/executor type crosses this boundary.
+bool on_io_thread() noexcept;
+
 enum class HttpVersion : std::uint8_t {
   Auto,                 // HTTP/2 via ALPN on https, HTTP/1.1 otherwise
   Http1_1,              // force HTTP/1.1

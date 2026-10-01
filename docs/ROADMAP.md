@@ -1,6 +1,6 @@
 # Roadmap: staged release ladder
 
-Design proposal for a two-person team; private transport, Chat and Messages buffered/SSE codecs now exist (see POC_PLAN, measured milestones M1, M1b, M2 and M3). Stage order is fixed; each stage ships only if its exit criteria pass. Property names are defined in CONFORMANCE section 5; decisions in decisions/README. The PoC runs ahead of Stage 0 and de-risks Stage 1; it is not an installed release or completion of a release stage. A reviewer requirement is one independent reviewer per stage (may be a different model family), not a standing panel.
+Design proposal for a two-person team; the private transport, Chat/Messages buffered/SSE codecs and async-native runtime now exist (see POC_PLAN, measured milestones M1 through M4). Stage order is fixed; each stage ships only if its exit criteria pass. Property names are defined in CONFORMANCE section 5; decisions in decisions/README. The PoC runs ahead of Stage 0 and de-risks Stage 1; it is not an installed release or completion of a release stage. A reviewer requirement is one independent reviewer per stage (may be a different model family), not a standing panel.
 
 ## Stage 0 — Foundations (docs and gates)
 - Entry: DESIGN, CONFORMANCE, RESEARCH and decisions accepted by the maintainer.
@@ -45,7 +45,7 @@ Design proposal for a two-person team; private transport, Chat and Messages buff
 
 ## Optional HTTP/3 transport lane
 
-- Accepted direction, not implemented or verified. [D1](decisions/D1-transport.md#optional-http3-policy) defines the policy; [POC_PLAN section 3.1](POC_PLAN.md#31-optional-http3-workstream) defines the workstream. Baseline stages retain their order; after measured M3, the next PoC milestone is M4.
+- Accepted direction, not implemented or verified. [D1](decisions/D1-transport.md#optional-http3-policy) defines the policy; [POC_PLAN section 3.1](POC_PLAN.md#31-optional-http3-workstream) defines the workstream. Baseline stages retain their order; after measured M4, the next PoC milestone is M5, with live calls still budget-gated.
 - Scope: HTTP/3 preference in capable builds, safe same-origin HTTPS connection-stage fallback to HTTP/2/1.1, and a working non-HTTP/3 build. One libcurl stack, shared provider codecs/events/accumulator, no protocol-specific NeoGraph call path.
 - Safety: only one connection candidate may send a request; possible acceptance is never retried under the name of fallback. One deadline/budget, generation POST 0-RTT disabled by default, and unchanged TLS verification.
 - Exit before advertising HTTP/3: [CONFORMANCE section 12.1](CONFORMANCE.md#121-optional-http3-gate), including actual QUIC negotiation, fallback request counters, cancellation/deadline, reset/truncation, shared-stream bounds/isolation and applicable sanitizer runs. Baseline HTTP/2/1.1 must remain usable without QUIC dependencies.

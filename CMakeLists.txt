@@ -78,12 +78,38 @@ target_compile_definitions(sp_transport PRIVATE ASIO_STANDALONE ASIO_NO_DEPRECAT
 target_compile_options(sp_transport PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(sp_transport PUBLIC Threads::Threads PRIVATE CURL::libcurl)
 
+add_library(sp_runtime STATIC src/runtime/client.cpp src/runtime/policy.cpp)
+target_include_directories(sp_runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_options(sp_runtime PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(sp_runtime PUBLIC sp_core PRIVATE sp_codecs sp_transport sp_descriptor sp_json)
+
 if(SP_BUILD_TESTS)
   enable_testing()
   # Model-free peers are required for the TLS and HTTP/2 gates, never silently skipped.
   find_program(SP_NODE node REQUIRED)
   find_program(SP_OPENSSL openssl REQUIRED)
 
+
+  # A positive control separates const-view failures from broken include/toolchain setup.
+  function(sp_check_runtime_result)
+    set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+    foreach(mutation_case RANGE 0 4)
+      try_compile(result_compiles
+                  "${CMAKE_CURRENT_BINARY_DIR}/runtime-result-${mutation_case}"
+                  "${CMAKE_CURRENT_SOURCE_DIR}/tests/runtime_result_compile.cpp"
+                  CMAKE_FLAGS -DCMAKE_CXX_STANDARD=20 -DCMAKE_CXX_STANDARD_REQUIRED=ON
+                  COMPILE_DEFINITIONS "-I${CMAKE_CURRENT_SOURCE_DIR}/src"
+                                      "-DSP_MUTATION_CASE=${mutation_case}"
+                  OUTPUT_VARIABLE compile_output)
+      if(mutation_case EQUAL 0 AND NOT result_compiles)
+        message(FATAL_ERROR "Runtime result read-only control did not compile: ${compile_output}")
+      elseif(mutation_case GREATER 0 AND result_compiles)
+        message(FATAL_ERROR "Runtime result mutation ${mutation_case} unexpectedly compiled")
+      endif()
+    endforeach()
+    message(STATUS "Runtime Result: read-only control compiled; four mutations rejected")
+  endfunction()
+  sp_check_runtime_result()
   add_executable(sp_loopback_server tests/support/loopback_server.cpp)
   target_include_directories(sp_loopback_server PRIVATE ${SP_ASIO_INCLUDE_DIR})
   target_compile_definitions(sp_loopback_server PRIVATE ASIO_STANDALONE ASIO_NO_DEPRECATED)
@@ -108,6 +134,15 @@ if(SP_BUILD_TESTS)
   target_link_libraries(sp_native_continuation_tests PRIVATE sp_codecs sp_descriptor sp_json)
   add_executable(sp_fixture_runner tests/fixture_runner.cpp)
   target_link_libraries(sp_fixture_runner PRIVATE sp_codecs sp_descriptor sp_json sp_transport)
+  add_executable(sp_runtime_policy_tests tests/runtime_policy_test.cpp)
+  target_link_libraries(sp_runtime_policy_tests PRIVATE sp_runtime sp_json)
+  add_executable(sp_runtime_scheduler_tests tests/runtime_scheduler_test.cpp)
+  target_link_libraries(sp_runtime_scheduler_tests PRIVATE sp_runtime sp_json)
+  add_executable(sp_runtime_tests tests/runtime_properties_test.cpp)
+  target_link_libraries(sp_runtime_tests PRIVATE sp_runtime sp_json)
+  foreach(target sp_runtime_policy_tests sp_runtime_scheduler_tests sp_runtime_tests)
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+  endforeach()
   foreach(target sp_sse_tests sp_descriptor_tests sp_chat_tests sp_messages_tests sp_messages_replay_tests sp_native_continuation_tests sp_fixture_runner)
     target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
   endforeach()
@@ -140,6 +175,12 @@ if(SP_BUILD_TESTS)
            ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/fixture_server.mjs
            ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/messages
            ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/anthropic-messages-descriptor.json)
+  add_test(NAME runtime_policy COMMAND ${sp_test_runner} $<TARGET_FILE:sp_runtime_policy_tests>)
+  add_test(NAME runtime_scheduler COMMAND ${sp_test_runner} $<TARGET_FILE:sp_runtime_scheduler_tests>
+           ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/runtime_server.mjs)
+  add_test(NAME runtime_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_runtime_tests>
+           ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/runtime_server.mjs)
+  set_tests_properties(runtime_policy runtime_scheduler runtime_properties PROPERTIES TIMEOUT 300)
   set_tests_properties(sse_properties descriptor_properties chat_properties chat_fixtures
                        messages_properties messages_replay native_continuation_bounds messages_fixtures PROPERTIES TIMEOUT 300)
 endif()

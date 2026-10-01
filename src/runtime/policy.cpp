@@ -1,0 +1,316 @@
+#include "runtime/policy.h"
+#include "json/json.h"
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <limits>
+
+namespace sp::runtime::detail {
+namespace {
+using Ms = std::chrono::milliseconds;
+constexpr auto max_ms = std::numeric_limits<Ms::rep>::max();
+
+std::string_view trim(std::string_view s) {
+  while (!s.empty() && (s.front() == ' ' || s.front() == '\t')) s.remove_prefix(1);
+  while (!s.empty() && (s.back() == ' ' || s.back() == '\t')) s.remove_suffix(1);
+  return s;
+}
+bool iequal(std::string_view a, std::string_view b) {
+  if (a.size() != b.size()) return false;
+  for (std::size_t i = 0; i < a.size(); ++i) {
+    auto c = a[i];
+    if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+    if (c != b[i]) return false;
+  }
+  return true;
+}
+bool digits(std::string_view s, std::int64_t& out) {
+  if (s.empty()) return false;
+  out = 0;
+  for (char c : s) {
+    if (c < '0' || c > '9' || out > (max_ms - (c - '0')) / 10) return false;
+    out = out * 10 + c - '0';
+  }
+  return true;
+}
+// Exact decimal conversion, rounded upward to a millisecond. No floating-point
+// parser, exponent syntax, locale, or overflow can shorten a server minimum.
+std::optional<Ms> decimal_ms(std::string_view s, std::int64_t scale) {
+  auto dot = s.find('.');
+  std::int64_t whole;
+  if (!digits(s.substr(0, dot), whole) || whole > max_ms / scale) return {};
+  auto value = whole * scale;
+  if (dot == std::string_view::npos) return Ms(value);
+  auto fraction = s.substr(dot + 1);
+  if (fraction.empty()) return {};
+  std::int64_t partial = 0;
+  bool remainder = false;
+  for (char c : fraction) {
+    if (c < '0' || c > '9') return {};
+    scale /= 10;
+    if (scale) partial += (c - '0') * scale;
+    else remainder = remainder || c != '0';
+  }
+  partial += remainder;
+  if (value > max_ms - partial) return {};
+  return Ms(value + partial);
+}
+std::optional<Ms> reset_duration(std::string_view s) {
+  std::int64_t total = 0, previous = max_ms;
+  while (!s.empty()) {
+    auto end = s.find_first_not_of("0123456789.");
+    if (end == std::string_view::npos || end == 0) return {};
+    auto number = s.substr(0, end);
+    s.remove_prefix(end);
+    std::int64_t scale;
+    if (s.starts_with("ms")) { scale = 1; s.remove_prefix(2); }
+    else {
+      switch (s.front()) {
+        case 'd': scale = 86400000; break;
+        case 'h': scale = 3600000; break;
+        case 'm': scale = 60000; break;
+        case 's': scale = 1000; break;
+        default: return {};
+      }
+      s.remove_prefix(1);
+    }
+    // Fractional seconds/milliseconds only: division of non-power-of-ten unit
+    // scales would otherwise require rational parsing. Unknown formats fail closed.
+    if (scale >= previous || (scale > 1000 && number.find('.') != std::string_view::npos)) return {};
+    previous = scale;
+    auto part = decimal_ms(number, scale);
+    if (!part || total > max_ms - part->count()) return {};
+    total += part->count();
+  }
+  return Ms(total);
+}
+SteadyTime add(SteadyTime t, Ms delay) {
+  using D = SteadyTime::duration;
+  if (delay < Ms::zero() || delay > std::chrono::duration_cast<Ms>(D::max())) return SteadyTime::max();
+  const auto d = std::chrono::duration_cast<D>(delay);
+  if (t.time_since_epoch().count() > D::max().count() - d.count()) return SteadyTime::max();
+  return t + d;
+}
+std::optional<Ms> http_date(std::string_view s, WallTime wall) {
+  // Admit IMF-fixdate only. Obsolete HTTP-date forms are conservatively unknown.
+  if (s.size() != 29 || s.substr(3, 2) != ", " || s[7] != ' ' || s[11] != ' ' ||
+      s[16] != ' ' || s[19] != ':' || s[22] != ':' || s.substr(25) != " GMT") return {};
+  constexpr std::array<std::string_view, 12> months{"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+  constexpr std::array<std::string_view, 7> weekdays{"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+  auto month = std::find(months.begin(), months.end(), s.substr(8, 3));
+  auto weekday = std::find(weekdays.begin(), weekdays.end(), s.substr(0, 3));
+  std::int64_t y, d, h, m, sec;
+  if (month == months.end() || weekday == weekdays.end() || !digits(s.substr(5, 2), d) ||
+      !digits(s.substr(12, 4), y) || !digits(s.substr(17, 2), h) ||
+      !digits(s.substr(20, 2), m) || !digits(s.substr(23, 2), sec) ||
+      y < 1601 || h > 23 || m > 59 || sec > 59) return {};
+  const std::chrono::year_month_day date{std::chrono::year(static_cast<int>(y)),
+      std::chrono::month(static_cast<unsigned>(month - months.begin() + 1)), std::chrono::day(static_cast<unsigned>(d))};
+  if (!date.ok()) return {};
+  const auto days = std::chrono::sys_days(date);
+  if (std::chrono::weekday(days).c_encoding() != static_cast<unsigned>(weekday - weekdays.begin())) return {};
+  const auto target = std::chrono::duration_cast<Ms>(days.time_since_epoch()).count() + ((h * 60 + m) * 60 + sec) * 1000;
+  const auto receipt = std::chrono::floor<Ms>(wall.time_since_epoch()).count();
+  if (target <= receipt) return Ms::zero();
+  if (receipt < 0 && target > max_ms + receipt) return {};
+  return Ms(target - receipt);
+}
+bool never_kind(ErrorKind k) {
+  switch (k) {
+    case ErrorKind::Transport: case ErrorKind::Truncated: case ErrorKind::RemoteFailure:
+    case ErrorKind::RateLimited: case ErrorKind::Overloaded: return false;
+    default: return true;
+  }
+}
+struct Code { std::string_view value; ErrorKind kind; RetryClass retry; };
+constexpr Code chat_codes[]{
+  {"insufficient_quota", ErrorKind::QuotaExhausted, RetryClass::Never},
+  {"rate_limit_exceeded", ErrorKind::RateLimited, RetryClass::AfterReset},
+  {"invalid_api_key", ErrorKind::Authentication, RetryClass::Never},
+  {"model_not_found", ErrorKind::NotFound, RetryClass::Never}};
+constexpr Code messages_codes[]{
+  {"invalid_request_error", ErrorKind::InvalidRequest, RetryClass::Never},
+  {"authentication_error", ErrorKind::Authentication, RetryClass::Never},
+  {"permission_error", ErrorKind::Permission, RetryClass::Never},
+  {"not_found_error", ErrorKind::NotFound, RetryClass::Never},
+  {"request_too_large", ErrorKind::InvalidRequest, RetryClass::Never},
+  {"rate_limit_error", ErrorKind::RateLimited, RetryClass::AfterReset},
+  {"api_error", ErrorKind::RemoteFailure, RetryClass::Transient},
+  {"overloaded_error", ErrorKind::Overloaded, RetryClass::Transient}};
+}  // namespace
+
+ResponseInfo inspect_response(std::string_view family, int status,
+    const std::vector<transport::Header>& headers, std::string_view body,
+    SteadyTime received, WallTime wall_received) {
+  ResponseInfo info;
+  switch (status) {
+    case 400: case 413: case 422: info.kind = ErrorKind::InvalidRequest; info.retry_class = RetryClass::Never; break;
+    case 401: info.kind = ErrorKind::Authentication; info.retry_class = RetryClass::Never; break;
+    case 403: info.kind = ErrorKind::Permission; info.retry_class = RetryClass::Never; break;
+    case 404: info.kind = ErrorKind::NotFound; info.retry_class = RetryClass::Never; break;
+    case 429: info.kind = ErrorKind::LimitUnknown; break;
+    case 500: case 502: case 503: case 504: case 529:
+      info.kind = ErrorKind::Overloaded; info.retry_class = RetryClass::Transient; break;
+    default: break;
+  }
+  if (!body.empty() && (family == "openai.chat" || family == "anthropic.messages")) {
+    auto parsed = json::parse(body, {body.size(), 32});
+    if (auto* document = std::get_if<json::Document>(&parsed)) {
+      auto error = document->root().get("error");
+      if (error.is_object()) {
+        auto admit = [&](json::Value field, const auto& codes) {
+          if (!field.is_string()) return;
+          for (const auto& code : codes) {
+            if (field.as_string() != code.value || info.kind == ErrorKind::QuotaExhausted) continue;
+            info.kind = code.kind; info.retry_class = code.retry; info.vendor_code = code.value;
+          }
+        };
+        if (family == "openai.chat") {
+          admit(error.get("type"), chat_codes);
+          admit(error.get("code"), chat_codes);
+        } else admit(error.get("type"), messages_codes);
+      }
+    }
+  }
+  for (const auto& header : headers) {
+    const auto value = trim(header.value);
+    std::optional<Ms> delay;
+    if (iequal(header.name, "retry-after")) {
+      std::int64_t seconds;
+      if (digits(value, seconds) && seconds <= max_ms / 1000) delay = Ms(seconds * 1000);
+      else delay = http_date(value, wall_received);
+    } else if (family == "openai.chat" && iequal(header.name, "retry-after-ms")) delay = decimal_ms(value, 1);
+    else if (family == "openai.chat" && (iequal(header.name, "x-ratelimit-reset-requests") || iequal(header.name, "x-ratelimit-reset-tokens"))) {
+      if (!value.empty()) delay = reset_duration(value);
+    } else continue;
+    const auto minimum = delay ? add(received, *delay) : SteadyTime::max();
+    info.retry_not_before = std::max(info.retry_not_before.value_or(minimum), minimum);
+  }
+  return info;
+}
+
+std::string_view safe_message(ErrorKind kind) noexcept {
+  switch (kind) {
+    case ErrorKind::InvalidConfig: return "invalid runtime configuration";
+    case ErrorKind::InvalidRequest: return "invalid request";
+    case ErrorKind::Unsupported: return "unsupported operation";
+    case ErrorKind::Authentication: return "authentication failed";
+    case ErrorKind::Permission: return "permission denied";
+    case ErrorKind::NotFound: return "requested resource not found";
+    case ErrorKind::RateLimited: return "request rate limited";
+    case ErrorKind::QuotaExhausted: return "quota exhausted";
+    case ErrorKind::LimitUnknown: return "unclassified request limit";
+    case ErrorKind::Overloaded: return "remote service unavailable";
+    case ErrorKind::Transport: return "transport failed";
+    case ErrorKind::ProtocolCorrupt: return "invalid response protocol";
+    case ErrorKind::Truncated: return "response ended abnormally";
+    case ErrorKind::RemoteFailure: return "remote request failed";
+    case ErrorKind::Cancelled: return "operation cancelled";
+    case ErrorKind::DeadlineExceeded: return "operation deadline exceeded";
+    case ErrorKind::ResourceLimit: return "runtime resource limit exceeded";
+    case ErrorKind::Misuse: return "runtime API misuse";
+    case ErrorKind::ReplayIneligible: return "native replay ineligible";
+  }
+  return "operation failed";
+}
+
+Error classify_failure(const transport::Result& result, const ResponseInfo& info,
+    const std::optional<Error>& semantic, bool output, std::uint32_t attempts, SteadyTime now) {
+  Error error;
+  if (semantic) {
+    error.kind = semantic->kind;
+    error.retry_class = semantic->retry_class;
+    if (error.kind == ErrorKind::RemoteFailure) { error.kind = info.kind; error.retry_class = info.retry_class; }
+  } else if (result.status == transport::Status::Cancelled) error.kind = ErrorKind::Cancelled;
+  else if (result.status == transport::Status::DeadlineExceeded) error.kind = ErrorKind::DeadlineExceeded;
+  else if (result.failure == transport::FailureKind::Protocol) error.kind = ErrorKind::ProtocolCorrupt;
+  else if (result.failure == transport::FailureKind::ResponseTooLarge) error.kind = ErrorKind::ResourceLimit;
+  else if (result.failure == transport::FailureKind::CallbackError || result.failure == transport::FailureKind::Misuse) error.kind = ErrorKind::Misuse;
+  else if (result.http_status >= 400 || result.status == transport::Status::Completed) {
+    error.kind = info.kind; error.retry_class = info.retry_class;
+  } else {
+    using F = transport::FailureKind;
+    switch (result.failure) {
+      case F::Protocol: error.kind = ErrorKind::ProtocolCorrupt; break;
+      case F::ResponseTooLarge: error.kind = ErrorKind::ResourceLimit; break;
+      case F::CallbackError: case F::Misuse: error.kind = ErrorKind::Misuse; break;
+      case F::Truncated: error.kind = ErrorKind::Truncated; error.retry_class = RetryClass::Transient; break;
+      case F::Resolve: case F::Connect: case F::Tls: case F::Send: case F::Receive: case F::ResendRefused:
+        error.kind = ErrorKind::Transport; error.retry_class = RetryClass::Transient; break;
+      default: error.kind = ErrorKind::Transport; error.retry_class = RetryClass::Unknown; break;
+    }
+  }
+  if (error.kind == ErrorKind::LimitUnknown) error.retry_class = RetryClass::Unknown;
+  else if (never_kind(error.kind)) error.retry_class = RetryClass::Never;
+  // Permanent response evidence remains a no-retry condition even when a wire
+  // close error has higher diagnostic precedence (for example quota + short EOF).
+  if (info.retry_class == RetryClass::Never) error.retry_class = RetryClass::Never;
+  error.safe_message = safe_message(error.kind);
+  error.http_status = result.http_status;
+  error.vendor_code = info.vendor_code;
+  const auto& a = result.attempt;
+  const bool sent = a.reached >= transport::Stage::RequestStarted || a.request_body_bytes > 0 ||
+                    a.response_head_seen || a.transport_internal_resends > 0 || result.http_status != 0;
+  error.attempt = {sent, a.request_body_bytes, a.response_head_seen, a.transport_internal_resends, attempts};
+  error.retry_safety = (output || (semantic && semantic->retry_safety == RetrySafety::OutputObserved)) ?
+      RetrySafety::OutputObserved : sent ? RetrySafety::PossiblyAccepted : RetrySafety::NotSent;
+  if (info.retry_not_before) {
+    if (*info.retry_not_before == SteadyTime::max()) error.retry_after = Ms::max();
+    else if (*info.retry_not_before <= now) error.retry_after = Ms::zero();
+    else {
+      // Subtraction is only performed once known to fit the signed duration.
+      const auto target = info.retry_not_before->time_since_epoch().count();
+      const auto start = now.time_since_epoch().count();
+      if (start < 0 && target > SteadyTime::duration::max().count() + start) error.retry_after = Ms::max();
+      else error.retry_after = std::chrono::ceil<Ms>(*info.retry_not_before - now);
+    }
+  }
+  return error;
+}
+
+bool valid_retry_policy(const RetryPolicy& p) noexcept {
+  return p.max_attempts > 0 && p.base_delay >= Ms::zero() && p.max_delay >= p.base_delay;
+}
+std::optional<SteadyTime> retry_at(const Error& e, const RetryPolicy& p,
+    std::uint32_t attempts, SteadyTime now, SteadyTime deadline, double uniform01) {
+  if (!valid_retry_policy(p) || !p.enabled || attempts == 0 || attempts >= p.max_attempts ||
+      e.attempt.attempts >= p.max_attempts || now >= deadline || never_kind(e.kind) ||
+      (e.retry_class != RetryClass::Transient && e.retry_class != RetryClass::AfterReset) ||
+      e.retry_safety == RetrySafety::OutputObserved ||
+      (e.retry_safety == RetrySafety::PossiblyAccepted && !p.allow_duplicate_billing_risk) ||
+      !std::isfinite(uniform01) || uniform01 < 0 || uniform01 > 1) return {};
+  auto bound = p.base_delay.count();
+  for (std::uint32_t n = 1; n < attempts && bound < p.max_delay.count(); ++n) {
+    if (bound == 0) break;
+    bound = bound > p.max_delay.count() / 2 ? p.max_delay.count() : bound * 2;
+  }
+  const long double jitter = static_cast<long double>(bound) * uniform01;
+  // Rounding up avoids dispatch before the sampled delay; preserve endpoints.
+  const auto delay = jitter >= static_cast<long double>(max_ms) ? Ms::max() : Ms(static_cast<Ms::rep>(std::ceil(jitter)));
+  if (e.retry_after && *e.retry_after < Ms::zero()) return {};
+  const auto when = add(now, std::max(delay, e.retry_after.value_or(Ms::zero())));
+  if (when == SteadyTime::max() || when >= deadline) return {};
+  return when;
+}
+
+TokenBucket::TokenBucket(std::size_t capacity, double rate, SteadyTime now)
+    : capacity_(static_cast<double>(capacity)), tokens_(capacity_),
+      refill_per_second_(std::isfinite(rate) && rate > 0 ? rate : 0), last_(now) {}
+void TokenBucket::refill(SteadyTime now) {
+  if (now <= last_) return;
+  const long double ticks = static_cast<long double>(now.time_since_epoch().count()) -
+                            static_cast<long double>(last_.time_since_epoch().count());
+  const long double seconds = ticks * SteadyTime::duration::period::num / SteadyTime::duration::period::den;
+  tokens_ = static_cast<double>(std::min(static_cast<long double>(capacity_),
+      static_cast<long double>(tokens_) + seconds * refill_per_second_));
+  last_ = now;
+}
+bool TokenBucket::available(SteadyTime now) { refill(now); return tokens_ >= 1; }
+bool TokenBucket::consume(SteadyTime now) {
+  refill(now);
+  if (tokens_ < 1) return false;
+  tokens_ -= 1;
+  return true;
+}
+}  // namespace sp::runtime::detail

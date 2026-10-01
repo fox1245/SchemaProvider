@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -68,8 +69,26 @@ struct StopReason {
   std::optional<std::string> sequence{};
   std::shared_ptr<const json::Document> details{};
 };
-enum class ErrorKind { InvalidConfig, InvalidRequest, Unsupported, Transport, ProtocolCorrupt, Truncated, RemoteFailure, Cancelled, DeadlineExceeded, ResourceLimit, Misuse, ReplayIneligible };
-struct Error { ErrorKind kind = ErrorKind::ProtocolCorrupt; std::string safe_message; };
+enum class ErrorKind { InvalidConfig, InvalidRequest, Unsupported, Transport, ProtocolCorrupt, Truncated, RemoteFailure, Cancelled, DeadlineExceeded, ResourceLimit, Misuse, ReplayIneligible, Authentication, Permission, NotFound, RateLimited, QuotaExhausted, LimitUnknown, Overloaded };
+enum class RetryClass { Never, Transient, AfterReset, Unknown };
+enum class RetrySafety { NotSent, PossiblyAccepted, RejectedBeforeOutput, OutputObserved };
+struct AttemptEvidence {
+  bool request_may_have_left = false;
+  std::int64_t request_body_bytes = 0;
+  bool response_head_seen = false;
+  std::uint32_t transport_internal_resends = 0;
+  std::uint32_t attempts = 0;
+};
+struct Error {
+  ErrorKind kind = ErrorKind::ProtocolCorrupt;
+  std::string safe_message;
+  RetryClass retry_class = RetryClass::Never;
+  RetrySafety retry_safety = RetrySafety::PossiblyAccepted;
+  int http_status = 0;
+  std::string vendor_code{};
+  std::optional<std::chrono::milliseconds> retry_after{};
+  AttemptEvidence attempt{};
+};
 struct Completion { std::vector<Message> messages; StopReason stop; Usage usage; };
 struct PartialCompletion { std::vector<Message> messages; Usage usage; std::optional<StopReason> stop; };
 struct Failure { Error error; PartialCompletion partial; };

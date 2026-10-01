@@ -2,6 +2,7 @@
 #include "core/value.h"
 #include <functional>
 #include <map>
+#include <utility>
 
 namespace sp {
 class Accumulator {
@@ -12,6 +13,8 @@ class Accumulator {
   // A known transport failure takes precedence over errors in deferred decoding.
   bool accept(const Event& event, const Error* failure_override = nullptr);
   const std::optional<Outcome>& outcome() const { return outcome_; }
+  // Terminal ownership transfer; discard the accumulator after taking its outcome.
+  std::optional<Outcome> take_outcome() { return std::move(outcome_); }
   bool terminal() const { return outcome_.has_value(); }
  private:
   enum class State { Created, Receiving, Draining, Terminal };
