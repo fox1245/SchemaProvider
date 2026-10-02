@@ -2,6 +2,8 @@
 #include "runtime/testing.h"
 #include "codecs/messages.h"
 #include "codecs/responses.h"
+#include "codecs/gemini.h"
+#include "codecs/interactions.h"
 
 #include <algorithm>
 #include <atomic>
@@ -279,7 +281,7 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
   SteadyTime deadline;
   transport::HttpRequest request;
   std::shared_ptr<const NativeContext> native_context;
-  enum class Family { Chat, Messages, Responses };
+  enum class Family { Chat, Messages, Responses, Gemini, Interactions };
   Family family = Family::Chat;
   bool admitted = false;
 
@@ -313,6 +315,8 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
   std::unique_ptr<chat::Codec> chat_codec;
   std::unique_ptr<messages::Codec> messages_codec;
   std::unique_ptr<responses::Codec> responses_codec;
+  std::unique_ptr<gemini::Codec> gemini_codec;
+  std::unique_ptr<interactions::Codec> interactions_codec;
   std::unique_ptr<transport::SseFramer> framer;
   std::optional<Head> response;
   ResponseInfo response_info;
@@ -471,6 +475,8 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
     chat_codec.reset();
     messages_codec.reset();
     responses_codec.reset();
+    gemini_codec.reset();
+    interactions_codec.reset();
     accumulator = std::make_unique<Accumulator>(client->options.limits.semantic,
         [this](const Event& event) { semantic(event); });
     if (family == Family::Chat) chat_codec = std::make_unique<chat::Codec>(client->descriptor,
@@ -478,8 +484,14 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
     else if (family == Family::Messages) messages_codec = std::make_unique<messages::Codec>(client->descriptor,
         options.streaming ? messages::Mode::Sse : messages::Mode::Buffered, *accumulator,
         native_context, client->options.limits.semantic);
-    else responses_codec = std::make_unique<responses::Codec>(client->descriptor,
+    else if (family == Family::Responses) responses_codec = std::make_unique<responses::Codec>(client->descriptor,
         options.streaming ? responses::Mode::Sse : responses::Mode::Buffered, *accumulator,
+        native_context, client->options.limits.semantic);
+    else if (family == Family::Gemini) gemini_codec = std::make_unique<gemini::Codec>(client->descriptor,
+        options.streaming ? gemini::Mode::Sse : gemini::Mode::Buffered, *accumulator,
+        native_context, client->options.limits.semantic);
+    else interactions_codec = std::make_unique<interactions::Codec>(client->descriptor,
+        options.streaming ? interactions::Mode::Sse : interactions::Mode::Buffered, *accumulator,
         native_context, client->options.limits.semantic);
     framer = options.streaming ? std::make_unique<transport::SseFramer>(client->options.limits.sse) : nullptr;
     response.reset();
@@ -599,7 +611,9 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
     framer->feed(bytes, [this](const transport::SseFrame& frame) {
       const bool accepted = chat_codec ? chat_codec->frame(frame.event, frame.data) :
           messages_codec ? messages_codec->frame(frame.event, frame.data) :
-          responses_codec->frame(frame.event, frame.data);
+          responses_codec ? responses_codec->frame(frame.event, frame.data) :
+          gemini_codec ? gemini_codec->frame(frame.event, frame.data) :
+          interactions_codec->frame(frame.event, frame.data);
       if (accumulator->terminal()) {
         const auto* failed = std::get_if<Failure>(&*accumulator->outcome());
         if (failed && failed->error.kind == ErrorKind::RemoteFailure) inspect(frame.data);
@@ -643,11 +657,15 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
           fail_semantic(framer->error() == transport::SseError::ResourceLimit ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt);
         else if (chat_codec) chat_codec->finish({normal, close_error.kind});
         else if (messages_codec) messages_codec->finish({normal, close_error.kind});
-        else responses_codec->finish({normal, close_error.kind});
+        else if (responses_codec) responses_codec->finish({normal, close_error.kind});
+        else if (gemini_codec) gemini_codec->finish({normal, close_error.kind});
+        else interactions_codec->finish({normal, close_error.kind});
       } else {
         if (chat_codec) chat_codec->buffered(buffered, {normal, close_error.kind});
         else if (messages_codec) messages_codec->buffered(buffered, {normal, close_error.kind});
-        else responses_codec->buffered(buffered, {normal, close_error.kind});
+        else if (responses_codec) responses_codec->buffered(buffered, {normal, close_error.kind});
+        else if (gemini_codec) gemini_codec->buffered(buffered, {normal, close_error.kind});
+        else interactions_codec->buffered(buffered, {normal, close_error.kind});
         if (accumulator->terminal()) {
           const auto* failure = std::get_if<Failure>(&*accumulator->outcome());
           if (failure && (failure->error.kind == ErrorKind::RemoteFailure ||
@@ -674,7 +692,7 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
       if (at) {
         pending_failure = std::move(outcome);
         stage = Stage::Backoff;
-        chat_codec.reset(); messages_codec.reset(); responses_codec.reset(); accumulator.reset(); framer.reset();
+        chat_codec.reset(); messages_codec.reset(); responses_codec.reset(); gemini_codec.reset(); interactions_codec.reset(); accumulator.reset(); framer.reset();
         terminal_wire.reset();
         buffered.clear(); response.reset();
         retry_timer.arm(*executor, *at, [weak = weak_from_this()] { if (auto self = weak.lock()) self->timer(true); });
@@ -706,7 +724,7 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
       if (client) note_callback(before, threw);
     }
     callbacks = {};
-    chat_codec.reset(); messages_codec.reset(); responses_codec.reset(); accumulator.reset(); framer.reset();
+    chat_codec.reset(); messages_codec.reset(); responses_codec.reset(); gemini_codec.reset(); interactions_codec.reset(); accumulator.reset(); framer.reset();
     pending_failure.reset(); response.reset(); terminal_wire.reset();
     std::string{}.swap(buffered);
     request = {}; native_context.reset();
@@ -971,11 +989,15 @@ Operation Client::start(Request request, RunOptions options, Callbacks callbacks
       using T = std::decay_t<decltype(typed)>;
       operation->family = std::is_same_v<T, chat::Request> ? detail::OperationState::Family::Chat :
           std::is_same_v<T, messages::Request> ? detail::OperationState::Family::Messages :
-          detail::OperationState::Family::Responses;
+          std::is_same_v<T, responses::Request> ? detail::OperationState::Family::Responses :
+          std::is_same_v<T, gemini::Request> ? detail::OperationState::Family::Gemini :
+          detail::OperationState::Family::Interactions;
       auto encoded = [&] {
         if constexpr (std::is_same_v<T, chat::Request>) return chat::encode(client->descriptor, typed, operation->options.streaming);
         else if constexpr (std::is_same_v<T, messages::Request>) return messages::encode(client->descriptor, typed, operation->options.streaming);
-        else return responses::encode(client->descriptor, typed, operation->options.streaming);
+        else if constexpr (std::is_same_v<T, responses::Request>) return responses::encode(client->descriptor, typed, operation->options.streaming);
+        else if constexpr (std::is_same_v<T, gemini::Request>) return gemini::encode(client->descriptor, typed, operation->options.streaming);
+        else return interactions::encode(client->descriptor, typed, operation->options.streaming);
       }();
       if (auto* failure = std::get_if<Error>(&encoded)) { error = std::move(*failure); return; }
       auto& value = std::get<0>(encoded);
@@ -988,6 +1010,9 @@ Operation Client::start(Request request, RunOptions options, Callbacks callbacks
       if (!client->options.api_key.empty()) {
         if (operation->family == detail::OperationState::Family::Messages)
           wire.headers.push_back({"x-api-key", client->options.api_key});
+        else if (operation->family == detail::OperationState::Family::Gemini ||
+                 operation->family == detail::OperationState::Family::Interactions)
+          wire.headers.push_back({"x-goog-api-key", client->options.api_key});
         else wire.headers.push_back({"Authorization", "Bearer " + client->options.api_key});
       }
       wire.deadline = deadline;

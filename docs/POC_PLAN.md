@@ -2,6 +2,8 @@
 
 Status: M0 through M5 are measured on this branch; M5 records a successful bounded experiment and a **NO-GO for strict lossless NeoGraph cutover**. Separate post-M5 Gemini compatibility and Responses reasoning experiments are in5.6/5.7. The runtime, canary and integration surfaces remain private, not installed/stable and not a completed release stage. Evidence labels: `[live observation]` (actually run here: Linux on WSL2, libcurl 8.5.0/OpenSSL 3.0.13; local peers or explicitly identified first-party API calls), `[read source]`, `[read docs]`, `[inference]`.
 
+The separate five-API inline-image/reasoning functional campaign is measured in5.8. Its bounded live observations do not qualify every transport/feature cell or change the lossless cutover decision.
+
 Optional HTTP/3 remains an accepted, unimplemented separate workstream (section3.1); none of these experiments proves QUIC support. The independent Responses reasoning PoC does not change the rich consumer contract/pre-dispatch migration gate identified by M5 or approve an automatic engine cutover.
 
 ## 1. Purpose and non-purpose
@@ -270,6 +272,125 @@ The report identifies `provider: gemini`, `api_family: openai.chat`, `verificati
 
 `[read docs]` Primary [Responses request/item contract](https://developers.openai.com/api/reference/resources/responses/methods/create), [reasoning and stateless continuation](https://developers.openai.com/api/docs/guides/reasoning), [event reference](https://developers.openai.com/api/reference/resources/responses/streaming-events), [SDK completed-reasoning authority](https://raw.githubusercontent.com/openai/openai-python/main/src/openai/types/responses/response_reasoning_item.py) and [pinned model/limits/pricing](https://developers.openai.com/api/docs/models/gpt-5-nano) were read. Prices are US$0.05 input/US$0.40 output per1M tokens;400k context is a conservative bound over the documented272k maximum input. This is not a legal/account spending-control verification.
 
+### 5.8 Five-API vision and reasoning `[live observation]`
+
+**Scope and implementation.** The owner selected five first-party API families and an additional **40-attempt/US$8** campaign, then superseded the OpenAI model choice with **`gpt-6-luna`**. This is a functional probe, not60-run qualification, nightly cadence, WebSocket, OpenRouter, installation, Python bindings or a NeoGraph migration. All five buffered/SSE paths share the existing production runtime, libcurl/Asio transport and accumulator.
+
+Typed inline images retain owned MIME/base64/detail values. Admission checks canonical base64, padding, supported MIME/magic and a5MiB decoded-image limit; this is not a complete pixel decoder or remote image fetcher. Chat emits ordered images then text; generic Message APIs preserve caller Part order. Image bytes, MIME/detail/order and typed Thought values join the existing prefix/provenance digest. Captured native generations are immutable in-process replay groups, not imported JSON authority.
+
+The independent Node/zlib PNG generator produced two640x480 scenes with no answer text: **A =3 red circles,2 blue squares, weighted8**; **B =5 red circles,1 blue square, weighted11**. The actual PNGs were visually inspected. The textual counting question is unchanged between images. Local peers verify decoded PNG bytes/hash, actual HTTP bodies, tool arguments/results, native order and terminal/normal-close evidence. The CLI oracle compares the three numeric answers, not nonempty output or model self-claims. Markdown/prose around one JSON object and integral JSON decimal notation are presentation, not failure; duplicate/contradictory objects or wrong counts do not pass.
+
+**Actual observations.** Initial failures remain charged and separate from later focused confirmations. There was no fresh full all-family rerun.
+
+| API / selected model | Vision and reasoning observation | Native evidence and remaining limit |
+|---|---|---|
+| Chat Completions / GPT-6 Luna | Initial A off/on buffered, A on SSE and changed B all returned the correct three-field oracle. Reported reasoning was0 off and20/29 on. A later SSE tool first/positive pair returned the correct score and final scene JSON. | Chat tools use `reasoning_effort:none`, as required by this model; plain vision-on uses low. No visible native reasoning block is claimed. The original tool-first `invalid_tool` remains a failure; its raw arguments were not retained, so its exact cause is not established. Subsequent2/2 tool observations are not a fresh6/6 campaign. |
+| Responses / GPT-6 Luna | **8/8 passed.** A/B vision, none/low controls and visible summaries were observed. Buffered/SSE on reported42/39 reasoning tokens and one summary item each; tool first reported23. | The live SSE positive retained the exact completed-item native output. One literal ciphertext-byte change returned HTTP400 with `invalid_encrypted_content`: **N=1 ReplayVerified**. The same replay without reasoning was accepted; that does not prove consumption by itself. |
+| Messages / Haiku4.5 | Initial thinking-on buffered/SSE reported122/140 reasoning tokens with visible signed thinking, although the original bare-JSON oracle rejected output presentation. A focused SSE first/positive pair passed the corrected scene oracle; first reported150 reasoning tokens and signed thinking. Missing off reasoning counters remain unknown, not asserted zero. | The captured vision thinking/signature/order were retained on an accepted positive continuation. This campaign did not dispatch a new vision-signature negative, so its replay-consumption classification remains **ReplayAcceptanceUnobservable**. Earlier M5 signature proof is historical, not substituted for this captured vision group. |
+| Native generateContent / Flash-Lite2.5 | Changed B passed initially; buffered/SSE on reported242/157 reasoning tokens and visible thought text. After correcting function schema serialization, focused tool first passed with score8,222 reasoning tokens and native signature presence. | Positive continuation retained the original native parts and received HTTP200, but its empty terminal Content omitted `parts`, which the original decoder rejected. The corrected decoder then decoded the actual held first/positive frames and produced the correct oracle without another API call. This is actual-receipt decoder proof, **not a fresh post-fix live continuation or a signature-negative proof**. |
+| Interactions / Flash-Lite2.5 | Buffered stateless responses omitted resource ID; a held actual response had the correct A oracle and decoded successfully after correction. Low was rejected because it mapped to256 tokens below the512 minimum; medium was rejected and the provider listed low/high. The final **high SSE** request passed: correct A oracle,248 reported thought tokens,2 summary items, signature present and complete native capture. | Stateless SSE also supplied empty ID strings; no vendor ID was fabricated. A high tool request encountered that then-unfixed decoder rejection and did not become a live replay pair. **Actual Interactions tool replay remains unverified at the exhausted40-call cap.** |
+
+**Corrections and model-free proof.**
+
+- Gemini model-invalid/null/scalar/duplicate-key function arguments remain `InvalidToolCall` and cannot obtain complete replay authority. An existing semantic/runtime regression failed before the eligibility correction.
+- Missing Gemini vendor call IDs receive generation-unique local ownership IDs; synthetic IDs are never written into `functionCall` or `functionResponse`. A successive two-turn regression failed before correction.
+- Absent/null terminal Interactions usage resets interim knowledge instead of upgrading stale partial counters to final. Both interim-delta and step-stop accounting regressions failed before correction.
+- Gemini declarations use **`parametersJsonSchema`**, preserving JSON Schema constraints such as `additionalProperties:false`; the narrower OpenAPI `parameters` field is not used or silently stripped.
+- A Gemini terminal Content with `role:model` and omitted `parts` is accepted only with genuine finish evidence; nonterminal missing parts, malformed arrays and abnormal close still fail.
+- Stateless Interactions accepts omitted/empty resource IDs as unavailable metadata, while non-string IDs, changed known IDs, model mismatches, failed statuses and missing terminals still fail.
+- Actual local peers exercise all five image/SSE/native paths, no-dispatch image/prefix/signature mutation refusal, normal-close ownership, failure/cancel paths, unknown/zero usage, wrong-scene rejection, real CLI execution and aggregate budget exhaustion through process/thread contention and restart.
+
+Final complete matrix after the empty-ID correction: **23/23** groups passed, plain **21.68s**, ASan+UBSan **31.61s**, TSan **32.88s**. Durations are not throughput measurements. Initial21/23, the separate failing-before regressions and later scoped/full passes remain distinct evidence.
+
+**Durable accounting.** New IDs4..8 share one aggregate40-attempt/8,000,000-microUSD guard. Every allowed backend start, including failed and diagnostic requests, is durably reserved before dispatch, with no refund or automatic retry. The same ledger preserves old IDs0..3 unchanged; an old balance is never renamed, recreated or reset.
+
+| New lane | Attempts | Reserved microUSD |
+|---|---:|---:|
+|4 Chat vision |7|1,880,508|
+|5 Responses vision |8|2,149,152|
+|6 Messages vision |8|1,927,680|
+|7 Gemini native vision |7|756,945|
+|8 Interactions vision |10|1,081,350|
+|**Total**|**40**|**7,795,635 (US$7.795635)**|
+
+Total bounded tokens are35,503,472. OpenAI reserves268,644 microUSD per attempt using1,050,000 full-context input,8192 output and conservative US$0.25/US$0.75 per1M maximum applicable rates; selected short-context list rates are US$0.10/US$0.50. Messages reserves240,960 using200k/8192 and US$1/US$5; Google reserves108,135 using1,048,576/8192 and US$0.10/US$0.40. These are **conditional conservative exposure, not invoices or account-wide hard caps**; absent usage on failures is not zero billing. Existing totals remain ID0:4/US$1.702340, ID1:11/US$4.625280, ID2:2/US$0.209820, ID3:8/US$0.186216.
+
+**Evidence limits.** Forty calls are exhausted, not authorization to spend the remaining reserved-dollar margin. Interactions live tool replay, new vision-signature negatives outside Responses, fresh post-fix complete campaigns, statistical equivalence and every release property remain unverified. Additional API execution requires a new explicit allowance. Raw provider prose, images, keys and native signature/ciphertext remain process-private; throwaway diagnosis used actual receipts in memory, not published captures or reconstructed public replay authority. Windows/DrvFS source ACL confidentiality is not claimed. Tsukkomi audit coverage remains incomplete (`unknown` from missing historic activation/parser evidence); external GraphRAG LLM work stayed paused.
+
+`[read docs]` Sources: [GPT-6 Luna model/API restrictions](https://developers.openai.com/api/docs/models/gpt-6-luna), [OpenAI pricing](https://developers.openai.com/api/docs/pricing), [OpenAI vision](https://developers.openai.com/api/docs/guides/images-vision), [Messages vision](https://platform.claude.com/docs/en/build-with-claude/vision), [Messages thinking](https://platform.claude.com/docs/en/build-with-claude/extended-thinking), [Gemini function JSON Schema](https://ai.google.dev/api/generate-content#FunctionDeclaration), [native Gemini thinking](https://ai.google.dev/gemini-api/docs/generate-content/thinking), [Interactions lifecycle](https://ai.google.dev/api/interactions-api), [OpenAPI](https://ai.google.dev/static/api/interactions.openapi.json), and [Interactions thinking](https://ai.google.dev/gemini-api/docs/thinking). Published Interactions level/ID descriptions and the observed selected-model behavior are recorded separately, not silently reconciled by fake fields.
+
+### 5.9 Remaining native controls and fresh campaign `[live observation]`
+
+**Explicit additional allowance.** After5.8, the owner requested the remaining work and selected **additional60 calls/US$12**. The baseline was40 calls/7,795,635 microUSD, not the old unspent US$8 ceiling. The unchanged ledger therefore has a new cumulative limit of **100 calls/19,795,635 microUSD**, not US$20. Earlier unused dollars are not renewed; IDs0..8 and every old debit remain intact. Same models, first-party origins, standard pricing, output8192, no automatic retry or hidden model/route fallback.
+
+**Scope.** Actual native first/positive/signature/omission contrasts for Messages, Gemini and Interactions preceded a fresh full five-API wave. A low-effort Responses generation lacking encrypted state then received one explicitly bounded separate medium-effort confirmation. This is not60-run statistical qualification, WebSocket/OpenRouter support, installation or engine migration.
+
+**Control fixes and consumer-visible proof.**
+
+- The actual Interactions response carried the **same opaque signature in a Thought step and the associated function-call step**. The old control required a globally unique serialized value, so it incorrectly skipped a signature mutation before debit. The real replay positive passed, while the signature control was unavailable; a duplicate-carrier peer then failed the expected control-debit invariant before correction.
+- Native controls now prefer the pending call's associated carrier and identify its particular occurrence even when the same value appears elsewhere. Exactly **one encoded byte in one carrier** changes after normal SDK native admission. No library replay path edits or deduplicates native state.
+- The omission control removes complete native thought/reasoning blocks **and remaining call-associated signature fields**, preserving call id/name/arguments and original image prefix. The earlier accepted Interactions thought-block-only omission still contained a valid call signature and is not substituted for this full native-state contrast.
+- Error proof is family-specific: GenerateContent uses numeric400/`INVALID_ARGUMENT`; Interactions uses string `invalid_request`. One bounded Interactions SSE ErrorEvent is parsed through the production framer, with a complete delimiter and normal HTTP400 close. Multiple, partial, malformed, wrong-schema/status or oversized envelopes stay inconclusive.
+- Only reviewed whole signature diagnostics or the bounded Responses required-reasoning item diagnostic are admitted. A signature error in omission mode cannot prove why an omission failed. Generic400, signature mentions in unrelated errors and accepted mutation never establish native validation.
+- Independent real CLI peers exercise exact single-byte associated-carrier changes, all-state omission, specific JSON/LF/CRLF SSE, unrelated/error-schema confusion, accepted controls, malformed/partial/multiple errors, privacy and the prohibition on synthetic `ReplayVerified`.
+- The new test initially exited126 before the CLI due to transferring one owned FD twice. It now follows the existing `dup2`-both-then-reset ownership pattern. That IPC failure is not cited as classifier failing-before proof.
+- Financial regressions preserve the old40-call/US$7.795635 history, admit only60 new calls or US$12, test the exact final allowance under process/thread contention and restart, and reject renewed US$20 margin. Direct CLI exhaustion and old ID0..3 balances remain exercised.
+
+**Targeted real native contrasts.** Each retained positive uses the exact first shared immutable SDK Outcome in the same process; controls mutate only transport-owned copies after admission. Actual private trace recorded HTTP/transport-close/resend/truncation facts without credential headers.
+
+| Native family | Actual observation |
+|---|---|
+| Interactions / Flash-Lite2.5 | Initial first/positive passed with normal HTTP200 closes and native retention; first reported3115 thought tokens and12 summary items. Duplicate-carrier signature control skipped before debit; a thought-block-only omission was accepted. After correction, all4 contrasts dispatched: first216 thoughts, positive correct oracle, one associated signature byte **accepted**, full native-state omission **HTTP400 generic invalid_request**. Single-carrier acceptance leaves a valid duplicate elsewhere; it does not prove the service ignores all native state. Consumption remains **ReplayAcceptanceUnobservable**; generic omission rejection is **negative_inconclusive**, not signature proof. |
+| Messages / Haiku4.5 | First/positive passed, first165 reported reasoning tokens with visible signed thinking. Exactly one signature-byte mutation returned reviewed HTTP400 signature rejection: **N=1 ReplayVerified**. Omission was accepted. |
+| Native Gemini / Flash-Lite2.5 | First/positive passed, first247 reported thought tokens and native signature presence. Signature mutation and full native-state omission were accepted: **ReplayAcceptanceUnobservable**, not failed wire parsing or verified consumption. |
+
+**Fresh complete wave and separate Responses confirmation.** All five returned correct A/B numeric vision oracles over buffered/SSE and correct tool scores/results. Missing or unreported counters remain unknown; a signature may exist with zero reasoning.
+
+| Run | Passed / failed / unavailable | Actual reasoning/replay boundary |
+|---|---|---|
+| Chat / GPT-6 Luna |6 /0 /0| Off0, on40/39 reported tokens; tool loop none-only, no native carry claim |
+| Responses / GPT-6 Luna, low |6 /0 /2| Plain on34/41 with encrypted reasoning; tool first emitted a direct call with0 thoughts and no encrypted item. Its two native controls correctly did not dispatch. This is **not8/8** or a cipher synthesized from another generation |
+| Messages / Haiku4.5 |8 /0 /0| On118/126, tool first168; exact native positive plus specific signature-negative again **N=1 ReplayVerified**; omission accepted |
+| Native Gemini / Flash-Lite2.5 |8 /0 /0| On315/151, tool first223; actual post-fix SSE positive now succeeds through the production decoder. Mutation/omission accepted; **ReplayAcceptanceUnobservable** |
+| Interactions / Flash-Lite2.5, high |7 /1 /0| Off0 although a signature is present; on552/161, tool first331. Exact native positive and signature mutation accepted; full-state omission HTTP400 remains generic/inconclusive. This is **not an all-case pass** |
+| Separate Responses medium confirmation |8 /0 /0| Entire A/B/buffered/SSE/tool/control run executed separately: on43/35, tool first35 with an encrypted item and visible summary. Exact SSE native positive passed; one ciphertext-byte mutation returned `invalid_encrypted_content`, **N=1 ReplayVerified**; omission accepted and reported25 reasoning tokens |
+
+The low and medium Responses records remain separate; medium is a real alternative request control, not a retry that invents native data or relabels the earlier unavailable cases. Its full8-call reservation was within the explicit60-call allowance.
+
+**Final accounting and matrix.**
+
+| Vision lane | Cumulative attempts | Cumulative reserved microUSD |
+|---|---:|---:|
+|4 Chat|13|3,492,372|
+|5 Responses|22|5,910,168|
+|6 Messages|20|4,819,200|
+|7 Gemini|19|2,054,565|
+|8 Interactions|25|2,703,375|
+|**Total**|**99**|**18,979,680 (US$18.979680)**|
+
+New allowance used **59/60 calls**,52,194,880 bounded tokens and **11,184,045 microUSD (US$11.184045)**; cumulative bounded tokens87,698,352. The original ledger prefix was unchanged before/after every parent-run invocation; old non-vision balances in5.8 remain unchanged. Includes the initial duplicate-carrier diagnostic, all failed/inconclusive controls, unavailable controls receiving no debit, the36-call fresh wave and8-call medium confirmation. No refund/reset and no need to spend the remaining allowance merely because it exists. These are conditional conservative reservations, **not invoices or provider-side hard spending controls**.
+
+Final code passed **24/24 CTest groups** under plain **24.20s**, ASan+UBSan **35.63s** and TSan **37.28s**. The local CLI/HTTP peers and actual changed API paths ran; durations are not throughput measurements. Temporary diagnostic sources/executables and private credential/receipt references are removed after recording only safe evidence.
+
+**Limits.** Remaining requested execution is performed, but Google's native-consumption classification is still unobservable for these accepted single-carrier controls. An unchanged duplicate may preserve valid state; no inference of universal signature permissiveness, universal model support or equivalence follows. Generic Interactions omission400 remains a failed/inconclusive assertion. Other transports,60-run cadence/equivalence, all-model part parity and lossless NeoGraph cutover are unchanged exclusions. Audit coverage still reports `unknown` from historic activation/parser gaps; no automatic compliance or external GraphRAG execution is claimed.
+
+`[read docs]` Current [Interactions Error/ErrorEvent contract](https://ai.google.dev/static/api/interactions.openapi.json), [Interactions reference](https://ai.google.dev/api/interactions-api), [thinking/signature contract](https://ai.google.dev/gemini-api/docs/thinking) and [GPT-6 Luna effort/function restrictions](https://developers.openai.com/api/docs/models/gpt-6-luna) were consulted; exact selected-model live results take precedence over inferred capabilities.
+
+### 5.10 Owner-requested remaining implementation `[plan]`
+
+The owner clarified that our canary choices must not dictate the user's token policy. The current commit records verified5.8/5.9 behavior and this remaining plan; it does **not** claim these six future tasks are implemented. No original NeoGraph code is changed merely by recording the integration plan.
+
+| Order | Remaining deliverable | Acceptance boundary |
+|---|---|---|
+|1| User controls MAX_TOKEN | Caller/configuration determines `max_output_tokens`; remove arbitrary canary8192 product-policy coupling, no silent clamp. Actual model/service constraints, resource budgets and separately approved call/money ceilings stay distinct |
+|2| Manage hardcoded values externally | Inventory and migrate configuration facts/defaults to existing closed/versioned JSON, with validation/provenance and no renewed spent allowance. Do not turn protocol state/correlation/signature/terminal logic back into an interpreter |
+|3| Verify HTTP/1.1,2,3 support | Record backend feature availability and actual negotiated versions, buffered/SSE, multiplex/backpressure, cancellation/deadline and single-attempt fallback. Earlier1.1/2 measurements are bounded; linked libcurl lacks3 and no QUIC success is claimed |
+|4| Run SchemaProvider benchmarks and organize results | Reproducible commands/configuration and fixed workload/version/worker conditions; compare latency percentiles/throughput/RSS/threads/codec-native overhead to baseline and separate model latency |
+|5| Integrate NeoGraph and revise existing code/examples | Resolve rich result/native request/pre-dispatch gate and journal/projection first, migrate all callers/examples and remove obsolete owned paths cleanly. Existing strict lossless ABI NO-GO is not waived |
+|6| Re-run NeoGraph benchmarks | After actual integration/cutover, run the same NeoGraph workload/user settings and report reproducible end-to-end before/after results, not library-only substitutes |
+
+This owner order is now the next-work plan in ROADMAP.24/24 sanitizer suites and the API experiments above are prior verification evidence, not new benchmark results, configurable-setting completion, HTTP3 support or integration approval.
+
 ## 6. Risk register
 
 | Id | Risk | State | Next step |
@@ -290,7 +411,7 @@ The report identifies `provider: gemini`, `api_family: openai.chat`, `verificati
 |---|---|---|---|
 | C1 | libcurl floor and required features | 7.88.0 (Debian 12) baseline floor, 8.5.0 tested; TLS and HTTP/2 required, HTTP/3 optional. The HTTP/3 lane needs its own validated libcurl/TLS/QUIC version combination; no baseline floor change is implied | owner, after M1b; HTTP/3 versions before that lane is admitted |
 | C2 | first platforms | Linux; Windows only after R5 | owner |
-| C3 | live call budget | M5 OpenAI/Anthropic each16/US$10 (5.5); Gemini4/US$1, observed2/US$0.209820 (5.6); Responses initially6/US$1 then explicit additive2, final8/US$0.186216 (5.7), also sharing OpenAI16/US$10. Preserve all balances; no remaining Responses allowance or automatic retry | owner |
+| C3 | live call budget | Historical balances5.5-5.8 remain preserved. The owner's new60/US$12 grant starts at actual40/US$7.795635, giving cumulative100/US$19.795635 without renewing old margin. Observed new59/US$11.184045, cumulative99/US$18.979680 in5.9. No automatic retry, refund or hidden fallback | owner; any further grant must be explicit |
 | C4 | target concurrency | scenarios C = 1, 32, 128 and held-stream counts of 4T + 64 and twice that, reported as measurements and never as promised capacity | owner |
 | C5 | libcurl deployment | system libcurl baseline; optional HTTP/3 evaluated through an isolated dependency build, without replacing system libraries. Backend versions, packaging and any vendoring remain undecided; R6 may independently require a newer libcurl | owner |
 

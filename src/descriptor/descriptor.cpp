@@ -163,10 +163,11 @@ bool origin(std::string_view url, bool https_only = false) {
     }
     return secure || loopback;
 }
-bool relative_path(std::string_view path) {
+bool relative_path(std::string_view path, bool google_generate = false) {
     if (path.empty() || path.front() != '/' || path.starts_with("//") || path.size() > 2048) return false;
+    if (google_generate && path.ends_with("?alt=sse")) path.remove_suffix(8);
     for (unsigned char c : path) {
-        if (!(ascii_alpha(static_cast<char>(c)) || digit(static_cast<char>(c)) || c == '/' || c == '-' || c == '_' || c == '.' || c == '~')) return false;
+        if (!(ascii_alpha(static_cast<char>(c)) || digit(static_cast<char>(c)) || c == '/' || c == '-' || c == '_' || c == '.' || c == '~' || (google_generate && c == ':'))) return false;
     }
     path.remove_prefix(1);
     while (!path.empty()) {
@@ -210,8 +211,9 @@ public:
             value_.id_ = string(root.get("id"), "/id", 128);
             if (!std::all_of(value_.id_.begin(), value_.id_.end(), [](char c) { return ascii_alpha(c) || digit(c) || c == '-' || c == '_' || c == '.'; })) fail("/id", "stable ASCII identifier");
             value_.family_ = string(root.get("family"), "/family", 64);
-            if (value_.family_ != "openai.chat" && value_.family_ != "anthropic.messages" && value_.family_ != "openai.responses")
-                fail("/family", "supported family openai.chat, anthropic.messages or openai.responses");
+            if (value_.family_ != "openai.chat" && value_.family_ != "anthropic.messages" && value_.family_ != "openai.responses" &&
+                value_.family_ != "google.generate" && value_.family_ != "google.interactions")
+                fail("/family", "supported Chat, Messages, Responses, Google generate or Interactions family");
             if (value_.family_ == "anthropic.messages") {
                 value_.stop_reasons_ = {
                     {"end_turn", StopKind::EndTurn}, {"max_tokens", StopKind::MaxTokens},
@@ -224,6 +226,19 @@ public:
                 value_.max_output_tokens_member_ = "max_output_tokens";
                 value_.stop_reasons_ = {{"completed", StopKind::EndTurn},
                     {"max_output_tokens", StopKind::MaxTokens}, {"content_filter", StopKind::ContentFilter}};
+            }
+            if (value_.family_ == "google.generate") {
+                value_.messages_member_ = "contents";
+                value_.max_output_tokens_member_ = "maxOutputTokens";
+                value_.usage_path_ = {"usageMetadata"};
+                value_.stop_reasons_ = {{"STOP", StopKind::EndTurn}, {"MAX_TOKENS", StopKind::MaxTokens},
+                    {"SAFETY", StopKind::ContentFilter}, {"MALFORMED_FUNCTION_CALL", StopKind::MalformedCall}};
+            }
+            if (value_.family_ == "google.interactions") {
+                value_.messages_member_ = "input";
+                value_.max_output_tokens_member_ = "max_output_tokens";
+                value_.stop_reasons_ = {{"completed", StopKind::EndTurn}, {"requires_action", StopKind::ToolUse},
+                    {"max_output_tokens", StopKind::MaxTokens}};
             }
             connection(root.get("connection"));
             if (auto item = root.get("evidence"); item.valid()) evidence(item);
@@ -259,8 +274,9 @@ private:
         object(paths, "/connection/paths");
         value_.buffered_path_ = string(paths.get("buffered"), "/connection/paths/buffered", 2048);
         value_.streaming_path_ = string(paths.get("streaming"), "/connection/paths/streaming", 2048);
-        if (!relative_path(value_.buffered_path_)) fail("/connection/paths/buffered", "origin-relative literal path without traversal or URL escapes");
-        if (!relative_path(value_.streaming_path_)) fail("/connection/paths/streaming", "origin-relative literal path without traversal or URL escapes");
+        const bool generate = value_.family_ == "google.generate";
+        if (!relative_path(value_.buffered_path_, generate)) fail("/connection/paths/buffered", "origin-relative literal path without traversal or URL escapes");
+        if (!relative_path(value_.streaming_path_, generate)) fail("/connection/paths/streaming", "origin-relative literal path without traversal or URL escapes");
         auto headers = item.get("headers");
         if (!headers.valid()) return;
         if (!headers.is_object() || headers.size() > 32) fail("/connection/headers", "object with at most 32 literal headers");
@@ -299,6 +315,7 @@ private:
             std::pair{"model", &value_.model_member_}, std::pair{"messages", &value_.messages_member_},
             std::pair{"stream", &value_.stream_member_}, std::pair{"max_output_tokens", &value_.max_output_tokens_member_}};
         std::unordered_set<std::string> destinations{"tools", "tool_choice", "temperature", "top_p", "stream_options", "n", "response_format", "stop", "max_completion_tokens"};
+        if (value_.family_ == "openai.chat") destinations.insert("reasoning_effort");
         if (value_.family_ == "anthropic.messages") {
             for (const auto* reserved : {"system", "thinking", "metadata", "stop_sequences", "top_k", "output_config", "service_tier", "context_management", "container", "mcp_servers"})
                 destinations.insert(reserved);
@@ -307,6 +324,12 @@ private:
             for (const auto* reserved : {"reasoning", "include", "store", "instructions", "conversation",
                     "previous_response_id", "parallel_tool_calls", "background", "truncation", "text",
                     "metadata", "service_tier", "prompt_cache_key", "context_management", "access_programs"})
+                destinations.insert(reserved);
+        }
+        if (value_.family_ == "google.generate" || value_.family_ == "google.interactions") {
+            for (const auto* reserved : {"systemInstruction", "generationConfig", "toolConfig", "cachedContent", "serviceTier",
+                    "system_instruction", "generation_config", "store", "service_tier", "previous_interaction_id",
+                    "background", "agent", "environment", "safetySettings", "safety_settings"})
                 destinations.insert(reserved);
         }
         for (auto [name, target] : slots) {
@@ -350,6 +373,11 @@ private:
             constexpr std::array response_fields{"created_at", "status", "output", "incomplete_details", "reasoning", "instructions"};
             if (std::find(response_fields.begin(), response_fields.end(), value_.usage_path_.front()) != response_fields.end())
                 fail("/bindings/usage", "usage root disjoint from Responses response fields", "response path collision");
+        }
+        if (value_.family_ == "google.generate" || value_.family_ == "google.interactions") {
+            constexpr std::array google_fields{"candidates", "promptFeedback", "modelVersion", "responseId", "steps", "status", "created", "updated"};
+            if (std::find(google_fields.begin(), google_fields.end(), value_.usage_path_.front()) != google_fields.end())
+                fail("/bindings/usage", "usage root disjoint from Google response fields", "response path collision");
         }
     }
     void stops(Value item) {

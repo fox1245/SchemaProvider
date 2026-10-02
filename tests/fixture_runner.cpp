@@ -184,8 +184,16 @@ std::string part_projection(const sp::Part& part) {
       require(p.content != nullptr, "server result has no native block");
       return "{\"type\":\"server_tool_result\",\"tool_use_id\":" + sp::json::quote(p.tool_use_id)
            + ",\"wire_type\":" + sp::json::quote(p.wire_type) + ",\"content\":" + p.content->root().dump() + '}';
-    } else if constexpr (std::is_same_v<T, sp::ToolResult>)
-      throw std::runtime_error("request-only tool result in model output");
+    } else if constexpr (std::is_same_v<T, sp::ToolResult> || std::is_same_v<T, sp::Image>)
+      throw std::runtime_error("request-only part in model output");
+    else if constexpr (std::is_same_v<T, sp::Thought>) {
+      std::string out = "{\"type\":\"thought\",\"summary\":[";
+      for (size_t i = 0; i < p.summary.size(); ++i) {
+        if (i) out += ',';
+        out += sp::json::quote(p.summary[i]);
+      }
+      return out + "],\"signature\":" + (p.signature ? sp::json::quote(*p.signature) : "null") + '}';
+    }
     else {
       std::string out = std::is_same_v<T, sp::ToolCall> ? "{\"type\":\"tool_call\"" : "{\"type\":\"invalid_tool_call\"";
       out += ",\"id\":" + sp::json::quote(p.id) + ",\"name\":" + sp::json::quote(p.name) + ",\"kind\":" + sp::json::quote(tool_kind_name(p.kind));

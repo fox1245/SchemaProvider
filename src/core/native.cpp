@@ -9,6 +9,18 @@
 namespace sp {
 namespace {
 using Digest = std::array<unsigned char, 32>;
+struct Domains {
+  std::string_view family, origin, content, prefix, output;
+};
+const Domains* domains(std::string_view family) {
+  static constexpr Domains values[]{
+      {"anthropic.messages", "sp.messages.origin.v1", "sp.messages.content.v1", "sp.messages.prefix.v1", "sp.messages.output.v1"},
+      {"openai.responses", "sp.responses.origin.v1", "sp.responses.content.v1", "sp.responses.prefix.v1", "sp.responses.output.v1"},
+      {"google.generate", "sp.gemini.origin.v1", "sp.gemini.content.v1", "sp.gemini.prefix.v1", "sp.gemini.output.v1"},
+      {"google.interactions", "sp.interactions.origin.v1", "sp.interactions.content.v1", "sp.interactions.prefix.v1", "sp.interactions.output.v1"}};
+  for (const auto& value : values) if (value.family == family) return &value;
+  return nullptr;
+}
 // Domain-separated, typed, length-prefixed values avoid delimiter collisions.
 // EVP is implementation-private; neither OpenSSL types nor digests grant provenance.
 class Hash {
@@ -52,7 +64,7 @@ class Hash {
       for (auto member : members) { if (!valid_) break; text(member.key); value(member.value, depth + 1); }
     } else valid_ = false;
   }
-  void message(const Message& message) {
+  void message(const Message& message, std::string_view output_domain) {
     text(message.id); number(static_cast<uint64_t>(message.role)); number(message.parts.size());
     for (const auto& part : message.parts) {
       if (!valid_) break;
@@ -77,11 +89,19 @@ class Hash {
           number(p.status.has_value()); if (p.status) text(*p.status);
           number(p.content.size()); for (const auto& s : p.content) text(s);
         } else if constexpr (std::is_same_v<P, Opaque>) { text(p.wire_type); document(p.wire_metadata); }
-        else valid_ = false;
+        else if constexpr (std::is_same_v<P, Image>) {
+          text(p.mime); number(p.data != nullptr); if (p.data) text(*p.data);
+          number(static_cast<uint64_t>(p.detail));
+        } else if constexpr (std::is_same_v<P, Thought>) {
+          number(p.summary.size());
+          for (const auto& summary : p.summary) { if (!valid_) break; text(summary); }
+          number(p.signature.has_value()); if (p.signature) text(*p.signature);
+        } else valid_ = false;
       }, part);
     }
-    // Absent Responses data leaves the established Messages content domain intact.
-    if (message.wire_output) { text("sp.responses.output.v1"); document(message.wire_output); }
+    // No native array leaves established Messages content bytes unchanged.
+    // The full ordered group also binds signatures on nonthinking Google parts.
+    if (message.wire_output) { text(output_domain); document(message.wire_output); }
   }
   bool finish(Digest& digest) {
     unsigned size = 0;
@@ -98,28 +118,34 @@ std::string lower(std::string_view text) {
   return result;
 }
 bool origin_digest(const descriptor::ValidatedDescriptor& descriptor, Digest& digest) {
-  const bool responses = descriptor.family() == "openai.responses";
-  if (!responses && descriptor.family() != "anthropic.messages") return false;
-  Hash hash; hash.text(responses ? "sp.responses.origin.v1" : "sp.messages.origin.v1");
+  const auto* domain = domains(descriptor.family());
+  if (!domain) return false;
+  const bool messages = descriptor.family() == "anthropic.messages";
+  Hash hash; hash.text(domain->origin);
   hash.text(descriptor.family()); hash.text(descriptor.id()); hash.text(descriptor.base_url());
+  if (descriptor.family() == "google.generate") {
+    // Both literal endpoints bind the surface; transport mode is not lineage.
+    hash.text(descriptor.path(false)); hash.text(descriptor.path(true));
+  }
   hash.text(descriptor.request_model_member()); hash.text(descriptor.request_messages_member());
   hash.text(descriptor.request_stream_member()); hash.text(descriptor.max_output_tokens_member());
   std::vector<std::pair<std::string, std::string_view>> headers;
   headers.reserve(descriptor.headers().size());
   for (const auto& [name, value] : descriptor.headers()) {
     auto key = lower(name);
-    if (key != "accept" && key != "content-type" && (responses || key != "anthropic-version")) headers.emplace_back(std::move(key), value);
+    if (key != "accept" && key != "content-type" && (!messages || key != "anthropic-version")) headers.emplace_back(std::move(key), value);
   }
   std::sort(headers.begin(), headers.end());
   hash.number(headers.size());
   for (const auto& [key, value] : headers) { hash.text(key); hash.text(value); }
-  if (!responses) { hash.text("anthropic-version"); hash.text("2023-06-01"); }
+  if (messages) { hash.text("anthropic-version"); hash.text("2023-06-01"); }
   return hash.finish(digest);
 }
 bool configuration_digest(const messages::Request& request, Digest& digest) {
   Hash hash; hash.text("sp.messages.configuration.v1");
   hash.text(request.model); hash.text(request.account_scope); hash.text(request.system);
   hash.number(request.thinking_budget.has_value()); if (request.thinking_budget) hash.number(*request.thinking_budget);
+  hash.number(request.max_tokens);
   hash.number(request.tools.size());
   for (const auto& tool : request.tools) {
     hash.text(tool.name); hash.text(tool.description); hash.document(tool.input_schema); hash.text(tool.type);
@@ -140,44 +166,115 @@ bool configuration_digest(const responses::Request& request, Digest& digest) {
   }
   return hash.finish(digest);
 }
-bool content_digest(const Message& message, Digest& digest, bool responses) {
-  Hash hash; hash.text(responses ? "sp.responses.content.v1" : "sp.messages.content.v1");
-  hash.message(message); return hash.finish(digest);
+bool configuration_digest(const gemini::Request& request, Digest& digest) {
+  Hash hash; hash.text("sp.gemini.configuration.v1");
+  hash.text(request.model); hash.text(request.account_scope); hash.text(request.system);
+  hash.number(request.max_output_tokens);
+  hash.number(request.thinking_budget.has_value()); if (request.thinking_budget) hash.number(*request.thinking_budget);
+  hash.number(request.include_thoughts);
+  // required_tool is a per-turn choice, not continuation lineage.
+  hash.number(request.tools.size());
+  for (const auto& tool : request.tools) {
+    hash.text(tool.name); hash.text(tool.description); hash.document(tool.parameters);
+  }
+  return hash.finish(digest);
 }
-bool append_prefix(Digest& prefix, const Digest& content, size_t index, bool responses) {
-  Hash hash; hash.text(responses ? "sp.responses.prefix.v1" : "sp.messages.prefix.v1"); hash.number(index);
+bool configuration_digest(const interactions::Request& request, Digest& digest) {
+  Hash hash; hash.text("sp.interactions.configuration.v1");
+  hash.text(request.model); hash.text(request.account_scope); hash.text(request.system);
+  hash.number(request.max_output_tokens);
+  hash.number(request.thinking_level.has_value()); if (request.thinking_level) hash.text(*request.thinking_level);
+  hash.number(request.thinking_summaries);
+  // required_tool is deliberately excluded just as in Responses.
+  hash.number(request.tools.size());
+  for (const auto& tool : request.tools) {
+    hash.text(tool.name); hash.text(tool.description); hash.document(tool.parameters);
+  }
+  return hash.finish(digest);
+}
+bool content_digest(const Message& message, Digest& digest, std::string_view family) {
+  const auto* domain = domains(family);
+  if (!domain) return false;
+  Hash hash; hash.text(domain->content);
+  hash.message(message, domain->output); return hash.finish(digest);
+}
+bool append_prefix(Digest& prefix, const Digest& content, size_t index, std::string_view family) {
+  const auto* domain = domains(family);
+  if (!domain) return false;
+  Hash hash; hash.text(domain->prefix); hash.number(index);
   hash.bytes(prefix.data(), prefix.size()); hash.bytes(content.data(), content.size());
   return hash.finish(prefix);
 }
 } // namespace
+std::string_view NativeContext::family_name(Family family) {
+  switch (family) {
+    case Family::Messages: return "anthropic.messages";
+    case Family::Responses: return "openai.responses";
+    case Family::Gemini: return "google.generate";
+    case Family::Interactions: return "google.interactions";
+  }
+  return {};
+}
 NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, const messages::Request& request, bool streaming)
-    : responses_(false), model_(request.model), route_(descriptor.path(streaming)), prefix_count_(request.messages.size()) {
+    : family_(Family::Messages), model_(request.model), route_(descriptor.path(streaming)), prefix_count_(request.messages.size()) {
   valid_ = descriptor.family() == "anthropic.messages" && origin_digest(descriptor, origin_) && configuration_digest(request, prefix_);
   if (valid_) bind_history(request.messages);
 }
 NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, const responses::Request& request, bool streaming)
-    : responses_(true), model_(request.model), route_(descriptor.path(streaming)), prefix_count_(request.messages.size()) {
+    : family_(Family::Responses), model_(request.model), route_(descriptor.path(streaming)), prefix_count_(request.messages.size()) {
   valid_ = descriptor.family() == "openai.responses" && origin_digest(descriptor, origin_) && configuration_digest(request, prefix_);
   if (valid_) bind_history(request.messages);
+}
+NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, const gemini::Request& request, bool)
+    : family_(Family::Gemini), model_(request.model), route_(descriptor.path(false)), prefix_count_(request.messages.size()) {
+  valid_ = descriptor.family() == family_name(family_) && origin_digest(descriptor, origin_) && configuration_digest(request, prefix_);
+  if (valid_) {
+    client_tools_.reserve(request.tools.size());
+    for (const auto& tool : request.tools) client_tools_.push_back(tool.name);
+    std::sort(client_tools_.begin(), client_tools_.end());
+    bind_history(request.messages);
+  }
+}
+NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, const interactions::Request& request, bool streaming)
+    : family_(Family::Interactions), model_(request.model), route_(descriptor.path(streaming)), prefix_count_(request.messages.size()) {
+  valid_ = descriptor.family() == family_name(family_) && origin_digest(descriptor, origin_) && configuration_digest(request, prefix_);
+  if (valid_) {
+    client_tools_.reserve(request.tools.size());
+    for (const auto& tool : request.tools) client_tools_.push_back(tool.name);
+    std::sort(client_tools_.begin(), client_tools_.end());
+    bind_history(request.messages);
+  }
 }
 void NativeContext::bind_history(const std::vector<Message>& messages) {
   std::map<std::string, std::string> pending;
   for (size_t index = 0; index < messages.size(); ++index) {
     const auto& message = messages[index];
-    if (!responses_ && (message.wire_output || std::any_of(message.parts.begin(), message.parts.end(), [](const Part& part) {
-          return std::holds_alternative<Reasoning>(part) || std::holds_alternative<Opaque>(part);
+    if (family_ == Family::Messages && (message.wire_output || std::any_of(message.parts.begin(), message.parts.end(), [](const Part& part) {
+          return std::holds_alternative<Reasoning>(part) || std::holds_alternative<Opaque>(part) || std::holds_alternative<Thought>(part);
         }))) { history_valid_ = false; return; }
+    if (family_ != Family::Messages) {
+      if (message.native) {
+        if (message.role != Role::Assistant || !message.wire_output || !message.wire_output->root().is_array()) {
+          history_valid_ = false; return;
+        }
+      } else {
+        if (message.role == Role::Assistant || message.wire_output ||
+            std::any_of(message.parts.begin(), message.parts.end(), [](const Part& part) {
+              return !std::holds_alternative<Text>(part) && !std::holds_alternative<Image>(part) && !std::holds_alternative<ToolResult>(part);
+            })) { history_valid_ = false; return; }
+      }
+    }
     Digest content{};
-    if (!content_digest(message, content, responses_)) { valid_ = false; return; }
+    if (!content_digest(message, content, family_name(family_))) { valid_ = false; return; }
     if (message.native) {
       const auto& seal = *message.native;
       if (!seal.complete_ || !seal.context_ || !seal.context_->valid_ ||
-          seal.context_->responses_ != responses_ || seal.context_->prefix_count_ != index || seal.context_->route_ != route_ ||
+          seal.context_->family_ != family_ || seal.context_->prefix_count_ != index || seal.context_->route_ != route_ ||
           seal.context_->origin_ != origin_ || seal.context_->prefix_ != prefix_ ||
           seal.content_ != content) { history_valid_ = false; return; }
     }
     // One bounded content hash per history message, not one rehash per capsule.
-    if (!append_prefix(prefix_, content, index, responses_)) { valid_ = false; return; }
+    if (!append_prefix(prefix_, content, index, family_name(family_))) { valid_ = false; return; }
     for (const auto& part : message.parts) {
       if (const auto* call = std::get_if<ToolCall>(&part); call && call->kind == ToolCallKind::ServerExecuted) pending.emplace(call->id, call->name);
       if (const auto* result = std::get_if<ServerToolResult>(&part)) pending.erase(result->tool_use_id);
@@ -196,12 +293,21 @@ std::optional<std::string_view> NativeContext::server_tool_name(std::string_view
   if (found != pending_server_tools_.end() && found->first == id) return found->second;
   return std::nullopt;
 }
+bool NativeContext::client_tool_declared(std::string_view name) const {
+  const auto found = std::lower_bound(client_tools_.begin(), client_tools_.end(), name,
+      [](const auto& entry, std::string_view key) { return std::string_view(entry) < key; });
+  return found != client_tools_.end() && *found == name;
+}
 NativeReplay::NativeReplay(std::shared_ptr<const NativeContext> context, const Message& message, const StopReason* stop, bool complete)
     : context_(std::move(context)), stop_(stop ? stop->kind : StopKind::Unknown) {
-  const bool responses = context_ && context_->responses_;
-  const bool eligible = !responses || (message.wire_output && message.wire_output->root().is_array() &&
+  const bool atomic = context_ && context_->family_ != NativeContext::Family::Messages;
+  const bool eligible = !atomic || (message.role == Role::Assistant && message.wire_output && message.wire_output->root().is_array() &&
       stop && (stop->kind == StopKind::EndTurn || stop->kind == StopKind::ToolUse || stop->kind == StopKind::Refusal));
-  complete_ = complete && eligible && context_ && context_->valid_ && context_->history_valid_ && stop &&
-      content_digest(message, content_, responses);
+  const bool invalid_call = context_ && context_->family_ == NativeContext::Family::Gemini &&
+      std::any_of(message.parts.begin(), message.parts.end(), [](const Part& part) {
+        return std::holds_alternative<InvalidToolCall>(part);
+      });
+  complete_ = complete && eligible && !invalid_call && context_ && context_->valid_ && context_->history_valid_ && stop &&
+      content_digest(message, content_, NativeContext::family_name(context_->family_));
 }
 } // namespace sp

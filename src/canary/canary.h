@@ -8,7 +8,13 @@
 #include <vector>
 
 namespace sp::canary {
-enum class Provider { OpenAI, Anthropic, Gemini, OpenAIResponses };
+enum class Provider { OpenAI, Anthropic, Gemini, OpenAIResponses, VisionChat, VisionResponses, VisionMessages, VisionGemini, VisionInteractions };
+constexpr bool vision_provider(Provider provider) {
+  return provider >= Provider::VisionChat && provider <= Provider::VisionInteractions;
+}
+// Owner-approved additional60/$12 after spent40/$7.795635; no old margin renewal.
+inline constexpr std::uint64_t vision_call_limit = 100;
+inline constexpr std::uint64_t vision_cost_limit = 19795635;
 struct Bounds {
   std::uint64_t input_tokens{}, output_tokens{}, input_rate{}, output_rate{};
   std::uint64_t calls{}, tokens{}, micro_usd{};
@@ -43,6 +49,7 @@ std::uint64_t reserved_cost(const Bounds&);
 // Separate opens + flock serialize threads and processes; partial records fail closed.
 Debit reserve(const Profile&, const std::string& ledger_path);
 Totals ledger_totals(const Profile&, const std::string& ledger_path);
+Totals vision_campaign_totals(const std::string& ledger_path);
 
 enum class State { Passed, Failed, NotRun };
 enum class Reason {
@@ -50,7 +57,8 @@ enum class Reason {
   RuntimeFailure, MissingText, MissingTool, InvalidTool, MissingSignature,
   PrerequisiteFailed, RetentionMismatch, MutationUnavailable,
   SignatureRejected, NegativeAccepted, NegativeInconclusive, InvalidUsage,
-  MissingReasoning, CiphertextRejected, OmissionAccepted, OmissionRejected
+  MissingReasoning, CiphertextRejected, OmissionAccepted, OmissionRejected,
+  IncorrectVision, UnreadableVision
 };
 enum class Replay { NotApplicable, ReplayVerified, ReplayAcceptanceUnobservable };
 struct Case {
@@ -68,6 +76,9 @@ struct Case {
   int http_status = 0;
   std::uint64_t reasoning_items = 0, summary_items = 0;
   bool encrypted_present = false, native_complete = false;
+  bool image_sent = false, reasoning_requested = false, reasoning_disabled = false, default_off = false;
+  bool visible_reasoning = false, native_present = false;
+  std::optional<bool> vision_correct{};
 };
 struct Report {
   Provider provider{};
@@ -78,11 +89,13 @@ struct Report {
   std::uint64_t native_leaves = 0;
   Totals reserved;
   bool reserved_known = false;
+  std::optional<Totals> campaign_reserved{};
   std::vector<Case> cases;
 };
 // Synchronous caller bridge, production runtime + HTTP backend, no retries.
 // Raw response material and native replay objects remain in process memory only.
 Report run(const Profile&, const std::string& ledger_path, std::string api_key);
+Report run_vision(const Profile&, const std::string& ledger_path, std::string api_key);
 std::string report_json(const Report&);
 std::string_view plan_json();
 std::string_view help_text();

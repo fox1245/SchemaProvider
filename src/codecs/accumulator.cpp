@@ -98,7 +98,8 @@ bool Accumulator::apply(const PartBegin& e) {
     if (!count_value(count_value, root, 0)) return reject(ErrorKind::ResourceLimit, "part metadata limit");
   }
   content_bytes_ += header_bytes;
-  parts_.emplace(e.part.value, Cursor{e.kind, e.header, {}, {}, false, {}});
+  parts_.emplace(e.part.value, Cursor{e.kind, e.header, {}, {},
+      m->second.native_context && m->second.native_context->family() == "google.generate", false, {}});
   m->second.parts_by_order.emplace(e.order, e.part.value);
   return true;
 }
@@ -124,7 +125,8 @@ bool Accumulator::apply(const PartSeal& e) {
   if (e.wire_metadata) {
     const auto metadata = e.wire_metadata->root();
     if (!metadata.is_object() ||
-        (c.kind != PartKind::Reasoning && c.kind != PartKind::Opaque && c.kind != PartKind::ToolCall))
+        (c.kind != PartKind::Reasoning && c.kind != PartKind::Opaque && c.kind != PartKind::ToolCall &&
+         c.kind != PartKind::Thought && !(c.google_part && (c.kind == PartKind::Text || c.kind == PartKind::Thinking))))
       return reject(ErrorKind::ProtocolCorrupt, "invalid native part metadata");
     if (c.sealed) {
       if (!c.header.wire_metadata || !json::equal(c.header.wire_metadata->root(), metadata))
@@ -151,9 +153,35 @@ bool Accumulator::apply(const PartSeal& e) {
     }
     if (!prefix.empty()) return reject(ErrorKind::ProtocolCorrupt, "incomplete reasoning summary snapshot");
   }
-  if (!c.sealed && c.kind == PartKind::Opaque &&
-      (!c.header.wire_metadata || c.header.wire_metadata->root().get("type").as_string() != c.header.wire_type))
-    return reject(ErrorKind::ProtocolCorrupt, "invalid opaque item metadata");
+  if (!c.sealed && c.kind == PartKind::Thought) {
+    if (!c.header.wire_metadata || c.header.wire_metadata->root().get("type").as_string() != "thought")
+      return reject(ErrorKind::ProtocolCorrupt, "invalid completed thought step");
+    const auto metadata = c.header.wire_metadata->root();
+    const auto signature = metadata.get("signature"), summary = metadata.get("summary");
+    if ((signature.valid() && !signature.is_null() && !signature.is_string()) ||
+        (summary.valid() && !summary.is_null() && !summary.is_array()))
+      return reject(ErrorKind::ProtocolCorrupt, "invalid thought fields");
+    std::string_view prefix(c.bytes);
+    for (auto item : summary.elements()) {
+      if (!item.is_object() || item.get("type").as_string() != "text" || !item.get("text").is_string())
+        return reject(ErrorKind::Unsupported, "unsupported thought summary content");
+      const auto text = item.get("text").as_string();
+      const auto size = std::min(prefix.size(), text.size());
+      if (prefix.substr(0, size) != text.substr(0, size))
+        return reject(ErrorKind::ProtocolCorrupt, "contradictory thought summary snapshot");
+      prefix.remove_prefix(size);
+    }
+    if (!prefix.empty()) return reject(ErrorKind::ProtocolCorrupt, "incomplete thought summary snapshot");
+  }
+  if (!c.sealed && c.kind == PartKind::Opaque) {
+    if (!c.header.wire_metadata) return reject(ErrorKind::ProtocolCorrupt, "missing opaque item metadata");
+    const auto metadata = c.header.wire_metadata->root();
+    if (c.google_part) {
+      if (metadata.get("type").valid() || (c.header.wire_type != "empty" && !metadata.get(c.header.wire_type).is_object()))
+        return reject(ErrorKind::ProtocolCorrupt, "invalid native Google opaque part");
+    } else if (metadata.get("type").as_string() != c.header.wire_type)
+      return reject(ErrorKind::ProtocolCorrupt, "invalid opaque item metadata");
+  }
   if (c.sealed) {
     if (!e.snapshot) return true;
     if (e.snapshot->size() > limits_.max_content_bytes ||
@@ -210,6 +238,19 @@ Part Accumulator::seal_value(Cursor& c, bool partial) {
     std::string{}.swap(c.bytes);
     return result;
   }
+  if (c.kind == PartKind::Thought) {
+    Thought result;
+    if (!c.header.wire_metadata) {
+      if (!c.bytes.empty()) result.summary.push_back(std::move(c.bytes));
+      return result;
+    }
+    const auto item = c.header.wire_metadata->root();
+    result.summary.reserve(item.get("summary").size());
+    for (auto value : item.get("summary").elements()) result.summary.emplace_back(value.get("text").as_string());
+    if (item.get("signature").is_string()) result.signature = item.get("signature").as_string();
+    std::string{}.swap(c.bytes);
+    return result;
+  }
   if (c.kind == PartKind::Opaque) return Opaque{c.header.wire_type, c.header.wire_metadata};
   if (c.kind == PartKind::ServerToolResult) {
     auto parsed = json::parse(c.bytes, {limits_.max_content_bytes, limits_.max_json_depth});
@@ -226,6 +267,9 @@ Part Accumulator::seal_value(Cursor& c, bool partial) {
   if (partial || (c.header.wire_type == "function_call" && c.header.wire_metadata &&
       c.header.wire_metadata->root().get("status").as_string() == "incomplete"))
     return invalid(InvalidReason::Truncated);
+  if (c.header.wire_type == "functionCall" && stop_ &&
+      stop_->kind != StopKind::EndTurn && stop_->kind != StopKind::ToolUse)
+    return invalid(stop_->kind == StopKind::MaxTokens ? InvalidReason::Truncated : InvalidReason::Other);
   if (c.bytes.empty()) return invalid(InvalidReason::Empty);
   auto parsed = json::parse(c.bytes, {limits_.max_tool_bytes, limits_.max_json_depth});
   if (auto* error = std::get_if<json::ParseError>(&parsed)) {

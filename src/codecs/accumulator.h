@@ -23,6 +23,7 @@ class Accumulator {
     PartHeader header;
     std::string bytes;
     std::optional<std::string> signature;
+    bool google_part = false;
     bool sealed = false;
     std::optional<Part> value;
   };

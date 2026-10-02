@@ -36,7 +36,8 @@ bool matching_result(std::string_view name, std::string_view type) {
   return !expected.empty() && (expected == name || (expected == "tool_search" && (name == "tool_search_tool_regex" || name == "tool_search_tool_bm25")));
 }
 bool native_part(const Part& part) {
-  return !std::holds_alternative<Text>(part) && !std::holds_alternative<ToolResult>(part) && !std::holds_alternative<Refusal>(part);
+  return !std::holds_alternative<Text>(part) && !std::holds_alternative<ToolResult>(part) &&
+      !std::holds_alternative<Refusal>(part) && !std::holds_alternative<Image>(part);
 }
 } // namespace
 EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request, bool streaming) {
@@ -51,13 +52,25 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (request.thinking_budget && (request.temperature || (request.top_p && *request.top_p < 0.95))) return bad("manual thinking sampling parameters are incompatible");
   // Check seals before encoding or interpreting the edited contents. Removing a seal
   // never converts native parts or captured tool calls into imported, trusted input.
+  bool captured_history = false;
+  std::optional<Error> image_error;
   for (size_t i = 0; i < request.messages.size(); ++i) {
     const auto& message = request.messages[i];
     if (!message.native) for (const auto& part : message.parts) if (native_part(part)) return replay_bad();
+    captured_history = captured_history || static_cast<bool>(message.native);
+    for (const auto& part : message.parts) if (const auto* image = std::get_if<Image>(&part); image && !image_error) {
+      if (message.role != Role::User) image_error = Error{ErrorKind::InvalidRequest, "image inputs require user role"};
+      else if (!valid_image(*image)) image_error = Error{ErrorKind::InvalidRequest, "invalid inline image payload"};
+      else if (image->detail != ImageDetail::Auto) image_error = Error{ErrorKind::Unsupported, "Messages images have no detail control"};
+    }
   }
+  // Invalid ordinary input never reaches hashing. For captured history, retain
+  // lineage mismatch precedence even when the edited prefix is no longer valid.
+  if (image_error && !captured_history) return *image_error;
   auto context = std::shared_ptr<const NativeContext>(new NativeContext(descriptor, request, streaming));
   if (!context->history_valid_) return replay_bad();
   if (!context->valid_) return Error{ErrorKind::ResourceLimit, "native binding could not be captured"};
+  if (image_error) return *image_error;
   EncodedRequest result{"POST", std::string(descriptor.path(streaming)), {}, {}, {}};
   for (const auto& header : descriptor.headers()) {
     auto key = lower(header.first);
@@ -126,6 +139,11 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         if (!assistant && responding_to_tools && server_waiting) return bad("pending server tools require tool-results-only continuation");
         text_seen = true;
         body.raw("{\"type\":\"text\",\"text\":").quoted(text->value).raw("}");
+      } else if (const auto* image = std::get_if<Image>(&part)) {
+        if (responding_to_tools && server_waiting) return bad("pending server tools require tool-results-only continuation");
+        text_seen = true; // Tool results, when present, must precede ordinary input.
+        body.raw("{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":")
+            .quoted(image->mime).raw(",\"data\":\"").raw(*image->data).raw("\"}}");
       } else if (const auto* thinking = std::get_if<Thinking>(&part)) {
         if (!assistant) return bad("thinking belongs to assistant messages");
         body.raw("{\"type\":\"thinking\",\"thinking\":").quoted(thinking->text);
@@ -181,8 +199,6 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   result.body.reserve(measured.size());
   json::BoundedWriter body({measured.size(), 64}, &result.body);
   if (auto error = build(body)) return *error;
-  auto validated = json::parse(result.body, {request_limit, 64});
-  if (std::holds_alternative<json::ParseError>(validated)) return bad("encoded request violates JSON limits or encoding");
   result.context = std::move(context);
   return result;
 }

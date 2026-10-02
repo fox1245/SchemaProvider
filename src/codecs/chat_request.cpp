@@ -13,7 +13,21 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (request.temperature && (!std::isfinite(*request.temperature) || *request.temperature < 0 || *request.temperature > 2)) return bad("temperature outside range");
   if (request.top_p && (!std::isfinite(*request.top_p) || *request.top_p < 0 || *request.top_p > 1)) return bad("top_p outside range");
   if (request.max_output_tokens && !*request.max_output_tokens) return bad("max_output_tokens must be positive");
-  constexpr json::Limits limits{1U << 20, 64};
+  if (request.reasoning_effort && *request.reasoning_effort != "none" &&
+      *request.reasoning_effort != "low" && *request.reasoning_effort != "medium" &&
+      *request.reasoning_effort != "high" && *request.reasoning_effort != "xhigh" &&
+      *request.reasoning_effort != "max")
+    return bad("unsupported typed reasoning effort");
+  bool has_images = false;
+  for (const auto& message : request.messages) {
+    if (!message.images.empty() && message.role != Role::User)
+      return bad("image inputs require user role");
+    for (const auto& image : message.images) {
+      if (!valid_image(image)) return bad("invalid inline image payload");
+      has_images = true;
+    }
+  }
+  const json::Limits limits{has_images ? 16U << 20 : 1U << 20, 64};
   auto build = [&](json::BoundedWriter& body, bool validate) -> std::optional<Error> {
     std::set<std::string_view> pending, names;
     body.raw("{").quoted(descriptor.request_model_member()).raw(":").quoted(request.model);
@@ -42,7 +56,24 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       }
       if (comma) body.raw(",");
       comma = true;
-      body.raw("{\"role\":").quoted(role).raw(",\"content\":").quoted(message.text);
+      body.raw("{\"role\":").quoted(role).raw(",\"content\":");
+      if (message.images.empty()) body.quoted(message.text);
+      else {
+        body.raw("[");
+        bool image_comma = false;
+        for (const auto& image : message.images) {
+          if (image_comma) body.raw(",");
+          image_comma = true;
+          // MIME and base64 are validated ASCII; stream the URI without a copy.
+          body.raw("{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:")
+              .raw(image.mime).raw(";base64,").raw(*image.data)
+              .raw("\",\"detail\":").quoted(image_detail_name(image.detail)).raw("}}");
+          if (!body.ok()) return bad("request exceeds JSON limits or encoding");
+        }
+        if (!message.text.empty())
+          body.raw(",{\"type\":\"text\",\"text\":").quoted(message.text).raw("}");
+        body.raw("]");
+      }
       if (!body.ok()) return bad("request exceeds JSON limits or encoding");
       if (message.role == Role::Tool) body.raw(",\"tool_call_id\":").quoted(message.tool_call_id);
       if (!message.tool_calls.empty()) {
@@ -94,6 +125,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     if (request.top_p) number("top_p", *request.top_p);
     if (request.max_output_tokens)
       body.raw(",").quoted(descriptor.max_output_tokens_member()).raw(":").raw(std::to_string(*request.max_output_tokens));
+    if (request.reasoning_effort) body.raw(",\"reasoning_effort\":").quoted(*request.reasoning_effort);
     body.raw("}");
     if (!body.ok()) return bad("request exceeds JSON limits or encoding");
     return {};

@@ -1,6 +1,19 @@
 # Roadmap: staged release ladder
 
-Design proposal for a two-person team; private transport, Chat/Messages codecs, runtime and M5 canary/consumer experiment now exist (see POC_PLAN, measured M1–M5). M5 supports recording a bounded experiment but explicitly rejects strict lossless NeoGraph cutover. Stage order is fixed; each stage ships only after its own exit criteria. The PoC runs ahead of Stage 0 and de-risks Stage 1; it is not an installed release or completed release stage. Property names are in CONFORMANCE and decisions in decisions/README.
+The private PoC now measures transport/runtime, five HTTP/SSE API families, inline vision and bounded native replay (POC_PLAN M1–M5 and5.6–5.9). It is not an installed release or a completed release stage; strict lossless NeoGraph cutover remains NO-GO. The owner's next implementation order below takes priority for upcoming work; the formal release ladder still defines qualification gates, not claims that those stages are complete.
+
+## Owner-requested next work
+
+Status: planned, not implemented by the current vision-verification commit. Keep each deliverable distinct and execute in this order:
+
+1. **User-controlled MAX_TOKEN.** Move the canary-imposed output-token restriction to caller request/configuration. The user chooses `max_output_tokens`; the PoC's8192 value is a historical workload setting, not product policy. No silent clamp or hidden library cap. Distinguish actual model/service limits from independently authorized call/money/resource budgets.
+2. **Externalize hardcoded configuration values.** Inventory model capabilities/defaults, endpoints/headers, rate/error/stop facts, timeout/retry/resource defaults, HTTP preference and campaign grants; use the existing closed/versioned JSON convention rather than adding YAML/TOML dependencies without a concrete need. Values stay data; framing/state transitions/signature assembly/terminal causality stay typed code. A request profile does not mint its own spending authorization or renew a spent budget.
+3. **Verify HTTP/1.1,2,3.** Record compiled backend availability and actual negotiated protocols, buffered/SSE behavior, multiplexing/backpressure, cancellation/deadlines and single-attempt fallback.1.1/2 have bounded prior evidence; the current linked libcurl lacks HTTP3, so QUIC remains a separate implementation/validation gap. A fallback is not HTTP3 proof.
+4. **SchemaProvider benchmark and results.** After user configuration and protocol gates, run reproducible same-workload/version/worker benchmarks against the recorded baseline. Report latency percentiles, throughput, RSS/threads and codec/native-carry overhead separately from model generation latency; preserve the commands/configuration/raw nonsecret measurements and interpretation limits.
+5. **NeoGraph integration and code/example cutover.** First admit a rich result/native-capable request and pre-dispatch version/capability gate, then migrate every owned caller and example and remove obsolete paths without lossy shims. Journal/projection and retained non-chat feature ownership must be explicit. The legacy ABI gap cannot be hidden by zero/default conversions.
+6. **Re-run NeoGraph benchmarks after integration.** Reuse the original workload and user knobs to compare end-to-end latency/throughput/RSS/threads/retry/cancel behavior before and after the actual cutover. Library-only numbers are not integrated NeoGraph evidence.
+
+Google native-consumption ambiguity and generic Interactions omission errors remain documented data-qualification limits; they do not replace these owner-defined implementation priorities. Python bindings stay after C++ API stabilization.
 
 ## Stage 0 — Foundations (docs and gates)
 - Entry: DESIGN, CONFORMANCE, RESEARCH and decisions accepted by the maintainer.
@@ -34,6 +47,8 @@ The existing consumer result/request ABI is a strict lossless **NO-GO**: five ze
 - Exit: Continuation has an explicit lifetime (Persisted | ConnectionBound) with full-input fallback or no-retry rule; previous_response_not_found path tested.
 - Cut line: WS lane may slip to a later release while Responses over SSE ships.
 - Private post-M5 HTTP/SSE Responses reasoning PoC now exists (POC_PLAN5.7). Final16/16 plain/ASan+UBSan/TSan groups pass; one buffered encrypted tool continuation is N=1 ReplayVerified, while omission was accepted. Initial live5/6 included a real SSE ciphertext-authority failure; two explicitly additive calls diagnosed it and confirmed corrected SSE, retaining8/US$0.186216 reservations. This is not a fresh6/6 run, live SSE tool replay or Stage2 exit. WebSocket, OpenRouter, server-state continuation and60-run qualification remain absent.
+- The later five-API vision probe (POC_PLAN5.8) verified GPT-6 Luna visible summaries and an actual Responses SSE tool/negative pair,8/8. This clears those bounded observations, not WebSocket/OpenRouter/60-run or Stage2 release admission.
+- Remaining5.9 work executed after an explicit additional60/US$12 grant. Fresh low Responses emitted no native payload in one tool generation (6passed/2unavailable); separate medium8/8 established another actual SSE positive/ciphertext-negative pair. These are separate cohorts, not statistical parity or a merged all-family pass.
 
 ## Stage 3 — Gemini
 - Scope: Gemini generate (buffered + SSE), part-structure-preserving codec. Interactions ONLY if a complete spec (event order, terminal semantics, resume) is written and reviewed first; otherwise not in this ladder.
@@ -42,6 +57,8 @@ The existing consumer result/request ABI is a strict lossless **NO-GO**: five ze
 - Canary cells: Gemini generate live cell; Interactions cell only if specified.
 - Exit: terminal-evidence table covers Gemini x {buffered, SSE}; EOF-without-trailing-blank-line policy has a captured fixture.
 - A separate cheap `gemini-2.5-flash-lite` OpenAI-compatibility text smoke now passed one buffered/SSE pair under a4-attempt/US$1 ceiling (POC_PLAN5.6). It is **not** this native Gemini stage's exit, tool/signature/replay support or broader model qualification. Future Gemini runs still prefer a low-cost model after checking current prices/features and explicit remaining/new budget.
+- POC_PLAN5.8 now implements private native Gemini and model-only stateless Interactions after current lifecycle/spec review. Actual vision/thinking ran on both; missing/empty stateless IDs and an omitted-parts Gemini terminal were corrected from real receipts. All23 model-free groups pass under plain/ASan+UBSan/TSan. The owner-approved40-call allowance is exhausted; Interactions live tool replay, further vision-signature negatives and full stage qualification are still unverified. No transport/engine cutover or automatic budget extension is implied.
+- POC_PLAN5.9 now observes actual retained Interactions SSE tool replay and complete new signature/omission contrasts. Google accepted single-carrier mutations, so native consumption remains unobservable; generic Interactions full-state omission400 remains inconclusive. Native Gemini fresh8/8 includes a real post-fix live continuation; Interactions fresh7/8 is not an all-case pass. Final24/24 plain/ASan/TSan and cumulative99/US$18.979680 preserve old debits and do not open further scope.
 - Cut line: Interactions.
 
 ## Stage 4 — NeoGraph adapter, journal v2, cutover

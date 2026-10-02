@@ -44,19 +44,31 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (request.reasoning && !reasoning_options(*request.reasoning)) return bad("unsupported typed reasoning options");
   // Captured groups never degrade to caller-imported assistant history when their
   // seal or original items are removed. Only plain input and tool results are imports.
+  bool captured_history = false;
+  std::optional<Error> image_error;
   for (const auto& message : request.messages) {
     if (message.native) {
       if (message.role != Role::Assistant || !message.wire_output || !message.wire_output->root().is_array()) return replay_bad();
     } else {
       if (message.role == Role::Assistant || message.wire_output) return replay_bad();
       for (const auto& part : message.parts) {
-        if (!std::holds_alternative<Text>(part) && !std::holds_alternative<ToolResult>(part)) return replay_bad();
+        if (!std::holds_alternative<Text>(part) && !std::holds_alternative<ToolResult>(part) &&
+            !std::holds_alternative<Image>(part)) return replay_bad();
       }
     }
+    captured_history = captured_history || static_cast<bool>(message.native);
+    for (const auto& part : message.parts) if (const auto* image = std::get_if<Image>(&part); image && !image_error) {
+      if (message.role != Role::User) image_error = Error{ErrorKind::InvalidRequest, "image inputs require user role"};
+      else if (!valid_image(*image)) image_error = Error{ErrorKind::InvalidRequest, "invalid inline image payload"};
+    }
   }
+  // Preserve native-prefix mismatch precedence over payload errors in edited
+  // captured history, but reject invalid ordinary input before hashing.
+  if (image_error && !captured_history) return *image_error;
   auto context = std::shared_ptr<const NativeContext>(new NativeContext(descriptor, request, streaming));
   if (!context->history_valid_) return replay_bad();
   if (!context->valid_) return Error{ErrorKind::ResourceLimit, "native binding could not be captured"};
+  if (image_error) return *image_error;
   EncodedRequest result{"POST", std::string(descriptor.path(streaming)), {}, {}, {}};
   for (const auto& header : descriptor.headers()) {
     const auto key = lower(header.first);
@@ -144,11 +156,16 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
           separator(); body.raw("{\"role\":").quoted(role).raw(",\"content\":[");
           bool comma = false;
           for (const auto& part : message.parts) {
-            const auto* text = std::get_if<Text>(&part);
-            if (!text) return Error{ErrorKind::Unsupported, "plain Responses input supports typed text only"};
             if (comma) body.raw(",");
             comma = true;
-            body.raw("{\"type\":\"input_text\",\"text\":").quoted(text->value).raw("}");
+            if (const auto* text = std::get_if<Text>(&part)) {
+              body.raw("{\"type\":\"input_text\",\"text\":").quoted(text->value).raw("}");
+            } else if (const auto* image = std::get_if<Image>(&part)) {
+              body.raw("{\"type\":\"input_image\",\"image_url\":\"data:")
+                  .raw(image->mime).raw(";base64,").raw(*image->data)
+                  .raw("\",\"detail\":").quoted(image_detail_name(image->detail)).raw("}");
+            } else return Error{ErrorKind::Unsupported, "plain Responses input supports typed text and images only"};
+            if (!body.ok()) return Error{ErrorKind::ResourceLimit, "request exceeds JSON byte, depth or encoding limits"};
           }
           body.raw("]}");
         }

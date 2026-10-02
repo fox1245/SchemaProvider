@@ -65,10 +65,12 @@ target_include_directories(sp_descriptor PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_options(sp_descriptor PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(sp_descriptor PRIVATE sp_json)
 
-add_library(sp_codecs STATIC src/core/native.cpp src/codecs/accumulator.cpp
+add_library(sp_codecs STATIC src/core/image.cpp src/core/native.cpp src/codecs/accumulator.cpp
             src/codecs/chat.cpp src/codecs/chat_request.cpp
             src/codecs/messages.cpp src/codecs/messages_request.cpp
-            src/codecs/responses.cpp src/codecs/responses_request.cpp)
+            src/codecs/responses.cpp src/codecs/responses_request.cpp
+            src/codecs/gemini.cpp src/codecs/gemini_request.cpp
+            src/codecs/interactions.cpp src/codecs/interactions_request.cpp)
 target_compile_options(sp_codecs PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(sp_codecs PUBLIC sp_core PRIVATE sp_json sp_descriptor OpenSSL::Crypto)
 
@@ -86,7 +88,7 @@ target_compile_options(sp_runtime PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(sp_runtime PUBLIC sp_core PRIVATE sp_codecs sp_transport sp_descriptor sp_json)
 
 add_library(sp_canary_core STATIC src/canary/profile.cpp src/canary/ledger.cpp
-            src/canary/runner.cpp src/canary/report.cpp)
+            src/canary/runner.cpp src/canary/vision.cpp src/canary/report.cpp)
 target_include_directories(sp_canary_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_options(sp_canary_core PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(sp_canary_core PRIVATE sp_runtime sp_codecs sp_descriptor sp_json sp_transport)
@@ -149,6 +151,22 @@ if(SP_BUILD_TESTS)
   add_executable(sp_responses_runtime_tests tests/responses_runtime_test.cpp)
   target_link_libraries(sp_responses_runtime_tests PRIVATE sp_runtime sp_codecs sp_descriptor sp_json sp_transport)
   target_compile_options(sp_responses_runtime_tests PRIVATE -Wall -Wextra -Wpedantic)
+  add_executable(sp_vision_inputs_tests tests/vision_inputs_test.cpp)
+  target_link_libraries(sp_vision_inputs_tests PRIVATE sp_codecs sp_descriptor sp_json)
+  target_compile_options(sp_vision_inputs_tests PRIVATE -Wall -Wextra -Wpedantic)
+  add_executable(sp_gemini_tests tests/gemini_semantic_test.cpp)
+  target_link_libraries(sp_gemini_tests PRIVATE sp_codecs sp_descriptor sp_json)
+  add_executable(sp_gemini_runtime_tests tests/gemini_runtime_test.cpp)
+  target_link_libraries(sp_gemini_runtime_tests PRIVATE sp_runtime sp_codecs sp_descriptor sp_json)
+  add_executable(sp_interactions_tests tests/interactions_semantic_test.cpp)
+  target_link_libraries(sp_interactions_tests PRIVATE sp_codecs sp_descriptor sp_json)
+  add_executable(sp_interactions_runtime_tests tests/interactions_runtime_test.cpp)
+  target_link_libraries(sp_interactions_runtime_tests PRIVATE sp_runtime sp_codecs sp_descriptor sp_json)
+  add_executable(sp_vision_campaign_tests tests/vision_campaign_test.cpp)
+  target_link_libraries(sp_vision_campaign_tests PRIVATE sp_runtime sp_codecs sp_descriptor sp_json)
+  foreach(target sp_gemini_tests sp_gemini_runtime_tests sp_interactions_tests sp_interactions_runtime_tests sp_vision_campaign_tests)
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+  endforeach()
   add_executable(sp_fixture_runner tests/fixture_runner.cpp)
   target_link_libraries(sp_fixture_runner PRIVATE sp_codecs sp_descriptor sp_json sp_transport)
   add_executable(sp_runtime_policy_tests tests/runtime_policy_test.cpp)
@@ -160,6 +178,12 @@ if(SP_BUILD_TESTS)
   add_executable(sp_canary_tests tests/canary_test.cpp)
   target_compile_options(sp_canary_tests PRIVATE -Wall -Wextra -Wpedantic)
   target_link_libraries(sp_canary_tests PRIVATE sp_canary_core sp_json Threads::Threads)
+  add_executable(sp_vision_canary_tests tests/vision_canary_test.cpp)
+  target_compile_options(sp_vision_canary_tests PRIVATE -Wall -Wextra -Wpedantic)
+  target_link_libraries(sp_vision_canary_tests PRIVATE sp_canary_core sp_json Threads::Threads)
+  add_executable(sp_vision_control_runtime_tests tests/vision_control_runtime_test.cpp)
+  target_compile_options(sp_vision_control_runtime_tests PRIVATE -Wall -Wextra -Wpedantic)
+  target_link_libraries(sp_vision_control_runtime_tests PRIVATE sp_canary_core sp_json)
   foreach(target sp_runtime_policy_tests sp_runtime_scheduler_tests sp_runtime_tests)
     target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
   endforeach()
@@ -191,6 +215,16 @@ if(SP_BUILD_TESTS)
   add_test(NAME responses_runtime COMMAND ${sp_test_runner} $<TARGET_FILE:sp_responses_runtime_tests>
            ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/responses_server.mjs)
   set_tests_properties(responses_properties responses_runtime PROPERTIES TIMEOUT 300)
+  add_test(NAME vision_inputs COMMAND ${sp_test_runner} $<TARGET_FILE:sp_vision_inputs_tests>)
+  add_test(NAME gemini_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_gemini_tests>)
+  add_test(NAME gemini_runtime COMMAND ${sp_test_runner} $<TARGET_FILE:sp_gemini_runtime_tests>
+           ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/gemini_server.mjs)
+  add_test(NAME interactions_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_interactions_tests>)
+  add_test(NAME interactions_runtime COMMAND ${sp_test_runner} $<TARGET_FILE:sp_interactions_runtime_tests>
+           ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/interactions_server.mjs)
+  add_test(NAME vision_campaign COMMAND ${sp_test_runner} $<TARGET_FILE:sp_vision_campaign_tests>
+           ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/vision_server.mjs)
+  set_tests_properties(vision_inputs gemini_properties gemini_runtime interactions_properties interactions_runtime vision_campaign PROPERTIES TIMEOUT 300)
   add_test(NAME chat_fixtures COMMAND ${sp_test_runner} $<TARGET_FILE:sp_fixture_runner> ${SP_NODE}
            ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/fixture_server.mjs
            ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/chat
@@ -207,6 +241,12 @@ if(SP_BUILD_TESTS)
   add_test(NAME canary_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_canary_tests>
            ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/canary_server.mjs $<TARGET_FILE:sp_canary>)
   set_tests_properties(canary_properties PROPERTIES TIMEOUT 300)
+  add_test(NAME vision_canary COMMAND ${sp_test_runner} $<TARGET_FILE:sp_vision_canary_tests>
+           ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/vision_server.mjs $<TARGET_FILE:sp_canary>)
+  set_tests_properties(vision_canary PROPERTIES TIMEOUT 300)
+  add_test(NAME vision_control_runtime COMMAND ${sp_test_runner} $<TARGET_FILE:sp_vision_control_runtime_tests>
+           ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/vision_server.mjs $<TARGET_FILE:sp_canary>)
+  set_tests_properties(vision_control_runtime PROPERTIES TIMEOUT 300)
   set_tests_properties(runtime_policy runtime_scheduler runtime_properties PROPERTIES TIMEOUT 300)
   set_tests_properties(sse_properties descriptor_properties chat_properties chat_fixtures
                        messages_properties messages_replay native_continuation_bounds messages_fixtures PROPERTIES TIMEOUT 300)

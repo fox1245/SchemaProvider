@@ -54,19 +54,27 @@ Profile parse_profile(std::string_view source, bool allow_test_loopback) {
       "call_cap", "token_cap", "micro_usd_cap", "thinking_budget", "provenance"});
   if (number(root, "version") != 1) fail();
   Profile result;
-  auto provider = text(root, "provider", 16);
+  auto provider = text(root, "provider", 32);
   if (provider == "openai") result.provider_ = Provider::OpenAI;
   else if (provider == "anthropic") result.provider_ = Provider::Anthropic;
   else if (provider == "gemini") result.provider_ = Provider::Gemini;
   else if (provider == "openai_responses") result.provider_ = Provider::OpenAIResponses;
+  else if (provider == "vision_chat") result.provider_ = Provider::VisionChat;
+  else if (provider == "vision_responses") result.provider_ = Provider::VisionResponses;
+  else if (provider == "vision_messages") result.provider_ = Provider::VisionMessages;
+  else if (provider == "vision_gemini") result.provider_ = Provider::VisionGemini;
+  else if (provider == "vision_interactions") result.provider_ = Provider::VisionInteractions;
   else fail();
   result.model_ = text(root, "model", 128);
   for (unsigned char c : result.model_)
     if (!key_character(c) && c != '-' && c != '.') fail();
   result.origin_ = text(root, "origin", 128);
-  const bool openai_provider = result.provider_ == Provider::OpenAI || result.provider_ == Provider::OpenAIResponses;
+  const bool vision = vision_provider(result.provider_);
+  const bool openai_provider = result.provider_ == Provider::OpenAI || result.provider_ == Provider::OpenAIResponses ||
+      result.provider_ == Provider::VisionChat || result.provider_ == Provider::VisionResponses;
+  const bool messages_provider = result.provider_ == Provider::Anthropic || result.provider_ == Provider::VisionMessages;
   const auto expected = openai_provider ? "https://api.openai.com" :
-      result.provider_ == Provider::Anthropic ? "https://api.anthropic.com" : "https://generativelanguage.googleapis.com";
+      messages_provider ? "https://api.anthropic.com" : "https://generativelanguage.googleapis.com";
   result.loopback_ = loopback(result.origin_);
   if (result.origin_ != expected && !(allow_test_loopback && result.loopback_)) fail();
   if (text(root, "input_bound_kind", 32) != "model_context_window") fail();
@@ -76,19 +84,31 @@ Profile parse_profile(std::string_view source, bool allow_test_loopback) {
   b.input_rate = number(root, "input_micro_usd_per_million");
   b.output_rate = number(root, "output_micro_usd_per_million");
   b.calls = number(root, "call_cap"); b.tokens = number(root, "token_cap"); b.micro_usd = number(root, "micro_usd_cap");
-  if (b.calls > 16 || b.micro_usd > 10000000 || b.output_tokens > b.input_tokens ||
+  if (b.calls > (vision ? vision_call_limit : 16U) || b.micro_usd > (vision ? vision_cost_limit : 10000000U) || b.output_tokens > b.input_tokens ||
       b.output_tokens > std::numeric_limits<std::uint64_t>::max() - b.input_tokens) fail();
   if (result.provider_ == Provider::Gemini &&
       (b.calls > 4 || b.micro_usd > 1000000 || b.output_tokens > 128)) fail();
   if (result.provider_ == Provider::OpenAIResponses &&
       (b.calls > 8 || b.micro_usd > 1000000 || b.output_tokens > 8192)) fail();
-  if (result.provider_ == Provider::Anthropic) {
+  if (vision && b.output_tokens > 8192) fail();
+  if (messages_provider) {
     result.thinking_budget_ = number(root, "thinking_budget");
     if (result.thinking_budget_ < 1024 || result.thinking_budget_ >= b.output_tokens) fail();
   } else if (root.get("thinking_budget").valid()) fail();
   // Live campaign targets have independently sourced model-window/rate floors.
   // A profile may over-reserve, but cannot substitute a character-token guess.
   if (!result.loopback_) {
+    if (vision && openai_provider) {
+      // Full-context reservation includes long-context/cache-write maximum rate.
+      if (result.model_ != "gpt-6-luna" || b.input_tokens < 1050000 ||
+          b.input_rate < 250000 || b.output_rate < 750000) fail();
+    } else if (result.provider_ == Provider::VisionMessages) {
+      if (result.model_ != "claude-haiku-4-5-20251001" || b.input_tokens < 200000 ||
+          b.input_rate < 1000000 || b.output_rate < 5000000) fail();
+    } else if (result.provider_ == Provider::VisionGemini || result.provider_ == Provider::VisionInteractions) {
+      if (result.model_ != "gemini-2.5-flash-lite" || b.input_tokens < 1048576 ||
+          b.input_rate < 100000 || b.output_rate < 400000) fail();
+    } else
     if (result.provider_ == Provider::OpenAI) {
       if (result.model_ != "gpt-4.1-mini-2025-04-14" || b.input_tokens < 1047576 ||
           b.output_tokens > 32768 || b.input_rate < 400000 || b.output_rate < 1600000) fail();
@@ -111,7 +131,7 @@ Profile parse_profile(std::string_view source, bool allow_test_loopback) {
     const bool anthropic = url.starts_with("https://platform.claude.com/") || url.starts_with("https://docs.anthropic.com/");
     const bool google = url.starts_with("https://ai.google.dev/");
     if (!(openai_provider ? openai :
-          result.provider_ == Provider::Anthropic ? anthropic : google)) fail();
+          messages_provider ? anthropic : google)) fail();
   }
   auto date = text(provenance, "verified_at", 10);
   if (date.size() != 10 || date[4] != '-' || date[7] != '-') fail();
@@ -129,8 +149,9 @@ Profile parse_profile(std::string_view source, bool allow_test_loopback) {
 }
 std::string read_profile_file(const std::string& path) { return detail::read_file(path, 16384, false); }
 std::string credential(Provider provider, const std::optional<std::string>& env_file) {
-  const char* name = provider == Provider::OpenAI || provider == Provider::OpenAIResponses ? "OPENAI_API_KEY" :
-      provider == Provider::Anthropic ? "ANTHROPIC_API_KEY" : "GEMINI_API_KEY";
+  const char* name = provider == Provider::OpenAI || provider == Provider::OpenAIResponses ||
+      provider == Provider::VisionChat || provider == Provider::VisionResponses ? "OPENAI_API_KEY" :
+      provider == Provider::Anthropic || provider == Provider::VisionMessages ? "ANTHROPIC_API_KEY" : "GEMINI_API_KEY";
   if (!env_file) {
     auto* value = std::getenv(name);
     if (!value) return {};

@@ -12,6 +12,9 @@ struct InputMessage {
   std::string text;
   std::vector<sp::ToolCall> tool_calls{};
   std::string tool_call_id{};
+  // Typed Chat content is canonical: images in vector order, then nonempty text.
+  // Generic Message-based APIs instead retain the caller's exact Part order.
+  std::vector<sp::Image> images{};
 };
 struct ToolDefinition { std::string name, description; std::shared_ptr<const json::Document> parameters; };
 struct Request {
@@ -20,6 +23,7 @@ struct Request {
   std::vector<ToolDefinition> tools;
   std::optional<double> temperature, top_p;
   std::optional<uint64_t> max_output_tokens;
+  std::optional<std::string> reasoning_effort{};
 };
 struct EncodedRequest { std::string method, path; std::vector<std::pair<std::string, std::string>> headers; std::string body; };
 using EncodeResult = std::variant<EncodedRequest, Error>;

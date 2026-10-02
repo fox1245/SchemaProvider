@@ -32,6 +32,8 @@ std::string_view reason(Reason value) {
     case Reason::CiphertextRejected: return "ciphertext_rejected";
     case Reason::OmissionAccepted: return "omission_accepted";
     case Reason::OmissionRejected: return "omission_rejected";
+    case Reason::IncorrectVision: return "incorrect_vision";
+    case Reason::UnreadableVision: return "unreadable_vision";
   }
   return "runtime_failure";
 }
@@ -50,13 +52,23 @@ std::string report_json(const Report& report) {
       ? "{\"calls\":" + std::to_string(report.reserved.calls) + ",\"tokens\":" + std::to_string(report.reserved.tokens) +
         ",\"micro_usd\":" + std::to_string(report.reserved.micro_usd) + '}'
       : std::string("null");
-  const bool responses = report.provider == Provider::OpenAIResponses;
-  const auto provider = report.provider == Provider::OpenAI || responses ? "openai" :
-      report.provider == Provider::Anthropic ? "anthropic" : "gemini";
+  const bool vision = vision_provider(report.provider);
+  const bool responses = report.provider == Provider::OpenAIResponses || report.provider == Provider::VisionResponses;
+  const bool messages = report.provider == Provider::Anthropic || report.provider == Provider::VisionMessages;
+  const auto provider = report.provider == Provider::OpenAI || report.provider == Provider::VisionChat || responses ? "openai" :
+      messages ? "anthropic" : "gemini";
+  const auto family = responses ? "openai.responses" : messages ? "anthropic.messages" :
+      report.provider == Provider::VisionGemini ? "google.generate" :
+      report.provider == Provider::VisionInteractions ? "google.interactions" : "openai.chat";
+  const auto campaign = report.campaign_reserved
+      ? "{\"calls\":" + std::to_string(report.campaign_reserved->calls) + ",\"tokens\":" +
+        std::to_string(report.campaign_reserved->tokens) + ",\"micro_usd\":" +
+        std::to_string(report.campaign_reserved->micro_usd) + '}'
+      : std::string("null");
   std::string out = "{\"version\":1,\"provider\":" + json::quote(provider) +
-      ",\"api_family\":" + json::quote(responses ? "openai.responses" :
-          report.provider == Provider::Anthropic ? "anthropic.messages" : "openai.chat") +
-      ",\"verification_scope\":" + json::quote(responses ? "stateless_reasoning_poc" :
+      ",\"api_family\":" + json::quote(family) +
+      ",\"verification_scope\":" + json::quote(vision ? "vision_reasoning_function_probe" :
+          responses ? "stateless_reasoning_poc" :
           report.provider == Provider::Gemini ? "text_only_compatibility_smoke" : "canary") +
       ",\"test_only\":" + (report.test_only ? "true" : "false") + ",\"replay\":" + json::quote(replay(report.replay)) +
       ",\"positive_retained\":" + (report.positive_retained ? "true" : "false") +
@@ -64,7 +76,7 @@ std::string report_json(const Report& report) {
       ",\"ciphertext_mutated\":" + (report.ciphertext_mutated ? "true" : "false") +
       ",\"reasoning_removed\":" + (report.reasoning_removed ? "true" : "false") +
       ",\"native_leaves\":" + std::to_string(report.native_leaves) +
-      ",\"reserved\":" + reserved +
+      ",\"reserved\":" + reserved + ",\"campaign_reserved\":" + campaign +
       ",\"billing\":\"conditional_conservative_exposure_not_invoice; provider_spending_control_required\","
       "\"usage_estimate\":\"reported_totals_at_profile_max_rates_not_billed_cost\",\"equivalence_admission\":false,\"cases\":[";
   bool comma = false;
@@ -74,7 +86,9 @@ std::string report_json(const Report& report) {
     // Do not serialize caller-owned identifiers even if a Report was edited.
     std::string_view name = "unknown";
     for (auto allowed : {"text_buffered", "text_sse", "tool_first", "tool_positive", "signature_negative",
-                        "reasoning_missing", "ciphertext_negative"})
+                        "reasoning_missing", "ciphertext_negative", "vision_off_buffered", "vision_on_buffered",
+                        "vision_on_sse", "vision_changed", "vision_tool_first", "vision_tool_positive",
+                        "vision_signature_negative", "vision_reasoning_missing"})
       if (item.name == allowed) name = allowed;
     out += "{\"name\":" + json::quote(name) + ",\"state\":" + json::quote(state(item.state)) +
         ",\"reason\":" + json::quote(reason(item.reason)) + ",\"dispatched\":" + (item.dispatched ? "true" : "false") +
@@ -90,12 +104,19 @@ std::string report_json(const Report& report) {
         ",\"reasoning_items\":" + std::to_string(item.reasoning_items) +
         ",\"summary_items\":" + std::to_string(item.summary_items) +
         ",\"encrypted_present\":" + (item.encrypted_present ? "true" : "false") +
-        ",\"native_complete\":" + (item.native_complete ? "true" : "false") + '}';
+        ",\"native_complete\":" + (item.native_complete ? "true" : "false") +
+        ",\"image_sent\":" + (item.image_sent ? "true" : "false") +
+        ",\"reasoning_requested\":" + (item.reasoning_requested ? "true" : "false") +
+        ",\"reasoning_disabled\":" + (item.reasoning_disabled ? "true" : "false") +
+        ",\"default_off\":" + (item.default_off ? "true" : "false") +
+        ",\"visible_reasoning\":" + (item.visible_reasoning ? "true" : "false") +
+        ",\"native_present\":" + (item.native_present ? "true" : "false") +
+        ",\"vision_correct\":" + (item.vision_correct ? (*item.vision_correct ? "true" : "false") : "null") + '}';
   }
   return out + "]}";
 }
 std::string_view plan_json() {
-  return R"({"version":1,"mode":"plan","state":"not_run","io_performed":false,"scenarios":["text_buffered","text_sse","tool_first","tool_positive","anthropic_signature_negative","responses_reasoning_missing","responses_ciphertext_negative"],"maximum_calls":{"openai":4,"anthropic":5,"gemini_text_compatibility":2,"openai_responses":6},"credentials":["OPENAI_API_KEY","ANTHROPIC_API_KEY","GEMINI_API_KEY"],"billing":"conditional_conservative_exposure_not_invoice; provider_spending_control_required","equivalence_admission":false})";
+  return R"({"version":1,"mode":"plan","state":"not_run","io_performed":false,"scenarios":["text_buffered","text_sse","tool_first","tool_positive","anthropic_signature_negative","responses_reasoning_missing","responses_ciphertext_negative","vision_off_buffered","vision_on_buffered","vision_on_sse","vision_changed","vision_tool_first","vision_tool_positive","vision_signature_negative","vision_reasoning_missing"],"maximum_calls":{"openai":4,"anthropic":5,"gemini_text_compatibility":2,"openai_responses":6,"vision_chat":6,"vision_responses":8,"vision_messages":8,"vision_gemini":8,"vision_interactions":8},"vision_campaign_cap":{"calls":100,"micro_usd":19795635},"vision_additional_allowance":{"calls":60,"micro_usd":12000000,"baseline_calls":40,"baseline_micro_usd":7795635},"credentials":["OPENAI_API_KEY","ANTHROPIC_API_KEY","GEMINI_API_KEY"],"billing":"conditional_conservative_exposure_not_invoice; provider_spending_control_required","equivalence_admission":false})";
 }
 std::string_view help_text() {
   return "Usage: sp_canary [--profile FILE] [--ledger FILE] [--env-file FILE] [--execute] [--test-loopback]\n"
@@ -104,9 +125,12 @@ std::string_view help_text() {
       "Private env file: NAME=value, optional blank/comment lines; owner-only regular file.\n"
       "--test-loopback permits only literal http://127.0.0.1:PORT or http://[::1]:PORT test origins.\n"
       "Live origins are exact first-party HTTPS origins; no gateway or extra endpoints.\n"
-      "Gemini is a two-request text-only OpenAI-compatibility smoke, not native Gemini support.\n"
+      "Legacy Gemini profile is a two-request text-only OpenAI-compatibility smoke.\n"
+      "Vision profiles exercise Chat, Responses, Messages, native Gemini and Interactions HTTP/SSE.\n"
+      "OpenAI vision profiles require gpt-6-luna; its Chat tool loop uses reasoning_effort:none.\n"
+      "Vision cumulative cap is100 attempts/US$19.795635: prior40/US$7.795635 plus additional60/US$12.\n"
       "Responses is a stateless HTTP/SSE reasoning/tool canary; no WebSocket or server continuation.\n"
-      "Responses has an8-attempt/US$1 sublimit; all OpenAI lanes also share16 attempts/US$10.\n"
+      "Legacy Responses has an8-attempt/US$1 sublimit; legacy OpenAI lanes share16 attempts/US$10.\n"
       "Exit 0: all cases passed; 2: failed/invalid; 3: at least one not_run.\n"
       "Reservations are durable, shared per provider, never refunded; preserve the ledger across restarts.\n"
       "Provider-side spending controls are required for invoice hard caps. A run is not equivalence admission.\n";

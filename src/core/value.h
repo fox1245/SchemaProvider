@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/image.h"
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -52,13 +53,17 @@ struct Opaque {
   std::string wire_type;
   std::shared_ptr<const json::Document> wire_metadata;
 };
-using Part = std::variant<Text, Refusal, ToolCall, InvalidToolCall, Thinking, RedactedThinking, ServerToolResult, ToolResult, Reasoning, Opaque>;
+struct Thought {
+  std::vector<std::string> summary;
+  std::optional<std::string> signature{};
+};
+using Part = std::variant<Text, Refusal, ToolCall, InvalidToolCall, Thinking, RedactedThinking, ServerToolResult, ToolResult, Reasoning, Opaque, Image, Thought>;
 struct Message {
   std::string id;
   Role role = Role::Assistant;
   std::vector<Part> parts;
   std::shared_ptr<const NativeReplay> native{};
-  // Responses output is one atomic ordered replay group, not imported JSON authority.
+  // Atomic ordered native replay group, never imported JSON authority.
   std::shared_ptr<const json::Document> wire_output{};
 };
 enum class Evidence { Reported, Derived };
@@ -106,7 +111,7 @@ struct PartialCompletion { std::vector<Message> messages; Usage usage; std::opti
 struct Failure { Error error; PartialCompletion partial; };
 using Outcome = std::variant<Completion, Failure>;
 struct LocalId { uint32_t value = 0; friend bool operator==(LocalId, LocalId) = default; };
-enum class PartKind { Text, Refusal, ToolCall, Thinking, RedactedThinking, ServerToolResult, Reasoning, Opaque };
+enum class PartKind { Text, Refusal, ToolCall, Thinking, RedactedThinking, ServerToolResult, Reasoning, Opaque, Thought };
 struct PartHeader {
   std::string wire_id, name;
   ToolCallKind tool_kind = ToolCallKind::ClientExecuted;

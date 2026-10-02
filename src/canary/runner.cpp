@@ -313,6 +313,7 @@ Reason blocked_reason(Reason value) {
 }
 } // namespace
 Report run(const Profile& profile, const std::string& ledger_path, std::string api_key) {
+  if (vision_provider(profile.provider())) return run_vision(profile, ledger_path, std::move(api_key));
   Report report;
   report.provider = profile.provider(); report.test_only = profile.loopback();
   const bool responses = profile.provider() == Provider::OpenAIResponses;
