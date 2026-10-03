@@ -123,76 +123,74 @@ bool never_kind(ErrorKind k) {
     default: return true;
   }
 }
-struct Code { std::string_view value; ErrorKind kind; RetryClass retry; };
-constexpr Code chat_codes[]{
-  {"insufficient_quota", ErrorKind::QuotaExhausted, RetryClass::Never},
-  {"rate_limit_exceeded", ErrorKind::RateLimited, RetryClass::AfterReset},
-  {"invalid_api_key", ErrorKind::Authentication, RetryClass::Never},
-  {"model_not_found", ErrorKind::NotFound, RetryClass::Never}};
-constexpr Code messages_codes[]{
-  {"invalid_request_error", ErrorKind::InvalidRequest, RetryClass::Never},
-  {"authentication_error", ErrorKind::Authentication, RetryClass::Never},
-  {"permission_error", ErrorKind::Permission, RetryClass::Never},
-  {"not_found_error", ErrorKind::NotFound, RetryClass::Never},
-  {"request_too_large", ErrorKind::InvalidRequest, RetryClass::Never},
-  {"rate_limit_error", ErrorKind::RateLimited, RetryClass::AfterReset},
-  {"api_error", ErrorKind::RemoteFailure, RetryClass::Transient},
-  {"overloaded_error", ErrorKind::Overloaded, RetryClass::Transient}};
 }  // namespace
 
-ResponseInfo inspect_response(std::string_view family, int status,
-    const std::vector<transport::Header>& headers, std::string_view body,
+ResponseInfo inspect_document_response(const configuration::RuntimePolicy& policy, std::string_view family, int status,
+    const std::vector<transport::Header>& headers, json::Value document,
     SteadyTime received, WallTime wall_received) {
   ResponseInfo info;
-  const bool openai = family == "openai.chat" || family == "openai.responses";
-  switch (status) {
-    case 400: case 413: case 422: info.kind = ErrorKind::InvalidRequest; info.retry_class = RetryClass::Never; break;
-    case 401: info.kind = ErrorKind::Authentication; info.retry_class = RetryClass::Never; break;
-    case 403: info.kind = ErrorKind::Permission; info.retry_class = RetryClass::Never; break;
-    case 404: info.kind = ErrorKind::NotFound; info.retry_class = RetryClass::Never; break;
-    case 429: info.kind = ErrorKind::LimitUnknown; break;
-    case 500: case 502: case 503: case 504: case 529:
-      info.kind = ErrorKind::Overloaded; info.retry_class = RetryClass::Transient; break;
-    default: break;
+  const auto& facts = policy.errors();
+  for (const auto& rule : facts.statuses) {
+    if (status != rule.status) continue;
+    info.kind = rule.kind;
+    info.retry_class = rule.retry;
+    break;
   }
-  if (!body.empty() && (openai || family == "anthropic.messages")) {
-    auto parsed = json::parse(body, {body.size(), 32});
-    if (auto* document = std::get_if<json::Document>(&parsed)) {
-      auto error = document->root().get("error");
-      if (family == "openai.responses" && !error.is_object()) {
-        error = document->root().get("response").get("error");
-        if (!error.is_object() && document->root().get("type").as_string() == "error") error = document->root();
-      }
-      if (error.is_object()) {
-        auto admit = [&](json::Value field, const auto& codes) {
-          if (!field.is_string()) return;
-          for (const auto& code : codes) {
-            if (field.as_string() != code.value || info.kind == ErrorKind::QuotaExhausted) continue;
-            info.kind = code.kind; info.retry_class = code.retry; info.vendor_code = code.value;
-          }
-        };
-        if (openai) {
-          admit(error.get("type"), chat_codes);
-          admit(error.get("code"), chat_codes);
-        } else admit(error.get("type"), messages_codes);
+  auto family_rules = std::find_if(facts.families.begin(), facts.families.end(),
+      [&](const auto& rule) { return rule.family == family; });
+  if (document.valid() && family_rules != facts.families.end()) {
+    json::Value error;
+    for (const auto& path : family_rules->error_paths) {
+      if (path == "error") error = document.get("error");
+      else if (path == "response.error") error = document.get("response").get("error");
+      else if (path == "root_error" && document.get("type").as_string() == family_rules->root_error_type) error = document;
+      if (error.is_object()) break;
+    }
+    if (error.is_object()) {
+      for (const auto& field : family_rules->code_fields) {
+        const auto value = error.get(field);
+        if (!value.is_string()) continue;
+        for (const auto& rule : family_rules->codes) {
+          if (value.as_string() != rule.value || info.kind == ErrorKind::QuotaExhausted) continue;
+          info.kind = rule.kind;
+          info.retry_class = rule.retry;
+          info.vendor_code = rule.value;
+          break;
+        }
       }
     }
   }
   for (const auto& header : headers) {
+    auto rule = std::find_if(facts.headers.begin(), facts.headers.end(), [&](const auto& candidate) {
+      return (candidate.family == "*" || candidate.family == family) && iequal(header.name, candidate.name);
+    });
+    if (rule == facts.headers.end()) continue;
     const auto value = trim(header.value);
     std::optional<Ms> delay;
-    if (iequal(header.name, "retry-after")) {
-      std::int64_t seconds;
-      if (digits(value, seconds) && seconds <= max_ms / 1000) delay = Ms(seconds * 1000);
-      else delay = http_date(value, wall_received);
-    } else if (openai && iequal(header.name, "retry-after-ms")) delay = decimal_ms(value, 1);
-    else if (openai && (iequal(header.name, "x-ratelimit-reset-requests") || iequal(header.name, "x-ratelimit-reset-tokens"))) {
-      if (!value.empty()) delay = reset_duration(value);
-    } else continue;
+    switch (rule->format) {
+      case configuration::HeaderFormat::SecondsOrHttpDate: {
+        std::int64_t seconds;
+        if (digits(value, seconds) && seconds <= max_ms / 1000) delay = Ms(seconds * 1000);
+        else delay = http_date(value, wall_received);
+        break;
+      }
+      case configuration::HeaderFormat::Milliseconds: delay = decimal_ms(value, 1); break;
+      case configuration::HeaderFormat::Duration: if (!value.empty()) delay = reset_duration(value); break;
+    }
     const auto minimum = delay ? add(received, *delay) : SteadyTime::max();
     info.retry_not_before = std::max(info.retry_not_before.value_or(minimum), minimum);
   }
   return info;
+}
+
+ResponseInfo inspect_response(const configuration::RuntimePolicy& policy, std::string_view family, int status,
+    const std::vector<transport::Header>& headers, std::string_view body,
+    SteadyTime received, WallTime wall_received) {
+  if (body.empty()) return inspect_document_response(policy, family, status, headers, {}, received, wall_received);
+  auto parsed = json::parse(body, {body.size(), static_cast<std::size_t>(policy.admission().error_json_depth)});
+  const auto* document = std::get_if<json::Document>(&parsed);
+  return inspect_document_response(policy, family, status, headers,
+      document ? document->root() : json::Value{}, received, wall_received);
 }
 
 std::string_view safe_message(ErrorKind kind) noexcept {
@@ -319,3 +317,13 @@ bool TokenBucket::consume(SteadyTime now) {
   return true;
 }
 }  // namespace sp::runtime::detail
+
+namespace sp::runtime {
+RetryPolicy default_retry_policy(const configuration::RuntimePolicy& policy) noexcept {
+  const auto& values = policy.defaults();
+  return {values.retry_enabled, values.retry_allow_duplicate_billing_risk,
+      static_cast<std::uint32_t>(values.retry_max_attempts),
+      std::chrono::milliseconds(values.retry_base_delay_ms),
+      std::chrono::milliseconds(values.retry_max_delay_ms)};
+}
+}

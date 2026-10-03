@@ -1,0 +1,26 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+find_dependency(CURL 7.88)
+find_dependency(OpenSSL COMPONENTS Crypto)
+if(@SP_EXTERNAL_YYJSON@ AND NOT TARGET yyjson::yyjson)
+  # Restore module lookup even when find_dependency returns from its caller.
+  function(_SchemaProvider_find_yyjson)
+    list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
+    find_dependency(yyjson MODULE)
+    set(yyjson_FOUND "${yyjson_FOUND}" PARENT_SCOPE)
+  endfunction()
+  _SchemaProvider_find_yyjson()
+  if(NOT yyjson_FOUND)
+    set(SchemaProvider_FOUND FALSE)
+    set(SchemaProvider_NOT_FOUND_MESSAGE "SchemaProvider requires the installed yyjson library used by this build")
+    return()
+  endif()
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/SchemaProviderTargets.cmake")
+foreach(_SchemaProvider_component core json descriptor codecs transport runtime)
+  set(SchemaProvider_${_SchemaProvider_component}_FOUND TRUE)
+endforeach()
+check_required_components(SchemaProvider)

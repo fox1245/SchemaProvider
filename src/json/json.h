@@ -1,5 +1,6 @@
 #pragma once
 
+#include "sp/config_defaults.h"
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
@@ -96,7 +97,10 @@ private:
     friend class Value;
 };
 
-struct Limits { std::size_t max_bytes = 1 << 20; std::size_t max_depth = 64; };
+struct Limits {
+    std::size_t max_bytes = config_defaults::codec_resources_json_bytes;
+    std::size_t max_depth = config_defaults::codec_resources_json_depth;
+};
 enum class ParseCode { Syntax, DuplicateKey, DepthExceeded, SizeExceeded };
 struct ParseError;
 class Document {
@@ -108,6 +112,8 @@ public:
     Document(const Document&) = delete;
     Document& operator=(const Document&) = delete;
     Value root() const;
+    // O(1) owned yyjson allocation bytes, not serialized text length.
+    std::size_t retained_bytes() const noexcept;
 private:
     explicit Document(void* document) : document_(document) {}
     void* document_ = nullptr;
@@ -123,6 +129,9 @@ struct ParseError {
 };
 using ParseResult = std::variant<Document, ParseError>;
 ParseResult parse(std::string_view input, Limits limits = {});
+// Conservative allocation ceiling for a fully parsed source of this extent.
+std::size_t retained_size_bound(std::size_t source_bytes) noexcept;
+std::uint32_t retained_size_contract() noexcept;
 bool equal(Value lhs, Value rhs);
 // Invalid UTF-8 returns an empty result; an empty input returns the JSON string "\"\"".
 std::string quote(std::string_view input);

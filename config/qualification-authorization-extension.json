@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "scope": "five_current_chat_api_qualification",
+  "additional_calls": 480,
+  "micro_usd": 3000000,
+  "original_authorization": "config/qualification-authorization.json",
+  "baseline_ledger": "build/m5-live.ledger",
+  "meter_ledger": "build/qualification-meter.ledger",
+  "catalog": "config/model-catalog.json",
+  "activation_anchor": "build/m5-live.ledger.qualification-binding",
+  "owner_selection": "추가 480회·US$3 승인",
+  "billing_guarantee": "local_meter_and_stop_not_invoice",
+  "unknown_cost_policy": "retain_reservation",
+  "excluded_paid_scope": [
+    "video_generation",
+    "image_generation",
+    "remote_graphrag"
+  ],
+  "binding": {
+    "original_authorization_sha256": "1bc7c4053ffa6444beeccebae71d322b62c5afd6ac8250d612c5f222b017e67a",
+    "baseline_sha256": "546bb5e2f08b7a28f0ea9b92b83702b2ffe87efc05b5362bff49e51be4501be3",
+    "catalog_sha256": "db3422c76f09585b4a11a09dcaee94c3b190cf50635809016c43c3c2e536a075",
+    "activation_sha256": "a0907908e1d589a139a54f99f4d6c273fa712a1511080a0db2d33de5ae0e5b88",
+    "meter_prefix_sha256": "cbe0bb379c7d3e2311aa5de6be71670dcf1e70bf160b661c22c69a385dd46662",
+    "meter_prefix_rows": 1220,
+    "meter_prefix_calls": 610,
+    "meter_prefix_spent_micro_usd": 219159,
+    "meter_prefix_held_micro_usd": 751233
+  }
+}

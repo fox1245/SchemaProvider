@@ -1,9 +1,12 @@
 #include "codecs/accumulator.h"
+#include "core/interface_contract.h"
 #include "core/native.h"
 #include "json/json.h"
 #include <algorithm>
 #include <utility>
+#include <limits>
 
+std::uint32_t sp::codec_interface_revision() noexcept { return 3; }
 namespace sp {
 namespace {
 bool incomplete(std::string_view s) {
@@ -44,8 +47,23 @@ bool reasoning_metadata(json::Value value, std::string_view id) {
       (!encrypted.valid() || encrypted.is_null() || encrypted.is_string()) &&
       (!status.valid() || status.is_null() || status.is_string());
 }
+std::size_t add_size(std::size_t a, std::size_t b) {
+  return b > std::numeric_limits<std::size_t>::max() - a ? std::numeric_limits<std::size_t>::max() : a + b;
 }
-Accumulator::Accumulator(SemanticLimits limits, Sink sink) : limits_(limits), sink_(std::move(sink)) {}
+std::size_t multiply_size(std::size_t a, std::size_t b) {
+  return a && b > std::numeric_limits<std::size_t>::max() / a ? std::numeric_limits<std::size_t>::max() : a * b;
+}
+std::size_t raw_retention_limit(std::size_t source_bytes) {
+  // A valid raw stream document carries at least {"type":"x"}. One additional
+  // malformed terminal observation may precede protocol rejection.
+  const auto records = source_bytes / std::string_view("{\"type\":\"x\"}").size() + 1;
+  const auto fixed = add_size(json::retained_size_bound(0), 2 * sizeof(RawWire) + sizeof(std::shared_ptr<const json::Document>));
+  return add_size(add_size(json::retained_size_bound(source_bytes), multiply_size(records, fixed)),
+                  multiply_size(source_bytes, 2));
+}
+}
+Accumulator::Accumulator(SemanticLimits limits, Sink sink, std::size_t source_bytes_limit)
+    : limits_(limits), sink_(std::move(sink)), raw_bytes_limit_(raw_retention_limit(source_bytes_limit)) {}
 bool Accumulator::accept(const Event& event, const Error* failure_override) {
   if (terminal()) return false;
   failure_override_ = failure_override;
@@ -304,6 +322,26 @@ bool Accumulator::apply(const MessageSeal& e) {
   }
   m->second.sealed = true; return true;
 }
+bool Accumulator::apply(const RawWire& e) {
+  if (e.type.empty() || !e.payload || !e.payload->root().is_object())
+    return reject(ErrorKind::ProtocolCorrupt, "invalid raw wire event");
+  const auto bytes = add_size(add_size(e.payload->retained_bytes(), sizeof(RawWire)),
+      add_size(e.type.capacity(), sizeof(std::shared_ptr<const json::Document>) + 1));
+  if (bytes > raw_bytes_limit_ - raw_bytes_)
+    return reject(ErrorKind::ResourceLimit, "raw wire retention limit");
+  raw_events_.push_back(e);
+  raw_bytes_ += bytes;
+  return true;
+}
+bool Accumulator::apply(const ResponseEnvelope& e) {
+  if (!e.payload || !e.payload->root().is_object())
+    return reject(ErrorKind::ProtocolCorrupt, "invalid response envelope");
+  size_t bytes = 0;
+  if (!metadata_size(e.payload->root(), 0, limits_.max_content_bytes, limits_.max_json_depth, bytes))
+    return reject(ErrorKind::ResourceLimit, "response envelope limit");
+  wire_envelope_ = e.payload;
+  return true;
+}
 bool Accumulator::apply(const UsageUpdate& e) {
   if (state_ != State::Receiving && state_ != State::Draining) return reject(ErrorKind::ProtocolCorrupt, "invalid usage transition");
   usage_ = e.snapshot; return true;
@@ -331,7 +369,7 @@ std::vector<Message> Accumulator::take_messages(bool partial) {
       auto& p = parts_.at(part_id);
       m.message.parts.push_back(p.value ? std::move(*p.value) : seal_value(p, partial));
     }
-    if (m.native_context) m.message.native = std::shared_ptr<const NativeReplay>(
+    if (m.native_context && m.native_context->replay_eligible()) m.message.native = std::shared_ptr<const NativeReplay>(
         new NativeReplay(std::move(m.native_context), m.message, stop_ ? &*stop_ : nullptr, !partial));
     result.push_back(std::move(m.message));
   }
@@ -347,13 +385,15 @@ bool Accumulator::apply(const Commit& e) {
     for (const auto& m : messages) for (const auto& part : m.parts) if (const auto* call = std::get_if<ToolCall>(&part); call && call->kind != ToolCallKind::ServerExecuted) stop_->kind = StopKind::ToolUse;
   }
   if (usage_.stage != UsageStage::Missing) usage_.stage = UsageStage::Final;
-  outcome_ = Completion{std::move(messages), std::move(*stop_), std::move(usage_)};
+  outcome_ = Completion{std::move(messages), std::move(*stop_), std::move(usage_),
+      std::move(wire_envelope_), {}, std::move(raw_events_)};
   state_ = State::Terminal; return true;
 }
 bool Accumulator::apply(const Fail& e) {
   if (terminal()) return false;
   if (usage_.stage != UsageStage::Missing) usage_.stage = UsageStage::Partial;
-  outcome_ = Failure{e.error, PartialCompletion{take_messages(true), std::move(usage_), std::move(stop_)}};
+  outcome_ = Failure{e.error, PartialCompletion{take_messages(true), std::move(usage_),
+      std::move(stop_), std::move(wire_envelope_), std::move(raw_events_)}};
   state_ = State::Terminal; return true;
 }
 } // namespace sp

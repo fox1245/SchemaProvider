@@ -1,11 +1,11 @@
 # D1 — Transport
 
 - Status: FIRM, revised 2026-10-01. Supersedes the earlier GATED default "A: one private Asio + OpenSSL stack, no libcurl".
-- Decider: the owner (SchemaProvider adopts libcurl with the existing standalone Asio event loop, then accepts optional HTTP/3 support), after the A/B measurement below and the M1/M1b transport spike of [../POC_PLAN.md](../POC_PLAN.md). HTTP/3 is an accepted direction, not an implemented or verified capability.
+- Decider: the owner accepts one libcurl/Asio stack and optional HTTP/3. Both capable and incapable Linux transport scenarios have now been exercised; hosted-provider interoperability and the capable sanitizer matrix remain separate evidence.
 - Evidence labels: `[read source]`, `[read docs]`, `[live observation]`, `[inference]`. Live observations are local loopback runs.
 
 ## Context
-The library needs HTTP/1.1 and HTTP/2, SSE for streamed responses, cancellation and deadlines that complete without peer progress, and a WebSocket lane for OpenAI Responses (a later stage). The previous default kept NeoGraph's hand-written Asio + OpenSSL HTTP/1.1 client and argued against libcurl partly on a recorded claim that libcurl HTTP/2 is about 25% slower at p50.
+The library needs HTTP/1.1, HTTP/2 and optional HTTP/3, SSE, and cancellation/deadlines without peer progress. The approved NeoGraph provider cutover uses typed HTTP/SSE and removes its old Responses WebSocket lane. Generic non-provider WebSocket transport is unaffected.
 
 ## Decision
 1. **One HTTP stack: libcurl, `multi_socket` interface**, private to the library. No httplib, no hand-written HTTP/1.1 client, no runtime backend flag, no `prefer_libcurl`.
@@ -17,14 +17,14 @@ The library needs HTTP/1.1 and HTTP/2, SSE for streamed responses, cancellation 
    - name resolution: single-flight, TTL-cached, on a bounded resolver pool, passed to libcurl with `CURLOPT_RESOLVE`, because libcurl's threaded resolver starts a thread per concurrent lookup;
    - normal-close classification: a body delimited only by connection close is a failure.
 4. **HTTP/2 comes from libcurl.** The opt-in HTTP/2 capability of the current NeoGraph implementation is therefore not retired; the former owner question O1 is closed.
-5. **WebSocket (OpenAI Responses lane) is not decided here (D1b).** libcurl's WebSocket API is official from 8.11 and the frame-masking fix is in 8.16 (`[read docs]`), while the libcurl on this machine and on Ubuntu 24.04 is 8.5.0 and Debian 12 ships 7.88.1 (`[inference]` from distribution package versions). D1b must be decided before ROADMAP Stage 2 and not before Stage 1. A permanent hybrid of two socket and cancel families remains rejected unless D1b shows no alternative and the cost is stated.
+5. **No Responses WebSocket lane in this cutover.** The owner approved typed HTTP/SSE replacement rather than retaining the old interpreter or a permanent hybrid provider stack.
 6. **HTTP/3 is optional within the same libcurl stack.** HTTP/3-capable builds can prefer it with safe connection-stage fallback; builds without it retain HTTP/2 and HTTP/1.1. No application-wide QUIC dependency requirement and no second HTTP stack. Policy and admission conditions follow below.
 
 ## Optional HTTP/3 policy
 
-**Status: accepted direction; not implemented or verified.** The existing 32 transport tests are HTTP/1.x/HTTP/2 evidence, not HTTP/3 evidence. HTTP/3 does not change the baseline release order or settle the separate WebSocket decision D1b.
+**Status: implemented; capable Linux scenarios pass under plain, ASan+UBSan and TSan.** The prior 32 transport cases and incapable build remain separate HTTP/1.x/HTTP/2 evidence. Actual QUIC exchanges are verified with an isolated capable build; this does not establish hosted API compatibility or a performance advantage.
 
-| Build / policy | Intended behavior once implemented and admitted |
+| Build / policy | Implemented behavior |
 |---|---|
 | HTTP/3-capable libcurl, HTTP/3 preference enabled | Prefer HTTP/3 for eligible HTTPS calls; allow HTTP/2 or HTTP/1.1 connection-stage fallback to the same HTTPS origin if QUIC is unavailable, unsupported by the peer or blocked by the network. |
 | libcurl without HTTP/3, or HTTP/3 preference disabled | Keep the normal HTTP/2/HTTP/1.1 path usable; do not require QUIC packages for this build. |
@@ -54,6 +54,10 @@ The operational rules are:
 - `[live observation]` M2 adds the Chat fixture path above the same transport: 35 independently reviewed synthetic fixtures, 9,409 partition variants and five buffered/SSE parity pairs pass, with five CTest groups green under plain, ASan+UBSan and TSan. An observed empty-literal-header omission required one transport correction (libcurl's empty-header form); the existing 32 transport cases still pass. These are loopback results, not live-provider or HTTP/3 evidence. Details: POC_PLAN section 5.2.
 - `[live observation]` M3 adds 62 independently reviewed Messages fixtures, 30,430 partition variants, ten parity pairs and actual two-request tool/server continuation over the same transport. No production transport change was needed. All nine CTest groups pass under plain, ASan+UBSan and TSan. Initial RSS/settle-time test failures and the precise-RSS/bounded-plateau oracle corrections are retained in POC_PLAN section 5.3; thresholds were not relaxed. These remain model-free loopback results, not a live-provider or HTTP/3 claim.
 - `[live observation]` HTTP/3 capability probe against the same shared libcurl used by the transport: libcurl 8.5.0, OpenSSL 3.0.13, `HTTP2=1`, `HTTP3=0`. Setting either `CURL_HTTP_VERSION_3` or `CURL_HTTP_VERSION_3ONLY` returned `CURLE_UNSUPPORTED_PROTOCOL`. The throwaway probe performed no HTTP transfer. This proves the current build lacks HTTP/3; it is not an HTTP/3 interoperability or performance result.
+- `[live observation]` Isolated curl 8.16.0 (`8.16.0-DEV` build string), OpenSSL 3.5.3, ngtcp2 1.16.0, nghttp3 1.12.0 and nghttp2 1.65.0 report `HTTP2=1`, `HTTP3=1`. `http3_transport_scenarios ... capable` passes preferred/only exchanges over actual HTTP/3, Auto over HTTP/2, and connection-stage fallback with one HTTP/2 POST and zero internal resends. The only lane never downgrades.
+- `[live observation]` The same capable run exercises buffered/SSE delivery, QUIC reset/truncated/short-body failures, cancel/deadline without peer progress, and same-connection pause/cancel isolation. A paused 64 MiB stream plateaus at 557,056 peer-produced bytes with 356,352 bytes of observed RSS growth, then delivers all 67,108,864 bytes. Its sibling completes; cancelling another paused stream leaves a surviving 64 MiB stream intact. These are one-run bounded local observations, not universal memory bounds or throughput claims.
+- `[live observation]` The capable scenario also passes with the transport/scenario C++ units compiled under ASan+UBSan and TSan. TSan uses the existing `setarch x86_64 -R` launch convention; GCC reports its known `atomic_thread_fence` instrumentation warning in Asio. No sanitizer runtime finding occurs. The isolated curl/OpenSSL/ngtcp2/nghttp3 dependencies themselves are release builds, not sanitizer-instrumented libraries.
+- Reproduce with an isolated HTTP/3-capable libcurl prefix, the existing `tests/support/http3_peer.py` and an isolated Python containing aioquic/h2. Select `SP_HTTP3_PYTHON`, configure the SDK against that prefix, then run the registered `http3_scenarios`; use `capable` or `incapable` when invoking the executable directly. Neither source acquisition nor prefix installation replaces system libraries or trust stores.
 
 ## Options considered
 - **A, one private Asio + OpenSSL stack (previous default):** rejected by the owner after the A/B result removed the performance argument, and because it keeps the maintenance of an HTTP/1.1 client, a connection pool and (later) an HTTP/2 path in this library.
@@ -84,5 +88,5 @@ Properties `OwnershipAndBounds`, `CancelWithoutPeerProgress`, `AdmissionIndepend
 
 ## Open items
 - C1 libcurl floor and feature requirements; C5 deployment (system libcurl baseline versus an isolated HTTP/3-capable dependency build, exact backend versions and packaging).
-- D1b WebSocket transport.
+- Responses WebSocket is excluded by the owner's typed HTTP/SSE cutover decision; any future new lane needs separate admission.
 - R3's broader HTTP/2 stream-count/TLS/peer/version matrix, R4's public trust stores and other TLS backends, and R5's non-Linux socket/platform support (POC_PLAN section 6). M1b closes only the measured scenarios, not universal compatibility.

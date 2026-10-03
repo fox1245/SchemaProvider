@@ -1,10 +1,13 @@
 #include "runtime/client.h"
 #include "runtime/testing.h"
+#include "core/native.h"
 #include "codecs/messages.h"
 #include "codecs/responses.h"
 #include "codecs/gemini.h"
 #include "codecs/interactions.h"
 
+#include <openssl/sha.h>
+#include <array>
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -18,10 +21,23 @@
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
+#include <iterator>
 #include <utility>
 
 namespace sp::runtime::detail {
 namespace {
+bool prior_attempt_proves_no_usage(const Failure& failed) noexcept {
+  const auto& attempt = failed.error.attempt;
+  const auto& usage = failed.partial.usage;
+  return failed.error.retry_safety == RetrySafety::NotSent &&
+      !attempt.request_may_have_left && attempt.request_body_bytes == 0 &&
+      !attempt.response_head_seen && attempt.transport_internal_resends == 0 &&
+      failed.partial.messages.empty() && !failed.partial.stop && !failed.partial.wire_envelope &&
+      failed.partial.raw_events.empty() && usage.stage == UsageStage::Missing &&
+      usage.quality == UsageQuality::Consistent && !usage.input_total && !usage.output_total &&
+      !usage.total && !usage.provider_reported_total && !usage.input_uncached &&
+      !usage.cache_read && !usage.cache_write && !usage.reasoning && usage.extra.empty() && usage.conflicts.empty();
+}
 thread_local unsigned runtime_depth = 0;
 thread_local const void* pool_thread = nullptr;
 struct RuntimeScope {
@@ -209,26 +225,41 @@ bool equal_ascii(std::string_view a, std::string_view b) {
   return true;
 }
 void validate(const descriptor::ValidatedDescriptor& descriptor, const Options& options) {
-  const auto& limits = options.limits;
-  bool valid = options.workers > 0 && options.workers <= 8 &&
-      options.transport.io_threads > 0 && options.transport.io_threads <= 8 &&
-      options.transport.resolver_threads > 0 && options.transport.resolver_threads <= 8 &&
-      options.workers + options.transport.io_threads + options.transport.resolver_threads <= 8 &&
-      options.transport.max_head_bytes > 0 && options.default_timeout.count() > 0 &&
-      options.slow_callback_threshold.count() >= 0 &&
-      std::isfinite(options.retry_tokens_per_second) && options.retry_tokens_per_second >= 0 &&
-      limits.max_operations > 0 && limits.queued_body_chunks > 0 && limits.queued_body_bytes > 0 &&
-      limits.max_response_bytes > 0 && limits.max_error_bytes > 0 &&
-      limits.semantic.max_parts > 0 && limits.semantic.max_content_bytes > 0 &&
-      limits.semantic.max_tool_bytes > 0 && limits.semantic.max_json_depth > 0 &&
-      limits.sse.max_line_bytes > 0 && limits.sse.max_event_bytes > 0 && limits.sse.max_total_bytes > 0 &&
-      options.api_key.size() <= 4096;
-  for (unsigned char byte : options.api_key) if (byte < 32 || byte == 127) valid = false;
+  if (!options.policy) throw descriptor::ConfigError{"/policy", "admitted runtime snapshot", 1, "runtime options rejected"};
+  const auto& ceiling = options.policy->admission();
+  auto reject = [](std::string pointer) {
+    throw descriptor::ConfigError{std::move(pointer), "value within admitted runtime policy", 1, "runtime options rejected"};
+  };
+  if (options.workers == 0 || options.workers > ceiling.workers) reject("/workers");
+  if (options.transport.io_threads == 0 || options.transport.io_threads > ceiling.io_threads) reject("/io_threads");
+  if (options.transport.resolver_threads == 0 || options.transport.resolver_threads > ceiling.resolver_threads) reject("/resolver_threads");
+  if (options.transport.max_host_connections < 0 || static_cast<std::uint64_t>(options.transport.max_host_connections) > ceiling.max_host_connections) reject("/max_host_connections");
+  if (options.transport.max_head_bytes == 0 || options.transport.max_head_bytes > ceiling.max_head_bytes) reject("/max_head_bytes");
+  if (options.transport.dns_ttl.count() < 0 || static_cast<std::uint64_t>(options.transport.dns_ttl.count()) > ceiling.dns_ttl_seconds) reject("/dns_ttl_seconds");
+  if (options.default_timeout.count() <= 0 || static_cast<std::uint64_t>(options.default_timeout.count()) > ceiling.default_timeout_ms) reject("/default_timeout_ms");
+  if (options.slow_callback_threshold.count() < 0 || static_cast<std::uint64_t>(options.slow_callback_threshold.count()) > ceiling.slow_callback_threshold_ms) reject("/slow_callback_threshold_ms");
+  if (options.retry_tokens > ceiling.retry_tokens) reject("/retry_tokens");
+  if (!std::isfinite(options.retry_tokens_per_second) || options.retry_tokens_per_second < 0 || options.retry_tokens_per_second > ceiling.retry_tokens_per_second) reject("/retry_tokens_per_second");
+  if (options.limits.max_operations == 0 || options.limits.max_operations > ceiling.max_operations) reject("/max_operations");
+  if (options.limits.queued_body_chunks == 0 || options.limits.queued_body_chunks > ceiling.queued_body_chunks) reject("/queued_body_chunks");
+  if (options.limits.queued_body_bytes == 0 || options.limits.queued_body_bytes > ceiling.queued_body_bytes) reject("/queued_body_bytes");
+  if (options.limits.max_response_bytes == 0 || options.limits.max_response_bytes > ceiling.max_response_bytes) reject("/max_response_bytes");
+  if (options.limits.max_error_bytes == 0 || options.limits.max_error_bytes > ceiling.max_error_bytes) reject("/max_error_bytes");
+  if (options.limits.semantic.max_parts == 0 || options.limits.semantic.max_parts > ceiling.semantic_max_parts) reject("/semantic_max_parts");
+  if (options.limits.semantic.max_content_bytes == 0 || options.limits.semantic.max_content_bytes > ceiling.semantic_max_content_bytes) reject("/semantic_max_content_bytes");
+  if (options.limits.semantic.max_tool_bytes == 0 || options.limits.semantic.max_tool_bytes > ceiling.semantic_max_tool_bytes) reject("/semantic_max_tool_bytes");
+  if (options.limits.semantic.max_json_depth == 0 || options.limits.semantic.max_json_depth > ceiling.semantic_max_json_depth) reject("/semantic_max_json_depth");
+  if (options.limits.sse.max_line_bytes == 0 || options.limits.sse.max_line_bytes > ceiling.sse_max_line_bytes) reject("/sse_max_line_bytes");
+  if (options.limits.sse.max_event_bytes == 0 || options.limits.sse.max_event_bytes > ceiling.sse_max_event_bytes) reject("/sse_max_event_bytes");
+  if (options.limits.sse.max_total_bytes == 0 || options.limits.sse.max_total_bytes > ceiling.sse_max_total_bytes) reject("/sse_max_total_bytes");
+  if (options.workers > ceiling.total_threads || options.transport.io_threads > ceiling.total_threads - options.workers ||
+      options.transport.resolver_threads > ceiling.total_threads - options.workers - options.transport.io_threads) reject("/total_threads");
+  if (options.api_key.size() > ceiling.api_key_bytes) reject("/api_key");
+  for (unsigned char byte : options.api_key) if (byte < 32 || byte == 127) reject("/api_key");
   if (!options.api_key.empty()) {
     for (const auto& header : descriptor.headers())
-      if (equal_ascii(header.first, "authorization") || equal_ascii(header.first, "x-api-key")) valid = false;
+      if (equal_ascii(header.first, "authorization") || equal_ascii(header.first, "x-api-key")) reject("/api_key");
   }
-  if (!valid) throw std::invalid_argument("invalid runtime options");
 }
 
 struct CallbackAbort {};
@@ -243,6 +274,7 @@ struct ClientState : std::enable_shared_from_this<ClientState> {
   std::mutex mutex;
   std::condition_variable drained;
   std::unordered_map<OperationState*, std::shared_ptr<OperationState>> active;
+  std::size_t prepared_operations = 0;
   TokenBucket bucket;
   std::function<double()> random01;
   bool stopping = false, asynchronous_shutdown = false, closing = false, closed = false;
@@ -284,6 +316,10 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
   enum class Family { Chat, Messages, Responses, Gemini, Interactions };
   Family family = Family::Chat;
   bool admitted = false;
+  bool prepared = false;
+  std::string prepared_model;
+  std::optional<std::uint64_t> prepared_max_output_tokens;
+  std::optional<std::uint64_t> prepared_model_invocation_limit;
 
   mutable std::mutex mutex;
   std::condition_variable joined;
@@ -321,11 +357,14 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
   std::optional<Head> response;
   ResponseInfo response_info;
   std::string buffered;
+  std::shared_ptr<const json::Document> observed_document;
   std::size_t response_bytes = 0;
   bool semantic_output = false;
   std::optional<Error> stopping_error;
   std::optional<transport::Result> terminal_wire;
   std::optional<Outcome> pending_failure;
+  bool prior_usage_unknown = false;
+  std::vector<RawWire> prior_raw_events;
 
   OperationState(std::shared_ptr<ClientState> c, RunOptions o, Callbacks cb, SteadyTime end)
       : client(std::move(c)), executor(client ? client->executor : nullptr), options(std::move(o)),
@@ -458,7 +497,9 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
   }
   void semantic(const Event& event) {
     if (std::holds_alternative<Commit>(event) || std::holds_alternative<Fail>(event)) return;
-    if (!std::holds_alternative<Begin>(event)) semantic_output = true;
+    if (const auto* raw = std::get_if<RawWire>(&event)) observed_document = raw->payload;
+    if (!std::holds_alternative<Begin>(event) && !std::holds_alternative<RawWire>(event) &&
+        !std::holds_alternative<ResponseEnvelope>(event)) semantic_output = true;
     if (stopping_error) return;
     if (callbacks.on_event) {
       const auto before = executor->now();
@@ -478,9 +519,10 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
     gemini_codec.reset();
     interactions_codec.reset();
     accumulator = std::make_unique<Accumulator>(client->options.limits.semantic,
-        [this](const Event& event) { semantic(event); });
+        [this](const Event& event) { semantic(event); }, client->options.limits.max_response_bytes);
     if (family == Family::Chat) chat_codec = std::make_unique<chat::Codec>(client->descriptor,
-        options.streaming ? chat::Mode::Sse : chat::Mode::Buffered, *accumulator, client->options.limits.semantic);
+        options.streaming ? chat::Mode::Sse : chat::Mode::Buffered, *accumulator,
+        client->options.limits.semantic, native_context);
     else if (family == Family::Messages) messages_codec = std::make_unique<messages::Codec>(client->descriptor,
         options.streaming ? messages::Mode::Sse : messages::Mode::Buffered, *accumulator,
         native_context, client->options.limits.semantic);
@@ -497,6 +539,7 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
     response.reset();
     response_info = {};
     buffered.clear();
+    observed_document.reset();
     response_bytes = 0;
     semantic_output = false;
     stopping_error.reset();
@@ -513,7 +556,7 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
       return true;
     };
     wire.on_done = [weak, epoch](const auto& done) { if (auto self = weak.lock()) self->receive_done(epoch, done); };
-    auto outbound = options.retry.enabled && attempts + 1 < options.retry.max_attempts ? request : std::move(request);
+    auto outbound = options.retry->enabled && attempts + 1 < options.retry->max_attempts ? request : std::move(request);
     outbound.deadline = deadline;
     {
       std::unique_lock lock(mutex);
@@ -528,6 +571,14 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
       if (retry) {
         std::lock_guard budget_lock(client->mutex);
         if (!client->bucket.consume(executor->now())) return;
+        if (pending_failure) {
+          auto& observations = std::get<Failure>(*pending_failure).partial.raw_events;
+          if (observations.size() > prior_raw_events.max_size() - prior_raw_events.size())
+            throw std::length_error("runtime raw observation extent exceeded");
+          prior_raw_events.reserve(prior_raw_events.size() + observations.size());
+          prior_raw_events.insert(prior_raw_events.end(), std::make_move_iterator(observations.begin()),
+              std::make_move_iterator(observations.end()));
+        }
         pending_failure.reset();
       }
       stage = Stage::InFlight;
@@ -559,8 +610,15 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
     if (!stopping_error) stopping_error = error_for(kind);
     if (stage == Stage::Initial || stage == Stage::Backoff) {
       Failure failure{*stopping_error, {}};
+      if (pending_failure) {
+        auto& previous = std::get<Failure>(*pending_failure);
+        failure.error.attempt = previous.error.attempt;
+        failure.error.retry_safety = previous.error.retry_safety;
+        failure.partial = std::move(previous.partial);
+      } else if (attempts == 0) {
+        failure.error.retry_safety = RetrySafety::NotSent;
+      }
       failure.error.attempt.attempts = attempts;
-      if (pending_failure) failure.partial = std::move(std::get<Failure>(*pending_failure).partial);
       deliver(Outcome{std::move(failure)});
       return;
     }
@@ -584,7 +642,7 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
     }
     if (attempt) attempt->cancel();
   }
-  void inspect(std::string_view body) {
+  void inspect(std::string_view body, bool retain_body = false) {
     if (body.size() > client->options.limits.max_error_bytes) {
       response_info = {};
       response_info.kind = ErrorKind::ResourceLimit;
@@ -592,9 +650,26 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
       return;
     }
     static const std::vector<transport::Header> no_headers;
-    response_info = inspect_response(client->descriptor.family(), response ? response->value.status : 0,
-        response ? response->value.headers : no_headers, body,
-        response ? response->received : executor->now(), response ? response->wall_received : executor->wall_now());
+    auto classify = [&](json::Value document) {
+      response_info = inspect_document_response(*client->options.policy, client->descriptor.family(),
+          response ? response->value.status : 0, response ? response->value.headers : no_headers, document,
+          response ? response->received : executor->now(), response ? response->wall_received : executor->wall_now());
+    };
+    if (observed_document) { classify(observed_document->root()); return; }
+    auto parsed = json::parse(body, {client->options.limits.max_error_bytes,
+        static_cast<std::size_t>(client->options.policy->admission().error_json_depth)});
+    if (auto* document = std::get_if<json::Document>(&parsed)) {
+      if (retain_body) {
+        observed_document = std::make_shared<const json::Document>(std::move(*document));
+        classify(observed_document->root());
+      } else classify(document->root());
+    } else {
+      auto& rejected = std::get<json::ParseError>(parsed);
+      if (retain_body && rejected.code == json::ParseCode::DuplicateKey && rejected.context.root().valid())
+        observed_document = std::make_shared<const json::Document>(std::move(rejected.context));
+      // Ambiguous duplicate fields remain diagnostic, never policy authority.
+      classify({});
+    }
   }
   void body(std::string_view bytes) {
     const auto& limits = client->options.limits;
@@ -609,6 +684,11 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
       return;
     }
     framer->feed(bytes, [this](const transport::SseFrame& frame) {
+      if (options.stop_token.stop_requested()) {
+        fail_semantic(ErrorKind::Cancelled);
+        return false;
+      }
+      observed_document.reset();
       const bool accepted = chat_codec ? chat_codec->frame(frame.event, frame.data) :
           messages_codec ? messages_codec->frame(frame.event, frame.data) :
           responses_codec ? responses_codec->frame(frame.event, frame.data) :
@@ -644,13 +724,17 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
     attempt.reset();
     terminal_wire = wire;
     const bool semantic_failure_decided = accumulator->terminal();
-    const bool http_error = wire.http_status >= 300 || (response && response->value.status >= 300);
-    if (http_error) inspect(buffered);
+    const bool http_error = (wire.http_status > 0 && (wire.http_status < 200 || wire.http_status >= 300)) ||
+        (response && (response->value.status < 200 || response->value.status >= 300));
+    if (http_error) inspect(buffered, true);
     const auto close_error = stopping_error ? *stopping_error :
         classify_failure(wire, response_info, {}, semantic_output, attempts, executor->now());
     const bool normal = wire.status == transport::Status::Completed && !stopping_error && !http_error;
     if (!accumulator->terminal()) {
-      if (http_error) accumulator->accept(Fail{close_error});
+      if (http_error) {
+        if (observed_document) accumulator->accept(RawWire{"http.error", observed_document}, &close_error);
+        if (!accumulator->terminal()) accumulator->accept(Fail{close_error});
+      }
       else if (options.streaming) {
         framer->finish();
         if (framer->error() != transport::SseError::None)
@@ -686,10 +770,11 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
       {
         std::lock_guard lock(client->mutex);
         available = client->bucket.available(executor->now());
-        random = available && options.retry.enabled ? client->random01() : 0;
+        random = available && options.retry->enabled ? client->random01() : 0;
       }
-      auto at = available ? retry_at(failure->error, options.retry, attempts, executor->now(), deadline, random) : std::nullopt;
+      auto at = available ? retry_at(failure->error, *options.retry, attempts, executor->now(), deadline, random) : std::nullopt;
       if (at) {
+        prior_usage_unknown = prior_usage_unknown || !prior_attempt_proves_no_usage(*failure);
         pending_failure = std::move(outcome);
         stage = Stage::Backoff;
         chat_codec.reset(); messages_codec.reset(); responses_codec.reset(); gemini_codec.reset(); interactions_codec.reset(); accumulator.reset(); framer.reset();
@@ -702,11 +787,35 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
     deliver(std::move(*outcome));
   }
   void deliver(Outcome outcome) {
-    stage = Stage::Terminal;
+    if (!prior_raw_events.empty()) {
+      auto& observations = std::visit([](auto& value) -> std::vector<RawWire>& {
+        using T = std::decay_t<decltype(value)>;
+        if constexpr (std::is_same_v<T, Completion>) return value.raw_events;
+        else return value.partial.raw_events;
+      }, outcome);
+      if (observations.size() > prior_raw_events.max_size() - prior_raw_events.size())
+        throw std::length_error("runtime raw observation extent exceeded");
+      prior_raw_events.reserve(prior_raw_events.size() + observations.size());
+      prior_raw_events.insert(prior_raw_events.end(), std::make_move_iterator(observations.begin()),
+          std::make_move_iterator(observations.end()));
+      observations = std::move(prior_raw_events);
+    }
+    if (auto* completion = std::get_if<Completion>(&outcome)) {
+      completion->attempt.attempts = attempts;
+      completion->attempt.prior_usage_unknown = prior_usage_unknown;
+      if (terminal_wire) {
+        const auto& observed = terminal_wire->attempt;
+        completion->attempt.request_may_have_left = observed.reached >= transport::Stage::RequestStarted;
+        completion->attempt.request_body_bytes = observed.request_body_bytes;
+        completion->attempt.response_head_seen = observed.response_head_seen;
+        completion->attempt.transport_internal_resends = observed.transport_internal_resends;
+      }
+    } else std::get<Failure>(outcome).error.attempt.prior_usage_unknown = prior_usage_unknown;
     {
       std::lock_guard lock(mutex);
       accepting = false;
       result = std::make_shared<const Outcome>(std::move(outcome));
+      stage = Stage::Terminal;
       body_input.clear(); head_input.reset(); done_input.reset();
       statistics.queued_bytes = statistics.queued_chunks = 0;
     }
@@ -897,6 +1006,38 @@ Client ClientAccess::make(descriptor::ValidatedDescriptor descriptor, Options op
   return Client(std::make_shared<ClientState>(std::move(descriptor), std::move(options),
       std::move(executor), std::move(transport), std::move(random01)));
 }
+PreparedRequest ClientAccess::prepare_control(Client& client, Request request, RunOptions options,
+                                             std::function<bool(std::string&)> transform) {
+  auto preparation = client.prepare(std::move(request), std::move(options));
+  if (preparation.error() || !transform) return preparation;
+  auto& state = *preparation.state_;
+  const auto digest = [](std::string_view bytes) {
+    std::array<unsigned char, SHA256_DIGEST_LENGTH> result{};
+    SHA256(reinterpret_cast<const unsigned char*>(bytes.data()), bytes.size(), result.data());
+    return result;
+  };
+  const auto before = digest(state.request.body);
+  std::optional<ErrorKind> error;
+  try {
+    if (!transform(state.request.body)) error = ErrorKind::InvalidRequest;
+    const auto& resources = state.client->descriptor.policy()->resources();
+    const auto ceiling = state.family == OperationState::Family::Chat
+        ? resources.chat_text_request_bytes : resources.request_bytes;
+    if (state.request.body.size() > ceiling) error = ErrorKind::ResourceLimit;
+  } catch (...) { error = ErrorKind::InvalidRequest; }
+  if (before != digest(state.request.body)) {
+    if (state.native_context) state.native_context = state.native_context->decoding_only();
+    // A private qualification control changed the actual body: original typed
+    // cap/invocation proofs cannot authorize a bounded ordinary dispatch.
+    state.prepared_max_output_tokens.reset();
+    state.prepared_model_invocation_limit.reset();
+  }
+  if (error) {
+    state.initial_error = error_for(*error);
+    state.initial_error->retry_safety = RetrySafety::NotSent;
+  }
+  return preparation;
+}
 OperationStats ClientAccess::stats(const Operation& operation) {
   if (!operation.state_) return {};
   std::lock_guard lock(operation.state_->mutex);
@@ -905,6 +1046,32 @@ OperationStats ClientAccess::stats(const Operation& operation) {
 }  // namespace sp::runtime::detail
 
 namespace sp::runtime {
+Options::Options(configuration::PolicySnapshot snapshot) : policy(std::move(snapshot)) {
+  if (!policy) throw descriptor::ConfigError{"/policy", "admitted runtime snapshot", 1, "runtime options rejected"};
+  const auto& values = policy->defaults();
+  workers = values.workers;
+  transport.io_threads = static_cast<unsigned>(values.io_threads);
+  transport.resolver_threads = static_cast<unsigned>(values.resolver_threads);
+  transport.max_host_connections = static_cast<long>(values.max_host_connections);
+  transport.max_head_bytes = values.max_head_bytes;
+  transport.dns_ttl = std::chrono::seconds(values.dns_ttl_seconds);
+  default_timeout = std::chrono::milliseconds(values.default_timeout_ms);
+  slow_callback_threshold = std::chrono::milliseconds(values.slow_callback_threshold_ms);
+  retry_tokens = values.retry_tokens;
+  retry_tokens_per_second = values.retry_tokens_per_second;
+  limits.max_operations = values.max_operations;
+  limits.queued_body_chunks = values.queued_body_chunks;
+  limits.queued_body_bytes = values.queued_body_bytes;
+  limits.max_response_bytes = values.max_response_bytes;
+  limits.max_error_bytes = values.max_error_bytes;
+  limits.semantic.max_parts = values.semantic_max_parts;
+  limits.semantic.max_content_bytes = values.semantic_max_content_bytes;
+  limits.semantic.max_tool_bytes = values.semantic_max_tool_bytes;
+  limits.semantic.max_json_depth = values.semantic_max_json_depth;
+  limits.sse.max_line_bytes = values.sse_max_line_bytes;
+  limits.sse.max_event_bytes = values.sse_max_event_bytes;
+  limits.sse.max_total_bytes = values.sse_max_total_bytes;
+}
 AdmissionError::AdmissionError(ErrorKind kind) {
   auto error = detail::error_for(kind);
   error.retry_safety = RetrySafety::NotSent;
@@ -932,8 +1099,25 @@ Result Operation::join() const {
   return state->result;
 }
 
+InterfaceContract interface_contract() noexcept {
+  const auto core = ::sp::core_interface_contract();
+  // Literal implementation revision is independent of the consumer's headers.
+  if (core.revision != 3 || codec_interface_revision() != 3 || descriptor::interface_revision() != 3) return {0, 0};
+  return {3, core.capabilities | capability::TypedRuntime | capability::PreparedAdmission |
+      capability::CompleteAttemptEvidence};
+}
+const char* InterfaceContractError::what() const noexcept {
+  return "SchemaProvider loaded interface contract is unsupported";
+}
+void require_interface_contract(std::uint32_t expected_revision, std::uint64_t required_capabilities) {
+  const auto actual = interface_contract();
+  if (actual.revision != expected_revision ||
+      (actual.capabilities & required_capabilities) != required_capabilities)
+    throw InterfaceContractError();
+}
 Client::Client(descriptor::ValidatedDescriptor descriptor, Options options)
-    : Client(detail::ClientAccess::make(std::move(descriptor), std::move(options), {})) {}
+    : Client((require_interface_contract(EXPECTED_INTERFACE_REVISION, capability::RequiredProvider),
+              detail::ClientAccess::make(std::move(descriptor), std::move(options), {}))) {}
 Client::Client(std::shared_ptr<detail::ClientState> state) : state_(std::move(state)) {}
 Client::~Client() { if (state_) state_->shutdown(); }
 Client::Client(Client&& other) noexcept : state_(std::move(other.state_)) {}
@@ -944,32 +1128,86 @@ Client& Client::operator=(Client&& other) noexcept {
   }
   return *this;
 }
-Operation Client::start(Request request, RunOptions options, Callbacks callbacks) {
-  auto client = state_;
-  if (!client) throw AdmissionError(ErrorKind::Misuse);
-  const auto now = client->executor->now();
-  const auto room = std::chrono::duration_cast<std::chrono::milliseconds>(SteadyTime::max() - now);
-  const auto deadline = options.deadline.value_or(client->options.default_timeout >= room
-      ? SteadyTime::max() - SteadyTime::duration{1} : now + client->options.default_timeout);
-  auto operation = std::make_shared<detail::OperationState>(client, std::move(options), std::move(callbacks), deadline);
-  std::optional<ErrorKind> admission;
-  {
+PreparedRequest::PreparedRequest(std::shared_ptr<detail::OperationState> state)
+    : state_(std::move(state)) {}
+PreparedRequest::~PreparedRequest() { release(); }
+PreparedRequest::PreparedRequest(PreparedRequest&& other) noexcept
+    : state_(std::move(other.state_)) {}
+PreparedRequest& PreparedRequest::operator=(PreparedRequest&& other) noexcept {
+  if (this != &other) {
+    release();
+    state_ = std::move(other.state_);
+  }
+  return *this;
+}
+void PreparedRequest::release() noexcept {
+  if (!state_) return;
+  auto client = state_->client;
+  if (client) {
     std::lock_guard lock(client->mutex);
-    if (client->stopping) admission = ErrorKind::Cancelled;
-    else if (client->active.size() >= client->options.limits.max_operations) admission = ErrorKind::ResourceLimit;
-    else {
-      client->active.emplace(operation.get(), operation);
-      operation->admitted = true;
+    if (state_->prepared) {
+      --client->prepared_operations;
+      state_->prepared = false;
     }
   }
-  if (admission) throw AdmissionError(*admission);
-  // Publication is transactional: allocation/post failure must not leave an
-  // unreachable operation pinning the bounded admission slot or its callbacks.
-  struct Reservation {
+  state_.reset();
+}
+bool PreparedRequest::valid() const noexcept { return state_ && state_->prepared; }
+const Error* PreparedRequest::error() const noexcept {
+  return state_ && state_->initial_error ? &*state_->initial_error : nullptr;
+}
+std::string_view PreparedRequest::family() const noexcept {
+  return state_ && state_->client ? state_->client->descriptor.family() : std::string_view{};
+}
+std::string_view PreparedRequest::model() const noexcept {
+  return state_ ? state_->prepared_model : std::string_view{};
+}
+std::string_view PreparedRequest::encoded_body() const noexcept {
+  return state_ ? state_->request.body : std::string_view{};
+}
+SteadyTime PreparedRequest::deadline() const noexcept {
+  return state_ ? state_->deadline : SteadyTime{};
+}
+const descriptor::ValidatedDescriptor* PreparedRequest::descriptor() const noexcept {
+  return state_ && state_->client ? &state_->client->descriptor : nullptr;
+}
+const RetryPolicy* PreparedRequest::retry_policy() const noexcept {
+  return state_ && state_->options.retry ? &*state_->options.retry : nullptr;
+}
+std::optional<std::uint64_t> PreparedRequest::max_output_tokens() const noexcept {
+  return state_ ? state_->prepared_max_output_tokens : std::nullopt;
+}
+const Limits* PreparedRequest::limits() const noexcept {
+  return state_ && state_->client ? &state_->client->options.limits : nullptr;
+}
+const NativeContext* PreparedRequest::native_context() const noexcept {
+  return state_ ? state_->native_context.get() : nullptr;
+}
+std::optional<std::uint64_t> PreparedRequest::model_invocation_limit() const noexcept {
+  return state_ ? state_->prepared_model_invocation_limit : std::nullopt;
+}
+Operation Client::start(Request request, RunOptions options, Callbacks callbacks) {
+  return start(prepare(std::move(request), std::move(options)), std::move(callbacks));
+}
+Operation Client::start(PreparedRequest preparation, Callbacks callbacks) {
+  require_interface_contract(EXPECTED_INTERFACE_REVISION, capability::RequiredProvider);
+  auto client = state_;
+  auto& operation = preparation.state_;
+  if (!client || !operation || operation->client != client || !operation->prepared)
+    throw AdmissionError(ErrorKind::Misuse);
+  {
+    std::lock_guard lock(client->mutex);
+    if (client->stopping) throw AdmissionError(ErrorKind::Cancelled);
+    client->active.emplace(operation.get(), operation);
+    --client->prepared_operations;
+    operation->prepared = false;
+    operation->admitted = true;
+  }
+  struct Publication {
     detail::ClientState& owner;
     detail::OperationState& operation;
     bool published = false;
-    ~Reservation() {
+    ~Publication() {
       if (published) return;
       {
         std::lock_guard lock(operation.mutex);
@@ -978,15 +1216,50 @@ Operation Client::start(Request request, RunOptions options, Callbacks callbacks
       operation.stop_callback.reset();
       owner.release(&operation);
     }
-  } reservation{*client, *operation};
+  } publication{*client, *operation};
+  operation->callbacks = std::move(callbacks);
+  try { operation->activate(); }
+  catch (...) { throw AdmissionError(ErrorKind::ResourceLimit); }
+  publication.published = true;
+  return Operation(std::move(operation));
+}
+PreparedRequest Client::prepare(Request request, RunOptions options) {
+  require_interface_contract(EXPECTED_INTERFACE_REVISION, capability::RequiredProvider);
+  auto client = state_;
+  if (!client) throw AdmissionError(ErrorKind::Misuse);
+  if (!options.retry) options.retry = default_retry_policy(*client->options.policy);
+  const auto now = client->executor->now();
+  const auto room = std::chrono::duration_cast<std::chrono::milliseconds>(SteadyTime::max() - now);
+  const auto deadline = options.deadline.value_or(client->options.default_timeout >= room
+      ? SteadyTime::max() - SteadyTime::duration{1} : now + client->options.default_timeout);
+  PreparedRequest preparation(std::make_shared<detail::OperationState>(client, std::move(options), Callbacks{}, deadline));
+  auto& operation = preparation.state_;
+  std::optional<ErrorKind> admission;
+  {
+    std::lock_guard lock(client->mutex);
+    if (client->stopping) admission = ErrorKind::Cancelled;
+    else if (client->active.size() >= client->options.limits.max_operations ||
+             client->prepared_operations >= client->options.limits.max_operations - client->active.size())
+      admission = ErrorKind::ResourceLimit;
+    else {
+      ++client->prepared_operations;
+      operation->prepared = true;
+    }
+  }
+  if (admission) throw AdmissionError(*admission);
   std::optional<Error> error;
-  if (!detail::valid_retry_policy(operation->options.retry) || deadline == SteadyTime::max())
+  const auto& retry_ceiling = client->options.policy->admission();
+  if (!detail::valid_retry_policy(*operation->options.retry) || deadline == SteadyTime::max() ||
+      operation->options.retry->max_attempts > retry_ceiling.retry_max_attempts ||
+      static_cast<std::uint64_t>(operation->options.retry->base_delay.count()) > retry_ceiling.retry_base_delay_ms ||
+      static_cast<std::uint64_t>(operation->options.retry->max_delay.count()) > retry_ceiling.retry_max_delay_ms)
     error = detail::error_for(ErrorKind::InvalidRequest);
   else if (operation->options.stop_token.stop_requested()) error = detail::error_for(ErrorKind::Cancelled);
   else if (client->executor->now() >= deadline) error = detail::error_for(ErrorKind::DeadlineExceeded);
   try {
     if (!error) std::visit([&](const auto& typed) {
       using T = std::decay_t<decltype(typed)>;
+      operation->prepared_model = typed.model;
       operation->family = std::is_same_v<T, chat::Request> ? detail::OperationState::Family::Chat :
           std::is_same_v<T, messages::Request> ? detail::OperationState::Family::Messages :
           std::is_same_v<T, responses::Request> ? detail::OperationState::Family::Responses :
@@ -1005,6 +1278,8 @@ Operation Client::start(Request request, RunOptions options, Callbacks callbacks
       wire.method = std::move(value.method);
       wire.url = std::string(client->descriptor.base_url()) + value.path;
       wire.body = std::move(value.body);
+      operation->prepared_max_output_tokens = value.max_output_tokens;
+      operation->prepared_model_invocation_limit = value.model_invocation_limit;
       wire.headers.reserve(value.headers.size() + (client->options.api_key.empty() ? 0 : 1));
       for (auto& header : value.headers) wire.headers.push_back({std::move(header.first), std::move(header.second)});
       if (!client->options.api_key.empty()) {
@@ -1018,7 +1293,7 @@ Operation Client::start(Request request, RunOptions options, Callbacks callbacks
       wire.deadline = deadline;
       wire.http_version = client->options.http_version;
       wire.ca_file = client->options.ca_file;
-      if constexpr (!std::is_same_v<T, chat::Request>) operation->native_context = std::move(value.context);
+      operation->native_context = std::move(value.context);
     }, request);
   } catch (...) { error = detail::error_for(ErrorKind::ResourceLimit); }
   if (error) {
@@ -1026,15 +1301,19 @@ Operation Client::start(Request request, RunOptions options, Callbacks callbacks
     error->retry_safety = RetrySafety::NotSent;
     operation->initial_error = std::move(error);
   }
-  try { operation->activate(); }
-  catch (...) { throw AdmissionError(ErrorKind::ResourceLimit); }
-  reservation.published = true;
-  return Operation(std::move(operation));
+  return preparation;
 }
 Result Client::complete(Request request, RunOptions options) {
   if (!state_ || state_->in_thread()) return detail::misuse_result();
   try {
     auto operation = start(std::move(request), std::move(options));
+    return operation.join();
+  } catch (const AdmissionError& error) { return error.outcome(); }
+}
+Result Client::complete(PreparedRequest preparation) {
+  if (!state_ || state_->in_thread()) return detail::misuse_result();
+  try {
+    auto operation = start(std::move(preparation));
     return operation.join();
   } catch (const AdmissionError& error) { return error.outcome(); }
 }

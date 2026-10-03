@@ -1,5 +1,6 @@
 #include "canary/canary.h"
 #include "canary/io.h"
+#include "canary/qualification.h"
 #include "core/native.h"
 #include "json/json.h"
 #include "runtime/testing.h"
@@ -12,13 +13,16 @@
 namespace sp::canary {
 namespace {
 constexpr std::string_view tool_prompt = "Call vision_score exactly once with value equal to weighted. After tool result return the same three-field JSON.";
+enum class Removal { All, ThoughtCarrier, CallCarrier };
 struct Wire {
   Case* result{};
   const Message* expected{};
   const vision_test::Scene* scene{};
-  Totals lane{}, campaign{};
-  bool totals_known = false, negative = false, omission = false, retained = false, changed = false, rejected = false;
+  detail::Qualification* qualification{};
+  bool negative = false, omission = false, duplicate = false, retained = false, changed = false, rejected = false;
   std::string positive;
+  Provider provider{};
+  Removal removal = Removal::All;
 };
 std::shared_ptr<const json::Document> document(std::string_view value) {
   auto parsed = json::parse(value, {16U << 20, 64});
@@ -133,13 +137,13 @@ bool native_leaf(json::Value leaf, Provider provider) {
   if (provider == Provider::VisionInteractions) return leaf.get("type").as_string() == "thought";
   return leaf.get("thought").is_bool() && leaf.get("thought").as_bool();
 }
-bool omit_native(std::string& body, json::Value root, Provider provider) {
+bool omit_native(std::string& body, json::Value root, Provider provider, Removal removal = Removal::All) {
   bool removed = false;
   auto build = [&](auto&& self, json::BoundedWriter& writer, json::Value value, size_t depth, bool target, bool native_item) -> void {
     if (value.is_array()) {
       writer.raw("["); bool comma = false;
       for (auto element : value.elements()) {
-        if (target && native_leaf(element, provider)) { removed = true; continue; }
+        if (target && removal != Removal::CallCarrier && native_leaf(element, provider)) { removed = true; continue; }
         if (comma) writer.raw(",");
         comma = true;
         self(self, writer, element, depth + 1, false, target);
@@ -151,7 +155,7 @@ bool omit_native(std::string& body, json::Value root, Provider provider) {
         const bool associated_signature = native_item &&
             ((provider == Provider::VisionGemini && member.key == "thoughtSignature") ||
              (provider == Provider::VisionInteractions && value.get("type").as_string() == "function_call" && member.key == "signature"));
-        if (associated_signature) { removed = true; continue; }
+        if (associated_signature && removal != Removal::ThoughtCarrier) { removed = true; continue; }
         if (comma) writer.raw(",");
         comma = true; writer.quoted(member.key).raw(":");
         const bool selection = member.key == "input" || member.key == "content" || member.key == "parts";
@@ -164,6 +168,51 @@ bool omit_native(std::string& body, json::Value root, Provider provider) {
   if (!measured.ok() || !removed) return false;
   std::string changed; changed.reserve(measured.size());
   json::BoundedWriter writer({measured.size(), 64}, &changed); build(build, writer, root, 0, false, false);
+  if (!writer.ok()) return false;
+  body = std::move(changed); return true;
+}
+bool duplicate_native(std::string& body, json::Value root, Provider provider) {
+  const auto target = captured_array(root, provider);
+  const auto key = provider == Provider::VisionGemini ? "thoughtSignature" : "signature";
+  json::Value selected;
+  for (auto leaf : target.elements()) {
+    if (leaf.get(key).is_string() && !leaf.get(key).as_string().empty()) {
+      selected = leaf;
+      if (native_leaf(leaf, provider)) break;
+    }
+  }
+  if (!selected.valid()) return false;
+  auto build = [&](auto&& self, json::BoundedWriter& writer, json::Value value, size_t depth) -> void {
+    if (value.is_array()) {
+      writer.raw("["); bool comma = false, inserted = false;
+      const bool target_array = json::equal(value, target);
+      for (auto leaf : value.elements()) {
+        if (target_array && provider == Provider::VisionInteractions &&
+            leaf.get("type").as_string() == "function_result") {
+          if (comma) writer.raw(",");
+          writer.value(selected, depth + 1); comma = inserted = true;
+        }
+        if (comma) writer.raw(",");
+        comma = true; self(self, writer, leaf, depth + 1);
+      }
+      if (target_array && !inserted) {
+        if (comma) writer.raw(",");
+        writer.value(selected, depth + 1);
+      }
+      writer.raw("]");
+    } else if (value.is_object()) {
+      writer.raw("{"); bool comma = false;
+      for (auto member : value.members()) {
+        if (comma) writer.raw(",");
+        comma = true; writer.quoted(member.key).raw(":"); self(self, writer, member.value, depth + 1);
+      }
+      writer.raw("}");
+    } else writer.value(value, depth);
+  };
+  json::BoundedWriter measure({16U << 20, 64}); build(build, measure, root, 0);
+  if (!measure.ok()) return false;
+  std::string changed; changed.reserve(measure.size());
+  json::BoundedWriter writer({measure.size(), 64}, &changed); build(build, writer, root, 0);
   if (!writer.ok()) return false;
   body = std::move(changed); return true;
 }
@@ -267,36 +316,11 @@ class Attempt final : public runtime::detail::Attempt {
 };
 class Backend final : public runtime::detail::AttemptTransport {
  public:
-  Backend(Profile profile, std::string ledger, std::shared_ptr<Wire> wire)
-      : profile_(std::move(profile)), ledger_(std::move(ledger)), wire_(std::move(wire)), backend_(std::make_unique<transport::Transport>()) {}
+  explicit Backend(std::shared_ptr<Wire> wire)
+      : wire_(std::move(wire)), backend_(std::make_unique<transport::Transport>()) {}
   std::unique_ptr<runtime::detail::Attempt> start(transport::HttpRequest request, transport::Callbacks callbacks) override {
     auto& wire = *wire_; auto& result = *wire.result;
-    if (profile_.provider() == Provider::VisionChat || profile_.provider() == Provider::VisionResponses) {
-      if (request.body.empty() || request.body.back() != '}') detail::fail();
-      request.body.pop_back(); request.body.append(",\"service_tier\":\"default\"}");
-    }
-    auto parsed = json::parse(request.body, {16U << 20, 64}); auto* doc = std::get_if<json::Document>(&parsed); if (!doc) detail::fail();
-    result.image_sent = image_exact(doc->root(), profile_.provider(), *wire.scene);
-    if (!result.image_sent) { result.reason = Reason::RetentionMismatch; detail::fail(); }
-    if (wire.expected) {
-      wire.retained = native_retained(doc->root(), profile_.provider(), *wire.expected);
-      if (!wire.retained) { result.reason = Reason::RetentionMismatch; detail::fail(); }
-      if (!wire.negative) wire.positive = request.body;
-      else {
-        if (wire.positive != request.body) { result.reason = Reason::RetentionMismatch; detail::fail(); }
-        wire.changed = wire.omission ? omit_native(request.body, doc->root(), profile_.provider()) : mutate_signature(request.body, doc->root(), profile_.provider());
-        if (!wire.changed) { result.reason = Reason::MutationUnavailable; detail::fail(); }
-      }
-    }
-    Debit debit;
-    try { debit = reserve(profile_, ledger_); }
-    catch (...) { wire.totals_known = false; result.reason = Reason::LedgerFailure; throw; }
-    wire.lane = debit.total; wire.totals_known = true; wire.campaign = vision_campaign_totals(ledger_);
-    if (debit.result != Reservation::Allowed) {
-      result.reason = debit.result == Reservation::Calls ? Reason::CallBudget : debit.result == Reservation::Tokens ? Reason::TokenBudget : Reason::CostBudget;
-      detail::fail();
-    }
-    ++result.attempts;
+    wire.qualification->dispatch(request.body, result);
     if (wire.negative) {
       struct Response { int status{}; std::string bytes; bool overflow{}; };
       auto response = std::make_shared<Response>();
@@ -312,7 +336,7 @@ class Backend final : public runtime::detail::AttemptTransport {
         if (body && !body(bytes)) return false;
         return true;
       };
-      callbacks.on_done = [response, done = std::move(done), wire = wire_, provider = profile_.provider(), omission = wire.omission](const transport::Result& value) {
+      callbacks.on_done = [response, done = std::move(done), wire = wire_, provider = wire.provider, omission = wire.omission](const transport::Result& value) {
         try { wire->rejected = value.status == transport::Status::Completed && !response->overflow && native_rejected(provider, response->status, response->bytes, omission); }
         catch (...) { wire->rejected = false; }
         response->bytes.clear(); if (done) done(value);
@@ -322,7 +346,7 @@ class Backend final : public runtime::detail::AttemptTransport {
     return std::make_unique<Attempt>(std::move(op));
   }
   void shutdown() noexcept override { backend_.reset(); }
- private: Profile profile_; std::string ledger_; std::shared_ptr<Wire> wire_; std::unique_ptr<transport::Transport> backend_;
+ private: std::shared_ptr<Wire> wire_; std::unique_ptr<transport::Transport> backend_;
 };
 descriptor::ValidatedDescriptor descriptor_for(const Profile& profile) {
   std::string family, buffered, streaming;
@@ -376,27 +400,79 @@ void observation(Case& item, const Completion& outcome) {
       if (const auto* r = std::get_if<Thought>(&p)) { ++item.reasoning_items; item.summary_items += r->summary.size(); item.native_present = item.native_present || (r->signature && !r->signature->empty()); for (const auto& v : r->summary) item.visible_reasoning = item.visible_reasoning || !v.empty(); }
     }
     if (m.wire_output) for (auto leaf : m.wire_output->root().elements()) if (leaf.get("thoughtSignature").is_string() && !leaf.get("thoughtSignature").as_string().empty()) item.native_present = true;
+    if (m.wire_output) {
+      std::vector<std::string_view> signatures;
+      for (auto leaf : m.wire_output->root().elements()) {
+        auto signature = leaf.get("thoughtSignature");
+        if (!signature.is_string()) signature = leaf.get("signature");
+        if (!signature.is_string() || signature.as_string().empty()) continue;
+        ++item.native_carriers;
+        if (std::find(signatures.begin(), signatures.end(), signature.as_string()) == signatures.end()) {
+          signatures.push_back(signature.as_string()); ++item.distinct_native_carriers;
+        }
+      }
+    }
   }
   item.native_present = item.native_present || item.encrypted_present;
 }
 } // namespace
-Report run_vision(const Profile& profile, const std::string& ledger, std::string api_key) {
-  Report report; report.provider = profile.provider(); report.test_only = profile.loopback();
+Report run_vision(const Profile& profile, const std::string& project_root, std::string api_key, RunSelection selection) {
+  if (selection.mode != ExecutionMode::Full && selection.mode != ExecutionMode::BaselinePair &&
+      selection.mode != ExecutionMode::GoogleDiagnostics) detail::fail();
+  if (selection.repetition >= (selection.mode == ExecutionMode::BaselinePair ? 60U :
+      selection.mode == ExecutionMode::GoogleDiagnostics ? 3U : 630U)) detail::fail();
+  Report report; report.provider = profile.provider(); report.test_only = profile.loopback(); report.mode = selection.mode;
+  report.repetition = selection.repetition + 1;
   const bool chat = profile.provider() == Provider::VisionChat;
-  report.replay = chat ? Replay::NotApplicable : Replay::ReplayAcceptanceUnobservable;
-  report.cases.reserve(chat ? 6 : 8);
-  for (auto name : {"vision_off_buffered", "vision_on_buffered", "vision_on_sse", "vision_changed", "vision_tool_first", "vision_tool_positive"}) report.cases.push_back(Case{name});
-  if (!chat) { report.cases.push_back(Case{"vision_signature_negative"}); report.cases.push_back(Case{"vision_reasoning_missing"}); }
+  report.replay = chat || selection.mode == ExecutionMode::BaselinePair ? Replay::NotApplicable : Replay::ReplayAcceptanceUnobservable;
+  const bool google = profile.provider() == Provider::VisionGemini || profile.provider() == Provider::VisionInteractions;
+  if (selection.mode == ExecutionMode::BaselinePair) {
+    // Keep stable runner case ordinals without allocating unused tool/control cases.
+    report.cases.resize(3);
+    report.cases[1].name = "vision_on_buffered";
+    report.cases[2].name = "vision_on_sse";
+  } else {
+    report.cases.reserve(chat ? 6 : profile.provider() == Provider::VisionInteractions ? 11 :
+        profile.provider() == Provider::VisionGemini ? 9 : 8);
+    for (auto name : {"vision_off_buffered", "vision_on_buffered", "vision_on_sse", "vision_changed", "vision_tool_first", "vision_tool_positive"}) report.cases.push_back(Case{name});
+    if (!chat) { report.cases.push_back(Case{"vision_signature_negative"}); report.cases.push_back(Case{"vision_reasoning_missing"}); }
+    if (google) report.cases.push_back(Case{"vision_carrier_duplicate"});
+    if (profile.provider() == Provider::VisionInteractions) {
+      report.cases.push_back(Case{"vision_thought_carrier_missing"});
+      report.cases.push_back(Case{"vision_call_carrier_missing"});
+    }
+  }
+  if (selection.mode == ExecutionMode::GoogleDiagnostics && !google) detail::fail();
+  if (selection.mode != ExecutionMode::Full) {
+    for (auto& item : report.cases) item.selected = false;
+    if (selection.mode == ExecutionMode::BaselinePair) {
+      report.cases[1].selected = report.cases[2].selected = true;
+    } else {
+      report.cases[4].selected = report.cases[5].selected = true;
+      if (profile.provider() == Provider::VisionGemini || selection.repetition % 3 == 1) {
+        for (size_t position : {6U, 7U, 8U}) report.cases[position].selected = true;
+      } else if (selection.repetition % 3 == 0) {
+        for (size_t position : {6U, 9U, 10U}) report.cases[position].selected = true;
+      } else {
+        for (size_t position : {8U, 9U, 10U}) report.cases[position].selected = true;
+      }
+    }
+  }
+  std::uint64_t dispatched_attempts = 0;
   if (api_key.empty()) { for (auto& item : report.cases) item.reason = Reason::MissingCredential; return report; }
   if (api_key.size() > 4096) detail::fail();
   for (unsigned char c : api_key) if (c < 0x21 || c > 0x7e) detail::fail();
-  auto wire = std::make_shared<Wire>(); auto backend = std::make_shared<Backend>(profile, ledger, wire);
+  detail::Qualification qualification(project_root);
+  auto wire = std::make_shared<Wire>(); wire->qualification = &qualification; wire->provider = profile.provider();
+  auto backend = std::make_shared<Backend>(wire);
   runtime::Options opts; opts.api_key = std::move(api_key); opts.retry_tokens = 0; opts.default_timeout = std::chrono::seconds(120);
   auto client = runtime::detail::ClientAccess::make(descriptor_for(profile), std::move(opts), {}, backend);
-  const auto schema = document(R"({"type":"object","properties":{"value":{"type":"integer"}},"required":["value"],"additionalProperties":false})");
+  const auto schema = selection.mode == ExecutionMode::BaselinePair ? std::shared_ptr<const json::Document>{} :
+      document(R"({"type":"object","properties":{"value":{"type":"integer"}},"required":["value"],"additionalProperties":false})");
   auto build = [&](const vision_test::Scene& scene, bool on, bool tools) -> runtime::Request {
     if (chat) {
       chat::Request r; r.model = profile.model(); r.max_output_tokens = profile.bounds().output_tokens;
+      r.service_tier = "default";
       // GPT-6 Luna Chat function calling only supports reasoning_effort:none.
       r.reasoning_effort = on && !tools ? "low" : "none";
       chat::InputMessage m{Role::User, std::string(vision_test::question)};
@@ -413,6 +489,7 @@ Report run_vision(const Profile& profile, const std::string& ledger, std::string
       case Provider::VisionResponses: {
         responses::Request r; r.model = profile.model(); r.account_scope = "vision-campaign";
         r.max_output_tokens = profile.bounds().output_tokens;
+        r.service_tier = "default";
         // Low may emit a direct tool call with no native payload. Medium is a
         // separate on control; absence still stays unobservable, never repaired.
         r.reasoning = responses::ReasoningOptions{on ? "medium" : "none", "auto"};
@@ -460,11 +537,38 @@ Report run_vision(const Profile& profile, const std::string& ledger, std::string
     }
   };
   auto call = [&](runtime::Request request, size_t position, bool streaming, const vision_test::Scene& scene, bool on) {
-    auto& item = report.cases[position]; wire->result = &item; wire->scene = &scene; item.reason = Reason::RuntimeFailure;
+    auto& item = report.cases[position];
+    if (!item.selected) return detail::not_run_result(item);
+    if (selection.mode == ExecutionMode::GoogleDiagnostics &&
+        dispatched_attempts >= std::min<std::uint64_t>(selection.attempt_limit, 15)) {
+      item.state = State::NotRun; item.reason = Reason::DiagnosticLimit;
+      return detail::not_run_result(item);
+    }
+    wire->result = &item; wire->scene = &scene; item.reason = Reason::RuntimeFailure;
     item.reasoning_requested = on; item.reasoning_disabled = !on && profile.provider() != Provider::VisionInteractions; item.default_off = !on && profile.provider() == Provider::VisionInteractions;
-    runtime::RunOptions run; run.streaming = streaming; run.retry.max_attempts = 1;
-    auto value = client.complete(std::move(request), run);
-    report.reserved = wire->lane; report.reserved_known = wire->totals_known; if (wire->totals_known) report.campaign_reserved = wire->campaign;
+    runtime::RunOptions run; run.streaming = streaming;
+    run.retry.emplace(); run.retry->enabled = false; run.retry->max_attempts = 1;
+    auto check_wire = [&](std::string& body) {
+      auto parsed = json::parse(body, {16U << 20, 64});
+      const auto* doc = std::get_if<json::Document>(&parsed); if (!doc) return false;
+      item.image_sent = image_exact(doc->root(), profile.provider(), scene);
+      if (!item.image_sent) { item.reason = Reason::RetentionMismatch; return false; }
+      if (!wire->expected) return true;
+      wire->retained = native_retained(doc->root(), profile.provider(), *wire->expected);
+      if (!wire->retained) { item.reason = Reason::RetentionMismatch; return false; }
+      if (!wire->negative) { wire->positive = body; return true; }
+      if (wire->positive != body) { item.reason = Reason::RetentionMismatch; return false; }
+      wire->changed = wire->duplicate ? duplicate_native(body, doc->root(), profile.provider()) :
+          wire->omission ? omit_native(body, doc->root(), profile.provider(), wire->removal) : mutate_signature(body, doc->root(), profile.provider());
+      item.control_changed = wire->changed; item.duplicate_control = wire->duplicate;
+      if (!wire->changed) item.reason = Reason::MutationUnavailable;
+      return wire->changed;
+    };
+    auto prepared = runtime::detail::ClientAccess::prepare_control(client, std::move(request), run, check_wire);
+    if (!qualification.admit(profile, prepared, streaming, item, report)) return detail::not_run_result(item);
+    auto value = client.start(std::move(prepared)).join();
+    dispatched_attempts += item.attempts;
+    qualification.settle(value, item, report);
     if (const auto* complete = std::get_if<Completion>(value.get())) {
       item.state = State::Passed; item.reason = Reason::None; usage(item, complete->usage, profile.bounds()); observation(item, *complete);
       if (complete->usage.stage != UsageStage::Final || complete->usage.quality != UsageQuality::Consistent) { item.state = State::Failed; item.reason = Reason::InvalidUsage; }
@@ -482,7 +586,9 @@ Report run_vision(const Profile& profile, const std::string& ledger, std::string
     return value;
   };
   const auto& a = vision_test::scene_a(); const auto& b = vision_test::scene_b();
-  for (size_t i = 0; i < 4; ++i) call(build(i == 3 ? b : a, i == 1 || i == 2, false), i, i == 2, i == 3 ? b : a, i == 1 || i == 2);
+  for (size_t i = 0; i < std::min<size_t>(4, report.cases.size()); ++i) if (report.cases[i].selected)
+    call(build(i == 3 ? b : a, i == 1 || i == 2, false), i, i == 2, i == 3 ? b : a, i == 1 || i == 2);
+  if (selection.mode == ExecutionMode::BaselinePair) return report;
   auto request = build(a, !chat, true); auto first = call(request, 4, true, a, !chat);
   const auto* first_complete = std::get_if<Completion>(first.get()); if (!first_complete) return report;
   const ToolCall* selected = nullptr; const Message* original = nullptr; bool invalid = false;
@@ -530,6 +636,29 @@ Report run_vision(const Profile& profile, const std::string& ledger, std::string
     if (wire->rejected) { control.state = State::Passed; control.reason = Reason::OmissionRejected; }
     else if (std::holds_alternative<Completion>(*missing)) { control.state = State::Passed; control.reason = Reason::OmissionAccepted; }
     else { control.state = State::Failed; control.reason = Reason::NegativeInconclusive; }
+  }
+  if (google) {
+    wire->omission = false; wire->duplicate = true; wire->changed = wire->rejected = false;
+    auto duplicated = call(request, 8, true, a, true);
+    auto& control = report.cases[8];
+    if (control.dispatched && wire->changed) {
+      // Acceptance proves delivery/acceptance only, not native consumption.
+      if (std::holds_alternative<Completion>(*duplicated)) { control.state = State::Passed; control.reason = Reason::NegativeAccepted; }
+      else { control.state = State::Failed; control.reason = Reason::NegativeInconclusive; }
+    }
+  }
+  if (profile.provider() == Provider::VisionInteractions) {
+    wire->duplicate = false; wire->omission = true;
+    for (size_t position : {9U, 10U}) {
+      wire->removal = position == 9 ? Removal::ThoughtCarrier : Removal::CallCarrier;
+      wire->changed = wire->rejected = false;
+      auto omitted = call(request, position, true, a, true);
+      auto& control = report.cases[position];
+      if (control.dispatched && wire->changed) {
+        if (std::holds_alternative<Completion>(*omitted)) { control.state = State::Passed; control.reason = Reason::OmissionAccepted; }
+        else { control.state = State::Failed; control.reason = Reason::NegativeInconclusive; }
+      }
+    }
   }
   return report;
 }

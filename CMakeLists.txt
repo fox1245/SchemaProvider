@@ -1,7 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(SchemaProvider VERSION 0.0.0 LANGUAGES C CXX)
 
-# Proof-of-concept build. Nothing here is an installed or stable interface yet; see docs/POC_PLAN.md.
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -12,9 +13,15 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "" FORCE)
 endif()
 
-option(SP_BUILD_TESTS "Build the PoC property tests, fixture runner and loopback peers" ON)
-option(SP_BUILD_NEOGRAPH_SPIKE "Build the optional read-only NeoGraph integration experiments" OFF)
+set(SP_TOP_LEVEL OFF)
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+  set(SP_TOP_LEVEL ON)
+endif()
+option(SP_BUILD_TESTS "Build the property tests, fixture runner and loopback peers" ${SP_TOP_LEVEL})
+option(BUILD_SHARED_LIBS "Build shared SchemaProvider libraries" OFF)
+option(SP_BUILD_BENCHMARKS "Build the controlled protocol and native-carry benchmark" OFF)
 set(SP_SANITIZE "" CACHE STRING "Sanitizer set: address, thread (undefined is added to address)")
+set(SP_HTTP3_PYTHON "" CACHE FILEPATH "Isolated Python with aioquic and h2 for optional real QUIC scenarios")
 
 if(SP_SANITIZE STREQUAL "address")
   add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined)
@@ -27,6 +34,27 @@ elseif(NOT SP_SANITIZE STREQUAL "")
 endif()
 
 find_package(Threads REQUIRED)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+set(SP_GENERATED_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_configuration.py"
+  "${CMAKE_CURRENT_SOURCE_DIR}/config/runtime-defaults.json"
+  "${CMAKE_CURRENT_SOURCE_DIR}/config/error-policy.json"
+  "${CMAKE_CURRENT_SOURCE_DIR}/config/descriptor-policy.json"
+  "${CMAKE_CURRENT_SOURCE_DIR}/config/codec-defaults.json"
+  "${CMAKE_CURRENT_SOURCE_DIR}/config/model-catalog.json")
+execute_process(
+  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_configuration.py"
+    --runtime "${CMAKE_CURRENT_SOURCE_DIR}/config/runtime-defaults.json"
+    --errors "${CMAKE_CURRENT_SOURCE_DIR}/config/error-policy.json"
+    --descriptor-policy "${CMAKE_CURRENT_SOURCE_DIR}/config/descriptor-policy.json"
+    --codec-defaults "${CMAKE_CURRENT_SOURCE_DIR}/config/codec-defaults.json"
+    --asset model_catalog_json "${CMAKE_CURRENT_SOURCE_DIR}/config/model-catalog.json"
+    --output "${SP_GENERATED_INCLUDE_DIR}/sp/config_defaults.h"
+  RESULT_VARIABLE SP_CONFIGURATION_RESULT)
+if(NOT SP_CONFIGURATION_RESULT EQUAL 0)
+  message(FATAL_ERROR "Closed configuration generation failed")
+endif()
 find_package(CURL 7.88 REQUIRED)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 find_path(SP_ASIO_INCLUDE_DIR asio.hpp HINTS "${ASIO_ROOT}/include" DOC "standalone Asio headers")
@@ -43,55 +71,94 @@ if(NOT SP_YYJSON_INCLUDE_DIR)
 endif()
 find_file(SP_YYJSON_SOURCE yyjson.c PATHS "${SP_YYJSON_INCLUDE_DIR}" NO_DEFAULT_PATH)
 if(SP_YYJSON_SOURCE)
-  add_library(sp_yyjson STATIC "${SP_YYJSON_SOURCE}")
+  # Embed the parser objects in sp_json, not an unexported static dependency.
+  add_library(sp_yyjson OBJECT "${SP_YYJSON_SOURCE}")
+  set_target_properties(sp_yyjson PROPERTIES POSITION_INDEPENDENT_CODE ON)
   target_include_directories(sp_yyjson SYSTEM INTERFACE "${SP_YYJSON_INCLUDE_DIR}")
 else()
   find_library(SP_YYJSON_LIBRARY yyjson HINTS "${YYJSON_ROOT}/lib" REQUIRED)
   add_library(sp_yyjson UNKNOWN IMPORTED)
   set_target_properties(sp_yyjson PROPERTIES IMPORTED_LOCATION "${SP_YYJSON_LIBRARY}"
                         INTERFACE_INCLUDE_DIRECTORIES "${SP_YYJSON_INCLUDE_DIR}")
+  if(NOT TARGET yyjson::yyjson)
+    add_library(yyjson::yyjson UNKNOWN IMPORTED)
+    set_target_properties(yyjson::yyjson PROPERTIES
+      IMPORTED_LOCATION "${SP_YYJSON_LIBRARY}"
+      INTERFACE_INCLUDE_DIRECTORIES "${SP_YYJSON_INCLUDE_DIR}")
+  endif()
 endif()
 
-add_library(sp_core INTERFACE)
-target_include_directories(sp_core INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+add_library(sp_core src/core/image.cpp src/core/native.cpp src/core/native_archive.cpp)
+target_compile_options(sp_core PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(sp_core PUBLIC sp_json sp_descriptor PRIVATE OpenSSL::Crypto)
 
-add_library(sp_json STATIC src/json/json.cpp)
-target_include_directories(sp_json PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+add_library(sp_json src/json/json.cpp)
 target_compile_options(sp_json PRIVATE -Wall -Wextra -Wpedantic)
-target_link_libraries(sp_json PRIVATE sp_yyjson)
+if(SP_YYJSON_SOURCE)
+  target_sources(sp_json PRIVATE $<TARGET_OBJECTS:sp_yyjson>)
+  target_include_directories(sp_json SYSTEM PRIVATE "${SP_YYJSON_INCLUDE_DIR}")
+  set(SP_EXTERNAL_YYJSON OFF)
+else()
+  target_link_libraries(sp_json PRIVATE yyjson::yyjson)
+  set(SP_EXTERNAL_YYJSON ON)
+endif()
 
-add_library(sp_descriptor STATIC src/descriptor/descriptor.cpp)
-target_include_directories(sp_descriptor PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+add_library(sp_descriptor src/descriptor/descriptor.cpp src/descriptor/policy.cpp)
 target_compile_options(sp_descriptor PRIVATE -Wall -Wextra -Wpedantic)
-target_link_libraries(sp_descriptor PRIVATE sp_json)
+target_link_libraries(sp_descriptor PUBLIC sp_json PRIVATE OpenSSL::Crypto)
 
-add_library(sp_codecs STATIC src/core/image.cpp src/core/native.cpp src/codecs/accumulator.cpp
+add_library(sp_codecs src/codecs/accumulator.cpp
             src/codecs/chat.cpp src/codecs/chat_request.cpp
             src/codecs/messages.cpp src/codecs/messages_request.cpp
             src/codecs/responses.cpp src/codecs/responses_request.cpp
             src/codecs/gemini.cpp src/codecs/gemini_request.cpp
             src/codecs/interactions.cpp src/codecs/interactions_request.cpp)
 target_compile_options(sp_codecs PRIVATE -Wall -Wextra -Wpedantic)
-target_link_libraries(sp_codecs PUBLIC sp_core PRIVATE sp_json sp_descriptor OpenSSL::Crypto)
+target_link_libraries(sp_codecs PUBLIC sp_core sp_json sp_descriptor PRIVATE OpenSSL::Crypto)
 
-add_library(sp_transport STATIC src/transport/http_transport.cpp src/transport/sse_framer.cpp)
-target_include_directories(sp_transport
-  PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/src
-  PRIVATE ${SP_ASIO_INCLUDE_DIR})
+add_library(sp_transport src/transport/http_transport.cpp src/transport/sse_framer.cpp)
+target_include_directories(sp_transport SYSTEM PRIVATE "${SP_ASIO_INCLUDE_DIR}")
 target_compile_definitions(sp_transport PRIVATE ASIO_STANDALONE ASIO_NO_DEPRECATED)
 target_compile_options(sp_transport PRIVATE -Wall -Wextra -Wpedantic)
-target_link_libraries(sp_transport PUBLIC Threads::Threads PRIVATE CURL::libcurl)
+target_link_libraries(sp_transport PUBLIC sp_core Threads::Threads PRIVATE CURL::libcurl)
 
-add_library(sp_runtime STATIC src/runtime/client.cpp src/runtime/policy.cpp)
-target_include_directories(sp_runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+add_library(sp_runtime src/runtime/client.cpp src/runtime/policy.cpp src/configuration/runtime_policy.cpp)
 target_compile_options(sp_runtime PRIVATE -Wall -Wextra -Wpedantic)
-target_link_libraries(sp_runtime PUBLIC sp_core PRIVATE sp_codecs sp_transport sp_descriptor sp_json)
+target_link_libraries(sp_runtime PUBLIC sp_core sp_codecs sp_transport sp_descriptor sp_json)
+
+if(APPLE)
+  set(SP_LIBRARY_INSTALL_RPATH "@loader_path")
+elseif(UNIX)
+  set(SP_LIBRARY_INSTALL_RPATH "$ORIGIN")
+endif()
+
+foreach(component core json descriptor codecs transport runtime)
+  add_library(SchemaProvider::${component} ALIAS sp_${component})
+  target_include_directories(sp_${component} PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+    "$<BUILD_INTERFACE:${SP_GENERATED_INCLUDE_DIR}>"
+    "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/SchemaProvider>")
+  target_compile_features(sp_${component} PUBLIC cxx_std_20)
+  set_target_properties(sp_${component} PROPERTIES
+    EXPORT_NAME ${component}
+    POSITION_INDEPENDENT_CODE ON
+    SOVERSION 3
+    INSTALL_RPATH "${SP_LIBRARY_INSTALL_RPATH}"
+    WINDOWS_EXPORT_ALL_SYMBOLS ON)
+endforeach()
+
+include(cmake/SchemaProviderInstall.cmake)
+
+add_library(sp_qualification STATIC src/qualification/catalog.cpp src/qualification/meter.cpp)
+target_include_directories(sp_qualification PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src "${SP_GENERATED_INCLUDE_DIR}")
+target_compile_options(sp_qualification PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(sp_qualification PRIVATE sp_json OpenSSL::Crypto)
 
 add_library(sp_canary_core STATIC src/canary/profile.cpp src/canary/ledger.cpp
             src/canary/runner.cpp src/canary/vision.cpp src/canary/report.cpp)
 target_include_directories(sp_canary_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_options(sp_canary_core PRIVATE -Wall -Wextra -Wpedantic)
-target_link_libraries(sp_canary_core PRIVATE sp_runtime sp_codecs sp_descriptor sp_json sp_transport)
+target_link_libraries(sp_canary_core PUBLIC sp_core PRIVATE sp_runtime sp_codecs sp_descriptor sp_json sp_transport sp_qualification OpenSSL::Crypto)
 add_executable(sp_canary tools/canary_main.cpp)
 target_compile_options(sp_canary PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(sp_canary PRIVATE sp_canary_core)
@@ -101,6 +168,25 @@ if(SP_BUILD_TESTS)
   # Model-free peers are required for the TLS and HTTP/2 gates, never silently skipped.
   find_program(SP_NODE node REQUIRED)
   find_program(SP_OPENSSL openssl REQUIRED)
+  # ThreadSanitizer's shadow memory needs a fixed address-space layout; kernels with high mmap
+  # entropy (this WSL2 kernel) abort with "unexpected memory mapping" unless ASLR is off.
+  set(sp_test_runner "")
+  if(SP_SANITIZE STREQUAL "thread")
+    find_program(SP_SETARCH setarch)
+    if(SP_SETARCH)
+      set(sp_test_runner ${SP_SETARCH} ${CMAKE_SYSTEM_PROCESSOR} -R)
+    endif()
+  endif()
+  add_executable(sp_qualification_meter_test tests/qualification_meter_test.cpp)
+  target_compile_options(sp_qualification_meter_test PRIVATE -Wall -Wextra -Wpedantic)
+  target_link_libraries(sp_qualification_meter_test PRIVATE sp_qualification sp_json OpenSSL::Crypto Threads::Threads)
+  add_test(NAME qualification_meter COMMAND ${sp_test_runner} $<TARGET_FILE:sp_qualification_meter_test> "${CMAKE_CURRENT_SOURCE_DIR}")
+  set_tests_properties(qualification_meter PROPERTIES TIMEOUT 120)
+  add_executable(sp_native_archive_tests tests/native_archive_test.cpp)
+  target_compile_options(sp_native_archive_tests PRIVATE -Wall -Wextra -Wpedantic)
+  target_link_libraries(sp_native_archive_tests PRIVATE sp_core sp_codecs OpenSSL::Crypto Threads::Threads)
+  add_test(NAME native_archive COMMAND ${sp_test_runner} $<TARGET_FILE:sp_native_archive_tests>)
+  set_tests_properties(native_archive PROPERTIES TIMEOUT 180)
 
 
   # A positive control separates const-view failures from broken include/toolchain setup.
@@ -112,6 +198,7 @@ if(SP_BUILD_TESTS)
                   "${CMAKE_CURRENT_SOURCE_DIR}/tests/runtime_result_compile.cpp"
                   CMAKE_FLAGS -DCMAKE_CXX_STANDARD=20 -DCMAKE_CXX_STANDARD_REQUIRED=ON
                   COMPILE_DEFINITIONS "-I${CMAKE_CURRENT_SOURCE_DIR}/src"
+                                      "-I${SP_GENERATED_INCLUDE_DIR}"
                                       "-DSP_MUTATION_CASE=${mutation_case}"
                   OUTPUT_VARIABLE compile_output)
       if(mutation_case EQUAL 0 AND NOT result_compiles)
@@ -132,6 +219,14 @@ if(SP_BUILD_TESTS)
   add_executable(sp_transport_tests tests/transport_properties_test.cpp)
   target_compile_options(sp_transport_tests PRIVATE -Wall -Wextra -Wpedantic)
   target_link_libraries(sp_transport_tests PRIVATE sp_transport)
+  add_executable(sp_http3_scenarios tests/http3_transport_scenarios.cpp)
+  target_compile_options(sp_http3_scenarios PRIVATE -Wall -Wextra -Wpedantic)
+  target_link_libraries(sp_http3_scenarios PRIVATE sp_transport)
+  if(SP_HTTP3_PYTHON)
+    add_test(NAME http3_scenarios COMMAND ${sp_test_runner} $<TARGET_FILE:sp_http3_scenarios>
+      "${SP_HTTP3_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/support/http3_peer.py" all)
+    set_tests_properties(http3_scenarios PROPERTIES TIMEOUT 180)
+  endif()
 
   add_executable(sp_sse_tests tests/sse_framer_test.cpp)
   target_link_libraries(sp_sse_tests PRIVATE sp_transport)
@@ -191,15 +286,6 @@ if(SP_BUILD_TESTS)
     target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
   endforeach()
 
-  # ThreadSanitizer's shadow memory needs a fixed address-space layout; kernels with high mmap
-  # entropy (this WSL2 kernel) abort with "unexpected memory mapping" unless ASLR is off.
-  set(sp_test_runner "")
-  if(SP_SANITIZE STREQUAL "thread")
-    find_program(SP_SETARCH setarch)
-    if(SP_SETARCH)
-      set(sp_test_runner ${SP_SETARCH} ${CMAKE_SYSTEM_PROCESSOR} -R)
-    endif()
-  endif()
 
   add_test(NAME transport_properties
            COMMAND ${sp_test_runner} $<TARGET_FILE:sp_transport_tests> $<TARGET_FILE:sp_loopback_server>
@@ -252,6 +338,7 @@ if(SP_BUILD_TESTS)
                        messages_properties messages_replay native_continuation_bounds messages_fixtures PROPERTIES TIMEOUT 300)
 endif()
 
-if(SP_BUILD_NEOGRAPH_SPIKE)
-  add_subdirectory(integration/neograph)
+
+if(SP_BUILD_BENCHMARKS)
+  add_subdirectory(benchmarks)
 endif()

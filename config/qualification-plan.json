@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "paired_runs_per_family": 60,
+  "baseline_cohort": "fresh-five-api-wave",
+  "baseline_cases": ["vision_off_buffered", "vision_on_buffered", "vision_on_sse", "vision_changed"],
+  "models": {
+    "openai.chat": "gpt-6-luna",
+    "openai.responses": "gpt-6-luna",
+    "anthropic.messages": "claude-haiku-4-5-20251001",
+    "google.generate": "gemini-2.5-flash-lite",
+    "google.interactions": "gemini-2.5-flash-lite"
+  },
+  "forecast_cache_read_fraction": null,
+  "cache_sensitivity_fractions": [0, 0.5, 0.9],
+  "diagnostic_requests": 30,
+  "diagnostic_families": ["google.generate", "google.interactions"],
+  "missing_output_estimate": "same_family_reported_visible_output_mean",
+  "notes": "Cost forecast only, not dispatch or spending authorization. Output totals already include billed thinking; output caps and model context windows are not expected token counts. Diagnostic allowance is priced at the largest observed eligible input and output, without assumed cache savings."
+}

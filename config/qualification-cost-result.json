@@ -1,0 +1,235 @@
+{
+  "version": 1,
+  "purpose": "workload_forecast_not_invoice_or_authorization",
+  "catalog_verified_at": "2026-10-02",
+  "families": [
+    {
+      "api_family": "openai.chat",
+      "model": "gpt-6-luna",
+      "calls": 120,
+      "measured_baseline_cases": 4,
+      "mean_input_tokens": 408.0,
+      "mean_output_tokens_including_thinking": 43.75,
+      "output_estimated_cases": [],
+      "output_estimate_basis": "same-family reported total minus reported thinking; not actual missing usage",
+      "expected_input_tokens": 48960.0,
+      "expected_output_tokens": 5250.0,
+      "forecast_cache_read_fraction": 0.0,
+      "forecast_cache_basis": "baseline_reported_token_fraction",
+      "cache_minimum_tokens": 1024,
+      "baseline_meets_documented_cache_minimum": false,
+      "observed_cache_read_fraction_known_rows": 0.0,
+      "observed_cache_rows": 6,
+      "observed_input_rows": 6,
+      "observed_cache_hit_requests": 0,
+      "observed_cache_hit_request_fraction_known_rows": 0.0,
+      "input_usd": "0.004896000",
+      "output_usd": "0.002625000",
+      "expected_usd": "0.007521000",
+      "cache_sensitivity_usd": [
+        {
+          "fraction": 0.0,
+          "applicability": "uncached",
+          "usd": "0.007521000"
+        },
+        {
+          "fraction": 0.5,
+          "applicability": "not_eligible_at_observed_lengths",
+          "usd": "0.005317800"
+        },
+        {
+          "fraction": 0.9,
+          "applicability": "not_eligible_at_observed_lengths",
+          "usd": "0.003555240"
+        }
+      ]
+    },
+    {
+      "api_family": "openai.responses",
+      "model": "gpt-6-luna",
+      "calls": 120,
+      "measured_baseline_cases": 4,
+      "mean_input_tokens": 409.0,
+      "mean_output_tokens_including_thinking": 41.75,
+      "output_estimated_cases": [],
+      "output_estimate_basis": "same-family reported total minus reported thinking; not actual missing usage",
+      "expected_input_tokens": 49080.0,
+      "expected_output_tokens": 5010.0,
+      "forecast_cache_read_fraction": 0.0,
+      "forecast_cache_basis": "baseline_reported_token_fraction",
+      "cache_minimum_tokens": 1024,
+      "baseline_meets_documented_cache_minimum": false,
+      "observed_cache_read_fraction_known_rows": 0.0,
+      "observed_cache_rows": 13,
+      "observed_input_rows": 13,
+      "observed_cache_hit_requests": 0,
+      "observed_cache_hit_request_fraction_known_rows": 0.0,
+      "input_usd": "0.004908000",
+      "output_usd": "0.002505000",
+      "expected_usd": "0.007413000",
+      "cache_sensitivity_usd": [
+        {
+          "fraction": 0.0,
+          "applicability": "uncached",
+          "usd": "0.007413000"
+        },
+        {
+          "fraction": 0.5,
+          "applicability": "not_eligible_at_observed_lengths",
+          "usd": "0.005204400"
+        },
+        {
+          "fraction": 0.9,
+          "applicability": "not_eligible_at_observed_lengths",
+          "usd": "0.003437520"
+        }
+      ]
+    },
+    {
+      "api_family": "anthropic.messages",
+      "model": "claude-haiku-4-5-20251001",
+      "calls": 120,
+      "measured_baseline_cases": 4,
+      "mean_input_tokens": 480.5,
+      "mean_output_tokens_including_thinking": 100.0,
+      "output_estimated_cases": [],
+      "output_estimate_basis": "same-family reported total minus reported thinking; not actual missing usage",
+      "expected_input_tokens": 57660.0,
+      "expected_output_tokens": 12000.0,
+      "forecast_cache_read_fraction": 0.0,
+      "forecast_cache_basis": "baseline_reported_token_fraction",
+      "cache_minimum_tokens": 4096,
+      "baseline_meets_documented_cache_minimum": false,
+      "observed_cache_read_fraction_known_rows": 0.0,
+      "observed_cache_rows": 10,
+      "observed_input_rows": 10,
+      "observed_cache_hit_requests": 0,
+      "observed_cache_hit_request_fraction_known_rows": 0.0,
+      "input_usd": "0.057660000",
+      "output_usd": "0.060000000",
+      "expected_usd": "0.117660000",
+      "cache_sensitivity_usd": [
+        {
+          "fraction": 0.0,
+          "applicability": "uncached",
+          "usd": "0.117660000"
+        },
+        {
+          "fraction": 0.5,
+          "applicability": "not_eligible_at_observed_lengths",
+          "usd": "0.091713000"
+        },
+        {
+          "fraction": 0.9,
+          "applicability": "not_eligible_at_observed_lengths",
+          "usd": "0.070955400"
+        }
+      ]
+    },
+    {
+      "api_family": "google.generate",
+      "model": "gemini-2.5-flash-lite",
+      "calls": 120,
+      "measured_baseline_cases": 4,
+      "mean_input_tokens": 299.0,
+      "mean_output_tokens_including_thinking": 146.0,
+      "output_estimated_cases": [
+        "vision_off_buffered",
+        "vision_changed"
+      ],
+      "output_estimate_basis": "same-family reported total minus reported thinking; not actual missing usage",
+      "expected_input_tokens": 35880.0,
+      "expected_output_tokens": 17520.0,
+      "forecast_cache_read_fraction": 0.0,
+      "forecast_cache_basis": "no_discount_assumed_missing_cache_usage",
+      "cache_minimum_tokens": null,
+      "baseline_meets_documented_cache_minimum": null,
+      "observed_cache_read_fraction_known_rows": null,
+      "observed_cache_rows": 0,
+      "observed_input_rows": 12,
+      "observed_cache_hit_requests": 0,
+      "observed_cache_hit_request_fraction_known_rows": null,
+      "input_usd": "0.003588000",
+      "output_usd": "0.007008000",
+      "expected_usd": "0.010596000",
+      "cache_sensitivity_usd": [
+        {
+          "fraction": 0.0,
+          "applicability": "uncached",
+          "usd": "0.010596000"
+        },
+        {
+          "fraction": 0.5,
+          "applicability": "hypothetical_not_guaranteed",
+          "usd": "0.008981400"
+        },
+        {
+          "fraction": 0.9,
+          "applicability": "hypothetical_not_guaranteed",
+          "usd": "0.007689720"
+        }
+      ]
+    },
+    {
+      "api_family": "google.interactions",
+      "model": "gemini-2.5-flash-lite",
+      "calls": 120,
+      "measured_baseline_cases": 4,
+      "mean_input_tokens": 299.0,
+      "mean_output_tokens_including_thinking": 231.5,
+      "output_estimated_cases": [],
+      "output_estimate_basis": "same-family reported total minus reported thinking; not actual missing usage",
+      "expected_input_tokens": 35880.0,
+      "expected_output_tokens": 27780.0,
+      "forecast_cache_read_fraction": 0.0,
+      "forecast_cache_basis": "baseline_reported_token_fraction",
+      "cache_minimum_tokens": null,
+      "baseline_meets_documented_cache_minimum": null,
+      "observed_cache_read_fraction_known_rows": 0.28005226480836237,
+      "observed_cache_rows": 10,
+      "observed_input_rows": 10,
+      "observed_cache_hit_requests": 2,
+      "observed_cache_hit_request_fraction_known_rows": 0.2,
+      "input_usd": "0.003588000",
+      "output_usd": "0.011112000",
+      "expected_usd": "0.014700000",
+      "cache_sensitivity_usd": [
+        {
+          "fraction": 0.0,
+          "applicability": "uncached",
+          "usd": "0.014700000"
+        },
+        {
+          "fraction": 0.5,
+          "applicability": "hypothetical_not_guaranteed",
+          "usd": "0.013085400"
+        },
+        {
+          "fraction": 0.9,
+          "applicability": "hypothetical_not_guaranteed",
+          "usd": "0.011793720"
+        }
+      ]
+    }
+  ],
+  "generation_calls": 600,
+  "expected_input_tokens": 227460.0,
+  "expected_output_tokens_including_thinking": 67560.0,
+  "generation_input_usd": "0.074640000",
+  "generation_output_usd": "0.083250000",
+  "generation_expected_usd": "0.157890000",
+  "diagnostic_requests": 30,
+  "diagnostic_pricing": "largest_observed_eligible_input_and_output_without_cache_discount",
+  "diagnostic_input_tokens": 790,
+  "diagnostic_output_tokens": 587,
+  "diagnostic_usd": "0.009414000",
+  "combined_expected_usd": "0.167304000",
+  "limits": [
+    "Small historical cohorts are not statistical qualification.",
+    "Missing usage stays missing; only forecast fields use labelled estimates.",
+    "Reported output includes thinking; never add thinking twice.",
+    "Context window and max_output_tokens are not expected token counts.",
+    "No cached-token savings are assumed without baseline evidence.",
+    "This tool does not refund reservations, reset a ledger, or grant calls."
+  ]
+}

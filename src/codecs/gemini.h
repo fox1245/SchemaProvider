@@ -18,7 +18,7 @@ class Codec {
   void finish(Close = {});
   const Diagnostics& diagnostics() const { return diagnostics_; }
  private:
-  bool document(std::string_view);
+  bool document(std::string_view, std::string_view event = {});
   bool identity(json::Value);
   bool candidate(json::Value);
   bool part(json::Value);

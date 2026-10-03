@@ -21,8 +21,7 @@ std::string_view image_detail_name(ImageDetail detail) noexcept {
   }
   return {};
 }
-bool valid_image(const Image& image) noexcept {
-  constexpr size_t decoded_limit = 5U << 20;
+bool valid_image(const Image& image, std::size_t decoded_limit) noexcept {
   if (!image.data || image_detail_name(image.detail).empty()) return false;
   const auto& data = *image.data;
   if (data.empty() || data.size() % 4 || data.size() > ((decoded_limit + 2) / 3) * 4) return false;

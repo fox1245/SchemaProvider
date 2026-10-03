@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "scope": "five_current_chat_api_qualification",
+  "additional_calls": 630,
+  "micro_usd": 1000000,
+  "baseline_vision_calls": 99,
+  "baseline_vision_exposure_micro_usd": 18979680,
+  "baseline_ledger": "build/m5-live.ledger",
+  "meter_ledger": "build/qualification-meter.ledger",
+  "catalog": "config/model-catalog.json",
+  "owner_selection": "추가 630회 / US$1 계량 한도",
+  "billing_guarantee": "local_meter_and_stop_not_invoice",
+  "unknown_cost_policy": "retain_reservation",
+  "unused_old_margin": "not_renewed",
+  "excluded_paid_scope": ["video_generation", "image_generation", "remote_graphrag"]
+}

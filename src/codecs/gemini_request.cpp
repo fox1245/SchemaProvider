@@ -1,12 +1,12 @@
 #include "codecs/gemini_request.h"
 #include "core/native.h"
 #include "json/json.h"
+#include "descriptor/policy.h"
 #include <map>
 #include <set>
 
 namespace sp::gemini {
 namespace {
-constexpr size_t request_limit = 16 << 20;
 bool name_valid(std::string_view name) {
   if (name.empty() || name.size() > 128) return false;
   for (const auto c : name) if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-')) return false;
@@ -20,14 +20,21 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (request.model.empty() || request.model.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._") != std::string::npos) return bad("literal model name required");
   const auto base = "/v1beta/models/" + request.model;
   if (descriptor.path(false) != base + ":generateContent" || descriptor.path(true) != base + ":streamGenerateContent?alt=sse") return Error{ErrorKind::InvalidConfig, "Gemini descriptor paths must target the same literal model"};
-  if (request.messages.empty() || request.messages.size() > 100000 || !request.max_output_tokens) return bad("messages and positive output cap required");
-  if (request.thinking_budget && *request.thinking_budget > request.max_output_tokens) return bad("thinking budget exceeds output cap");
+  const auto& resources = descriptor.policy()->resources();
+  auto effective = descriptor::effective_defaults(descriptor, request.model);
+  if (request.max_output_tokens) effective.max_output_tokens = request.max_output_tokens;
+  if (request.thinking_budget) effective.thinking_budget = request.thinking_budget;
+  if (request.include_thoughts) effective.include_thoughts = request.include_thoughts;
+  if (auto error = descriptor::validate_choices(descriptor, request.model, effective)) return bad(std::move(*error));
+  if (request.messages.empty() || request.messages.size() > resources.request_messages || request.tools.size() > resources.request_tools)
+    return bad("request count limit exceeded");
   for (const auto& message : request.messages) {
+    if (message.parts.size() > resources.request_parts) return bad("request part count limit exceeded");
     if (!message.native && (message.role == Role::Assistant || message.wire_output)) return replay_bad();
     if (!message.native) for (const auto& p : message.parts)
       if (!std::holds_alternative<Text>(p) && !std::holds_alternative<Image>(p) && !std::holds_alternative<ToolResult>(p)) return replay_bad();
   }
-  auto context = std::shared_ptr<const NativeContext>(new NativeContext(descriptor, request, streaming));
+  auto context = std::shared_ptr<const NativeContext>(new NativeContext(descriptor, request, effective, streaming));
   if (!context->history_valid_) return replay_bad();
   if (!context->valid_) return Error{ErrorKind::ResourceLimit, "native binding could not be captured"};
   EncodedRequest result{"POST", std::string(descriptor.path(streaming)), {}, {}, {}};
@@ -41,10 +48,23 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   auto build = [&](json::BoundedWriter& w) -> std::optional<Error> {
     auto invalid = [](const char* text) { return Error{ErrorKind::InvalidRequest, text}; };
     std::set<std::string_view> tool_names;
-    w.raw("{\"generationConfig\":{\"maxOutputTokens\":").raw(std::to_string(request.max_output_tokens));
-    w.raw(",\"thinkingConfig\":{\"includeThoughts\":").raw(request.include_thoughts ? "true" : "false");
-    if (request.thinking_budget) w.raw(",\"thinkingBudget\":").raw(std::to_string(*request.thinking_budget));
-    w.raw("}}");
+    w.raw("{\"generationConfig\":{");
+    bool generation_comma = false;
+    if (effective.max_output_tokens) {
+      w.quoted(descriptor.max_output_tokens_member()).raw(":").raw(std::to_string(*effective.max_output_tokens));
+      generation_comma = true;
+    }
+    if (effective.include_thoughts || effective.thinking_budget) {
+      if (generation_comma) w.raw(",");
+      w.raw("\"thinkingConfig\":{");
+      if (effective.include_thoughts) w.raw("\"includeThoughts\":").raw(*effective.include_thoughts ? "true" : "false");
+      if (effective.thinking_budget) {
+        if (effective.include_thoughts) w.raw(",");
+        w.raw("\"thinkingBudget\":").raw(std::to_string(*effective.thinking_budget));
+      }
+      w.raw("}");
+    }
+    w.raw("}");
     if (!request.system.empty()) w.raw(",\"systemInstruction\":{\"parts\":[{\"text\":").quoted(request.system).raw("}]}");
     if (!request.tools.empty()) {
       w.raw(",\"tools\":[{\"functionDeclarations\":[");
@@ -64,7 +84,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     struct Pending { std::string_view name; bool wire_id; };
     std::map<std::string_view, Pending> pending;
     std::set<std::string_view> all_calls;
-    w.raw(",\"contents\":[");
+    w.raw(",").quoted(descriptor.request_messages_member()).raw(":[");
     bool comma = false;
     for (const auto& m : request.messages) {
       if (m.parts.empty()) return invalid("empty content message");
@@ -91,12 +111,12 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
             if (results_only || m.role == Role::Tool) return invalid("function results must be immediate and complete");
             w.raw("{\"text\":").quoted(text->value).raw("}");
           } else if (auto image = std::get_if<Image>(&p)) {
-            if (results_only || m.role == Role::Tool || !valid_image(*image)) return invalid("invalid inline image or image role");
+            if (results_only || m.role == Role::Tool || !valid_image(*image, resources.image_decoded_bytes)) return invalid("invalid inline image or image role");
             w.raw("{\"inlineData\":{\"mimeType\":").quoted(image->mime).raw(",\"data\":\"").raw(*image->data).raw("\"}}");
           } else if (auto tr = std::get_if<ToolResult>(&p)) {
             auto found = pending.find(tr->tool_use_id);
             if (found == pending.end()) return invalid("function result lacks unique client ownership");
-            auto parsed = json::parse(tr->content, {request_limit, 64});
+            auto parsed = json::parse(tr->content, {resources.request_bytes, resources.json_depth});
             auto doc = std::get_if<json::Document>(&parsed);
             if (!doc || !doc->root().is_object()) return invalid("function result must be JSON object");
             w.raw("{\"functionResponse\":{\"name\":").quoted(found->second.name);
@@ -117,12 +137,13 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     if (!w.ok()) return invalid("request exceeds JSON limits or encoding");
     return {};
   };
-  json::BoundedWriter measured({request_limit, 64});
+  json::BoundedWriter measured({resources.request_bytes, resources.json_depth});
   if (auto error = build(measured)) return *error;
   result.body.reserve(measured.size());
-  json::BoundedWriter writer({measured.size(), 64}, &result.body);
+  json::BoundedWriter writer({measured.size(), resources.json_depth}, &result.body);
   if (auto error = build(writer)) return *error;
   result.context = std::move(context);
+  result.max_output_tokens = effective.max_output_tokens;
   return result;
 }
 } // namespace sp::gemini

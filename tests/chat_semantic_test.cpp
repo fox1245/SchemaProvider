@@ -70,6 +70,86 @@ std::string projection(const Outcome& outcome) {
   return result;
 }
 const std::string full_usage = R"({"prompt_tokens":10,"completion_tokens":4,"total_tokens":14,"prompt_tokens_details":{"cached_tokens":4,"cache_write_tokens":0},"completion_tokens_details":{"reasoning_tokens":2}})";
+void owned_raw_observations() {
+  for (bool streaming : {false, true}) {
+    std::vector<std::string> sources;
+    auto source = streaming ? chunk(R"({"role":"assistant","content":"kept"})")
+                            : body(R"({"role":"assistant","content":"kept"})");
+    source.pop_back();
+    source += R"(,"vendor":{"z":[3,{"b":true,"a":null}],"a":"retained"},"service_tier":"future"})";
+    sources.push_back(source);
+    if (streaming) sources.push_back(chunk("{}", "\"stop\""));
+    std::vector<RawWire> observed;
+    bool begun = false;
+    const auto outcome = [&] {
+      Accumulator accumulator({}, [&](const Event& event) {
+        if (const auto* raw = std::get_if<RawWire>(&event)) {
+          CHECK(raw->payload->root().dump() == sources.at(observed.size()));
+          observed.push_back(*raw);
+        } else if (std::holds_alternative<Begin>(event)) {
+          CHECK(observed.at(0).payload->root().get("vendor").get("a").as_string() == "retained");
+          begun = true;
+        }
+      });
+      chat::Codec codec(descriptor_value(), streaming ? chat::Mode::Sse : chat::Mode::Buffered, accumulator);
+      if (streaming) {
+        for (const auto& wire : sources) CHECK(codec.frame("message", wire));
+        CHECK(codec.frame("message", "[DONE]"));
+        codec.finish();
+      } else CHECK(codec.buffered(source, {}));
+      CHECK(accumulator.outcome());
+      return *accumulator.outcome();
+    }();
+    const auto& completion = completed(outcome);
+    CHECK(begun && text_of(completion.messages) == "kept");
+    CHECK(completion.raw_events.size() == sources.size());
+    for (size_t i = 0; i < sources.size(); ++i) {
+      CHECK(completion.raw_events[i].payload == observed[i].payload);
+      CHECK(completion.raw_events[i].payload->root().dump() == sources[i]);
+      CHECK(completion.raw_events[i].type == (streaming ? "chat.completion.chunk" : "chat.completion"));
+    }
+    const auto nested = completion.raw_events[0].payload->root().get("vendor").get("z").at(1);
+    auto member = nested.members().begin();
+    CHECK((*member++).key == "b" && (*member).key == "a");
+  }
+}
+void raw_failure_evidence() {
+  const auto initial = chunk(R"({"content":"partial"})");
+  const std::string error = R"({"error":{"message":"private vendor error","extra":[2,1]},"vendor":{"opaque":true}})";
+  const auto outcome = [&] {
+    Accumulator accumulator;
+    chat::Codec codec(descriptor_value(), chat::Mode::Sse, accumulator);
+    CHECK(codec.frame("message", initial));
+    CHECK(!codec.frame("error", error));
+    CHECK(!codec.frame("message", chunk(R"({"content":"ignored"})")));
+    codec.finish({false, ErrorKind::Cancelled});
+    return *accumulator.outcome();
+  }();
+  const auto& failure = failed(outcome, ErrorKind::RemoteFailure);
+  CHECK(text_of(failure.partial.messages) == "partial");
+  CHECK(failure.partial.raw_events.size() == 2);
+  CHECK(failure.partial.raw_events[0].payload->root().dump() == initial);
+  CHECK(failure.partial.raw_events[1].type == "error");
+  CHECK(failure.partial.raw_events[1].payload->root().dump() == error);
+  CHECK(failure.error.safe_message.find("private") == std::string::npos);
+  for (const auto& message : failure.partial.messages) CHECK(!message.native);
+  for (const auto& malformed : {"{", "unstructured error", "[]", R"({"x":1,"x":2})"}) {
+    Accumulator accumulator;
+    chat::Codec codec(descriptor_value(), chat::Mode::Sse, accumulator);
+    CHECK(!codec.frame("error", malformed));
+    CHECK(failed(*accumulator.outcome(), ErrorKind::RemoteFailure).partial.raw_events.empty());
+  }
+  const auto truncated = frames({initial});
+  const auto& partial = failed(truncated, ErrorKind::Truncated).partial;
+  CHECK(partial.raw_events.size() == 1 && partial.raw_events[0].payload->root().dump() == initial);
+  CHECK(text_of(partial.messages) == "partial");
+  for (const auto& message : partial.messages) CHECK(!message.native);
+  const auto buffered_wire = body(R"({"role":"assistant","content":"partial"})");
+  const auto buffered_truncated = buffered(buffered_wire, false);
+  CHECK(failed(buffered_truncated, ErrorKind::Truncated).partial.raw_events[0].payload->root().dump() == buffered_wire);
+  const auto buffered_error = buffered(error);
+  CHECK(failed(buffered_error, ErrorKind::RemoteFailure).partial.raw_events[0].payload->root().dump() == error);
+}
 void chunk_partition_invariant() {
   const std::string wire = "\xef\xbb\xbf: heartbeat\r\n\r\n"
     "data: {\"id\":\"generation-1\",\"model\":\"fixture-model\",\"created\":7,\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\r\n"
@@ -554,6 +634,7 @@ void quoted_json_and_request_bounds() {
 } // namespace
 int main() {
   try {
+    owned_raw_observations(); raw_failure_evidence();
     chunk_partition_invariant(); no_terminal_no_success(); transport_projection_parity(); known_corrupt_never_ignored();
     invalid_tools_and_compatibility(); usage_knowledge(); accumulator_transitions_and_seals(); typed_request_encoding();
     required_metadata_and_identity(); required_usage_and_unknown_cache(); unindexed_tool_order_and_optional_function(); buffered_close_precedence();

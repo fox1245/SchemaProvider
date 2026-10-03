@@ -238,8 +238,121 @@ const Failure& failure(const Result& result, ErrorKind kind) {
 RunOptions buffered(const std::shared_ptr<ManualExecutor>& executor) {
   RunOptions run;
   run.streaming = false;
+  run.retry = RetryPolicy{false, false, 3, 0ms, 0ms};
   run.deadline = executor->now() + 1s;
   return run;
+}
+
+using ConfigEdits = std::vector<std::pair<std::string, std::string>>;
+std::string policy_input(ConfigEdits defaults = {}, ConfigEdits admission = {}) {
+  auto parsed = json::parse(config_defaults::runtime_defaults_json);
+  CHECK(std::holds_alternative<json::Document>(parsed));
+  const auto root = std::get<json::Document>(parsed).root();
+  std::string result = "{\"version\":1";
+  for (std::string_view section : {"defaults", "admission"}) {
+    const auto& edits = section == "defaults" ? defaults : admission;
+    result += ",\"" + std::string(section) + "\":{";
+    bool first = true;
+    auto emit = [&](std::string_view key, std::string_view value) {
+      if (!std::exchange(first, false)) result += ',';
+      result += json::quote(key) + ":" + std::string(value);
+    };
+    for (auto member : root.get(section).members()) {
+      if (std::none_of(edits.begin(), edits.end(), [&](const auto& edit) { return edit.first == member.key; }))
+        emit(member.key, member.value.dump());
+    }
+    for (const auto& edit : edits) emit(edit.first, edit.second);
+    result += '}';
+  }
+  return result + '}';
+}
+configuration::PolicySnapshot policy_value(const std::string& input, std::string_view errors = config_defaults::error_policy_json) {
+  auto loaded = configuration::load_runtime_policy(input, errors);
+  CHECK(std::holds_alternative<configuration::PolicySnapshot>(loaded));
+  return std::get<configuration::PolicySnapshot>(std::move(loaded));
+}
+void external_policy_boundaries() {
+  for (const auto& edits : std::vector<ConfigEdits>{
+      {{"unknown-secret", "1"}}, {{"workers", "true"}}, {{"workers", "18446744073709551616"}},
+      {{"workers", "1"}, {"workers", "2"}}, {{"workers", "0"}}, {{"retry_tokens_per_second", "-1"}},
+      {{"retry_base_delay_ms", "100"}, {"retry_max_delay_ms", "99"}}}) {
+    auto loaded = configuration::load_runtime_policy(policy_input(edits), config_defaults::error_policy_json);
+    CHECK(std::holds_alternative<descriptor::ConfigError>(loaded));
+    const auto& error = std::get<descriptor::ConfigError>(loaded);
+    CHECK(error.pointer.find("secret") == std::string::npos && error.message.find("secret") == std::string::npos);
+  }
+  for (std::string_view errors : {
+      R"({"version":1,"statuses":[{"status":200,"kind":"RemoteFailure","retry":"Transient"}],"families":[],"headers":[]})",
+      R"({"version":1,"statuses":[{"status":503,"kind":"Completion","retry":"Transient"}],"families":[],"headers":[]})",
+      R"({"version":1,"statuses":[],"families":[],"headers":[],"retry_safety":"NotSent"})",
+      R"({"version":1,"statuses":[],"statuses":[],"families":[],"headers":[]})"}) {
+    auto loaded = configuration::load_runtime_policy(policy_input(), errors);
+    CHECK(std::holds_alternative<descriptor::ConfigError>(loaded));
+  }
+  auto snapshot = policy_value(policy_input({{"max_operations", "1"}, {"default_timeout_ms", "7"},
+      {"max_response_bytes", "600"}, {"semantic_max_content_bytes", "4"}},
+      {{"workers", "10"}, {"total_threads", "12"}}));
+  {
+    auto executor = std::make_shared<ManualExecutor>();
+    auto wire = std::make_shared<ModelTransport>();
+    Options options(snapshot);
+    options.workers = 9; // 9 + 2 + 2 exceeds this snapshot's configured total.
+    bool rejected = false;
+    try { auto bad = detail::ClientAccess::make(descriptor_value(), options, executor, wire); }
+    catch (const descriptor::ConfigError&) { rejected = true; }
+    CHECK(rejected);
+    options.workers = 8; // Total 12 is admitted: no hidden total-thread-8 cap.
+    auto client = detail::ClientAccess::make(descriptor_value(), options, executor, wire);
+    RunOptions run; run.streaming = false;
+    auto held = client.start(request(), run);
+    executor->drain();
+    bool denied = false;
+    try { auto extra = client.start(request(), run); }
+    catch (const AdmissionError& error) { denied = true; failure(error.outcome(), ErrorKind::ResourceLimit); }
+    CHECK(denied);
+    executor->advance(6ms); executor->drain();
+    CHECK(wire->calls.front()->cancellations == 0);
+    executor->advance(1ms); executor->drain();
+    failure(held.join(), ErrorKind::DeadlineExceeded);
+    wire->on_start = [](const auto& call) { call->reply(200, body("hello")); };
+    auto semantic = client.start(request(), run); executor->drain();
+    failure(semantic.join(), ErrorKind::ResourceLimit);
+    wire->on_start = [](const auto& call) { call->reply(200, body(std::string(1000, 'x'))); };
+    auto bounded = client.start(request(), run); executor->drain();
+    failure(bounded.join(), ErrorKind::ResourceLimit);
+  }
+  const auto runtime = policy_input({{"retry_enabled", "true"}, {"retry_allow_duplicate_billing_risk", "true"},
+      {"retry_max_attempts", "2"}, {"retry_base_delay_ms", "0"}, {"retry_max_delay_ms", "0"},
+      {"retry_tokens", "1"}, {"retry_tokens_per_second", "0"}});
+  auto errors = [](std::string_view kind, std::string_view retry) {
+    return "{\"version\":1,\"statuses\":[],\"headers\":[],\"families\":[{\"family\":\"openai.chat\","
+        "\"root_error_type\":\"error\",\"error_paths\":[\"error\"],\"code_fields\":[\"code\"],\"codes\":[{\"value\":\"synthetic_busy\","
+        "\"kind\":" + json::quote(kind) + ",\"retry\":" + json::quote(retry) + "}]}]}";
+  };
+  auto permanent = policy_value(runtime, errors("Authentication", "Transient"));
+  auto executor = std::make_shared<ManualExecutor>();
+  auto wire = std::make_shared<ModelTransport>();
+  auto existing = detail::ClientAccess::make(descriptor_value(), Options(permanent), executor, wire);
+  auto reloaded = policy_value(runtime, errors("Overloaded", "Transient"));
+  wire->on_start = [](const auto& call) { call->reply(503, "{\"error\":{\"code\":\"synthetic_busy\"}}"); };
+  RunOptions run; run.streaming = false;
+  auto no_retry = existing.start(request(), run); executor->drain();
+  CHECK(failure(no_retry.join(), ErrorKind::Authentication).error.retry_class == RetryClass::Never);
+  CHECK(wire->calls.size() == 1);
+  auto fresh_executor = std::make_shared<ManualExecutor>();
+  auto fresh_wire = std::make_shared<ModelTransport>();
+  fresh_wire->on_start = [fresh_wire](const auto& call) {
+    if (fresh_wire->calls.size() == 1) call->reply(503, "{\"error\":{\"code\":\"synthetic_busy\"}}");
+    else call->reply(200, body());
+  };
+  auto fresh = detail::ClientAccess::make(descriptor_value(), Options(reloaded), fresh_executor, fresh_wire);
+  auto retried = fresh.start(request(), run); fresh_executor->drain();
+  CHECK(text_of(retried.join()) == "ok" && fresh_wire->calls.size() == 2);
+  fresh_wire->on_start = [](const auto& call) { call->reply(503, "{\"error\":{\"code\":\"synthetic_busy\"}}"); };
+  auto exhausted = fresh.start(request(), run); fresh_executor->drain();
+  CHECK(failure(exhausted.join(), ErrorKind::Overloaded).error.attempt.attempts == 1);
+  CHECK(fresh_wire->calls.size() == 3);
+  fresh_wire->on_start = {}; // Break the fixture callback ownership cycle.
 }
 
 void terminal_interleavings() {
@@ -362,9 +475,7 @@ void seeded_shared_budget() {
     std::array<std::size_t, 8> outcomes{};
     std::vector<Operation> operations;
     auto run = buffered(executor);
-    run.retry.enabled = true;
-    run.retry.allow_duplicate_billing_risk = true;
-    run.retry.max_attempts = 2;
+    run.retry = RetryPolicy{true, true, 2, 100ms, 5s};
     for (std::size_t i = 0; i < results.size(); ++i) {
       operations.push_back(client.start(request("slot-" + std::to_string(i)), run, {
         {}, [&, i](Result result) { results[i] = std::move(result); ++outcomes[i]; }
@@ -452,7 +563,7 @@ void admission_and_preflight() {
     auto input = request();
     std::stop_source stop;
     ErrorKind expected = ErrorKind::InvalidRequest;
-    if (boundary == 0) run.retry.max_attempts = 0;
+    if (boundary == 0) run.retry = RetryPolicy{false, false, 0, 0ms, 0ms};
     if (boundary == 1) { run.stop_token = stop.get_token(); stop.request_stop(); expected = ErrorKind::Cancelled; }
     if (boundary == 2) { run.deadline = executor->now(); expected = ErrorKind::DeadlineExceeded; }
     if (boundary == 3) input.model.clear();
@@ -490,6 +601,70 @@ void admission_and_preflight() {
   executor->drain();
   CHECK(text_of(operation.join()) == "ok" && wire->calls.size() == 1);
   std::cout << "executor-only preflight, bounded admission and join slot fence passed\n";
+}
+
+void prepared_admission() {
+  auto executor = std::make_shared<ManualExecutor>();
+  auto wire = std::make_shared<ModelTransport>();
+  Options options;
+  options.limits.max_operations = 1;
+  auto client = detail::ClientAccess::make(descriptor_value(), options, executor, wire);
+  {
+    auto preparation = client.prepare(request(), buffered(executor));
+    CHECK(preparation.valid() && !preparation.error());
+    CHECK(wire->calls.empty() && executor->ready_count() == 0 && executor->timer_count() == 0);
+    bool rejected = false;
+    try {
+      auto denied = client.prepare(request(), buffered(executor));
+    } catch (const AdmissionError& error) {
+      rejected = true;
+      failure(error.outcome(), ErrorKind::ResourceLimit);
+    }
+    CHECK(rejected);
+    auto moved = std::move(preparation);
+    CHECK(!preparation.valid() && moved.valid());
+  }
+  CHECK(wire->calls.empty() && executor->ready_count() == 0 && executor->timer_count() == 0);
+  {
+    auto invalid = request();
+    invalid.model.clear();
+    auto preparation = client.prepare(std::move(invalid), buffered(executor));
+    CHECK(preparation.error() && preparation.error()->kind == ErrorKind::InvalidRequest);
+    CHECK(preparation.error()->retry_safety == RetrySafety::NotSent);
+    CHECK(wire->calls.empty() && executor->ready_count() == 0 && executor->timer_count() == 0);
+  }
+  {
+    auto preparation = client.prepare(request(), buffered(executor));
+    executor->advance(2s);
+    auto operation = client.start(std::move(preparation));
+    executor->drain();
+    const auto& error = failure(operation.join(), ErrorKind::DeadlineExceeded).error;
+    CHECK(error.retry_safety == RetrySafety::NotSent && error.attempt.attempts == 0);
+    CHECK(wire->calls.empty());
+  }
+  {
+    std::stop_source stop;
+    auto run = buffered(executor);
+    run.stop_token = stop.get_token();
+    auto preparation = client.prepare(request(), run);
+    stop.request_stop();
+    auto operation = client.start(std::move(preparation));
+    executor->drain();
+    CHECK(failure(operation.join(), ErrorKind::Cancelled).error.retry_safety == RetrySafety::NotSent);
+    CHECK(wire->calls.empty());
+  }
+  {
+    auto preparation = detail::ClientAccess::prepare_control(
+        client, request(), buffered(executor), [](std::string&) { return false; });
+    CHECK(preparation.error() && preparation.error()->kind == ErrorKind::InvalidRequest);
+    CHECK(wire->calls.empty() && executor->ready_count() == 0 && executor->timer_count() == 0);
+  }
+  wire->on_start = [](const auto& call) { call->reply(200, body()); };
+  auto preparation = client.prepare(request(), buffered(executor));
+  auto operation = client.start(std::move(preparation));
+  executor->drain();
+  CHECK(std::holds_alternative<Completion>(*operation.join()) && wire->calls.size() == 1);
+  std::cout << "prepared slot abandonment, preflight, original deadline and cancellation boundaries passed\n";
 }
 
 void real_paused_redelivery(const char* node, const char* script) {
@@ -554,6 +729,8 @@ int main(int argc, char** argv) {
     seeded_shared_budget();
     callback_and_start_boundaries();
     admission_and_preflight();
+    prepared_admission();
+    external_policy_boundaries();
     real_paused_redelivery(argv[1], argv[2]);
     return 0;
   } catch (const std::exception& error) {

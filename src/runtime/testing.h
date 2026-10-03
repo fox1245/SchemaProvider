@@ -51,6 +51,10 @@ class ClientAccess {
                      std::shared_ptr<AttemptTransport> = {},
                      std::function<double()> random01 = {});
   static OperationStats stats(const Operation&);
+  // Private qualification seam: freeze a bounded body-only negative control
+  // before spending admission. Changed native requests cannot mint replay seals.
+  static PreparedRequest prepare_control(Client&, Request, RunOptions,
+                                         std::function<bool(std::string&)>);
 };
 
 }  // namespace sp::runtime::detail

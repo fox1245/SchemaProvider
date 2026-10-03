@@ -1,0 +1,476 @@
+{
+  "version": 1,
+  "revision": 3,
+  "families": [
+    {
+      "family": "openai.chat",
+      "openrouter_origins": ["https://openrouter.ai"],
+      "bindings": {
+        "model": "model",
+        "messages": "messages",
+        "stream": "stream",
+        "max_output_tokens": "max_tokens",
+        "usage": [
+          "usage"
+        ]
+      },
+      "stop_reasons": {
+        "stop": "EndTurn",
+        "length": "MaxTokens",
+        "tool_calls": "ToolUse",
+        "content_filter": "ContentFilter",
+        "refusal": "Refusal",
+        "pause_turn": "PauseTurn",
+        "context_length_exceeded": "ContextLimit"
+      },
+      "defaults": {
+        "max_output_tokens": null,
+        "thinking_budget": null,
+        "include_thoughts": null,
+        "thinking_summaries": null,
+        "reasoning_enabled": false,
+        "reasoning_effort": null,
+        "reasoning_summary": null,
+        "thinking_level": null,
+        "service_tier": null,
+        "temperature": null,
+        "top_p": null,
+        "strict_tools": null
+      },
+      "required_output_cap": false,
+      "temperature_range": [
+        0,
+        2
+      ],
+      "top_p_range": [
+        0,
+        1
+      ],
+      "thinking_minimum": 0,
+      "thinking_top_p_minimum": 0,
+      "reasoning_efforts": [
+        "none",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "reasoning_summaries": [],
+      "thinking_levels": [],
+      "service_tiers": [
+        "auto",
+        "default",
+        "flex",
+        "priority"
+      ],
+      "header_versions": [],
+      "header_version": null,
+      "server_tools": []
+    },
+    {
+      "family": "anthropic.messages",
+      "openrouter_origins": [],
+      "bindings": {
+        "model": "model",
+        "messages": "messages",
+        "stream": "stream",
+        "max_output_tokens": "max_tokens",
+        "usage": [
+          "usage"
+        ]
+      },
+      "stop_reasons": {
+        "end_turn": "EndTurn",
+        "max_tokens": "MaxTokens",
+        "tool_use": "ToolUse",
+        "stop_sequence": "StopSequence",
+        "pause_turn": "PauseTurn",
+        "refusal": "Refusal",
+        "model_context_window_exceeded": "ContextLimit"
+      },
+      "defaults": {
+        "max_output_tokens": 1024,
+        "thinking_budget": null,
+        "include_thoughts": null,
+        "thinking_summaries": null,
+        "reasoning_enabled": false,
+        "reasoning_effort": null,
+        "reasoning_summary": null,
+        "thinking_level": null,
+        "service_tier": null,
+        "temperature": null,
+        "top_p": null,
+        "strict_tools": null
+      },
+      "required_output_cap": true,
+      "temperature_range": [
+        0,
+        1
+      ],
+      "top_p_range": [
+        0,
+        1
+      ],
+      "thinking_minimum": 1024,
+      "thinking_top_p_minimum": 0.95,
+      "reasoning_efforts": [],
+      "reasoning_summaries": [],
+      "thinking_levels": [],
+      "service_tiers": [],
+      "header_versions": [
+        "2023-06-01"
+      ],
+      "header_version": "2023-06-01",
+      "server_tools": [
+        {
+          "type": "web_search_20250305",
+          "name": "web_search",
+          "max_uses": true
+        },
+        {
+          "type": "web_search_20260209",
+          "name": "web_search",
+          "max_uses": true
+        },
+        {
+          "type": "web_search_20260318",
+          "name": "web_search",
+          "max_uses": true
+        },
+        {
+          "type": "web_fetch_20250910",
+          "name": "web_fetch",
+          "max_uses": true
+        },
+        {
+          "type": "web_fetch_20260209",
+          "name": "web_fetch",
+          "max_uses": true
+        },
+        {
+          "type": "web_fetch_20260309",
+          "name": "web_fetch",
+          "max_uses": true
+        },
+        {
+          "type": "web_fetch_20260318",
+          "name": "web_fetch",
+          "max_uses": true
+        },
+        {
+          "type": "code_execution_20250522",
+          "name": "code_execution",
+          "max_uses": false
+        },
+        {
+          "type": "code_execution_20250825",
+          "name": "code_execution",
+          "max_uses": false
+        },
+        {
+          "type": "code_execution_20260120",
+          "name": "code_execution",
+          "max_uses": false
+        },
+        {
+          "type": "code_execution_20260521",
+          "name": "code_execution",
+          "max_uses": false
+        },
+        {
+          "type": "tool_search_tool_regex_20251119",
+          "name": "tool_search_tool_regex",
+          "max_uses": false
+        },
+        {
+          "type": "tool_search_tool_bm25_20251119",
+          "name": "tool_search_tool_bm25",
+          "max_uses": false
+        }
+      ]
+    },
+    {
+      "family": "openai.responses",
+      "openrouter_origins": ["https://openrouter.ai"],
+      "bindings": {
+        "model": "model",
+        "messages": "input",
+        "stream": "stream",
+        "max_output_tokens": "max_output_tokens",
+        "usage": [
+          "usage"
+        ]
+      },
+      "stop_reasons": {
+        "completed": "EndTurn",
+        "max_output_tokens": "MaxTokens",
+        "content_filter": "ContentFilter"
+      },
+      "defaults": {
+        "max_output_tokens": null,
+        "thinking_budget": null,
+        "include_thoughts": null,
+        "thinking_summaries": null,
+        "reasoning_enabled": false,
+        "reasoning_effort": "low",
+        "reasoning_summary": "auto",
+        "thinking_level": null,
+        "service_tier": null,
+        "temperature": null,
+        "top_p": null,
+        "strict_tools": true
+      },
+      "required_output_cap": false,
+      "temperature_range": [
+        0,
+        2
+      ],
+      "top_p_range": [
+        0,
+        1
+      ],
+      "thinking_minimum": 0,
+      "thinking_top_p_minimum": 0,
+      "reasoning_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "reasoning_summaries": [
+        "auto",
+        "concise",
+        "detailed"
+      ],
+      "thinking_levels": [],
+      "service_tiers": [
+        "auto",
+        "default",
+        "flex",
+        "priority"
+      ],
+      "header_versions": [],
+      "header_version": null,
+      "server_tools": [
+        {"type": "web_search", "name": "web_search", "max_uses": false},
+        {"type": "image_generation", "name": "image_generation", "max_uses": false},
+        {"type": "file_search", "name": "file_search", "max_uses": false},
+        {"type": "tool_search", "name": "tool_search", "max_uses": false},
+        {"type": "shell", "name": "shell", "max_uses": false}
+      ]
+    },
+    {
+      "family": "google.generate",
+      "openrouter_origins": [],
+      "bindings": {
+        "model": "model",
+        "messages": "contents",
+        "stream": "stream",
+        "max_output_tokens": "maxOutputTokens",
+        "usage": [
+          "usageMetadata"
+        ]
+      },
+      "stop_reasons": {
+        "STOP": "EndTurn",
+        "MAX_TOKENS": "MaxTokens",
+        "SAFETY": "ContentFilter",
+        "MALFORMED_FUNCTION_CALL": "MalformedCall"
+      },
+      "defaults": {
+        "max_output_tokens": 4096,
+        "thinking_budget": null,
+        "include_thoughts": true,
+        "thinking_summaries": null,
+        "reasoning_enabled": false,
+        "reasoning_effort": null,
+        "reasoning_summary": null,
+        "thinking_level": null,
+        "service_tier": null,
+        "temperature": null,
+        "top_p": null,
+        "strict_tools": null
+      },
+      "required_output_cap": false,
+      "temperature_range": [
+        0,
+        2
+      ],
+      "top_p_range": [
+        0,
+        1
+      ],
+      "thinking_minimum": 0,
+      "thinking_top_p_minimum": 0,
+      "reasoning_efforts": [],
+      "reasoning_summaries": [],
+      "thinking_levels": [],
+      "service_tiers": [],
+      "header_versions": [],
+      "header_version": null,
+      "server_tools": []
+    },
+    {
+      "family": "google.interactions",
+      "openrouter_origins": [],
+      "bindings": {
+        "model": "model",
+        "messages": "input",
+        "stream": "stream",
+        "max_output_tokens": "max_output_tokens",
+        "usage": [
+          "usage"
+        ]
+      },
+      "stop_reasons": {
+        "completed": "EndTurn",
+        "requires_action": "ToolUse",
+        "max_output_tokens": "MaxTokens"
+      },
+      "defaults": {
+        "max_output_tokens": 4096,
+        "thinking_budget": null,
+        "include_thoughts": null,
+        "thinking_summaries": true,
+        "reasoning_enabled": false,
+        "reasoning_effort": null,
+        "reasoning_summary": null,
+        "thinking_level": null,
+        "service_tier": "standard",
+        "temperature": null,
+        "top_p": null,
+        "strict_tools": null
+      },
+      "required_output_cap": false,
+      "temperature_range": [
+        0,
+        2
+      ],
+      "top_p_range": [
+        0,
+        1
+      ],
+      "thinking_minimum": 0,
+      "thinking_top_p_minimum": 0,
+      "reasoning_efforts": [],
+      "reasoning_summaries": [],
+      "thinking_levels": [
+        "minimal",
+        "low",
+        "medium",
+        "high"
+      ],
+      "service_tiers": [
+        "standard"
+      ],
+      "header_versions": [],
+      "header_version": null,
+      "server_tools": []
+    }
+  ],
+  "models": [
+    {
+      "family": "openai.chat",
+      "model": "gpt-6-luna",
+      "defaults": {
+        "max_output_tokens": null,
+        "thinking_budget": null,
+        "include_thoughts": null,
+        "thinking_summaries": null,
+        "reasoning_enabled": false,
+        "reasoning_effort": null,
+        "reasoning_summary": null,
+        "thinking_level": null,
+        "service_tier": null,
+        "temperature": null,
+        "top_p": null,
+        "strict_tools": null
+      },
+      "output_limit": 128000,
+      "input_limit": 922000
+    },
+    {
+      "family": "openai.responses",
+      "model": "gpt-6-luna",
+      "defaults": {
+        "max_output_tokens": null,
+        "thinking_budget": null,
+        "include_thoughts": null,
+        "thinking_summaries": null,
+        "reasoning_enabled": false,
+        "reasoning_effort": "low",
+        "reasoning_summary": "auto",
+        "thinking_level": null,
+        "service_tier": null,
+        "temperature": null,
+        "top_p": null,
+        "strict_tools": true
+      },
+      "output_limit": 128000,
+      "input_limit": 922000
+    },
+    {
+      "family": "anthropic.messages",
+      "model": "claude-haiku-4-5-20251001",
+      "defaults": {
+        "max_output_tokens": 1024,
+        "thinking_budget": null,
+        "include_thoughts": null,
+        "thinking_summaries": null,
+        "reasoning_enabled": false,
+        "reasoning_effort": null,
+        "reasoning_summary": null,
+        "thinking_level": null,
+        "service_tier": null,
+        "temperature": null,
+        "top_p": null,
+        "strict_tools": null
+      },
+      "output_limit": 64000,
+      "input_limit": 200000
+    },
+    {
+      "family": "google.generate",
+      "model": "gemini-2.5-flash-lite",
+      "defaults": {
+        "max_output_tokens": 4096,
+        "thinking_budget": null,
+        "include_thoughts": true,
+        "thinking_summaries": null,
+        "reasoning_enabled": false,
+        "reasoning_effort": null,
+        "reasoning_summary": null,
+        "thinking_level": null,
+        "service_tier": null,
+        "temperature": null,
+        "top_p": null,
+        "strict_tools": null
+      },
+      "output_limit": 65536,
+      "input_limit": 1048576
+    },
+    {
+      "family": "google.interactions",
+      "model": "gemini-2.5-flash-lite",
+      "defaults": {
+        "max_output_tokens": 4096,
+        "thinking_budget": null,
+        "include_thoughts": null,
+        "thinking_summaries": true,
+        "reasoning_enabled": false,
+        "reasoning_effort": null,
+        "reasoning_summary": null,
+        "thinking_level": null,
+        "service_tier": "standard",
+        "temperature": null,
+        "top_p": null,
+        "strict_tools": null
+      },
+      "output_limit": 65536,
+      "input_limit": 1048576
+    }
+  ]
+}

@@ -12,9 +12,10 @@ struct Request {
   std::string model, account_scope, system;
   std::vector<Message> messages;
   std::vector<ToolDefinition> tools;
-  uint64_t max_output_tokens = 4096;
+  std::optional<uint64_t> max_output_tokens;
   std::optional<std::string> thinking_level;
-  bool thinking_summaries = true;
+  std::optional<bool> thinking_summaries;
+  std::optional<std::string> service_tier;
   std::optional<std::string> required_tool;
 };
 struct EncodedRequest {
@@ -22,6 +23,8 @@ struct EncodedRequest {
   std::vector<std::pair<std::string, std::string>> headers;
   std::string body;
   std::shared_ptr<const NativeContext> context;
+  std::optional<std::uint64_t> max_output_tokens{};
+  std::optional<std::uint64_t> model_invocation_limit{1};
 };
 using EncodeResult = std::variant<EncodedRequest, Error>;
 EncodeResult encode(const descriptor::ValidatedDescriptor&, const Request&, bool streaming);

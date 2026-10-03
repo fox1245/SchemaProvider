@@ -1,26 +1,20 @@
 #include "codecs/messages_request.h"
 #include "core/native.h"
 #include "json/json.h"
+#include "descriptor/policy.h"
+#include <algorithm>
 #include <charconv>
 #include <cmath>
 #include <map>
 #include <set>
+#include <limits>
 
 namespace sp::messages {
 namespace {
-constexpr size_t request_limit = 16 << 20;
 std::string lower(std::string_view text) {
   std::string value(text);
   for (char& c : value) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + ('a' - 'A'));
   return value;
-}
-std::string_view server_name(std::string_view type) {
-  if (type == "web_search_20250305" || type == "web_search_20260209" || type == "web_search_20260318") return "web_search";
-  if (type == "web_fetch_20250910" || type == "web_fetch_20260209" || type == "web_fetch_20260309" || type == "web_fetch_20260318") return "web_fetch";
-  if (type == "code_execution_20250522" || type == "code_execution_20250825" || type == "code_execution_20260120" || type == "code_execution_20260521") return "code_execution";
-  if (type == "tool_search_tool_regex_20251119") return "tool_search_tool_regex";
-  if (type == "tool_search_tool_bm25_20251119") return "tool_search_tool_bm25";
-  return {};
 }
 std::string_view result_name(std::string_view type) {
   if (type == "web_search_tool_result") return "web_search";
@@ -45,53 +39,61 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   auto replay_bad = []() -> EncodeResult { return Error{ErrorKind::ReplayIneligible, "native replay provenance, binding or content mismatch"}; };
   if (descriptor.family() != "anthropic.messages") return Error{ErrorKind::InvalidConfig, "Messages encoder requires Messages descriptor"};
   if (request.model.empty() || request.messages.empty()) return bad("model and messages are required");
-  if (request.messages.size() > 100000) return bad("too many request messages");
-  if (request.temperature && (!std::isfinite(*request.temperature) || *request.temperature < 0 || *request.temperature > 1)) return bad("temperature outside range");
-  if (request.top_p && (!std::isfinite(*request.top_p) || *request.top_p < 0 || *request.top_p > 1)) return bad("top_p outside range");
-  if (request.thinking_budget && (*request.thinking_budget < 1024 || *request.thinking_budget >= request.max_tokens)) return bad("thinking budget must be at least 1024 and below max_tokens");
-  if (request.thinking_budget && (request.temperature || (request.top_p && *request.top_p < 0.95))) return bad("manual thinking sampling parameters are incompatible");
+  const auto& resources = descriptor.policy()->resources();
+  const auto& family = descriptor.family_policy();
+  auto effective = descriptor::effective_defaults(descriptor, request.model);
+  if (request.max_tokens) effective.max_output_tokens = request.max_tokens;
+  if (request.thinking_budget) effective.thinking_budget = request.thinking_budget;
+  if (request.temperature) effective.temperature = request.temperature;
+  if (request.top_p) effective.top_p = request.top_p;
+  if (auto error = descriptor::validate_choices(descriptor, request.model, effective)) return bad(std::move(*error));
+  if (request.messages.size() > resources.request_messages || request.tools.size() > resources.request_tools)
+    return bad("request count limit exceeded");
   // Check seals before encoding or interpreting the edited contents. Removing a seal
   // never converts native parts or captured tool calls into imported, trusted input.
   bool captured_history = false;
   std::optional<Error> image_error;
   for (size_t i = 0; i < request.messages.size(); ++i) {
     const auto& message = request.messages[i];
+    if (message.parts.size() > resources.request_parts) return bad("request part count limit exceeded");
     if (!message.native) for (const auto& part : message.parts) if (native_part(part)) return replay_bad();
     captured_history = captured_history || static_cast<bool>(message.native);
     for (const auto& part : message.parts) if (const auto* image = std::get_if<Image>(&part); image && !image_error) {
       if (message.role != Role::User) image_error = Error{ErrorKind::InvalidRequest, "image inputs require user role"};
-      else if (!valid_image(*image)) image_error = Error{ErrorKind::InvalidRequest, "invalid inline image payload"};
+      else if (!valid_image(*image, resources.image_decoded_bytes)) image_error = Error{ErrorKind::InvalidRequest, "invalid inline image payload"};
       else if (image->detail != ImageDetail::Auto) image_error = Error{ErrorKind::Unsupported, "Messages images have no detail control"};
     }
   }
   // Invalid ordinary input never reaches hashing. For captured history, retain
   // lineage mismatch precedence even when the edited prefix is no longer valid.
   if (image_error && !captured_history) return *image_error;
-  auto context = std::shared_ptr<const NativeContext>(new NativeContext(descriptor, request, streaming));
+  auto context = std::shared_ptr<const NativeContext>(new NativeContext(descriptor, request, effective, streaming));
   if (!context->history_valid_) return replay_bad();
   if (!context->valid_) return Error{ErrorKind::ResourceLimit, "native binding could not be captured"};
   if (image_error) return *image_error;
   EncodedRequest result{"POST", std::string(descriptor.path(streaming)), {}, {}, {}};
+  std::string_view version = *family.header_version;
   for (const auto& header : descriptor.headers()) {
     auto key = lower(header.first);
     if (key != "content-type" && key != "accept" && key != "anthropic-version") result.headers.push_back(header);
+    else if (key == "anthropic-version") version = header.second;
   }
   result.headers.emplace_back("Content-Type", "application/json");
   result.headers.emplace_back("Accept", streaming ? "text/event-stream" : "application/json");
-  result.headers.emplace_back("anthropic-version", "2023-06-01");
+  result.headers.emplace_back("anthropic-version", version);
   auto build = [&](json::BoundedWriter& body) -> std::optional<Error> {
   auto bad = [](std::string message) { return Error{ErrorKind::InvalidRequest, std::move(message)}; };
   body.raw("{").quoted(descriptor.request_model_member()).raw(":").quoted(request.model);
-  body.raw(",").quoted(descriptor.max_output_tokens_member()).raw(":").raw(std::to_string(request.max_tokens));
+  body.raw(",").quoted(descriptor.max_output_tokens_member()).raw(":").raw(std::to_string(*effective.max_output_tokens));
   body.raw(",").quoted(descriptor.request_stream_member()).raw(streaming ? ":true" : ":false");
   if (!request.system.empty()) body.raw(",\"system\":").quoted(request.system);
-  if (request.thinking_budget) body.raw(",\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":").raw(std::to_string(*request.thinking_budget)).raw("}");
+  if (effective.thinking_budget) body.raw(",\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":").raw(std::to_string(*effective.thinking_budget)).raw("}");
   auto number = [&](std::string_view key, double value) {
     char bytes[64]; const auto converted = std::to_chars(bytes, bytes + sizeof bytes, value);
     body.raw(",").quoted(key).raw(":").raw(std::string_view(bytes, converted.ptr));
   };
-  if (request.temperature) number("temperature", *request.temperature);
-  if (request.top_p) number("top_p", *request.top_p);
+  if (effective.temperature) number("temperature", *effective.temperature);
+  if (effective.top_p) number("top_p", *effective.top_p);
   std::set<std::string_view> tool_names;
   if (!request.tools.empty()) {
     body.raw(",\"tools\":[");
@@ -104,10 +106,10 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         if (!tool.input_schema || !tool.input_schema->root().is_object() || tool.max_uses) return bad("client tools require object schemas and no server fields");
         body.raw("{\"name\":").quoted(tool.name).raw(",\"description\":").quoted(tool.description).raw(",\"input_schema\":").value(tool.input_schema->root(), 3).raw("}");
       } else {
-        const auto name = server_name(tool.type);
-        if (name.empty()) return Error{ErrorKind::Unsupported, "unsupported server tool type"};
-        if (tool.name != name || tool.input_schema || !tool.description.empty()) return bad("server tool fields do not match typed schema");
-        if (tool.max_uses && (!*tool.max_uses || (name != "web_search" && name != "web_fetch"))) return bad("max_uses is unsupported or out of range");
+        const auto fact = std::find_if(family.server_tools.begin(), family.server_tools.end(), [&](const auto& value) { return value.type == tool.type; });
+        if (fact == family.server_tools.end()) return Error{ErrorKind::Unsupported, "unsupported server tool type"};
+        if (tool.name != fact->name || tool.input_schema || !tool.description.empty()) return bad("server tool fields do not match typed schema");
+        if (tool.max_uses && (!*tool.max_uses || !fact->max_uses)) return bad("max_uses is unsupported or out of range");
         body.raw("{\"type\":").quoted(tool.type).raw(",\"name\":").quoted(tool.name);
         if (tool.max_uses) body.raw(",\"max_uses\":").raw(std::to_string(*tool.max_uses));
         body.raw("}");
@@ -194,12 +196,21 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   };
   // Measure the entire aggregate before allocating its encoded representation.
   // Both passes use the same writer and syntax, including all document leaves.
-  json::BoundedWriter measured({request_limit, 64});
+  json::BoundedWriter measured({resources.request_bytes, resources.json_depth});
   if (auto error = build(measured)) return *error;
   result.body.reserve(measured.size());
-  json::BoundedWriter body({measured.size(), 64}, &result.body);
+  json::BoundedWriter body({measured.size(), resources.json_depth}, &result.body);
   if (auto error = build(body)) return *error;
   result.context = std::move(context);
+  result.max_output_tokens = effective.max_output_tokens;
+  for (const auto& tool : request.tools) if (!tool.type.empty()) {
+    if (!tool.max_uses || !result.model_invocation_limit ||
+        *tool.max_uses > std::numeric_limits<std::uint64_t>::max() - *result.model_invocation_limit) {
+      result.model_invocation_limit.reset();
+      break;
+    }
+    *result.model_invocation_limit += *tool.max_uses;
+  }
   return result;
 }
 } // namespace sp::messages

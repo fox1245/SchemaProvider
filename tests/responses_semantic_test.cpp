@@ -106,6 +106,18 @@ void grouped_native_and_owned_outcomes() {
     auto d = parse(std::get<responses::EncodedRequest>(encoded).body); auto input = d.root().get("input");
     for (size_t i = 0; i < 3; ++i) CHECK(json::equal(input.at(i + 1), m.wire_output->root().at(i)));
     CHECK(input.at(4).get("type").as_string() == "function_call_output" && input.at(4).get("call_id").as_string() == "call_1");
+    auto changed = r2; changed.service_tier = "default";
+    auto mismatch = responses::encode(desc(), changed, false);
+    CHECK(std::holds_alternative<Error>(mismatch) && std::get<Error>(mismatch).kind == ErrorKind::ReplayIneligible);
+    changed = r2; changed.max_output_tokens = 129;
+    mismatch = responses::encode(desc(), changed, false);
+    CHECK(std::holds_alternative<Error>(mismatch) && std::get<Error>(mismatch).kind == ErrorKind::ReplayIneligible);
+    changed = r2; changed.reasoning->summary = "detailed";
+    mismatch = responses::encode(desc(), changed, false);
+    CHECK(std::holds_alternative<Error>(mismatch) && std::get<Error>(mismatch).kind == ErrorKind::ReplayIneligible);
+    changed = r2; changed.tools[0].strict = false;
+    mismatch = responses::encode(desc(), changed, false);
+    CHECK(std::holds_alternative<Error>(mismatch) && std::get<Error>(mismatch).kind == ErrorKind::ReplayIneligible);
   }
   // Codec and accumulator are already destroyed; strings and parsed arguments remain owned.
   CHECK(std::get<Reasoning>(completed(s).messages[0].parts[0]).encrypted_content == "SEALED_NATIVE_MARKER_a810");
@@ -131,6 +143,105 @@ void normal_close_required() {
   failed(buffered(body("[]", "failed")), ErrorKind::RemoteFailure);
   failed(buffered(body("[]", "cancelled")), ErrorKind::Cancelled);
   failed(stream({created(), event("response.failed", ",\"response\":" + body("[]", "failed"))}), ErrorKind::RemoteFailure);
+}
+void named_error_precedence() {
+  const auto frames = text_frames();
+  for (const auto count : {size_t{0}, size_t{4}, frames.size()}) {
+    const std::string expected = count == 0 ? "" : count == 4 ? "hel" : "hello";
+    for (const auto& wire : {std::string("{"), std::string("[]"), std::string("[DONE]"),
+        std::string(R"({"x":1,"x":2})"), std::string("{}"),
+        std::string(R"({"type":7,"error":{"message":"private"}})"),
+        std::string(R"({"type":"response.completed","vendor":{"b":[2,1],"a":true}})")}) {
+      size_t commits = 0, failures = 0;
+      std::shared_ptr<const json::Document> observed;
+      const auto outcome = [&] {
+        Accumulator acc({}, [&](const Event& e) {
+          if (std::holds_alternative<Commit>(e)) ++commits;
+          if (std::holds_alternative<Fail>(e)) ++failures;
+          if (const auto* raw = std::get_if<RawWire>(&e); raw && raw->type == "error") observed = raw->payload;
+        });
+        responses::Codec codec(desc(), responses::Mode::Sse, acc, context());
+        for (size_t i = 0; i < count; ++i) CHECK(codec.frame(frames[i].first, frames[i].second));
+        CHECK(!codec.frame("error", wire));
+        CHECK(!codec.frame("message", "[DONE]"));
+        codec.finish({false, ErrorKind::Cancelled});
+        CHECK(acc.outcome());
+        return *acc.outcome();
+      }();
+      const auto& f = failed(outcome, ErrorKind::RemoteFailure);
+      CHECK(commits == 0 && failures == 1 && text(f.partial.messages) == expected);
+      CHECK(f.error.safe_message.find("private") == std::string::npos);
+      CHECK(f.partial.raw_events.size() == count + (observed ? 1 : 0));
+      for (size_t i = 0; i < count; ++i) CHECK(f.partial.raw_events[i].payload->root().dump() == frames[i].second);
+      if (wire == "{}" || wire.find("vendor") != std::string::npos || wire.find("private") != std::string::npos) {
+        CHECK(observed && f.partial.raw_events.back().payload == observed);
+        CHECK(f.partial.raw_events.back().type == "error" && observed->root().dump() == wire);
+      } else CHECK(!observed);
+      for (const auto& m : f.partial.messages) CHECK(!m.native || !m.native->complete());
+      if (count == frames.size()) {
+        CHECK(f.partial.usage.stage == UsageStage::Partial);
+        CHECK(f.partial.wire_envelope->root().get("status").as_string() == "completed");
+      }
+    }
+    for (bool byte_limit : {false, true}) {
+      SemanticLimits limits;
+      std::string wire;
+      if (byte_limit) {
+        size_t prefix_bytes = 0;
+        for (size_t i = 0; i < count; ++i) prefix_bytes += frames[i].second.size();
+        limits.max_content_bytes = prefix_bytes + 1;
+        wire = "{}";
+      } else {
+        limits.max_json_depth = 8;
+        wire = R"({"error":[[[[[[[[[[0]]]]]]]]]]})";
+      }
+      std::vector<Frame> source(frames.begin(), frames.begin() + static_cast<std::ptrdiff_t>(count));
+      source.emplace_back("error", wire);
+      const auto outcome = stream(source, {}, limits);
+      const auto& f = failed(outcome, ErrorKind::RemoteFailure);
+      CHECK(text(f.partial.messages) == expected && f.partial.raw_events.size() == count);
+      for (size_t i = 0; i < count; ++i) CHECK(f.partial.raw_events[i].payload->root().dump() == frames[i].second);
+    }
+  }
+}
+void named_error_raw_capacity() {
+  const auto frames = text_frames();
+  const std::string wire = "{\"vendor\":" + json::quote(std::string(1 << 20, 'x')) + "}";
+  SemanticLimits limits; limits.max_content_bytes = 2 << 20;
+  for (size_t count : {size_t{0}, size_t{4}}) {
+    size_t commits = 0, failures = 0;
+    Accumulator acc(limits, [&](const Event& e) {
+      if (std::holds_alternative<Commit>(e)) ++commits;
+      if (std::holds_alternative<Fail>(e)) ++failures;
+    }, 4096);
+    responses::Codec codec(desc(), responses::Mode::Sse, acc, context(), limits);
+    for (size_t i = 0; i < count; ++i) CHECK(codec.frame(frames[i].first, frames[i].second));
+    CHECK(!codec.frame("error", wire));
+    CHECK(!codec.frame("message", "[DONE]"));
+    codec.finish();
+    const auto& f = failed(*acc.outcome(), ErrorKind::RemoteFailure);
+    CHECK(commits == 0 && failures == 1 && text(f.partial.messages) == (count ? "hel" : ""));
+    CHECK(f.partial.raw_events.size() == count);
+    for (size_t i = 0; i < count; ++i) CHECK(f.partial.raw_events[i].payload->root().dump() == frames[i].second);
+  }
+}
+void cancellation_observation_boundary() {
+  const auto frames = text_frames();
+  for (const auto& [count, expected] : std::vector<std::pair<size_t, std::string>>{{3, ""}, {4, "hel"}}) {
+    const auto outcome = stream(std::vector<Frame>(frames.begin(), frames.begin() + static_cast<std::ptrdiff_t>(count)),
+        {false, ErrorKind::Cancelled});
+    const auto& f = failed(outcome, ErrorKind::Cancelled);
+    CHECK(text(f.partial.messages) == expected);
+    CHECK(f.partial.wire_envelope && f.partial.wire_envelope->root().get("status").as_string() == "in_progress");
+    CHECK(!f.partial.raw_events.empty());
+    const auto& last = f.partial.raw_events.back();
+    CHECK(last.type == (expected.empty() ? "response.content_part.added" : "response.output_text.delta"));
+    if (expected.empty()) {
+      CHECK(last.payload->root().get("part").get("type").as_string() == "output_text");
+      CHECK(last.payload->root().get("part").get("text").as_string().empty());
+    } else CHECK(last.payload->root().get("delta").as_string() == expected);
+    for (const auto& m : f.partial.messages) CHECK(!m.native || !m.native->complete());
+  }
 }
 void reasoning_stream_snapshots() {
   const auto r_start = R"({"id":"rs_1","type":"reasoning","summary":[]})";
@@ -211,6 +322,54 @@ void incomplete_and_server_items() {
   CHECK(json::equal(std::get<Opaque>(parts[0]).wire_metadata->root(), parse(server).root()));
   for (const auto& p : parts) CHECK(!std::holds_alternative<ToolCall>(p));
 }
+void unknown_hosted_item_ownership() {
+  const std::string hosted = R"({"id":"hosted_1","type":"future_hosted_call","status":"completed","call_id":"provider_call","name":"lookup","arguments":{"x":2},"result":{"text":"provider result"}})";
+  const auto output = "[" + hosted + "," + message + "]";
+  for (const auto& outcome : {buffered(body(output)),
+      stream({created(), added(0, hosted), item_done(0, hosted), added(1, message), item_done(1, message), terminal(output)})}) {
+    const auto& c = completed(outcome);
+    CHECK(c.stop.kind == StopKind::EndTurn && text(c.messages) == "hello");
+    const auto& group = c.messages[0];
+    CHECK(group.native && group.native->complete() && json::equal(group.wire_output->root(), parse(output).root()));
+    const auto& item = std::get<Opaque>(group.parts[0]);
+    CHECK(item.wire_type == "future_hosted_call" && json::equal(item.wire_metadata->root(), parse(hosted).root()));
+    for (const auto& p : group.parts) CHECK(!std::holds_alternative<ToolCall>(p));
+    auto next = request(); next.messages.push_back(group);
+    const auto encoded = responses::encode(desc(), next, false);
+    CHECK(std::holds_alternative<responses::EncodedRequest>(encoded));
+    const auto input = parse(std::get<responses::EncodedRequest>(encoded).body);
+    CHECK(json::equal(input.root().get("input").at(1), item.wire_metadata->root()));
+    CHECK(json::equal(input.root().get("input").at(2), parse(message).root()));
+    next.account_scope = "foreign-account";
+    const auto foreign = responses::encode(desc(), next, false);
+    CHECK(std::holds_alternative<Error>(foreign) && std::get<Error>(foreign).kind == ErrorKind::ReplayIneligible);
+  }
+}
+void unknown_wire_observation_boundary() {
+  const auto unknown = event("response.future_semantic.delta",
+      R"(,"delta":"not assistant text","status":"completed","metadata":{"nested":[{"value":"owned unknown payload"}]})");
+  const auto frames = text_frames();
+  for (const auto& [count, expected] : std::vector<std::pair<size_t, std::string>>{{1, ""}, {4, "hel"}, {8, "hello"}}) {
+    std::vector<Frame> wire(frames.begin(), frames.begin() + static_cast<std::ptrdiff_t>(count));
+    wire.push_back(unknown);
+    wire.insert(wire.end(), frames.begin() + static_cast<std::ptrdiff_t>(count), frames.end());
+    const auto outcome = stream(wire);
+    const auto& f = failed(outcome, ErrorKind::Unsupported);
+    CHECK(text(f.partial.messages) == expected && !f.partial.stop);
+    CHECK(f.partial.wire_envelope && f.partial.wire_envelope->root().get("status").as_string() == "in_progress");
+    for (const auto& m : f.partial.messages) CHECK(!m.native || !m.native->complete());
+    CHECK(!f.partial.raw_events.empty() && f.partial.raw_events.front().type == "response.created");
+    const auto& retained = f.partial.raw_events.back();
+    CHECK(retained.type == unknown.first &&
+        retained.payload->root().get("metadata").get("nested").at(0).get("value").as_string() == "owned unknown payload");
+    if (count != 1) {
+      const auto& prior = f.partial.raw_events.at(f.partial.raw_events.size() - 2);
+      CHECK(prior.type == (count == 4 ? "response.output_text.delta" : "response.output_item.done"));
+    }
+  }
+  failed(stream({created(), unknown}), ErrorKind::Unsupported);
+  failed(stream({created(), {"response.output_text.delta", unknown.second}}), ErrorKind::ProtocolCorrupt);
+}
 void usage_boundaries() {
   auto normal = buffered(body("[" + reasoning + "]")); const auto& u = completed(normal).usage;
   CHECK(u.stage == UsageStage::Final && u.quality == UsageQuality::Consistent);
@@ -227,7 +386,6 @@ void corruption_and_bounds() {
   auto frames = text_frames(); frames[3] = text_delta("foreign", 0, "hel"); failed(stream(frames), ErrorKind::ProtocolCorrupt);
   frames = text_frames(); frames.back() = terminal("[]"); failed(stream(frames), ErrorKind::ProtocolCorrupt);
   frames = text_frames(); frames.push_back(text_delta("msg_1", 0, "late")); failed(stream(frames), ErrorKind::ProtocolCorrupt);
-  failed(stream({created(), event("response.future_semantic.delta", R"(,"delta":"lost")")}), ErrorKind::Unsupported);
   failed(stream({{"response.created", terminal("[]").second}}), ErrorKind::ProtocolCorrupt);
   auto sequenced = std::vector<Frame>{event("response.created", ",\"sequence_number\":2,\"response\":" + body("[]", "in_progress", "null")),
     event("response.in_progress", ",\"sequence_number\":1,\"response\":" + body("[]", "in_progress", "null"))};
@@ -289,7 +447,7 @@ void reviewed_wire_boundaries() {
 }
 } // namespace
 int main() {
-  try { completed_reasoning_ciphertext_authority(); reviewed_wire_boundaries(); typed_encode(); grouped_native_and_owned_outcomes(); normal_close_required(); reasoning_stream_snapshots(); tools_interleaving_and_ownership(); incomplete_and_server_items(); usage_boundaries(); corruption_and_bounds();
+  try { named_error_precedence(); named_error_raw_capacity(); completed_reasoning_ciphertext_authority(); reviewed_wire_boundaries(); typed_encode(); grouped_native_and_owned_outcomes(); normal_close_required(); cancellation_observation_boundary(); reasoning_stream_snapshots(); tools_interleaving_and_ownership(); incomplete_and_server_items(); unknown_hosted_item_ownership(); unknown_wire_observation_boundary(); usage_boundaries(); corruption_and_bounds();
     std::cout << "Responses semantic contracts passed\n"; return 0;
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

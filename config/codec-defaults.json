@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "resources": {
+    "json_bytes": 1048576,
+    "json_depth": 64,
+    "request_bytes": 16777216,
+    "chat_text_request_bytes": 1048576,
+    "request_messages": 100000,
+    "request_tools": 100000,
+    "request_parts": 1000000,
+    "native_bytes": 33554432,
+    "native_depth": 64,
+    "native_members": 1048576,
+    "image_decoded_bytes": 5242880,
+    "descriptor_bytes": 65536,
+    "descriptor_depth": 16,
+    "policy_bytes": 1048576,
+    "policy_depth": 32
+  },
+  "admission": {
+    "json_bytes": 67108864,
+    "json_depth": 256,
+    "request_bytes": 67108864,
+    "chat_text_request_bytes": 67108864,
+    "request_messages": 1000000,
+    "request_tools": 1000000,
+    "request_parts": 10000000,
+    "native_bytes": 134217728,
+    "native_depth": 256,
+    "native_members": 1048576,
+    "image_decoded_bytes": 16777216,
+    "descriptor_bytes": 1048576,
+    "descriptor_depth": 64,
+    "policy_bytes": 1048576,
+    "policy_depth": 64
+  }
+}

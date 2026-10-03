@@ -15,7 +15,7 @@ const SteadyTime receipt{100s};
 const WallTime wall{std::chrono::sys_days(std::chrono::year(2026)/10/1).time_since_epoch()};
 ResponseInfo inspect(int status, std::string_view body = {}, std::vector<transport::Header> headers = {},
                      std::string_view family = "openai.chat") {
-  return inspect_response(family, status, headers, body, receipt, wall);
+  return inspect_response(*configuration::builtin_runtime_policy(), family, status, headers, body, receipt, wall);
 }
 Error transport_error(transport::Stage stage = transport::Stage::Connected) {
   transport::Result result;
@@ -23,7 +23,7 @@ Error transport_error(transport::Stage stage = transport::Stage::Connected) {
   result.attempt.reached = stage;
   return classify_failure(result, {}, {}, false, 1, receipt);
 }
-RetryPolicy enabled() { RetryPolicy p; p.enabled = true; return p; }
+RetryPolicy enabled() { return {true, false, 3, 100ms, 5s}; }
 
 void classification() {
   auto quota = inspect(429, R"({"error":{"code":"insufficient_quota","type":"rate_limit_exceeded","message":"SECRET"}})", {{"Retry-After", "1"}});
@@ -73,7 +73,8 @@ void safety_and_budget() {
   auto e = transport_error();
   CHECK(e.retry_safety == RetrySafety::NotSent);
   CHECK(retry_at(e, p, 1, receipt, deadline, 0) == receipt);
-  CHECK(!retry_at(e, RetryPolicy{}, 1, receipt, deadline, 0));
+  auto disabled = p; disabled.enabled = false;
+  CHECK(!retry_at(e, disabled, 1, receipt, deadline, 0));
   e = transport_error(transport::Stage::RequestStarted);
   CHECK(e.attempt.request_body_bytes == 0 && e.attempt.request_may_have_left);
   CHECK(e.retry_safety == RetrySafety::PossiblyAccepted);
@@ -116,7 +117,7 @@ void hints() {
   CHECK(!retry_at(e, p, 1, receipt + 500ms, receipt + 2s, 0));
   e = hinted({{"Retry-After", "Thu, 01 Oct 2026 00:00:02 GMT"}});
   CHECK(e.retry_after == 2s);
-  auto fractional_receipt = inspect_response("openai.chat", 503, {{"Retry-After", "Thu, 01 Oct 2026 00:00:02 GMT"}}, {}, receipt, wall + 500us);
+  auto fractional_receipt = inspect_response(*configuration::builtin_runtime_policy(), "openai.chat", 503, {{"Retry-After", "Thu, 01 Oct 2026 00:00:02 GMT"}}, {}, receipt, wall + 500us);
   CHECK(fractional_receipt.retry_not_before == receipt + 2s); // Never round a minimum down.
   CHECK(inspect(503, {}, {{"Retry-After", "Wed, 30 Sep 2026 23:59:59 GMT"}}).retry_not_before == receipt);
   e = hinted({{"retry-after-ms", "0.001"}});
@@ -139,7 +140,7 @@ void hints() {
     CHECK(!retry_at(e, p, 1, receipt, SteadyTime::max(), 0));
   }
   CHECK(!inspect(503, {}, {{"retry-after-ms", "SECRET"}}, "anthropic.messages").retry_not_before);
-  auto extreme = inspect_response("openai.chat", 503, {{"Retry-After", "1"}}, {}, SteadyTime::max() - 1ms, wall);
+  auto extreme = inspect_response(*configuration::builtin_runtime_policy(), "openai.chat", 503, {{"Retry-After", "1"}}, {}, SteadyTime::max() - 1ms, wall);
   CHECK(extreme.retry_not_before == SteadyTime::max());
 }
 

@@ -1,4 +1,5 @@
 #include "descriptor/descriptor.h"
+#include "descriptor/policy.h"
 #include "json/json.h"
 
 #include <algorithm>
@@ -192,12 +193,15 @@ bool date(std::string_view s) {
 
 class Loader {
 public:
+    explicit Loader(PolicySnapshot policy) { value_.policy_ = std::move(policy); }
     LoadResult run(std::string_view source) {
-        auto parsed = json::parse(source, {65536, 16});
+        if (!value_.policy_) return ConfigError{"", "admitted immutable descriptor policy", 0, "missing descriptor policy"};
+        const auto& limits = value_.policy_->resources();
+        auto parsed = json::parse(source, {limits.descriptor_bytes, limits.descriptor_depth});
         if (auto* error = std::get_if<json::ParseError>(&parsed)) {
             const auto root = error->context.root();
             return ConfigError{diagnostic_pointer(error->pointer, root),
-                "strict JSON object (65536 bytes, 16 container levels)",
+                "strict bounded JSON descriptor",
                 unambiguous_revision(root), error->message};
         }
         auto root = std::get<json::Document>(parsed).root();
@@ -214,32 +218,22 @@ public:
             if (value_.family_ != "openai.chat" && value_.family_ != "anthropic.messages" && value_.family_ != "openai.responses" &&
                 value_.family_ != "google.generate" && value_.family_ != "google.interactions")
                 fail("/family", "supported Chat, Messages, Responses, Google generate or Interactions family");
-            if (value_.family_ == "anthropic.messages") {
-                value_.stop_reasons_ = {
-                    {"end_turn", StopKind::EndTurn}, {"max_tokens", StopKind::MaxTokens},
-                    {"tool_use", StopKind::ToolUse}, {"stop_sequence", StopKind::StopSequence},
-                    {"pause_turn", StopKind::PauseTurn}, {"refusal", StopKind::Refusal},
-                    {"model_context_window_exceeded", StopKind::ContextLimit}};
+            const auto* family = value_.policy_->family(value_.family_);
+            if (!family) fail("/family", "family in admitted policy");
+            value_.model_member_ = family->model_member;
+            value_.messages_member_ = family->messages_member;
+            value_.stream_member_ = family->stream_member;
+            value_.max_output_tokens_member_ = family->cap_member;
+            value_.usage_path_ = family->usage_path;
+            value_.stop_reasons_ = family->stops;
+            std::string default_bindings = "{\"usage\":[";
+            for (const auto& segment : family->usage_path) {
+                if (default_bindings.back() != '[') default_bindings += ',';
+                default_bindings += json::quote(segment);
             }
-            if (value_.family_ == "openai.responses") {
-                value_.messages_member_ = "input";
-                value_.max_output_tokens_member_ = "max_output_tokens";
-                value_.stop_reasons_ = {{"completed", StopKind::EndTurn},
-                    {"max_output_tokens", StopKind::MaxTokens}, {"content_filter", StopKind::ContentFilter}};
-            }
-            if (value_.family_ == "google.generate") {
-                value_.messages_member_ = "contents";
-                value_.max_output_tokens_member_ = "maxOutputTokens";
-                value_.usage_path_ = {"usageMetadata"};
-                value_.stop_reasons_ = {{"STOP", StopKind::EndTurn}, {"MAX_TOKENS", StopKind::MaxTokens},
-                    {"SAFETY", StopKind::ContentFilter}, {"MALFORMED_FUNCTION_CALL", StopKind::MalformedCall}};
-            }
-            if (value_.family_ == "google.interactions") {
-                value_.messages_member_ = "input";
-                value_.max_output_tokens_member_ = "max_output_tokens";
-                value_.stop_reasons_ = {{"completed", StopKind::EndTurn}, {"requires_action", StopKind::ToolUse},
-                    {"max_output_tokens", StopKind::MaxTokens}};
-            }
+            default_bindings += "]}";
+            auto defaults = json::parse(default_bindings);
+            bindings(std::get<json::Document>(defaults).root());
             connection(root.get("connection"));
             if (auto item = root.get("evidence"); item.valid()) evidence(item);
             if (auto item = root.get("bindings"); item.valid()) bindings(item);
@@ -289,8 +283,9 @@ private:
             if (std::find(reserved.begin(), reserved.end(), name) != reserved.end() || name.starts_with("proxy-") || !names.insert(name).second)
                 fail(pointer, "unique non-reserved literal header name");
             value_.headers_.emplace_back(member.key, string(member.value, pointer, 4096, true));
-            if (value_.family_ == "anthropic.messages" && name == "anthropic-version" && value_.headers_.back().second != "2023-06-01")
-                fail(pointer, "supported Messages API version 2023-06-01");
+            if (value_.family_ == "anthropic.messages" && name == "anthropic-version" &&
+                !contains(value_.family_policy().header_versions, value_.headers_.back().second))
+                fail(pointer, "admitted Messages API version");
         }
     }
     void evidence(Value item) {
@@ -314,15 +309,15 @@ private:
         std::array slots{
             std::pair{"model", &value_.model_member_}, std::pair{"messages", &value_.messages_member_},
             std::pair{"stream", &value_.stream_member_}, std::pair{"max_output_tokens", &value_.max_output_tokens_member_}};
-        std::unordered_set<std::string> destinations{"tools", "tool_choice", "temperature", "top_p", "stream_options", "n", "response_format", "stop", "max_completion_tokens"};
-        if (value_.family_ == "openai.chat") destinations.insert("reasoning_effort");
+        std::unordered_set<std::string> destinations{"tools", "tool_choice", "temperature", "top_p", "stream_options", "n", "response_format", "stop", "max_completion_tokens", "provider"};
+        if (value_.family_ == "openai.chat") { destinations.insert("reasoning_effort"); destinations.insert("service_tier"); }
         if (value_.family_ == "anthropic.messages") {
             for (const auto* reserved : {"system", "thinking", "metadata", "stop_sequences", "top_k", "output_config", "service_tier", "context_management", "container", "mcp_servers"})
                 destinations.insert(reserved);
         }
         if (value_.family_ == "openai.responses") {
             for (const auto* reserved : {"reasoning", "include", "store", "instructions", "conversation",
-                    "previous_response_id", "parallel_tool_calls", "background", "truncation", "text",
+                    "previous_response_id", "parallel_tool_calls", "max_tool_calls", "background", "truncation", "text",
                     "metadata", "service_tier", "prompt_cache_key", "context_management", "access_programs"})
                 destinations.insert(reserved);
         }
@@ -413,6 +408,12 @@ StopKind ValidatedDescriptor::stop_kind(std::string_view raw) const {
     for (const auto& [key, value] : stop_reasons_) if (key == raw) return value;
     return StopKind::Unknown;
 }
-LoadResult load(std::string_view source) { return Loader{}.run(source); }
+const FamilyPolicy& ValidatedDescriptor::family_policy() const noexcept { return *policy_->family(family_); }
+LoadResult load(std::string_view source, PolicySnapshot policy) { return Loader{std::move(policy)}.run(source); }
+LoadResult load(std::string_view source) { return load(source, builtin_policy()); }
 
 } // namespace sp::descriptor
+
+namespace sp::descriptor {
+bool valid_origin(std::string_view url) { return origin(url); }
+}

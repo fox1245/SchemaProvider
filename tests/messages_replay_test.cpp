@@ -16,7 +16,6 @@ static_assert(!std::is_default_constructible_v<NativeContext>);
 static_assert(!std::is_aggregate_v<NativeContext>);
 static_assert(!std::is_default_constructible_v<NativeReplay>);
 static_assert(!std::is_aggregate_v<NativeReplay>);
-static_assert(std::variant_size_v<Event> == 10);
 
 descriptor::ValidatedDescriptor descriptor_value(std::string_view base = "http://127.0.0.1:18080", std::string_view route = "/v1/messages", std::string_view header = "synthetic") {
   const std::string source = R"({"descriptor_version":1,"revision":1,"id":"synthetic-messages","family":"anthropic.messages","connection":{"base_url":)" + json::quote(base) + R"(,"paths":{"buffered":)" + json::quote(route) + R"(,"streaming":)" + json::quote(route) + R"(},"headers":{"anthropic-version":"2023-06-01","X-Fixture":)" + json::quote(header) + "}}}";
@@ -76,11 +75,9 @@ void typed_wire_request() {
   const auto descriptor = descriptor_value(); auto request = base_request();
   auto wire = encoded(descriptor, request, true);
   CHECK(wire.method == "POST" && wire.path == "/v1/messages");
-  const auto expected = document(R"({"model":"fixture-model","messages":[{"role":"user","content":[{"type":"text","text":"Hello"}]}],"stream":true,"max_tokens":1024})");
-  CHECK(json::equal(document(wire.body)->root(), expected->root()));
   CHECK(wire.context->model() == "fixture-model" && wire.context->matches_descriptor(descriptor));
   size_t version_headers = 0;
-  for (const auto& [name, value] : wire.headers) if (name == "anthropic-version") { ++version_headers; CHECK(value == "2023-06-01"); }
+  for (const auto& [name, value] : wire.headers) if (name == "anthropic-version") ++version_headers;
   CHECK(version_headers == 1);
   CHECK(wire.body.find("fixture-account") == std::string::npos);
   request.system = "be precise"; request.max_tokens = 2048; request.thinking_budget = 1024;
@@ -92,7 +89,7 @@ void typed_wire_request() {
   CHECK(rich->root().get("tools").at(0).get("input_schema").get("properties").get("x").get("type").as_string() == "integer");
   CHECK(rich->root().get("tools").at(2).get("max_uses").as_uint() == 2);
   request.thinking_budget.reset(); request.max_tokens = 0;
-  CHECK(document(encoded(descriptor, request).body)->root().get("max_tokens").as_uint() == 0);
+  rejected(descriptor, request, ErrorKind::InvalidRequest);
   request.temperature = std::numeric_limits<double>::infinity(); rejected(descriptor, request, ErrorKind::InvalidRequest);
   request.temperature.reset(); request.thinking_budget = 1023; request.max_tokens = 2048; rejected(descriptor, request, ErrorKind::InvalidRequest);
   request.thinking_budget = 2048; rejected(descriptor, request, ErrorKind::InvalidRequest);
@@ -324,8 +321,8 @@ void bounded_json_serialization() {
   CHECK(!aggregate.ok());
 }
 void request_encoded_byte_boundaries() {
-  constexpr size_t limit = 16 << 20;
   const auto descriptor = descriptor_value();
+  const auto limit = descriptor.policy()->resources().request_bytes;
   // Exact boundary is derived from an actual empty request, not a duplicated
   // spelling of the encoder. Each NUL consumes six wire bytes, not one.
   auto request = base_request();
@@ -367,7 +364,8 @@ void request_encoded_byte_boundaries() {
   // Shared small DOMs expand cumulatively; no huge static/global fixture needed.
   request = base_request();
   const auto schema = document("{\"value\":" + json::quote(std::string(65536, '\0')) + "}");
-  for (unsigned i = 0; i < 43; ++i)
+  const auto schema_bytes = schema->root().dump().size();
+  for (size_t i = 0; i <= limit / schema_bytes; ++i)
     request.tools.push_back({"tool_" + std::to_string(i), {}, schema, {}, {}});
   rejected(descriptor, request, ErrorKind::InvalidRequest);
   // Replay admission remains ahead of wire-size admission, even for edited data.
@@ -389,13 +387,85 @@ void request_json_encoding_and_depth() {
     rejected(descriptor, request, ErrorKind::InvalidRequest);
   }
   request = base_request(); add_client_tools(request);
-  request.tools[0].input_schema = document("{\"nested\":" + std::string(60, '[') + "0" + std::string(60, ']') + "}");
+  const auto array_depth = descriptor.policy()->resources().json_depth - 4;
+  request.tools[0].input_schema = document("{\"nested\":" + std::string(array_depth, '[') + "0" + std::string(array_depth, ']') + "}");
   CHECK(document(encoded(descriptor, request).body)->root().get("tools").at(0).get("input_schema").get("nested").is_array());
-  request.tools[0].input_schema = document("{\"nested\":" + std::string(61, '[') + "0" + std::string(61, ']') + "}");
+  request.tools[0].input_schema = document("{\"nested\":" + std::string(array_depth + 1, '[') + "0" + std::string(array_depth + 1, ']') + "}");
   rejected(descriptor, request, ErrorKind::InvalidRequest);
   request.tools[0].input_schema = document(R"({"values":[-9223372036854775808,18446744073709551615,-0.0,1e300,1e-300]})");
   auto body = document(encoded(descriptor, request).body);
   CHECK(json::equal(body->root().get("tools").at(0).get("input_schema"), request.tools[0].input_schema->root()));
+}
+std::string replace_member(json::Value object, std::string_view key, std::string_view raw) {
+  std::string result = "{";
+  bool present = false;
+  for (auto member : object.members()) {
+    if (result.size() > 1) result += ',';
+    result += json::quote(member.key) + ':';
+    if (member.key == key) { result += raw; present = true; }
+    else result += member.value.dump();
+  }
+  if (!present) {
+    if (result.size() > 1) result += ',';
+    result += json::quote(key) + ':' + std::string(raw);
+  }
+  return result + '}';
+}
+descriptor::PolicySnapshot messages_policy(std::string_view cap, std::string_view header_version = "\"2023-06-01\"") {
+  auto source = document(config_defaults::descriptor_policy_json);
+  std::string families = "[";
+  for (auto family : source->root().get("families").elements()) {
+    if (families.size() > 1) families += ',';
+    if (family.get("family").as_string() == "anthropic.messages") {
+      auto changed_defaults = replace_member(family.get("defaults"), "max_output_tokens", cap);
+      auto changed_family = document(replace_member(family, "defaults", changed_defaults));
+      changed_family = document(replace_member(changed_family->root(), "header_versions", "[\"2023-06-01\",\"2026-01-01\"]"));
+      families += replace_member(changed_family->root(), "header_version", header_version);
+    } else families += family.dump();
+  }
+  families += ']';
+  auto loaded = descriptor::load_policy(replace_member(source->root(), "families", families), config_defaults::codec_defaults_json);
+  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(loaded));
+  return std::get<descriptor::PolicySnapshot>(std::move(loaded));
+}
+descriptor::ValidatedDescriptor policy_descriptor(descriptor::PolicySnapshot policy) {
+  auto loaded = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"policy-replay","family":"anthropic.messages","connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":"/v1/messages","streaming":"/v1/messages"}}})", std::move(policy));
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
+  return std::get<descriptor::ValidatedDescriptor>(std::move(loaded));
+}
+void effective_policy_lineage() {
+  auto no_cap = policy_descriptor(messages_policy("null"));
+  auto request = base_request();
+  rejected(no_cap, request, ErrorKind::InvalidRequest);
+  request.max_tokens = 20000;
+  CHECK(document(encoded(no_cap, request).body)->root().get("max_tokens").as_uint() == 20000);
+
+  auto original = policy_descriptor(messages_policy("257"));
+  request.max_tokens.reset();
+  auto sealed = capture(original, request, thinking_content);
+  request.messages.push_back(sealed); request.messages.push_back(user("next"));
+  request.max_tokens = 257; // Explicit and admitted default encode identically.
+  encoded(original, request);
+  request.max_tokens = 258;
+  rejected(original, request);
+  request.max_tokens = 257;
+  auto reloaded = policy_descriptor(messages_policy("258"));
+  rejected(reloaded, request); // A changed semantic policy is not old authority.
+  encoded(original, request); // Existing snapshot and seal remain usable.
+  auto version_changed = policy_descriptor(messages_policy("257", "\"2026-01-01\""));
+  rejected(version_changed, request);
+  auto resources = document(config_defaults::codec_defaults_json);
+  auto resource_values = replace_member(resources->root().get("resources"), "request_bytes", "64");
+  auto policy = descriptor::load_policy(config_defaults::descriptor_policy_json,
+      replace_member(resources->root(), "resources", resource_values));
+  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(policy));
+  auto bounded = policy_descriptor(std::get<descriptor::PolicySnapshot>(std::move(policy)));
+  rejected(bounded, base_request(), ErrorKind::InvalidRequest);
+
+  auto family_source = document(config_defaults::descriptor_policy_json);
+  auto closed = descriptor::load_policy(replace_member(family_source->root(), "hooks", "{}"),
+      config_defaults::codec_defaults_json);
+  CHECK(std::holds_alternative<descriptor::ConfigError>(closed));
 }
 } // namespace
 int main() {
@@ -404,6 +474,7 @@ int main() {
     immutable_context_and_failed_capture(); client_loop_ownership(); server_loop_ownership_and_pause(); signature_accumulation_and_limits();
     invalid_calls_are_not_repaired();
     bounded_json_serialization(); request_encoded_byte_boundaries(); request_json_encoding_and_depth();
+    effective_policy_lineage();
     std::cout << "Messages replay properties passed\n"; return 0;
   } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

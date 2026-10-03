@@ -41,10 +41,12 @@ bool key_character(unsigned char c) {
 }
 void valid_secret(std::string_view value) {
   if (value.size() > 4096) fail();
-  for (unsigned char c : value) if (c < 0x21 || c > 0x7e || c == '"' || c == '\'') fail();
+  for (unsigned char c : value)
+    if (c < 0x21 || c > 0x7e || c == '"' || c == '\'' || c == '$' || c == '`' || c == '\\') fail();
 }
 } // namespace
-Profile parse_profile(std::string_view source, bool allow_test_loopback) {
+Profile parse_profile(std::string_view source, bool allow_test_loopback,
+                      std::optional<std::uint64_t> output_tokens) {
   auto parsed = json::parse(source, {16384, 8});
   auto* doc = std::get_if<json::Document>(&parsed);
   if (!doc) fail();
@@ -81,16 +83,16 @@ Profile parse_profile(std::string_view source, bool allow_test_loopback) {
   auto& b = result.bounds_;
   b.input_tokens = number(root, "max_input_tokens");
   b.output_tokens = number(root, "max_output_tokens");
+  if (output_tokens) {
+    if (!*output_tokens) fail();
+    b.output_tokens = *output_tokens;
+  }
   b.input_rate = number(root, "input_micro_usd_per_million");
   b.output_rate = number(root, "output_micro_usd_per_million");
   b.calls = number(root, "call_cap"); b.tokens = number(root, "token_cap"); b.micro_usd = number(root, "micro_usd_cap");
-  if (b.calls > (vision ? vision_call_limit : 16U) || b.micro_usd > (vision ? vision_cost_limit : 10000000U) || b.output_tokens > b.input_tokens ||
-      b.output_tokens > std::numeric_limits<std::uint64_t>::max() - b.input_tokens) fail();
-  if (result.provider_ == Provider::Gemini &&
-      (b.calls > 4 || b.micro_usd > 1000000 || b.output_tokens > 128)) fail();
-  if (result.provider_ == Provider::OpenAIResponses &&
-      (b.calls > 8 || b.micro_usd > 1000000 || b.output_tokens > 8192)) fail();
-  if (vision && b.output_tokens > 8192) fail();
+  // Legacy profile caps are inert scenario metadata, not spending authority.
+  // Only the fixed approved qualification Meter grants calls and money.
+  if (b.output_tokens > std::numeric_limits<std::uint64_t>::max() - b.input_tokens) fail();
   if (messages_provider) {
     result.thinking_budget_ = number(root, "thinking_budget");
     if (result.thinking_budget_ < 1024 || result.thinking_budget_ >= b.output_tokens) fail();
@@ -108,13 +110,9 @@ Profile parse_profile(std::string_view source, bool allow_test_loopback) {
     } else if (result.provider_ == Provider::VisionGemini || result.provider_ == Provider::VisionInteractions) {
       if (result.model_ != "gemini-2.5-flash-lite" || b.input_tokens < 1048576 ||
           b.input_rate < 100000 || b.output_rate < 400000) fail();
-    } else
-    if (result.provider_ == Provider::OpenAI) {
-      if (result.model_ != "gpt-4.1-mini-2025-04-14" || b.input_tokens < 1047576 ||
-          b.output_tokens > 32768 || b.input_rate < 400000 || b.output_rate < 1600000) fail();
-    } else if (result.provider_ == Provider::OpenAIResponses) {
-      if (result.model_ != "gpt-5-nano-2025-08-07" || b.input_tokens < 400000 ||
-          b.input_rate < 50000 || b.output_rate < 400000) fail();
+    } else if (openai_provider) {
+      if (result.model_ != "gpt-6-luna" || b.input_tokens < 922000 ||
+          b.input_rate < 250000 || b.output_rate < 750000) fail();
     } else if (result.provider_ == Provider::Anthropic) {
       if (result.model_ != "claude-haiku-4-5-20251001" || b.input_tokens < 200000 ||
           b.output_tokens > 64000 || b.input_rate < 2000000 || b.output_rate < 5000000) fail();

@@ -18,8 +18,7 @@ bool item_status(json::Value v, bool optional, bool final) {
   return v.as_string() == "completed" || v.as_string() == "incomplete" || (!final && v.as_string() == "in_progress");
 }
 bool opaque(std::string_view type) {
-  return type == "web_search_call" || type == "file_search_call" || type == "code_interpreter_call" ||
-         type == "mcp_call" || type == "mcp_list_tools";
+  return type != "message" && type != "function_call" && type != "reasoning";
 }
 // Opaque server execution is observable metadata, never a host tool invocation.
 bool server_event(std::string_view type) {
@@ -141,7 +140,8 @@ bool Codec::buffered(std::string_view body, Close close) {
 bool Codec::frame(std::string_view event, std::string_view data) {
   if (closed_ || accumulator_.terminal()) return false;
   if (mode_ != Mode::Sse) return fail(ErrorKind::Misuse, "unexpected stream frame");
-  if (event == "error") return fail(ErrorKind::RemoteFailure, "remote Responses error event");
+  if (data == "[DONE]" && event != "error")
+    return terminal_ ? true : fail(ErrorKind::Truncated, "Responses sentinel lacks terminal envelope");
   return document(data, event, true);
 }
 bool Codec::index(json::Value root, std::string_view key, uint64_t& target) {
@@ -160,19 +160,52 @@ Codec::Item* Codec::event_item(json::Value root, uint64_t& position) {
   return &found->second;
 }
 bool Codec::document(std::string_view bytes, std::string_view event, bool streaming) {
-  if (!context_valid_) return fail(ErrorKind::InvalidConfig, "Responses request context required");
-  if (bytes.size() > limits_.max_content_bytes - std::min(input_bytes_, limits_.max_content_bytes)) return fail(ErrorKind::ResourceLimit, "response byte limit");
+  const bool named_error = streaming && event == "error";
+  if (!named_error && !context_valid_) return fail(ErrorKind::InvalidConfig, "Responses request context required");
+  if (bytes.size() > limits_.max_content_bytes - std::min(input_bytes_, limits_.max_content_bytes))
+    return fail(named_error ? ErrorKind::RemoteFailure : ErrorKind::ResourceLimit,
+                named_error ? "remote Responses error payload" : "response byte limit");
   input_bytes_ += bytes.size();
   auto parsed = json::parse(bytes, {limits_.max_content_bytes, limits_.max_json_depth});
-  if (auto* e = std::get_if<json::ParseError>(&parsed)) return fail(e->code == json::ParseCode::SizeExceeded || e->code == json::ParseCode::DepthExceeded ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, "invalid response JSON");
-  const auto root = std::get<json::Document>(parsed).root();
-  if (!root.is_object()) return fail(ErrorKind::ProtocolCorrupt, "response object required");
-  if (!streaming) return response(root, {}, false);
-  auto type = root.get("type");
+  if (auto* e = std::get_if<json::ParseError>(&parsed))
+    return fail(named_error ? ErrorKind::RemoteFailure :
+                e->code == json::ParseCode::SizeExceeded || e->code == json::ParseCode::DepthExceeded ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt,
+                named_error ? "remote Responses error payload" : "invalid response JSON");
+  auto wire = std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
+  const auto root = wire->root();
+  if (!root.is_object())
+    return fail(named_error ? ErrorKind::RemoteFailure : ErrorKind::ProtocolCorrupt,
+                named_error ? "remote Responses error payload" : "response object required");
+  const auto type = root.get("type");
+  std::string wire_type = named_error ? std::string(event) : streaming
+      ? (nonempty(type) ? std::string(type.as_string()) : std::string(event))
+      : "response";
+  // The SSE error name is authoritative even when its payload type is absent
+  // or contradictory, and remains so if raw retention rejects the document.
+  if (named_error) {
+    const Error remote{ErrorKind::RemoteFailure, "remote Responses error payload"};
+    if (!accumulator_.accept(RawWire{std::move(wire_type), wire}, &remote)) return false;
+    return fail(remote.kind, remote.safe_message);
+  }
+  if (!emit(RawWire{std::move(wire_type), wire})) return false;
+  if (!streaming) {
+    if (!emit(ResponseEnvelope{wire})) return false;
+    return response(root, {}, false);
+  }
   if (!nonempty(type)) return fail(ErrorKind::ProtocolCorrupt, "event type required");
   // Errors remain authoritative until the actual HTTP stream closes.
   if (type.as_string() == "error") return fail(ErrorKind::RemoteFailure, "remote Responses error payload");
-  if (type.as_string() != event) return fail(ErrorKind::ProtocolCorrupt, "SSE event and payload type disagree");
+  if (!event.empty() && event != "message" && type.as_string() != event)
+    return fail(ErrorKind::ProtocolCorrupt, "SSE event and payload type disagree");
+  event = type.as_string();
+  const auto envelope = root.get("response");
+  const bool response_event = event == "response.created" || event == "response.in_progress" ||
+      event == "response.completed" || event == "response.incomplete" || event == "response.done" ||
+      event == "response.failed" || event == "response.cancelled";
+  if (response_event && envelope.is_object()) {
+    auto owned = own(envelope);
+    if (!owned || !emit(ResponseEnvelope{std::move(owned)})) return false;
+  }
   auto seq = root.get("sequence_number");
   if (seq.valid()) {
     if (!count_value(seq) || (sequence_ && number(seq) <= *sequence_)) return fail(ErrorKind::ProtocolCorrupt, "event sequence regression or duplicate");
@@ -180,23 +213,28 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
   }
   if (event == "response.failed" || event == "response.cancelled") {
     auto r = root.get("response");
-    if (r.is_object() && !usage(usage_at(r))) return false;
+    if (r.is_object() && !response(r, event, true)) return false;
     return fail(event == "response.cancelled" ? ErrorKind::Cancelled : ErrorKind::RemoteFailure, "remote response failure");
-  }
-  if (terminal_) return fail(ErrorKind::ProtocolCorrupt, "output after response terminal");
-  if (event == "response.created" || event == "response.in_progress" || event == "response.completed" || event == "response.incomplete") return response(root.get("response"), event, true);
-  if (!begun_) return fail(ErrorKind::ProtocolCorrupt, "event before response.created");
-  uint64_t position;
-  if (event == "response.output_item.added" || event == "response.output_item.done") {
-    if (!index(root, "output_index", position)) return false;
-    return event == "response.output_item.added" ? add_item(root.get("item"), position, true) : done_item(root.get("item"), position, true);
   }
   const bool supported = server_event(event) || event == "response.function_call_arguments.delta" || event == "response.function_call_arguments.done" ||
       event == "response.content_part.added" || event == "response.content_part.done" || event == "response.reasoning_summary_part.added" || event == "response.reasoning_summary_part.done" ||
       event == "response.output_text.delta" || event == "response.output_text.done" || event == "response.refusal.delta" || event == "response.refusal.done" ||
       event == "response.reasoning_summary_text.delta" || event == "response.reasoning_summary_text.done" || event == "response.reasoning_text.delta" || event == "response.reasoning_text.done" ||
       event == "response.output_text.annotation.added";
-  if (!supported) return fail(ErrorKind::Unsupported, "unsupported semantic Responses event");
+  const bool lifecycle = event == "response.created" || event == "response.in_progress" ||
+      event == "response.completed" || event == "response.incomplete" || event == "response.done";
+  const bool output_item = event == "response.output_item.added" || event == "response.output_item.done";
+  // Raw ownership does not establish that an undeclared event is semantically harmless.
+  if (!supported && !lifecycle && !output_item)
+    return fail(ErrorKind::Unsupported, "unsupported semantic Responses event");
+  if (terminal_) return fail(ErrorKind::ProtocolCorrupt, "output after response terminal");
+  if (lifecycle) return response(root.get("response"), event, true);
+  if (!begun_) return fail(ErrorKind::ProtocolCorrupt, "event before response.created");
+  uint64_t position;
+  if (output_item) {
+    if (!index(root, "output_index", position)) return false;
+    return event == "response.output_item.added" ? add_item(root.get("item"), position, true) : done_item(root.get("item"), position, true);
+  }
   Item* item = event_item(root, position);
   if (!item) return false;
   if (event == "response.function_call_arguments.delta" || event == "response.function_call_arguments.done") {
@@ -279,6 +317,8 @@ bool Codec::response(json::Value v, std::string_view event, bool streaming) {
   }
   if (!final && state != "in_progress" && state != "queued") return fail(ErrorKind::Unsupported, "unsupported response status");
   if (!streaming && !final) return fail(ErrorKind::Truncated, "buffered response is not terminal");
+  if (streaming && event == "response.done" && !final)
+    return fail(ErrorKind::ProtocolCorrupt, "response.done requires a terminal response envelope");
   if (streaming && ((event == "response.completed" && state != "completed") || (event == "response.incomplete" && state != "incomplete") ||
       (event == "response.in_progress" && state != "in_progress") ||
       ((event == "response.created" || event == "response.in_progress") && final))) return fail(ErrorKind::ProtocolCorrupt, "event and response status disagree");
@@ -361,8 +401,9 @@ bool Codec::item_fields(json::Value v, bool final) {
     if (status.valid() && !nonempty(status)) return fail(ErrorKind::ProtocolCorrupt, "invalid server item status");
     if (status.is_string()) {
       const auto state = status.as_string();
-      if (state != "in_progress" && state != "searching" && state != "interpreting" && state != "completed" && state != "incomplete" && state != "failed") return fail(ErrorKind::Unsupported, "unsupported server item status");
-      if (final && state != "completed" && state != "incomplete" && state != "failed") return fail(ErrorKind::ProtocolCorrupt, "nonterminal server item at done");
+      if (state.empty()) return fail(ErrorKind::ProtocolCorrupt, "empty server item status");
+      if (final && (state == "in_progress" || state == "searching" || state == "interpreting"))
+        return fail(ErrorKind::ProtocolCorrupt, "nonterminal server item at done");
     }
     // The entire server item remains immutable in native output and Opaque.
   } else return fail(ErrorKind::Unsupported, "unsupported Responses output item type");
@@ -555,7 +596,11 @@ bool Codec::done_item(json::Value v, uint64_t position, bool streaming) {
   auto& item = found->second;
   if (!item_fields(v, true)) return false;
   if (v.get("id").as_string() != item.id || v.get("type").as_string() != item.type) return fail(ErrorKind::ProtocolCorrupt, "output item done identity mismatch");
-  if (item.added && !initial_metadata(item.added->root(), v, {"status", "content", "summary", "arguments", "encrypted_content", "output", "error", "code", "results", "action", "tools"})) return false;
+  // Hosted/unknown items have provider-defined evolving payload fields. Their
+  // identity and terminal status are checked; retain each full wire observation
+  // and the final opaque snapshot without inventing field-level semantics.
+  if (item.added && !opaque(item.type) &&
+      !initial_metadata(item.added->root(), v, {"status", "content", "summary", "arguments", "encrypted_content", "output", "error", "code", "results", "action", "tools"})) return false;
   if (item.added) {
     auto previous = item.added->root().get("status"), next = v.get("status");
     if (previous.is_string() && (previous.as_string() == "completed" || previous.as_string() == "incomplete" || previous.as_string() == "failed") &&

@@ -1,4 +1,5 @@
 #include "codecs/chat.h"
+#include "core/native.h"
 #include "descriptor/descriptor.h"
 #include "json/json.h"
 #include <algorithm>
@@ -24,9 +25,12 @@ StopKind stop_kind(descriptor::StopKind kind) {
   return StopKind::Unknown;
 }
 }
-Codec::Codec(const descriptor::ValidatedDescriptor& descriptor, Mode mode, Accumulator& accumulator, SemanticLimits limits)
-    : descriptor_(descriptor), mode_(mode), accumulator_(accumulator), limits_(limits) {
+Codec::Codec(const descriptor::ValidatedDescriptor& descriptor, Mode mode, Accumulator& accumulator,
+             SemanticLimits limits, std::shared_ptr<const NativeContext> context)
+    : descriptor_(descriptor), mode_(mode), accumulator_(accumulator), context_(std::move(context)), limits_(limits) {
   if (descriptor_.family() != "openai.chat") fail(ErrorKind::InvalidConfig, "descriptor family does not match Chat codec");
+  if (context_ && !context_->matches_descriptor(descriptor_))
+    fail(ErrorKind::InvalidConfig, "Chat request context does not match descriptor");
 }
 bool Codec::emit(const Event& e) {
   return accumulator_.accept(e, buffered_failure_ ? &*buffered_failure_ : nullptr);
@@ -43,29 +47,53 @@ bool Codec::buffered(std::string_view body, Close close) {
   if (mode_ != Mode::Buffered || body_seen_) return fail(ErrorKind::Misuse, "unexpected buffered document");
   body_seen_ = true;
   if (!close.normal) buffered_failure_ = Error{close.error, "abnormal response close"};
-  const bool decoded = document(body, false);
+  const bool decoded = document(body, {}, false);
   finish(close);
   return decoded && accumulator_.outcome() && std::holds_alternative<Completion>(*accumulator_.outcome());
 }
 bool Codec::frame(std::string_view event, std::string_view data) {
   if (closed_ || accumulator_.terminal()) return false;
   if (mode_ != Mode::Sse) return fail(ErrorKind::Misuse, "unexpected stream frame");
-  if (event == "error") return fail(ErrorKind::RemoteFailure, "remote error event");
-  if (!event.empty() && event != "message") return fail(ErrorKind::Unsupported, "unknown stream event");
-  if (data == "[DONE]") {
+  if (data == "[DONE]" && event != "error") {
+    if (!event.empty() && event != "message") return fail(ErrorKind::Unsupported, "unknown stream event");
     if (done_) return fail(ErrorKind::ProtocolCorrupt, "duplicate DONE");
     if (!stopped_) return fail(ErrorKind::ProtocolCorrupt, "DONE without finish reason");
     done_ = true; return true;
   }
-  return document(data, true);
+  return document(data, event, true);
 }
-bool Codec::document(std::string_view bytes, bool streaming) {
-  if (bytes.size() > limits_.max_content_bytes - std::min(input_bytes_, limits_.max_content_bytes)) return fail(ErrorKind::ResourceLimit, "response byte limit");
+bool Codec::document(std::string_view bytes, std::string_view event, bool streaming) {
+  const bool named_error = streaming && event == "error";
+  const bool unknown_event = streaming && !event.empty() && event != "message" && !named_error;
+  if (bytes.size() > limits_.max_content_bytes - std::min(input_bytes_, limits_.max_content_bytes)) {
+    if (unknown_event) return fail(ErrorKind::Unsupported, "unknown stream event");
+    return fail(named_error ? ErrorKind::RemoteFailure : ErrorKind::ResourceLimit, named_error ? "remote error event" : "response byte limit");
+  }
   input_bytes_ += bytes.size();
   auto parsed = json::parse(bytes, {limits_.max_content_bytes, limits_.max_json_depth});
-  if (auto* error = std::get_if<json::ParseError>(&parsed)) return fail(error->code == json::ParseCode::SizeExceeded || error->code == json::ParseCode::DepthExceeded ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, "invalid response JSON");
-  auto root = std::get<json::Document>(parsed).root();
-  if (!root.is_object()) return fail(ErrorKind::ProtocolCorrupt, "response must be object");
+  if (auto* error = std::get_if<json::ParseError>(&parsed)) {
+    if (unknown_event) return fail(ErrorKind::Unsupported, "unknown stream event");
+    return fail(named_error ? ErrorKind::RemoteFailure : error->code == json::ParseCode::SizeExceeded || error->code == json::ParseCode::DepthExceeded ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt,
+                named_error ? "remote error event" : "invalid response JSON");
+  }
+  auto wire = std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
+  const auto root = wire->root();
+  if (!root.is_object()) {
+    if (unknown_event) return fail(ErrorKind::Unsupported, "unknown stream event");
+    return fail(named_error ? ErrorKind::RemoteFailure : ErrorKind::ProtocolCorrupt, named_error ? "remote error event" : "response must be object");
+  }
+  const auto object = root.get("object");
+  std::string wire_type = named_error ? std::string(event)
+      : object.is_string() && !object.as_string().empty() ? std::string(object.as_string())
+      : !event.empty() ? std::string(event)
+      : streaming ? "chat.completion.chunk" : "chat.completion";
+  if (named_error || unknown_event) {
+    const Error classified{named_error ? ErrorKind::RemoteFailure : ErrorKind::Unsupported,
+                           named_error ? "remote error event" : "unknown stream event"};
+    if (!accumulator_.accept(RawWire{std::move(wire_type), wire}, &classified)) return false;
+    return fail(classified.kind, classified.safe_message);
+  }
+  if (!emit(RawWire{std::move(wire_type), wire})) return false;
   if (root.get("error").valid()) return fail(ErrorKind::RemoteFailure, "remote error property");
   if (done_) return fail(ErrorKind::ProtocolCorrupt, "frame after DONE");
   for (auto name : {"id", "model", "object"}) if (!root.get(name).is_string()) return fail(ErrorKind::ProtocolCorrupt, "required response metadata must be string");
@@ -82,7 +110,7 @@ bool Codec::document(std::string_view bytes, bool streaming) {
     generation_ = root.get("id").as_string();
     model_ = root.get("model").as_string();
     created_ = uint_value(created);
-    if (!emit(Begin{generation_}) || !emit(MessageBegin{{0}, {}, Role::Assistant})) return false;
+    if (!emit(Begin{generation_}) || !emit(MessageBegin{{0}, generation_, Role::Assistant, context_})) return false;
     begun_ = true;
   }
   auto usage_value = root;
@@ -114,6 +142,7 @@ bool Codec::document(std::string_view bytes, bool streaming) {
       if (reason.as_string().empty()) return fail(ErrorKind::ProtocolCorrupt, "empty finish reason");
       if (reason.as_string() == "error") return fail(ErrorKind::RemoteFailure, "remote failure terminal");
       auto kind = stop_kind(descriptor_.stop_kind(reason.as_string()));
+      if (streaming && !finish_reasoning_details()) return false;
       if (!emit(Stop{{kind, std::string(reason.as_string())}})) return false;
       stopped_ = true;
     }
@@ -123,20 +152,27 @@ bool Codec::document(std::string_view bytes, bool streaming) {
 }
 bool Codec::item(json::Value value, bool streaming) {
   if (!value.is_object()) return fail(ErrorKind::ProtocolCorrupt, "message or delta must be object");
-  unknown(value, {"role", "content", "refusal", "tool_calls", "function_call", "annotations", "audio", "reasoning", "reasoning_content"});
+  unknown(value, {"role", "content", "refusal", "tool_calls", "function_call", "annotations", "audio", "reasoning", "reasoning_content", "reasoning_details"});
   auto role = value.get("role");
   if ((!streaming && !role.valid()) || (role.valid() && (!role.is_string() || role.as_string() != "assistant"))) return fail(ErrorKind::ProtocolCorrupt, "assistant role required");
-  for (auto key : {"function_call", "audio", "reasoning", "reasoning_content"}) {
+  for (auto key : {"function_call", "audio"}) {
     auto v = value.get(key);
     if (v.valid() && !v.is_null()) {
-      const bool expected = std::string_view(key) == "reasoning" || std::string_view(key) == "reasoning_content" ? v.is_string() : v.is_object();
-      return fail(expected ? ErrorKind::Unsupported : ErrorKind::ProtocolCorrupt, "unsupported known message feature");
+      return fail(v.is_object() ? ErrorKind::Unsupported : ErrorKind::ProtocolCorrupt, "unsupported known message feature");
     }
   }
   if (auto annotations = value.get("annotations"); annotations.valid()) {
     if (!annotations.is_array()) return fail(ErrorKind::ProtocolCorrupt, "annotations must be array");
     if (annotations.size()) return fail(ErrorKind::Unsupported, "annotations outside first Chat cell");
   }
+  auto reasoning = value.get("reasoning"), reasoning_content = value.get("reasoning_content");
+  for (auto fragment : {reasoning, reasoning_content})
+    if (fragment.valid() && !fragment.is_null() && !fragment.is_string())
+      return fail(ErrorKind::ProtocolCorrupt, "reasoning must be string or null");
+  if (reasoning.is_string() && reasoning_content.is_string() && !json::equal(reasoning, reasoning_content))
+    return fail(ErrorKind::Unsupported, "contradictory reasoning aliases");
+  if (!text(reasoning_content.is_string() ? reasoning_content : reasoning, PartKind::Thinking, streaming) ||
+      !reasoning_details(value.get("reasoning_details"), streaming)) return false;
   auto content = value.get("content");
   if (!streaming && !content.valid()) return fail(ErrorKind::ProtocolCorrupt, "buffered content required");
   if (!text(content, PartKind::Text, streaming) || !text(value.get("refusal"), PartKind::Refusal, streaming)) return false;
@@ -149,14 +185,155 @@ bool Codec::item(json::Value value, bool streaming) {
 }
 bool Codec::text(json::Value value, PartKind kind, bool streaming) {
   if (!value.valid() || value.is_null()) return true;
-  if (!value.is_string()) return fail(ErrorKind::ProtocolCorrupt, "content and refusal must be strings or null");
-  auto& id = kind == PartKind::Text ? text_ : refusal_;
+  if (!value.is_string()) return fail(ErrorKind::ProtocolCorrupt, "text channels must be strings or null");
+  auto& id = kind == PartKind::Text ? text_ : kind == PartKind::Thinking ? thinking_ : refusal_;
   if (!id) {
     id = LocalId{next_part_++};
-    if (!emit(PartBegin{{0}, *id, kind, {}, kind == PartKind::Text ? 0U : 1U})) return false;
+    const uint64_t order = kind == PartKind::Thinking ? 0U :
+        kind == PartKind::Text ? 1 + limits_.max_parts : 2 + limits_.max_parts;
+    if (!emit(PartBegin{{0}, *id, kind, {}, order})) return false;
   }
   if (streaming) return emit(PartDelta{*id, {kind, value.as_string()}});
   return emit(PartSeal{*id, value.as_string()});
+}
+bool Codec::reasoning_details(json::Value value, bool streaming) {
+  if (!value.valid() || value.is_null()) return true;
+  if (!value.is_array()) return fail(ErrorKind::ProtocolCorrupt, "reasoning_details must be array");
+  if (!descriptor::contains(descriptor_.family_policy().openrouter_origins, descriptor_.base_url()))
+    return fail(ErrorKind::Unsupported, "reasoning_details requires declared OpenRouter origin");
+  if (reasoning_details_count_ >= limits_.max_parts)
+    return fail(ErrorKind::ResourceLimit, "reasoning details part limit");
+  for (auto detail : value.elements())
+    if (!detail.is_object()) return fail(ErrorKind::ProtocolCorrupt, "reasoning detail must be object");
+  const json::Limits limits{limits_.max_content_bytes, limits_.max_json_depth};
+  const std::string_view type = streaming ? "reasoning_details.frame" : "reasoning_details";
+  auto write = [&](json::BoundedWriter& writer) {
+    writer.raw("{\"type\":").quoted(type).raw(",\"details\":").value(value, 1).raw("}");
+  };
+  json::BoundedWriter measure(limits);
+  write(measure);
+  if (!measure.ok()) return fail(ErrorKind::ResourceLimit, "reasoning details metadata limit");
+  std::string bytes;
+  bytes.reserve(measure.size());
+  json::BoundedWriter output(limits, &bytes);
+  write(output);
+  auto parsed = json::parse(bytes, limits);
+  auto* document = std::get_if<json::Document>(&parsed);
+  if (!document) return fail(ErrorKind::ResourceLimit, "reasoning details metadata cannot be retained");
+  auto metadata = std::make_shared<const json::Document>(std::move(*document));
+  const LocalId id{next_part_++};
+  const uint64_t order = 1 + reasoning_details_count_++;
+  if (!emit(PartBegin{{0}, id, PartKind::Opaque,
+                      {{}, {}, ToolCallKind::ClientExecuted, std::string(type), metadata}, order}) ||
+      !emit(PartSeal{id, {}})) return false;
+  if (!streaming) return true;
+  reasoning_frames_.push_back(std::move(metadata));
+  // OpenRouter's official accumulator joins consecutive text/summary deltas;
+  // encrypted objects are discrete blobs and are never concatenated.
+  // https://github.com/OpenRouterTeam/ai-sdk-provider/blob/main/src/chat/index.ts
+  for (auto detail : reasoning_frames_.back()->root().get("details").elements()) {
+    const auto detail_type = detail.get("type");
+    if (!detail_type.is_string() || detail_type.as_string().empty())
+      return fail(ErrorKind::ProtocolCorrupt, "reasoning detail requires a type");
+    const auto name = detail_type.as_string();
+    const auto identity = detail.get("id"), index = detail.get("index"), format = detail.get("format");
+    if ((identity.valid() && !identity.is_null() && !identity.is_string()) ||
+        (index.valid() && !unsigned_count(index)) ||
+        (format.valid() && !format.is_null() && !format.is_string()))
+      return fail(ErrorKind::ProtocolCorrupt, "invalid reasoning detail identity");
+    const std::string_view key = name == "reasoning.text" ? "text" : name == "reasoning.summary" ? "summary" : "";
+    if (key.empty()) {
+      if (name == "reasoning.encrypted" && !detail.get("data").is_string())
+        return fail(ErrorKind::ProtocolCorrupt, "encrypted reasoning requires a complete opaque blob");
+      if (reasoning_bindings_.size() >= limits_.max_parts)
+        return fail(ErrorKind::ResourceLimit, "reasoning detail count limit");
+      reasoning_bindings_.push_back({detail, {}, {}, {}});
+      continue;
+    }
+    const auto fragment = detail.get(key), signature = detail.get("signature");
+    if ((fragment.valid() && !fragment.is_null() && !fragment.is_string()) ||
+        (signature.valid() && !signature.is_null() && !signature.is_string()))
+      return fail(ErrorKind::ProtocolCorrupt, "invalid reasoning text or signature fragment");
+    bool join = !reasoning_bindings_.empty() && reasoning_bindings_.back().payload_key == key;
+    if (join) for (const auto identity_key : {"id", "index"}) {
+      const auto previous = reasoning_bindings_.back().fields.find(identity_key);
+      const auto next = detail.get(identity_key);
+      if (previous != reasoning_bindings_.back().fields.end() && !previous->second.is_null() &&
+          next.valid() && !next.is_null() && !json::equal(previous->second, next)) join = false;
+    }
+    if (!join) {
+      if (reasoning_bindings_.size() >= limits_.max_parts)
+        return fail(ErrorKind::ResourceLimit, "reasoning detail count limit");
+      reasoning_bindings_.push_back({detail, {}, key, {}});
+    }
+    auto& binding = reasoning_bindings_.back();
+    for (auto member : detail.members()) {
+      if (member.key == key) continue;
+      auto [found, inserted] = binding.fields.emplace(member.key, member.value);
+      if (inserted || member.value.is_null()) continue;
+      if (found->second.is_null() ||
+          (found->second.is_string() && found->second.as_string().empty())) {
+        found->second = member.value;
+      } else if (!json::equal(found->second, member.value) &&
+                 !(member.value.is_string() && member.value.as_string().empty())) {
+        return fail(ErrorKind::ProtocolCorrupt, "contradictory reasoning detail metadata");
+      }
+    }
+    if (fragment.is_string()) {
+      const auto bytes = fragment.as_string();
+      if (bytes.size() > limits_.max_content_bytes - std::min(binding.payload.size(), limits_.max_content_bytes))
+        return fail(ErrorKind::ResourceLimit, "reasoning payload limit");
+      binding.payload.append(bytes);
+    }
+  }
+  return true;
+}
+bool Codec::finish_reasoning_details() {
+  if (reasoning_frames_.empty()) return true;
+  const json::Limits limits{limits_.max_content_bytes, limits_.max_json_depth};
+  auto write = [&](json::BoundedWriter& writer) {
+    writer.raw("{\"type\":\"reasoning_details\",\"details\":[");
+    bool comma = false;
+    for (const auto& binding : reasoning_bindings_) {
+      if (comma) writer.raw(",");
+      comma = true;
+      if (binding.payload_key.empty()) writer.value(binding.original, 2);
+      else {
+        writer.raw("{");
+        bool field_comma = false;
+        for (const auto& [key, value] : binding.fields) {
+          if (field_comma) writer.raw(",");
+          field_comma = true;
+          writer.quoted(key).raw(":").value(value, 3);
+        }
+        if (field_comma) writer.raw(",");
+        writer.quoted(binding.payload_key).raw(":").quoted(binding.payload).raw("}");
+      }
+    }
+    writer.raw("],\"frames\":[");
+    comma = false;
+    for (const auto& frame : reasoning_frames_) {
+      if (comma) writer.raw(",");
+      comma = true;
+      writer.value(frame->root().get("details"), 2);
+    }
+    writer.raw("]}");
+  };
+  json::BoundedWriter measure(limits);
+  write(measure);
+  if (!measure.ok()) return fail(ErrorKind::ResourceLimit, "completed reasoning metadata limit");
+  std::string bytes;
+  bytes.reserve(measure.size());
+  json::BoundedWriter output(limits, &bytes);
+  write(output);
+  auto parsed = json::parse(bytes, limits);
+  auto* document = std::get_if<json::Document>(&parsed);
+  if (!document) return fail(ErrorKind::ResourceLimit, "completed reasoning metadata cannot be retained");
+  auto metadata = std::make_shared<const json::Document>(std::move(*document));
+  const LocalId id{next_part_++};
+  return emit(PartBegin{{0}, id, PartKind::Opaque,
+                        {{}, {}, ToolCallKind::ClientExecuted, "reasoning_details", metadata},
+                        1 + reasoning_details_count_}) && emit(PartSeal{id, {}});
 }
 bool Codec::tool(json::Value value, bool streaming, uint64_t position) {
   if (!value.is_object()) return fail(ErrorKind::ProtocolCorrupt, "tool call must be object");
@@ -192,7 +369,8 @@ bool Codec::tool(json::Value value, bool streaming, uint64_t position) {
     if (tools_.size() >= limits_.max_parts) return fail(ErrorKind::ResourceLimit, "tool count limit");
     if (indexed_tools_ && *indexed_tools_ != indexed) return fail(ErrorKind::ProtocolCorrupt, "mixed tool ordering is ambiguous");
     indexed_tools_ = indexed;
-    const auto order = indexed ? 2 + wire_index * limits_.max_parts + tools_.size() : 2 + tools_.size();
+    const uint64_t base = 3 + limits_.max_parts;
+    const auto order = indexed ? base + wire_index * limits_.max_parts + tools_.size() : base + tools_.size();
     ToolBinding binding{{next_part_++}, std::string(id.as_string()), std::string(name.as_string()), order};
     if (!emit(PartBegin{{0}, binding.local, PartKind::ToolCall, {binding.id, binding.name, ToolCallKind::ClientExecuted}, order})) return false;
     found = tools_.size(); tools_.push_back(std::move(binding));
@@ -260,6 +438,7 @@ void Codec::finish(Close close) {
   if (mode_ == Mode::Sse) {
     if (text_ && !emit(PartSeal{*text_, {}})) return;
     if (refusal_ && !emit(PartSeal{*refusal_, {}})) return;
+    if (thinking_ && !emit(PartSeal{*thinking_, {}})) return;
     for (const auto& tool : tools_) if (!emit(PartSeal{tool.local, {}})) return;
   }
   if (!emit(MessageSeal{{0}})) return;

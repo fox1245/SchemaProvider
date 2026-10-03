@@ -15,6 +15,7 @@
 //    connection close is NOT a normal end (Failed/Truncated).
 //  * Cancellation and the deadline complete without peer progress.
 #pragma once
+#include "sp/config_defaults.h"
 
 #include <chrono>
 #include <cstddef>
@@ -35,6 +36,8 @@ enum class HttpVersion : std::uint8_t {
   Auto,                 // HTTP/2 via ALPN on https, HTTP/1.1 otherwise
   Http1_1,              // force HTTP/1.1
   Http2PriorKnowledge,  // cleartext HTTP/2 (tests and loopback only)
+  Http3Preferred,       // HTTPS: prefer QUIC when linked libcurl supports it, else normal H2/H1
+  Http3Only,            // HTTPS only, fresh QUIC connection, explicit failure instead of downgrade
 };
 
 struct Header {
@@ -54,7 +57,7 @@ struct HttpRequest {
   std::string ca_file;             // optional extra trust anchor file (tests, private CAs)
 };
 
-enum class ResponseVersion : std::uint8_t { Unknown, Http1_0, Http1_1, Http2 };
+enum class ResponseVersion : std::uint8_t { Unknown, Http1_0, Http1_1, Http2, Http3 };
 
 // How the response body is delimited on the wire.
 enum class BodyFraming : std::uint8_t {
@@ -62,7 +65,7 @@ enum class BodyFraming : std::uint8_t {
   ContentLength,
   Chunked,
   CloseDelimited,   // delimited only by connection close: never a normal end
-  Stream,           // HTTP/2 stream (END_STREAM)
+  Stream,           // HTTP/2 END_STREAM or HTTP/3 stream FIN; libcurl validates stream framing
 };
 
 struct ResponseHead {
@@ -106,12 +109,12 @@ enum class Status : std::uint8_t { Completed, Cancelled, DeadlineExceeded, Faile
 enum class FailureKind : std::uint8_t {
   None,
   Resolve,          // DNS
-  Connect,          // TCP connect
+  Connect,          // TCP or QUIC connection establishment
   Tls,              // handshake or certificate verification
   Send,
   Receive,          // reset, EOF before any response, stream error
   Truncated,        // abnormal end of the body (no normal close)
-  Protocol,         // malformed HTTP / HTTP/2
+  Protocol,         // malformed HTTP / HTTP/2 / HTTP/3, or unsupported requested protocol
   ResendRefused,    // libcurl wanted to resend on a fresh connection; refused
   ResponseTooLarge, // response head exceeded max_head_bytes
   CallbackError,    // a user callback threw
@@ -149,15 +152,15 @@ struct Callbacks {
 using ResolveFn = std::function<std::vector<std::string>(const std::string& host)>;
 
 struct TransportOptions {
-  unsigned io_threads = 2;
-  long max_host_connections = 0;        // 0 = unlimited (libcurl default)
-  std::size_t max_head_bytes = 64 * 1024;
+  unsigned io_threads = static_cast<unsigned>(config_defaults::defaults_io_threads);
+  long max_host_connections = static_cast<long>(config_defaults::defaults_max_host_connections); // 0 = unlimited
+  std::size_t max_head_bytes = config_defaults::defaults_max_head_bytes;
   // Name resolution is done by the transport, not by libcurl, because libcurl's threaded resolver
   // starts one thread per concurrent lookup (measured: 72 simultaneous lookups -> +72 threads),
   // which breaks the "threads independent of concurrency" gate. Lookups are single-flight per
   // host, cached for dns_ttl, and run on at most resolver_threads threads. IP literals skip it.
-  unsigned resolver_threads = 2;
-  std::chrono::seconds dns_ttl{60};
+  unsigned resolver_threads = static_cast<unsigned>(config_defaults::defaults_resolver_threads);
+  std::chrono::seconds dns_ttl{config_defaults::defaults_dns_ttl_seconds};
   ResolveFn resolve;                    // empty: getaddrinfo
 };
 
@@ -165,6 +168,7 @@ struct RuntimeInfo {
   std::string curl_version;
   std::string ssl_backend;
   bool http2 = false;
+  bool http3 = false; // linked CURL_VERSION_HTTP3 feature, not a header/version-number guess
   bool async_dns = false;
 };
 

@@ -1,0 +1,224 @@
+{
+  "version": 1,
+  "statuses": [
+    {
+      "status": 400,
+      "kind": "InvalidRequest",
+      "retry": "Never"
+    },
+    {
+      "status": 413,
+      "kind": "InvalidRequest",
+      "retry": "Never"
+    },
+    {
+      "status": 422,
+      "kind": "InvalidRequest",
+      "retry": "Never"
+    },
+    {
+      "status": 401,
+      "kind": "Authentication",
+      "retry": "Never"
+    },
+    {
+      "status": 403,
+      "kind": "Permission",
+      "retry": "Never"
+    },
+    {
+      "status": 404,
+      "kind": "NotFound",
+      "retry": "Never"
+    },
+    {
+      "status": 429,
+      "kind": "LimitUnknown",
+      "retry": "Unknown"
+    },
+    {
+      "status": 500,
+      "kind": "Overloaded",
+      "retry": "Transient"
+    },
+    {
+      "status": 502,
+      "kind": "Overloaded",
+      "retry": "Transient"
+    },
+    {
+      "status": 503,
+      "kind": "Overloaded",
+      "retry": "Transient"
+    },
+    {
+      "status": 504,
+      "kind": "Overloaded",
+      "retry": "Transient"
+    },
+    {
+      "status": 529,
+      "kind": "Overloaded",
+      "retry": "Transient"
+    }
+  ],
+  "families": [
+    {
+      "family": "openai.chat",
+      "root_error_type": "error",
+      "error_paths": [
+        "error"
+      ],
+      "code_fields": [
+        "type",
+        "code"
+      ],
+      "codes": [
+        {
+          "value": "insufficient_quota",
+          "kind": "QuotaExhausted",
+          "retry": "Never"
+        },
+        {
+          "value": "rate_limit_exceeded",
+          "kind": "RateLimited",
+          "retry": "AfterReset"
+        },
+        {
+          "value": "invalid_api_key",
+          "kind": "Authentication",
+          "retry": "Never"
+        },
+        {
+          "value": "model_not_found",
+          "kind": "NotFound",
+          "retry": "Never"
+        }
+      ]
+    },
+    {
+      "family": "openai.responses",
+      "root_error_type": "error",
+      "error_paths": [
+        "error",
+        "response.error",
+        "root_error"
+      ],
+      "code_fields": [
+        "type",
+        "code"
+      ],
+      "codes": [
+        {
+          "value": "insufficient_quota",
+          "kind": "QuotaExhausted",
+          "retry": "Never"
+        },
+        {
+          "value": "rate_limit_exceeded",
+          "kind": "RateLimited",
+          "retry": "AfterReset"
+        },
+        {
+          "value": "invalid_api_key",
+          "kind": "Authentication",
+          "retry": "Never"
+        },
+        {
+          "value": "model_not_found",
+          "kind": "NotFound",
+          "retry": "Never"
+        }
+      ]
+    },
+    {
+      "family": "anthropic.messages",
+      "root_error_type": "error",
+      "error_paths": [
+        "error"
+      ],
+      "code_fields": [
+        "type"
+      ],
+      "codes": [
+        {
+          "value": "invalid_request_error",
+          "kind": "InvalidRequest",
+          "retry": "Never"
+        },
+        {
+          "value": "authentication_error",
+          "kind": "Authentication",
+          "retry": "Never"
+        },
+        {
+          "value": "permission_error",
+          "kind": "Permission",
+          "retry": "Never"
+        },
+        {
+          "value": "not_found_error",
+          "kind": "NotFound",
+          "retry": "Never"
+        },
+        {
+          "value": "request_too_large",
+          "kind": "InvalidRequest",
+          "retry": "Never"
+        },
+        {
+          "value": "rate_limit_error",
+          "kind": "RateLimited",
+          "retry": "AfterReset"
+        },
+        {
+          "value": "api_error",
+          "kind": "RemoteFailure",
+          "retry": "Transient"
+        },
+        {
+          "value": "overloaded_error",
+          "kind": "Overloaded",
+          "retry": "Transient"
+        }
+      ]
+    }
+  ],
+  "headers": [
+    {
+      "family": "*",
+      "name": "retry-after",
+      "format": "seconds_or_http_date"
+    },
+    {
+      "family": "openai.chat",
+      "name": "retry-after-ms",
+      "format": "milliseconds"
+    },
+    {
+      "family": "openai.responses",
+      "name": "retry-after-ms",
+      "format": "milliseconds"
+    },
+    {
+      "family": "openai.chat",
+      "name": "x-ratelimit-reset-requests",
+      "format": "duration"
+    },
+    {
+      "family": "openai.chat",
+      "name": "x-ratelimit-reset-tokens",
+      "format": "duration"
+    },
+    {
+      "family": "openai.responses",
+      "name": "x-ratelimit-reset-requests",
+      "format": "duration"
+    },
+    {
+      "family": "openai.responses",
+      "name": "x-ratelimit-reset-tokens",
+      "format": "duration"
+    }
+  ]
+}

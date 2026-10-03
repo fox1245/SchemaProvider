@@ -70,9 +70,7 @@ bool Codec::buffered(std::string_view body, Close close) {
 bool Codec::frame(std::string_view event, std::string_view data) {
   if (closed_ || accumulator_.terminal()) return false;
   if (mode_ != Mode::Sse) return fail(ErrorKind::Misuse, "unexpected Gemini stream frame");
-  if (event == "error") return fail(ErrorKind::RemoteFailure, "remote Gemini error event");
-  if (!event.empty() && event != "message") return fail(ErrorKind::Unsupported, "unknown Gemini SSE event");
-  return document(data);
+  return document(data, event);
 }
 bool Codec::identity(json::Value root) {
   auto id = root.get("responseId"), model = root.get("modelVersion");
@@ -95,17 +93,34 @@ bool Codec::identity(json::Value root) {
   }
   return true;
 }
-bool Codec::document(std::string_view bytes) {
-  if (!context_ || descriptor_.family() != "google.generate" || !context_->matches_descriptor(descriptor_)) return fail(ErrorKind::InvalidConfig, "Gemini request context required");
-  if (bytes.size() > limits_.max_content_bytes - std::min(input_bytes_, limits_.max_content_bytes)) return fail(ErrorKind::ResourceLimit, "Gemini response byte limit");
+bool Codec::document(std::string_view bytes, std::string_view event) {
+  const bool remote_error = event == "error";
+  const bool unsupported_event = !event.empty() && event != "message" && !remote_error;
+  auto reject = [&](ErrorKind kind, std::string label) {
+    if (remote_error) return fail(ErrorKind::RemoteFailure, "remote Gemini error event");
+    if (unsupported_event) return fail(ErrorKind::Unsupported, "unknown Gemini SSE event");
+    return fail(kind, std::move(label));
+  };
+  if (!context_ || descriptor_.family() != "google.generate" || !context_->matches_descriptor(descriptor_)) return reject(ErrorKind::InvalidConfig, "Gemini request context required");
+  if (bytes.size() > limits_.max_content_bytes - std::min(input_bytes_, limits_.max_content_bytes)) return reject(ErrorKind::ResourceLimit, "Gemini response byte limit");
   input_bytes_ += bytes.size();
   auto parsed = json::parse(bytes, {limits_.max_content_bytes, limits_.max_json_depth});
-  json::Value root;
+  std::shared_ptr<const json::Document> wire;
   if (auto e = std::get_if<json::ParseError>(&parsed)) {
-    if (e->code == json::ParseCode::DuplicateKey && envelope_unique(e->context.root())) root = e->context.root();
-    else return fail(e->code == json::ParseCode::SizeExceeded || e->code == json::ParseCode::DepthExceeded ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, "invalid Gemini response JSON");
-  } else root = std::get<json::Document>(parsed).root();
-  if (!root.is_object()) return fail(ErrorKind::ProtocolCorrupt, "Gemini response must be object");
+    if (e->code == json::ParseCode::DuplicateKey && envelope_unique(e->context.root()))
+      wire = std::make_shared<const json::Document>(std::move(e->context));
+    else return reject(e->code == json::ParseCode::SizeExceeded || e->code == json::ParseCode::DepthExceeded ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, "invalid Gemini response JSON");
+  } else wire = std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
+  const auto root = wire->root();
+  if (!root.is_object()) return reject(ErrorKind::ProtocolCorrupt, "Gemini response must be object");
+  const Event raw = RawWire{event.empty() ? "generateContentResponse" : std::string(event), wire};
+  if (remote_error) {
+    const Error error{ErrorKind::RemoteFailure, "remote Gemini error event"};
+    if (!accumulator_.accept(raw, &error)) return false;
+    return fail(error.kind, error.safe_message);
+  }
+  if (!emit(raw)) return false;
+  if (unsupported_event) return fail(ErrorKind::Unsupported, "unknown Gemini SSE event");
   if (root.get("error").valid()) return fail(ErrorKind::RemoteFailure, "remote Gemini error response");
   if (!identity(root)) return false;
   unknown(root, {"candidates", "promptFeedback", "usageMetadata", "modelVersion", "responseId", "modelStatus"});

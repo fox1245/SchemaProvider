@@ -1,0 +1,90 @@
+{
+  "version": 1,
+  "scope": "owner_requested_minimal_retained_endpoint_validation",
+  "owner_instruction": "셋 다 하되 검증은 최소 비용으로 짧게 ... 그것도 싼 모델로 최소한의 검증만",
+  "paid_attempts_per_feature": 1,
+  "automatic_retry": false,
+  "chat_qualification_grant_is_separate": true,
+  "images": {
+    "model": "gemini-3.1-flash-lite-image",
+    "profile": "nano_banana_2_lite",
+    "images": 1,
+    "image_size": "1K",
+    "aspect_ratio": "1:1",
+    "thinking": "minimal",
+    "max_output_tokens": 2048,
+    "prompt": "Create one simple red circle on a plain white background. Return one image, no text.",
+    "expected_image_tokens": 1120,
+    "input_micro_usd_per_million": 250000,
+    "text_thinking_output_micro_usd_per_million": 1500000,
+    "image_output_micro_usd_per_million": 30000000,
+    "expected_image_micro_usd": 33600,
+    "catalog": "https://ai.google.dev/gemini-api/docs/pricing#gemini-3.1-flash-lite-image"
+  },
+  "veo": {
+    "model": "veo-3.1-lite-generate-preview",
+    "videos": 1,
+    "resolution": "720p",
+    "duration_seconds": 4,
+    "aspect_ratio": "16:9",
+    "prompt": "A red ball rolls slowly across a plain white floor. Static camera.",
+    "micro_usd_per_second": 50000,
+    "expected_micro_usd": 200000,
+    "catalog": "https://ai.google.dev/gemini-api/docs/pricing#veo-3.1",
+    "limits_source": "https://ai.google.dev/gemini-api/docs/veo"
+  },
+  "decisions": {
+    "model": "typesafe/jev-1.13",
+    "questions": 1,
+    "state": "The checkout page is blank after clicking Pay.",
+    "instruction": "Is the state describing a software defect?",
+    "input_micro_usd_per_million": 42000,
+    "output_micro_usd_per_million": 0,
+    "catalog": "https://openrouter.ai/api/v1/models/typesafe/jev-1.13/endpoints"
+  },
+  "verified_at": "2026-10-02",
+  "billing": "catalogue_based_expectation_not_invoice; stop_after_one_attempt_per_feature",
+  "observed_validation": {
+    "performed_at": "2026-10-03",
+    "paid_generation_requests": 3,
+    "automatic_retry": false,
+    "chat_campaign_requests": 0,
+    "images": {
+      "status": "passed",
+      "images": 1,
+      "width": 1024,
+      "height": 1024,
+      "mime": "image/jpeg",
+      "artifact_bytes": 360685,
+      "input_tokens": 19,
+      "output_tokens": 1408,
+      "total_tokens": 1427,
+      "output_price_band_breakdown": "not_captured_by_minimal_smoke",
+      "visual": "one red circle on a plain white background"
+    },
+    "veo": {
+      "status": "passed",
+      "generation_dispatches": 1,
+      "status_queries": 3,
+      "width": 1280,
+      "height": 720,
+      "duration_seconds": 4,
+      "mime": "video/mp4",
+      "artifact_bytes": 437737,
+      "input_tokens": null,
+      "output_tokens": null,
+      "total_tokens": null,
+      "decoder": "Chromium loaded metadata, sought to1second, readyState4, no decode error; actual frame inspected"
+    },
+    "decisions": {
+      "status": "passed",
+      "questions": 1,
+      "probability": 0.93,
+      "input_tokens": 283,
+      "output_tokens": 21,
+      "total_tokens": null,
+      "reported_cost_usd": 0.000011886
+    },
+    "billing": "Image0.0336USD catalogue base plus text/thinking; Veo0.20USD catalogue expectation; Decisions API-reported cost, not invoice. No additional media request authorized by these results."
+  }
+}

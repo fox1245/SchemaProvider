@@ -6,6 +6,8 @@
 #include <cstdlib>
 #include <memory>
 #include <new>
+#include <limits>
+#include <cstddef>
 #include <optional>
 #include <unordered_set>
 #include <utility>
@@ -14,6 +16,33 @@
 namespace sp::json {
 namespace {
 yyjson_val* val(void* pointer) { return static_cast<yyjson_val*>(pointer); }
+// Store allocation extents in the same malloc/realloc block: no second
+// allocation, global ledger, DOM traversal or Document ABI/layout change.
+struct alignas(std::max_align_t) AllocationExtent { std::size_t bytes; };
+void* document_malloc(void*, std::size_t size) noexcept {
+    if (size > std::numeric_limits<std::size_t>::max() - sizeof(AllocationExtent)) return nullptr;
+    auto* allocation = static_cast<AllocationExtent*>(std::malloc(size + sizeof(AllocationExtent)));
+    if (!allocation) return nullptr;
+    allocation->bytes = size + sizeof(AllocationExtent);
+    return allocation + 1;
+}
+void document_free(void*, void* pointer) noexcept {
+    if (pointer) std::free(static_cast<AllocationExtent*>(pointer) - 1);
+}
+void* document_realloc(void*, void* pointer, std::size_t, std::size_t size) noexcept {
+    if (!pointer) return document_malloc(nullptr, size);
+    if (size == 0) { document_free(nullptr, pointer); return nullptr; }
+    if (size > std::numeric_limits<std::size_t>::max() - sizeof(AllocationExtent)) return nullptr;
+    auto* allocation = static_cast<AllocationExtent*>(std::realloc(
+        static_cast<AllocationExtent*>(pointer) - 1, size + sizeof(AllocationExtent)));
+    if (!allocation) return nullptr;
+    allocation->bytes = size + sizeof(AllocationExtent);
+    return allocation + 1;
+}
+std::size_t allocation_extent(void* pointer) noexcept {
+    return pointer ? (static_cast<AllocationExtent*>(pointer) - 1)->bytes : 0;
+}
+const yyjson_alc document_allocator{document_malloc, document_realloc, document_free, nullptr};
 std::string pointer_segment(std::string_view key) {
     std::string result;
     for (char c : key) {
@@ -130,6 +159,25 @@ Document& Document::operator=(Document&& other) noexcept {
     return *this;
 }
 Value Document::root() const { return Value(yyjson_doc_get_root(static_cast<yyjson_doc*>(document_))); }
+std::size_t Document::retained_bytes() const noexcept {
+    auto* document = static_cast<yyjson_doc*>(document_);
+    if (!document) return 0;
+    if (document->alc.free != document_free) return std::numeric_limits<std::size_t>::max();
+    const auto values = allocation_extent(document);
+    const auto strings = allocation_extent(document->str_pool);
+    if (values > std::numeric_limits<std::size_t>::max() - sizeof(Document) ||
+        strings > std::numeric_limits<std::size_t>::max() - sizeof(Document) - values)
+        return std::numeric_limits<std::size_t>::max();
+    return values + strings + sizeof(Document);
+}
+std::size_t retained_size_bound(std::size_t source_bytes) noexcept {
+    const auto bound = yyjson_read_max_memory_usage(source_bytes, 0);
+    constexpr auto metadata = 2 * sizeof(AllocationExtent) + sizeof(Document);
+    if (!bound || bound > std::numeric_limits<std::size_t>::max() - metadata)
+        return std::numeric_limits<std::size_t>::max();
+    return bound + metadata;
+}
+std::uint32_t retained_size_contract() noexcept { return 1; }
 ParseResult parse(std::string_view input, Limits limits) {
     if (input.size() > limits.max_bytes)
         return ParseError{ParseCode::SizeExceeded, {}, "JSON byte limit exceeded"};
@@ -149,7 +197,7 @@ ParseResult parse(std::string_view input, Limits limits) {
         } else if ((c == '}' || c == ']') && depth) --depth;
     }
     yyjson_read_err error{};
-    auto* raw = yyjson_read_opts(const_cast<char*>(input.data()), input.size(), 0, nullptr, &error);
+    auto* raw = yyjson_read_opts(const_cast<char*>(input.data()), input.size(), 0, &document_allocator, &error);
     if (!raw) {
         if (error.code == YYJSON_READ_ERROR_MEMORY_ALLOCATION) throw std::bad_alloc();
         return ParseError{ParseCode::Syntax, {}, "invalid JSON document"};

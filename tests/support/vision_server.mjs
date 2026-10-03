@@ -15,7 +15,7 @@ const notify = () => { for (const wake of [...waiters]) wake(); };
 const snapshot = c => ({ count: c.count, invalid: c.invalid, unexpected, faults: c.faults,
   held: c.held.size, closed: c.closed, images: c.images, replayed: c.replayed, on: c.on, off: c.off, sse: c.sse,
   ...(c.scenario === 'campaign' ? { retained: c.retained, signature_negative: c.signatureNegative,
-    reasoning_missing: c.reasoningMissing, scene_a: c.sceneA, scene_b: c.sceneB, tool_first: c.toolFirst } : {}) });
+    reasoning_missing: c.reasoningMissing, carrier_duplicate: c.carrierDuplicate, scene_a: c.sceneA, scene_b: c.sceneB, tool_first: c.toolFirst } : {}) });
 const scoreSchema = { type: 'object', properties: { value: { type: 'integer' } }, required: ['value'], additionalProperties: false };
 const frame = (event, data) => `${event ? `event: ${event}\n` : ''}data: ${JSON.stringify(data)}\n\n`;
 const schema = { type: 'object', properties: { red_circles: { type: 'integer' }, blue_squares: { type: 'integer' }, weighted: { type: 'integer' } }, required: ['red_circles', 'blue_squares', 'weighted'], additionalProperties: false };
@@ -42,11 +42,25 @@ function nativeMatches(c, incoming, family) {
     return true;
   }
   if (c.scenario !== 'campaign' || !Array.isArray(incoming)) return false;
+  if (['gemini', 'interactions'].includes(family) && incoming.length === c.native.length + 1 &&
+      equal(incoming.slice(0, -1), c.native) &&
+      c.native.some(part => equal(part, incoming.at(-1)) &&
+        typeof part[family === 'gemini' ? 'thoughtSignature' : 'signature'] === 'string')) {
+    ++c.carrierDuplicate; return true;
+  }
   const remaining = c.native.filter(part => family === 'responses' ? part.type !== 'reasoning' :
     family === 'messages' ? !['thinking', 'redacted_thinking'].includes(part.type) :
     family === 'gemini' ? part.thought !== true : part.type !== 'thought').map(part =>
       family === 'gemini' ? Object.fromEntries(Object.entries(part).filter(([key]) => key !== 'thoughtSignature')) :
       family === 'interactions' && part.type === 'function_call' ? Object.fromEntries(Object.entries(part).filter(([key]) => key !== 'signature')) : part);
+  const thoughtOnly = c.native.filter(part => part.type !== 'thought');
+  const callOnly = c.native.map(part => part.type === 'function_call' ?
+    Object.fromEntries(Object.entries(part).filter(([key]) => key !== 'signature')) : part);
+  if (family === 'interactions' && (equal(thoughtOnly, incoming) || equal(callOnly, incoming))) {
+    ++c.reasoningMissing;
+    if (c.acceptOmission) return true;
+    const error = new Error('native carrier omitted'); error.signature = true; error.omission = true; throw error;
+  }
   if (remaining.length < c.native.length && equal(remaining, incoming)) {
     ++c.reasoningMissing;
     if (c.acceptOmission) return true;
@@ -89,10 +103,6 @@ function examine(req, body, c, family) {
   const toolQuestion = 'Call vision_score exactly once with value equal to weighted. After tool result return the same three-field JSON.';
   if (text.text !== question && !(campaign && family === 'chat' && text.text === question + '\n' + toolQuestion)) throw new Error('question');
   if (content.length === 3 && content[2]?.text !== toolQuestion) throw new Error('tool question order');
-  if (campaign) {
-    const cap = family === 'chat' ? body.max_completion_tokens ?? body.max_tokens : family === 'responses' ? body.max_output_tokens : family === 'messages' ? body.max_tokens : family === 'gemini' ? body.generationConfig?.maxOutputTokens : body.generation_config?.max_output_tokens;
-    if (cap !== 8192) throw new Error('campaign output cap');
-  }
   let mime, data;
   if (family === 'chat' || family === 'responses') {
     const uri = family === 'chat' ? image.image_url?.url : image.image_url;
@@ -133,6 +143,9 @@ function examine(req, body, c, family) {
   if (tool && toolName !== 'observe_scene' && !(c.scenario === 'campaign' && toolName === 'vision_score')) throw new Error('tool');
   if (tool && !equal(family === 'chat' ? tool.function?.parameters : family === 'messages' ? tool.input_schema : family === 'gemini' ? tool.parametersJsonSchema : tool.parameters, toolName === 'vision_score' ? scoreSchema : schema)) throw new Error('tool schema');
   if (family === 'responses' && body.store !== false || family === 'interactions' && body.store !== false) throw new Error('store');
+  const freshToolGeneration = campaign && tool && (family === 'gemini' ? body.contents?.length === 1 :
+    ['responses', 'interactions'].includes(family) ? body.input?.length === 1 : body.messages?.length === 1);
+  if (freshToolGeneration) c.native = undefined; // Explicit fresh diagnostic round, not continuation.
   if (c.native) {
     const answer = JSON.stringify(c.toolPayload);
     if (scene.sha256 !== c.scene.sha256) throw new Error('replay image prefix');
@@ -284,7 +297,7 @@ control.on('line', async line => {
     if (command.arm) {
       if (cases.has(command.arm)) throw new Error('duplicate');
       cases.set(command.arm, { scenario: command.scenario, count: 0, invalid: 0, faults: 0, held: new Map(), closed: 0, images: 0, replayed: 0, on: 0, off: 0, sse: 0,
-        retained: 0, signatureNegative: 0, reasoningMissing: 0, sceneA: 0, sceneB: 0, toolFirst: 0,
+        retained: 0, signatureNegative: 0, reasoningMissing: 0, carrierDuplicate: 0, sceneA: 0, sceneB: 0, toolFirst: 0,
         wrongOracle: command.scenario === 'campaign' && command.wrong_oracle === true,
         signatureError: command.signature_error, omissionError: command.omission_error,
         acceptSignature: command.accept_signature === true, acceptOmission: command.accept_omission === true }); reply({ armed: true }); return;

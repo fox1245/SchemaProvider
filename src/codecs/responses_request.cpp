@@ -1,12 +1,15 @@
 #include "codecs/responses_request.h"
 #include "core/native.h"
 #include "json/json.h"
+#include "descriptor/policy.h"
 #include <map>
 #include <set>
+#include <type_traits>
+#include <charconv>
+#include <limits>
 
 namespace sp::responses {
 namespace {
-constexpr size_t request_limit = 16 << 20;
 std::string lower(std::string_view text) {
   std::string value(text);
   for (char& c : value) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + ('a' - 'A'));
@@ -26,12 +29,15 @@ bool function_name(std::string_view name) {
       (c >= '0' && c <= '9') || c == '_' || c == '-')) return false;
   return true;
 }
-bool reasoning_options(const ReasoningOptions& options) {
-  const auto& effort = options.effort;
-  const auto& summary = options.summary;
-  return (effort == "none" || effort == "minimal" || effort == "low" || effort == "medium" ||
-      effort == "high" || effort == "xhigh") &&
-      (summary == "auto" || summary == "concise" || summary == "detailed");
+std::string_view hosted_type(const HostedTool& tool) {
+  return std::visit([](const auto& value) -> std::string_view {
+    using T = std::decay_t<decltype(value)>;
+    if constexpr (std::is_same_v<T, WebSearchTool>) return "web_search";
+    if constexpr (std::is_same_v<T, ImageGenerationTool>) return "image_generation";
+    if constexpr (std::is_same_v<T, FileSearchTool>) return "file_search";
+    if constexpr (std::is_same_v<T, ToolSearchTool>) return "tool_search";
+    if constexpr (std::is_same_v<T, ShellTool>) return "shell";
+  }, tool);
 }
 } // namespace
 EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request, bool streaming) {
@@ -39,14 +45,69 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   auto replay_bad = []() -> EncodeResult { return Error{ErrorKind::ReplayIneligible, "native replay provenance, binding or content mismatch"}; };
   if (descriptor.family() != "openai.responses") return Error{ErrorKind::InvalidConfig, "Responses encoder requires Responses descriptor"};
   if (request.model.empty() || request.messages.empty()) return bad("model and messages are required");
-  if (request.messages.size() > 100000) return bad("too many request messages");
-  if (request.max_output_tokens && !*request.max_output_tokens) return bad("max_output_tokens must be positive");
-  if (request.reasoning && !reasoning_options(*request.reasoning)) return bad("unsupported typed reasoning options");
+  const auto& resources = descriptor.policy()->resources();
+  const auto& defaults = descriptor.policy()->defaults(descriptor.family(), request.model);
+  auto effective = descriptor::effective_defaults(descriptor, request.model);
+  if (request.max_output_tokens) effective.max_output_tokens = request.max_output_tokens;
+  if (request.service_tier) effective.service_tier = *request.service_tier;
+  if (request.temperature) effective.temperature = request.temperature;
+  if (request.top_p) effective.top_p = request.top_p;
+  if (request.reasoning) {
+    effective.reasoning_enabled = true;
+    if (request.reasoning->effort) effective.reasoning_effort = *request.reasoning->effort;
+    if (request.reasoning->summary) effective.reasoning_summary = *request.reasoning->summary;
+  }
+  if (auto error = descriptor::validate_choices(descriptor, request.model, effective)) return bad(std::move(*error));
+  if (request.messages.size() > resources.request_messages || request.tools.size() > resources.request_tools ||
+      request.hosted_tools.size() > resources.request_tools - request.tools.size())
+    return bad("request count limit exceeded");
+  if (request.provider)
+    if (auto error = request_controls::validate_routing(descriptor, *request.provider)) return bad(std::move(*error));
+  if (request.response_format)
+    if (auto error = request_controls::validate_response_format(*request.response_format, resources)) return bad(std::move(*error));
+  std::set<std::string_view> hosted_types;
+  for (const auto& tool : request.hosted_tools) {
+    const auto type = hosted_type(tool);
+    bool admitted = false;
+    for (const auto& fact : descriptor.family_policy().server_tools)
+      if (fact.type == type) admitted = true;
+    if (!admitted) return Error{ErrorKind::Unsupported, "hosted Responses tool is not admitted by policy"};
+    if (!hosted_types.insert(type).second) return bad("hosted tool types must be unique");
+    if (const auto* image = std::get_if<ImageGenerationTool>(&tool)) {
+      if (image->size && *image->size != "auto" && *image->size != "1024x1024" &&
+          *image->size != "1024x1536" && *image->size != "1536x1024")
+        return bad("unsupported image generation size");
+      if (image->quality && *image->quality != "auto" && *image->quality != "low" &&
+          *image->quality != "medium" && *image->quality != "high")
+        return bad("unsupported image generation quality");
+    }
+    if (const auto* files = std::get_if<FileSearchTool>(&tool)) {
+      if (files->vector_store_ids.empty() || files->vector_store_ids.size() > resources.request_parts)
+        return bad("file search requires bounded vector store ids");
+      std::set<std::string_view> ids;
+      for (const auto& id : files->vector_store_ids)
+        if (id.empty() || !ids.insert(id).second) return bad("vector store ids must be nonempty and unique");
+    }
+    if (const auto* shell = std::get_if<ShellTool>(&tool)) {
+      if (shell->environment.skills.size() > resources.request_parts) return bad("shell skill count limit exceeded");
+      std::set<std::string_view> ids;
+      for (const auto& skill : shell->environment.skills)
+        if (skill.skill_id.empty() || !ids.insert(skill.skill_id).second)
+          return bad("shell skill references must be nonempty and unique");
+    }
+  }
+  bool deferred = false;
+  for (const auto& tool : request.tools) deferred = deferred || tool.defer_loading.value_or(false);
+  if (deferred && !hosted_types.contains("tool_search"))
+    return bad("deferred functions require tool_search");
+  if (hosted_types.contains("tool_search") && !deferred)
+    return bad("tool_search requires a deferred function definition");
   // Captured groups never degrade to caller-imported assistant history when their
   // seal or original items are removed. Only plain input and tool results are imports.
   bool captured_history = false;
   std::optional<Error> image_error;
   for (const auto& message : request.messages) {
+    if (message.parts.size() > resources.request_parts) return bad("request part count limit exceeded");
     if (message.native) {
       if (message.role != Role::Assistant || !message.wire_output || !message.wire_output->root().is_array()) return replay_bad();
     } else {
@@ -59,13 +120,13 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     captured_history = captured_history || static_cast<bool>(message.native);
     for (const auto& part : message.parts) if (const auto* image = std::get_if<Image>(&part); image && !image_error) {
       if (message.role != Role::User) image_error = Error{ErrorKind::InvalidRequest, "image inputs require user role"};
-      else if (!valid_image(*image)) image_error = Error{ErrorKind::InvalidRequest, "invalid inline image payload"};
+      else if (!valid_image(*image, resources.image_decoded_bytes)) image_error = Error{ErrorKind::InvalidRequest, "invalid inline image payload"};
     }
   }
   // Preserve native-prefix mismatch precedence over payload errors in edited
   // captured history, but reject invalid ordinary input before hashing.
   if (image_error && !captured_history) return *image_error;
-  auto context = std::shared_ptr<const NativeContext>(new NativeContext(descriptor, request, streaming));
+  auto context = std::shared_ptr<const NativeContext>(new NativeContext(descriptor, request, effective, streaming));
   if (!context->history_valid_) return replay_bad();
   if (!context->valid_) return Error{ErrorKind::ResourceLimit, "native binding could not be captured"};
   if (image_error) return *image_error;
@@ -80,13 +141,32 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     auto invalid = [](std::string message) { return Error{ErrorKind::InvalidRequest, std::move(message)}; };
     body.raw("{").quoted(descriptor.request_model_member()).raw(":").quoted(request.model);
     body.raw(",").quoted(descriptor.request_stream_member()).raw(streaming ? ":true" : ":false");
-    body.raw(",\"store\":false,\"include\":[\"reasoning.encrypted_content\"]");
+    body.raw(",\"store\":").raw(request.store.value_or(false) ? "true" : "false")
+        .raw(",\"include\":[\"reasoning.encrypted_content\"]");
+    auto number = [&](std::string_view key, double value) {
+      char bytes[64];
+      const auto converted = std::to_chars(bytes, bytes + sizeof bytes, value);
+      body.raw(",").quoted(key).raw(":").raw({bytes, static_cast<size_t>(converted.ptr - bytes)});
+    };
+    if (effective.temperature) number("temperature", *effective.temperature);
+    if (effective.top_p) number("top_p", *effective.top_p);
+    if (request.provider) {
+      body.raw(",\"provider\":");
+      request_controls::write_routing(body, *request.provider);
+    }
+    if (request.response_format) {
+      body.raw(",\"text\":{\"format\":");
+      request_controls::write_response_format(body, *request.response_format, true);
+      body.raw("}");
+    }
     if (!request.instructions.empty()) body.raw(",\"instructions\":").quoted(request.instructions);
-    if (request.max_output_tokens) body.raw(",").quoted(descriptor.max_output_tokens_member()).raw(":").raw(std::to_string(*request.max_output_tokens));
-    if (request.reasoning) body.raw(",\"reasoning\":{\"effort\":").quoted(request.reasoning->effort)
-        .raw(",\"summary\":").quoted(request.reasoning->summary).raw("}");
+    if (effective.max_output_tokens) body.raw(",").quoted(descriptor.max_output_tokens_member()).raw(":").raw(std::to_string(*effective.max_output_tokens));
+    if (request.max_tool_calls) body.raw(",\"max_tool_calls\":").raw(std::to_string(*request.max_tool_calls));
+    if (effective.reasoning_enabled) body.raw(",\"reasoning\":{\"effort\":").quoted(*effective.reasoning_effort)
+        .raw(",\"summary\":").quoted(*effective.reasoning_summary).raw("}");
+    if (effective.service_tier) body.raw(",\"service_tier\":").quoted(*effective.service_tier);
     std::set<std::string_view> tool_names;
-    if (!request.tools.empty()) {
+    if (!request.tools.empty() || !request.hosted_tools.empty()) {
       body.raw(",\"tools\":[");
       bool comma = false;
       for (const auto& tool : request.tools) {
@@ -95,7 +175,45 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         if (comma) body.raw(",");
         comma = true;
         body.raw("{\"type\":\"function\",\"name\":").quoted(tool.name).raw(",\"description\":").quoted(tool.description)
-            .raw(",\"parameters\":").value(tool.parameters->root(), 3).raw(",\"strict\":").raw(tool.strict ? "true}" : "false}");
+            .raw(",\"parameters\":").value(tool.parameters->root(), 3);
+        const auto strict = tool.strict ? tool.strict : defaults.strict_tools;
+        if (strict) body.raw(",\"strict\":").raw(*strict ? "true" : "false");
+        if (tool.defer_loading) body.raw(",\"defer_loading\":").raw(*tool.defer_loading ? "true" : "false");
+        body.raw("}");
+      }
+      for (const auto& tool : request.hosted_tools) {
+        if (comma) body.raw(",");
+        comma = true;
+        body.raw("{\"type\":").quoted(hosted_type(tool));
+        std::visit([&](const auto& value) {
+          using T = std::decay_t<decltype(value)>;
+          if constexpr (std::is_same_v<T, ImageGenerationTool>) {
+            if (value.size) body.raw(",\"size\":").quoted(*value.size);
+            if (value.quality) body.raw(",\"quality\":").quoted(*value.quality);
+          } else if constexpr (std::is_same_v<T, FileSearchTool>) {
+            body.raw(",\"vector_store_ids\":[");
+            bool id_comma = false;
+            for (const auto& id : value.vector_store_ids) {
+              if (id_comma) body.raw(",");
+              id_comma = true; body.quoted(id);
+            }
+            body.raw("]");
+          } else if constexpr (std::is_same_v<T, ShellTool>) {
+            body.raw(",\"environment\":{\"type\":\"container_auto\"");
+            if (!value.environment.skills.empty()) {
+              body.raw(",\"skills\":[");
+              bool skill_comma = false;
+              for (const auto& skill : value.environment.skills) {
+                if (skill_comma) body.raw(",");
+                skill_comma = true;
+                body.raw("{\"type\":\"skill_reference\",\"skill_id\":").quoted(skill.skill_id).raw("}");
+              }
+              body.raw("]");
+            }
+            body.raw("}");
+          }
+        }, tool);
+        body.raw("}");
       }
       body.raw("]");
     }
@@ -177,12 +295,18 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     if (!body.ok()) return Error{ErrorKind::ResourceLimit, "request exceeds JSON byte, depth or encoding limits"};
     return std::nullopt;
   };
-  json::BoundedWriter measured({request_limit, 64});
+  json::BoundedWriter measured({resources.request_bytes, resources.json_depth});
   if (auto error = build(measured)) return *error;
   result.body.reserve(measured.size());
-  json::BoundedWriter body({measured.size(), 64}, &result.body);
+  json::BoundedWriter body({measured.size(), resources.json_depth}, &result.body);
   if (auto error = build(body)) return *error;
   result.context = std::move(context);
+  result.max_output_tokens = effective.max_output_tokens;
+  if (!request.hosted_tools.empty()) {
+    if (!request.max_tool_calls || *request.max_tool_calls == std::numeric_limits<std::uint64_t>::max())
+      result.model_invocation_limit.reset();
+    else result.model_invocation_limit = *request.max_tool_calls + 1;
+  }
   return result;
 }
 } // namespace sp::responses

@@ -68,16 +68,29 @@ struct Capture {
   std::mutex mutex;
   std::condition_variable cv;
   Result result;
-  size_t outcomes = 0, events = 0, deltas = 0, terminals = 0;
+  size_t outcomes = 0, terminals = 0;
+  bool terminal_envelope = false;
+  std::string observed_text;
   sp::runtime::Callbacks callbacks() {
-    return {[this](const sp::Event& e) { std::lock_guard lock(mutex); ++events;
-      if (std::holds_alternative<sp::PartDelta>(e)) ++deltas;
+    return {[this](const sp::Event& e) { std::lock_guard lock(mutex);
+      if (const auto* delta = std::get_if<sp::PartDelta>(&e);
+          delta && delta->payload.kind == sp::PartKind::Text)
+        observed_text.append(delta->payload.bytes);
+      if (const auto* envelope = std::get_if<sp::ResponseEnvelope>(&e)) {
+        const auto status = envelope->payload->root().get("status").as_string();
+        terminal_envelope = status == "completed" || status == "incomplete";
+      }
       if (std::holds_alternative<sp::Commit>(e) || std::holds_alternative<sp::Fail>(e)) ++terminals;
       cv.notify_all(); },
       [this](Result value) { std::lock_guard lock(mutex); result = std::move(value); ++outcomes; cv.notify_all(); }};
   }
-  void observed(bool delta = false) {
-    std::unique_lock lock(mutex); require(cv.wait_for(lock, 15s, [&] { return delta ? deltas != 0 : events != 0; }), "semantic callback timed out");
+  void terminal_observed() {
+    std::unique_lock lock(mutex);
+    require(cv.wait_for(lock, 15s, [&] { return terminal_envelope; }), "terminal envelope callback timed out");
+  }
+  void text_observed(std::string_view expected) {
+    std::unique_lock lock(mutex);
+    require(cv.wait_for(lock, 15s, [&] { return observed_text == expected; }), "text callback timed out");
   }
   void pending() { std::lock_guard lock(mutex); require(!result && outcomes == 0 && terminals == 0, "committed before observed normal HTTP close"); }
   Result await() {
@@ -163,9 +176,54 @@ void failed_terminal_matrix(Peer& peer) {
   const auto partial = peer.arm("partial-error"); const auto partial_result = client.complete(request(partial), run(true));
   require(text(failure(partial_result, sp::ErrorKind::RemoteFailure).partial.messages) == "partial owned", "partial error lost deltas"); peer.count(partial, 1, 1);
   const auto truncated = peer.arm("partial"); Capture cut; auto op = client.start(request(truncated), run(true), cut.callbacks());
-  peer.wait(truncated, "held"); cut.observed(true); peer.release(truncated);
+  peer.wait(truncated, "held"); cut.text_observed("partial owned"); peer.release(truncated);
   const auto cut_result = finish(op, cut); require(text(failure(cut_result).partial.messages) == "partial owned", "truncation lost owned deltas");
   incomplete_native(std::get<sp::Failure>(*cut_result).partial.messages); peer.count(truncated, 1, 1);
+}
+void named_error_outcomes_and_retry(Peer& peer) {
+  Result retained;
+  {
+    Client client(descriptor(peer), options());
+    auto retry = run(true);
+    retry.retry = sp::runtime::RetryPolicy{true, true, 2, 0ms, 0ms};
+    for (const auto scenario : {"named-empty-malformed", "named-completed-malformed", "named-completed-sentinel",
+        "named-partial-typeless", "named-completed-typeless", "named-completed-wrong-type", "named-empty-typeless"}) {
+      const std::string_view name = scenario;
+      const bool malformed = name.ends_with("-malformed") || name.ends_with("-sentinel");
+      const bool empty = name.starts_with("named-empty-");
+      const std::string expected = empty ? "" : name.starts_with("named-partial-") ? "partial owned" : "hello";
+      const auto model = peer.arm(scenario);
+      const auto result = client.complete(request(model), retry);
+      const auto& f = failure(result, malformed ? sp::ErrorKind::RemoteFailure : sp::ErrorKind::RateLimited);
+      require(text(f.partial.messages) == expected, "named error discarded original output");
+      require(f.error.retry_safety == (empty ? sp::RetrySafety::PossiblyAccepted : sp::RetrySafety::OutputObserved),
+          "raw error document became generated output or partial output lost retry protection");
+      const auto attempts = empty && !malformed ? 2U : 1U;
+      require(f.error.attempt.attempts == attempts && f.error.http_status == 200 &&
+          f.error.attempt.response_head_seen && f.error.attempt.request_may_have_left,
+          "named error lost real HTTP attempt evidence");
+      require(f.error.vendor_code == (malformed ? "" : "rate_limit_exceeded"), "named error lost vendor classification");
+      if (!malformed) {
+        require(f.error.retry_class == sp::RetryClass::AfterReset, "named vendor error lost retry policy");
+        require(f.partial.raw_events.back().type == "error" &&
+            f.partial.raw_events.back().payload->root().get("error").get("code").as_string() == "rate_limit_exceeded",
+            "named error did not retain original valid DOM");
+        if (name.ends_with("-wrong-type"))
+          require(f.partial.raw_events.back().payload->root().get("type").as_string() == "response.completed",
+              "named error rewrote contradictory payload type");
+        else require(!f.partial.raw_events.back().payload->root().get("type").valid(), "named error manufactured payload type");
+        if (empty) require(f.partial.raw_events.size() == 2 && f.partial.messages.empty() && !f.partial.stop &&
+            !f.partial.wire_envelope && f.partial.usage.stage == sp::UsageStage::Missing &&
+            f.error.attempt.prior_usage_unknown, "no-output retries dropped prior raw error or invented semantic output");
+        retained = result;
+      }
+      incomplete_native(f.partial.messages);
+      peer.count(model, attempts, attempts);
+    }
+  }
+  const auto& raw = failure(retained, sp::ErrorKind::RateLimited).partial.raw_events;
+  require(raw[0].payload->root().get("vendor").get("b").at(0).as_uint() == 2 &&
+      raw[1].payload->root().get("vendor").get("a").as_bool(), "client destruction invalidated retried raw error DOM");
 }
 void close_cancel_deadline_and_retention(Peer& peer) {
   Result retained, retained_failure;
@@ -173,12 +231,12 @@ void close_cancel_deadline_and_retention(Peer& peer) {
     Client client(descriptor(peer), options());
     for (const auto scenario : {"close-gate", "completed-reset"}) {
       const auto model = peer.arm(scenario); Capture capture; auto op = client.start(request(model), run(true), capture.callbacks());
-      peer.wait(model, "held"); capture.observed(); capture.pending(); peer.release(model); auto result = finish(op, capture);
+      peer.wait(model, "held"); capture.terminal_observed(); capture.pending(); peer.release(model); auto result = finish(op, capture);
       if (std::string_view(scenario) == "close-gate") { retained = result; require(text(completion(result).messages) == "hello", "normal close lost completion"); peer.count(model, 1); }
       else { const auto& f = failure(result); incomplete_native(f.partial.messages); require(f.partial.usage.stage != sp::UsageStage::Final, "reset after terminal finalized usage"); peer.count(model, 1, 1); }
     }
     const auto cancelled = peer.arm("partial"); Capture cancel; auto op = client.start(request(cancelled), run(true), cancel.callbacks());
-    peer.wait(cancelled, "held"); cancel.observed(true); op.cancel(); auto result = finish(op, cancel);
+    peer.wait(cancelled, "held"); cancel.text_observed("partial owned"); op.cancel(); auto result = finish(op, cancel);
     retained_failure = result;
     const auto& f = failure(result, sp::ErrorKind::Cancelled); require(text(f.partial.messages) == "partial owned", "cancel lost partial ownership"); incomplete_native(f.partial.messages); peer.count(cancelled, 1);
     const auto model = peer.arm("hold"); Capture deadline; auto timed = run(false); timed.deadline = runtime_test::Clock::now() + 5s;
@@ -187,7 +245,15 @@ void close_cancel_deadline_and_retention(Peer& peer) {
   }
   require(text(completion(retained).messages) == "hello", "client destruction invalidated retained completion");
   require(std::get<sp::Reasoning>(completion(retained).messages[0].parts[0]).encrypted_content == cipher, "client destruction invalidated retained cipher");
+  const auto& complete_raw = completion(retained).raw_events;
+  require(!complete_raw.empty() && complete_raw.back().type == "response.completed" &&
+      complete_raw.back().payload->root().get("response").get("output").at(0).get("encrypted_content").as_string() ==
+          "TERMINAL_ONLY_REPRESENTATION", "native authority replaced original terminal wire evidence");
   require(text(failure(retained_failure, sp::ErrorKind::Cancelled).partial.messages) == "partial owned", "client destruction invalidated retained failure");
+  const auto& partial = failure(retained_failure, sp::ErrorKind::Cancelled).partial;
+  require(partial.wire_envelope && partial.wire_envelope->root().get("status").as_string() == "in_progress", "client destruction invalidated retained envelope");
+  require(!partial.raw_events.empty() && partial.raw_events.back().type == "response.output_text.delta" &&
+      partial.raw_events.back().payload->root().get("delta").as_string() == "partial owned", "cancel lost owned raw text observation");
 }
 void incomplete_and_opaque(Peer& peer) {
   Client client(descriptor(peer), options());
@@ -211,7 +277,7 @@ int main(int argc, char** argv) {
     runtime_test::LogCapture logs;
     {
       Peer peer(argv[1], argv[2]); two_turn_and_refusal(peer); negative_replay_is_only_model_free(peer);
-      failed_terminal_matrix(peer); close_cancel_deadline_and_retention(peer); incomplete_and_opaque(peer);
+      failed_terminal_matrix(peer); named_error_outcomes_and_retry(peer); close_cancel_deadline_and_retention(peer); incomplete_and_opaque(peer);
     }
     const auto captured = logs.finish(); require(captured.find(key) == std::string::npos && captured.find(cipher) == std::string::npos, "credential/cipher leaked in diagnostics");
     std::cout << "Responses model-free HTTP contracts passed (not vendor replay validation)\n"; return 0;

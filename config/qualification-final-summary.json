@@ -1,0 +1,90 @@
+{
+  "version": 1,
+  "actual_final_meter": {
+    "calls": 1110,
+    "spent_micro_usd": 437958,
+    "held_micro_usd": 1287828,
+    "exact_settlements": 480,
+    "upper_bound_settlements": 618,
+    "unknown_settlements": 12,
+    "call_limit": 1110,
+    "money_limit_micro_usd": 4000000,
+    "original_call_limit": 630,
+    "original_money_limit_micro_usd": 1000000,
+    "extension_authorization_events": 1,
+    "extension_calls": 480,
+    "extension_micro_usd": 3000000,
+    "baseline_vision_calls": 99,
+    "baseline_vision_exposure_micro_usd": 18979680
+  },
+  "billing": "catalogue_meter_not_invoice",
+  "observed_plus_held_micro_usd": 1725786,
+  "paired_samples": [
+    {
+      "family": "chat",
+      "pairs": 60,
+      "requests": 120,
+      "passes": 120,
+      "failures": 0,
+      "qualified_pairs": 60
+    },
+    {
+      "family": "responses",
+      "pairs": 60,
+      "requests": 120,
+      "passes": 120,
+      "failures": 0,
+      "qualified_pairs": 60
+    },
+    {
+      "family": "messages",
+      "pairs": 60,
+      "requests": 120,
+      "passes": 120,
+      "failures": 0,
+      "qualified_pairs": 60
+    },
+    {
+      "family": "gemini",
+      "pairs": 60,
+      "requests": 120,
+      "passes": 116,
+      "failures": 4,
+      "qualified_pairs": 56
+    },
+    {
+      "family": "interactions",
+      "pairs": 60,
+      "requests": 120,
+      "passes": 117,
+      "failures": 3,
+      "qualified_pairs": 57
+    }
+  ],
+  "total_pairs": 300,
+  "qualified_pairs": 293,
+  "requests_with_vision_success": 593,
+  "all_baseline_requests": 600,
+  "native_delivery_observations": {
+    "generate_signature_mutation": "accepted",
+    "generate_combined_omission": "accepted",
+    "generate_duplicate": "accepted",
+    "interactions_signature_one_owner_mutation": "accepted",
+    "interactions_thought_carrier_signature_omission": "accepted",
+    "interactions_call_carrier_signature_omission": "accepted",
+    "interactions_duplicate_carrier": "accepted",
+    "interactions_all_native_thought_groups_and_signatures_removed": "HTTP400generic",
+    "interactions_all_signature_fields_removed_thought_items_retained": "HTTP400generic"
+  },
+  "claim_limitations": [
+    "No native consumption or model equivalence proved",
+    "Interactions aggregate signature absence rejected, but generic400 is not cryptographic issuer-validation proof",
+    "Last signatures-only capture had local original-retention control; server positive control is a prior same-profile cohort"
+  ],
+  "sources": [
+    "config/qualification-extension-results.json",
+    "config/qualification-native-axis-results.json",
+    "config/qualification-combined-omission-results.json",
+    "config/qualification-signature-presence-results.json"
+  ]
+}

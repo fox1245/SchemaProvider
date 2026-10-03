@@ -52,6 +52,119 @@ std::string text(const std::vector<Message>& messages) {
   for (const auto& m : messages) for (const auto& p : m.parts) if (auto t = std::get_if<Text>(&p)) result += t->value;
   return result;
 }
+void owned_raw_observations() {
+  for (bool streaming : {false, true}) {
+    std::vector<Frame> sources;
+    const std::string content = R"([{"type":"text","text":"kept"}])";
+    auto source = streaming ? start().second : body(content);
+    source.pop_back();
+    source += R"(,"vendor":{"z":[3,{"b":true,"a":null}],"a":"retained"},"service_tier":"future"})";
+    sources.emplace_back(streaming ? "message_start" : "", source);
+    if (streaming) {
+      sources.push_back(block(0, R"({"type":"text","text":"kept"})"));
+      sources.push_back(end(0)); sources.push_back(stop()); sources.push_back(done);
+    }
+    std::vector<RawWire> observed;
+    bool begun = false;
+    const auto outcome = [&] {
+      Accumulator accumulator({}, [&](const Event& event) {
+        if (const auto* raw = std::get_if<RawWire>(&event)) {
+          CHECK(raw->payload->root().dump() == sources.at(observed.size()).second);
+          observed.push_back(*raw);
+        } else if (std::holds_alternative<Begin>(event)) {
+          CHECK(observed.at(0).payload->root().get("vendor").get("a").as_string() == "retained");
+          begun = true;
+        }
+      });
+      messages::Codec codec(descriptor_value(), streaming ? messages::Mode::Sse : messages::Mode::Buffered, accumulator, context());
+      if (streaming) {
+        for (const auto& [event, wire] : sources) CHECK(codec.frame(event, wire));
+        codec.finish();
+      } else CHECK(codec.buffered(source, {}));
+      CHECK(accumulator.outcome());
+      return *accumulator.outcome();
+    }();
+    const auto& completion = completed(outcome);
+    CHECK(begun && text(completion.messages) == "kept");
+    CHECK(completion.raw_events.size() == sources.size());
+    for (size_t i = 0; i < sources.size(); ++i) {
+      CHECK(completion.raw_events[i].payload == observed[i].payload);
+      CHECK(completion.raw_events[i].payload->root().dump() == sources[i].second);
+      CHECK(completion.raw_events[i].type == (streaming ? sources[i].first : "message"));
+    }
+    const auto nested = completion.raw_events[0].payload->root().get("vendor").get("z").at(1);
+    auto member = nested.members().begin();
+    CHECK((*member++).key == "b" && (*member).key == "a");
+  }
+}
+void raw_failure_evidence() {
+  const auto initial = start();
+  const auto content = block(0, R"({"type":"text","text":"partial"})");
+  const Frame error{"error", R"({"type":"error","error":{"message":"private vendor error","extra":[2,1]},"vendor":{"opaque":true}})"};
+  const auto outcome = [&] {
+    Accumulator accumulator;
+    messages::Codec codec(descriptor_value(), messages::Mode::Sse, accumulator, context());
+    CHECK(codec.frame(initial.first, initial.second));
+    CHECK(codec.frame(content.first, content.second));
+    CHECK(!codec.frame(error.first, error.second));
+    CHECK(!codec.frame(ping.first, ping.second));
+    codec.finish({false, ErrorKind::Cancelled});
+    return *accumulator.outcome();
+  }();
+  const auto& failure = failed(outcome, ErrorKind::RemoteFailure);
+  CHECK(text(failure.partial.messages) == "partial");
+  CHECK(failure.partial.raw_events.size() == 3);
+  CHECK(failure.partial.raw_events[0].payload->root().dump() == initial.second);
+  CHECK(failure.partial.raw_events[1].payload->root().dump() == content.second);
+  CHECK(failure.partial.raw_events[2].type == "error");
+  CHECK(failure.partial.raw_events[2].payload->root().dump() == error.second);
+  CHECK(failure.error.safe_message.find("private") == std::string::npos);
+  for (const auto& message : failure.partial.messages) CHECK(!message.native || !message.native->complete());
+  for (const auto& malformed : {"{", "unstructured error", "[]", R"({"x":1,"x":2})"}) {
+    const auto rejected = stream({{"error", malformed}});
+    CHECK(failed(rejected, ErrorKind::RemoteFailure).partial.raw_events.empty());
+  }
+  const auto truncated = stream({initial, content});
+  const auto& partial = failed(truncated, ErrorKind::Truncated).partial;
+  CHECK(partial.raw_events.size() == 2);
+  CHECK(partial.raw_events[1].payload->root().dump() == content.second);
+  CHECK(text(partial.messages) == "partial");
+  for (const auto& message : partial.messages) CHECK(!message.native || !message.native->complete());
+  const auto buffered_wire = body(R"([{"type":"text","text":"partial"}])");
+  const auto buffered_truncated = buffered(buffered_wire, {false, ErrorKind::Truncated});
+  CHECK(failed(buffered_truncated, ErrorKind::Truncated).partial.raw_events[0].payload->root().dump() == buffered_wire);
+  const auto buffered_error = buffered(error.second);
+  CHECK(failed(buffered_error, ErrorKind::RemoteFailure).partial.raw_events[0].payload->root().dump() == error.second);
+}
+void typeless_buffered_error() {
+  const std::string wire = R"({"error":{"type":"overloaded_error","message":"private vendor error","extra":[2,1]},"vendor":{"b":true,"a":null}})";
+  std::shared_ptr<const json::Document> observed;
+  size_t commits = 0;
+  const auto outcome = [&] {
+    Accumulator acc({}, [&](const Event& event) {
+      if (const auto* raw = std::get_if<RawWire>(&event)) observed = raw->payload;
+      if (std::holds_alternative<Commit>(event)) ++commits;
+    });
+    messages::Codec codec(descriptor_value(), messages::Mode::Buffered, acc, context());
+    CHECK(!codec.buffered(wire, {}));
+    CHECK(acc.outcome()); return *acc.outcome();
+  }();
+  const auto& f = failed(outcome, ErrorKind::RemoteFailure);
+  CHECK(commits == 0 && f.partial.messages.empty() && !f.partial.wire_envelope && !f.partial.stop);
+  CHECK(f.partial.raw_events.size() == 1 && f.partial.raw_events[0].type == "messages.buffered");
+  CHECK(observed && f.partial.raw_events[0].payload == observed && observed->root().dump() == wire);
+  CHECK(!observed->root().get("type").valid() && f.error.safe_message.find("private") == std::string::npos);
+  CHECK(f.partial.usage.stage == UsageStage::Missing && !f.partial.usage.total);
+  const auto cancelled = buffered(wire, {false, ErrorKind::Cancelled});
+  CHECK(failed(cancelled, ErrorKind::Cancelled).partial.raw_events[0].payload->root().dump() == wire);
+  const std::string large = "{\"error\":{\"message\":" + json::quote(std::string(1 << 20, 'x')) + "}}";
+  SemanticLimits limits; limits.max_content_bytes = 2 << 20;
+  Accumulator capped(limits, {}, 4096);
+  messages::Codec codec(descriptor_value(), messages::Mode::Buffered, capped, context(), limits);
+  CHECK(!codec.buffered(large, {}));
+  const auto& overflow = failed(*capped.outcome(), ErrorKind::RemoteFailure);
+  CHECK(overflow.partial.raw_events.empty() && overflow.partial.messages.empty() && !overflow.partial.stop);
+}
 void terminal_matrix() {
   const std::vector<Frame> sequence{start(), block(0, R"({"type":"text","text":"partial"})"), end(0), stop(), done};
   for (size_t n = 0; n <= sequence.size(); ++n) for (bool normal : {false, true}) {
@@ -118,8 +231,16 @@ void tool_fragments() {
     const auto& invalid = std::get<InvalidToolCall>(completed(outcome).messages[0].parts[0]);
     CHECK(invalid.raw_fragment == bad.args && invalid.reason == bad.reason);
   }
-  const auto duplicate = buffered(body(R"([{"type":"tool_use","id":"a","name":"f","input":{"x":1,"x":2}}])", "\"tool_use\""));
-  CHECK(std::get<InvalidToolCall>(completed(duplicate).messages[0].parts[0]).reason == InvalidReason::DuplicateKey);
+  const auto duplicate_wire = body(R"([{"type":"tool_use","id":"a","name":"f","input":{"x":1,"x":2}}])", "\"tool_use\"");
+  const auto duplicate = buffered(duplicate_wire);
+  const auto& duplicate_completion = completed(duplicate);
+  const auto& invalid = std::get<InvalidToolCall>(duplicate_completion.messages[0].parts[0]);
+  CHECK(invalid.reason == InvalidReason::DuplicateKey && invalid.raw_fragment == R"({"x":1,"x":2})");
+  CHECK(duplicate_completion.raw_events[0].payload->root().dump() == duplicate_wire);
+  auto members = duplicate_completion.raw_events[0].payload->root().get("content").at(0).get("input").members();
+  auto member = members.begin();
+  CHECK((*member).key == "x" && (*member++).value.as_uint() == 1);
+  CHECK((*member).key == "x" && (*member++).value.as_uint() == 2 && member == members.end());
   failed(buffered(body(R"([{"type":"tool_use","id":"a","name":"f","input":{"x":1,"x":2},"caller":{"type":"direct","type":"direct"}}])")), ErrorKind::ProtocolCorrupt);
 }
 void server_semantics() {
@@ -332,6 +453,7 @@ void limits_and_close_priority() {
 } // namespace
 int main() {
   try {
+    owned_raw_observations(); raw_failure_evidence(); typeless_buffered_error();
     usage_binding_precedence();
     usage_detail_forward_compatibility(); toolset_metadata_shapes();
     terminal_matrix(); text_thinking_and_order(); tool_fragments(); server_semantics(); server_result_shapes();

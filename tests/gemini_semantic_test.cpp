@@ -80,6 +80,8 @@ void native_group_and_replay() {
     bad = r; bad.system += "edit"; reject(bad);
     bad = r; bad.thinking_budget = 0; reject(bad);
     bad = r; bad.tools[0].description += "edit"; reject(bad);
+    bad = r; bad.include_thoughts = false; reject(bad);
+    bad = r; bad.max_output_tokens = 2049; reject(bad);
     bad = r; bad.messages.pop_back(); CHECK(std::holds_alternative<Error>(gemini::encode(desc(), bad, false)));
     bad = r; std::get<ToolResult>(bad.messages[2].parts[0]).tool_use_id = "foreign"; CHECK(std::holds_alternative<Error>(gemini::encode(desc(), bad, false)));
   }
@@ -174,8 +176,69 @@ void errors_and_terminals() {
   o = buffered(body(R"([{"toolCall":{"id":"server","toolType":"GOOGLE_SEARCH","args":{}}},{"codeExecutionResult":{"outcome":"OUTCOME_OK","output":"one"}}])"));
   for (const auto& p : complete(o).messages[0].parts) CHECK(std::holds_alternative<Opaque>(p));
 }
+void raw_observation_ownership() {
+  auto wire = body(R"([{"toolCall":{"id":"server","toolType":"GOOGLE_SEARCH","args":{"z":[null,2,1]}}}])");
+  wire.pop_back(); wire += R"(,"future":{"z":[null,{"b":2,"a":1}],"a":false}})";
+  auto outcome = buffered(wire);
+  const auto& done = complete(outcome);
+  CHECK(done.raw_events.size() == 1 && done.raw_events[0].payload->root().dump() == wire);
+  CHECK(std::holds_alternative<Opaque>(done.messages[0].parts[0]));
+  const auto prefix = body(R"([{"text":"owned prefix"}])", "", "null");
+  const auto terminal = body("[]", "STOP", "null");
+  const auto trailing = R"({"usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":2},"future":[3,2,1]})";
+  outcome = stream({prefix, terminal, trailing});
+  const auto& history = complete(outcome).raw_events;
+  CHECK(history.size() == 3);
+  CHECK(history[0].payload->root().dump() == prefix && history[1].payload->root().dump() == terminal &&
+      history[2].payload->root().dump() == trailing);
+  CHECK(!complete(outcome).usage.output_total && !complete(outcome).usage.reasoning);
+  outcome = stream({prefix});
+  const auto& partial = failure(outcome, ErrorKind::Truncated).partial;
+  CHECK(partial.raw_events.size() == 1 && partial.raw_events[0].payload->root().dump() == prefix);
+  CHECK(std::get<Text>(partial.messages[0].parts[0]).value == "owned prefix");
+  const auto duplicate = body(R"([{"functionCall":{"id":"dup","name":"lookup","args":{"z":1,"z":2,"a":[3,2]}}}])");
+  outcome = buffered(duplicate);
+  const auto& invalid = complete(outcome);
+  CHECK(invalid.raw_events[0].payload->root().dump() == duplicate);
+  CHECK(std::get<InvalidToolCall>(invalid.messages[0].parts[0]).raw_fragment == R"({"z":1,"z":2,"a":[3,2]})");
+  CHECK(!invalid.messages[0].native || !invalid.messages[0].native->complete());
+  const auto unsupported = body(R"([{"futureTool":{"b":2,"a":1}}])");
+  outcome = buffered(unsupported);
+  CHECK(failure(outcome, ErrorKind::Unsupported).partial.raw_events[0].payload->root().dump() == unsupported);
+  const auto remote = R"({"error":{"message":"private","vendor":{"b":2,"a":1}}})";
+  outcome = buffered(remote);
+  CHECK(failure(outcome, ErrorKind::RemoteFailure).partial.raw_events[0].payload->root().dump() == remote);
+  outcome = stream({prefix, terminal, remote});
+  const auto& rejected = failure(outcome, ErrorKind::RemoteFailure).partial;
+  CHECK(rejected.raw_events.size() == 3 && rejected.raw_events[2].payload->root().dump() == remote);
+  CHECK(rejected.stop && rejected.stop->kind == StopKind::EndTurn);
+}
+void named_error_raw_ownership() {
+  const auto prefix = body(R"([{"text":"before error"}])", "", "null");
+  const auto structured = R"({"code":429,"details":{"future":[{"b":2,"a":1}]},"message":"private"})";
+  for (const auto& error : {std::string(structured), std::string("{"), std::string("unstructured"), std::string("[]")}) {
+    const auto outcome = [&] {
+      Accumulator a; gemini::Codec c(desc(), gemini::Mode::Sse, a, context());
+      CHECK(c.frame("message", prefix)); CHECK(!c.frame("error", error));
+      CHECK(!c.frame("message", body("[]"))); c.finish();
+      CHECK(a.outcome()); return *a.outcome();
+    }();
+    const auto& partial = failure(outcome, ErrorKind::RemoteFailure).partial;
+    CHECK(std::get<Text>(partial.messages[0].parts[0]).value == "before error");
+    CHECK(partial.raw_events.size() == (error == structured ? 2U : 1U));
+    CHECK(partial.raw_events[0].payload->root().dump() == prefix);
+    if (error == structured) CHECK(partial.raw_events[1].type == "error" &&
+        partial.raw_events[1].payload->root().dump() == structured);
+  }
+  const auto bounded = [&] {
+    Accumulator a({}, {}, 0); gemini::Codec c(desc(), gemini::Mode::Sse, a, context());
+    CHECK(!c.frame("error", "{\"vendor\":\"" + std::string(8192, 'x') + "\"}"));
+    CHECK(a.outcome()); return *a.outcome();
+  }();
+  CHECK(failure(bounded, ErrorKind::RemoteFailure).partial.raw_events.empty());
+}
 }
 int main() {
-  try { terminal_with_omitted_parts(); successive_unidentified_calls(); native_group_and_replay(); nullable_usage(); invalid_model_calls(); errors_and_terminals(); std::cout << "Gemini semantic invariants passed\n"; }
+  try { raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); successive_unidentified_calls(); native_group_and_replay(); nullable_usage(); invalid_model_calls(); errors_and_terminals(); std::cout << "Gemini semantic invariants passed\n"; }
   catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

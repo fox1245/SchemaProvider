@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/interface_contract.h"
 #include "codecs/chat.h"
 #include "codecs/messages_request.h"
 #include "codecs/responses_request.h"
@@ -16,6 +17,14 @@
 
 namespace sp::runtime {
 
+// Out-of-line capability gate checks the actually linked runtime and core.
+InterfaceContract interface_contract() noexcept;
+class InterfaceContractError final : public std::exception {
+ public:
+  const char* what() const noexcept override;
+};
+void require_interface_contract(std::uint32_t expected_revision, std::uint64_t required_capabilities);
+
 using Request = std::variant<chat::Request, messages::Request, responses::Request, gemini::Request, interactions::Request>;
 using Result = std::shared_ptr<const Outcome>;
 
@@ -23,29 +32,31 @@ struct RunOptions {
   bool streaming = true;
   std::optional<SteadyTime> deadline;
   std::stop_token stop_token;
-  RetryPolicy retry;
+  std::optional<RetryPolicy> retry;
 };
 
 struct Limits {
-  std::size_t max_operations = 256;
-  std::size_t queued_body_chunks = 16;
-  std::size_t queued_body_bytes = 256 << 10;
-  std::size_t max_response_bytes = 16 << 20;
-  std::size_t max_error_bytes = 64 << 10;
+  std::size_t max_operations = config_defaults::defaults_max_operations;
+  std::size_t queued_body_chunks = config_defaults::defaults_queued_body_chunks;
+  std::size_t queued_body_bytes = config_defaults::defaults_queued_body_bytes;
+  std::size_t max_response_bytes = config_defaults::defaults_max_response_bytes;
+  std::size_t max_error_bytes = config_defaults::defaults_max_error_bytes;
   SemanticLimits semantic;
   transport::SseLimits sse;
 };
 
 struct Options {
-  std::size_t workers = 2;
+  Options(configuration::PolicySnapshot = configuration::builtin_runtime_policy());
+  configuration::PolicySnapshot policy;
+  std::size_t workers = config_defaults::defaults_workers;
   transport::TransportOptions transport;
   transport::HttpVersion http_version = transport::HttpVersion::Auto;
   std::string ca_file;
   std::string api_key;
-  std::chrono::milliseconds default_timeout{30000};
-  std::chrono::milliseconds slow_callback_threshold{50};
-  std::size_t retry_tokens = 16;
-  double retry_tokens_per_second = 1;
+  std::chrono::milliseconds default_timeout{config_defaults::defaults_default_timeout_ms};
+  std::chrono::milliseconds slow_callback_threshold{config_defaults::defaults_slow_callback_threshold_ms};
+  std::size_t retry_tokens = config_defaults::defaults_retry_tokens;
+  double retry_tokens_per_second = config_defaults::defaults_retry_tokens_per_second;
   Limits limits;
 };
 
@@ -98,21 +109,58 @@ class Operation {
   friend class detail::ClientAccess;
 };
 
+// Move-only pre-dispatch admission. Encoding/native validation happens once;
+// no executor callback, timer, transport or provider request runs before start().
+// The bounded preparation slot is released on abandonment. Views are borrowed
+// from this handle; encoded_body may contain sensitive native provider state.
+class PreparedRequest {
+ public:
+  PreparedRequest() = default;
+  ~PreparedRequest();
+  PreparedRequest(PreparedRequest&&) noexcept;
+  PreparedRequest& operator=(PreparedRequest&&) noexcept;
+  PreparedRequest(const PreparedRequest&) = delete;
+  PreparedRequest& operator=(const PreparedRequest&) = delete;
+  bool valid() const noexcept;
+  const Error* error() const noexcept;
+  std::string_view family() const noexcept;
+  std::string_view model() const noexcept;
+  std::string_view encoded_body() const noexcept;
+  SteadyTime deadline() const noexcept;
+  const descriptor::ValidatedDescriptor* descriptor() const noexcept;
+  const RetryPolicy* retry_policy() const noexcept;
+  std::optional<std::uint64_t> max_output_tokens() const noexcept;
+  const Limits* limits() const noexcept;
+  const NativeContext* native_context() const noexcept;
+  std::optional<std::uint64_t> model_invocation_limit() const noexcept;
+ private:
+  explicit PreparedRequest(std::shared_ptr<detail::OperationState>);
+  void release() noexcept;
+  std::shared_ptr<detail::OperationState> state_;
+  friend class Client;
+  friend class detail::ClientAccess;
+};
+
 class Client {
  public:
   // One immutable descriptor/credential-origin and one shared retry budget.
-  // Invalid options throw a fixed, non-sensitive invalid_argument message.
+  // Invalid options throw ConfigError with fixed, non-sensitive diagnostics.
   explicit Client(descriptor::ValidatedDescriptor, Options = {});
   ~Client();
   Client(const Client&) = delete;
   Client& operator=(const Client&) = delete;
   Client(Client&&) noexcept;
   Client& operator=(Client&&) noexcept;
+  // Holds a bounded slot and the original absolute deadline. An initial error
+  // is observable before a durable dispatch receipt or money reservation.
+  PreparedRequest prepare(Request, RunOptions = {});
+  Operation start(PreparedRequest, Callbacks = {});
   // Accepted operations always deliver on the executor, including preflight failures.
   // Capacity/shutdown/moved-client rejection throws AdmissionError; no callback runs.
   Operation start(Request, RunOptions = {}, Callbacks = {});
   // AdmissionError is translated to the same owned Failure result.
   Result complete(Request, RunOptions = {});
+  Result complete(PreparedRequest);
   Diagnostics diagnostics() const noexcept;
  private:
   explicit Client(std::shared_ptr<detail::ClientState>);

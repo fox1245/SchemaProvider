@@ -1,5 +1,6 @@
 #include "canary/canary.h"
 #include "canary/io.h"
+#include "canary/qualification.h"
 #include "core/native.h"
 #include "json/json.h"
 #include "runtime/testing.h"
@@ -10,12 +11,12 @@ namespace sp::canary {
 namespace {
 struct WireState {
   Case* result{};
-  Totals total;
-  bool total_known{};
+  detail::Qualification* qualification{};
   const Message* expected{};
   bool omission{}, removed{};
   bool negative{}, retained{}, mutated{}, rejected{};
   std::string positive_wire;
+  bool responses = false;
 };
 std::shared_ptr<const json::Document> document(std::string_view text) {
   auto parsed = json::parse(text);
@@ -184,54 +185,14 @@ class RealAttempt final : public runtime::detail::Attempt {
 };
 class GuardedTransport final : public runtime::detail::AttemptTransport {
  public:
-  GuardedTransport(const Profile& profile, std::string ledger, std::shared_ptr<WireState> state)
-      : profile_(profile), ledger_(std::move(ledger)), state_(std::move(state)), backend_(std::make_unique<transport::Transport>()) {}
+  explicit GuardedTransport(std::shared_ptr<WireState> state)
+      : state_(std::move(state)), backend_(std::make_unique<transport::Transport>()) {}
   std::unique_ptr<runtime::detail::Attempt> start(transport::HttpRequest request, transport::Callbacks callbacks) override {
     auto& state = *state_;
     auto& result = *state.result;
-    const bool responses = profile_.provider() == Provider::OpenAIResponses;
-    if (profile_.provider() == Provider::OpenAI || responses) {
-      // An omitted tier inherits a project's premium setting. This campaign
-      // uses only standard pricing, independently of that account default.
-      if (request.body.empty() || request.body.back() != '}') detail::fail();
-      request.body.pop_back();
-      request.body.append(",\"service_tier\":\"default\"}");
-    }
-    if (profile_.provider() == Provider::Gemini) {
-      // Standard is Google's documented omitted tier. Explicitly disable
-      // thinking on this 2.5 text-only smoke; never enable tools or caching.
-      if (request.body.empty() || request.body.back() != '}') detail::fail();
-      request.body.pop_back();
-      request.body.append(",\"reasoning_effort\":\"none\"}");
-    }
-    if (state.expected) {
-      state.retained = responses ? responses_retained(request.body, *state.expected) : retained(request.body, *state.expected);
-      if (!state.retained) { result.reason = Reason::RetentionMismatch; detail::fail(); }
-      if (state.negative) {
-        if (state.positive_wire != request.body) { result.reason = Reason::RetentionMismatch; detail::fail(); }
-        const bool changed = state.omission ? omit_reasoning(request.body) :
-            responses ? mutate_ciphertext(request.body, *state.expected) : mutate(request.body, *state.expected);
-        if (!changed) { result.reason = Reason::MutationUnavailable; detail::fail(); }
-        state.removed = state.omission;
-        state.mutated = !state.omission;
-      } else state.positive_wire = request.body;
-    }
-    Debit debit;
-    try { debit = reserve(profile_, ledger_); }
-    catch (...) { state.total_known = false; result.reason = Reason::LedgerFailure; throw; }
-    state.total = debit.total;
-    state.total_known = true;
-    if (debit.result != Reservation::Allowed) {
-      switch (debit.result) {
-        case Reservation::Calls: result.reason = Reason::CallBudget; break;
-        case Reservation::Tokens: result.reason = Reason::TokenBudget; break;
-        case Reservation::Cost: result.reason = Reason::CostBudget; break;
-        default: break;
-      }
-      detail::fail();
-    }
+    const bool responses = state.responses;
+    state.qualification->dispatch(request.body, result);
     // The durable debit precedes even a possibly-failing backend start. No refunds.
-    ++result.attempts;
     if (state.negative) {
       struct Response { int status{}; std::string body; bool overflow{}; };
       auto response = std::make_shared<Response>();
@@ -265,8 +226,6 @@ class GuardedTransport final : public runtime::detail::AttemptTransport {
   }
   void shutdown() noexcept override { backend_.reset(); }
  private:
-  Profile profile_;
-  std::string ledger_;
   std::shared_ptr<WireState> state_;
   std::unique_ptr<transport::Transport> backend_;
 };
@@ -279,7 +238,10 @@ descriptor::ValidatedDescriptor descriptor_for(const Profile& profile) {
       json::quote(responses ? "openai.responses" : chat ? "openai.chat" : "anthropic.messages") + ",\"connection\":{\"base_url\":" +
       json::quote(profile.origin()) + ",\"paths\":{\"buffered\":" + json::quote(path) + ",\"streaming\":" + json::quote(path) + '}';
   if (!chat) source += ",\"headers\":{\"anthropic-version\":\"2023-06-01\"}";
-  source += "}}";
+  source += '}';
+  if (profile.provider() == Provider::OpenAI)
+    source += ",\"bindings\":{\"max_output_tokens\":\"max_completion_tokens\"}";
+  source += '}';
   auto loaded = descriptor::load(source);
   if (!std::holds_alternative<descriptor::ValidatedDescriptor>(loaded)) detail::fail();
   return std::get<descriptor::ValidatedDescriptor>(std::move(loaded));
@@ -312,10 +274,13 @@ Reason blocked_reason(Reason value) {
   }
 }
 } // namespace
-Report run(const Profile& profile, const std::string& ledger_path, std::string api_key) {
-  if (vision_provider(profile.provider())) return run_vision(profile, ledger_path, std::move(api_key));
+Report run(const Profile& profile, const std::string& project_root, std::string api_key, RunSelection selection) {
+  if (vision_provider(profile.provider())) return run_vision(profile, project_root, std::move(api_key), selection);
+  if (selection.mode != ExecutionMode::Full) detail::fail();
+  if (selection.repetition >= 630) detail::fail();
   Report report;
   report.provider = profile.provider(); report.test_only = profile.loopback();
+  report.repetition = selection.repetition + 1;
   const bool responses = profile.provider() == Provider::OpenAIResponses;
   report.replay = profile.provider() == Provider::Anthropic || responses ? Replay::ReplayAcceptanceUnobservable : Replay::NotApplicable;
   report.cases.reserve(responses ? 6 : profile.provider() == Provider::Gemini ? 2 : profile.provider() == Provider::Anthropic ? 5 : 4);
@@ -333,18 +298,34 @@ Report run(const Profile& profile, const std::string& ledger_path, std::string a
   }
   if (api_key.size() > 4096) detail::fail();
   for (unsigned char c : api_key) if (c < 0x21 || c > 0x7e) detail::fail();
-  auto wire = std::make_shared<WireState>();
+  detail::Qualification qualification(project_root);
+  auto wire = std::make_shared<WireState>(); wire->qualification = &qualification; wire->responses = responses;
   runtime::Options options; options.api_key = std::move(api_key); options.retry_tokens = 0;
   if (responses) options.default_timeout = std::chrono::seconds(120);
-  auto transport = std::make_shared<GuardedTransport>(profile, ledger_path, wire);
+  auto transport = std::make_shared<GuardedTransport>(wire);
   auto client = runtime::detail::ClientAccess::make(descriptor_for(profile), std::move(options), {}, transport);
   auto call = [&](runtime::Request request, std::size_t index, bool streaming) {
     auto& item = report.cases[index]; wire->result = &item;
     item.reason = Reason::RuntimeFailure;
-    runtime::RunOptions opts; opts.streaming = streaming; opts.retry.max_attempts = 1;
-    auto value = client.complete(std::move(request), opts);
-    report.reserved = wire->total;
-    report.reserved_known = wire->total_known;
+    runtime::RunOptions opts; opts.streaming = streaming;
+    opts.retry.emplace(); opts.retry->enabled = false; opts.retry->max_attempts = 1;
+    auto check_wire = [&](std::string& body) {
+      if (!wire->expected) return true;
+      wire->retained = responses ? responses_retained(body, *wire->expected) : retained(body, *wire->expected);
+      if (!wire->retained) { item.reason = Reason::RetentionMismatch; return false; }
+      if (!wire->negative) { wire->positive_wire = body; return true; }
+      if (wire->positive_wire != body) { item.reason = Reason::RetentionMismatch; return false; }
+      const bool changed = wire->omission ? omit_reasoning(body) :
+          responses ? mutate_ciphertext(body, *wire->expected) : mutate(body, *wire->expected);
+      if (!changed) { item.reason = Reason::MutationUnavailable; return false; }
+      wire->removed = wire->omission; wire->mutated = !wire->omission;
+      item.control_changed = true;
+      return true;
+    };
+    auto prepared = runtime::detail::ClientAccess::prepare_control(client, std::move(request), opts, check_wire);
+    if (!qualification.admit(profile, prepared, streaming, item, report)) return detail::not_run_result(item);
+    auto value = client.start(std::move(prepared)).join();
+    qualification.settle(value, item, report);
     if (const auto* good = completion(value)) {
       item.state = State::Passed; item.reason = Reason::None; usage(item, good->usage, profile.bounds());
       for (const auto& message : good->messages) {
@@ -371,6 +352,7 @@ Report run(const Profile& profile, const std::string& ledger_path, std::string a
   };
   if (profile.provider() == Provider::Gemini) {
     chat::Request request; request.model = profile.model(); request.max_output_tokens = profile.bounds().output_tokens;
+    request.reasoning_effort = "none";
     request.messages.push_back({Role::User, "Reply with the single word OK."});
     for (std::size_t i = 0; i < 2; ++i) {
       auto outcome = call(request, i, i == 1);
@@ -387,6 +369,7 @@ Report run(const Profile& profile, const std::string& ledger_path, std::string a
     responses::Request request;
     request.model = profile.model(); request.account_scope = "canary-process";
     request.max_output_tokens = profile.bounds().output_tokens;
+    request.service_tier = "default";
     request.reasoning = responses::ReasoningOptions{"low", "auto"};
     request.messages.push_back(Message{{}, Role::User, {Text{text_prompt}}});
     for (size_t i = 0; i < 2; ++i) {
@@ -459,6 +442,8 @@ Report run(const Profile& profile, const std::string& ledger_path, std::string a
   }
   if (profile.provider() == Provider::OpenAI) {
     chat::Request request; request.model = profile.model(); request.max_output_tokens = profile.bounds().output_tokens;
+    request.service_tier = "default";
+    request.reasoning_effort = "none";
     request.messages.push_back({Role::User, text_prompt});
     for (std::size_t i = 0; i < 2; ++i) {
       auto outcome = call(request, i, i == 1);
@@ -539,7 +524,7 @@ Report run(const Profile& profile, const std::string& ledger_path, std::string a
   if (control.dispatched) {
     if (wire->rejected && report.signature_mutated) {
       control.state = State::Passed; control.reason = Reason::SignatureRejected;
-      if (report.cases[3].state == State::Passed) report.replay = Replay::ReplayVerified;
+      if (!profile.loopback() && report.cases[3].state == State::Passed) report.replay = Replay::ReplayVerified;
     } else if (completion(negative)) {
       control.state = State::Failed; control.reason = Reason::NegativeAccepted;
     } else { control.state = State::Failed; control.reason = Reason::NegativeInconclusive; }

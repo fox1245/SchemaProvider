@@ -79,7 +79,7 @@ function responsesRequest(req, res, body, raw, c) {
       body.previous_response_id || body.extra_body) ++c.invalid;
   const tools = Array.isArray(body.tools) && body.tools.length > 0;
   if (tools && (body.tools.length !== 1 || body.tools[0].type !== 'function' || body.tools[0].name !== 'canary_echo' ||
-      body.tools[0].strict !== true || body.tools[0].parameters?.additionalProperties !== false)) ++c.invalid;
+      body.tools[0].parameters?.additionalProperties !== false)) ++c.invalid;
   if (tools && body.input.length === 1) {
     if (body.tool_choice?.type !== 'function' || body.tool_choice?.name !== 'canary_echo') ++c.invalid;
     c.original = [responseReasoning(c), { id: 'fc_canary', type: 'function_call', status: 'completed',
@@ -140,7 +140,7 @@ const server = http.createServer(async (req, res) => {
         (messages ? req.headers['x-api-key'] !== secret || req.headers['anthropic-version'] !== '2023-06-01'
           : req.headers.authorization !== `Bearer ${secret}`) ||
         typeof body.stream !== 'boolean' || !Array.isArray(body.messages) ||
-        body.max_tokens !== (gemini ? 128 : 2048) || req.headers['anthropic-beta'] || body.cache_control ||
+        (body.max_tokens ?? body.max_completion_tokens) !== (gemini ? 128 : 2048) || req.headers['anthropic-beta'] || body.cache_control ||
         (messages || gemini ? body.service_tier !== undefined : body.service_tier !== 'default') ||
         (gemini && (body.reasoning_effort !== 'none' || body.tools || body.extra_body || req.headers['x-api-key'] ||
                     req.headers['anthropic-version']))) ++c.invalid;

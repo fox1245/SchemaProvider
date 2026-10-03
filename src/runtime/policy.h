@@ -2,11 +2,14 @@
 
 #include "core/value.h"
 #include "transport/http_transport.h"
+#include "configuration/runtime_policy.h"
 
 #include <chrono>
 #include <optional>
 #include <string>
 #include <string_view>
+
+namespace sp::json { class Value; }
 
 namespace sp::runtime {
 
@@ -14,12 +17,14 @@ using SteadyTime = std::chrono::steady_clock::time_point;
 using WallTime = std::chrono::system_clock::time_point;
 
 struct RetryPolicy {
-  bool enabled = false;
-  bool allow_duplicate_billing_risk = false;
-  std::uint32_t max_attempts = 3;
-  std::chrono::milliseconds base_delay{100};
-  std::chrono::milliseconds max_delay{5000};
+  bool enabled = config_defaults::defaults_retry_enabled;
+  bool allow_duplicate_billing_risk = config_defaults::defaults_retry_allow_duplicate_billing_risk;
+  std::uint32_t max_attempts = config_defaults::defaults_retry_max_attempts;
+  std::chrono::milliseconds base_delay{config_defaults::defaults_retry_base_delay_ms};
+  std::chrono::milliseconds max_delay{config_defaults::defaults_retry_max_delay_ms};
 };
+
+RetryPolicy default_retry_policy(const configuration::RuntimePolicy&) noexcept;
 
 namespace detail {
 struct ResponseInfo {
@@ -30,10 +35,14 @@ struct ResponseInfo {
 };
 
 // Only admitted family codes/headers survive. Caller bounds error_body before inspection.
-ResponseInfo inspect_response(std::string_view family, int status,
+ResponseInfo inspect_response(const configuration::RuntimePolicy&, std::string_view family, int status,
                               const std::vector<transport::Header>& headers,
                               std::string_view error_body,
                               SteadyTime received, WallTime wall_received);
+ResponseInfo inspect_document_response(const configuration::RuntimePolicy&, std::string_view family, int status,
+                                      const std::vector<transport::Header>& headers,
+                                      json::Value error_document,
+                                      SteadyTime received, WallTime wall_received);
 Error classify_failure(const transport::Result&, const ResponseInfo&,
                        const std::optional<Error>& semantic_error,
                        bool semantic_output, std::uint32_t attempts, SteadyTime now);

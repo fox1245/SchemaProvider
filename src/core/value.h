@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/image.h"
+#include "sp/config_defaults.h"
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -42,7 +43,15 @@ struct ServerToolResult {
   std::string tool_use_id, wire_type;
   std::shared_ptr<const json::Document> content;
 };
-struct ToolResult { std::string tool_use_id, content; bool is_error = false; };
+struct ToolResultHostMetadata {
+  std::string name, status;
+  bool retryable = false, effect_uncertain = false;
+};
+struct ToolResult {
+  std::string tool_use_id, content;
+  bool is_error = false;
+  std::optional<ToolResultHostMetadata> host{};
+};
 struct Reasoning {
   std::string id;
   std::vector<std::string> summary;
@@ -95,6 +104,8 @@ struct AttemptEvidence {
   bool response_head_seen = false;
   std::uint32_t transport_internal_resends = 0;
   std::uint32_t attempts = 0;
+  // A real retried wire attempt could have accrued unreported provider usage.
+  bool prior_usage_unknown = false;
 };
 struct Error {
   ErrorKind kind = ErrorKind::ProtocolCorrupt;
@@ -106,8 +117,24 @@ struct Error {
   std::optional<std::chrono::milliseconds> retry_after{};
   AttemptEvidence attempt{};
 };
-struct Completion { std::vector<Message> messages; StopReason stop; Usage usage; };
-struct PartialCompletion { std::vector<Message> messages; Usage usage; std::optional<StopReason> stop; };
+// Owned wire observations, in arrival order before their semantic projections.
+// Neither field grants native replay authority.
+struct RawWire { std::string type; std::shared_ptr<const json::Document> payload; };
+struct Completion {
+  std::vector<Message> messages;
+  StopReason stop;
+  Usage usage;
+  std::shared_ptr<const json::Document> wire_envelope{};
+  AttemptEvidence attempt{};
+  std::vector<RawWire> raw_events{};
+};
+struct PartialCompletion {
+  std::vector<Message> messages;
+  Usage usage;
+  std::optional<StopReason> stop;
+  std::shared_ptr<const json::Document> wire_envelope{};
+  std::vector<RawWire> raw_events{};
+};
 struct Failure { Error error; PartialCompletion partial; };
 using Outcome = std::variant<Completion, Failure>;
 struct LocalId { uint32_t value = 0; friend bool operator==(LocalId, LocalId) = default; };
@@ -144,6 +171,12 @@ struct UsageUpdate { Usage snapshot; };
 struct Stop { StopReason reason; };
 struct Commit { std::string evidence; };
 struct Fail { Error error; };
-using Event = std::variant<Begin, MessageBegin, PartBegin, PartDelta, PartSeal, MessageSeal, UsageUpdate, Stop, Commit, Fail>;
-struct SemanticLimits { size_t max_parts = 1024; size_t max_content_bytes = 16 << 20; size_t max_tool_bytes = 1 << 20; size_t max_json_depth = 64; };
+struct ResponseEnvelope { std::shared_ptr<const json::Document> payload; };
+using Event = std::variant<Begin, MessageBegin, PartBegin, PartDelta, PartSeal, MessageSeal, UsageUpdate, Stop, Commit, Fail, RawWire, ResponseEnvelope>;
+struct SemanticLimits {
+  size_t max_parts = config_defaults::defaults_semantic_max_parts;
+  size_t max_content_bytes = config_defaults::defaults_semantic_max_content_bytes;
+  size_t max_tool_bytes = config_defaults::defaults_semantic_max_tool_bytes;
+  size_t max_json_depth = config_defaults::defaults_semantic_max_json_depth;
+};
 } // namespace sp

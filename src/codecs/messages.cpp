@@ -86,23 +86,40 @@ bool Codec::buffered(std::string_view body, Close close) {
 bool Codec::frame(std::string_view event, std::string_view data) {
   if (closed_ || accumulator_.terminal()) return false;
   if (mode_ != Mode::Sse) return fail(ErrorKind::Misuse, "unexpected stream frame");
-  // A named error is already authoritative, including after message_stop.
-  if (event == "error") return fail(ErrorKind::RemoteFailure, "remote error event");
   return document(data, event, true);
 }
 bool Codec::document(std::string_view bytes, std::string_view event, bool streaming) {
-  if (!context_valid_) return fail(ErrorKind::InvalidConfig, "Messages request context required");
-  if (bytes.size() > limits_.max_content_bytes - std::min(input_bytes_, limits_.max_content_bytes)) return fail(ErrorKind::ResourceLimit, "response byte limit");
+  const bool named_error = streaming && event == "error";
+  if (!named_error && !context_valid_) return fail(ErrorKind::InvalidConfig, "Messages request context required");
+  if (bytes.size() > limits_.max_content_bytes - std::min(input_bytes_, limits_.max_content_bytes))
+    return fail(named_error ? ErrorKind::RemoteFailure : ErrorKind::ResourceLimit, named_error ? "remote error event" : "response byte limit");
   input_bytes_ += bytes.size();
   auto parsed = json::parse(bytes, {limits_.max_content_bytes, limits_.max_json_depth});
-  json::Value root;
+  std::shared_ptr<const json::Document> wire;
   if (auto* e = std::get_if<json::ParseError>(&parsed)) {
     if (!streaming && e->code == json::ParseCode::DuplicateKey && e->context.root().is_object() && unique_envelope(e->context.root(), true))
-      root = e->context.root();
-    else return fail(e->code == json::ParseCode::SizeExceeded || e->code == json::ParseCode::DepthExceeded ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, "invalid response JSON");
-  } else root = std::get<json::Document>(parsed).root();
-  if (!root.is_object()) return fail(ErrorKind::ProtocolCorrupt, "response must be object");
-  if (root.get("error").valid() || (root.get("type").is_string() && root.get("type").as_string() == "error")) return fail(ErrorKind::RemoteFailure, "remote error response");
+      wire = std::make_shared<const json::Document>(std::move(e->context));
+    else return fail(named_error ? ErrorKind::RemoteFailure : e->code == json::ParseCode::SizeExceeded || e->code == json::ParseCode::DepthExceeded ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt,
+                     named_error ? "remote error event" : "invalid response JSON");
+  } else wire = std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
+  const auto root = wire->root();
+  if (!root.is_object()) return fail(named_error ? ErrorKind::RemoteFailure : ErrorKind::ProtocolCorrupt, named_error ? "remote error event" : "response must be object");
+  const auto payload_type = root.get("type");
+  std::string wire_type = named_error ? std::string(event)
+      : nonempty(payload_type) ? std::string(payload_type.as_string())
+      : !streaming ? "messages.buffered" : std::string(event);
+  if (named_error) {
+    const Error remote{ErrorKind::RemoteFailure, "remote error event"};
+    if (!accumulator_.accept(RawWire{std::move(wire_type), wire}, &remote)) return false;
+    return fail(remote.kind, remote.safe_message);
+  }
+  if (root.get("error").valid() || (payload_type.is_string() && payload_type.as_string() == "error")) {
+    const Error remote{ErrorKind::RemoteFailure, "remote error response"};
+    if (!accumulator_.accept(RawWire{std::move(wire_type), wire},
+                             buffered_failure_ ? &*buffered_failure_ : &remote)) return false;
+    return fail(remote.kind, remote.safe_message);
+  }
+  if (!emit(RawWire{std::move(wire_type), wire})) return false;
   if (!root.get("type").is_string()) return fail(ErrorKind::ProtocolCorrupt, "response type required");
   const auto type = root.get("type").as_string();
   if (!streaming) return message(root, false);

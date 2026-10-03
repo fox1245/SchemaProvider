@@ -83,6 +83,11 @@ void exact_steps_and_replay() {
     bad = next; std::swap(bad.messages[1].parts[0], bad.messages[1].parts[1]); reject(bad);
     bad = next; bad.thinking_level = "high"; reject(bad);
     bad = next; bad.account_scope = "foreign"; reject(bad);
+    bad = next; bad.thinking_summaries = false; reject(bad);
+    bad = next; bad.max_output_tokens = 129; reject(bad);
+    bad = next; bad.service_tier = "unsupported";
+    auto invalid_tier = interactions::encode(desc(), bad, false);
+    CHECK(std::holds_alternative<Error>(invalid_tier) && std::get<Error>(invalid_tier).kind == ErrorKind::InvalidRequest);
   }
   auto o = stream(frames()); CHECK(std::get<Text>(complete(o).messages[0].parts[1]).value == "answer");
 }
@@ -165,9 +170,67 @@ void stateless_missing_resource_id() {
       frame("interaction.completed", ",\"interaction\":{\"id\":\"\",\"model\":\"fixture-model\",\"status\":\"completed\",\"steps\":[" + output + "],\"usage\":" + counters + "}")});
   CHECK(complete(stateless).messages[0].id.empty() && complete(stateless).messages[0].native->complete());
 }
+void raw_observation_ownership() {
+  auto wire = resource("[" + output + "]");
+  wire.pop_back(); wire += R"(,"future":{"z":[null,{"b":2,"a":1}],"a":false}})";
+  auto outcome = buffered(wire);
+  CHECK(complete(outcome).raw_events.size() == 1 && complete(outcome).raw_events[0].payload->root().dump() == wire);
+  const auto sequence = frames();
+  outcome = stream(sequence);
+  const auto& history = complete(outcome).raw_events;
+  CHECK(history.size() + 1 == sequence.size());
+  for (size_t i = 0; i < history.size(); ++i)
+    CHECK(history[i].type == sequence[i].first && history[i].payload->root().dump() == sequence[i].second);
+  const std::vector<Frame> prefix{created(), start(0, R"({"type":"model_output","content":[]})"),
+      delta(0, R"({"type":"text","text":"owned prefix"})")};
+  outcome = stream(prefix);
+  const auto& partial = failure(outcome, ErrorKind::Truncated).partial;
+  CHECK(partial.raw_events.size() == prefix.size());
+  for (size_t i = 0; i < prefix.size(); ++i) CHECK(partial.raw_events[i].payload->root().dump() == prefix[i].second);
+  CHECK(std::get<Text>(partial.messages[0].parts[0]).value == "owned prefix");
+  const auto unsupported = resource(R"([{"type":"future_atomic_step","vendor":{"b":2,"a":[3,2,1]}}])");
+  outcome = buffered(unsupported);
+  const auto& unknown_step = failure(outcome, ErrorKind::Unsupported).partial;
+  CHECK(unknown_step.raw_events.size() == 1 && unknown_step.raw_events[0].payload->root().dump() == unsupported);
+  const auto future = frame("future.event", R"(,"metadata":{"b":2,"a":[3,2,1]})");
+  outcome = stream({created(), future});
+  const auto& unknown_event = failure(outcome, ErrorKind::Unsupported).partial;
+  CHECK(unknown_event.raw_events.size() == 2 && unknown_event.raw_events[1].payload->root().dump() == future.second);
+  const auto remote = R"({"error":{"message":"private","vendor":{"b":2,"a":1}}})";
+  outcome = buffered(remote);
+  CHECK(failure(outcome, ErrorKind::RemoteFailure).partial.raw_events[0].payload->root().dump() == remote);
+  auto late_error = sequence; late_error.push_back({"error", remote});
+  outcome = stream(late_error);
+  const auto& rejected = failure(outcome, ErrorKind::RemoteFailure).partial;
+  CHECK(rejected.raw_events.size() == sequence.size() && rejected.raw_events.back().payload->root().dump() == remote);
+  CHECK(rejected.stop && rejected.stop->kind == StopKind::EndTurn);
+}
+void named_error_raw_ownership() {
+  const auto initial = created();
+  const auto structured = R"({"code":429,"details":{"future":[{"b":2,"a":1}]},"message":"private"})";
+  for (const auto& error : {std::string(structured), std::string("{"), std::string("unstructured"), std::string("[]")}) {
+    const auto outcome = [&] {
+      Accumulator a; interactions::Codec c(desc(), interactions::Mode::Sse, a, context());
+      CHECK(c.frame(initial.first, initial.second)); CHECK(!c.frame("error", error));
+      CHECK(!c.frame(initial.first, initial.second)); c.finish();
+      CHECK(a.outcome()); return *a.outcome();
+    }();
+    const auto& partial = failure(outcome, ErrorKind::RemoteFailure).partial;
+    CHECK(partial.raw_events.size() == (error == structured ? 2U : 1U));
+    CHECK(partial.raw_events[0].payload->root().dump() == initial.second);
+    if (error == structured) CHECK(partial.raw_events[1].type == "error" &&
+        partial.raw_events[1].payload->root().dump() == structured);
+  }
+  const auto bounded = [&] {
+    Accumulator a({}, {}, 0); interactions::Codec c(desc(), interactions::Mode::Sse, a, context());
+    CHECK(!c.frame("error", "{\"vendor\":\"" + std::string(8192, 'x') + "\"}"));
+    CHECK(a.outcome()); return *a.outcome();
+  }();
+  CHECK(failure(bounded, ErrorKind::RemoteFailure).partial.raw_events.empty());
+}
 }
 int main() {
-  try { stateless_missing_resource_id(); missing_terminal_usage(); exact_steps_and_replay(); input_boundaries(); lifecycle_and_errors(); unknown_usage_and_signature();
+  try { raw_observation_ownership(); named_error_raw_ownership(); stateless_missing_resource_id(); missing_terminal_usage(); exact_steps_and_replay(); input_boundaries(); lifecycle_and_errors(); unknown_usage_and_signature();
     std::cout << "Interactions semantic contracts passed\n"; return 0;
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

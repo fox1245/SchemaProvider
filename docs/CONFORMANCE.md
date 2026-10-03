@@ -1,8 +1,8 @@
 # Conformance plan
 
-Status: this is the acceptance plan for a future installed library. M1/M1b measure transport properties; M2/M3 provide 35 Chat and 62 Messages fixtures, partition/parity, semantics and local native gates. M4 adds the private async runtime and scheduler/bounds/ownership evidence. M5 adds the budgeted canary, a real isolated consumer bridge and the same 97-fixture legacy comparison: 57 expected-fail candidates, 40 unsupported and strict lossless cutover NO-GO. A single direct live run passed four OpenAI and five Anthropic scenario assertions, including the expected signature-negative rejection; it is not release/equivalence admission. Exact evidence/limits: [POC_PLAN sections 5.2–5.5](POC_PLAN.md#55-m5-results-and-go-no-go-live-observation). This does not complete all 22 properties, all cells, the mutant catalog or a release stage. DESIGN is authoritative where target sketches and cells disagree.
+Status: acceptance plan and historical measurements for the **installed unstable SDK0.0.0/interface3/SOV3** and owner-approved typed C++ cutover **IN VERIFICATION**. Current SDK rebuild/CTest passed26/26 on Linux; installed shared ABI3 consumer proof passed, static proof predates latest extensions. M5's old-ABI NO-GO and earlier cohorts remain historical, not current cutover status. SDK proof is not complete NeoGraph/release/equivalence qualification. [Current provenance](POC_PLAN.md#current-typed-c-cutover-provenance) and [current public contracts](../README.md#owned-requests-results-and-configuration) supersede private/not-installed and legacy adapter/importer sketches.
 
-Optional HTTP/3 is an accepted design direction only. None of the existing transport results proves QUIC support; the additional, unrun gate is [section 12.1](#121-optional-http3-gate).
+Optional HTTP/3 capable Linux scenarios passed plain, ASan+UBSan and TSan; [D1 exact evidence](decisions/D1-transport.md#evidence) records uninstrumented release-backend limits. Every WebSocket property/table/oracle below is deferred future specification, excluded from current SDK/release gates and never counted as a pass.
 
 Scope (decision D2): chat completion APIs and the artifacts that arrive inside chat responses. Long-running operations, standalone image endpoints and the OpenRouter decisions endpoint have no cell, no property and no fixture here, and none may be advertised as supported. The earlier operation-lifecycle property is dropped for that reason.
 
@@ -10,7 +10,7 @@ Scope (decision D2): chat completion APIs and the artifacts that arrive inside c
 
 The suite answers one question: does the library hand its caller the same messages, tool calls, usage, stop reason and failure that the vendor's protocol actually means? It does not measure code coverage or test count.
 
-Design target (`DESIGN.md` sections 2 and 4): request, then a validated immutable plan, then one transport attempt, then a family frame decoder, then semantic events, then one accumulator, then a `Completion` or a `Failure`. Non-stream, SSE and WebSocket share the event and accumulator path. The suite follows that path and the failure classes that previously broke tool loops, usage accounting and reasoning replay.
+Implemented path: typed owned request, validated move-only prepared handle, one attempt, family decoder, semantic events, one accumulator and immutable owned Completion/Failure. Buffered/SSE share this path. Durable host claim/receipt precedes dispatch of that same handle; consumer/observer/persistence failures retain original outcomes/partials.
 
 ### 1.1 Oracle philosophy
 
@@ -467,7 +467,7 @@ The same fixture corpus runs against the current NeoGraph implementation, unchan
 - Existing tests are reused only when their expectation matches consumer-visible meaning. Expectations that encode old defects (a stream cut without a terminal event treated as success; a cut stream without a callback treated as retry-safe) are not migrated.
 - The old journal identity `provider-completion/v1` keeps its verification. New dispatches pass the v2 gate; mismatches start a new run or fork.
 - Output: per property and family the counts of pass, expected-fail and unsupported, plus the accepted differences.
-- M5's optional `integration/neograph` target compiles selected unchanged current NeoGraph sources into the isolated SchemaProvider build; it does not configure or alter the NeoGraph checkout. The fixture driver translates declared paths, bindings and synthetic headers into an in-memory legacy schema. Reports retain raw body differences, with only omitted `stream=false` and an exact singleton plain-text block admitted as equivalent wire representations. Native/tool/block differences are never normalized away.
+- Historical M5 compiled unchanged pre-cutover NeoGraph sources in an isolated experiment and retained raw body/native/tool/block differences rather than normalizing away loss. That obsolete adapter/legacy driver/build path is removed. Its fixed corpus and past NO-GO observations remain historical, not a current CTest alias or ABI support claim. Current direct consumers must qualify the typed SDK/NeoGraph boundary before dispatch.
 - The actual request handler is awaited through its full fault schedule before reporting. A client that completes and closes before a delayed reset is recorded as `early-terminal-before-close` / `client_closed_before_fault`, not as proof that a reset was delivered and ignored. Comparable semantics and unsupported ABI dimensions remain separate. Named independent defect acceptance is recorded in the M5 result, never inferred from every author-labelled expected-failure row.
 
 ## 11. CI gates

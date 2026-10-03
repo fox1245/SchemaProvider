@@ -42,7 +42,6 @@ bool Codec::buffered(std::string_view body, Close close) {
 bool Codec::frame(std::string_view event, std::string_view data) {
   if (closed_ || accumulator_.terminal()) return false;
   if (mode_ != Mode::Sse) return fail(ErrorKind::Misuse, "unexpected interaction frame");
-  if (event == "error") return fail(ErrorKind::RemoteFailure, "remote interaction error");
   if (event == "done" && data == "[DONE]") {
     if (!terminal_ || done_) return fail(ErrorKind::ProtocolCorrupt, "unexpected stream sentinel");
     done_ = true; return true;
@@ -65,16 +64,32 @@ bool Codec::identity(json::Value resource, bool initial) {
   return true;
 }
 bool Codec::document(std::string_view bytes, std::string_view event, bool streaming) {
+  const bool remote_error = streaming && event == "error";
+  auto reject = [&](ErrorKind kind, std::string label) {
+    return remote_error ? fail(ErrorKind::RemoteFailure, "remote interaction error") : fail(kind, std::move(label));
+  };
   if (!context_ || descriptor_.family() != "google.interactions" || !context_->matches_descriptor(descriptor_))
-    return fail(ErrorKind::InvalidConfig, "Interactions request context required");
+    return reject(ErrorKind::InvalidConfig, "Interactions request context required");
   if (bytes.size() > limits_.max_content_bytes - std::min(input_bytes_, limits_.max_content_bytes))
-    return fail(ErrorKind::ResourceLimit, "interaction response byte limit");
+    return reject(ErrorKind::ResourceLimit, "interaction response byte limit");
   input_bytes_ += bytes.size();
   auto parsed = json::parse(bytes, {limits_.max_content_bytes, limits_.max_json_depth});
-  if (auto error = std::get_if<json::ParseError>(&parsed)) return fail(error->code == json::ParseCode::SizeExceeded ||
+  if (auto error = std::get_if<json::ParseError>(&parsed)) return reject(error->code == json::ParseCode::SizeExceeded ||
       error->code == json::ParseCode::DepthExceeded ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, "invalid interaction JSON");
-  auto root = std::get<json::Document>(parsed).root();
-  if (!root.is_object()) return fail(ErrorKind::ProtocolCorrupt, "interaction object required");
+  auto wire = std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
+  const auto root = wire->root();
+  if (!root.is_object()) return reject(ErrorKind::ProtocolCorrupt, "interaction object required");
+  const auto type = root.get("event_type");
+  std::string wire_type = streaming
+      ? (nonempty(type) ? std::string(type.as_string()) : event.empty() ? "interaction" : std::string(event))
+      : "interaction";
+  const Event raw = RawWire{std::move(wire_type), wire};
+  if (remote_error) {
+    const Error error{ErrorKind::RemoteFailure, "remote interaction error"};
+    if (!accumulator_.accept(raw, &error)) return false;
+    return fail(error.kind, error.safe_message);
+  }
+  if (!emit(raw)) return false;
   if (root.get("error").valid() && !root.get("error").is_null()) return fail(ErrorKind::RemoteFailure, "remote interaction error");
   if (!streaming) {
     if (!nonempty(root.get("model"))) return fail(ErrorKind::ProtocolCorrupt, "buffered interaction model required");
@@ -87,7 +102,6 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
     if (steps.valid()) for (auto step : steps.elements()) { if (!start(step, index) || !stop(index)) return false; ++index; }
     return terminal(root, false);
   }
-  auto type = root.get("event_type");
   if (!type.is_string() || (!event.empty() && event != type.as_string())) return fail(ErrorKind::ProtocolCorrupt, "interaction event discriminator mismatch");
   auto name = type.as_string();
   if (name == "error") return fail(ErrorKind::RemoteFailure, "remote interaction error");

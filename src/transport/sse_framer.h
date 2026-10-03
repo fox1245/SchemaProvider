@@ -1,4 +1,5 @@
 #pragma once
+#include "sp/config_defaults.h"
 
 #include <array>
 #include <cstddef>
@@ -19,14 +20,14 @@ struct SseFrame {
 
 struct SseLimits {
   // Decoded line bytes, excluding its CR/LF terminator and the leading BOM.
-  std::size_t max_line_bytes = 1 << 20;
+  std::size_t max_line_bytes = config_defaults::defaults_sse_max_line_bytes;
   // Aggregate retained data (including joining LFs), event type and persistent
   // id bytes. Replacements reclaim the old field's allowance. The implicit
   // "message" type is a constant, not retained input. The line buffer has its
   // own independent limit above.
-  std::size_t max_event_bytes = 1 << 20;
+  std::size_t max_event_bytes = config_defaults::defaults_sse_max_event_bytes;
   // Wire bytes consumed, including BOM, comments, ignored fields and CR/LF.
-  std::size_t max_total_bytes = 16 << 20;
+  std::size_t max_total_bytes = config_defaults::defaults_sse_max_total_bytes;
 };
 
 enum class SseError { None, ResourceLimit, InvalidUtf8, Misuse };

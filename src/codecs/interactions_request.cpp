@@ -2,6 +2,7 @@
 #include "core/native.h"
 #include "core/image.h"
 #include "json/json.h"
+#include "descriptor/policy.h"
 #include <limits>
 #include <map>
 #include <set>
@@ -25,12 +26,17 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   auto replay_bad = []() -> EncodeResult { return Error{ErrorKind::ReplayIneligible, "native replay provenance, binding or content mismatch"}; };
   if (descriptor.family() != "google.interactions" || descriptor.path(false) != "/v1beta/interactions" ||
       descriptor.path(true) != "/v1beta/interactions") return Error{ErrorKind::InvalidConfig, "Interactions requires the model interaction endpoint"};
-  if (request.model.empty() || request.messages.empty() || request.messages.size() > 100000 ||
-      !request.max_output_tokens || request.max_output_tokens > static_cast<uint64_t>(std::numeric_limits<int32_t>::max()))
-    return bad("model, messages and positive int32 output cap required");
-  if (request.thinking_level && *request.thinking_level != "minimal" && *request.thinking_level != "low" &&
-      *request.thinking_level != "medium" && *request.thinking_level != "high") return bad("unsupported thinking level");
+  const auto& resources = descriptor.policy()->resources();
+  auto effective = descriptor::effective_defaults(descriptor, request.model);
+  if (request.max_output_tokens) effective.max_output_tokens = request.max_output_tokens;
+  if (request.thinking_level) effective.thinking_level = *request.thinking_level;
+  if (request.thinking_summaries) effective.thinking_summaries = request.thinking_summaries;
+  if (request.service_tier) effective.service_tier = *request.service_tier;
+  if (auto error = descriptor::validate_choices(descriptor, request.model, effective)) return bad(std::move(*error));
+  if (request.model.empty() || request.messages.empty() || request.messages.size() > resources.request_messages || request.tools.size() > resources.request_tools)
+    return bad("model and bounded messages/tools required");
   for (const auto& message : request.messages) {
+    if (message.parts.size() > resources.request_parts) return bad("request part count limit exceeded");
     if (message.native) {
       if (message.role != Role::Assistant || !message.wire_output || !message.wire_output->root().is_array()) return replay_bad();
     } else {
@@ -39,7 +45,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
           !std::holds_alternative<Image>(part) && !std::holds_alternative<ToolResult>(part)) return replay_bad();
     }
   }
-  auto context = std::shared_ptr<const NativeContext>(new NativeContext(descriptor, request, streaming));
+  auto context = std::shared_ptr<const NativeContext>(new NativeContext(descriptor, request, effective, streaming));
   if (!context->history_valid_) return replay_bad();
   if (!context->valid_) return Error{ErrorKind::ResourceLimit, "native binding could not be captured"};
   EncodedRequest result{"POST", std::string(descriptor.path(streaming)), {}, {}, {}};
@@ -51,8 +57,9 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   result.headers.emplace_back("Accept", streaming ? "text/event-stream" : "application/json");
   auto build = [&](json::BoundedWriter& body) -> std::optional<Error> {
     auto invalid = [](std::string label) { return Error{ErrorKind::InvalidRequest, std::move(label)}; };
-    body.raw("{\"model\":").quoted(request.model).raw(",\"store\":false,\"service_tier\":\"standard\",\"stream\":")
-        .raw(streaming ? "true" : "false");
+    body.raw("{").quoted(descriptor.request_model_member()).raw(":").quoted(request.model)
+        .raw(",\"store\":false,").quoted(descriptor.request_stream_member()).raw(":").raw(streaming ? "true" : "false");
+    if (effective.service_tier) body.raw(",\"service_tier\":").quoted(*effective.service_tier);
     if (!request.system.empty()) body.raw(",\"system_instruction\":").quoted(request.system);
     std::set<std::string_view> names;
     if (!request.tools.empty()) {
@@ -67,14 +74,28 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       }
       body.raw("]");
     }
-    body.raw(",\"generation_config\":{\"max_output_tokens\":").raw(std::to_string(request.max_output_tokens))
-        .raw(",\"thinking_summaries\":").quoted(request.thinking_summaries ? "auto" : "none");
-    if (request.thinking_level) body.raw(",\"thinking_level\":").quoted(*request.thinking_level);
+    body.raw(",\"generation_config\":{");
+    bool generation_comma = false;
+    if (effective.max_output_tokens) {
+      body.quoted(descriptor.max_output_tokens_member()).raw(":").raw(std::to_string(*effective.max_output_tokens));
+      generation_comma = true;
+    }
+    if (effective.thinking_summaries) {
+      if (generation_comma) body.raw(",");
+      body.raw("\"thinking_summaries\":").quoted(*effective.thinking_summaries ? "auto" : "none");
+      generation_comma = true;
+    }
+    if (effective.thinking_level) {
+      if (generation_comma) body.raw(",");
+      body.raw("\"thinking_level\":").quoted(*effective.thinking_level);
+      generation_comma = true;
+    }
     if (request.required_tool) {
       if (!names.contains(*request.required_tool)) return invalid("required tool must name a declared function");
-      body.raw(",\"tool_choice\":{\"allowed_tools\":{\"mode\":\"any\",\"tools\":[").quoted(*request.required_tool).raw("]}}");
+      if (generation_comma) body.raw(",");
+      body.raw("\"tool_choice\":{\"allowed_tools\":{\"mode\":\"any\",\"tools\":[").quoted(*request.required_tool).raw("]}}");
     }
-    body.raw("},\"input\":["); bool comma = false;
+    body.raw("},").quoted(descriptor.request_messages_member()).raw(":["); bool comma = false;
     auto separator = [&] { if (comma) body.raw(","); comma = true; };
     std::map<std::string_view, std::string_view> pending;
     std::set<std::string_view> ids;
@@ -127,7 +148,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
             content_comma = true;
             if (auto text = std::get_if<Text>(&part)) body.raw("{\"type\":\"text\",\"text\":").quoted(text->value).raw("}");
             else if (auto image = std::get_if<Image>(&part)) {
-              if (!valid_image(*image)) return invalid("invalid typed image");
+              if (!valid_image(*image, resources.image_decoded_bytes)) return invalid("invalid typed image");
               body.raw("{\"type\":\"image\",\"mime_type\":").quoted(image->mime).raw(",\"data\":").quoted(*image->data).raw("}");
             } else return Error{ErrorKind::Unsupported, "unsupported input content"};
           }
@@ -141,9 +162,11 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     if (!body.ok()) return Error{ErrorKind::ResourceLimit, "request exceeds JSON limits"};
     return std::nullopt;
   };
-  json::BoundedWriter measured({16 << 20, 64}); if (auto error = build(measured)) return *error;
-  result.body.reserve(measured.size()); json::BoundedWriter body({measured.size(), 64}, &result.body);
+  json::BoundedWriter measured({resources.request_bytes, resources.json_depth}); if (auto error = build(measured)) return *error;
+  result.body.reserve(measured.size()); json::BoundedWriter body({measured.size(), resources.json_depth}, &result.body);
   if (auto error = build(body)) return *error;
-  result.context = std::move(context); return result;
+  result.context = std::move(context);
+  result.max_output_tokens = effective.max_output_tokens;
+  return result;
 }
 } // namespace sp::interactions

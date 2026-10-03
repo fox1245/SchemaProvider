@@ -85,6 +85,13 @@ const server = http.createServer(async (req, res) => {
     res.on('close', () => { ++c.closed; c.held.delete(res); notify(); });
     notify();
     const scenario = c.scenario;
+    if (scenario === 'typeless-buffered-error') {
+      if (!messages || body.stream) ++c.invalid;
+      res.writeHead(200, { 'Content-Type': 'application/json', Connection: 'close' });
+      res.end(JSON.stringify({ error: { type: 'overloaded_error', message: marker, extra: [2, 1] },
+        vendor: { b: true, a: null } }));
+      ++c.faults; notify(); return;
+    }
     const fail = scenario === 'always-error' || scenario === 'quota' || scenario === 'vendor-secret' || scenario === 'error-cap'
       || scenario === 'rate' || scenario === 'long-rate' || scenario === 'malformed-rate'
       || ((scenario === 'recover' || scenario === 'retry-held') && c.count === 1);

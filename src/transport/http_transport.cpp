@@ -79,21 +79,25 @@ struct TransportCore;
 namespace {
 
 // Splits a URL into host and port through libcurl's URL API (the same parser that will connect).
-bool parse_host_port(const std::string& url, std::string& host, std::string& port) {
+bool parse_host_port(const std::string& url, std::string& host, std::string& port, bool& https) {
   CURLU* u = curl_url();
   if (!u) return false;
   bool ok = false;
   char* h = nullptr;
   char* p = nullptr;
+  char* scheme = nullptr;
   if (curl_url_set(u, CURLUPART_URL, url.c_str(), 0) == CURLUE_OK &&
       curl_url_get(u, CURLUPART_HOST, &h, 0) == CURLUE_OK &&
-      curl_url_get(u, CURLUPART_PORT, &p, CURLU_DEFAULT_PORT) == CURLUE_OK) {
+      curl_url_get(u, CURLUPART_PORT, &p, CURLU_DEFAULT_PORT) == CURLUE_OK &&
+      curl_url_get(u, CURLUPART_SCHEME, &scheme, 0) == CURLUE_OK) {
     host = h;
     port = p;
+    https = iequals(scheme, "https");
     ok = true;
   }
   curl_free(h);
   curl_free(p);
+  curl_free(scheme);
   curl_url_cleanup(u);
   return ok;
 }
@@ -209,6 +213,8 @@ struct OperationState {
   CURL* easy = nullptr;
   curl_slist* hdrs = nullptr;
   std::string setup_error;
+  FailureKind setup_failure = FailureKind::Other;
+  CURLcode setup_code = CURLE_OK;
   std::optional<asio::steady_timer> deadline_timer;
   bool in_multi = false;
   bool paused = false;
@@ -273,7 +279,7 @@ struct TransportCore : std::enable_shared_from_this<TransportCore> {
   };
 
   explicit TransportCore(TransportOptions options)
-      : opts(options),
+      : opts(std::move(options)),
         strand(asio::make_strand(ctx)),
         guard(asio::make_work_guard(ctx)),
         timer(ctx) {}
@@ -294,9 +300,9 @@ struct TransportCore : std::enable_shared_from_this<TransportCore> {
   // paused, and it reads and buffers (up to DYN_PAUSE_BUFFER) whenever the application reports
   // readability on it. TCP backpressure therefore needs the application to stop reporting
   // readability for the socket of a paused transfer. That is only safe when the socket carries
-  // exactly one transfer, i.e. HTTP/1.x. On HTTP/2 a paused stream shares its socket with live
-  // ones, so readability is still reported and libcurl buffers the paused stream's data up to the
-  // stream window (documented by curl_easy_pause); see POC_PLAN.md risk R3.
+  // exactly one transfer, i.e. HTTP/1.x. HTTP/2 and HTTP/3 paused streams share their
+  // connection with live siblings, so their read readiness must remain enabled.
+  // libcurl's stream flow-control windows bound retained data (curl_easy_pause).
   std::unordered_set<curl_socket_t> paused_h1_socks;
   // Name resolution: single-flight per host, TTL cache, bounded resolver threads.
   struct DnsEntry {
@@ -361,8 +367,9 @@ void OperationState::setup() {
   };
 
   set(CURLOPT_URL, req.url.c_str());
+  bool https = false;
   if (setup_error.empty()) {
-    if (!parse_host_port(req.url, host, port)) setup_error = "invalid URL";
+    if (!parse_host_port(req.url, host, port, https)) setup_error = "invalid URL";
     else needs_resolve = !is_ip_literal(host);
   }
   set(CURLOPT_PROTOCOLS_STR, "http,https");
@@ -378,11 +385,33 @@ void OperationState::setup() {
   set(CURLOPT_PREREQFUNCTION, &OperationState::prereq_cb);
   set(CURLOPT_PREREQDATA, static_cast<void*>(this));
 
+  const auto features = curl_version_info(CURLVERSION_NOW)->features;
+  const long normal_http = (features & CURL_VERSION_HTTP2) ? CURL_HTTP_VERSION_2TLS : CURL_HTTP_VERSION_1_1;
   switch (req.http_version) {
-    case HttpVersion::Auto: break;
+    case HttpVersion::Auto:
+      set(CURLOPT_HTTP_VERSION, normal_http);
+      break;
     case HttpVersion::Http1_1: set(CURLOPT_HTTP_VERSION, static_cast<long>(CURL_HTTP_VERSION_1_1)); break;
     case HttpVersion::Http2PriorKnowledge:
       set(CURLOPT_HTTP_VERSION, static_cast<long>(CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE));
+      break;
+    case HttpVersion::Http3Preferred:
+      set(CURLOPT_HTTP_VERSION, https && (features & CURL_VERSION_HTTP3)
+                                   ? static_cast<long>(CURL_HTTP_VERSION_3) : normal_http);
+      break;
+    case HttpVersion::Http3Only:
+      if (!https || !(features & CURL_VERSION_HTTP3)) {
+        setup_error = !https ? "HTTP/3-only requires HTTPS" : "linked libcurl lacks HTTP/3";
+        setup_failure = FailureKind::Protocol;
+        setup_code = CURLE_UNSUPPORTED_PROTOCOL;
+        return;
+      }
+      set(CURLOPT_HTTP_VERSION, static_cast<long>(CURL_HTTP_VERSION_3ONLY));
+      // A shared multi cache may contain H2/H1 for this origin. Never let its
+      // existing connection satisfy the verification lane, nor retain this lane's
+      // connection for another policy. Ordinary preferred H3 remains multiplexable.
+      set(CURLOPT_FRESH_CONNECT, 1L);
+      set(CURLOPT_FORBID_REUSE, 1L);
       break;
   }
 
@@ -444,7 +473,8 @@ namespace {
 // Content-Length gives no framing. Anything ambiguous is treated as close-delimited, which is never
 // a normal end, so EOF cannot turn it into a success.
 BodyFraming derive_framing(const ResponseHead& head, bool head_request) {
-  if (head.version == ResponseVersion::Http2) return BodyFraming::Stream;
+  if (head.version == ResponseVersion::Http2 || head.version == ResponseVersion::Http3)
+    return BodyFraming::Stream;
   if (head_request || head.status == 204 || head.status == 304) return BodyFraming::None;
 
   bool te_present = false;
@@ -505,6 +535,7 @@ std::size_t OperationState::header_cb(char* buf, std::size_t size, std::size_t n
     if (proto == "HTTP/1.0") op->head.version = ResponseVersion::Http1_0;
     else if (proto == "HTTP/1.1") op->head.version = ResponseVersion::Http1_1;
     else if (proto == "HTTP/2") op->head.version = ResponseVersion::Http2;
+    else if (proto == "HTTP/3") op->head.version = ResponseVersion::Http3;
     if (space != std::string_view::npos) {
       int code = 0;
       for (char c : trim(line.substr(space + 1)).substr(0, 3)) {
@@ -615,7 +646,7 @@ void TransportCore::begin(const std::shared_ptr<OperationState>& op) {
     return;
   }
   if (!op->setup_error.empty()) {
-    finish(op, Status::Failed, FailureKind::Other, CURLE_OK, op->setup_error.c_str());
+    finish(op, Status::Failed, op->setup_failure, op->setup_code, op->setup_error.c_str());
     return;
   }
   if (op->req.deadline <= std::chrono::steady_clock::now()) {
@@ -755,6 +786,7 @@ void TransportCore::finish(std::shared_ptr<OperationState> op, Status status, Fa
       if (v == CURL_HTTP_VERSION_1_0) r.attempt.version = ResponseVersion::Http1_0;
       else if (v == CURL_HTTP_VERSION_1_1) r.attempt.version = ResponseVersion::Http1_1;
       else if (v == CURL_HTTP_VERSION_2_0) r.attempt.version = ResponseVersion::Http2;
+      else if (v == CURL_HTTP_VERSION_3) r.attempt.version = ResponseVersion::Http3;
     }
   }
 
@@ -824,7 +856,8 @@ void TransportCore::resume(const std::shared_ptr<OperationState>& op) {
 }
 
 void TransportCore::note_pause(OperationState& op) {
-  if (op.head.version == ResponseVersion::Http2 || op.sock == CURL_SOCKET_BAD || op.counted_pause) return;
+  if ((op.head.version != ResponseVersion::Http1_0 && op.head.version != ResponseVersion::Http1_1) ||
+      op.sock == CURL_SOCKET_BAD || op.counted_pause) return;
   op.counted_pause = true;
   paused_h1_socks.insert(op.sock);
 }
@@ -847,6 +880,9 @@ void TransportCore::complete_from_curl(const std::shared_ptr<OperationState>& op
   if (code == CURLE_OK) {
     if (!op->head_delivered) {
       finish(op, Status::Failed, FailureKind::Protocol, code, "response ended without a head");
+    } else if (op->req.http_version == HttpVersion::Http3Only && op->head.version != ResponseVersion::Http3) {
+      finish(op, Status::Failed, FailureKind::Protocol, CURLE_UNSUPPORTED_PROTOCOL,
+             "HTTP/3-only exchange did not negotiate HTTP/3");
     } else if (op->head.framing == BodyFraming::CloseDelimited) {
       finish(op, Status::Failed, FailureKind::Truncated, code,
              "body delimited only by connection close is not a normal end");
@@ -871,6 +907,9 @@ void TransportCore::complete_from_curl(const std::shared_ptr<OperationState>& op
     case CURLE_COULDNT_RESOLVE_HOST:
     case CURLE_COULDNT_RESOLVE_PROXY: kind = FailureKind::Resolve; break;
     case CURLE_COULDNT_CONNECT: kind = FailureKind::Connect; break;
+    case CURLE_QUIC_CONNECT_ERROR:
+      kind = op->head_delivered ? FailureKind::Truncated : FailureKind::Connect;
+      break;
     case CURLE_SSL_CONNECT_ERROR:
     case CURLE_PEER_FAILED_VERIFICATION:
     case CURLE_SSL_CERTPROBLEM:
@@ -886,6 +925,9 @@ void TransportCore::complete_from_curl(const std::shared_ptr<OperationState>& op
       kind = op->head_delivered ? FailureKind::Truncated : FailureKind::Receive;
       break;
     case CURLE_PARTIAL_FILE: kind = FailureKind::Truncated; break;
+    case CURLE_HTTP3:
+      kind = op->head_delivered ? FailureKind::Truncated : FailureKind::Protocol;
+      break;
     case CURLE_WEIRD_SERVER_REPLY:
     case CURLE_HTTP2:
     case CURLE_UNSUPPORTED_PROTOCOL: kind = FailureKind::Protocol; break;
@@ -1095,7 +1137,7 @@ Result Operation::join() {
   return state->result;
 }
 
-Transport::Transport(TransportOptions options) : core_(std::make_shared<TransportCore>(options)) {
+Transport::Transport(TransportOptions options) : core_(std::make_shared<TransportCore>(std::move(options))) {
   core_->init();
 }
 
@@ -1127,6 +1169,7 @@ RuntimeInfo Transport::runtime_info() const {
   out.curl_version = info->version ? info->version : "";
   out.ssl_backend = info->ssl_version ? info->ssl_version : "";
   out.http2 = (info->features & CURL_VERSION_HTTP2) != 0;
+  out.http3 = (info->features & CURL_VERSION_HTTP3) != 0;
   out.async_dns = (info->features & CURL_VERSION_ASYNCHDNS) != 0;
   return out;
 }

@@ -9,7 +9,8 @@ class Accumulator {
  public:
   // Events and delta/snapshot views are borrowed for this invocation only.
   using Sink = std::function<void(const Event&)>;
-  explicit Accumulator(SemanticLimits limits = {}, Sink sink = {});
+  explicit Accumulator(SemanticLimits limits = {}, Sink sink = {},
+                       std::size_t source_bytes_limit = config_defaults::defaults_max_response_bytes);
   // A known transport failure takes precedence over errors in deferred decoding.
   bool accept(const Event& event, const Error* failure_override = nullptr);
   const std::optional<Outcome>& outcome() const { return outcome_; }
@@ -37,6 +38,7 @@ class Accumulator {
   bool apply(const Begin&); bool apply(const MessageBegin&); bool apply(const PartBegin&);
   bool apply(const PartDelta&); bool apply(const PartSeal&); bool apply(const MessageSeal&);
   bool apply(const UsageUpdate&); bool apply(const Stop&); bool apply(const Commit&); bool apply(const Fail&);
+  bool apply(const RawWire&); bool apply(const ResponseEnvelope&);
   bool reject(ErrorKind kind, std::string message);
   std::vector<Message> take_messages(bool partial);
   Part seal_value(Cursor&, bool partial);
@@ -48,6 +50,9 @@ class Accumulator {
   size_t content_bytes_ = 0;
   Usage usage_;
   std::optional<StopReason> stop_;
+  std::shared_ptr<const json::Document> wire_envelope_;
+  std::vector<RawWire> raw_events_;
+  std::size_t raw_bytes_ = 0, raw_bytes_limit_ = 0;
   const Error* failure_override_ = nullptr;
   std::optional<Outcome> outcome_;
 };

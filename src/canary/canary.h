@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/value.h"
+#include "qualification/meter.h"
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -12,9 +13,6 @@ enum class Provider { OpenAI, Anthropic, Gemini, OpenAIResponses, VisionChat, Vi
 constexpr bool vision_provider(Provider provider) {
   return provider >= Provider::VisionChat && provider <= Provider::VisionInteractions;
 }
-// Owner-approved additional60/$12 after spent40/$7.795635; no old margin renewal.
-inline constexpr std::uint64_t vision_call_limit = 100;
-inline constexpr std::uint64_t vision_cost_limit = 19795635;
 struct Bounds {
   std::uint64_t input_tokens{}, output_tokens{}, input_rate{}, output_rate{};
   std::uint64_t calls{}, tokens{}, micro_usd{};
@@ -34,31 +32,32 @@ class Profile {
   Bounds bounds_;
   std::uint64_t thinking_budget_{};
   bool loopback_{};
-  friend Profile parse_profile(std::string_view, bool);
+  friend Profile parse_profile(std::string_view, bool, std::optional<std::uint64_t>);
 };
 // All exceptions have fixed, non-sensitive messages. Neither parser echoes input.
-Profile parse_profile(std::string_view, bool allow_test_loopback = false);
+Profile parse_profile(std::string_view, bool allow_test_loopback = false,
+                      std::optional<std::uint64_t> output_tokens = {});
 std::string read_profile_file(const std::string& path);
 // An explicit file overrides the process environment. Only NAME=value syntax is
 // supported; no shell, expansion, export, quoting, or fallback on malformed input.
 std::string credential(Provider, const std::optional<std::string>& env_file = {});
-struct Totals { std::uint64_t calls{}, tokens{}, micro_usd{}; };
-enum class Reservation { Allowed, Calls, Tokens, Cost };
-struct Debit { Reservation result; Totals total; };
 std::uint64_t reserved_cost(const Bounds&);
-// Separate opens + flock serialize threads and processes; partial records fail closed.
-Debit reserve(const Profile&, const std::string& ledger_path);
-Totals ledger_totals(const Profile&, const std::string& ledger_path);
-Totals vision_campaign_totals(const std::string& ledger_path);
 
 enum class State { Passed, Failed, NotRun };
+enum class ExecutionMode { Full, BaselinePair, GoogleDiagnostics };
+struct RunSelection {
+  ExecutionMode mode = ExecutionMode::Full;
+  std::uint64_t repetition = 0;
+  // Diagnostics only: remaining attempts in this bounded CLI invocation.
+  std::uint64_t attempt_limit = 15;
+};
 enum class Reason {
   None, MissingCredential, CallBudget, TokenBudget, CostBudget, LedgerFailure,
   RuntimeFailure, MissingText, MissingTool, InvalidTool, MissingSignature,
   PrerequisiteFailed, RetentionMismatch, MutationUnavailable,
   SignatureRejected, NegativeAccepted, NegativeInconclusive, InvalidUsage,
   MissingReasoning, CiphertextRejected, OmissionAccepted, OmissionRejected,
-  IncorrectVision, UnreadableVision
+  IncorrectVision, UnreadableVision, DiagnosticLimit
 };
 enum class Replay { NotApplicable, ReplayVerified, ReplayAcceptanceUnobservable };
 struct Case {
@@ -66,6 +65,7 @@ struct Case {
   State state = State::NotRun;
   Reason reason = Reason::PrerequisiteFailed;
   bool dispatched = false;
+  bool selected = true;
   std::uint64_t attempts = 0;
   std::optional<std::uint64_t> input_tokens{}, output_tokens{};
   std::optional<std::uint64_t> estimated_micro_usd{};
@@ -79,23 +79,28 @@ struct Case {
   bool image_sent = false, reasoning_requested = false, reasoning_disabled = false, default_off = false;
   bool visible_reasoning = false, native_present = false;
   std::optional<bool> vision_correct{};
+  std::optional<qualification::SettlementKind> settlement{};
+  std::optional<std::uint64_t> reserved_micro_usd{}, charged_micro_usd{};
+  std::optional<qualification::Denial> admission_denial{};
+  std::uint64_t native_carriers = 0, distinct_native_carriers = 0;
+  bool duplicate_control = false, control_changed = false;
 };
 struct Report {
   Provider provider{};
+  ExecutionMode mode = ExecutionMode::Full;
   bool test_only = false;
   Replay replay = Replay::NotApplicable;
   bool positive_retained = false, signature_mutated = false;
   bool ciphertext_mutated = false, reasoning_removed = false;
   std::uint64_t native_leaves = 0;
-  Totals reserved;
-  bool reserved_known = false;
-  std::optional<Totals> campaign_reserved{};
+  std::optional<qualification::Totals> meter_totals{};
+  std::uint64_t repetition = 1;
   std::vector<Case> cases;
 };
 // Synchronous caller bridge, production runtime + HTTP backend, no retries.
 // Raw response material and native replay objects remain in process memory only.
-Report run(const Profile&, const std::string& ledger_path, std::string api_key);
-Report run_vision(const Profile&, const std::string& ledger_path, std::string api_key);
+Report run(const Profile&, const std::string& project_root, std::string api_key, RunSelection = {});
+Report run_vision(const Profile&, const std::string& project_root, std::string api_key, RunSelection = {});
 std::string report_json(const Report&);
 std::string_view plan_json();
 std::string_view help_text();

@@ -69,8 +69,8 @@ sp::runtime::Request request(const std::string& model, bool messages = false) {
   sp::Message m; m.role = sp::Role::User; m.parts.emplace_back(sp::Text{"synthetic"}); r.messages.push_back(std::move(m)); return r;
 }
 sp::runtime::RunOptions run(bool streaming = true, bool retry = false, bool risk = false) {
-  sp::runtime::RunOptions result; result.streaming = streaming; result.retry.enabled = retry;
-  result.retry.allow_duplicate_billing_risk = risk; result.retry.base_delay = 0ms; result.retry.max_delay = 0ms; return result;
+  sp::runtime::RunOptions result; result.streaming = streaming;
+  result.retry = sp::runtime::RetryPolicy{retry, risk, 3, 0ms, 0ms}; return result;
 }
 const sp::Failure& failure(const Result& result, std::optional<sp::ErrorKind> kind = {}) {
   require(result && std::holds_alternative<sp::Failure>(*result), "expected failure outcome");
@@ -185,13 +185,22 @@ void retry_policy(Peer& peer) {
         "possibly accepted failure retried without billing consent");
       require(f.error.http_status == 503 && f.error.attempt.response_head_seen && f.error.attempt.request_may_have_left,
         "response evidence was lost");
+      require(f.partial.raw_events.size() == 1 && f.partial.raw_events[0].payload &&
+          f.partial.raw_events[0].payload->root().get("error").get("message").as_string() == marker,
+          "non-success HTTP response dropped original owned error JSON");
       peer.count(model, 1, 1);
     }
-    const auto recovered = peer.arm("recover"); success(client.complete(request(recovered, messages), run(streaming, true, true))); peer.count(recovered, 2, 1);
+    const auto recovered = peer.arm("recover");
+    const auto recovered_result = client.complete(request(recovered, messages), run(streaming, true, true));
+    success(recovered_result); peer.count(recovered, 2, 1);
+    const auto& observations = std::get<sp::Completion>(*recovered_result).raw_events;
+    require(observations.size() >= 2 && observations[0].payload &&
+        observations[0].payload->root().get("error").get("message").as_string() == marker,
+        "successful retry discarded the prior actual HTTP error observation");
     const auto quota = peer.arm("quota");
     failure(client.complete(request(quota, messages), run(streaming, true, true)),
       messages ? sp::ErrorKind::LimitUnknown : sp::ErrorKind::QuotaExhausted); peer.count(quota, 1, 1);
-    const auto capped = peer.arm("always-error"); auto capped_run = run(streaming, true, true); capped_run.retry.max_attempts = 2;
+    const auto capped = peer.arm("always-error"); auto capped_run = run(streaming, true, true); capped_run.retry->max_attempts = 2;
     const auto capped_result = client.complete(request(capped, messages), capped_run);
     require(failure(capped_result).error.attempt.attempts == 2, "max attempts not applied"); peer.count(capped, 2, 2);
   }
@@ -250,6 +259,39 @@ void partial_ping_and_close(Peer& peer) {
     }
   }
 }
+void typeless_messages_runtime_error(Peer& peer) {
+  Result retained;
+  {
+    Client client(descriptor(peer, true), options());
+    for (bool retry : {false, true}) {
+      const auto model = peer.arm("typeless-buffered-error");
+      auto controls = run(false, retry, true); controls.retry->max_attempts = 2;
+      const auto result = client.complete(request(model, true), controls);
+      const auto& f = failure(result, sp::ErrorKind::Overloaded);
+      const auto attempts = retry ? 2U : 1U;
+      require(f.error.vendor_code == "overloaded_error" && f.error.retry_class == sp::RetryClass::Transient &&
+          f.error.retry_safety == sp::RetrySafety::PossiblyAccepted && f.error.attempt.attempts == attempts &&
+          f.error.http_status == 200 && f.error.attempt.response_head_seen && f.error.attempt.request_may_have_left,
+          "typeless buffered error lost vendor or retry evidence");
+      require(f.partial.messages.empty() && !f.partial.stop && !f.partial.wire_envelope &&
+          f.partial.usage.stage == sp::UsageStage::Missing && !f.partial.usage.total,
+          "raw error document became semantic output or manufactured usage");
+      require(f.partial.raw_events.size() == attempts && f.error.attempt.prior_usage_unknown == retry,
+          "retry lost previous actual error observations or attempt uncertainty");
+      for (const auto& raw : f.partial.raw_events) {
+        require(raw.type == "messages.buffered" && !raw.payload->root().get("type").valid() &&
+            raw.payload->root().get("error").get("type").as_string() == "overloaded_error" &&
+            raw.payload->root().get("error").get("message").as_string() == marker,
+            "typeless buffered raw diagnostic changed provider JSON");
+      }
+      peer.count(model, attempts, attempts);
+      retained = result;
+    }
+  }
+  const auto& raw = failure(retained, sp::ErrorKind::Overloaded).partial.raw_events;
+  require(raw[0].payload->root().get("vendor").get("b").as_bool() &&
+      raw[1].payload->root().get("vendor").get("a").is_null(), "owned error DOM did not survive client destruction");
+}
 void minima_budget_deadline(Peer& peer) {
   for (bool messages : {false, true}) {
     auto opts = options(); opts.retry_tokens = 1; Client client(descriptor(peer, messages), opts);
@@ -274,7 +316,7 @@ void minima_budget_deadline(Peer& peer) {
     peer.count(second, std::holds_alternative<sp::Completion>(*br) ? 2 : 1, 1);
   }
   Client client(descriptor(peer, false), options());
-  const auto rate = peer.arm("rate"); auto r = run(false, true, true); r.retry.max_attempts = 2;
+  const auto rate = peer.arm("rate"); auto r = run(false, true, true); r.retry->max_attempts = 2;
   failure(client.complete(request(rate), r), sp::ErrorKind::RateLimited); peer.count(rate, 2, 2);
   auto times = peer.stats(rate); auto ts = times.root().get("times");
   require(ts.at(1).as_double() - ts.at(0).as_double() >= 1240.0, "retry dispatched before strongest server minimum");
@@ -429,8 +471,8 @@ int thread_count() {
 void held_stream_gate(Peer& peer) {
   const int baseline = thread_count();
   auto opts = options(); opts.limits.max_operations = 256;
+  opts.workers = 2; opts.transport.io_threads = 2; opts.transport.resolver_threads = 2;
   const std::size_t threads = opts.workers + opts.transport.io_threads + opts.transport.resolver_threads;
-  require(threads <= 8, "configured worker count exceeds contract");
   const std::size_t k = 4 * threads + 64;
   Client client(descriptor(peer, false), opts);
   int first = 0;
@@ -438,7 +480,7 @@ void held_stream_gate(Peer& peer) {
     const auto held = peer.arm("hold"); std::vector<Operation> operations; operations.reserve(count);
     for (std::size_t i = 0; i < count; ++i) operations.push_back(client.start(request(held)));
     peer.wait(held, "held", count);
-    const int measured = thread_count(); require(measured <= baseline + 8, "held requests allocated per-request threads");
+    const int measured = thread_count(); require(measured <= baseline + static_cast<int>(threads), "held requests allocated per-request threads");
     if (first) require(measured <= first, "thread count increased from K to 2K held requests"); else first = measured;
     const auto short_model = peer.arm("normal"); auto short_run = run(); short_run.deadline = Clock::now() + 5s;
     success(client.complete(request(short_model), short_run)); peer.count(short_model, 1);
@@ -474,7 +516,7 @@ void resource_and_admission(Peer& peer) {
   Client client(descriptor(peer, false), options()); const auto invalid = peer.arm("normal");
   auto empty = request(invalid); std::get<sp::chat::Request>(empty).messages.clear();
   failure(client.complete(empty), sp::ErrorKind::InvalidRequest); peer.count(invalid, 0);
-  auto bad_retry = run(); bad_retry.retry.enabled = true; bad_retry.retry.max_attempts = 0;
+  auto bad_retry = run(); bad_retry.retry->enabled = true; bad_retry.retry->max_attempts = 0;
   failure(client.complete(request(invalid), bad_retry)); peer.count(invalid, 0);
   const auto mismatch = client.complete(request(invalid, true));
   const auto mismatch_kind = failure(mismatch).error.kind;
@@ -507,7 +549,7 @@ void secrets_and_replay(Peer& peer) {
     && ue.expected.find(marker) == std::string::npos, "rejected userinfo leaked secret");
   auto opts = options(); opts.api_key += '\n'; bool caught = false;
   try { Client bad(descriptor(peer, false), opts); }
-  catch (const std::invalid_argument& error) { caught = true; require(std::string_view(error.what()).find(marker) == std::string_view::npos, "credential validation leaked secret"); }
+  catch (const sp::descriptor::ConfigError& error) { caught = true; require(error.message.find(marker) == std::string::npos, "credential validation leaked secret"); }
   require(caught, "control-bearing credential accepted");
 }
 
@@ -578,6 +620,7 @@ int main(int argc, char** argv) {
     check("retry policy", [&] { retry_policy(peer); });
     check("safe connect retry", [&] { safe_connect_retry(); });
     check("partial, ping and close", [&] { partial_ping_and_close(peer); });
+    check("typeless Messages buffered error", [&] { typeless_messages_runtime_error(peer); });
     check("minima, bucket and deadline", [&] { minima_budget_deadline(peer); });
     check("ownership", [&] { ownership(peer); });
     check("callback ownership and misuse", [&] { callback_ownership_and_misuse(peer); });

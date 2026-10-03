@@ -1,11 +1,11 @@
 # Decision records
 
-Design records. D1 was revised on 2026-10-01 after a measurement and a transport spike (see ../POC_PLAN.md); the other records are proposals that no implementation has exercised yet. Each record lists reconsideration conditions, falsifiers and enforcement names.
+Decision records with historical design and current implementation guidance. Current installed SDK is unstable0.0.0/interface3/SOV3 and typed owner-approved C++ cutover is IN VERIFICATION. [Current provenance](../POC_PLAN.md#current-typed-c-cutover-provenance) and [public installation/configuration/custody contracts](../../README.md#install-and-use-the-unstable-c-sdk) supersede private/not-installed, legacy importer/adapter and WS sketches. D1's exact HTTP3 proof is preserved; no NeoGraph full qualification, release or multiplatform support is inferred.
 
 | ID | Title | Status | Date | Decision | Open item |
 |---|---|---|---|---|---|
-| [D1](D1-transport.md) | Transport | FIRM (revised) | 2026-10-01 | One libcurl `multi_socket` stack on private Asio; HTTP/2 included, optional HTTP/3 direction accepted but not implemented. Capable builds can prefer HTTP/3 with safe connection-stage fallback; non-capable builds keep HTTP/2/1.1. One attempt, shared semantics, generation POST 0-RTT off by default | HTTP/3 build/admission gate; D1b WebSocket; libcurl floor/deployment; broader HTTP/2/TLS/platform matrix beyond M1b (POC_PLAN R3-R5, R9) |
-| [D2](D2-non-chat-scope.md) | Non-chat scope | FIRM | 2026-10-01 | First release is chat + chat artifacts only; cutover gated on typed clients or approved deletion for Images/Veo/Decisions | Owner usage inventory |
+| [D1](D1-transport.md) | Transport | FIRM (revised) | 2026-10-01 | One libcurl stack; optional HTTP3 implemented and locally exercised plain/ASan+UBSan/TSan with release backend libraries; safe one-POST fallback and incapable-build rejection | Hosted-provider/platform matrix; WebSocket deferred/excluded |
+| [D2](D2-non-chat-scope.md) | Non-chat scope | FIRM | 2026-10-01 | SDK chat/artifacts only; NeoGraph retains separate typed Images/Veo/Decisions clients and separate authority | Paid media single-shot evidence not yet executed |
 | [D3](D3-async-native.md) | Async-native core | FIRM | 2026-10-01 | Bounded I/O workers, blocking facade over the same operation; gated by cancel and admission properties | NeoGraph target concurrency for the scheduled benchmark |
 | [D4](D4-origin-and-binding.md) | Origin and binding facts | FIRM | 2026-10-01 | Exact-origin default gate plus recorded binding facts; documented equivalence class only after negative-control canary | Bedrock/Vertex direct credentials; OpenRouter invalid-signature cause |
 | [D5](D5-rule-admission.md) | Descriptor rule admission | FIRM | 2026-10-01 | 3 real independent cases + truth table + tests; v1 has only omit and require_greater | Pre-validate against vendor docs; real fixture paths |

@@ -1,6 +1,7 @@
 #include "canary/canary.h"
 #include "canary/io.h"
 #include "support/runtime_peer.h"
+#include "support/qualification_fixture.h"
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -10,16 +11,14 @@ namespace {
 using runtime_test::require;
 class Directory {
  public:
-  Directory() {
-    char pattern[] = "/tmp/sp-vision-control-XXXXXX";
-    auto* path = ::mkdtemp(pattern); require(path, "temporary directory failed"); path_ = path;
-  }
-  ~Directory() { std::error_code ignored; std::filesystem::remove_all(path_, ignored); }
+  Directory(const std::filesystem::path& source, const std::string& model)
+      : campaign_(source, {model}) {}
   Directory(const Directory&) = delete;
   Directory& operator=(const Directory&) = delete;
-  std::string file(std::string_view name) const { return path_ + '/' + std::string(name); }
+  std::string file(std::string_view name) const { return (campaign_.root / name).string(); }
+  std::string root() const { return campaign_.root.string(); }
  private:
-  std::string path_;
+  qualification_test::Campaign campaign_;
 };
 void save(const std::string& path, std::string_view bytes) {
   sp::canary::detail::Fd fd(::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600));
@@ -40,13 +39,13 @@ std::string profile(std::string_view provider, const std::string& model, std::ui
 struct CliResult { int code; std::string text; };
 CliResult cli(const char* executable, const Directory& directory) {
   runtime_test::Pipe output;
-  const auto source = directory.file("profile"), ledger = directory.file("ledger"), keys = directory.file("keys");
+  const auto source = directory.file("profile"), root = directory.root(), keys = directory.file("keys");
   const auto pid = ::fork(); require(pid >= 0, "CLI fork failed");
   if (!pid) {
     output.reader.reset();
     if (::dup2(output.writer.get(), STDOUT_FILENO) < 0 || ::dup2(output.writer.get(), STDERR_FILENO) < 0) _exit(126);
     output.writer.reset();
-    ::execl(executable, executable, "--profile", source.c_str(), "--ledger", ledger.c_str(),
+    ::execl(executable, executable, "--profile", source.c_str(), "--project-root", root.c_str(),
         "--env-file", keys.c_str(), "--execute", "--test-loopback", static_cast<char*>(nullptr)); _exit(127);
   }
   runtime_test::Process child(pid); output.writer.reset();
@@ -82,9 +81,10 @@ struct Scenario {
   std::string omission_response{};
   bool omission_specific = false;
 };
-void run(runtime_test::Peer& peer, const char* executable, const Scenario& scenario, unsigned sequence) {
-  Directory directory;
+void run(runtime_test::Peer& peer, const char* executable, const Scenario& scenario, unsigned sequence,
+         const std::filesystem::path& source) {
   const auto model = "native-control-" + std::to_string(sequence);
+  Directory directory(source, model);
   peer.command("{\"arm\":" + sp::json::quote(model) + ",\"scenario\":\"campaign\",\"signature_error\":" +
       control(scenario.response, scenario.status, scenario.sse, scenario.short_close) +
       ",\"omission_error\":" + control(scenario.omission_response.empty() ? scenario.response : scenario.omission_response,
@@ -95,13 +95,15 @@ void run(runtime_test::Peer& peer, const char* executable, const Scenario& scena
   const auto observed = cli(executable, directory);
   require(observed.code == (scenario.accepted || (scenario.specific && scenario.omission_specific) ? 0 : 2),
       "CLI lost control status at scenario " + std::to_string(sequence) + "; exit=" + std::to_string(observed.code) + "; safe report=" + observed.text);
-  const auto document = runtime_test::parse(observed.text); const auto root = document.root();
+  const auto document = qualification_test::first_report(observed.text); const auto root = document.root();
   require(root.get("test_only").as_bool() && !root.get("equivalence_admission").as_bool() &&
       root.get("replay").as_string() == "ReplayAcceptanceUnobservable", "loopback granted live native replay proof");
   require(root.get("positive_retained").as_bool() && root.get("reasoning_removed").as_bool() &&
       root.get(scenario.provider == "vision_responses" ? "ciphertext_mutated" : "signature_mutated").as_bool(),
       "CLI lost positive retention or exact native controls");
-  const auto cases = root.get("cases"); require(cases.is_array() && cases.size() == 8, "CLI omitted native control cases");
+  const bool google = scenario.provider == "vision_gemini" || scenario.provider == "vision_interactions";
+  const auto count = scenario.provider == "vision_interactions" ? 11U : google ? 9U : 8U;
+  const auto cases = root.get("cases"); require(cases.is_array() && cases.size() == count, "CLI omitted native control cases");
   for (std::size_t i = 0; i < 6; ++i) {
     const auto item = cases.at(i);
     require(item.get("state").as_string() == "passed" && item.get("dispatched").as_bool() &&
@@ -118,10 +120,37 @@ void run(runtime_test::Peer& peer, const char* executable, const Scenario& scena
           scenario.omission_specific ? "omission_rejected" : "negative_inconclusive") &&
       omission.get("state").as_string() == (scenario.accepted || scenario.omission_specific ? "passed" : "failed"),
       "omission was mislabeled signature proof");
+  require(cases.at(5).get("native_complete").as_bool(), "control preparation cleared retained positive replay authority");
+  if (scenario.accepted) {
+    const auto settlement = scenario.provider == "vision_messages" ? "Exact" : "UpperBound";
+    for (std::size_t i = 6; i < count; ++i)
+      require(cases.at(i).get("state").as_string() == "passed" &&
+          cases.at(i).get("control_changed").as_bool() &&
+          cases.at(i).get("settlement").as_string() == settlement &&
+          cases.at(i).get("usage_stage").as_string() == "final" &&
+          !cases.at(i).get("native_complete").as_bool(),
+          "accepted changed control lost final usage or minted native replay authority; scenario=" +
+          std::to_string(sequence) + "; case=" + std::to_string(i) + "; safe report=" + observed.text);
+  }
+  if (google) {
+    require(cases.at(8).get("reason").as_string() == "negative_accepted" &&
+        cases.at(8).get("duplicate_control").as_bool() &&
+        cases.at(8).get("control_changed").as_bool() &&
+        !cases.at(8).get("native_complete").as_bool(),
+        "valid duplicate carrier was rejected or granted replay authority; scenario=" + std::to_string(sequence) +
+        "; safe report=" + observed.text);
+    if (scenario.provider == "vision_interactions") {
+      for (std::size_t i : {9U, 10U})
+        require(cases.at(i).get("control_changed").as_bool() &&
+            cases.at(i).get("reason").as_string() == (scenario.accepted ? "omission_accepted" : "negative_inconclusive"),
+            "independent thought/call omission lost contrast or fabricated consumption");
+    }
+  }
   const auto stats = peer.stats(model); const auto wire = stats.root();
-  peer.count(model, 8, scenario.accepted ? 0 : 2);
+  peer.count(model, count, scenario.accepted ? 0 : scenario.provider == "vision_interactions" ? 4 : 2);
   require(wire.get("retained").as_uint() == 1 && wire.get("signature_negative").as_uint() == 1 &&
-      wire.get("reasoning_missing").as_uint() == 1 && wire.get("images").as_uint() == 8,
+      wire.get("reasoning_missing").as_uint() == (scenario.provider == "vision_interactions" ? 3U : 1U) && wire.get("images").as_uint() == count &&
+      (!google || wire.get("carrier_duplicate").as_uint() == 1),
       "peer did not verify exact positive, one-byte mutation, omission and original images");
 }
 } // namespace
@@ -181,7 +210,8 @@ int main(int argc, char** argv) {
       {"vision_messages", {}, false, 400, false, false, true},
       {"vision_responses", {}, false, 400, false, false, true}
     };
-    unsigned sequence = 0; for (const auto& scenario : scenarios) run(peer, argv[3], scenario, ++sequence);
+    const auto source = std::filesystem::absolute(argv[2]).parent_path().parent_path().parent_path();
+    unsigned sequence = 0; for (const auto& scenario : scenarios) run(peer, argv[3], scenario, ++sequence, source);
     std::cout << "vision native control JSON/SSE classification and privacy passed\n"; return 0;
   } catch (const std::exception& error) {
     std::cerr << "vision control behavior failed: " << error.what() << '\n'; return 1;

@@ -122,6 +122,17 @@ const server = http.createServer(async (req, res) => {
     if (c.scenario === 'short-close') headers['Content-Length'] = Buffer.byteLength(data) + 19;
     res.writeHead(200, headers); res.flushHeaders();
     const send = value => { c.bytes += Buffer.byteLength(value); res.write(value); };
+    if (c.scenario.startsWith('named-')) {
+      if (c.scenario.startsWith('named-completed-')) send(data);
+      else if (c.scenario.startsWith('named-partial-')) send(prefix(body.model));
+      const error = { code: 'rate_limit_exceeded', message: key };
+      const payload = c.scenario.endsWith('-malformed') ? '{'
+        : c.scenario.endsWith('-sentinel') ? '[DONE]'
+        : JSON.stringify({ ...(c.scenario.endsWith('-wrong-type') ? { type: 'response.completed' } : {}), error,
+            vendor: { b: [2, 1], a: true } });
+      send(`event: error\ndata: ${payload}\n\ndata: [DONE]\n\n`);
+      fault(); res.end(); return;
+    }
     if (c.scenario === 'hold') { c.held.set(res, () => { send(data); res.end(); }); notify(); return; }
     if (c.scenario === 'partial' || c.scenario === 'partial-error') {
       send(prefix(body.model));

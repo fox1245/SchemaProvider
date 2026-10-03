@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <memory>
 #include <string_view>
 #include <utility>
 #include <variant>
@@ -23,6 +24,9 @@ struct ConfigError {
     std::uint64_t revision = 0;
     std::string message;
 };
+class DescriptorPolicy;
+struct FamilyPolicy;
+using PolicySnapshot = std::shared_ptr<const DescriptorPolicy>;
 class Loader;
 class ValidatedDescriptor {
 public:
@@ -38,24 +42,25 @@ public:
     const std::vector<std::string>& usage_path() const { return usage_path_; }
     const std::vector<std::pair<std::string, std::string>>& headers() const { return headers_; }
     const Evidence& evidence() const { return evidence_; }
+    const PolicySnapshot& policy() const noexcept { return policy_; }
+    const FamilyPolicy& family_policy() const noexcept;
     StopKind stop_kind(std::string_view raw) const;
+    const std::vector<std::pair<std::string, StopKind>>& stop_mappings() const noexcept { return stop_reasons_; }
 private:
     ValidatedDescriptor() = default;
     std::uint64_t revision_ = 0;
     std::string id_, family_, base_url_, buffered_path_, streaming_path_;
-    std::string model_member_ = "model", messages_member_ = "messages", stream_member_ = "stream";
-    std::string max_output_tokens_member_ = "max_tokens";
-    std::vector<std::string> usage_path_{"usage"};
+    std::string model_member_, messages_member_, stream_member_, max_output_tokens_member_;
+    std::vector<std::string> usage_path_;
     std::vector<std::pair<std::string, std::string>> headers_;
-    std::vector<std::pair<std::string, StopKind>> stop_reasons_{
-        {"stop", StopKind::EndTurn}, {"length", StopKind::MaxTokens},
-        {"tool_calls", StopKind::ToolUse}, {"content_filter", StopKind::ContentFilter},
-        {"refusal", StopKind::Refusal}, {"pause_turn", StopKind::PauseTurn},
-        {"context_length_exceeded", StopKind::ContextLimit}};
+    std::vector<std::pair<std::string, StopKind>> stop_reasons_;
+    PolicySnapshot policy_;
     Evidence evidence_;
     friend class Loader;
 };
 using LoadResult = std::variant<ValidatedDescriptor, ConfigError>;
 LoadResult load(std::string_view source);
+LoadResult load(std::string_view source, PolicySnapshot policy);
+bool valid_origin(std::string_view url);
 
 } // namespace sp::descriptor
