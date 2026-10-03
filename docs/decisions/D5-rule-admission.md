@@ -3,6 +3,8 @@
 - Status: FIRM, 2026-10-01
 - Deciders: maintainer + two-family review panel
 
+**Current implementation boundary.** This record governs the original proposed constraints grammar and future rule admission, not currently installed rule execution. Closed runtime/error and descriptor/codec policy snapshots are implemented; the broader descriptor constraints interpreter is not. The old NeoGraph interpreter cited as design-time evidence below was removed by the approved cutover, not retained behind a compatibility path. [Current inventory and admission APIs](../../README.md#owned-requests-results-and-configuration).
+
 ## Context
 Descriptors are data; every stateless rule kind added to the grammar adds an interpreter path, a bump to the descriptor major version and review burden. Prior drafts carried `RequireEqualWhen` without a real case.
 
@@ -16,14 +18,14 @@ A new stateless rule kind is admitted only with:
 
 Forbidden forever, regardless of case count: state, ordering/chaining, dynamic paths, callbacks/hooks, I/O, vendor-name conditions, message reordering, event-meaning changes.
 
-Every new rule bumps the descriptor major version. **v1 ships only rules with a real case in current NeoGraph**: `omit` (with `when.in`) and `require_greater`; the bootstrap waiver is recorded in `rules.json`.
-`RequireEqualWhen` has NO real case (verified: the current NeoGraph interpreter parses only omit and require_greater) and is **removed from v1** until a real case is submitted.
+Every new rule would bump the target descriptor major version. **The original target v1 selected only rules with a real case in pre-cutover NeoGraph**: `omit` (with `when.in`) and `require_greater`; the bootstrap waiver remains in `rules.json`. This is an admission policy, not a current SDK support claim.
+`RequireEqualWhen` had no real case: the historical NeoGraph interpreter parsed only omit and require_greater. It was **removed from the target v1** until a real case is submitted; the interpreter itself is no longer current.
 `require_greater` needs a selector/exemption: Anthropic documents that `budget_tokens` may exceed `max_tokens` with interleaved thinking, so it is modelled as conditional on a selector slot.
 
-Machine-readable ledger: `rules.json`. CI gate: loader rule-kind enumeration == ledger.
+Machine-readable design ledger: `rules.json`. A future implemented rule loader must satisfy loader rule-kind enumeration == ledger; the ledger alone is not execution or CI-pass evidence.
 
 ## Evidence
-- [read source] Current NeoGraph interpreter handles only `omit` and `require_greater`.
+- [read source] The pre-cutover NeoGraph interpreter handled only `omit` and `require_greater`; this is historical rationale, not evidence that the removed interpreter survives.
 - [read docs] Anthropic documents the interleaved-thinking exemption for `budget_tokens` vs `max_tokens`; another documented request shape (block binding with a between-tools option returning 400) is a mutual-exclusion rule, i.e. a fourth shape, so the rule set must be checked against current vendor docs before freezing.
 - [inference] Three-case threshold is a policy to resist single-vendor special-casing.
 

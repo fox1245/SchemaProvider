@@ -8,7 +8,7 @@
 // Transport::start() (and the multi handle in the constructor before any I/O thread exists); an
 // easy handle that has not been added yet is owned by the caller alone, so that is not shared state.
 //
-// Linux/POSIX only in this spike: sockets owned by libcurl are watched through
+// Linux/POSIX only in the current implementation: sockets owned by libcurl are watched through
 // asio::posix::stream_descriptor and released (never closed) when libcurl removes them.
 #include "transport/http_transport.h"
 

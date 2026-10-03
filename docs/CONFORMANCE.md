@@ -1,6 +1,6 @@
 # Conformance plan
 
-Status: acceptance plan and historical measurements for the **installed unstable SDK0.0.0/interface3/SOV3** and owner-approved typed C++ cutover **IN VERIFICATION**. Current SDK rebuild/CTest passed26/26 on Linux; installed shared ABI3 consumer proof passed, static proof predates latest extensions. M5's old-ABI NO-GO and earlier cohorts remain historical, not current cutover status. SDK proof is not complete NeoGraph/release/equivalence qualification. [Current provenance](POC_PLAN.md#current-typed-c-cutover-provenance) and [current public contracts](../README.md#owned-requests-results-and-configuration) supersede private/not-installed and legacy adapter/importer sketches.
+Status: acceptance plan and historical measurements for the **installed unstable SDK0.0.0/interface3/SOV3** and owner-approved typed C++ cutover, with **actual integrated proof recorded**, not stable/released or fully qualified. Latest SDK26/26 passed with zero failures in74.07seconds; fresh installed static/shared ABI3 consumers exercised actual two-turn HTTP native/tool replay, refusal, known-zero/raw ownership and linked-interface mismatch refusal. Core2242-test full proof had zero failures and16 documented skips. M5's old-ABI NO-GO and earlier cohorts remain historical; remote mixed-gRPC TSan remains unqualified. [Current provenance](POC_PLAN.md#current-typed-c-cutover-provenance) and [current public contracts](../README.md#owned-requests-results-and-configuration) supersede private/not-installed and legacy adapter/importer sketches without asserting that every release/equivalence gate below has passed.
 
 Optional HTTP/3 capable Linux scenarios passed plain, ASan+UBSan and TSan; [D1 exact evidence](decisions/D1-transport.md#evidence) records uninstrumented release-backend limits. Every WebSocket property/table/oracle below is deferred future specification, excluded from current SDK/release gates and never counted as a pass.
 
@@ -158,7 +158,7 @@ General rules for every property:
 
 - Statement: no EOF, clean close, reset, in-band error event, HTTP 200 with an error body, failed Responses status or early WebSocket close produces a successful completion. Terminal evidence is what the family defines for that transport (`DESIGN.md` section 4.2). Empty output without terminal evidence is a failure. When terminal, error and cancel race, the caller gets exactly one outcome and no callback fires after it.
 - Normal close, defined once for all cells: HTTP/1.1 response complete when Content-Length bytes arrived, or the chunked zero-length terminator arrived; HTTP/2 when END_STREAM arrived with no earlier RST_STREAM; WebSocket when a close frame with a normal code arrived after the terminal message. EOF on a close-delimited body, a short Content-Length body, a missing chunk terminator, RST_STREAM and an abnormal close code are abnormal close and yield `Failure(Truncated)` even if the received bytes parse as complete JSON. The scripted server expresses each through `close.how` (section 2). Whether the `Failure` keeps the partial content for the caller is a `DESIGN.md` rule; the oracle checks that it is never a `Completion`.
-  - For optional HTTP/3, require complete HTTP message framing and a clean end of the response direction of the QUIC stream. A stream reset or connection failure before completion is abnormal; QUIC FIN or GOAWAY alone never substitutes for family terminal evidence. These rows remain planned until the HTTP/3 lane is run.
+  - For optional HTTP/3, require complete HTTP message framing and a clean end of the response direction of the QUIC stream. A stream reset or connection failure before completion is abnormal; QUIC FIN or GOAWAY alone never substitutes for family terminal evidence. Actual capable Linux completion/reset/truncation scenarios passed plain, ASan+UBSan and TSan; [D1 evidence](decisions/D1-transport.md#evidence) preserves the exact scope and release-backend instrumentation limits.
 - Oracle matrix: the terminal evidence each cell must show for `Commit` (rows restate fixture expectations and follow `DESIGN.md` section 4.2). Every cell also requires normal close; a cell's fixture set is {complete, cut before terminal, cut after terminal but before a usage trailer, clean close with no terminal, reset, in-band error, terminal plus error}.
 
 | Family | Buffered | SSE | WebSocket |
@@ -508,14 +508,14 @@ Release criteria are stage gates, defined with their dates, cells and property s
 
 ### 12.1 Optional HTTP/3 gate
 
-Planned, not run. This gate applies before any release advertises HTTP/3; it is not required to keep the HTTP/2/HTTP/1.1 baseline usable. Policy authority: [D1](decisions/D1-transport.md#optional-http3-policy). Existing property names are reused rather than introducing a second semantic suite.
+Implemented optional transport; capable Linux scenarios have run under plain, ASan+UBSan and TSan, with actual HTTP/3 preference/only negotiation, one-POST HTTP/2 fallback, cancel/deadline, reset/truncation and same-connection paused-stream isolation. The non-QUIC system build rejects HTTP/3-only before dispatch. [D1 evidence](decisions/D1-transport.md#evidence) records exact linked versions and uninstrumented release-backend limits. The table remains the acceptance checklist for any advertised release/build matrix, not a claim that every peer/fault combination or five-family semantic parity cell has been qualified. HTTP/3 is not required for the HTTP/2/HTTP/1.1 baseline; existing property names are reused rather than introducing a second semantic suite.
 
 | Gate | Required evidence |
 |---|---|
 | Capability and install isolation (`InstallAndDependencyDAG`, `IntentOrError`) | Test builds with and without HTTP/3 in the linked libcurl, not just a `curl` executable. The non-capable build uses its normal HTTP/2/1.1 path. QUIC backend headers/types remain private. Missing capability is explicit in an HTTP/3-only verification run. |
 | Actual protocol, not successful fallback | A real QUIC peer and an isolated HTTP/3-only client connection prove HTTP/3 negotiation from both ends. A response served by HTTP/2/1.1 is fallback evidence only, never an HTTP/3 pass. Record the linked libcurl/TLS/QUIC versions and negotiated protocol with the result. |
 | Safe fallback and replay (`RetrySafetyBudgetDeadline`) | Unsupported peer, UDP refusal/blackhole, QUIC handshake failure, raced connection candidates and failures after possible send. At most one HTTP request reaches the peers per permitted application attempt; no timeout/budget reset, silent resend or retry after semantic output. Verify generation POST early data is disabled. |
-| Completion and parity (`NoTerminalNoSuccess`, `TransportProjectionParity`) | Normal HTTP/3 stream end, truncated body, stream reset and connection failure; one outcome, with no EOF-created success. Once codecs exist, HTTP/2 and HTTP/3 yield the same buffered/SSE semantic and replay projections. |
+| Completion and parity (`NoTerminalNoSuccess`, `TransportProjectionParity`) | Normal HTTP/3 stream end, truncated body, stream reset and connection failure; one outcome, with no EOF-created success. HTTP/2 and HTTP/3 must yield the same buffered/SSE semantic and replay projections for each advertised family cell; transport delivery proof alone is not full semantic parity qualification. |
 | Liveness and bounds (`CancelWithoutPeerProgress`, `OwnershipAndBounds`, `AdmissionIndependentOfHeldStreams`) | Cancel/deadline while QUIC handshake, fallback race or response delivery makes no progress; pause/resume one stream beside active siblings, cancel it without aborting siblings, and verify byte completeness and bounded memory. QUIC timers must still run; do not suppress readability for the entire shared connection as for HTTP/1.x. Run the applicable scenarios under plain, ASan+UBSan and TSan. |
 
 TLS verification and origin/credential boundaries apply in both the HTTP/3 and fallback lanes. Capability or loopback success does not establish a provider's HTTP/3 support; provider claims need the relevant budgeted live evidence. Performance comparisons are measurements, not correctness gates or promised speedups.
@@ -527,7 +527,7 @@ Decided (see `decisions/`): D1 transport (libcurl `multi_socket` on a private As
 - D1b: the WebSocket transport for the Responses lane (decides how 5.15's WebSocket partial-frame state and the WSS canary cells are run).
 - Direct Bedrock and Vertex credentials for the equivalence-class canary; without them those cells stay `Documented-Unverified`.
 - NeoGraph's target concurrency for the scheduled D3 benchmark.
-- Owner usage inventory for image, long-running operation and decisions features (affects NeoGraph's cutover, not this suite).
+- Non-chat SDK scope remains excluded; NeoGraph's retained Images/Veo/Decisions are separate typed clients. [Recorded single-shot media validation and limits](../README.md#persistent-qualification-campaign-completed-observations-explicit-limits) do not establish broad endpoint qualification or authorize more requests.
 
 ## 14. Limits of this plan
 
@@ -536,7 +536,7 @@ Decided (see `decisions/`): D1 transport (libcurl `multi_socket` on a private As
 - Synthetic signatures prove structure and retention, never vendor acceptance.
 - Mutant sets are a floor chosen by the authors; they do not prove the properties are strong enough.
 - The deterministic seam enumerates interleavings among handlers it controls; it does not model kernel or vendor timing.
-- Properties are proposed gates. None has been run, and every number or threshold in this document is a target, not an observation.
+- The property catalogue remains the release acceptance plan, not a blanket pass report. Measurements explicitly identified above or in POC_PLAN/D1 are observations with their recorded cohorts and limits; unexercised properties, proposed thresholds and future cells remain gates, never retroactive successes.
 
 ## Appendix A. Review disposition
 

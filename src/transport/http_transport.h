@@ -1,9 +1,9 @@
-// Private transport port: one HTTP attempt over libcurl's multi_socket interface,
+// Transport boundary: one HTTP attempt over libcurl's multi_socket interface,
 // driven by a private standalone-Asio event loop (decision D1, docs/decisions/D1-transport.md).
 //
-// This header is deliberately free of Asio and libcurl types so that the include-direction
-// gate (DESIGN.md section 2.4) can hold when the library grows installed headers. It is NOT an
-// installed header and promises no stability.
+// This header is free of Asio and libcurl types so the installed include-direction
+// gate (DESIGN.md section 2.4) can hold. It is shipped under SchemaProvider/transport
+// by the unstable SDK package; backend types stay private and no stability is promised.
 //
 // Contract (DESIGN.md sections 2.1 rule 3, 7; CONFORMANCE.md 5.2, 5.12, 5.15, 5.21):
 //  * One start() is one logical attempt. The transport never retries and refuses libcurl's own

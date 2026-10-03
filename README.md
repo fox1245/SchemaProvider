@@ -13,7 +13,7 @@ A multi-vendor LLM client library for C++20.
 > Initial five-API vision/reasoning probe:23/23 model-free groups passed and40/40 calls reserved US$7.795635. Actual vision/thinking ran on all five families; GPT-6 Luna Responses passed8/8 with N=1 ciphertext proof. Interactions tool replay and further vision-signature controls were not yet observed at that cap. This remains the historical [POC_PLAN5.8](docs/POC_PLAN.md#58-five-api-vision-and-reasoning-live-observation) record, not a new all-family pass.
 > Remaining native controls and fresh execution: **24/24 groups pass** under plain, ASan+UBSan and TSan. Actual Interactions SSE tool replay now passes with exact native retention; Messages and Responses have N=1 `ReplayVerified`. Gemini/Interactions accepted single-carrier signature mutation and remain `ReplayAcceptanceUnobservable`. Fresh results: Chat6/6, Messages8/8, Gemini8/8, Interactions7/8 (generic omission rejection), Responses low6 passed/2 unavailable, then separate medium8/8. Additional **59/60 calls / US$11.184045 reserved**, cumulative99/100 / US$18.979680. [Exact separate cohorts, fixes and limits](docs/POC_PLAN.md#59-remaining-native-controls-and-fresh-campaign-live-observation).
 > **Optional HTTP/3 policy is implemented and capable Linux scenarios pass under plain, ASan+UBSan and TSan.** An isolated curl 8.16/OpenSSL 3.5.3/ngtcp2/nghttp3 build negotiates real HTTP/3 for preference/only, HTTP/2 for single-POST fallback, and preserves cancel/deadline, reset/truncation and same-connection paused-stream isolation. The system curl 8.5 remains a supported non-QUIC build; its only mode rejects before dispatch. Backend dependency libraries are release builds; hosted API evidence is separate. [Exact local observations and limits](docs/decisions/D1-transport.md#evidence).
-> Owner-priority work: caller-controlled MAX_TOKEN, bounded HTTP/3 transport, installed shared SDK and the 58-configuration model-free SDK benchmark matrix are exercised. Full external JSON admission, lossless NeoGraph consumer/example/cookbook cutover and before/after graph measurements remain in integrated verification. [Current sequence](docs/ROADMAP.md#owner-requested-next-work).
+> Owner-priority work: caller-controlled MAX_TOKEN, closed external JSON snapshot admission, bounded HTTP/3 transport, installed shared SDK and the 58-configuration/174-record model-free SDK benchmark are exercised. The typed lossless NeoGraph caller/example cutover and integrated C++ consumers have recorded proof; the final graph benchmark completed16 configurations/48 fresh-process records with zero failures. Selected cookbook runtime observations and unexercised variants remain distinct; none of this establishes stable release, broad platform support or universal vendor qualification. [Current sequence and evidence](docs/ROADMAP.md#owner-requested-next-work).
 
 ## What it is meant to be
 One C++20 client over the chat API families the major vendors expose (Chat Completions, Responses, Messages, Gemini generate and Interactions), usable on its own and as the LLM layer of NeoGraph. The first release is chat completion plus artifacts that arrive inside chat responses; image-generation endpoints, long-running video operations and the OpenRouter decisions endpoint are not part of it.
@@ -163,10 +163,10 @@ Reports separate `Exact`, `UpperBound` and `UnknownHold`; unknown usage retains 
 
 
 ## Documentation
-Current installation/configuration guidance below is normative for the unstable SDK. Historical measurements retain their original cohort and limits; remaining design sketches and release properties are not claims of implementation.
+Current installation/configuration guidance above is normative for the unstable SDK. Historical measurements retain their original cohort and limits; design sketches and remaining release properties are not claims of implementation.
 - [docs/POC_PLAN.md](docs/POC_PLAN.md): the proof-of-concept plan, its milestones, the transport spike results and the risk register.
-- [docs/DESIGN.md](docs/DESIGN.md): proposed architecture, vocabulary, streaming model, threat model, extension walkthroughs, decisions and the open questions.
-- [docs/ROADMAP.md](docs/ROADMAP.md): the staged release plan (what ships first and the extension order).
+- [docs/DESIGN.md](docs/DESIGN.md): current implementation status alongside explicitly historical/proposed vocabulary and API sketches, streaming invariants, threat model, extension walkthroughs and open decisions.
+- [docs/ROADMAP.md](docs/ROADMAP.md): completed owner-requested sequence and the separate, still-unclaimed staged release gates.
 - [docs/CONFORMANCE.md](docs/CONFORMANCE.md): the properties a release must pass and how they are tested.
 - [docs/RESEARCH.md](docs/RESEARCH.md): the measurements and surveys the design is based on.
 - [docs/decisions/](docs/decisions/): the decision records D1-D5 (all FIRM; D1 revised to libcurl on 2026-10-01) and the descriptor rule ledger.
@@ -178,7 +178,7 @@ Current installation/configuration guidance below is normative for the unstable 
 - A graph or agent runtime: that stays in NeoGraph.
 
 ## Relationship to NeoGraph
-NeoGraph's engine already depends only on the `Provider` interface, not on `SchemaProvider`. Splitting the two is mostly making that boundary real. The staging (contract cleanup inside NeoGraph, then the conformance suite, then the new implementation, then the switch; NeoGraph's cutover also removes its old descriptor interpreter) is written up in [NeoGraph#321](https://github.com/fox1245/NeoGraph/issues/321).
+NeoGraph's typed provider boundary now consumes SchemaProvider's owned requests/results with a pre-dispatch linked-interface gate. The old `Provider::complete`, parallel provider paths and descriptor interpreter are removed, not compatibility shims; the SDK's `runtime::Client::complete` remains supported. Non-chat Images/Veo/Decisions stay separate typed NeoGraph clients. The original staging is recorded in [NeoGraph#321](https://github.com/fox1245/NeoGraph/issues/321); [current integrated evidence and limits](#persistent-qualification-campaign-completed-observations-explicit-limits) describe the realized cutover without changing M5's historical old-ABI NO-GO.
 
 ## License
 MIT. See [LICENSE](LICENSE).

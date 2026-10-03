@@ -1,6 +1,6 @@
 # Proof-of-concept plan
 
-Status: historical M0–M5 and subsequent cohorts retain their measured results, including **M5 old-ABI strict lossless NO-GO**. Current state is an **installed unstable SDK0.0.0/interface3/SOV3 and owner-approved typed C++ cutover IN VERIFICATION**, not stable/released or fully qualified. [Current provenance](#current-typed-c-cutover-provenance) appends evidence without rewriting past results. Python bindings remain deferred/not ported.
+Status: historical M0–M5 and subsequent cohorts retain their measured results, including **M5 old-ABI strict lossless NO-GO**. Current state is an **installed unstable SDK0.0.0/interface3/SOV3 with actual integrated typed C++ cutover proof recorded**, not stable/released or fully qualified. [Current provenance](#current-typed-c-cutover-provenance) appends evidence without rewriting past results; the owner-requested implementation sequence is recorded in [ROADMAP](ROADMAP.md#owner-requested-next-work). Python bindings remain deferred/not ported.
 
 Five typed HTTP/SSE families now exist; earlier limitations remain attached to their own cohorts.
 
@@ -42,7 +42,7 @@ Stop rule for every milestone: if a property cannot be met, the finding is writt
 
 ### 3.1 Optional HTTP/3 workstream
 
-Status: planned, not started; policy accepted in [D1](decisions/D1-transport.md#optional-http3-policy). This workstream does not reorder M2-M5 or make QUIC a prerequisite for the baseline build. It uses model-free protocol peers; Ollama/llama.cpp setup remains excluded and live provider calls remain subject to C3.
+Status: implemented optional transport with actual capable Linux plain/ASan+UBSan/TSan proof recorded in [D1](decisions/D1-transport.md#evidence), including negotiation, one-POST fallback and lifecycle/isolation; backend libraries are uninstrumented release builds. The numbered list retains the original acceptance workstream, not a claim that every fault matrix or benefit measurement is complete. It did not reorder historical M2–M5 or make QUIC a prerequisite for the baseline build. Model-free protocol peers do not establish hosted API qualification; live provider calls require explicit persistent authority.
 
 1. **Optional dependency build.** Use an isolated, pinned libcurl + ngtcp2 + nghttp3 + compatible TLS build without replacing system libraries. Prove the linked library's HTTP/3 capability, keep a non-HTTP/3 build in the matrix, and record backend versions. Exact versions/distribution remain C1/C5 decisions.
 2. **Private adapter support.** Add HTTP/3 protocol selection and observation, response-version and stream-framing handling, typed QUIC failures, and shared-connection pause/cancel behavior. Reuse the existing libcurl/Asio integration and semantic boundaries; do not create a second HTTP stack or per-protocol codecs.
@@ -52,7 +52,7 @@ Status: planned, not started; policy accepted in [D1](decisions/D1-transport.md#
 
 Exit: the advertised HTTP/3 lane passes its applicable gates and the non-HTTP/3 baseline still works. Failure leaves HTTP/3 unadvertised rather than weakening the one-attempt or lifecycle contract.
 
-Current evidence `[live observation]`: a throwaway probe linked to the transport's libcurl 8.5.0/OpenSSL 3.0.13 reported `HTTP2=1`, `HTTP3=0`; both HTTP/3 preference and HTTP/3-only options returned `CURLE_UNSUPPORTED_PROTOCOL`. It made no HTTP request and was removed. This is a capability finding, not a QUIC transfer test.
+Baseline capability evidence `[live observation]`: the original throwaway libcurl8.5.0/OpenSSL3.0.13 probe reported `HTTP2=1`, `HTTP3=0`; both HTTP/3 preference/only options returned `CURLE_UNSUPPORTED_PROTOCOL` without an HTTP request. That probe remains historical, not a current SDK-only failure. The implemented non-QUIC policy retains the baseline H2/H1 path and rejects only mode before dispatch; isolated curl8.16/OpenSSL3.5.3/ngtcp2/nghttp3 now supplies real capable HTTP/3 proof with [exact versions and limits](decisions/D1-transport.md#evidence).
 
 ## 4. M1 experiments (what was built and what each one proves)
 
@@ -378,7 +378,7 @@ Final code passed **24/24 CTest groups** under plain **24.20s**, ASan+UBSan **35
 
 ### 5.10 Owner-requested remaining implementation `[plan]`
 
-The owner clarified that our canary choices must not dictate the user's token policy. The current commit records verified5.8/5.9 behavior and this remaining plan; it does **not** claim these six future tasks are implemented. No original NeoGraph code is changed merely by recording the integration plan.
+**Historical plan snapshot immediately after5.9.** At that checkpoint the owner clarified that canary choices must not dictate the user's token policy; these six deliverables were future work, not claims made by the24/24 cohort. The table preserves that original order and acceptance boundary. Current MAX_TOKEN/closed JSON/HTTP3/SDK benchmarks/typed caller-example cutover/final graph measurements now have bounded recorded proof in [ROADMAP](ROADMAP.md#owner-requested-next-work) and [current provenance](#current-typed-c-cutover-provenance); it must not be read as today's pending-work list.
 
 | Order | Remaining deliverable | Acceptance boundary |
 |---|---|---|
@@ -389,7 +389,7 @@ The owner clarified that our canary choices must not dictate the user's token po
 |5| Integrate NeoGraph and revise existing code/examples | Resolve rich result/native request/pre-dispatch gate and journal/projection first, migrate all callers/examples and remove obsolete owned paths cleanly. Existing strict lossless ABI NO-GO is not waived |
 |6| Re-run NeoGraph benchmarks | After actual integration/cutover, run the same NeoGraph workload/user settings and report reproducible end-to-end before/after results, not library-only substitutes |
 
-This owner order is now the next-work plan in ROADMAP.24/24 sanitizer suites and the API experiments above are prior verification evidence, not new benchmark results, configurable-setting completion, HTTP3 support or integration approval.
+At that checkpoint the24/24 sanitizer suites and API experiments were prior evidence, not new benchmark results, configurable-setting completion, HTTP3 support or integration approval. Later proof is recorded separately; historical grants, canary values and old-ABI NO-GO are not retroactively changed.
 
 ## 6. Risk register
 
@@ -403,7 +403,7 @@ This owner order is now the next-work plan in ROADMAP.24/24 sanitizer suites and
 | R6 | WebSocket for the Responses lane | undecided (D1b): libcurl WebSocket is official from 8.11 and the CVE fix is in 8.16, while the distribution libcurl here is 8.5.0 | decide before ROADMAP Stage 2, not before Stage 1 |
 | R7 | single `CURLM` on one strand limits CPU throughput | M4 measures held-stream admission and bounded redelivery, not throughput; the earlier polling-worker A/B was within about 4% of the Asio pool at 128 concurrent POSTs | measure real codec throughput separately before any multi-handle sharding decision |
 | R8 | resolver pool threads stuck in `getaddrinfo` delay uncached hosts | accepted and bounded by pool size | document; the deadline still ends every operation |
-| R9 | HTTP/3 build availability, connection fallback, replay and QUIC lifecycle | accepted direction; current linked libcurl has no HTTP/3; adapter support and QUIC tests are unimplemented | optional workstream 3.1 and conformance 12.1; retain the non-QUIC baseline and do not count fallback as HTTP/3 evidence |
+| R9 | HTTP/3 build availability, connection fallback, replay and QUIC lifecycle | implemented; isolated capable Linux negotiation/fallback/lifecycle/isolation scenarios pass plain/ASan+UBSan/TSan, while system libcurl8.5 retains the non-QUIC baseline | preserve D1's exact backend and uninstrumented-release-library limits; expand peer/platform/fault matrices only with evidence, retain baseline compatibility and never count fallback as HTTP/3 proof |
 
 ## 7. Open decisions and defaults
 
@@ -411,7 +411,7 @@ This owner order is now the next-work plan in ROADMAP.24/24 sanitizer suites and
 |---|---|---|---|
 | C1 | libcurl floor and required features | 7.88.0 (Debian 12) baseline floor, 8.5.0 tested; TLS and HTTP/2 required, HTTP/3 optional. The HTTP/3 lane needs its own validated libcurl/TLS/QUIC version combination; no baseline floor change is implied | owner, after M1b; HTTP/3 versions before that lane is admitted |
 | C2 | first platforms | Linux; Windows only after R5 | owner |
-| C3 | live call budget | Historical balances5.5-5.8 remain preserved. The owner's new60/US$12 grant starts at actual40/US$7.795635, giving cumulative100/US$19.795635 without renewing old margin. Observed new59/US$11.184045, cumulative99/US$18.979680 in5.9. No automatic retry, refund or hidden fallback | owner; any further grant must be explicit |
+| C3 | live call budget | Historical5.5–5.9 balances retain cumulative99/US$18.979680 exposure with no refund/reset. Later `SPQUAL1` original630/US$1 plus separately approved one-time480/US$3 admits aggregate1110/US$4; actual1110 calls,437958 microUSD debited and1287828 held are recorded in current provenance, not invoices. No automatic retry or hidden authority renewal | owner; no further paid calls authorized by these observations |
 | C4 | target concurrency | scenarios C = 1, 32, 128 and held-stream counts of 4T + 64 and twice that, reported as measurements and never as promised capacity | owner |
 | C5 | libcurl deployment | system libcurl baseline; optional HTTP/3 evaluated through an isolated dependency build, without replacing system libraries. Backend versions, packaging and any vendoring remain undecided; R6 may independently require a newer libcurl | owner |
 
