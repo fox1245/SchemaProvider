@@ -1,6 +1,7 @@
 #pragma once
 #include "core/value.h"
 #include "descriptor/descriptor.h"
+#include "core/request_controls.h"
 #include <utility>
 
 namespace sp::messages {
@@ -10,6 +11,16 @@ struct ToolDefinition {
   std::string type;
   std::optional<uint64_t> max_uses;
 };
+enum class ThinkingMode { Manual, Adaptive, Disabled };
+enum class OutputEffort { Low, Medium, High, Max };
+enum class CacheTtl { FiveMinutes, OneHour };
+struct CacheControl { std::optional<CacheTtl> ttl; };
+enum class ToolChoiceMode { Auto, Any, None, Tool };
+struct ToolChoice {
+  ToolChoiceMode mode = ToolChoiceMode::Auto;
+  std::string name;
+  std::optional<bool> disable_parallel_tool_use;
+};
 struct Request {
   std::string model, system, account_scope;
   std::vector<sp::Message> messages;
@@ -17,6 +28,11 @@ struct Request {
   std::optional<uint64_t> max_tokens;
   std::optional<uint64_t> thinking_budget;
   std::optional<double> temperature, top_p;
+  std::optional<ThinkingMode> thinking_mode{};
+  std::optional<OutputEffort> output_effort{};
+  std::optional<CacheControl> cache_control{};
+  std::optional<ToolChoice> tool_choice{};
+  std::optional<sp::OpenRouterRouting> provider{};
 };
 struct EncodedRequest {
   std::string method, path;

@@ -3,6 +3,8 @@
 - Status: FIRM, 2026-10-01
 - Deciders: maintainer + two-family review panel
 
+Current runtime supports HTTP/SSE, not WebSocket. WS waits and the 45% WSS scheduled benchmark below preserve historical future acceptance proposals; they are excluded from current SDK release gates. See [Usage](../USAGE.md#streaming-deadlines-cancellation-and-backpressure) for actual callback/deadline/handle semantics.
+
 ## Context
 Agent workloads hold many long streams (SSE, WebSocket) concurrently. A thread-per-request design ties capacity to thread count; a blocking-first design makes cancellation of waiting states hard.
 
@@ -41,7 +43,7 @@ Thread count growing with K, a waiting state where cancel needs peer progress, o
 
 ### M4 implementation and corrections
 
-At M4, `src/runtime/client.h` was private/not installed. It is now installed as `<runtime/client.h>` in the unstable0.0.0/interface3/SOV3 SDK, not stable. `Operation` is move-only; dropping it requests nonblocking cancellation, while `detach()` explicitly relinquishes it without cancellation. SDK `Client::complete()` waits on that same operation and remains supported. Results are immutable owned values and `join()` fences terminal callback return, closure destruction and admission-slot release. Admitted preflight errors run on the executor. A request that cannot reserve/publish a slot throws `AdmissionError` without calling a callback; the blocking facade returns its owned `Failure`. This keeps rejection bounded without inline reentrancy.
+At M4, `src/runtime/client.h` was private; the current typed runtime is installed with interface4 in a pre-stable package. `Operation` is move-only; destruction requests nonblocking cancellation and `detach()` relinquishes without cancel. SDK `Client::complete()` remains the blocking facade; results outlive Client and `join()` fences callback return/storage/slot release. Admitted preflight failures run on the executor; capacity/publication rejection throws `AdmissionError` without callbacks and `complete()` returns its owned Failure. `prepare()` exposes semantic/native rejection before dispatch. Historical M4/interface3 observations below are not new interface4 verification.
 
 RAII applies to workers, timers, stop registrations, attempt handles and test processes/FDs. A timer wait originally borrowed a map key across an unlock; the actual API smoke reproduced ASan heap-use-after-free, so the wait now takes a deadline value. Injected initial enqueue allocation failure also reproduced a shutdown hang caused by an unreleased admission slot; an RAII publication reservation now rolls back that ownership. A bounded manual-executor test enumerates 298 ready-task schedules and records actual completion/cancel/timer firings; 64 seeded eight-operation schedules exercise the shared retry budget. These are local runtime tests, not exhaustive OS/libcurl scheduling or the future WebSocket gate.
 

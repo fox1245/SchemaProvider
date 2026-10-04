@@ -6,6 +6,7 @@
 #include <charconv>
 #include <cmath>
 #include <set>
+#include <limits>
 
 namespace sp::chat {
 EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request, bool streaming) {
@@ -23,6 +24,36 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (request.reasoning_effort) effective.reasoning_effort = *request.reasoning_effort;
   if (request.service_tier) effective.service_tier = *request.service_tier;
   if (auto error = descriptor::validate_choices(descriptor, request.model, effective)) return bad(std::move(*error));
+  if (request.reasoning || request.include_reasoning || request.usage_include || !request.models.empty()) {
+    if (!descriptor::contains(descriptor.family_policy().openrouter_origins, descriptor.base_url()))
+      return bad("gateway controls require declared OpenRouter origin");
+  }
+  if (request.reasoning) {
+    const auto& reasoning = *request.reasoning;
+    if (!reasoning.effort && !reasoning.max_tokens && !reasoning.exclude && !reasoning.enabled)
+      return bad("reasoning options must not be empty");
+    if (reasoning.effort && !descriptor::contains(descriptor.family_policy().reasoning_efforts, *reasoning.effort))
+      return bad("unsupported reasoning effort");
+    if (reasoning.effort && reasoning.max_tokens)
+      return bad("reasoning effort and max_tokens are mutually exclusive");
+    if (reasoning.max_tokens && (!*reasoning.max_tokens ||
+        *reasoning.max_tokens > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) ||
+        (effective.max_output_tokens && *reasoning.max_tokens > *effective.max_output_tokens)))
+      return bad("reasoning max_tokens outside output budget");
+    if (reasoning.enabled == false && (reasoning.effort || reasoning.max_tokens))
+      return bad("disabled reasoning cannot specify effort or budget");
+    if (effective.reasoning_effort)
+      return bad("scalar and nested reasoning controls conflict");
+    if (reasoning.exclude == true && request.include_reasoning == true)
+      return bad("excluded reasoning cannot be included");
+  }
+  if (request.models.size() > resources.request_tools) return bad("alternative model count limit exceeded");
+  std::set<std::string_view> alternative_models;
+  for (const auto& model : request.models) {
+    if (model.empty() || !alternative_models.insert(model).second)
+      return bad("alternative models require unique nonempty names");
+    if (auto error = descriptor::validate_choices(descriptor, model, effective)) return bad(std::move(*error));
+  }
   if (request.provider)
     if (auto error = request_controls::validate_routing(descriptor, *request.provider))
       return bad(std::move(*error));
@@ -266,6 +297,25 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       body.raw(",").quoted(descriptor.max_output_tokens_member()).raw(":").raw(std::to_string(*effective.max_output_tokens));
     if (effective.reasoning_effort) body.raw(",\"reasoning_effort\":").quoted(*effective.reasoning_effort);
     if (effective.service_tier) body.raw(",\"service_tier\":").quoted(*effective.service_tier);
+    if (request.reasoning) {
+      const auto& reasoning = *request.reasoning;
+      body.raw(",\"reasoning\":{");
+      bool field = false;
+      auto key = [&](std::string_view name) { if (field) body.raw(","); field = true; body.quoted(name).raw(":"); };
+      if (reasoning.effort) { key("effort"); body.quoted(*reasoning.effort); }
+      if (reasoning.max_tokens) { key("max_tokens"); body.raw(std::to_string(*reasoning.max_tokens)); }
+      if (reasoning.exclude) { key("exclude"); body.raw(*reasoning.exclude ? "true" : "false"); }
+      if (reasoning.enabled) { key("enabled"); body.raw(*reasoning.enabled ? "true" : "false"); }
+      body.raw("}");
+    }
+    if (request.include_reasoning) body.raw(",\"include_reasoning\":").raw(*request.include_reasoning ? "true" : "false");
+    if (request.usage_include) body.raw(",\"usage\":{\"include\":").raw(*request.usage_include ? "true}" : "false}");
+    if (!request.models.empty()) {
+      body.raw(",\"models\":[");
+      bool model_comma = false;
+      for (const auto& model : request.models) { if (model_comma) body.raw(","); model_comma = true; body.quoted(model); }
+      body.raw("]");
+    }
     if (request.provider) {
       body.raw(",\"provider\":");
       request_controls::write_routing(body, *request.provider);

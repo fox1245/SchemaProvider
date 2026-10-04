@@ -1,4 +1,5 @@
 #include "core/native_archive.h"
+#include "core/native_archive_fs.h"
 #include "core/native.h"
 #include "json/json.h"
 #include <openssl/crypto.h>
@@ -7,90 +8,18 @@
 #include <openssl/rand.h>
 #include <algorithm>
 #include <array>
-#include <cerrno>
 #include <cstring>
 #include <stdexcept>
 #include <type_traits>
-#include <fcntl.h>
 #include <utility>
-#include <dirent.h>
 #include <mutex>
-#include <sys/file.h>
-#include <sys/syscall.h>
-#include <linux/fs.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 namespace sp {
 namespace {
 using Digest = std::array<unsigned char, 32>;
-struct Rejected {};
-void require(bool value) { if (!value) throw Rejected{}; }
+using namespace archive_fs;
 Error error() { Error e; e.kind = ErrorKind::Permission; e.safe_message = "Trusted local native archive admission failed"; e.retry_safety = RetrySafety::NotSent; return e; }
-class Fd {
- public:
-  explicit Fd(int n = -1) : n_(n) {}
-  ~Fd() { if (n_ >= 0) ::close(n_); }
-  Fd(const Fd&) = delete;
-  Fd& operator=(const Fd&) = delete;
-  Fd(Fd&& other) noexcept : n_(std::exchange(other.n_, -1)) {}
-  Fd& operator=(Fd&& other) noexcept { if (n_ >= 0) ::close(n_); n_ = std::exchange(other.n_, -1); return *this; }
-  int get() const { return n_; }
- private: int n_;
-};
-class StoreLock {
- public:
-  explicit StoreLock(int fd) : fd_(fd) { require(::flock(fd_, LOCK_EX) == 0); }
-  ~StoreLock() { ::flock(fd_, LOCK_UN); }
- private: int fd_;
-};
-struct Location { Fd parent; std::string name; };
-// Walk every component through directory descriptors: no ancestor symlinks and
-// no path traversal into an attacker-selected replacement during an operation.
-Location locate(std::string_view path) {
-  require(!path.empty() && path.back() != '/');
-  Fd current(::open(path.front() == '/' ? "/" : ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
-  require(current.get() >= 0);
-  size_t pos = path.front() == '/' ? 1 : 0;
-  while (true) {
-    const auto end = path.find('/', pos);
-    std::string component(path.substr(pos, end == path.npos ? path.size() - pos : end - pos));
-    require(!component.empty() && component != "." && component != "..");
-    if (end == path.npos) return {std::move(current), std::move(component)};
-    Fd next(::openat(current.get(), component.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
-    require(next.get() >= 0); current = std::move(next); pos = end + 1;
-  }
-}
-struct stat status(int fd) { struct stat value{}; require(::fstat(fd, &value) == 0); return value; }
-void private_directory(int fd) {
-  const auto s = status(fd); require(S_ISDIR(s.st_mode) && s.st_uid == ::geteuid() && (s.st_mode & 07777) == 0700);
-}
-void private_file(int fd, mode_t mode) {
-  const auto s = status(fd); require(S_ISREG(s.st_mode) && s.st_uid == ::geteuid() && (s.st_mode & 07777) == mode && s.st_nlink == 1);
-}
-bool same_file(const struct stat& a, const struct stat& b) { return a.st_dev == b.st_dev && a.st_ino == b.st_ino; }
-void independent_key_parent(int root, int parent) {
-  Fd current(::openat(parent,".",O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW));require(current.get()>=0);
-  const auto archive=status(root);
-  while(true) {
-    const auto here=status(current.get());require(!same_file(archive,here));
-    Fd next(::openat(current.get(),"..",O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW));require(next.get()>=0);
-    if(same_file(here,status(next.get())))return;
-    current=std::move(next);
-  }
-}
-bool unchanged(const struct stat& a, const struct stat& b) {
-  return same_file(a,b) && a.st_size == b.st_size && a.st_mtim.tv_sec == b.st_mtim.tv_sec && a.st_mtim.tv_nsec == b.st_mtim.tv_nsec && a.st_ctim.tv_sec == b.st_ctim.tv_sec && a.st_ctim.tv_nsec == b.st_ctim.tv_nsec;
-}
-void write_all(int fd, std::string_view bytes) {
-  while (!bytes.empty()) { const auto n = ::write(fd, bytes.data(), bytes.size()); if (n < 0 && errno == EINTR) continue; require(n > 0); bytes.remove_prefix(static_cast<size_t>(n)); }
-}
-std::string read_all(int fd, size_t limit) {
-  const auto before = status(fd); require(before.st_size >= 0 && static_cast<uint64_t>(before.st_size) <= limit);
-  std::string bytes(static_cast<size_t>(before.st_size), '\0'); size_t done = 0;
-  while (done < bytes.size()) { const auto n = ::pread(fd, bytes.data()+done, bytes.size()-done, static_cast<off_t>(done)); if (n < 0 && errno == EINTR) continue; require(n > 0); done += static_cast<size_t>(n); }
-  require(unchanged(before, status(fd))); return bytes;
-}
+using Fd = archive_fs::Handle;
 Digest mac(const Digest& key, std::string_view bytes) {
   Digest result{}; unsigned size = 0;
   require(HMAC(EVP_sha256(), key.data(), static_cast<int>(key.size()), reinterpret_cast<const unsigned char*>(bytes.data()), bytes.size(), result.data(), &size) && size == result.size()); return result;
@@ -184,15 +113,15 @@ struct NativeArchive::State {
   descriptor::ValidatedDescriptor descriptor;
   NativeArchiveLimits limits;
   Fd root, key_fd;
-  struct stat root_identity{}, key_identity{};
+  Status root_identity{}, key_identity{};
   mutable std::mutex save_mutex;
   Digest key{};
   State(std::string d,std::string k,std::string o,descriptor::ValidatedDescriptor descriptor,NativeArchiveLimits l)
       :directory(std::move(d)),key_file(std::move(k)),owner(std::move(o)),descriptor_identity(descriptor_binding(descriptor,l)),descriptor(std::move(descriptor)),limits(l) {}
   ~State() { OPENSSL_cleanse(key.data(),key.size()); OPENSSL_cleanse(activation.data(),activation.size()); }
   void verify() const {
-    auto d=locate(directory);Fd root_now(::openat(d.parent.get(),d.name.c_str(),O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW));require(root_now.get()>=0);private_directory(root_now.get());require(same_file(root_identity,status(root_now.get())));
-    auto k=locate(key_file);private_directory(k.parent.get());independent_key_parent(root.get(),k.parent.get());Fd key_now(::openat(k.parent.get(),k.name.c_str(),O_RDONLY|O_CLOEXEC|O_NOFOLLOW));require(key_now.get()>=0);private_file(key_now.get(),0400);require(unchanged(key_identity,status(key_now.get())));auto bytes=read_all(key_now.get(),96);require(bytes.size()==activation.size() && CRYPTO_memcmp(bytes.data(),activation.data(),bytes.size())==0);OPENSSL_cleanse(bytes.data(),bytes.size());
+    auto d=locate(directory);auto root_now=open_directory(d.parent,d.name);private_directory(root_now);require(same_file(root_identity,status(root_now)));
+    auto k=locate(key_file);private_directory(k.parent);independent_key_parent(root,k);auto key_now=open_file(k.parent,k.name);private_file(key_now,true);require(unchanged(key_identity,status(key_now)));auto bytes=read_all(key_now,96);require(bytes.size()==activation.size() && CRYPTO_memcmp(bytes.data(),activation.data(),bytes.size())==0);OPENSSL_cleanse(bytes.data(),bytes.size());
   }
 };
 NativeArchive::NativeArchive(std::unique_ptr<State> state):state_(std::move(state)) {}
@@ -228,22 +157,21 @@ NativeArchive::Activation NativeArchive::activate(std::string d,std::string k,st
             l.max_records > 0 && l.max_records <= resources.request_messages &&
             l.max_store_bytes >= l.max_bytes && l.max_store_bytes <= storage_ceiling);
     auto state=std::make_unique<State>(std::move(d),std::move(k),std::move(o),std::move(v),l);
-    auto dir=locate(state->directory); auto key=locate(state->key_file); private_directory(key.parent.get());
-    if(create) require(::mkdirat(dir.parent.get(),dir.name.c_str(),0700)==0);
-    state->root=Fd(::openat(dir.parent.get(),dir.name.c_str(),O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW));require(state->root.get()>=0);private_directory(state->root.get());state->root_identity=status(state->root.get());
+    auto dir=locate(state->directory); auto key=locate(state->key_file); private_directory(key.parent);
+    state->root=create ? create_directory(dir.parent,dir.name) : open_directory(dir.parent,dir.name);private_directory(state->root);state->root_identity=status(state->root);
     // The independent activation must remain outside the entire archive tree.
-    independent_key_parent(state->root.get(),key.parent.get());
+    independent_key_parent(state->root,key);
     if(create) {
       require(RAND_bytes(state->key.data(),static_cast<int>(state->key.size()))==1);
-      Fd fd(::openat(key.parent.get(),key.name.c_str(),O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600));require(fd.get()>=0);private_file(fd.get(),0600);
-      state->key_identity=status(fd.get());
-      Writer identity(l);identity.text(state->owner);identity.text(state->descriptor_identity);identity.number(state->root_identity.st_dev);identity.number(state->root_identity.st_ino);identity.number(state->key_identity.st_dev);identity.number(state->key_identity.st_ino);
-      Writer activation(l);activation.digest(state->key);activation.number(state->root_identity.st_dev);activation.number(state->root_identity.st_ino);activation.number(state->key_identity.st_dev);activation.number(state->key_identity.st_ino);activation.digest(mac(state->key,identity.data));
-      write_all(fd.get(),activation.data);OPENSSL_cleanse(activation.data.data(),activation.data.size());require(::fchmod(fd.get(),0400)==0 && ::fsync(fd.get())==0 && ::fsync(key.parent.get())==0 && ::fsync(dir.parent.get())==0);
+      auto fd=create_file(key.parent,key.name);private_file(fd,false);
+      state->key_identity=status(fd);
+      Writer identity(l);identity.text(state->owner);identity.text(state->descriptor_identity);identity.number(state->root_identity.device);identity.number(state->root_identity.inode);identity.number(state->key_identity.device);identity.number(state->key_identity.inode);
+      Writer activation(l);activation.digest(state->key);activation.number(state->root_identity.device);activation.number(state->root_identity.inode);activation.number(state->key_identity.device);activation.number(state->key_identity.inode);activation.digest(mac(state->key,identity.data));
+      write_all(fd,activation.data);OPENSSL_cleanse(activation.data.data(),activation.data.size());seal_file(fd);sync(fd);sync(key.parent);sync(dir.parent);
     }
-    state->key_fd=Fd(::openat(key.parent.get(),key.name.c_str(),O_RDONLY|O_CLOEXEC|O_NOFOLLOW));require(state->key_fd.get()>=0);private_file(state->key_fd.get(),0400);state->key_identity=status(state->key_fd.get());state->activation=read_all(state->key_fd.get(),96);require(state->activation.size()==96);
-    Reader activation(state->activation,l);state->key=activation.digest();require(activation.number()==static_cast<uint64_t>(state->root_identity.st_dev) && activation.number()==static_cast<uint64_t>(state->root_identity.st_ino) && activation.number()==static_cast<uint64_t>(state->key_identity.st_dev) && activation.number()==static_cast<uint64_t>(state->key_identity.st_ino));
-    Writer identity(l);identity.text(state->owner);identity.text(state->descriptor_identity);identity.number(state->root_identity.st_dev);identity.number(state->root_identity.st_ino);identity.number(state->key_identity.st_dev);identity.number(state->key_identity.st_ino);const auto expected=mac(state->key,identity.data);const auto actual=activation.digest();require(CRYPTO_memcmp(expected.data(),actual.data(),expected.size())==0);
+    state->key_fd=open_file(key.parent,key.name);private_file(state->key_fd,true);state->key_identity=status(state->key_fd);state->activation=read_all(state->key_fd,96);require(state->activation.size()==96);
+    Reader activation(state->activation,l);state->key=activation.digest();require(activation.number()==state->root_identity.device && activation.number()==state->root_identity.inode && activation.number()==state->key_identity.device && activation.number()==state->key_identity.inode);
+    Writer identity(l);identity.text(state->owner);identity.text(state->descriptor_identity);identity.number(state->root_identity.device);identity.number(state->root_identity.inode);identity.number(state->key_identity.device);identity.number(state->key_identity.inode);const auto expected=mac(state->key,identity.data);const auto actual=activation.digest();require(CRYPTO_memcmp(expected.data(),actual.data(),expected.size())==0);
     state->verify();
     return std::shared_ptr<NativeArchive>(new NativeArchive(std::move(state)));
   }catch(const Rejected&){return error();}
@@ -259,38 +187,35 @@ NativeArchive::Saved NativeArchive::save(const std::vector<Message>& messages,st
       }
     }
     const auto reference="spna3:"+hex(mac(state_->key,w.data));const auto filename=reference.substr(6);
-    std::lock_guard guard(state_->save_mutex);StoreLock store_lock(state_->root.get());state_->verify();
-    Fd existing(::openat(state_->root.get(),filename.c_str(),O_RDONLY|O_CLOEXEC|O_NOFOLLOW));
-    if(existing.get()>=0) {private_file(existing.get(),0400);require(read_all(existing.get(),state_->limits.max_bytes)==w.data);return reference;}
-    require(errno==ENOENT);
+    std::lock_guard guard(state_->save_mutex);StoreLock store_lock(state_->root,state_->key_fd);state_->verify();
+    auto existing=open_file(state_->root,filename,true);
+    if(existing) {
+      private_file(existing,true);require(read_all(existing,state_->limits.max_bytes)==w.data);
+      // Publication follows a successful seal and file flush. A prior save may
+      // nevertheless have failed after rename: require the directory's durable
+      // publication barrier again before acknowledging this immutable record.
+      // Do not reopen the sealed file for write access (including on Windows).
+      sync(state_->root);state_->verify();return reference;
+    }
     // Capacity is durable, not renewed by reopening the archive. Interrupted
     // staging records also count until the host investigates them.
-    const int scan_fd=::openat(state_->root.get(),".",O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);require(scan_fd>=0);
-    std::unique_ptr<DIR,decltype(&::closedir)> entries(::fdopendir(scan_fd),::closedir);if(!entries){::close(scan_fd);throw Rejected{};}
-    uint64_t bytes_used=0;size_t records=0;errno=0;
-    while(auto* entry=::readdir(entries.get())) {
-      if(std::strcmp(entry->d_name,".")==0 || std::strcmp(entry->d_name,"..")==0)continue;
-      struct stat s{};require(::fstatat(state_->root.get(),entry->d_name,&s,AT_SYMLINK_NOFOLLOW)==0 && S_ISREG(s.st_mode) && s.st_uid==::geteuid() && (s.st_mode&0077)==0 && s.st_size>=0);
-      require(++records<state_->limits.max_records && static_cast<uint64_t>(s.st_size)<=state_->limits.max_store_bytes-bytes_used);bytes_used+=static_cast<uint64_t>(s.st_size);errno=0;
-    }
-    require(errno==0 && w.data.size()<=state_->limits.max_store_bytes-bytes_used);
+    check_capacity(state_->root,state_->limits.max_records,state_->limits.max_store_bytes,w.data.size());
     // Stage under an unpredictable private name, then atomically publish without
     // overwrite. An interrupted write can never expose a partial archive record.
     Digest random{};require(RAND_bytes(random.data(),static_cast<int>(random.size()))==1);const auto temporary=".pending-"+hex(random);
-    Fd fd(::openat(state_->root.get(),temporary.c_str(),O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600));require(fd.get()>=0);
+    auto fd=create_file(state_->root,temporary);bool published=false;
     try {
-      private_file(fd.get(),0600);write_all(fd.get(),w.data);require(::fchmod(fd.get(),0400)==0 && ::fsync(fd.get())==0);
-      // Linux's no-replace rename has no transient second hard link and no
-      // truncate/replacement window, including a crash immediately after publish.
-      require(::syscall(SYS_renameat2,state_->root.get(),temporary.c_str(),state_->root.get(),filename.c_str(),RENAME_NOREPLACE)==0);
-      require(::fsync(state_->root.get())==0);state_->verify();return reference;
-    }catch(...) {::unlinkat(state_->root.get(),temporary.c_str(),0);throw;}
+      private_file(fd,false);write_all(fd,w.data);seal_file(fd);sync(fd);
+      // Each platform publishes with a genuine atomic no-replace rename.
+      publish(state_->root,fd,temporary,filename);published=true;
+      finish_publication(state_->root,fd);state_->verify();return reference;
+    }catch(...) {if(!published)remove_staging(state_->root,fd,temporary);throw;}
   }catch(const Rejected&){return error();}
 }
 NativeArchive::Loaded NativeArchive::load(std::string_view reference,std::string_view binding) const {
   try {
-    state_->verify();require(reference.size()==70 && reference.substr(0,6)=="spna3:");const auto name=reference.substr(6);require(std::all_of(name.begin(),name.end(),[](char c){return(c>='0'&&c<='9')||(c>='a'&&c<='f');}));
-    Fd fd(::openat(state_->root.get(),std::string(name).c_str(),O_RDONLY|O_CLOEXEC|O_NOFOLLOW));require(fd.get()>=0);private_file(fd.get(),0400);const auto identity=status(fd.get());auto bytes=read_all(fd.get(),state_->limits.max_bytes);const auto expected=hex(mac(state_->key,bytes));require(CRYPTO_memcmp(expected.data(),name.data(),64)==0);
+    state_->verify();require(reference.size()==70 && reference.substr(0,6)=="spna3:");const std::string name(reference.substr(6));require(std::all_of(name.begin(),name.end(),[](char c){return(c>='0'&&c<='9')||(c>='a'&&c<='f');}));
+    auto fd=open_file(state_->root,name);private_file(fd,true);const auto identity=status(fd);auto bytes=read_all(fd,state_->limits.max_bytes);const auto expected=hex(mac(state_->key,bytes));require(CRYPTO_memcmp(expected.data(),name.data(),64)==0);
     Reader r(bytes,state_->limits);require(r.text()=="sp.native.local-custody.archive.v3" && r.text()==state_->owner && r.text()==state_->descriptor_identity && r.text()==binding);auto count=r.count(state_->limits.max_messages);std::vector<Message> messages;messages.reserve(count);size_t parts=0;
     while(count--) {
       Message m;m.id=r.text();m.role=r.enumeration<Role>(4);auto n=r.count(state_->limits.max_parts-parts);parts+=n;m.parts.reserve(n);while(n--)m.parts.push_back(read_part(r));m.wire_output=r.document(true);
@@ -300,7 +225,7 @@ NativeArchive::Loaded NativeArchive::load(std::string_view reference,std::string
       }
       messages.push_back(std::move(m));
     }
-    require(r.data.empty());struct stat current{};require(::fstatat(state_->root.get(),std::string(name).c_str(),&current,AT_SYMLINK_NOFOLLOW)==0 && unchanged(identity,current));private_file(fd.get(),0400);state_->verify();return messages;
+    require(r.data.empty());require(unchanged(identity,entry_status(state_->root,name)));private_file(fd,true);state_->verify();return messages;
   }catch(const Rejected&){return error();}
 }
 } // namespace sp

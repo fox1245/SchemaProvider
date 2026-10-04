@@ -84,7 +84,14 @@ void exact_steps_and_replay() {
     bad = next; bad.thinking_level = "high"; reject(bad);
     bad = next; bad.account_scope = "foreign"; reject(bad);
     bad = next; bad.thinking_summaries = false; reject(bad);
-    bad = next; bad.max_output_tokens = 129; reject(bad);
+    bad = next; bad.max_output_tokens = 129;
+    auto increased = interactions::encode(desc(), bad, false);
+    CHECK(std::holds_alternative<interactions::EncodedRequest>(increased));
+    const auto& larger = std::get<interactions::EncodedRequest>(increased);
+    CHECK(larger.max_output_tokens == 129);
+    const auto larger_wire = parse(larger.body);
+    CHECK(larger_wire.root().get("generation_config").get("max_output_tokens").as_uint() == 129);
+    CHECK(json::equal(larger_wire.root().get("input").at(1), m.wire_output->root().at(0)));
     bad = next; bad.service_tier = "unsupported";
     auto invalid_tier = interactions::encode(desc(), bad, false);
     CHECK(std::holds_alternative<Error>(invalid_tier) && std::get<Error>(invalid_tier).kind == ErrorKind::InvalidRequest);

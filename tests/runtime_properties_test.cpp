@@ -1,6 +1,7 @@
 // Real, model-free runtime properties. Usage: sp_runtime_tests <node> <runtime_server.mjs>
 #include "runtime/client.h"
 #include "runtime/testing.h"
+#include "core/native.h"
 #include "descriptor/descriptor.h"
 #include "json/json.h"
 #include "support/runtime_peer.h"
@@ -172,6 +173,68 @@ void family_modes(Peer& peer) {
     } else require(usage.input_total && usage.input_total->value == 2, "Chat input usage was not retained");
     peer.count(model, 1);
     const auto blocking = peer.arm("normal"); success(client.complete(request(blocking, messages), run(streaming))); peer.count(blocking, 1);
+  }
+}
+void preserved_messages_controls_and_headers(Peer& peer) {
+  auto admitted = sp::descriptor::load_with_deployment_headers(
+      descriptor_source(peer.port, true), {{"ANTHROPIC-BETA", "host-override"}},
+      {"workspace-local", "environment-beta"}, {});
+  require(std::holds_alternative<sp::descriptor::ValidatedDescriptor>(admitted), "deployment preprocessing rejected");
+  Client client(std::get<sp::descriptor::ValidatedDescriptor>(std::move(admitted)), options());
+  auto schema = sp::json::parse(R"({"type":"object"})");
+  require(std::holds_alternative<sp::json::Document>(schema), "local tool schema rejected");
+  auto owned_schema = std::make_shared<const sp::json::Document>(std::move(std::get<sp::json::Document>(schema)));
+  for (bool streaming : {false, true}) {
+    for (const auto mode : {sp::messages::ThinkingMode::Manual, sp::messages::ThinkingMode::Adaptive,
+                            sp::messages::ThinkingMode::Disabled}) {
+      const auto scenario = mode == sp::messages::ThinkingMode::Manual ? "preserved-manual" :
+          mode == sp::messages::ThinkingMode::Adaptive ? "preserved-adaptive" : "preserved-disabled";
+      const auto model = peer.arm(scenario);
+      auto value = std::get<sp::messages::Request>(request(model, true));
+      value.max_tokens = 4096; value.temperature = 0.7; value.thinking_mode = mode;
+      if (mode == sp::messages::ThinkingMode::Manual) value.thinking_budget = 1024;
+      value.output_effort = sp::messages::OutputEffort::High;
+      value.cache_control = sp::messages::CacheControl{sp::messages::CacheTtl::OneHour};
+      value.tools.push_back({"lookup", "Find a value", owned_schema, {}, {}});
+      value.tool_choice = sp::messages::ToolChoice{mode == sp::messages::ThinkingMode::Disabled ?
+          sp::messages::ToolChoiceMode::Tool : sp::messages::ToolChoiceMode::Auto,
+          mode == sp::messages::ThinkingMode::Disabled ? "lookup" : "", true};
+      success(client.complete(value, run(streaming)));
+      peer.count(model, 1);
+    }
+    const auto invalid = peer.arm("preserved-adaptive");
+    auto bad = std::get<sp::messages::Request>(request(invalid, true));
+    bad.thinking_mode = sp::messages::ThinkingMode::Adaptive; bad.thinking_budget = 1024;
+    failure(client.complete(bad, run(streaming)), sp::ErrorKind::InvalidRequest);
+    peer.count(invalid, 0);
+  }
+}
+void native_generation_cap_ladder(Peer& peer) {
+  for (bool streaming : {false, true}) {
+    Client client(descriptor(peer, true), options());
+    const auto model = peer.arm("native-cap");
+    auto value = std::get<sp::messages::Request>(request(model, true));
+    value.max_tokens = 2048; value.thinking_budget = 1024;
+    auto first = client.complete(value, run(streaming)); success(first);
+    const auto& sealed = std::get<sp::Completion>(*first).messages.at(0);
+    require(sealed.native && sealed.native->complete(), "initial native history lacked completed custody");
+    value.messages.push_back(sealed);
+    value.messages.push_back(sp::Message{"", sp::Role::User, {sp::Text{"next"}}});
+    for (const std::uint64_t cap : {4096, 8192, 16384}) {
+      value.max_tokens = cap;
+      auto prepared = client.prepare(value, run(streaming));
+      require(prepared.max_output_tokens() == cap, "increased cap lost actual admission bound");
+      Capture capture;
+      auto operation = client.start(std::move(prepared), capture.callbacks());
+      success(finish(operation, capture));
+    }
+    peer.count(model, 4);
+    auto changed = value;
+    std::get<sp::Thinking>(changed.messages.at(1).parts.at(0)).signature = "edited";
+    failure(client.complete(changed, run(streaming)), sp::ErrorKind::ReplayIneligible);
+    changed = value; changed.thinking_budget = 2048;
+    failure(client.complete(changed, run(streaming)), sp::ErrorKind::ReplayIneligible);
+    peer.count(model, 4);
   }
 }
 void retry_policy(Peer& peer) {
@@ -617,6 +680,8 @@ int main(int argc, char** argv) {
     Peer peer(argv[1], argv[2]);
     check("quota abnormal close", [&] { quota_abnormal_close(peer); });
     check("family modes", [&] { family_modes(peer); });
+    check("preserved Messages controls and headers", [&] { preserved_messages_controls_and_headers(peer); });
+    check("native generation cap ladder", [&] { native_generation_cap_ladder(peer); });
     check("retry policy", [&] { retry_policy(peer); });
     check("safe connect retry", [&] { safe_connect_retry(); });
     check("partial, ping and close", [&] { partial_ping_and_close(peer); });

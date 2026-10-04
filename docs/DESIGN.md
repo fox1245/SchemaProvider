@@ -1,26 +1,13 @@
 # SchemaProvider design
 
-## 0. Status
+## 0. Status and reading boundary
 
-**Current contract: unstable installed SDK 0.0.0, interface revision 3/SOVERSION 3; owner-approved typed C++ integrated proof recorded with explicit limits below, not stable/released.** Five typed HTTP/SSE families are implemented. Current Linux SDK rebuild/CTest passed 26/26 after named-error, non-2xx raw-history and archive semantic-binding corrections; current ASan+UBSan passed 26/26, and TSan passed 25 groups plus the corrected HTTP/3 launcher group. Fresh installed static/shared ABI3 consumers passed after these corrections, exercising actual two-turn HTTP native/tool continuation, refusal, nullable known-zero usage, raw ownership after Client destruction and linked-interface mismatch refusal. M5's old-ABI NO-GO remains historical. [README installation and owned contracts](../README.md#install-and-use-the-unstable-c-sdk) are authoritative over superseded sketches below: installed headers/targets, immutable closed-JSON snapshots, authenticated owner-private NativeArchive v3/spna3 custody with independent key (not encryption/issuer authentication), no JSON-import native authority. WebSocket and legacy consumer/importer sketches below are historical/deferred, not current API or release gates. Python bindings remain deferred. [Current provenance](POC_PLAN.md#current-typed-c-cutover-provenance) records actual evidence without rewriting past cohorts.
+The current SDK uses interface revision 4/shared-library generation 4 and five typed HTTP/SSE request families in package0.1.0 alpha. The interface gate is not a source or cross-toolchain ABI promise. [README](../README.md), [Usage](USAGE.md) and [Migration](MIGRATION.md) describe actual names and boundaries. Earlier interface 3 observations remain archived, not relabeled interface 4 qualification.
 
-Previously recorded SDK/sanitizer/installed-consumer cohorts retain their original dates, measurements and scope; the latest integrated proof below does not rewrite or retroactively qualify them. Full remote mixed-gRPC TSan remains an explicit unqualified coverage limit.
+[Current typed-cutover provenance](POC_PLAN.md#current-typed-c-cutover-provenance) records earlier executed Linux SDK/static/shared/consumer cohorts and their limits. M5's old-ABI strict lossless NO-GO is historical, not a rejection of the current typed result contract. Model-free local replay does not prove vendor signature validation; paid baseline results were 293/300 pairs, not universal qualification. No further paid calls are authorized by this document. HTTP/3 and remote TSan limits remain attached to their recorded cohorts.
 
-**Genuine InMemory shared-bank fork retained and exercised.** The original genuine C++ fork uses ONE original financial journal and trusted current branch heads, not cloned grants. `publish_managed_budget_fork(authenticated_source, genuine_shared_bank_fork)` (and `_async`) requires the authentic current source/full commitment and actual same-bank native C++ pointer; durable standalone forks remain explicitly unsupported. `OwnedManagedBudgetLease::scope()` and original owner/thread/graph, ceiling, deadline/clock and generation remain immutable. Read-only store-issued `execution_thread_id()` / `execution_storage_thread_id()` select the execution branch separately; `GraphState::budget_original_thread_id()` identifies the original financial bank. Exact selected-branch head CAS and global actor/revision serialize all branches against canonical current counters, pending effects and burned identities. Original and fork branches remain usable without replenishment; stale snapshots, copied checkpoints and imported JSON cannot mint aliases or rewind heads. The original root30 → charge3 → original continuation6 → fork lower20 → continuation9 same-bank proof PASSED in the unchanged test_graph_engine.cpp:810–913; saved original ceiling30 is separate from effective fork ceiling20; widening31 and JSON-only restore must reject. Unbounded reported observations are factual data, not finite grants. Only a proven zero-effect lease can release an unchanged head; unknown/pending effects keep their obligations.
+Section 3, the broader grammar table in 5.1, general treatment/storage sketches in 6.3–6.4 and the review appendix retain historical proposals, not installed APIs. WebSocket, cross-origin equivalence, general Drop/Demote and constraints execution are unavailable. Interface 4's Generate portable-history sentinel is a separately typed unsealed-import path; Responses provider-held cursors have separate terminal ownership. Neither grants imported native authority. NeoGraph owns its Python consumer bindings.
 
-**Recorded-control causal fix exercised in the full suite.** Captured command replay durably reserves only new CPU wall-time/Core work before execution, then publishes measured work and any newly produced Core checkpoint through the result CAS. It consumes no new model, money or Program-operation allowance and does not redispatch captured external effects. An unreconciled reservation remains debited. The reservation selects the authenticated settlement transition rather than an ordinary Running→Running transition that rejected the first new Core checkpoint. Await channel receive, timer wait/cancel and handoff wait initiation/release are serialized on their owning executors/strands; the existing Recorded CPU/Memory await/handoff scenarios passed in the full suite; remote TSan coverage limits remain explicit below.
-
-**Completed paid observations; not universal qualification.** Original `SPQUAL1` base630/1000000 microUSD is unchanged; ONE hash-chained `A` admits approved extension480/3000000 in the same original ledger, aggregate1110/4000000, with cumulative calls/spent/holds/settlements and no new grant ID/header/reset. Exact declaration bytes/file identity and original authorization/baseline/catalog/activation/ledger-prefix hashes/totals remain pinned; removal/replacement/change fails closed. The final canonical ledger is calls1110/spent437958/held1287828 microUSD, eventA1, limits1110/4000000; spent+held is US$1.725786 LOCAL catalogue meter, not an invoice. The documented five-family60-pair baseline completed600 requests: Chat60/60, Responses60/60, Messages60/60, Generate56/60 (four incorrect-vision SSE), Interactions57/60 (one buffered and two SSE incorrect-vision); aggregate293/300 pairs, not300/300. Other old600 financial records remain preserved, not full behavioral proof. Earlier M5/media one-shot cohorts are unchanged. The earlier three-round Google prerequisites retain two invalid-tool and one unreadable-positive failures. No further paid calls are authorized. Final SDK evidence and native-axis limits are separate from baseline success. Earlier activation/reopen smoke remains recorded at calls610/spent219159/held751233 after two reopens, with SDK meter/canary/vision four tests passed19.38seconds; these are scoped prior checkpoints, not final ledger totals. The earlier verified Chat60-pair cohort retains120 actual attempts,120 UpperBound charges and no UnknownHold.
-
-**Native-axis observations, not cryptographic verification or native consumption/equivalence.** Generate accepted mutation, omission and duplication. Interactions accepted the isolated genuine source/positive control, one-owner signature mutation, thought-carrier omission, call-carrier omission and duplication. Removing all thoughts/signatures returned generic400; removing all signature fields while keeping THOUGHT items also returned generic400. The last capture had a local encoded-original retention control, not a same-capture server positive; the earlier positive cohort remains genuine. These observations establish an aggregate-carrier-absence boundary only, not issuer/signature validation or vendor consumption. Actual reports: SDK `config/qualification-extension-results.json`, `qualification-final-summary.json`, `qualification-native-axis-results.json`, `qualification-combined-omission-results.json`, `qualification-signature-presence-results.json`; prerequisite-failed/not-run/negative-inconclusive states remain factual. Thought-only/carrier-only omissions were accepted while another carrier remained; this does not strengthen issuer-validation or native-consumption claims.
-
-Reports: [qualification-extension-results.json](../config/qualification-extension-results.json), [qualification-final-summary.json](../config/qualification-final-summary.json), [qualification-native-axis-results.json](../config/qualification-native-axis-results.json), [qualification-combined-omission-results.json](../config/qualification-combined-omission-results.json), [qualification-signature-presence-results.json](../config/qualification-signature-presence-results.json).
-
-**Actual integrated proof and remaining limits.** Latest Core full run:2242 tests, zero failures,16 skips (14 RAM process-loss cases not applicable; two live-credential gates),130.17seconds. `PgNestedJsonRoundTrips` preserved exact duplicate keys/order/null metadata, blob and residual in0.18seconds. The unchanged original shared-bank fork and existing Recorded CPU/Memory await/handoff scenarios passed. Real wrappedMemory/SQLite/PostgreSQL/gRPC finite130/hold65/lower129/strip/old-head/pruning/no-archive/import probes passed plain and ASan+UBSan. LOCAL Memory/SQLite/PostgreSQL TSan scopes:seven passed,zero warnings. Full mixed gRPC plus system Abseil/Protobuf TSan exited66 with402 race warnings in dependency/generated-RPC stacks: an instrumentation/coverage limit, not a proven false positive; remote TSan/race-freedom is NOT claimed and no warning is suppressed. Installed find_package Program C++/C ABI/dualQuickJS three consumers passed. Fresh installed NeoGraph/SchemaProvider typed consumer passed two real HTTP requests, provider destruction before coroutine start, native/tool replay, refusal,known-zero/raw retention and actual LinkedMismatch rejection. Browser Alice/Bob isolation and generation2 replacement were visually verified; PostgreSQL Program Chat six black-box tests passed18.989seconds. Latest SDK26/26 passed,zero failures,74.07seconds. Final ReleaseGraph16 configurations ×3 fresh process repetitions/48 records completed38.29seconds,zero failures,all actual protocol/owned-outcome checks passed. NeoGraph `benchmarks/provider-cutover-final-results.json` and `benchmarks/provider-cutover-final-summary.json` retain this separate final cohort. No compiler or paid model ran during measurement; historical cohorts stay unchanged and semantic/resource equivalence is not claimed. Unstable SDK/ABI3 is not a stable release or broader-platform qualification.
-
-[Current campaign selectors and admitted Meter limits](../README.md#persistent-qualification-campaign-completed-observations-explicit-limits).
-
-**Reading boundary.** Section0 and the linked README describe the current installed contract and observed proof. The original vocabulary/API sketches and broader descriptor/rule grammar below remain historical design targets where they differ from installed headers; they are not copy-ready SDK examples or assertions that every release gate has run. Future WebSocket/equivalence/platform gates remain unclaimed.
 
 Words: MUST, SHOULD, MAY are used as in RFC 2119. "Family" means a wire protocol shape (Chat Completions, Responses, Messages, Gemini generate, Interactions). "Vendor" means an endpoint operator speaking a family. "Descriptor" means a JSON file of vendor values. Labels: `[read docs]` = a primary vendor page was read while writing; `[INFERENCE]` = not observed, reasoned; "unverified" = a claim that a fixture or canary must still establish.
 
@@ -37,11 +24,11 @@ Non-goals:
 
 - No generic bidirectional "universal IR" or gateway feature. Events are decoded one way and folded; they are never re-encoded into another vendor's wire format, and no event persistence format is promised.
 - No cross-vendor continuity of native reasoning state (signed or encrypted reasoning cannot be translated).
-- No public codec SDK, public transport port, executor framework, middleware chain, or binary plugin ABI. New families are source contributions.
+- No binary codec/plugin ABI, public executor framework or middleware chain. Typed codec/transport headers are installed, but adding a family still requires a source contribution.
 - No descriptor scripting: no event actions, hooks, conditionals over state, templates or loops (section 5).
 - No graph/agent runtime, tool execution, cost tables, tenant billing, circuit breaker, or cross-vendor fallback. Those stay in the host.
-- No Python or other language bindings until the C++ API settles.
-- **Non-chat endpoints are out of the first release (D2, FIRM):** standalone image endpoints, long-running video operations and the OpenRouter decisions endpoint are not covered by the Event set and not supported. Artifacts that arrive inside a chat response (`Completion.artifacts`) are in scope. NeoGraph owns the cutover of those features (section 13).
+- No separate SDK Python package; NeoGraph owns its typed Python consumer bindings.
+- **Non-chat endpoints are outside SDK scope (D2):** standalone image endpoints, long-running video operations and OpenRouter Decisions are not covered. Artifacts received inside supported chat protocols are retained in typed parts/raw observations; there is no installed `Completion::artifacts` field.
 - **Native access to Amazon Bedrock or Google Cloud Vertex is out of scope** unless separately designed: SigV4 signing, OAuth/Azure AD style credential refresh and AWS binary event-stream framing are not in this design. A vendor is reachable only through an HTTP endpoint that a descriptor can express with a static credential binding.
 
 ## 2. Architecture
@@ -52,48 +39,43 @@ Arrows mean "depends on" (compile-time), not call flow.
 
 ```mermaid
 graph TD
-  App[Application or NeoGraph adapter] --> Pub[Installed public headers]
-  Pub --> Runtime[sp_runtime: client, retry controller, operation state]
-  Runtime --> Codecs[sp_codecs: family codecs, usage mapper, accumulator]
-  Runtime --> Transport[sp_transport: HTTP, SSE framer, WebSocket]
-  Codecs --> Desc[sp_descriptor: strict loader, validated types]
-  Codecs --> Core[sp_core: value types, Event, Error]
-  Desc --> Core
-  Desc --> Json[sp_json: private JSON wrapper]
-  Codecs --> Json
-  Transport --> TP[libcurl multi_socket + private Asio loop, D1]
-  Core --> Std[C++20 standard library only]
+  App[Application or NeoGraph adapter] --> Runtime[sp_runtime: admission, client, retry, lifecycle]
+  Runtime --> Codecs[sp_codecs: typed encoders, decoders, accumulator]
+  Runtime --> Transport[sp_transport: HTTP and SSE framing]
+  Codecs --> Core[sp_core: values and native custody]
+  Codecs --> Desc[sp_descriptor: closed loader and policies]
+  Core --> Desc
+  Core --> Json[sp_json: owned JSON wrapper]
+  Desc --> Json
+  Transport --> Curl[Private libcurl and standalone Asio]
 ```
 
-Rules:
+Codecs consume frames and emit events; they do not perform sockets, sleeps or retries. Transport reports one attempt's wire evidence without interpreting provider semantics. The runtime owns retry, deadlines, cancellation and operation workers. NeoGraph-specific coroutines, cancellation bridging, budgets and journals live in NeoGraph.
 
-1. `sp_core` depends on the C++20 standard library only. It does not know HTTP, JSON libraries, descriptors, or NeoGraph.
-2. Codecs are pure with respect to I/O: they consume frames and emit events; they never perform retries, sleeps, or sockets.
-3. The transport reports one `AttemptObservation` (bytes sent, response headers seen, close/reset kind, transport-internal resends) and never interprets semantics or retries. Whether semantic output was observed is an accumulator/runtime judgment, not a transport one (section 3.6).
-4. Only the runtime owns retry, deadlines, cancellation and threads.
-5. NeoGraph-specific pieces (coroutine bridge, graph cancellation token, journal digest) live in NeoGraph, not here.
+`sp_core` now includes native/archive implementations and links JSON/descriptor code plus private OpenSSL Crypto. Earlier standard-library-only core sketches do not describe the installed target graph.
+
 
 ### 2.2 Public vs private
 
-Installed include root is `include/SchemaProvider`; public include spelling is `<runtime/client.h>`, `<core/value.h>`, `<core/interface_contract.h>`, `<core/native_archive.h>` and the corresponding typed family/configuration headers. Use `find_package(SchemaProvider 0.0.0 EXACT CONFIG REQUIRED)` and `SchemaProvider::runtime`. Shared product libraries use SOVERSION3; out-of-line revision/capability checks validate linked runtime/core. This is an unstable product interface, not binary plugin extensibility.
+Installed include root is `include/SchemaProvider`; public include spelling is `<runtime/client.h>`, `<core/value.h>`, `<core/interface_contract.h>`, `<core/native_archive.h>` and the typed family/configuration headers. Use `find_package(SchemaProvider CONFIG REQUIRED)` and `SchemaProvider::runtime`; pin the selected build's exact version for deployment. The loaded revision/capability check is an unstable product-interface gate, not binary plugin extensibility.
 
 Private scheduler/testing seams, canaries and qualification grants are not installed. Installed typed declarations are authoritative over old flat-header sketches.
 
-`JsonValue` is a small immutable owner of validated JSON text with parse/serialize and bounded lookup only. It has no DOM mutation, no raw parser pointers, no general transformation API. It exists so tool parameter schemas and tool arguments carry validation evidence (duplicate keys rejected, depth bounded) and are not re-validated at each boundary. Callers may read arguments with their own JSON library.
+`sp::json::Document` is a move-only JSON owner; `Value`, member/element iterators and strings borrow it. Public result/tool fields retain shared immutable Documents. Duplicate keys are rejected for executable request/tool input; diagnostic-only Documents do not acquire that authority. yyjson types remain private.
 
 ### 2.3 Third-party dependencies per layer
 
 | Layer | Allowed dependencies |
 |---|---|
-| `sp_core` | C++20 standard library |
+| `sp_core` | standard library, `sp_json`, `sp_descriptor`, private OpenSSL Crypto for native/archive custody |
 | `sp_json` | yyjson (private; never in a public header) |
-| `sp_descriptor` | `sp_core`, `sp_json` |
+| `sp_descriptor` | `sp_json`, private OpenSSL Crypto for policy identity |
 | `sp_codecs` | `sp_core`, `sp_json`, `sp_descriptor`; private OpenSSL Crypto for M3 replay fingerprints |
 | `sp_transport` | libcurl (`multi_socket`) driven by a private standalone Asio loop; TLS through libcurl's backend (D1, FIRM) |
 | `sp_runtime` | the above, standard threads, `std::stop_token` |
 | public headers | standard library only |
 
-In the private M3 build, `src/core/native.cpp` belongs to the `sp_codecs` target, not `sp_core`. Its SHA-256 implementation links `OpenSSL::Crypto` privately and exposes no OpenSSL types in a header; `sp_core` remains standard-library-only. This is content/binding integrity inside trusted code, not authentication of the capsule issuer.
+Native fingerprinting and archive integrity authenticate local binding/custody, not the vendor issuer. Neither OpenSSL nor yyjson implementation types appear in public signatures.
 
 libcurl remains the HTTP stack with private Asio integration; no stateful descriptor interpreter, general schema validator or second HTTP stack is introduced. Embedded defaults are generated at configure time. Callers can explicitly load closed runtime/error and descriptor/codec snapshots; existing clients retain admitted values. No globbing/fetch is needed. WebSocket is deferred, not an available build switch.
 
@@ -104,15 +86,17 @@ libcurl remains the HTTP stack with private Asio integration; no stateful descri
 CI MUST fail when any of these hold (property `InstallAndDependencyDAG`). The forbidden edges are listed once here and CONFORMANCE refers to this list:
 
 - an installed header includes yyjson, asio, OpenSSL, `httplib`, curl, a QUIC-backend header, or any `src/` header;
-- `sp_core` links or includes anything but the standard library;
-- the CMake target graph has an edge from `sp_core` or `sp_descriptor` to `sp_codecs`, `sp_transport` or `sp_runtime`, or from `sp_codecs` to `sp_transport`;
+- `sp_core` or `sp_descriptor` depends on codecs, transport or runtime, or codecs depend on transport;
+- private external implementation types leak through installed headers or exported usage requirements;
 - a clean consumer project fails to `find_package`, compile each public header standalone, link, and complete one loopback request against the installed tree.
 
-The check reads compile commands and compiler dependency output, and inspects the target graph; it does not rely on grep of source alone. Measurable proxies (to be tracked after implementation; not results): public dependency leaks = 0; accumulator implementations = 1; retry-owning classes = 1; vendor-name branches in shared code = 0 (counted by a named-vendor token scan of `sp_codecs` shared files and `sp_runtime`); C++ files touched to add a strict-compatible vendor = 0 (measured on each real addition, section 9).
+The current build graph is in `CMakeLists.txt`; the installed package exports its dependency requirements. A complete dependency/consumer CI gate remains a release requirement, not proof supplied by this diagram. Historical source-touch/proxy targets must be measured for each extension before being advertised.
 
 ## 3. Core vocabulary
 
 **Historical/proposed vocabulary sketches, not the installed API.** These C++20 sketches use a stub `JsonValue`; the original `sketch-compile` check is a design gate, not evidence of current SDK behavior. Installed names and ownership are defined by `<runtime/client.h>`, `<core/value.h>` and the five typed family request headers; use [README](../README.md#owned-requests-results-and-configuration) for actual admission and result contracts.
+
+Current interface 4 controls are detailed in [Usage](USAGE.md#reasoning-sampling-and-tool-controls). Responses cursor `messages` contains only new input; local previous history proves ownership without being emitted. Generate portable history is opt-in and never strips authentic seals. Model-specific temperature prefix facts are closed policy data; deployment environment headers are resolved explicitly before admission, never in a runtime interpreter.
 
 **Original sketch error model.** The proposed `Result<T>` factory/`Client::option`, direct `Outcome` completion and `Status` join below are not current installed methods/signatures. The installed `runtime::Client` constructor reports invalid options with `ConfigError`; async admission rejection throws `AdmissionError` without callbacks, while `complete` translates it to the same owned `Failure`. `prepare` returns the move-only validated handle, `start` returns `Operation`, and `complete`/`Operation::join` return immutable shared owned outcomes. There is no installed `Client::option`; caller controls are typed. SDK `Client::complete` remains supported and is distinct from the removed NeoGraph `Provider::complete`.
 
@@ -532,7 +516,7 @@ Descriptors are trusted deployment input (no remote refresh, no external `$ref`)
 
 **Historical admission versus target grammar.** Original M3 admitted Chat/Messages version/revision/identity/evidence, origin-only base URLs, literal paths/headers, request/usage bindings and stops, while pinning `anthropic-version:2023-06-01`; later cohorts added Responses, native Gemini and Interactions and their declared/reserved slots. Gemini's literal model routes permit its colon method and fixed `?alt=sse` suffix; both routes must address the same request model. Those earlier loader measurements remain in POC_PLAN5.3/5.7/5.8. The current installed loader retains immutable externally admitted descriptor/codec policies, distinct from runtime/error policy and qualification/model/grant inputs. This does not implement the entire target grammar below: auth programs, environment-header programs, model selectors, arbitrary query templates, namespaced option programs, constraints/D5 execution and schema generation are not implied by closed JSON admission.
 
-**Owner-controlled settings contract — implemented and exercised.** The arbitrary PoC8192/128 ceilings and output-versus-input shortcut are removed. `max_output_tokens` belongs to the user's typed request and external configuration/default selection; the library does not silently clamp it. Actual five-family CLI proof carried16384 unchanged in38 peer requests without widening durable authority. Genuine service/model limits, representation/resource limits and spending authorization remain separate contracts; historical canary measurements retain the workload values actually used. [Current control proof](../README.md#caller-controlled-output-tokens).
+**Owner-controlled settings contract.** The arbitrary PoC output ceilings and output-versus-input shortcut are removed. Caller-selected typed caps are not silently clamped. Model/representation/resource bounds reject incompatible values separately from host financial authority. Historical five-family CLI proof carried 16384 unchanged in 38 peer requests; see [ROADMAP](ROADMAP.md#owner-requested-next-work) and [current controls](USAGE.md#request-families-and-controls).
 
 Configurable values now have a closed/versioned JSON inventory: runtime/error defaults and classification, descriptor/codec policies, model/pricing catalogues, profiles and separate owner-approved campaign grants. Immutable runtime/descriptor snapshots affect newly admitted clients/descriptors, not existing ones; profiles/configuration cannot issue, reset or renew financial authority. [README inventory and loaders](../README.md#owned-requests-results-and-configuration) identify the realized admission APIs. Protocol framing, causality, correlation, signature assembly and terminal decisions remain typed logic, not executable configuration hooks. [ROADMAP](ROADMAP.md#owner-requested-next-work) records completed bounded HTTP/benchmark/integration proof alongside still-unclaimed release gates.
 
@@ -560,13 +544,13 @@ A descriptor cannot: template message content, loop or branch, dispatch on event
 
 ### 5.2 Load-time validation
 
-Loading is: strict JSON parse (duplicate keys rejected, size and depth bounded) -> closed type and unknown-key check -> match against the family's slot inventory -> checks for path collisions, reserved destinations, model-selector priority, rule contradictions, and usage source overlap -> `ValidatedDescriptor`. Errors carry the JSON pointer, expected type and revision, and never a secret. There is no coercion or migration on load; a future `descriptor_version` or an unknown key is an error. A changed endpoint changes where credentials are sent, so the factory applies an endpoint allow-policy. Clients are immutable: a new descriptor means a new `Client`, so an in-flight request never changes revision or origin. The loader returns `Result<ValidatedDescriptor>`.
+The current loader performs strict bounded JSON parsing, closed type/key checks and admitted family/origin/path/header/binding/stop validation, then returns `LoadResult = variant<ValidatedDescriptor, ConfigError>`. It does not execute the model selectors, rule contradictions or full usage programs in the original table. Diagnostics carry a trusted pointer, expected value and revision. Newer grammar versions and unknown keys reject without coercion. Endpoint validation is not a host credential-recipient allow-list; the host must apply that policy. New descriptors mean new immutable clients.
 
 In the current loader, diagnostic pointers stop at the longest trusted schema ancestor: arbitrary unknown keys, header names, stop-map keys and their control/secret text are not copied into errors. A syntactically valid duplicate-key document retains its unambiguous positive root revision, including the full unsigned range; missing, invalid or duplicated revision remains unknown (`0`). The private yyjson port owns the parse tree and exposes no yyjson types in its headers.
 
-### 5.3 Schema is generated from the C++ inventory
+### 5.3 Historical schema-generation proposal
 
-The typed common field inventory plus each family's slot inventory is the single grammar authority. `descriptor-v1.schema.json` is generated from it; it is not hand-written. CI checks that the published schema and the runtime loader agree on a corpus of accepted and rejected instances. Cross-field invariants (path collisions, rule contradictions) are runtime checks; the schema documents that it does not cover them. A schema pass alone is never evidence of typo rejection.
+The original design called for a generated `descriptor-v1.schema.json` and a schema/loader acceptance-corpus gate. That full-target schema generator is not implemented. The installed closed loader and policy declarations are the current inventory; do not copy the broader table into configuration because a draft schema sketch looks plausible.
 
 ### 5.4 Growth-cap rule
 
@@ -578,7 +562,7 @@ Descriptors are HTTPS-only with one exception: `http` is allowed when the host i
 
 ### 5.6 What "zero C++" means
 
-Adding a vendor with a descriptor and fixtures needs no edit to any C++ source file, **but only for a strict-compatible vendor** and only as a *source-tree contributor*: the descriptor is embedded at configure time, so the library is rebuilt and released. There is no runtime descriptor injection in the installed API of the first release. **Strict-compat qualification test** (run on recordings before a vendor is accepted under an existing family): terminal profile matches the family (finish reason and `[DONE]` present); tool-call fragments carry an `index`; the finish reason after a streamed tool call is the tool-call finish reason, not `stop`; usage arrives in the documented shape. A vendor that fails any item (for example an OpenAI-compatible endpoint that omits the tool-call index and reports `stop` for streamed tool calls) needs a codec profile: that is C++ (section 9, case c).
+An application can call `descriptor::load(source)` at runtime and construct a new immutable client without rebuilding the library. This admits only values within an existing compiled family's inventory. It does not qualify an endpoint automatically. A different terminal profile, tool correlation rule or stream lifecycle needs typed codec work and independent fixtures, not descriptor scripting. Historical “embedded-only descriptor” and generic option-slot proposals are superseded.
 
 ## 6. Reasoning carry
 
@@ -600,13 +584,15 @@ Vendor reasoning state (signed thinking blocks, encrypted reasoning items, thoug
 
 **Capture.** Decoders capture reasoning by default, separately from visible text: Messages thinking and redacted blocks with order and signature; Responses reasoning items with id, encrypted content and summary (ordered group, 4.4); Gemini thought parts and signatures with the function-call association; OpenRouter `reasoning_details` as a whole. A gateway's `format` field is a provenance hint, not a replay permission.
 
-**Replay gate.** Native replay requires exactly equal `Origin` (or an activated `Documented-Unverified` class, 3.1), equal `BindingFacts` checks (model, context fingerprint, account scope), a complete capsule, and the codec's binding checks.
+The installed native gate checks admitted descriptor/origin, model, context prefix, controls/tool/account scope and complete sealed content. `NativeContext`/`NativeReplay` are the actual types; callers cannot supply trusted binding hashes. There is no activated cross-origin equivalence class in the current SDK.
 
-**Measured M3 subset.** Messages captures ordered thinking, absent versus empty signatures, redacted data, and server-tool result leaves. Its encoder derives immutable context from the actual request and admitted descriptor; the accumulator seals the complete message. Replay checks exact origin/route, model, declared non-secret account scope, system/tools/thinking configuration, preceding message prefix and sealed content before building an HTTP request. The account label is caller-supplied scope, not credential verification. The codec, accumulator and context helpers are trusted private in-process components, not an authenticated importer. Loopback continuation and zero-dispatch mutation evidence are in [D4](decisions/D4-origin-and-binding.md#measured-m3-implementation); no equivalence class, persistence/import, Drop/Demote policy or live canary is implemented.
+**Historical M3 subset.** That cohort checked exact Messages origin/route/model/account scope, system/tools/thinking configuration, preceding prefix and sealed content. It had no persisted native admission or live canary. [D4's M3 evidence](decisions/D4-origin-and-binding.md#measured-m3-implementation) retains that limit; later `NativeArchive` and live cohorts are separate, not a rewrite of M3.
 
 **Canary (`CanaryNegativeControl`).** A live same-origin canary runs a real second request. Its record carries `negative_control: rejected|accepted|not_run` and three evidence fields: `client_retention_verified`, `request_accepted`, `native_validation_evidenced` (presence of thinking, usage or cache evidence). A cell whose negative control (a tampered signature must be rejected) is `accepted` or `not_run` is `ReplayAcceptanceUnobservable` and is never reported as "replay verified": acceptance alone is vacuous because the vendor degrades gracefully by dropping unreadable blocks. Results are N-run acceptance rates with a lower confidence bound, not a boolean. Canary keys, cost, fork-PR secret exposure and terms of service are handled in the pre-mortem (section 11).
 
 ### 6.3 Treatments
+
+The table retains historical general treatments. `ForeignReasoning`, `ConversionLoss` and general Drop/Demote are not installed types. Interface 4 separately exposes Generate `HistoryMode::PortableForeign`, admitting only unsealed portable Text/client ToolCall with its documented first-imported-call sentinel; it cannot repair foreign or edited native carry. The actual [portable path](USAGE.md#explicit-portable-gemini-history) supersedes the old generic sentinel sketch.
 
 | Treatment | When | Result |
 |---|---|---|
@@ -614,17 +600,19 @@ Vendor reasoning state (signed thinking blocks, encrypted reasoning items, thoug
 | Explicit demotion | foreign origin, caller set `ForeignReasoning::DemoteReference` | public visible text or summary only, rendered as an **assistant-role quoted block inside an explicit untrusted delimiter** (for example `<foreign_reasoning untrusted origin="...">`), with delimiter sequences in the content escaped; NEVER in a user-, system- or developer-role instruction position; a `ConversionLoss` is recorded. Signature, encrypted and redacted bytes are never exposed as text |
 | Drop | foreign origin, caller set `ForeignReasoning::Drop` | reasoning removed; `ConversionLoss` recorded. Not a claim of continuity |
 
-Default for a foreign capsule is **Reject** (fails before dispatch with `ReplayIneligible`). Drop and Demote are opt-in only.
+The proposed foreign-capsule default was Reject with explicit Drop/Demote alternatives. Only native eligibility/rejection is implemented; callers cannot enable those historical alternatives.
 
 Rules that are not relaxed:
 
 - **Same-origin unsigned blocks are never demoted or dropped** (a missing signature is not evidence of a foreign origin).
 - A tool loop (outstanding call, result, and the same vendor's follow-up) cannot cross origins; a mid-loop vendor switch is refused. Imported history without provenance needs a verified envelope.
 - The library never strips reasoning and retries after an error, and never silently rewrites history to make a request pass.
-- Gemini's documented sentinel for missing signatures is usable only under an explicit `AllowDocumentedSentinel` approval for completed foreign history, with a recorded quality loss; otherwise a missing required signature is a pre-dispatch error.
+- The installed Generate imported-history exception requires explicit `PortableForeign`: only the first foreign function call receives `skip_thought_signature_validator`; text-only and genuine native groups do not. There is no general `AllowDocumentedSentinel` approval type.
 - Editing visible text, compacting history, or changing system/tools can invalidate vendor-side bindings (the context fingerprint detects this before dispatch). The builder drops the affected seal.
 
 ### 6.4 Storage policy (resolves opt-in versus journal)
+
+`SealedStore`/`Capsuleless` below are historical journal-mode proposals, not SDK enum values. The current durable path is explicit `NativeArchive::provision/open/save/load`; NeoGraph owns its run/checkpoint policy. Archive custody authenticates local binding, is not encryption or vendor identity, and rejects v2 rather than upgrading it. See [actual usage](USAGE.md#native-continuation-and-persistence).
 
 Capture is always in memory. **Persistence is never implicit.** A run that is journaled and meant to be resumable must choose exactly one mode, recorded in the journal record:
 
@@ -683,65 +671,43 @@ Tested by `NativeRetentionForeignGate` (with `OriginBindingFacts` and `CanaryNeg
 
 **Backpressure and callback exceptions.** M4 bounds each operation's **wire-event** queue by body chunks and bytes, with separate reserved header/completion slots. Refusing a body chunk consumes none of it: libcurl pauses and redelivers after the actor drains and resumes. Semantic events are folded and delivered inline on the serialized actor, with no unbounded semantic backlog. A nonterminal callback exception cancels with safe `Failure(Misuse)`; a throwing `on_outcome` cannot replace the already-decided result or produce a second outcome, and increments `callback_exceptions`. Raw `what()` text is never exposed. **Accepted constraint:** callbacks run on shared runtime workers and must not block. `slow_callbacks` detects violations; it does not preempt callbacks or guarantee fairness when callers block. Slow work belongs in the consumer's own queue.
 
-Public logs and errors never contain secrets, opaque reasoning, or raw bodies; headers are exposed through a bounded allow-list; raw body capture is opt-in.
+Safe errors do not embed raw vendor text. Outcomes retain bounded original JSON/raw observations by default; this is result ownership, not automatically safe logging or native authority. Applications must not export credential/native/raw content through telemetry.
 
 ## 8. Consumer contract: NeoGraph adapter and journal
 
-The library never computes a NeoGraph digest. It provides a **canonical replay projection** (`projection_version`) of a `Completion` and of each capsule, and NeoGraph owns the digest. There is no separate `completion-envelope`: the projection is the only serialization, specified below and tested by `JournalVersionAndCanonicalOrder`.
+The SDK returns immutable full outcomes and genuine native sidecars; it does not define a NeoGraph journal, calculate its digests or ship a general `projection_version` serializer. NeoGraph owns its provider-outcome/call/checkpoint formats, budgets, custody admission and persistence errors.
 
-**NeoGraph adapter (in the NeoGraph repo).** Bridges the library to NeoGraph's coroutine model and cancellation token (converted to `std::stop_token`), maps `Completion` to NeoGraph types, and maps `StopKind::Unknown` and `MalformedCall` to errors or tool-error results per its policy. The library knows nothing of graphs, journals or tool executors.
+The adapter's `Provider::prepare(ProviderRequest)` returns move-only `PreparedProviderRequest`. `dispatch`/`dispatch_async` consumes that exact preparation; `invoke`/`invoke_async` combines the two steps. Its coroutine operation owns runtime/request state, rather than borrowing the provider across scheduling. The bridge handles host cancellation and bounded event delivery without replacing `Completion`/`Failure` with a text-only result.
 
-**Historical M5 consumer-boundary finding.** The isolated pre-cutover experiment demonstrated that legacy `ChatCompletion` could not represent nullable/provenance/stage/quality usage, owned partial failure or sealed native authority. Its strict lossless comparison produced NO-GO, including the risk of making a billable request before a legacy projection failed. Those observations remain historical evidence; the experiment, adapter and optional build path are now removed rather than shipped as compatibility. Current consumers use typed requests, pre-effect version/capability/native custody admission and immutable full outcomes directly.
+Preparation exposes initial errors before a host dispatch receipt or money claim. The host persists required authority before consuming the same request, preserving deadline/cancel scope. Observer/settlement errors retain the exact drained outcome through `ProviderOutcomeError`; downstream failure is not permission to redispatch.
 
+**Historical M5 finding.** Legacy `ChatCompletion` could not represent unknown/provenance usage, owned partial failure or native authority. Its strict lossless NO-GO remains in [POC_PLAN](POC_PLAN.md#55-m5-results-and-gono-go-live-observation). The old experiment/adapter/build path was removed, not shipped as a shim. Typed consumer proof is a separate cohort.
 
-**`provider-completion/v2` is an explicit cutover.** The existing `provider-completion/v1` digest is computed over message, stop reason, and three usage numbers (per RESEARCH.md); it cannot express unknown-vs-zero usage, several ordered messages, origin, invalid tool calls or continuation without inventing values. No fake zeros keep v1 alive and v1 is not reinterpreted.
+The earlier `provider-completion/v2` projection, general consumer conformance kit and automatic turn-boundary `Capsuleless` migration described a target, not installed SDK APIs. Current callers must preserve typed messages, nullable usage, raw/stop/attempt evidence and genuine sidecars with the host's actual serializer. Old portable JSON cannot acquire native authority or have old digests relabeled/rehashed as current. See [Migration](MIGRATION.md) for actual signatures and boundaries.
 
-| Included in the canonical projection | Excluded |
-|---|---|
-| projection version; ordered messages and parts with part boundaries, vendor ids and phase; tool ids/names/kinds/sealed input, `InvalidToolCall` reason and bounded fragment; stop raw value and kind; nullable usage with provenance, stage, quality, `provider_reported_total`, `extra`; native state identity (origin, binding facts, representation version, replay projection); continuation (origin, reference, lifetime, representation version); artifact identity | chunk boundaries, transport mode, local ids (remapped canonically), timestamps, `request_id`, `losses` and diagnostics, retry attempt facts |
-
-- **Projection versus raw bytes.** Native bytes of a streamed reasoning block are **library-assembled, not vendor bytes**: a stream delivers fragments, and the captured block is built from them. The replay projection is the versioned, per-codec definition of what is sent back: JSON structure is compared semantically (member order and whitespace are not identity), while opaque leaves the vendor supplied whole (signatures, encrypted content, ids) are exact bytes and assembled leaves (concatenated thinking text, argument text) are exact over their assembled value. Which leaves are exact is listed per codec. If a leaf is replay-relevant and cannot be reproduced identically in one mode, the capsule is marked `complete=false` in that mode and that fixture is excluded from the parity set as a recorded known gap.
-- **Unified parity statement.** `TransportProjectionParity`: for every fixture in the parity corpus, buffered, SSE and WS produce equal messages, usage, stop, binding facts and canonical replay projection. It is defined on the projection, never on raw wire bytes, and holds unconditionally over that corpus; fixtures outside the corpus are documented gaps, not exceptions to the statement.
-- **Library-side golden plus consumer kit.** The library's own release gate includes a journal-projection golden (Completion fixture -> projection bytes) that does not depend on any consumer repository. It also ships a consumer conformance kit: the same golden pairs plus a runner description so NeoGraph (or any consumer) can prove its digest is invariant under partition and local-id changes and changes under origin, binding-fact or native-byte changes.
-- **Conversion receipts.** Demotion/drop approvals and loss notices live in a receipt outside completion identity. Text produced by demotion is part of the following request's identity because it is sent.
-- **Pre-dispatch version gate.** NeoGraph checks the journal version and the provider-call record version before sending; a mismatch stops the run with no billable call.
-- **v1 reader stays immutable.** Old records verify with their stored serializer; digests are never rehashed in bulk. **Limits:** a paused v1 run cannot resume natively on the new library; a run paused in the middle of a tool loop cannot be migrated at all (tool loops cannot cross origins and v1 holds no capsule). Migration is possible only at a turn boundary, as an explicit checkpoint creating a new v2 run whose parent provenance is the v1 digest, in `Capsuleless` mode (6.4). Imported reasoning is never auto-promoted to native-eligible and no unknown origin is invented.
 
 ## 9. Extension walkthroughs
 
-Paths below are the target release layout, not a list of implemented files. M2/M3 use private `src/` modules and `tests/fixtures/`; their measured scope is in POC_PLAN. A fixture is one JSON case file (request, transport schedule, expected, provenance); the target format uses sidecars for large binary data. Generated capability tables and a release `CHANGELOG.md` belong to the release workflow below. "Zero C++" means *no C++ source edit by the contributor*; the library is still rebuilt and released (5.6).
+**An endpoint with existing wire semantics.** Load a new descriptor with admitted origin/routes/bindings/stops and create a new client. No C++ rebuild is needed for runtime-loaded values, but independent request/response fixtures and endpoint evidence are still required before a support claim.
 
-**(a) Add a strict-compatible OpenAI-style vendor `acme` (Chat Completions shape).** Applies only to a vendor that passes the qualification test of 5.6. No C++ source edit.
-- `descriptors/vendors/acme.json`, `descriptors/manifest.json`
-- `fixtures/chat_completions/acme-basic.json` (and a tool-stream case, plus the qualification recording)
-- `docs/providers/acme.md`, `CHANGELOG.md`
+**A caller control already exposed in C++.** Set the typed member, such as `responses::Request::service_tier`. Family/model policy validates its value. There is no `Client::option` or generic scalar-option destination program.
 
-The fixture proves the request body and the response mapping. If `acme` fails the qualification (missing tool-call index, different finish reason, a different stream lifecycle), it is case (c) or (d), not (a). Expect this to be common, not exceptional; the measured touch set of each real addition is recorded, and the target "0 C++ files" is judged on those records, not assumed.
+**A new request control or event meaning.** Update the family's request declaration/encoder and/or response codec plus semantic/runtime fixtures. Reuse the common accumulator and transport when their contracts suffice. A mere additional raw stop mapping can be data only when it does not bypass compiled standard/failure-stop safety.
 
-**(b) Add an optional request field to an existing vendor (for example a Responses `service_tier` scalar).** No C++ edit when an existing scalar / list / flat-record option slot can carry it.
-- `descriptors/vendors/openai-responses.json`, `fixtures/responses/service-tier.json`, `docs/providers/openai-responses.md`, `CHANGELOG.md`
+**A new family.** Add typed request/encoder/codec source, expand the runtime variant and family dispatch, admit a closed family policy/loader inventory, update build/exported interfaces and migrate consumers' exhaustive visitors. Add independent buffered/SSE causality, usage, tool/native and lifetime evidence. A new transport is a separate decision; JSON cannot add one.
 
-Callers use `client.option("openai:service_tier", value)`. If the field needs a typed `Request` member, or changes continuation, prompt ordering, response interpretation, or tool lifecycle, it is C++ (`types.h`, `src/codecs/responses.cpp`, tests) and is not advertised as data-only.
+Earlier `descriptors/manifest.json`, `src/codecs/registry.cpp`, flat `types.h` and generic option-slot paths were proposed layouts, not files to edit in the current repository. Actual modules live under `src/codecs`, `src/descriptor`, `src/runtime`, and existing test corpora under `tests`.
 
-**(c) A vendor changes a stream event meaning, or a compat vendor needs a profile.** C++ required; transport files untouched.
-- `src/codecs/<family>.cpp`, a fixture, `docs/protocols/<family>.md`, `CHANGELOG.md`
-
-The same decoder serves buffered, SSE and WS, so the parity suite covers all transports. A new raw stop string alone is a descriptor `stop_reasons` edit, unless it is a failure-class terminal (3.6), which is C++. A new kind of part the ten events cannot express is a core change with a major release.
-
-**(d) A genuinely new wire family `acme-dialog`.** C++ required.
-- `src/codecs/acme_dialog.{h,cpp}` (declares its descriptor slot inventory), `src/codecs/registry.cpp`, `CMakeLists.txt`, `descriptors/vendors/acme-dialog.json`, `descriptors/manifest.json`, two fixtures, `docs/protocols/acme-dialog.md`, `CHANGELOG.md`
-
-Goal: the common loader, accumulator and transport stay untouched. A new transport is a further `src/transport/<name>.cpp` and is not data-only.
-
-Summary: (a) and (b, simple scalar) need no C++ source edit for strict-compatible shapes; (c) and (d) need C++. The measurable target: (a)/(b) additions touch no C++ file; a semantic stream fix touches no transport file. A prototype must show the target before it is claimed.
 
 ## 10. Versioning and stability
 
-- **Source API.** SemVer for the C++ source API. Changes that affect exhaustive visitors over `Event`/`Part`/`ErrorKind`/`StopKind` or any specified meaning are major. A new option slot entry or source-level codec is minor. A fix to violated behaviour is a patch with a semantic release note.
+- **Source API.** Package0.1.0 is alpha; interface 4 and shared generation4 identify this typed source cutover, not SemVer major4. Rebuild and migrate exhaustive visitors/consumers for the selected release. The older major/minor sketch is not a pre-stability compatibility promise; historical interface3 proof is not current interface4 verification.
 - **ABI.** No stable cross-compiler ABI is promised. Shared builds are supported only with the same toolchain, standard library and flags; consumers rebuild per release.
 - **Descriptor.** `descriptor_version` (grammar) and `revision` (vendor facts) are separate. Grammar growth or any new rule bumps the descriptor major; correcting a fact bumps `revision` and must add fixture evidence. Exact-version support: newer versions and unknown keys are rejected. Changing a retention or usage-inclusion rule in data is still a semantic release.
 - **Fixtures and projection.** `fixture_version`, `projection_version` and NeoGraph `provider-completion` version are independent. Changing a fixture's expected meaning needs a justification and a reviewed old/new diff; expected files are never regenerated and approved unread. Old serialized artifacts are read by version-specific readers; no aliases or shims to the live API.
 - **Runtime reload.** No live reload. New descriptors mean a new immutable client.
+
+Native archive format remains v3/`spna3`. Policy/control identity changed independently, so older authenticated records can be replay-ineligible without a storage-format change. Generation cap is per-call admission, excluded only from replay configuration; origin/model/prefix/content, reasoning/routing and other bound controls remain checked. There is no seal repair or implicit record migration.
 
 ## 11. Pre-mortem: likely two-year failure modes
 
@@ -770,13 +736,13 @@ Decided items, with status and the record. Nothing in this table is open unless 
 | D1 | Transport: one private stack, libcurl `multi_socket` driven by standalone Asio; HTTP/2 included and optional HTTP/3 implemented and exercised on capable Linux plain/ASan+UBSan/TSan builds. The transport owns cancel/deadline, one attempt, HTTP/1.x backpressure and bounded name resolution. Capable builds can prefer QUIC with safe connection-stage fallback; non-capable builds keep HTTP/2/1.1 and reject HTTP/3-only before dispatch. No second stack/backend selector; generation POST 0-RTT stays off by default. Exact release-backend, hosted-provider and platform limits remain in D1; Responses WebSocket is deferred/excluded | FIRM | [D1-transport](decisions/D1-transport.md) |
 | D2 | Non-chat scope: the SDK covers chat plus artifacts in chat responses, not image, Veo operation or OpenRouter Decisions endpoints. The approved NeoGraph cutover removed the old interpreter and retained separate typed Images/Veo/Decisions clients and authority. Recorded single-shot media observations are bounded, not universal endpoint qualification or authorization for more calls | FIRM | [D2-non-chat-scope](decisions/D2-non-chat-scope.md) |
 | D3 | Async-native private core plus blocking facade; no switching thresholds; gated by `CancelWithoutPeerProgress` and `AdmissionIndependentOfHeldStreams`; a non-gating scheduled benchmark for the first three releases | FIRM | [D3-async-native](decisions/D3-async-native.md) |
-| D4 | Exact-origin default, per-capsule binding facts, C++ allow-list equivalence class (`Documented-Unverified`) activated only after a negative-control canary; OpenRouter never in a class | FIRM | [D4-origin-and-binding](decisions/D4-origin-and-binding.md) |
+| D4 | Implemented exact-origin/binding/native gate and explicit local archive custody; cross-origin equivalence activation remains a historical proposal requiring separate admission | FIRM | [D4-origin-and-binding](decisions/D4-origin-and-binding.md) |
 | D5 | Rule admission policy: three independent real cases, truth table, permutation tests, mutant check and prototype; original target v1 only omit(+when.in) and require_greater. Current installed loader does not execute the proposed constraints grammar; no old interpreter is restored | FIRM | [D5-rule-admission](decisions/D5-rule-admission.md) |
 
 **Open questions (O1 was closed by the revised D1; D1b was added):**
 
-- **D1b. WebSocket transport for the Responses lane.** libcurl WebSocket support is official from 8.11 and the masking fix is in 8.16, while the libcurl on current LTS distributions is older. Options: a newer libcurl (vendored), or a separate WebSocket client with its own socket and cancel proof. Not needed before ROADMAP Stage 2.
-- **O2. Direct credentials for Bedrock/Vertex** to run the equivalence-class canary. Without them the class stays inert (3.1).
+- **D1b. Future WebSocket lane.** Current SDK and release gates exclude Responses WebSocket. Any new lane requires a separate transport decision and actual causality/cancel/ownership proof; it is not a missing prerequisite for implemented Responses HTTP/SSE.
+- **O2. Native origin equivalence.** Direct Bedrock/Vertex credentials and a separate implementation/admission decision would be required; no active equivalence class exists.
 - **O3. NeoGraph's target concurrency** for the scheduled held-stream benchmark; capacity numbers in the decision are proposals, not measurements.
 - **O4. Future optional non-chat `Endpoints` target.** The approved cutover retained typed Images/Veo/Decisions in NeoGraph and removed the old interpreter; this is no longer a pending current cutover blocker. A later SDK target still requires a separate owner scope decision and qualification; single-shot media proof does not change SDK chat-only scope.
 
@@ -806,7 +772,7 @@ Historical migration inventory based on the pre-cutover code measured in RESEARC
 | Expectation that a cut stream without a callback is retry-safe; EOF treated as success | Replaced by RetrySafety and terminal evidence |
 | Multiple HTTP stacks in the new library | One private transport, D1 |
 
-**SDK non-goal (D2), realized NeoGraph ownership:** the approved cutover removed the old descriptor-grammar interpreter for `operation`, `artifacts`, `prompt_template`/`prompt_field`, `request_json` and `SchemaPrimitiveRegistry`, rather than retaining shims. Images/Veo/Decisions remain separate typed NeoGraph clients on its own async HTTP layer with separate authority. The original half-migration gate was that no old descriptor interpreter survive; current [integrated proof and limits](../README.md#persistent-qualification-campaign-completed-observations-explicit-limits) record the realized cutover, not stable release or universal media qualification. The separate staged release ladder remains in [ROADMAP.md](ROADMAP.md).
+**SDK non-goal (D2), realized NeoGraph ownership:** the approved cutover removed the descriptor interpreter for `operation`, `artifacts`, `prompt_template`/`prompt_field`, `request_json` and `SchemaPrimitiveRegistry`, without shims. Images/Veo/Decisions remain separate typed NeoGraph clients with host authority. [Recorded integrated proof and limits](POC_PLAN.md#current-typed-c-cutover-provenance) describe that cutover, not stable release or universal media qualification.
 
 ## Appendix: Review disposition
 

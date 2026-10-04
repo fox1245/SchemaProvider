@@ -631,6 +631,62 @@ void quoted_json_and_request_bounds() {
   request.messages[0].text.assign(limit / 6, '\0');
   CHECK(std::get<Error>(chat::encode(descriptor_value(), request, false)).kind == ErrorKind::InvalidRequest);
 }
+void gateway_request_controls() {
+  auto loaded = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"gateway","family":"openai.chat","connection":{"base_url":"https://openrouter.ai","paths":{"buffered":"/api/v1/chat/completions","streaming":"/api/v1/chat/completions"}}})");
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
+  const auto& gateway = std::get<descriptor::ValidatedDescriptor>(loaded);
+  chat::Request request; request.model = "fixture-model"; request.messages.push_back({Role::User, "hello"});
+  request.reasoning = chat::ReasoningOptions{"low", {}, false, true};
+  request.include_reasoning = true; request.usage_include = false;
+  request.models = {"openai/gpt-4o-mini", "anthropic/claude-sonnet-4"};
+  auto result = chat::encode(gateway, request, true);
+  CHECK(std::holds_alternative<chat::EncodedRequest>(result));
+  auto parsed = json::parse(std::get<chat::EncodedRequest>(result).body);
+  CHECK(std::holds_alternative<json::Document>(parsed));
+  const auto root = std::get<json::Document>(parsed).root();
+  CHECK(root.get("reasoning").get("effort").as_string() == "low");
+  CHECK(!root.get("reasoning").get("exclude").as_bool() && root.get("reasoning").get("enabled").as_bool());
+  CHECK(root.get("include_reasoning").as_bool() && !root.get("usage").get("include").as_bool());
+  CHECK(root.get("models").at(1).as_string() == "anthropic/claude-sonnet-4");
+  CHECK(std::get<Error>(chat::encode(descriptor_value(), request, false)).kind == ErrorKind::InvalidRequest);
+  auto reject = [&](const chat::Request& changed) {
+    CHECK(std::get<Error>(chat::encode(gateway, changed, false)).kind == ErrorKind::InvalidRequest);
+  };
+  auto changed = request; changed.reasoning->effort = "arbitrary"; reject(changed);
+  changed = request; changed.reasoning->max_tokens = 128; reject(changed);
+  changed = request; changed.reasoning->enabled = false; reject(changed);
+  changed = request; changed.reasoning->exclude = true; reject(changed);
+  changed = request; changed.reasoning_effort = "low"; reject(changed);
+  changed = request; changed.models.push_back(changed.models.front()); reject(changed);
+  changed = request; changed.temperature = 0.5; changed.models = {"OpenAI/GPT-5-nano"}; reject(changed);
+  request.reasoning->effort.reset(); request.reasoning->max_tokens = 256; request.max_output_tokens = 512;
+  result = chat::encode(gateway, request, false);
+  CHECK(std::holds_alternative<chat::EncodedRequest>(result));
+  parsed = json::parse(std::get<chat::EncodedRequest>(result).body);
+  CHECK(std::get<json::Document>(parsed).root().get("reasoning").get("max_tokens").as_uint() == 256);
+  changed = request; changed.reasoning->max_tokens = 0; reject(changed);
+  changed = request; changed.reasoning->max_tokens = 513; reject(changed);
+  changed = request; changed.reasoning->max_tokens = std::numeric_limits<uint64_t>::max(); reject(changed);
+  Accumulator accumulator;
+  chat::Codec codec(gateway, chat::Mode::Buffered, accumulator, {}, std::get<chat::EncodedRequest>(result).context);
+  codec.buffered(body(R"({"role":"assistant","content":"answer"})"), {});
+  CHECK(accumulator.outcome() && std::holds_alternative<Completion>(*accumulator.outcome()));
+  request.messages.clear(); request.canonical_messages = {Message{{}, Role::User, {Text{"hello"}}}};
+  request.canonical_messages.push_back(std::get<Completion>(*accumulator.outcome()).messages.at(0));
+  request.canonical_messages.push_back(Message{{}, Role::User, {Text{"next"}}});
+  CHECK(std::holds_alternative<chat::EncodedRequest>(chat::encode(gateway, request, false)));
+  for (int field = 0; field != 7; ++field) {
+    changed = request;
+    if (field == 0) changed.reasoning->max_tokens = 255;
+    if (field == 1) changed.include_reasoning = false;
+    if (field == 2) changed.usage_include = true;
+    if (field == 3) changed.models.pop_back();
+    if (field == 4) changed.reasoning->exclude.reset();
+    if (field == 5) changed.reasoning->enabled.reset();
+    if (field == 6) { changed.reasoning->max_tokens.reset(); changed.reasoning->effort = "medium"; }
+    CHECK(std::get<Error>(chat::encode(gateway, changed, false)).kind == ErrorKind::ReplayIneligible);
+  }
+}
 } // namespace
 int main() {
   try {
@@ -640,6 +696,7 @@ int main() {
     required_metadata_and_identity(); required_usage_and_unknown_cache(); unindexed_tool_order_and_optional_function(); buffered_close_precedence();
     accumulator_interleaved_ordering(); accumulator_order_uniqueness_and_limits();
     tool_history_and_escaped_arguments(); quoted_json_and_request_bounds();
+    gateway_request_controls();
     std::cout << "chat semantic properties passed\n";
     return 0;
   } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

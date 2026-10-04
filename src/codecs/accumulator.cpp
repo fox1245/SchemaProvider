@@ -6,7 +6,7 @@
 #include <utility>
 #include <limits>
 
-std::uint32_t sp::codec_interface_revision() noexcept { return 3; }
+std::uint32_t sp::codec_interface_revision() noexcept { return 4; }
 namespace sp {
 namespace {
 bool incomplete(std::string_view s) {
@@ -69,7 +69,11 @@ bool Accumulator::accept(const Event& event, const Error* failure_override) {
   failure_override_ = failure_override;
   const bool ok = std::visit([this](const auto& e) { return apply(e); }, event);
   failure_override_ = nullptr;
-  if (ok && sink_) sink_(event);
+  if (ok && sink_) {
+    if (const auto* stop = std::get_if<Stop>(&event); stop && stop->reason.kind != stop_->kind)
+      sink_(Event{Stop{*stop_}});
+    else sink_(event);
+  }
   return ok;
 }
 bool Accumulator::reject(ErrorKind kind, std::string message) {
@@ -356,7 +360,19 @@ bool Accumulator::apply(const Stop& e) {
         invalid->reason = InvalidReason::Truncated;
     }
   }
-  stop_ = e.reason; state_ = State::Draining; return true;
+  stop_ = e.reason;
+  if (stop_->kind == StopKind::EndTurn) {
+    for (const auto& [id, part] : parts_) {
+      (void)id;
+      // Client intent is known before streamed arguments are sealed, including
+      // calls whose arguments later become InvalidToolCall.
+      if (part.kind == PartKind::ToolCall && part.header.tool_kind != ToolCallKind::ServerExecuted) {
+        stop_->kind = StopKind::ToolUse;
+        break;
+      }
+    }
+  }
+  state_ = State::Draining; return true;
 }
 std::vector<Message> Accumulator::take_messages(bool partial) {
   std::vector<Message> result;
@@ -369,7 +385,8 @@ std::vector<Message> Accumulator::take_messages(bool partial) {
       auto& p = parts_.at(part_id);
       m.message.parts.push_back(p.value ? std::move(*p.value) : seal_value(p, partial));
     }
-    if (m.native_context && m.native_context->replay_eligible()) m.message.native = std::shared_ptr<const NativeReplay>(
+    if (m.native_context && (m.native_context->replay_eligible() || m.native_context->cursor_authority_))
+      m.message.native = std::shared_ptr<const NativeReplay>(
         new NativeReplay(std::move(m.native_context), m.message, stop_ ? &*stop_ : nullptr, !partial));
     result.push_back(std::move(m.message));
   }
@@ -381,9 +398,6 @@ bool Accumulator::apply(const Commit& e) {
   if (state_ != State::Draining || !stop_ || e.evidence.empty()) return reject(ErrorKind::ProtocolCorrupt, "commit without evidence");
   for (const auto& [id, m] : messages_) { (void)id; if (!m.sealed) return reject(ErrorKind::ProtocolCorrupt, "commit with open message"); }
   auto messages = take_messages(false);
-  if (stop_->kind == StopKind::EndTurn) {
-    for (const auto& m : messages) for (const auto& part : m.parts) if (const auto* call = std::get_if<ToolCall>(&part); call && call->kind != ToolCallKind::ServerExecuted) stop_->kind = StopKind::ToolUse;
-  }
   if (usage_.stage != UsageStage::Missing) usage_.stage = UsageStage::Final;
   outcome_ = Completion{std::move(messages), std::move(*stop_), std::move(usage_),
       std::move(wire_envelope_), {}, std::move(raw_events_)};

@@ -46,7 +46,67 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (request.thinking_budget) effective.thinking_budget = request.thinking_budget;
   if (request.temperature) effective.temperature = request.temperature;
   if (request.top_p) effective.top_p = request.top_p;
+  if (request.temperature && descriptor::temperature_forbidden(descriptor, request.model))
+    return bad("temperature is prohibited for this model");
+  if (request.temperature && (!std::isfinite(*request.temperature) ||
+      *request.temperature < family.temperature_range[0] || *request.temperature > family.temperature_range[1]))
+    return bad("temperature outside admitted range");
+  std::optional<ThinkingMode> thinking_mode = request.thinking_mode;
+  if (thinking_mode) {
+    switch (*thinking_mode) {
+      case ThinkingMode::Manual:
+        if (!effective.thinking_budget || !*effective.thinking_budget) return bad("manual thinking requires a positive budget");
+        break;
+      case ThinkingMode::Adaptive:
+      case ThinkingMode::Disabled:
+        if (request.thinking_budget) return bad("adaptive and disabled thinking forbid budget");
+        effective.thinking_budget.reset();
+        break;
+      default: return bad("invalid thinking mode");
+    }
+  } else if (effective.thinking_budget) thinking_mode = ThinkingMode::Manual;
+  const bool thinking_enabled = thinking_mode && *thinking_mode != ThinkingMode::Disabled;
+  if (thinking_enabled) {
+    effective.temperature.reset();
+    if (effective.top_p && *effective.top_p < family.thinking_top_p_minimum)
+      return bad("thinking top_p outside admitted range");
+  }
   if (auto error = descriptor::validate_choices(descriptor, request.model, effective)) return bad(std::move(*error));
+  std::string_view effort, ttl, tool_mode;
+  if (request.output_effort) switch (*request.output_effort) {
+    case OutputEffort::Low: effort = "low"; break;
+    case OutputEffort::Medium: effort = "medium"; break;
+    case OutputEffort::High: effort = "high"; break;
+    case OutputEffort::Max: effort = "max"; break;
+    default: return bad("invalid output effort");
+  }
+  if (request.cache_control && request.cache_control->ttl) switch (*request.cache_control->ttl) {
+    case CacheTtl::FiveMinutes: ttl = "5m"; break;
+    case CacheTtl::OneHour: ttl = "1h"; break;
+    default: return bad("invalid cache TTL");
+  }
+  if (request.tool_choice) {
+    const auto& choice = *request.tool_choice;
+    switch (choice.mode) {
+      case ToolChoiceMode::Auto: tool_mode = "auto"; break;
+      case ToolChoiceMode::Any: tool_mode = "any"; break;
+      case ToolChoiceMode::None: tool_mode = "none"; break;
+      case ToolChoiceMode::Tool: tool_mode = "tool"; break;
+      default: return bad("invalid tool choice");
+    }
+    if (choice.mode == ToolChoiceMode::Tool) {
+      if (choice.name.empty() || std::none_of(request.tools.begin(), request.tools.end(),
+          [&](const auto& tool) { return tool.type.empty() && tool.name == choice.name; }))
+        return bad("named tool choice requires a declared client tool");
+    } else if (!choice.name.empty()) return bad("only named tool choice accepts a name");
+    if ((choice.mode == ToolChoiceMode::Any || choice.mode == ToolChoiceMode::Tool) &&
+        (request.tools.empty() || thinking_enabled))
+      return bad("forced tool choice requires tools and thinking disabled");
+    if (choice.mode == ToolChoiceMode::None && choice.disable_parallel_tool_use)
+      return bad("none tool choice cannot control parallel use");
+  }
+  if (request.provider)
+    if (auto error = request_controls::validate_routing(descriptor, *request.provider)) return bad(std::move(*error));
   if (request.messages.size() > resources.request_messages || request.tools.size() > resources.request_tools)
     return bad("request count limit exceeded");
   // Check seals before encoding or interpreting the edited contents. Removing a seal
@@ -87,7 +147,30 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   body.raw(",").quoted(descriptor.max_output_tokens_member()).raw(":").raw(std::to_string(*effective.max_output_tokens));
   body.raw(",").quoted(descriptor.request_stream_member()).raw(streaming ? ":true" : ":false");
   if (!request.system.empty()) body.raw(",\"system\":").quoted(request.system);
-  if (effective.thinking_budget) body.raw(",\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":").raw(std::to_string(*effective.thinking_budget)).raw("}");
+  if (thinking_mode) {
+    body.raw(",\"thinking\":{\"type\":");
+    switch (*thinking_mode) {
+      case ThinkingMode::Manual:
+        body.quoted("enabled").raw(",\"budget_tokens\":").raw(std::to_string(*effective.thinking_budget)); break;
+      case ThinkingMode::Adaptive: body.quoted("adaptive"); break;
+      case ThinkingMode::Disabled: body.quoted("disabled"); break;
+    }
+    body.raw("}");
+  }
+  if (request.output_effort) body.raw(",\"output_config\":{\"effort\":").quoted(effort).raw("}");
+  if (request.cache_control) {
+    body.raw(",\"cache_control\":{\"type\":\"ephemeral\"");
+    if (!ttl.empty()) body.raw(",\"ttl\":").quoted(ttl);
+    body.raw("}");
+  }
+  if (request.tool_choice) {
+    body.raw(",\"tool_choice\":{\"type\":").quoted(tool_mode);
+    if (request.tool_choice->mode == ToolChoiceMode::Tool) body.raw(",\"name\":").quoted(request.tool_choice->name);
+    if (request.tool_choice->disable_parallel_tool_use)
+      body.raw(",\"disable_parallel_tool_use\":").raw(*request.tool_choice->disable_parallel_tool_use ? "true" : "false");
+    body.raw("}");
+  }
+  if (request.provider) { body.raw(",\"provider\":"); request_controls::write_routing(body, *request.provider); }
   auto number = [&](std::string_view key, double value) {
     char bytes[64]; const auto converted = std::to_chars(bytes, bytes + sizeof bytes, value);
     body.raw(",").quoted(key).raw(":").raw(std::string_view(bytes, converted.ptr));

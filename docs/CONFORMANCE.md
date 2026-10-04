@@ -1,10 +1,25 @@
 # Conformance plan
 
-Status: acceptance plan and historical measurements for the **installed unstable SDK0.0.0/interface3/SOV3** and owner-approved typed C++ cutover, with **actual integrated proof recorded**, not stable/released or fully qualified. Latest SDK26/26 passed with zero failures in74.07seconds; fresh installed static/shared ABI3 consumers exercised actual two-turn HTTP native/tool replay, refusal, known-zero/raw ownership and linked-interface mismatch refusal. Core2242-test full proof had zero failures and16 documented skips. M5's old-ABI NO-GO and earlier cohorts remain historical; remote mixed-gRPC TSan remains unqualified. [Current provenance](POC_PLAN.md#current-typed-c-cutover-provenance) and [current public contracts](../README.md#owned-requests-results-and-configuration) supersede private/not-installed and legacy adapter/importer sketches without asserting that every release/equivalence gate below has passed.
+This is a behavioral acceptance catalogue, not a blanket pass report. The current typed SDK uses interface/shared-library generation 4 and remains pre-stable. [Usage](USAGE.md) defines current controls and ownership. The [interface 4 execution record](#interface-4-execution-record) below is separate from [earlier interface 3 provenance](POC_PLAN.md#current-typed-c-cutover-provenance); no historical count is relabeled.
 
-Optional HTTP/3 capable Linux scenarios passed plain, ASan+UBSan and TSan; [D1 exact evidence](decisions/D1-transport.md#evidence) records uninstrumented release-backend limits. Every WebSocket property/table/oracle below is deferred future specification, excluded from current SDK/release gates and never counted as a pass.
+Earlier interface 3 Linux cohorts exercised optional HTTP/3 under plain, ASan+UBSan and TSan; [D1's historical evidence](decisions/D1-transport.md#evidence) records those backends and instrumentation limits. Current interface 4 has no fresh HTTP/3, ASan/TSan or Windows/macOS/ARM64 qualification. WebSocket properties below remain deferred future specifications, outside current SDK/release gates and never counted as passes.
 
 Scope (decision D2): chat completion APIs and the artifacts that arrive inside chat responses. Long-running operations, standalone image endpoints and the OpenRouter decisions endpoint have no cell, no property and no fixture here, and none may be advertised as supported. The earlier operation-lifecycle property is dropped for that reason.
+
+Current source scope is five typed buffered/SSE families, bounded prepare/start/complete lifecycle, owned nullable/raw outcomes, exact native binding and archive v3 custody, plus interface 4 controls, Responses cursor ownership and explicit Generate portable history. General sidecar fixture schema, constraints engine, generated support tables, SDK journal projection/kit, cross-origin equivalence and general Drop/Demote remain historical proposals. Generate's explicit imported-call sentinel is a narrow current path, not those historical treatments. WebSocket has no current cell; NeoGraph owns its outcome/checkpoint serializers.
+
+## Interface 4 execution record
+
+The SDK0.1.0 Release build and installed consumer were exercised on Linux x86_64/WSL2 with GNU13.3.0. The initial full run passed25 of27 registered cases; the two remaining cases used obsolete cap-binding and partial native-pointer assumptions. After replacing those assumptions with archive-restored changed-cap wire/content checks and the actual Truncated/replay-ineligible boundary, both corrected cases passed in a focused run. All27 cases therefore have passing execution coverage from **25 initial passes plus2 corrected passes**, not a claimed second full27/27 run.
+
+Real local peers exercised Responses cursor text/client-tool state, Generate foreign/native/control paths, the signed Messages2048/4096/8192/16384 cap ladder, model-specific admission, deployment headers, nullable usage and runtime ownership. An unchanged installed Stop consumer failed all four valid/invalid buffered/SSE cases before the fix and then observed ToolUse consistently in both semantic events and final outcomes in all four. The exact README CMake/C++ consumer compiled against installed interface4 and passed reported-zero, missing-count and HTTP400 Failure scenarios, with one credential-free request per variant to an owned ephemeral loopback port.
+
+All14 C++ fragments in USAGE were syntax-compiled with `g++ -std=c++20 -fsyntax-only` against installed interface4, using the documented surrounding context. This verifies type/API spelling and contextual compilation, not runtime behavior of every fragment.
+
+The exact documented Responses cursor fragment also ran in a standalone installed-interface4 consumer against an independent owned HTTP peer. The peer observed two requests: initial input, then `previous_response_id` with only the new follow-up input. Inherited store/parallel/verbosity/truncation/include controls matched, the response reflected the peer's held conversation state, and the cursor outcome remained ineligible for full native replay. No hosted endpoint or credential was used.
+
+These observations establish no new hosted-vendor, signature-consumption, Windows/macOS/ARM64, HTTP/3 or sanitizer qualification. Archive format remains3. Native NeoGraph/wheel and publication were separate pending integration work at this checkpoint; no paid calls were made.
+
 
 ## 1. Purpose
 
@@ -96,9 +111,9 @@ Field rules:
 - `provenance`: `synthetic` fixtures cite the documentation they were written from (page title and section). `captured` fixtures record API version, model and date. Reviewer, date and review mode are required. Digests are integrity checks, never proof of meaning.
 - `origin` and `binding_facts` are the capsule identity the fixture asserts (`OriginBindingFacts`); the model and account scope are non-secret labels.
 - `request`: the complete outbound request after scrubbing. `semantic_headers` lists only headers that change vendor behaviour. Credentials are never part of a fixture.
-- `transport`: `scheme: http` is accepted only for a loopback authority (`127.0.0.1` or `[::1]`) and only with the test-only transport configuration; `tls.test_ca` names a test certificate authority for loopback HTTPS. Neither field may appear in a descriptor or in a captured vendor fixture. `close.how` makes "normal close" an explicit scripted fact (section 5.2).
+- `transport`: model-free HTTP peers use canonical loopback origins, which the installed descriptor/transport path admits without a public test-only configuration flag. Hosted origins require HTTPS. `tls.test_ca` in this proposed fixture schema records the private peer's trust anchor; the actual runtime option is `Options::ca_file`, not a descriptor credential/trust field.
 - `transport.schedule` is separate from the semantic expectation and fixes chunk boundaries, delays, fragmentation, close shape and reset. Metamorphic variants rewrite the schedule only.
-- `expect.events` uses the closed ten-event vocabulary (`DESIGN.md` section 3.4). Chunk boundaries, local ids, timestamps, request ids and loss diagnostics are not part of the projection.
+- `expect.events`: the original example used the historical ten-event sketch. Actual `sp::Event` in `<core/value.h>` also includes `MessageSeal`, `RawWire` and `ResponseEnvelope`; current fixtures/visitors must use installed declarations, not the old sketch count.
 - `expect.outcome`: exactly one of completion or failure. A scrub that removes the terminal event to "tidy" a fixture is forbidden.
 - `scrub.replay_eligible: false` marks fixtures whose signatures or encrypted reasoning were replaced: they verify parsing and assembly, not vendor acceptance.
 
@@ -132,7 +147,7 @@ The support matrix is a table of cells: family, vendor descriptor, transport (bu
 
 - A cell is `Supported` only if every property that applies to it passed with its fault injection observed and its mutants failing (section 5). Otherwise it is `Unsupported` (explicit request error) or `Unverified` (documented as such). There is no fourth state.
 - Skipped or not-applicable tests are never counted as passes. The report prints the three totals and lists every skip with its reason.
-- A property with zero applicable cells in a family needs a reviewed "not applicable" reason. WebSocket applies to the Responses family only.
+- A property with zero applicable cells needs a reviewed not-applicable reason. WebSocket is a historical future Responses lane, excluded from current advertised cells and release gates.
 - Reasoning replay acceptance is a separate evidence column with its own values (section 9.1): `ReplayVerified`, `ReplayAcceptanceUnobservable`, `Unverified`. A cell whose live canary has not run, whose negative control was not rejected, or which is a gateway cell without route pinning (section 9.1) is never `ReplayVerified`, whatever the recorded fixtures say.
 - The support table in the documentation is generated from descriptors plus evidence dates. CI fails if the documentation claims a cell that has no evidence.
 
@@ -142,7 +157,7 @@ General rules for every property:
 
 - Each property declares the fault it injects. The harness counts how often the fault fired and fails the test if the count is zero, so a property cannot pass because the trigger never ran.
 - Each property has a fixed mutant set in the catalog (5.23). Every mutant must fail the property. A property with a surviving mutant is vacuous and blocks the stage.
-- Every property runs over every cell where it applies, including buffered, SSE and WebSocket paths.
+- Every property runs over each currently advertised buffered/SSE cell to which it applies. Deferred WebSocket, equivalence and generic rule-engine scenarios do not become implied current gates.
 - "Defect class prevented" cites the NeoGraph audit (issue and PR numbers of that repository) or surveyed projects (numbers belong to those projects). Items marked `[INFERENCE]` come from design analysis or from review, not from an observed defect.
 - Race properties run on the deterministic executor seam (5.24), not on sampled thread timing.
 
@@ -215,6 +230,8 @@ General rules for every property:
 
 ### 5.7 NativeRetentionForeignGate
 
+Current eligibility/content/prefix rejection and archive custody retain genuine native authority. Cross-origin equivalence and general Drop/Demote remain historical; Generate's explicit `HistoryMode::PortableForeign` admits only unsealed portable assistant Text/client ToolCall and applies the documented first-foreign-call sentinel. It never repairs an edited or mismatched authentic seal. Responses cursor ownership is separate, terminal in-process evidence, not complete NativeReplay/archive authority. New controls are bound except generation cap and documented per-turn selection/cursor scope.
+
 - Statement: within one origin, signed, unsigned, empty and redacted reasoning blocks are retained whole and in order, and replayed without editing. Exact bytes are required for the leaves that the vendor validates (signature, encrypted content, thinking text); the surrounding structure is the library's canonical replay projection for that family (section 5.13), not vendor bytes, because streamed blocks are assembled by the library. Blocks with the same index but different type stay separate. A capsule is bound to its origin `(family, vendor, effective authority, route scope)` and replay to a different origin is refused by default, with Drop or Demote only when explicitly requested (`DESIGN.md` section 6). Same-origin unsigned blocks are never demoted. A vendor switch in the middle of a tool loop is refused. No foreign native value appears in an outbound native wire field. Demoted reasoning is placed as a quoted block in an assistant-role position or behind an explicit untrusted delimiter, never in a user-role instruction position.
 - Family retention oracles:
   - Responses with `store: false`: a reasoning item (`rs_` id) is retained with its required following item as an ordered group. Removing or reordering any member invalidates the whole group and the gate refuses the group rather than sending part of it. A function call carries both its item id and its `call_id`. The phase is per item.
@@ -263,11 +280,14 @@ General rules for every property:
 
 ### 5.11 IntentOrError
 
-- Statement: every declared option reaches the wire with its intended meaning or fails before any request is sent. An undeclared or misspelled option, a reserved-path collision or an unsupported feature causes zero network requests. Explicit values (temperature, budgets) are never silently altered. Structured-output and reasoning request options (`DESIGN.md` section 3) follow the same rule: one that the target model does not support is an error, not a silent drop.
+- Statement: every declared control reaches the wire with its documented family meaning or rejects before I/O. Unknown/reserved/unsupported values cause zero requests. Caller caps are not clamped and explicit false/empty selections remain explicit. Messages enabled thinking has a named temperature-omission rule after prohibited-model/range rejection; test that family behavior instead of treating it as arbitrary silent rewriting. Do not infer unsupported model capability from acceptance alone.
 - Exercised by: body-sensitive capture at the scripted server, a per-option probe diffing the wire body against a baseline with the declared-options list, and a server-side request counter (not a mock echo).
 - Fault injected: each declared option toggled; a typo per option name; each reserved path; each unsupported option per descriptor and per model capability.
-- Mutants: drop an unknown option silently; alter an explicit temperature; send a request before validation fails.
+- Mutants: silently drop unknown options; bypass model-specific sampling rejection or the declared thinking omission; send before validation; replace explicit false/empty with defaults.
 - Prevents: undeclared fields silently dropped (NeoGraph audit, issue 309); reasoning effort dropped by a built-in schema (PR 304); temperature forced or rejected for new models; silent drops in Portkey (issue 1469) and Bifrost (issue 5764). The probe follows a Pydantic AI test.
+
+
+Interface 4 peer scenarios must count actual requests and inspect encoded controls, semantic Stop/outcome agreement and private state ownership. Cover Chat wrong-origin reasoning/usage/model alternatives; Messages mode/budget/sampling/tool/cache combinations and header precedence; Generate duplicate safety/tool settings and explicit foreign versus genuine/edited carry; Responses new-input cursor chains, mismatched original-prefix/tool ownership, absent versus explicit include and incomplete full-native/archive eligibility. Never promote compiled fields or mock echoes to wire proof.
 
 ### 5.12 OwnershipAndBounds
 
@@ -280,6 +300,8 @@ General rules for every property:
 
 ### 5.13 JournalVersionAndCanonicalOrder
 
+Historical SDK journal-projection proposal, not an installed serializer/consumer kit or active SDK release gate. NeoGraph owns current typed provider-outcome/call/checkpoint serializers. The retained statement records the original versioning rationale; it does not claim `projection_version`, continuation or artifact fields exist in `sp::Completion`.
+
 - Statement: the consumer journal identity is `provider-completion/v2`. A version mismatch is rejected before dispatch. The identity is computed from the canonical replay projection of the completion (`DESIGN.md` section 8): ordered messages and parts with vendor ids and phases, stop (raw and normalized), nullable usage with provenance, native carry, origin and binding facts, continuation (with its lifetime) and artifact identity. The native carry enters as a projection, not as vendor bytes: stream-assembled blocks are synthesized by the library, so the projection fixes which leaves are exact (signature, encrypted content, thinking text, vendor ids) and which structure is canonicalized (key order, whitespace). The identity changes when usage moves between unknown and zero, when native leaves or origin change, or when continuation changes. It does not change with chunk partition, transport, local ids, timestamps, request id or loss diagnostics. Local ids are remapped canonically and ordering is by semantic order key, not arrival. A resume in the capsule-less mode (Drop) has a different identity from a native resume; a v1 paused run is not resumed natively; a run in the middle of a tool loop is not migrated across identity versions.
 - Library-side gate: the library repository contains pinned bytes-and-hash goldens of the canonical replay projection (including its `projection_version`) for every fixture family, written from the decision and approved by someone other than the author. Its release gate never runs consumer code. A separate consumer conformance kit is shipped with the library (projection goldens plus a driver) so that a consumer can run the same check on its own digest; the kit's results are consumer evidence and not a library gate. The separate `completion-envelope` serialization is dropped in `DESIGN.md`; the projection and a field inventory test replace it: a test lists every `Completion` field and fails when a field is neither in the projection nor explicitly excluded, and a projection change without a `projection_version` bump fails the pinned goldens.
 - Exercised by: pinned goldens, transitions over each included field, perturbation of each excluded field, buffered versus streamed projection equality (5.9).
@@ -289,7 +311,7 @@ General rules for every property:
 
 ### 5.14 InstallAndDependencyDAG
 
-- Statement: a clean external consumer compiles, links and sends a loopback request against the installed tree using only installed headers. Installed headers (`DESIGN.md` section 2.2) include no yyjson, Asio, OpenSSL or HTTP-library header. Private object targets obey the include direction of `DESIGN.md` section 2.4. There is one installed target.
+- Statement: a clean consumer compiles, links and sends a loopback request using only installed headers/targets. Public signatures expose no yyjson, Asio, OpenSSL or curl implementation types. The current package exports six component targets; applications normally link `SchemaProvider::runtime`. Private target direction follows DESIGN section 2.4.
 - Exercised by: install-tree consumer build in CI, a standalone compile of each public header, include-direction checks from the compiler's dependency output and the CMake target graph (PRIVATE linking alone does not stop a stray include). The C++ toolchain floor (standard library support for `std::stop_token`) is checked by a configure-time test on each supported compiler.
 - Fault injected: a planted forbidden include in a public header, a planted reverse include between private targets, a planted install of a private header.
 - Mutants: the same three plants, each must fail the gate.
@@ -329,6 +351,8 @@ General rules for every property:
 
 ### 5.19 OriginBindingFacts
 
+Actual native contexts bind admitted descriptor/model/prefix/control/scope and reject mutations. Equivalence-class activation/manifest clauses below are future proposals, not current codec branches.
+
 - Statement: besides origin equality (the necessary gate of 5.7), each capsule records its binding facts (producing model id, a fingerprint of the replay context as sent, non-secret account scope) and the codec checks them before dispatch (`DESIGN.md` section 6). A changed model, a changed context fingerprint (system prompt, tool list or an earlier message) or a different account scope is refused before any request is sent, with a specific error, unless the family rule says that a change is tolerated; an allow-listed equivalence class (for example Messages across direct, Bedrock and Vertex) is status `Documented-Unverified` and inactive until the canary admits the exact cell (section 9.1). The OpenRouter authority is never in an equivalence class.
 - Exercised by: outbound capture with zero request count on refusal; a matrix of binding-fact changes; equivalence class activation tests with and without canary evidence in the manifest.
 - Fault injected: change each binding fact singly; toggle thinking mid-turn; change tool order; activate a class without evidence.
@@ -353,6 +377,8 @@ General rules for every property:
 - M4 measured subset: T = 6 configured runtime/I/O/resolver workers, K = 88 and 2K = 176 held SSE requests. Peer counters prove each held state; the short unrelated call succeeds at both loads, OS thread growth remains at most eight and does not rise from K to 2K. These are HTTP-loopback admission checks, not a throughput benchmark or the future SSE/WSS/HTTPS mixed-load gate.
 
 ### 5.22 DescriptorRuleAdmission
+
+Historical future constraints-engine admission proposal. The installed loader validates closed descriptors/policies and rejects unknown keys; it does not enumerate/execute the ledger's proposed `omit`/`require_greater` rules. D5 remains policy for a separately approved implementation, not evidence the grammar shipped.
 
 - Statement: the loader's set of rule kinds equals the ledger `decisions/rules.json`; every admitted rule kind has its admission evidence (decision D5): at least three independent real cases (different vendor, source document with date or reproduction log, model family; two models from one vendor document count once), each with a fixture that fails when the rule is removed; a full truth table over equivalence classes (enum values and unknown, absent, null, wrong type, explicit versus library default, numeric below, equal, above and boundaries); a permutation test showing identical output under every rule order; and contradictory rules rejected at load. Stateful, ordered, chained, dynamic-path and callback rules are refused at load. A rule kind added to the loader without a ledger entry fails CI.
 - Exercised by: enumeration check, truth-table runner over the ledger, permutation and idempotence test, and the mutant check below.
@@ -456,9 +482,9 @@ A fingerprint is a structural summary, not sampled prose: event type tags seen, 
 - Changes in generated wording are recorded but are not a codec regression. A silent vendor rule change (for example the 2026-08-31 default enforcement) is caught only as a replay rejection on a cell that ran after it; the account-age field in the manifest is the control for it.
 - Statistical monitoring of model behaviour is out of the library. The library never sends hidden billable probes, and opaque reasoning is never probed.
 
-## 10. Running the suite against the current NeoGraph implementation
+## 10. Historical comparison against pre-cutover NeoGraph
 
-The same fixture corpus runs against the current NeoGraph implementation, unchanged except for decision D2 (non-chat features are out of the gate), as a migration gate, through a thin target adapter on its injectable transport and test seams. The adapter feeds the schedule, captures outbound requests and projects the result into the fixture's expected shape.
+The M5 experiment ran the fixture corpus against unchanged old NeoGraph sources through an isolated adapter. That adapter/driver/build flag has been removed. The comparison and requirements below preserve that cohort's methodology and NO-GO, not a current command or requirement to keep two implementations. Current installed consumers exercise the typed boundary directly.
 
 - Outcomes are `pass`, `expected-fail`, `unsupported` or `not-applicable`. An expected failure is a tracked entry naming the audited defect class and flips to pass when fixed. An expected-fail that unexpectedly passes, or a previously passing cell that fails, fails the gate.
 - Properties depending on the new design (origin-bound capsules, binding facts, invalid-call representation, server-tool kinds, journal v2, installed headers, the seam-dependent race properties) are `unsupported` or `not-applicable` for the old implementation and are never reported as pass.
@@ -474,7 +500,7 @@ The same fixture corpus runs against the current NeoGraph implementation, unchan
 
 Pull request (deterministic, no credentials):
 
-1. Descriptor strict load: unknown keys, duplicate keys and reserved paths are errors; the generated schema and the runtime loader accept the same documents; rule kinds equal the ledger (`DescriptorRuleAdmission`).
+1. Current descriptor/policy strict load: unknown/duplicate keys, invalid origins and reserved bindings reject. The full target-schema generation and proposed rule-ledger equality remain future gates only if that grammar is separately implemented.
 2. Fixture replay: fixtures of changed families first, then the small corpus, with body-sensitive matching and unused-interaction checks.
 3. Metamorphic and property suites with fixed seeds and fault-fired assertions. Mutant runs for the properties whose sources changed; the catalog check (every patch applies) always.
 4. Loopback smoke per advertised transport: fragmentation, reset, slow reader, cancel per waiting state, held streams.
@@ -485,11 +511,10 @@ Pull request (deterministic, no credentials):
 9. Deterministic D3 gates: library-caused extra threads at most 8 and independent of concurrency, exactly one outcome, no late callbacks, sanitizer runs of `OwnershipAndBounds`.
 
 Scheduled:
-
+- Live canary cadence is a future operations proposal, never hidden probing or permission to renew the completed fixed campaign. New hosted calls require separate explicit owner authority.
 - Full mutant catalog, byte-framer and event-sequence fuzz (failing seeds added).
-- Live canary (section 9) and drift artifacts on the stated cadence.
-- D3 benchmark, non-gating for the first three releases: a held-stream scenario at concurrency C and 2C (45 percent SSE, 45 percent WebSocket, 10 percent short HTTPS) reporting p99 admission delay, resident memory and cancel latency. After three baseline releases it becomes a check for a regression above 25 percent against the recorded baseline. C is NeoGraph's real target concurrency, which is unknown (open decision below); until it is supplied the benchmark uses a stated placeholder, and all numbers are proposals, not measurements.
-- Migration-gate run while the current implementation exists.
+- The historical migration comparison ran while the old implementation existed; the approved cutover removes that path rather than retaining a compatibility test driver.
+- The historical D3 C/2C mixed SSE/WebSocket benchmark and proposed later 25% regression gate are future work, not current capacity or supported WS claims. The completed HTTP/SSE SDK matrix measures a different workload; it must not be substituted for that historical proposal.
 
 Semantic release notes are required for any change to stop, usage, retry or replay meaning, even if labelled a bug fix, with fixture and journal-identity impact reviewed.
 
@@ -500,7 +525,7 @@ Release criteria are stage gates, defined with their dates, cells and property s
 1. A stage ships only for the cells it advertises. Every property that applies to an advertised cell passes with fault-fired assertions green and mutants failing. No skipped cell counts as supported, and a property needed by a later stage only is listed as not yet in force, never as passed.
 2. The loopback smoke passes for every advertised transport.
 3. Replay claims: a cell has `ReplayVerified` only with the evidence of section 9.1 in a manifest whose age limit is fixed in `ROADMAP.md` before that stage; otherwise it is listed `Unverified` or `ReplayAcceptanceUnobservable` and excluded from support claims.
-4. The library-side journal projection golden (5.13) passes and the consumer conformance kit is published. Consumer adoption evidence is reported separately and is not a library gate.
+4. The original library-side journal projection golden/consumer kit is a historical proposal, not an installed feature or current SDK release gate. Actual adapter serializers and native archive/custody must preserve their advertised host contracts and version boundaries.
 5. The migration gate report has no unexplained difference, no unexpected pass of an expected-fail, and every accepted difference has an approver who is not its author.
 6. The install-tree consumer builds and no forbidden include exists in installed headers.
 7. The support table, release manifest (descriptor verification dates, canary rates, account age classes) and semantic release notes are generated and reviewed under the rules of section 1.1.
@@ -524,10 +549,10 @@ TLS verification and origin/credential boundaries apply in both the HTTP/3 and f
 
 Decided (see `decisions/`): D1 transport (libcurl `multi_socket` on a private Asio loop, FIRM, revised 2026-10-01; the transport-level properties 5.2, 5.12, 5.15 and 5.21 already run in the M1 spike, see `POC_PLAN.md` section 5), D2 scope (chat only), D3 async core (gates 5.15 and 5.21), D4 exact origin plus recorded binding facts and a documented equivalence class, D5 rule admission. Still open:
 
-- D1b: the WebSocket transport for the Responses lane (decides how 5.15's WebSocket partial-frame state and the WSS canary cells are run).
-- Direct Bedrock and Vertex credentials for the equivalence-class canary; without them those cells stay `Documented-Unverified`.
-- NeoGraph's target concurrency for the scheduled D3 benchmark.
-- Non-chat SDK scope remains excluded; NeoGraph's retained Images/Veo/Decisions are separate typed clients. [Recorded single-shot media validation and limits](../README.md#persistent-qualification-campaign-completed-observations-explicit-limits) do not establish broad endpoint qualification or authorize more requests.
+- Any future WebSocket lane requires separate design and protocol/cancel proof; it does not block current Responses HTTP/SSE.
+- Any cross-origin equivalence activation requires separate implementation/admission and evidence. Direct Bedrock/Vertex access is not current SDK scope.
+- NeoGraph's target concurrency for the historical scheduled D3 benchmark remains separate from the completed model-free SDK matrix.
+- Non-chat SDK scope remains excluded; NeoGraph's retained Images/Veo/Decisions are separate typed clients. [Recorded sanitized media observations](../config/media-minimal-validation.json) do not establish broad endpoint qualification or authorize more requests.
 
 ## 14. Limits of this plan
 

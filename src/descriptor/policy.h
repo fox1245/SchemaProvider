@@ -32,6 +32,7 @@ struct FamilyPolicy {
   std::vector<std::string> reasoning_efforts, reasoning_summaries, thinking_levels, service_tiers, header_versions;
   std::optional<std::string> header_version;
   std::vector<std::string> openrouter_origins;
+  std::vector<std::string> temperature_forbidden_model_prefixes;
   std::vector<ServerToolFact> server_tools;
 };
 struct ModelDefaults {
@@ -72,5 +73,6 @@ struct EffectiveChoices {
 EffectiveChoices effective_defaults(const ValidatedDescriptor&, std::string_view model);
 std::optional<std::string_view> borrowed(const std::optional<std::string>&);
 bool contains(const std::vector<std::string>&, std::string_view);
+bool temperature_forbidden(const ValidatedDescriptor&, std::string_view model);
 std::optional<std::string> validate_choices(const ValidatedDescriptor&, std::string_view model, const EffectiveChoices&);
 } // namespace sp::descriptor

@@ -1,4 +1,5 @@
 #include "descriptor/descriptor.h"
+#include "descriptor/policy.h"
 #include "json/json.h"
 
 #include <cstdio>
@@ -267,6 +268,64 @@ void duplicate_errors_retain_only_unambiguous_revision() {
     rejected(R"({"revision":7,"bindings":{"revision":1,"revision":2}})", "/bindings");
     rejected(R"({"revision":7,"id":1,"id":2,})", "", 0);
 }
+void deployment_header_admission() {
+    using namespace sp::descriptor;
+    auto source = descriptor({}, "https://api.example.test", "/v1/messages",
+                             R"(,"headers":{"ANTHROPIC-BETA":"descriptor-beta","X-Tenant":"original"})");
+    source.replace(source.find("openai.chat"), std::string_view("openai.chat").size(), "anthropic.messages");
+    DeploymentHeaderEnvironment environment{"workspace-env", "beta-env"};
+    auto admitted = load_with_deployment_headers(source, {{"anthropic-beta", "override-beta"}, {"x-tenant", "new"}}, environment, {});
+    CHECK(std::holds_alternative<ValidatedDescriptor>(admitted));
+    if (const auto* value = std::get_if<ValidatedDescriptor>(&admitted)) {
+        CHECK((value->headers() == std::vector<std::pair<std::string, std::string>>{
+            {"anthropic-beta", "override-beta"}, {"x-tenant", "new"}, {"anthropic-workspace-id", "workspace-env"}}));
+    }
+    auto explicit_only = load_with_deployment_headers(source, {}, environment, {});
+    CHECK(std::holds_alternative<ValidatedDescriptor>(explicit_only));
+    if (const auto* value = std::get_if<ValidatedDescriptor>(&explicit_only))
+        CHECK(value->headers()[0].second == "descriptor-beta");
+    auto plain = descriptor({}, "https://api.example.test", "/v1/messages");
+    plain.replace(plain.find("openai.chat"), std::string_view("openai.chat").size(), "anthropic.messages");
+    auto absent = load_with_deployment_headers(plain, {}, {}, {});
+    CHECK(std::holds_alternative<ValidatedDescriptor>(absent));
+    if (const auto* value = std::get_if<ValidatedDescriptor>(&absent)) CHECK(value->headers().empty());
+    auto other_family = load_with_deployment_headers(descriptor(), {}, environment, {});
+    CHECK(std::holds_alternative<ValidatedDescriptor>(other_family));
+    if (const auto* value = std::get_if<ValidatedDescriptor>(&other_family)) CHECK(value->headers().empty());
+    for (const auto& overrides : {
+        std::vector<std::pair<std::string, std::string>>{{"X-One", "a"}, {"x-one", "b"}},
+        std::vector<std::pair<std::string, std::string>>{{"Authorization", "forbidden"}},
+        std::vector<std::pair<std::string, std::string>>{{"X-Tenant", "bad\r\nheader"}},
+        std::vector<std::pair<std::string, std::string>>{{"anthropic-version", "2099-01-01"}}})
+        CHECK(std::holds_alternative<ConfigError>(load_with_deployment_headers(plain, overrides, {}, {})));
+    CHECK(std::holds_alternative<ConfigError>(load_with_deployment_headers(plain, {}, {"bad\nworkspace", {}}, {})));
+}
+void model_sampling_admission() {
+    using namespace sp::descriptor;
+    auto loaded = load(descriptor());
+    CHECK(std::holds_alternative<ValidatedDescriptor>(loaded));
+    if (!std::holds_alternative<ValidatedDescriptor>(loaded)) return;
+    const auto& value = std::get<ValidatedDescriptor>(loaded);
+    for (auto model : {"gpt-5-mini", "GPT-6", "openai/O3-mini", "gateway/OpenAI/O4-test", "o1-preview"}) {
+        auto controls = effective_defaults(value, model);
+        controls.temperature = 0.7;
+        CHECK(validate_choices(value, model, controls).has_value());
+    }
+    auto controls = effective_defaults(value, "gpt-4o-mini");
+    controls.temperature = 0.7;
+    CHECK(!validate_choices(value, "gpt-4o-mini", controls));
+    auto messages = descriptor({}, "https://api.example.test", "/v1/messages");
+    messages.replace(messages.find("openai.chat"), std::string_view("openai.chat").size(), "anthropic.messages");
+    auto anthropic = load(messages);
+    CHECK(std::holds_alternative<ValidatedDescriptor>(anthropic));
+    if (const auto* admitted = std::get_if<ValidatedDescriptor>(&anthropic)) {
+        for (auto model : {"anthropic/CLAUDE-OPUS-4-7", "claude-opus-4-8-test", "claude-opus-5", "claude-sonnet-5", "claude-fable-test"}) {
+            auto choices = effective_defaults(*admitted, model);
+            choices.temperature = 0.7;
+            CHECK(validate_choices(*admitted, model, choices).has_value());
+        }
+    }
+}
 }
 int main() {
     json_validation_and_ownership();
@@ -277,6 +336,8 @@ int main() {
     collisions_and_selector_rejection();
     diagnostics_exclude_untrusted_keys_and_controls();
     duplicate_errors_retain_only_unambiguous_revision();
+    deployment_header_admission();
+    model_sampling_admission();
     if (failures) std::fprintf(stderr, "%d descriptor/JSON checks failed\n", failures);
     else std::puts("descriptor/JSON properties passed");
     return failures ? 1 : 0;

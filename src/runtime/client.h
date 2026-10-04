@@ -26,10 +26,13 @@ class InterfaceContractError final : public std::exception {
 void require_interface_contract(std::uint32_t expected_revision, std::uint64_t required_capabilities);
 
 using Request = std::variant<chat::Request, messages::Request, responses::Request, gemini::Request, interactions::Request>;
+// Immutable outcome owner; messages/raw JSON/native carry can outlive Client.
 using Result = std::shared_ptr<const Outcome>;
 
 struct RunOptions {
   bool streaming = true;
+  // Absolute monotonic deadline, fixed at preparation; includes encoding/waits.
+  // If omitted, prepare computes now + Options::default_timeout once.
   std::optional<SteadyTime> deadline;
   std::stop_token stop_token;
   std::optional<RetryPolicy> retry;
@@ -52,6 +55,7 @@ struct Options {
   transport::TransportOptions transport;
   transport::HttpVersion http_version = transport::HttpVersion::Auto;
   std::string ca_file;
+  // Host-provided credential; family code selects the auth header. Never log it.
   std::string api_key;
   std::chrono::milliseconds default_timeout{config_defaults::defaults_default_timeout_ms};
   std::chrono::milliseconds slow_callback_threshold{config_defaults::defaults_slow_callback_threshold_ms};
@@ -90,6 +94,7 @@ class AdmissionError final : public std::exception {
 };
 
 class Operation {
+  // Destruction requests nonblocking cancellation; detach relinquishes without it.
  public:
   Operation() = default;
   ~Operation();
@@ -121,6 +126,7 @@ class PreparedRequest {
   PreparedRequest& operator=(PreparedRequest&&) noexcept;
   PreparedRequest(const PreparedRequest&) = delete;
   PreparedRequest& operator=(const PreparedRequest&) = delete;
+  // valid() means owned state, not successful preflight; inspect error() as well.
   bool valid() const noexcept;
   const Error* error() const noexcept;
   std::string_view family() const noexcept;
@@ -154,6 +160,7 @@ class Client {
   // Holds a bounded slot and the original absolute deadline. An initial error
   // is observable before a durable dispatch receipt or money reservation.
   PreparedRequest prepare(Request, RunOptions = {});
+  // Consumes a preparation belonging to this Client; never re-encodes it.
   Operation start(PreparedRequest, Callbacks = {});
   // Accepted operations always deliver on the executor, including preflight failures.
   // Capacity/shutdown/moved-client rejection throws AdmissionError; no callback runs.

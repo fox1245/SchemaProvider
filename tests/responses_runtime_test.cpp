@@ -115,6 +115,122 @@ sp::responses::Request continuation(const std::string& model, const Result& resu
   auto r = request(model); r.messages.push_back(completion(result).messages[0]);
   r.messages.push_back(sp::Message{"", sp::Role::Tool, {sp::ToolResult{"call_owned", "one"}}}); return r;
 }
+sp::responses::Request stateful_request(const std::string& model) {
+  auto r = request(model);
+  r.store = true;
+  r.parallel_tool_calls = false;
+  r.verbosity = sp::responses::Verbosity::High;
+  r.truncation = sp::responses::Truncation::Auto;
+  r.include = std::vector<sp::responses::Include>{};
+  return r;
+}
+void provider_held_continuation(Peer& peer) {
+  for (bool streaming : {false, true}) {
+    const auto model = peer.arm("stateful-text");
+    Client client(descriptor(peer), options());
+    auto r = stateful_request(model);
+    r.messages = {sp::Message{"", sp::Role::User, {sp::Text{"Remember blue"}}}};
+    auto first = client.complete(r, run(streaming));
+    require(text(completion(first).messages) == "remembered", "provider did not store first turn");
+    peer.count(model, 1);
+    r.previous_response_id = completion(first).messages[0].id;
+    r.messages = {sp::Message{"", sp::Role::User, {sp::Text{"What color?"}}}};
+    for (const auto& cursor : {std::string{}, std::string("resp bad"), std::string(257, 'a')}) {
+      auto bad = r; bad.previous_response_id = cursor;
+      const auto result = client.complete(bad, run(!streaming));
+      const auto& f = failure(result, sp::ErrorKind::InvalidRequest);
+      require(!f.error.attempt.request_may_have_left && f.error.attempt.request_body_bytes == 0, "invalid cursor reached HTTP");
+      peer.count(model, 1);
+    }
+    for (int selection = 0; selection < 3; ++selection) {
+      auto bad = r;
+      if (selection == 0) bad.verbosity = static_cast<sp::responses::Verbosity>(99);
+      else if (selection == 1) bad.truncation = static_cast<sp::responses::Truncation>(99);
+      else bad.include = std::vector<sp::responses::Include>{static_cast<sp::responses::Include>(99)};
+      const auto result = client.complete(bad, run(!streaming));
+      const auto& f = failure(result, sp::ErrorKind::InvalidRequest);
+      require(!f.error.attempt.request_may_have_left && f.error.attempt.request_body_bytes == 0, "invalid closed control reached HTTP");
+      peer.count(model, 1);
+    }
+    auto second = client.complete(r, run(!streaming));
+    require(text(completion(second).messages) == "blue", "cursor failed to retrieve provider-held history");
+    require(!completion(second).messages[0].native || !completion(second).messages[0].native->complete(),
+        "cursor fabricated native replay authority");
+    peer.count(model, 2);
+    auto replay = stateful_request(model);
+    replay.messages.push_back(completion(second).messages[0]);
+    ineligible(client.complete(replay, run(streaming))); peer.count(model, 2);
+    r.previous_response_id = completion(second).messages[0].id;
+    r.messages = {sp::Message{"", sp::Role::User, {sp::Text{"What did I ask?"}}}};
+    const auto third = client.complete(r, run(streaming));
+    require(text(completion(third).messages) == "What color?", "provider did not retain the continued turn");
+    peer.count(model, 3);
+    auto stats = peer.stats(model);
+    require(stats.root().get("stored").as_uint() == 3 && stats.root().get("continued").as_uint() == 2,
+        "provider-held history was not keyed by response identity");
+    r.previous_response_id = "resp_unknown";
+    const auto unknown = client.complete(r, run(!streaming));
+    const auto& f = failure(unknown);
+    require(f.error.http_status == 404 && f.error.attempt.request_may_have_left, "unknown provider cursor became local success");
+    peer.count(model, 4, 1);
+  }
+}
+void provider_held_client_tool_ownership(Peer& peer) {
+  for (bool streaming : {false, true}) {
+    const auto model = peer.arm("stateful-tools");
+    Client client(descriptor(peer), options());
+    const auto initial = stateful_request(model);
+    const auto first = client.complete(initial, run(streaming));
+    require(completion(first).stop.kind == sp::StopKind::ToolUse, "provider did not issue client call");
+    auto next = initial;
+    next.previous_response_id = completion(first).messages[0].id;
+    next.previous_response_history = initial.messages;
+    next.previous_response_history.push_back(completion(first).messages[0]);
+    next.messages = {sp::Message{"", sp::Role::Tool, {sp::ToolResult{"call_owned", "one"}}}};
+    auto reject = [&](sp::responses::Request bad, sp::ErrorKind kind, size_t count) {
+      const auto result = client.complete(bad, run(!streaming));
+      const auto& f = failure(result, kind);
+      require(!f.error.attempt.request_may_have_left && f.error.attempt.request_body_bytes == 0, "invalid ownership reached provider");
+      peer.count(model, count);
+    };
+    auto bad = next; std::get<sp::Text>(bad.previous_response_history[0].parts[0]).value = "tampered";
+    reject(bad, sp::ErrorKind::ReplayIneligible, 1);
+    bad = next; bad.previous_response_history.back().id = "foreign";
+    reject(bad, sp::ErrorKind::ReplayIneligible, 1);
+    bad = next; bad.previous_response_history.back().native.reset();
+    reject(bad, sp::ErrorKind::ReplayIneligible, 1);
+    bad = next; bad.previous_response_history.clear();
+    reject(bad, sp::ErrorKind::InvalidRequest, 1);
+    bad = next; bad.messages.push_back(bad.messages[0]);
+    reject(bad, sp::ErrorKind::InvalidRequest, 1);
+    bad = next; bad.verbosity = sp::responses::Verbosity::Low;
+    reject(bad, sp::ErrorKind::ReplayIneligible, 1);
+    Client foreign(descriptor(peer, true), options());
+    ineligible(foreign.complete(next, run(streaming))); peer.count(model, 1);
+    const auto second = client.complete(next, run(!streaming));
+    require(completion(second).stop.kind == sp::StopKind::ToolUse &&
+        std::get<sp::ToolCall>(completion(second).messages[0].parts[0]).id == "call_next",
+        "provider failed to continue pending client call state");
+    require(completion(second).messages[0].native && !completion(second).messages[0].native->complete(),
+        "continued tool output became full replay authority");
+    peer.count(model, 2);
+    next.previous_response_id = completion(second).messages[0].id;
+    next.previous_response_history = {completion(second).messages[0]};
+    next.messages = {sp::Message{"", sp::Role::Tool, {sp::ToolResult{"call_next", "two"}}}};
+    bad = next; std::get<sp::ToolCall>(bad.previous_response_history[0].parts[0]).id = "edited";
+    reject(bad, sp::ErrorKind::ReplayIneligible, 2);
+    bad = next; bad.previous_response_history[0].wire_output = document("[]");
+    reject(bad, sp::ErrorKind::ReplayIneligible, 2);
+    bad = next; std::get<sp::ToolResult>(bad.messages[0].parts[0]).tool_use_id = "call_owned";
+    reject(bad, sp::ErrorKind::InvalidRequest, 2);
+    const auto third = client.complete(next, run(streaming));
+    require(text(completion(third).messages) == "one+two", "provider-held tool results did not feed final answer");
+    peer.count(model, 3);
+    const auto stats = peer.stats(model);
+    require(stats.root().get("stored").as_uint() == 3 && stats.root().get("continued").as_uint() == 2,
+        "provider did not consume two new-input-only tool continuations");
+  }
+}
 void two_turn_and_refusal(Peer& peer) {
   for (bool streaming : {false, true}) {
     const auto model = peer.arm("grouped"); Client client(descriptor(peer), options());
@@ -276,7 +392,8 @@ int main(int argc, char** argv) {
     require(argc == 3, "usage: sp_responses_runtime_tests <node> <responses_server.mjs>");
     runtime_test::LogCapture logs;
     {
-      Peer peer(argv[1], argv[2]); two_turn_and_refusal(peer); negative_replay_is_only_model_free(peer);
+      Peer peer(argv[1], argv[2]); provider_held_continuation(peer); provider_held_client_tool_ownership(peer);
+      two_turn_and_refusal(peer); negative_replay_is_only_model_free(peer);
       failed_terminal_matrix(peer); named_error_outcomes_and_retry(peer); close_cancel_deadline_and_retention(peer); incomplete_and_opaque(peer);
     }
     const auto captured = logs.finish(); require(captured.find(key) == std::string::npos && captured.find(cipher) == std::string::npos, "credential/cipher leaked in diagnostics");

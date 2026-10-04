@@ -33,12 +33,16 @@ class NativeContext final {
   NativeContext(const descriptor::ValidatedDescriptor&, const gemini::Request&, const descriptor::EffectiveChoices&, bool streaming);
   NativeContext(const descriptor::ValidatedDescriptor&, const interactions::Request&, const descriptor::EffectiveChoices&, bool streaming);
   NativeContext(const descriptor::ValidatedDescriptor&, const chat::Request&, const descriptor::EffectiveChoices&, bool streaming);
-  void bind_history(const std::vector<Message>&);
+  void bind_history(const std::vector<Message>&, bool portable_gemini = false);
   const Family family_;
   const std::string model_, route_;
   const size_t prefix_count_;
   const descriptor::PolicySnapshot policy_;
   std::array<unsigned char, 32> origin_{}, prefix_{};
+  // In-process Responses cursor custody is separate from portable/native replay.
+  // These fields are deliberately not part of archive format 3.
+  std::array<unsigned char, 32> configuration_{};
+  bool cursor_authority_ = false;
   bool valid_ = false;
   bool history_valid_ = true;
   bool replay_eligible_ = true;
@@ -51,6 +55,7 @@ class NativeContext final {
   friend chat::EncodeResult chat::encode(const descriptor::ValidatedDescriptor&, const chat::Request&, bool);
   friend class NativeReplay;
   friend class NativeArchive;
+  friend class Accumulator;
 };
 class NativeReplay final {
  public:
@@ -65,6 +70,7 @@ class NativeReplay final {
   const StopKind stop_;
   std::array<unsigned char, 32> content_{};
   bool complete_ = false;
+  bool continuation_complete_ = false;
   friend class Accumulator;
   friend class NativeContext;
   friend class NativeArchive;

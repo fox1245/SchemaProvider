@@ -3,7 +3,7 @@
 - Status: FIRM, 2026-10-01
 - Deciders: maintainer + two-family review panel
 
-**Current cutover status.** The approved typed C++ cutover removed the old interpreter and retained separate typed Images/Veo/Decisions clients in NeoGraph, not in the SDK. [Current integrated proof and single-shot media observations](../../README.md#persistent-qualification-campaign-completed-observations-explicit-limits) record the actual retained paths and separate authority. Image/video/Decisions observations are bounded one-shot evidence, not broad endpoint qualification, invoices or permission for more generation. The original design/checklist below remains the acceptance rationale, not today's unfinished cutover list.
+The approved typed C++ cutover removed the old interpreter and retained separate Images/Veo/Decisions clients in NeoGraph, not this SDK. [Recorded integrated proof](../POC_PLAN.md#current-typed-c-cutover-provenance) and [sanitized media observations](../../config/media-minimal-validation.json) preserve distinct host authority and one-shot scope; they are not universal endpoint qualification, invoices or permission for more requests. The original checklist below is historical acceptance rationale, not unfinished cutover work.
 
 ## Context
 At the original design checkpoint, NeoGraph's provider descriptors also drove non-chat features: long-running `operation` (Veo), `artifacts`, `prompt_template`/`prompt_field` (standalone image endpoints), `request_json` and OpenRouter Decisions. The library design had to decide whether these belonged in its Event/Completion model; those old descriptor-interpreter paths are now removed.

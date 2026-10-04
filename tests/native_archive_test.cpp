@@ -83,7 +83,11 @@ void full_portable_and_native_roundtrip() {
   auto r=request();r.messages.push_back(genuine(d,r));r.messages.push_back(user("continue"));auto native_ref=saved(a->save(r.messages,"native-call"));auto restored=loaded(a->load(native_ref,"native-call"));auto replay=r;replay.messages=restored;CHECK(encoded(d,replay).body==encoded(d,r).body);
   std::get<Thinking>(restored[1].parts[0]).signature="changed";CHECK(std::holds_alternative<Error>(a->save(restored,"native-call")));replay.messages=restored;CHECK(std::holds_alternative<Error>(messages::encode(d,replay,false)));
   replay.messages=loaded(a->load(native_ref,"native-call"));replay.messages[1].native.reset();CHECK(std::holds_alternative<Error>(messages::encode(d,replay,false)));
-  replay=r;replay.account_scope="other-account";CHECK(std::holds_alternative<Error>(messages::encode(d,replay,false)));replay=r;replay.model="other-model";CHECK(std::holds_alternative<Error>(messages::encode(d,replay,false)));replay=r;replay.messages.insert(replay.messages.begin(),user("stale prefix"));CHECK(std::holds_alternative<Error>(messages::encode(d,replay,false)));replay=r;replay.max_tokens=1234;CHECK(std::holds_alternative<Error>(messages::encode(d,replay,false)));
+  replay=r;replay.account_scope="other-account";CHECK(std::holds_alternative<Error>(messages::encode(d,replay,false)));replay=r;replay.model="other-model";CHECK(std::holds_alternative<Error>(messages::encode(d,replay,false)));replay=r;replay.messages.insert(replay.messages.begin(),user("stale prefix"));CHECK(std::holds_alternative<Error>(messages::encode(d,replay,false)));
+  replay=r;replay.messages=loaded(a->load(native_ref,"native-call"));replay.max_tokens=1234;
+  const auto resized_messages=document(encoded(d,replay).body);
+  CHECK(resized_messages->root().get("max_tokens").as_uint()==1234);
+  CHECK(resized_messages->root().get("messages").at(1).get("content").at(0).get("signature").as_string()=="synthetic-sensitive-signature");
   auto incomplete=request();incomplete.messages.push_back(genuine(d,incomplete,false));auto incomplete_ref=saved(a->save(incomplete.messages,"partial"));incomplete.messages=loaded(a->load(incomplete_ref,"partial"));CHECK(incomplete.messages[1].native && !incomplete.messages[1].native->complete());CHECK(std::holds_alternative<Error>(messages::encode(d,incomplete,false)));
 }
 void responses_ordered_restart() {
@@ -120,7 +124,12 @@ void chat_encrypted_legacy_to_canonical_restart() {
   a=admitted(NativeArchive::open(f.directory(),f.key(),"chat-owner",d));follow.canonical_messages=loaded(a->load(ref,"chat-call"));
   auto actual=chat::encode(d,follow,false);CHECK(std::holds_alternative<chat::EncodedRequest>(actual));CHECK(std::get<chat::EncodedRequest>(actual).body==std::get<chat::EncodedRequest>(expected).body);
   follow.canonical_messages[1].native.reset();CHECK(std::holds_alternative<Error>(chat::encode(d,follow,false)));
-  follow.canonical_messages=loaded(a->load(ref,"chat-call"));follow.max_output_tokens=256;CHECK(std::holds_alternative<Error>(chat::encode(d,follow,false)));follow.max_output_tokens=128;
+  follow.canonical_messages=loaded(a->load(ref,"chat-call"));follow.max_output_tokens=256;
+  const auto resized_chat=chat::encode(d,follow,false);CHECK(std::holds_alternative<chat::EncodedRequest>(resized_chat));
+  const auto resized_body=document(std::get<chat::EncodedRequest>(resized_chat).body);
+  CHECK(resized_body->root().get("max_tokens").as_uint()==256);
+  CHECK(resized_body->root().get("messages").at(1).get("reasoning_details").at(0).get("data").as_string()=="synthetic-encrypted");
+  follow.max_output_tokens=128;
   for(auto& part:follow.canonical_messages[1].parts)if(auto* opaque=std::get_if<Opaque>(&part))opaque->wire_metadata=document(R"({"type":"reasoning_details","details":[]})");
   CHECK(std::holds_alternative<Error>(chat::encode(d,follow,false)));CHECK(std::holds_alternative<Error>(a->save(follow.canonical_messages,"chat-call")));
 }

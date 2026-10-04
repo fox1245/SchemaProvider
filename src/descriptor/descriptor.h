@@ -4,6 +4,7 @@
 #include <string>
 #include <memory>
 #include <string_view>
+#include <optional>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -61,6 +62,20 @@ private:
 using LoadResult = std::variant<ValidatedDescriptor, ConfigError>;
 LoadResult load(std::string_view source);
 LoadResult load(std::string_view source, PolicySnapshot policy);
+struct DeploymentHeaderEnvironment {
+    std::optional<std::string> anthropic_workspace_id, anthropic_beta;
+};
+// Explicit host preprocessing. Descriptor admission remains the final authority;
+// no environment reads or header mutation occur after admission.
+LoadResult load_with_deployment_headers(
+    std::string_view source,
+    const std::vector<std::pair<std::string, std::string>>& overrides,
+    const DeploymentHeaderEnvironment& environment,
+    PolicySnapshot policy);
+LoadResult load_with_environment_headers(
+    std::string_view source,
+    const std::vector<std::pair<std::string, std::string>>& overrides = {},
+    PolicySnapshot policy = {});
 bool valid_origin(std::string_view url);
 
 } // namespace sp::descriptor

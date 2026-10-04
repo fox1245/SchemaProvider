@@ -83,6 +83,62 @@ void typed_encode() {
   r = request(); r.tools.push_back(r.tools.front()); CHECK(std::holds_alternative<Error>(responses::encode(desc(), r, false)));
   r = request(); r.messages.push_back(Message{"", Role::Tool, {ToolResult{"orphan", "result"}}}); CHECK(std::holds_alternative<Error>(responses::encode(desc(), r, false)));
 }
+void controls_and_cursor_boundaries() {
+  const auto encode_body = [&](const responses::Request& r) {
+    auto encoded = responses::encode(desc(), r, false);
+    CHECK(std::holds_alternative<responses::EncodedRequest>(encoded));
+    return parse(std::get<responses::EncodedRequest>(encoded).body);
+  };
+  const auto rejected = [&](const responses::Request& r, ErrorKind kind = ErrorKind::InvalidRequest) {
+    auto encoded = responses::encode(desc(), r, false);
+    CHECK(std::holds_alternative<Error>(encoded) && std::get<Error>(encoded).kind == kind);
+  };
+  auto r = request();
+  r.parallel_tool_calls = false;
+  r.response_format = ResponseFormat{};
+  for (const auto& [value, name] : std::vector<std::pair<responses::Verbosity, std::string>>{
+      {responses::Verbosity::Low, "low"}, {responses::Verbosity::Medium, "medium"}, {responses::Verbosity::High, "high"}}) {
+    r.verbosity = value;
+    auto wire = encode_body(r);
+    CHECK(!wire.root().get("parallel_tool_calls").as_bool());
+    CHECK(wire.root().get("text").get("verbosity").as_string() == name);
+    CHECK(wire.root().get("text").get("format").get("type").as_string() == "json_object");
+  }
+  r.parallel_tool_calls = true;
+  r.response_format.reset();
+  r.truncation = responses::Truncation::Disabled;
+  auto wire = encode_body(r);
+  CHECK(wire.root().get("parallel_tool_calls").as_bool());
+  CHECK(wire.root().get("truncation").as_string() == "disabled");
+  r.truncation = responses::Truncation::Auto;
+  r.include = std::vector<responses::Include>{responses::Include::WebSearchSources, responses::Include::FileSearchResults,
+    responses::Include::MessageOutputTextLogprobs, responses::Include::ComputerCallOutputImageUrl,
+    responses::Include::CodeInterpreterCallOutputs, responses::Include::ReasoningEncryptedContent};
+  wire = encode_body(r);
+  CHECK(wire.root().get("truncation").as_string() == "auto");
+  CHECK(json::equal(wire.root().get("include"), parse(R"(["web_search_call.action.sources","file_search_call.results","message.output_text.logprobs","computer_call_output.output.image_url","code_interpreter_call.outputs","reasoning.encrypted_content"])").root()));
+  r.include = std::vector<responses::Include>{};
+  wire = encode_body(r); CHECK(wire.root().get("include").size() == 0);
+  r.include.reset();
+  wire = encode_body(r); CHECK(json::equal(wire.root().get("include"), parse(R"(["reasoning.encrypted_content"])").root()));
+  r.verbosity = static_cast<responses::Verbosity>(-1); rejected(r);
+  r = request(); r.truncation = static_cast<responses::Truncation>(99); rejected(r);
+  r = request(); r.include = std::vector<responses::Include>{static_cast<responses::Include>(99)}; rejected(r);
+  r.include = std::vector<responses::Include>{responses::Include::FileSearchResults, responses::Include::FileSearchResults}; rejected(r);
+  r = request();
+  for (const auto& cursor : {std::string{}, std::string("resp bad"), std::string("resp\nbad"), std::string(257, 'a'), std::string("resp/\xc3\xa9")}) {
+    r.previous_response_id = cursor; rejected(r);
+  }
+  r.previous_response_id = std::string(256, 'a');
+  wire = encode_body(r);
+  CHECK(wire.root().get("previous_response_id").as_string() == *r.previous_response_id);
+  CHECK(wire.root().get("input").size() == 1);
+  auto encoded = responses::encode(desc(), r, false);
+  CHECK(!std::get<responses::EncodedRequest>(encoded).context->replay_eligible());
+  r.messages = {Message{"", Role::Tool, {ToolResult{"call_1", "one"}}}};
+  rejected(r); // A caller-provided cursor alone does not authorize client results.
+  r = request(); r.previous_response_history = r.messages; rejected(r);
+}
 void grouped_native_and_owned_outcomes() {
   const auto output = "[" + reasoning + "," + call + "," + message + "]";
   auto b = buffered(body(output)); auto s = stream({created(), added(0, reasoning), item_done(0, reasoning), added(1, call), item_done(1, call),
@@ -111,7 +167,8 @@ void grouped_native_and_owned_outcomes() {
     CHECK(std::holds_alternative<Error>(mismatch) && std::get<Error>(mismatch).kind == ErrorKind::ReplayIneligible);
     changed = r2; changed.max_output_tokens = 129;
     mismatch = responses::encode(desc(), changed, false);
-    CHECK(std::holds_alternative<Error>(mismatch) && std::get<Error>(mismatch).kind == ErrorKind::ReplayIneligible);
+    CHECK(std::holds_alternative<responses::EncodedRequest>(mismatch));
+    CHECK(std::get<responses::EncodedRequest>(mismatch).max_output_tokens == 129);
     changed = r2; changed.reasoning->summary = "detailed";
     mismatch = responses::encode(desc(), changed, false);
     CHECK(std::holds_alternative<Error>(mismatch) && std::get<Error>(mismatch).kind == ErrorKind::ReplayIneligible);
@@ -121,6 +178,41 @@ void grouped_native_and_owned_outcomes() {
   }
   // Codec and accumulator are already destroyed; strings and parsed arguments remain owned.
   CHECK(std::get<Reasoning>(completed(s).messages[0].parts[0]).encrypted_content == "SEALED_NATIVE_MARKER_a810");
+}
+void previous_response_ownership() {
+  const auto first = buffered(body("[" + reasoning + "," + call + "," + message + "]"));
+  auto r = request();
+  r.previous_response_id = completed(first).messages[0].id;
+  r.previous_response_history = r.messages;
+  r.previous_response_history.push_back(completed(first).messages[0]);
+  r.messages = {Message{"", Role::Tool, {ToolResult{"call_1", "one"}}}};
+  auto encoded = responses::encode(desc(), r, false);
+  CHECK(std::holds_alternative<responses::EncodedRequest>(encoded));
+  const auto& value = std::get<responses::EncodedRequest>(encoded);
+  auto wire = parse(value.body);
+  CHECK(!value.context->replay_eligible());
+  CHECK(json::equal(wire.root().get("input"), parse(R"([{"type":"function_call_output","call_id":"call_1","output":"one"}])").root()));
+  const auto reject = [&](const responses::Request& bad, ErrorKind kind) {
+    const auto result = responses::encode(desc(), bad, false);
+    CHECK(std::holds_alternative<Error>(result) && std::get<Error>(result).kind == kind);
+  };
+  auto bad = r; bad.previous_response_id = "other"; reject(bad, ErrorKind::ReplayIneligible);
+  bad = r; std::get<Text>(bad.previous_response_history[0].parts[0]).value = "changed"; reject(bad, ErrorKind::ReplayIneligible);
+  bad = r; std::get<ToolCall>(bad.previous_response_history.back().parts[1]).id = "foreign"; reject(bad, ErrorKind::ReplayIneligible);
+  bad = r; bad.previous_response_history.back().native.reset(); reject(bad, ErrorKind::ReplayIneligible);
+  bad = r; bad.previous_response_history.erase(bad.previous_response_history.begin()); reject(bad, ErrorKind::ReplayIneligible);
+  bad = r; bad.messages.push_back(bad.previous_response_history.back()); reject(bad, ErrorKind::ReplayIneligible);
+  bad = r; bad.messages.push_back(bad.messages[0]); reject(bad, ErrorKind::InvalidRequest);
+  bad = r; std::get<ToolResult>(bad.messages[0].parts[0]).tool_use_id = "orphan"; reject(bad, ErrorKind::InvalidRequest);
+  bad = r; bad.messages = {Message{"", Role::User, {Text{"skip result"}}}}; reject(bad, ErrorKind::InvalidRequest);
+  for (int selection = 0; selection < 4; ++selection) {
+    bad = r;
+    if (selection == 0) bad.parallel_tool_calls = false;
+    else if (selection == 1) bad.verbosity = responses::Verbosity::High;
+    else if (selection == 2) bad.truncation = responses::Truncation::Auto;
+    else bad.include = std::vector<responses::Include>{};
+    reject(bad, ErrorKind::ReplayIneligible);
+  }
 }
 void normal_close_required() {
   const auto frames = text_frames();
@@ -447,7 +539,7 @@ void reviewed_wire_boundaries() {
 }
 } // namespace
 int main() {
-  try { named_error_precedence(); named_error_raw_capacity(); completed_reasoning_ciphertext_authority(); reviewed_wire_boundaries(); typed_encode(); grouped_native_and_owned_outcomes(); normal_close_required(); cancellation_observation_boundary(); reasoning_stream_snapshots(); tools_interleaving_and_ownership(); incomplete_and_server_items(); unknown_hosted_item_ownership(); unknown_wire_observation_boundary(); usage_boundaries(); corruption_and_bounds();
+  try { named_error_precedence(); named_error_raw_capacity(); completed_reasoning_ciphertext_authority(); reviewed_wire_boundaries(); typed_encode(); controls_and_cursor_boundaries(); previous_response_ownership(); grouped_native_and_owned_outcomes(); normal_close_required(); cancellation_observation_boundary(); reasoning_stream_snapshots(); tools_interleaving_and_ownership(); incomplete_and_server_items(); unknown_hosted_item_ownership(); unknown_wire_observation_boundary(); usage_boundaries(); corruption_and_bounds();
     std::cout << "Responses semantic contracts passed\n"; return 0;
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

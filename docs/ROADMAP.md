@@ -1,108 +1,73 @@
-# Roadmap: staged release ladder
+# Roadmap and release gates
 
-Current SDK is installed and exercised but **unstable0.0.0/interface3/SOV3**, not stable/released or universally qualified. [Current provenance](POC_PLAN.md#current-typed-c-cutover-provenance) records latest SDK26/26 in74.07seconds, Core2242 zero-failure/16-skip full proof, real installed Program/typed-consumer proof and paid baseline293/300 pairs. Remote mixed-gRPC TSan limits remain explicit; the fresh final ReleaseGraph16-configuration/48-record benchmark completed with zero failures in38.29seconds; historical M5/benchmark cohorts are unchanged.
-
-Previously recorded SDK/sanitizer/installed-consumer cohorts retain their original dates, measurements and scope; the latest integrated proof below does not rewrite or retroactively qualify them. Full remote mixed-gRPC TSan remains an explicit unqualified coverage limit.
-
-**Genuine InMemory shared-bank fork retained and exercised.** The original genuine C++ fork uses ONE original financial journal and trusted current branch heads, not cloned grants. `publish_managed_budget_fork(authenticated_source, genuine_shared_bank_fork)` (and `_async`) requires the authentic current source/full commitment and actual same-bank native C++ pointer; durable standalone forks remain explicitly unsupported. `OwnedManagedBudgetLease::scope()` and original owner/thread/graph, ceiling, deadline/clock and generation remain immutable. Read-only store-issued `execution_thread_id()` / `execution_storage_thread_id()` select the execution branch separately; `GraphState::budget_original_thread_id()` identifies the original financial bank. Exact selected-branch head CAS and global actor/revision serialize all branches against canonical current counters, pending effects and burned identities. Original and fork branches remain usable without replenishment; stale snapshots, copied checkpoints and imported JSON cannot mint aliases or rewind heads. The original root30 → charge3 → original continuation6 → fork lower20 → continuation9 same-bank proof PASSED in the unchanged test_graph_engine.cpp:810–913; saved original ceiling30 is separate from effective fork ceiling20; widening31 and JSON-only restore must reject. Unbounded reported observations are factual data, not finite grants. Only a proven zero-effect lease can release an unchanged head; unknown/pending effects keep their obligations.
-
-**Recorded-control causal fix exercised in the full suite.** Captured command replay durably reserves only new CPU wall-time/Core work before execution, then publishes measured work and any newly produced Core checkpoint through the result CAS. It consumes no new model, money or Program-operation allowance and does not redispatch captured external effects. An unreconciled reservation remains debited. The reservation selects the authenticated settlement transition rather than an ordinary Running→Running transition that rejected the first new Core checkpoint. Await channel receive, timer wait/cancel and handoff wait initiation/release are serialized on their owning executors/strands; the existing Recorded CPU/Memory await/handoff scenarios passed in the full suite; remote TSan coverage limits remain explicit below.
-
-**Completed paid observations; not universal qualification.** Original `SPQUAL1` base630/1000000 microUSD is unchanged; ONE hash-chained `A` admits approved extension480/3000000 in the same original ledger, aggregate1110/4000000, with cumulative calls/spent/holds/settlements and no new grant ID/header/reset. Exact declaration bytes/file identity and original authorization/baseline/catalog/activation/ledger-prefix hashes/totals remain pinned; removal/replacement/change fails closed. The final canonical ledger is calls1110/spent437958/held1287828 microUSD, eventA1, limits1110/4000000; spent+held is US$1.725786 LOCAL catalogue meter, not an invoice. The documented five-family60-pair baseline completed600 requests: Chat60/60, Responses60/60, Messages60/60, Generate56/60 (four incorrect-vision SSE), Interactions57/60 (one buffered and two SSE incorrect-vision); aggregate293/300 pairs, not300/300. Other old600 financial records remain preserved, not full behavioral proof. Earlier M5/media one-shot cohorts are unchanged. The earlier three-round Google prerequisites retain two invalid-tool and one unreadable-positive failures. No further paid calls are authorized. Final SDK evidence and native-axis limits are separate from baseline success. Earlier activation/reopen smoke remains recorded at calls610/spent219159/held751233 after two reopens, with SDK meter/canary/vision four tests passed19.38seconds; these are scoped prior checkpoints, not final ledger totals. The earlier verified Chat60-pair cohort retains120 actual attempts,120 UpperBound charges and no UnknownHold.
-
-**Native-axis observations, not cryptographic verification or native consumption/equivalence.** Generate accepted mutation, omission and duplication. Interactions accepted the isolated genuine source/positive control, one-owner signature mutation, thought-carrier omission, call-carrier omission and duplication. Removing all thoughts/signatures returned generic400; removing all signature fields while keeping THOUGHT items also returned generic400. The last capture had a local encoded-original retention control, not a same-capture server positive; the earlier positive cohort remains genuine. These observations establish an aggregate-carrier-absence boundary only, not issuer/signature validation or vendor consumption. Actual reports: SDK `config/qualification-extension-results.json`, `qualification-final-summary.json`, `qualification-native-axis-results.json`, `qualification-combined-omission-results.json`, `qualification-signature-presence-results.json`; prerequisite-failed/not-run/negative-inconclusive states remain factual. Thought-only/carrier-only omissions were accepted while another carrier remained; this does not strengthen issuer-validation or native-consumption claims.
-
-Reports: [qualification-extension-results.json](../config/qualification-extension-results.json), [qualification-final-summary.json](../config/qualification-final-summary.json), [qualification-native-axis-results.json](../config/qualification-native-axis-results.json), [qualification-combined-omission-results.json](../config/qualification-combined-omission-results.json), [qualification-signature-presence-results.json](../config/qualification-signature-presence-results.json).
-
-**Actual integrated proof and remaining limits.** Latest Core full run:2242 tests, zero failures,16 skips (14 RAM process-loss cases not applicable; two live-credential gates),130.17seconds. `PgNestedJsonRoundTrips` preserved exact duplicate keys/order/null metadata, blob and residual in0.18seconds. The unchanged original shared-bank fork and existing Recorded CPU/Memory await/handoff scenarios passed. Real wrappedMemory/SQLite/PostgreSQL/gRPC finite130/hold65/lower129/strip/old-head/pruning/no-archive/import probes passed plain and ASan+UBSan. LOCAL Memory/SQLite/PostgreSQL TSan scopes:seven passed,zero warnings. Full mixed gRPC plus system Abseil/Protobuf TSan exited66 with402 race warnings in dependency/generated-RPC stacks: an instrumentation/coverage limit, not a proven false positive; remote TSan/race-freedom is NOT claimed and no warning is suppressed. Installed find_package Program C++/C ABI/dualQuickJS three consumers passed. Fresh installed NeoGraph/SchemaProvider typed consumer passed two real HTTP requests, provider destruction before coroutine start, native/tool replay, refusal,known-zero/raw retention and actual LinkedMismatch rejection. Browser Alice/Bob isolation and generation2 replacement were visually verified; PostgreSQL Program Chat six black-box tests passed18.989seconds. Latest SDK26/26 passed,zero failures,74.07seconds. Final ReleaseGraph16 configurations ×3 fresh process repetitions/48 records completed38.29seconds,zero failures,all actual protocol/owned-outcome checks passed. NeoGraph `benchmarks/provider-cutover-final-results.json` and `benchmarks/provider-cutover-final-summary.json` retain this separate final cohort. No compiler or paid model ran during measurement; historical cohorts stay unchanged and semantic/resource equivalence is not claimed. Unstable SDK/ABI3 is not a stable release or broader-platform qualification.
-
-[Current campaign selectors and admitted Meter limits](../README.md#persistent-qualification-campaign-completed-observations-explicit-limits).
+Current package0.1.0 alpha uses typed interface/shared-library generation4 with five HTTP/SSE families and the NeoGraph adapter. [Usage](USAGE.md) defines new preserved controls, Responses provider-held cursors and explicit Generate portable imports. [Recorded provenance](POC_PLAN.md#current-typed-c-cutover-provenance) keeps previous interface3 runs unchanged; implementation, fresh wire proof and release/support admission are separate claims.
 
 ## Owner-requested next work
 
-Current progress: the owner-requested C++ implementation/cutover sequence below has recorded evidence, not just a pending integration plan. Caller MAX_TOKEN, closed external JSON immutable snapshots, installed SDK packaging and typed C++ consumers/custody are implemented and exercised. HTTP/3 capable Linux transport passed plain, ASan+UBSan and TSan with release backend libraries uninstrumented. Preserve the original sequence and distinguish bounded implementation proof from the separate release ladder and vendor qualification:
+The heading retains links from the original work sequence. These C++ items are implemented, not a pending plan:
 
-1. **User-controlled MAX_TOKEN — implemented.** Request/profile output choice is unchanged; `sp_canary --max-output-tokens N` overrides the profile without raising any durable budget. Historical8192/128 caps and the output-versus-input shortcut were removed. Actual CLI proof: five families,38 requests carrying16384 over configured8192/input10000; first six positive assertions per family passed. This is model-free control evidence, not live qualification.
-2. **External closed JSON admission — implemented.** Runtime/error, descriptor/codec defaults, model catalog, profiles and separate grants have explicit inventory/loaders in [README](../README.md#owned-requests-results-and-configuration). Snapshots are immutable; profile/configuration cannot issue or renew authority.
-3. **Verify HTTP/1.1,2,3 — local transport proof recorded.** Capable HTTP/3 plain/ASan+UBSan/TSan scenarios and noncapable rejection are observed; [D1](decisions/D1-transport.md#evidence) preserves backend/OS limits. Hosted API qualification remains separate.
-4. **SchemaProvider benchmark and results — recorded.** The model-free58-configuration/174-fresh-process matrix after full five-family raw retention preserves workload/configuration, commands and latency/throughput/RSS/thread/native-encode observations in [README](../README.md#reproducible-model-free-benchmarks). No paid inference or HTTP/3 performance result is implied.
-5. **NeoGraph integration and code/example cutover — implemented and exercised.** Owned native-capable requests/results, exact-once preparation, pre-dispatch linked-interface gating and explicit journal/custody boundaries replace the old completion/interpreter/provider paths without lossy shims. Installed Program C++, native C ABI, second QuickJS and actual two-turn HTTP typed consumers passed. Selected cookbook scenarios have actual local proof, not every live variant; see the NeoGraph cookbook inventory. [Integrated proof and limits](../README.md#persistent-qualification-campaign-completed-observations-explicit-limits) preserve the historical old-ABI NO-GO, remote TSan and qualification boundaries.
-6. **Re-run NeoGraph benchmarks after integration — recorded.** The final model-free ReleaseGraph matrix completed16 configurations/48 fresh-process records with zero failures in38.29seconds. NeoGraph retains the original before/after cohorts and final `benchmarks/provider-cutover-final-results.json` / `provider-cutover-final-summary.json`; library-only numbers are not substituted for the graph measurements, and no model-inference speedup is claimed.
+| Item | Current state and evidence |
+|---|---|
+| Caller output cap | Typed caller/default selection; incompatible model/resource facts reject rather than silently clamp. Historical CLI proof carried 16384 unchanged in 38 model-free peer requests. [Policy/control contract](USAGE.md#request-families-and-controls). |
+| Closed external JSON | Immutable runtime/error and descriptor/codec snapshots with explicit bounded loaders. JSON cannot issue financial or native authority. [Inventory](USAGE.md#descriptors-credentials-and-defaults). |
+| HTTP/1.1, HTTP/2, optional HTTP/3 | One libcurl/Asio transport. Capable Linux HTTP/3 scenarios and incapable-build rejection have recorded evidence; exact backends/instrumentation/platform limits remain in [D1](decisions/D1-transport.md#evidence). |
+| SDK benchmark | Model-free 58-configuration/174-fresh-process cohort after full raw retention. [Records](../benchmarks/current-sdk-benchmark-results.json), [summary](../benchmarks/current-sdk-summary.json), [recipe](#model-free-benchmark-recipe). No H3 performance or model-inference claim. |
+| Typed NeoGraph cutover | Owned native-capable requests/outcomes, prepare-before-effect, linked-interface gate and host receipt/custody boundary; obsolete provider/interpreter paths removed. [Migration](MIGRATION.md) and [integrated evidence](POC_PLAN.md#current-typed-c-cutover-provenance). |
+| Post-cutover graph benchmark | Separate final 16-configuration/48-process ReleaseGraph cohort with zero recorded failures. NeoGraph owns its result/summary artifacts; SDK-only numbers are not substituted for graph runs. |
 
-Google native-consumption ambiguity and generic Interactions omission errors remain documented data-qualification limits; they do not replace these owner-defined implementation priorities. Python bindings stay after C++ API stabilization.
+NeoGraph owns its Python binding migration and package verification. This SDK does not ship an independent Python package. Do not use the old “Python after C++ stabilization” proposal as a current NeoGraph implementation restriction.
 
-The stages below retain the original release ladder and required acceptance gates. An implemented family or bounded local/paid observation does not by itself mean its stage shipped, a stable release exists, or every listed gate has passed.
+The preservation cutover adds Chat reasoning/usage/alternative-model controls, Messages mode/output/cache/tool controls, Generate thinking/safety/tool/sampling controls and explicit portable foreign history, Responses cursor/new-input ownership and detail controls, case-insensitive model temperature facts, and host environment-header preprocessing. Parent owns interface4 qualification; earlier interface3 passes/benchmarks are not new passes. `spna3` storage format remains3 while policy/control identity changes can reject old carry.
 
-## Stage 0 — Foundations (docs and gates)
-- Entry: DESIGN, CONFORMANCE, RESEARCH and decisions accepted by the maintainer.
-- Work: fixture format; descriptor schema generator (descriptors embedded at configure time); conformance runner skeleton; include-direction gate (forbidden edges unified, measurable proxies); mutant catalog skeleton; deterministic scheduler/executor seam; sketch compile-check.
-- Required properties (runnable as skeleton, real on the fixtures available): `JournalVersionAndCanonicalOrder`, `InstallAndDependencyDAG`, `DescriptorRuleAdmission`.
-- Canary cells: none.
-- Exit: runner executes a trivial fixture end to end; include gate fails on a seeded violation; rule-kind enumeration == `decisions/rules.json`.
-- Cut line: no network code merges before Stage 0 exits.
+## Historical release ladder
 
-## Stage 1 — Minimum shipping cell
-- Scope: Chat Completions + Messages over HTTP/SSE, two vendors, one transport: libcurl on a private Asio loop (D1), async core (D3). No WebSocket, no Responses.
-- Validation starts with hosted APIs: OpenAI Chat Completions and Anthropic direct Messages. Ollama/llama.cpp setup and local model runs are excluded from the current campaign. Model-free HTTP/TLS fixtures are transport oracles, not substitutes for the budgeted live canary.
-- Entry: Stage 0 exit.
-- Required properties: `ChunkPartitionInvariant`, `NoTerminalNoSuccess`, `KnownCorruptNeverIgnored`, `InterleavedToolOwnership`, `SnapshotNotAppend`, `UsageKnowledgeTransitions`, `StopMeaning`, `TransportProjectionParity` (SSE vs buffered), `RetrySafetyBudgetDeadline`, `IntentOrError`, `OwnershipAndBounds`, `CancelWithoutPeerProgress` (HTTP states), `AdmissionIndependentOfHeldStreams`, `InvalidToolCallRepresentation`, `ServerToolNotExecuted` (Messages), `FailureClassTerminal`, `OriginBindingFacts`, `DescriptorRuleAdmission`.
-- Canary minimum: one live cell per vendor (Chat Completions vendor, Anthropic direct Messages) run nightly on the maintainers' own keys, never on fork PRs; `CanaryNegativeControl` run for Anthropic signed thinking (negative control must be rejected, otherwise the cell reports `ReplayAcceptanceUnobservable`); 60-run transport parity per D1 reconsideration condition 5.
-- Exit: all listed properties green including sanitizers; both canary cells pass or are reported with cause; README states supported cells only.
-- Cut line (drop first if late): second Chat Completions vendor -> cut to one; reasoning replay -> Drop mode only (capsule-less resume with its own identity).
+The original stages explain the order of design/experiments, not today's inventory or a claim that all stage gates passed. M0–M5 and later family/native/control cohorts remain in [POC_PLAN](POC_PLAN.md), including M5's strict lossless **old consumer ABI NO-GO**. The typed cutover replaces that ABI; it does not rewrite the finding.
 
-### M5 checkpoint before any engine replacement
+| Original stage | What exists now | What it did not establish |
+|---|---|---|
+| 0: foundations | Strict JSON/descriptor admission, fixture runner, shared accumulator, runtime scheduling seam and explicit decision records. | A generic descriptor-constraints engine, generated full-target schema or every proposed mutant/dependency gate. |
+| 1: Chat and Messages | Typed buffered/SSE encoders/codecs/runtime; recorded semantic, ownership and bounded live cohorts. | Nightly canary cadence, every model/operator or statistical equivalence. |
+| 2: Responses/OpenRouter | Responses HTTP/SSE, typed controls/native carry, and interface4 provider-held cursor state with new input and private tool ownership. | WebSocket, automatic full transcript retrieval, unrestricted gateway/model qualification or native authority from cursor strings. |
+| 3: Gemini/Interactions | Native Generate and model-only stateless Interactions HTTP/SSE; local and bounded paid observations. | Agents/environments, arbitrary server tools, native-signature consumption or universal vision correctness. |
+| 4: NeoGraph cutover | Typed adapter, full outcome preservation and explicit archive/host custody integration; no legacy interpreter shim. | Automatic migration of old native-ineligible records, mid-tool-loop origin switching or cross-platform stable ABI. |
 
-One N=1 first-party GPT-4.1 Mini / Haiku 4.5 run passed its text/SSE/tool-loop assertions, with a real signature-negative rejection for that captured Haiku continuation. Full plain/ASan+UBSan/TSan suites pass 14/14. These observations do not satisfy nightly cadence, 60-run parity/equivalence or every release property.
+## Remaining release and support gates
 
-At M5 the existing consumer ABI was strict lossless **NO-GO**. The owner subsequently approved the explicit typed rich-result/native-capable request contract and pre-dispatch version/capability gate, with removal of obsolete adapters/interpreter. Current integration is IN VERIFICATION; no fake-zero/lossy-success shim changes the historical M5 finding.
+A release manifest must state the actual package version, interface revision, toolchain/dependency set and exercised platform/cells. A shared-library generation is not a stable cross-compiler ABI, and “all five families implemented” is not “every hosted model passed.” Use [CONFORMANCE](CONFORMANCE.md) for behavioral acceptance and explicit unsupported/error boundaries.
 
+Current executed runtime/custody evidence is Linux/POSIX scoped. Windows/macOS portability work and their native socket/custody paths need actual platform runtime/CI proof; source changes alone do not qualify those platforms. Neither platform gets silently advertised as qualified or removed from another product's package metadata on the strength of this SDK note.
 
-## Stage 2 — Responses and OpenRouter reasoning
-- Current scope: Responses HTTP/SSE plus declared typed hosted-OpenRouter retention/routing/JSON controls; live OpenRouter qualification is separate.
-- Entry: supported-cell gates plus current typed installed interface/capabilities.
-- Required properties: supported HTTP/SSE semantics/native/usage/ownership and explicit in-band errors; **all WS properties/canaries are excluded from current release gates**.
-- Deferred future scope: WebSocket requires a separate transport decision and actual protocol/canary proof; no WSS pass is implied.
-- Exit: Continuation has an explicit lifetime (Persisted | ConnectionBound) with full-input fallback or no-retry rule; previous_response_not_found path tested.
-- Cut line: WS lane may slip to a later release while Responses over SSE ships.
-- Private post-M5 HTTP/SSE Responses reasoning PoC now exists (POC_PLAN5.7). Final16/16 plain/ASan+UBSan/TSan groups pass; one buffered encrypted tool continuation is N=1 ReplayVerified, while omission was accepted. Initial live5/6 included a real SSE ciphertext-authority failure; two explicitly additive calls diagnosed it and confirmed corrected SSE, retaining8/US$0.186216 reservations. This is not a fresh6/6 run, live SSE tool replay or Stage2 exit. WebSocket, OpenRouter, server-state continuation and60-run qualification remain absent.
-- The later five-API vision probe (POC_PLAN5.8) verified GPT-6 Luna visible summaries and an actual Responses SSE tool/negative pair,8/8. This clears those bounded observations, not WebSocket/OpenRouter/60-run or Stage2 release admission.
-- Remaining5.9 work executed after an explicit additional60/US$12 grant. Fresh low Responses emitted no native payload in one tool generation (6passed/2unavailable); separate medium8/8 established another actual SSE positive/ciphertext-negative pair. These are separate cohorts, not statistical parity or a merged all-family pass.
+[Current interface4 local execution](CONFORMANCE.md#interface-4-execution-record) records all27 cases covered by25 initial and2 corrected focused passes, plus unchanged installed Stop and exact README consumer observations. It is not a second full-suite run, hosted/platform qualification or a replacement for earlier interface3 benchmarks.
 
-## Stage 3 — Gemini
-- Scope: Gemini generate (buffered + SSE), part-structure-preserving codec. Interactions ONLY if a complete spec (event order, terminal semantics, resume) is written and reviewed first; otherwise not in this ladder.
-- Entry: Stage 2 exit (or Stage 1 exit if the maintainer reorders).
-- Required properties: Stage 1 set with `TransportProjectionParity` defined on parts, `FailureClassTerminal` (Gemini failure finish reasons).
-- Canary cells: Gemini generate live cell; Interactions cell only if specified.
-- Exit: terminal-evidence table covers Gemini x {buffered, SSE}; EOF-without-trailing-blank-line policy has a captured fixture.
-- A separate cheap `gemini-2.5-flash-lite` OpenAI-compatibility text smoke now passed one buffered/SSE pair under a4-attempt/US$1 ceiling (POC_PLAN5.6). It is **not** this native Gemini stage's exit, tool/signature/replay support or broader model qualification. Future Gemini runs still prefer a low-cost model after checking current prices/features and explicit remaining/new budget.
-- POC_PLAN5.8 now implements private native Gemini and model-only stateless Interactions after current lifecycle/spec review. Actual vision/thinking ran on both; missing/empty stateless IDs and an omitted-parts Gemini terminal were corrected from real receipts. All23 model-free groups pass under plain/ASan+UBSan/TSan. The owner-approved40-call allowance is exhausted; Interactions live tool replay, further vision-signature negatives and full stage qualification are still unverified. No transport/engine cutover or automatic budget extension is implied.
-- POC_PLAN5.9 now observes actual retained Interactions SSE tool replay and complete new signature/omission contrasts. Google accepted single-carrier mutations, so native consumption remains unobservable; generic Interactions full-state omission400 remains inconclusive. Native Gemini fresh8/8 includes a real post-fix live continuation; Interactions fresh7/8 is not an all-case pass. Final24/24 plain/ASan/TSan and cumulative99/US$18.979680 preserve old debits and do not open further scope.
-- Cut line: Interactions.
+HTTP/3 remains optional. Baseline builds must work without QUIC dependencies; capable claims require actual negotiated QUIC, one-request connection-stage fallback, unchanged deadline/cancel/retry safety, reset/truncation and shared-stream bounds. [D1](decisions/D1-transport.md) separates capable proof from uninstrumented release-backend coverage and hosted-provider support.
 
-## Stage 4 — NeoGraph adapter, journal v2, cutover
-- Scope: NeoGraph adapter; journal v2 with a library-side projection golden and a consumer conformance kit; cutover including D2 typed clients and deletion gate.
-- Entry: Stage 1 exit minimum (cutover of supported cells only); owner inventory for Images/Veo/Decisions available.
-- Required properties: `JournalVersionAndCanonicalOrder`, `SnapshotNotAppend`, `OwnershipAndBounds`, plus all supported-cell properties via the adapter.
-- Exit: D2 cutover checklist complete (delete-list approved by owner, half-migration search finds zero old-grammar interpreter code, kept features have typed clients); paused v1 runs are documented as not natively resumable and mid-tool-loop runs as not migratable; dual-implementation period ends.
-- Canary cells: adapter smoke on each shipped cell.
-- Cut line: anything unsupported stays on the old path only if the old path is fully removed from shared code; no partial migration.
+The paid baseline recorded 293/300 pairs: Chat/Responses/Messages 60/60 each, Generate 56/60, Interactions 57/60. Google mutation/omission acceptance and generic aggregate-omission errors do not prove cryptographic validation or native consumption. [Qualification summary](../config/qualification-final-summary.json) and [native-axis report](../config/qualification-native-axis-results.json) retain failures/unavailable/inconclusive rows. The fixed campaign has no remaining authorized requests; a release gate is not permission to run it again.
 
-## Optional HTTP/3 transport lane
+Remote mixed-gRPC TSan limits belong to the NeoGraph integrated cohort and are not a race-freedom claim. Earlier SDK, sanitizer and installed-consumer observations retain their original dates/counts; future verification must record a new cohort rather than relabel old outputs current.
 
-- Implemented and locally exercised on capable Linux plain/ASan+UBSan/TSan builds. [D1](decisions/D1-transport.md#evidence) is the authoritative evidence/limitations record; this is not hosted-provider or multiplatform qualification.
-- Scope: HTTP/3 preference in capable builds, safe same-origin HTTPS connection-stage fallback to HTTP/2/1.1, and a working non-HTTP/3 build. One libcurl stack, shared provider codecs/events/accumulator, no protocol-specific NeoGraph call path.
-- Safety: only one connection candidate may send a request; possible acceptance is never retried under the name of fallback. One deadline/budget, generation POST 0-RTT disabled by default, and unchanged TLS verification.
-- Exit before advertising HTTP/3: [CONFORMANCE section 12.1](CONFORMANCE.md#121-optional-http3-gate), including actual QUIC negotiation, fallback request counters, cancellation/deadline, reset/truncation, shared-stream bounds/isolation and applicable sanitizer runs. Baseline HTTP/2/1.1 must remain usable without QUIC dependencies.
-- Benefit targets are lower cold-connection and cross-stream tail latency on suitable networks, not faster model inference; measure rather than promise. This lane does not settle D1b or claim WebSocket-over-HTTP/3 support.
+## Explicitly outside the current SDK
 
-## Explicitly deferred
-- Python bindings.
-- Bedrock and Vertex native access (SigV4, OAuth, binary event stream, credential refresh): out of scope unless designed; equivalence canary for them needs direct credentials (open item D4).
-- Enterprise HTTP CONNECT proxy configuration and testing (libcurl can proxy; the library does not promise it before it is tested).
-- HTTP/2 beyond the measured M1b case: stream caps, many paused streams, TLS multiplexing and other peer/libcurl combinations. One paused h2c stream with three live siblings, cancellation isolation, GOAWAY/REFUSED_STREAM and resolver refresh now pass (POC_PLAN section 5.1); this is not an arbitrary-concurrency memory guarantee.
-- Windows and macOS: POSIX descriptor model and trust stores (POC_PLAN risks R4 and R5).
-- Non-chat endpoints (D2): Veo, image endpoints, Decisions.
-- Multi-lane Responses WebSocket.
+- Responses WebSocket, automatic server-state transcript retrieval/backfill and transparent cursor-failure resend; implemented previous_response_id state is a distinct bounded path.
+- Native Bedrock/Vertex authentication: SigV4, OAuth refresh and binary event framing.
+- Cross-origin native equivalence and general Drop/Demote treatments; Generate's explicit unsealed PortableForeign/sentinel path is implemented separately and never repairs native carry.
+- Generic descriptor constraints/model-selector/options programs and full target schema generation.
+- Standalone image, Veo and Decisions endpoints; NeoGraph retains separate typed clients.
+- An independent SDK Python package, graph runtime, tool executor or financial budget authority.
+- Qualified enterprise proxy and broader platform/TLS-backend matrices.
 
-## Risks tracked across stages
-Vendor silently changes binding rules; gateway multi-backend nondeterminism; canary keys/cost/ToS and no secrets on fork PRs; bus factor of two; dual-implementation migration period.
+## Model-free benchmark recipe
+
+These commands are a recipe, not a fresh result. Run from the SDK root, with Node.js and OpenSSL CLI available and `YYJSON_ROOT` pointing to an existing dependency:
+
+```sh
+cmake -S . -B build-bench -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_SHARED_LIBS=OFF -DSP_BUILD_TESTS=OFF -DSP_BUILD_CANARY=OFF -DSP_BUILD_BENCHMARKS=ON \
+  -DYYJSON_ROOT="$YYJSON_ROOT"
+cmake --build build-bench --target sp_provider_benchmark
+python3 -c 'import json; d=json.load(open("benchmarks/matrix.json")); print(*(d["same_workload_baseline_configs"]+d["extended_runtime_configs"]+d["local_encode_configs"]), sep="\n")' |
+while IFS= read -r config; do
+  build-bench/benchmarks/sp_provider_benchmark "$config" || exit "$?"
+done
+```
+
+The [matrix](../benchmarks/matrix.json) is the workload authority. Compare equivalent Release workloads/settings and record actual protocol counts, owned-outcome checks, latency units, RSS and threads. Synthetic local signatures prove retention only; local transport throughput is not model generation speed.

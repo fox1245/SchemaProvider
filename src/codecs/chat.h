@@ -18,6 +18,11 @@ struct InputMessage {
   std::vector<sp::Image> images{};
 };
 struct ToolDefinition { std::string name, description; std::shared_ptr<const json::Document> parameters; };
+struct ReasoningOptions {
+  std::optional<std::string> effort;
+  std::optional<uint64_t> max_tokens;
+  std::optional<bool> exclude, enabled;
+};
 struct Request {
   std::string model;
   std::vector<InputMessage> messages;
@@ -31,6 +36,9 @@ struct Request {
   std::vector<sp::Message> canonical_messages{};
   std::optional<sp::OpenRouterRouting> provider{};
   std::optional<sp::ResponseFormat> response_format{};
+  std::optional<ReasoningOptions> reasoning{};
+  std::optional<bool> include_reasoning{}, usage_include{};
+  std::vector<std::string> models{};
 };
 struct EncodedRequest {
   std::string method, path;
@@ -89,6 +97,7 @@ class Codec {
   std::size_t reasoning_details_count_ = 0;
   std::vector<std::shared_ptr<const json::Document>> reasoning_frames_;
   std::vector<ReasoningBinding> reasoning_bindings_;
+  std::map<uint64_t, size_t> reasoning_indices_;
   std::map<uint64_t, size_t> indices_;
   std::vector<ToolBinding> tools_;
   size_t input_bytes_ = 0;

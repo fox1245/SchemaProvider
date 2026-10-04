@@ -1,6 +1,6 @@
 # D4 — Origin, binding facts and replay of native reasoning
 
-- Status: FIRM (exact-origin default + documented equivalence class), 2026-10-01
+- Status: FIRM exact-origin/binding decision; equivalence/treatment proposals remain unimplemented, 2026-10-01
 - Deciders: maintainer + two-family review panel
 
 ## Context
@@ -9,17 +9,19 @@ Signed/encrypted reasoning blocks must be replayed to the producing model to kee
 ## Correction note
 Earlier drafts claimed that cross-host signature interoperability is "unverified" as a premise. That premise was **wrong**: Anthropic documents cross-platform compatibility of `signature` values together with model, prefix and account binding (see Evidence). What remains unverified is our own observation for Bedrock/Vertex direct access, not the vendor statement.
 
-## Decision
-1. `Origin = (family, vendor, authority, route_scope)`; exact equality stays the DEFAULT replay gate (necessary, not sufficient).
-2. Each capsule ALSO records binding facts the codec checks before dispatch: producing model id; a context fingerprint of the replay prefix (system, tools, preceding messages as sent); account/credential-profile scope (non-secret). Property `OriginBindingFacts`.
-3. A documented equivalence class (`anthropic.messages` across direct / Bedrock / Vertex) is a C++ allow-list in the Messages codec with status `Documented-Unverified`, activated per canary cell only after a negative-control canary passes. OpenRouter is NEVER in an equivalence class.
+## Decision and implementation scope
+1. The installed `NativeContext`/`NativeReplay` gate checks descriptor/origin, producing model, actual request prefix, tool/control scope, non-secret account scope and complete sealed content. Historical `Origin`/`BindingFacts` structs were sketches, not the current C++ surface.
+2. Exact native eligibility or rejection is implemented; no caller-provided binding hash can mint a seal.
+3. A documented direct/Bedrock/Vertex equivalence allow-list was proposed, requiring separate implementation and negative-control admission. No such active class exists in the installed SDK. OpenRouter was excluded from that proposal.
 4. The live canary carries a NEGATIVE CONTROL (tampered signature must be rejected) and records `negative_control: rejected|accepted|not_run` plus `client_retention_verified`, `request_accepted`, `native_validation_evidenced`. A cell whose negative control is accepted/not_run is `ReplayAcceptanceUnobservable` and never "replay verified". Acceptance alone is vacuous because Anthropic degrades gracefully (a 200 was seen after stripping thinking in a same-turn loop), so the oracle also observes thinking presence / usage / cache evidence. Results are N-run acceptance rates with a lower confidence bound, with model and account age in the manifest. Property `CanaryNegativeControl`.
 5. Equivalence-class admission: vendor documentation + 60-run no-failure canary per (host, model, direction) + 100% negative-control rejection. Bedrock/Vertex direct access is currently UNTESTED (no credentials on the owner's machine).
-6. Reject-by-default is a policy with an availability cost: per-model capability (`required|optional|ignored` replay of thinking, with evidence) is recorded in descriptor `models`, so Reject applies where replay is required and Drop is the explicit choice elsewhere.
+6. Per-model `required|optional|ignored` replay capabilities and explicit Drop/Demote were historical target grammar/treatments. The installed descriptor root has no `models` program, and the SDK exposes no Drop/Demote policy; ineligible native replay rejects.
 
-Origin is an observed/configured replay boundary, NOT cryptographic proof of issuer. `sealed` means C++ immutability + provenance, not authentication. Importer input is untrusted; persistent capsules need a host-held AEAD/HMAC envelope or are not replayed natively (see DESIGN threat model).
+Origin is a configured replay boundary, not proof of vendor issuer. In-process sealing provides provenance/content integrity; explicit independent-key archive custody authenticates local restoration, not encryption or vendor identity. Editable JSON cannot mint native authority.
 
 **Current custody boundary.** The installed unstable SDK now admits persisted genuine native generations through explicitly provisioned/opened independent-key owner-private `NativeArchive` v3/`spna3` custody. This authenticates local custody/binding, not encryption or vendor issuer identity; editable JSON cannot mint replay authority, and v2 is not upgraded. [Current public contract and proof](../../README.md#owned-requests-results-and-configuration) supersede the M3 no-persistence checkpoint below. Documented-equivalence activation, cross-vendor native consumption and statistical model equivalence remain unclaimed; Google accepted single-carrier controls, and generic aggregate-omission400 is not cryptographic validation.
+
+Interface 4 adds two distinct boundaries without changing archive format3. Generate `HistoryMode::PortableForeign` imports only unsealed portable assistant Text/client ToolCall, using the documented first-imported-function-call sentinel; genuine native groups still require exact seals. Responses cursors carry provider-held state and separate in-process completed terminal ownership; they are incomplete for full NativeReplay/archive use. The new policy/control identity can reject old policy-bound records. Generation cap is per-dispatch admission, not a native replay configuration field; all remaining origin/model/prefix/content/reasoning/tool-scope checks still apply. See [current usage](../USAGE.md#explicit-portable-gemini-history).
 
 ## Measured M3 implementation
 
@@ -29,7 +31,7 @@ Origin is an observed/configured replay boundary, NOT cryptographic proof of iss
 
 At the M3 checkpoint these were trusted private in-process helpers: raw codec input or synthetic accumulator events were outside the boundary, and persisted/imported capsule admission did not yet exist. The account label was not authenticated credentials and SHA-256 was not issuer authentication. Only exact-origin Native-or-Reject was implemented, not documented-equivalence activation, Drop or Demote. Those historical limits are not changed by later protected archive admission; an invalid tool call is still retained for inspection, never repaired into replayable input.
 
-The M3 fixture signatures, encrypted leaves and server IDs were synthetic: **local client-retention/pre-dispatch rejection evidence**, not a live canary, provider acceptance, cryptographic validation or equivalence-policy activation. Later bounded M5/5.7–5.9 and qualification cohorts are recorded separately in [POC_PLAN](../POC_PLAN.md) and [README](../../README.md#persistent-qualification-campaign-completed-observations-explicit-limits); they do not retroactively qualify M3 fixtures or establish native consumption.
+M3 signatures, encrypted leaves and server IDs were synthetic local retention/rejection evidence, not a live canary or signature validity proof. Later M5/5.7–5.9 and [typed-cutover/qualification cohorts](../POC_PLAN.md#current-typed-c-cutover-provenance) are separate observations and do not establish universal native consumption.
 
 ## Evidence
 - [read docs] Anthropic extended-thinking documentation: `signature` values are compatible across the Claude API, Amazon Bedrock and Google Cloud; a thinking block is readable only by the producing model and certain other models (unreadable blocks are silently ignored/dropped); newer models bind blocks to the preceding system/tools/messages prefix (400 when it changes; enforced by default for accounts created on/after 2026-08-31, opt-in through `thinking.block_binding.prefix_mismatch_behavior` for older accounts); Sonnet 5.5 blocks are account-bound; toggling thinking mid-turn silently disables thinking.
@@ -53,7 +55,7 @@ Caveats: small samples; one model; one account; no direct Bedrock/Vertex credent
 - Always Drop: rejected as default (breaks tool loops where replay is required).
 
 ## Consequences
-Capsule carries binding facts; codec verifies before dispatch; availability cost of Reject is explicit per model; OpenRouter reasoning is demoted rather than replayed to other hosts (demotion uses an assistant-role quoted block or explicit untrusted delimiter, never a user-role instruction).
+Native sidecars retain binding facts and codecs check them before dispatch. The SDK rejects foreign/edited carry rather than automatically demoting OpenRouter reasoning or stripping it and retrying. Historical demotion proposals do not change that current behavior.
 
 ## Reconsideration conditions
 Vendors change binding rules (example: 2026-08-31 default enforcement) — canary must detect; equivalence class admission evidence obtained for a cell; OpenRouter failure cause identified and fixed with negative control rejecting.

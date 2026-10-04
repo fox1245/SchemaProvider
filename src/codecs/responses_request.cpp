@@ -39,6 +39,38 @@ std::string_view hosted_type(const HostedTool& tool) {
     if constexpr (std::is_same_v<T, ShellTool>) return "shell";
   }, tool);
 }
+std::string_view verbosity_name(Verbosity value) {
+  switch (value) {
+    case Verbosity::Low: return "low";
+    case Verbosity::Medium: return "medium";
+    case Verbosity::High: return "high";
+  }
+  return {};
+}
+std::string_view truncation_name(Truncation value) {
+  switch (value) {
+    case Truncation::Disabled: return "disabled";
+    case Truncation::Auto: return "auto";
+  }
+  return {};
+}
+std::string_view include_name(Include value) {
+  switch (value) {
+    case Include::ReasoningEncryptedContent: return "reasoning.encrypted_content";
+    case Include::WebSearchSources: return "web_search_call.action.sources";
+    case Include::FileSearchResults: return "file_search_call.results";
+    case Include::MessageOutputTextLogprobs: return "message.output_text.logprobs";
+    case Include::ComputerCallOutputImageUrl: return "computer_call_output.output.image_url";
+    case Include::CodeInterpreterCallOutputs: return "code_interpreter_call.outputs";
+  }
+  return {};
+}
+bool cursor_valid(std::string_view id) {
+  if (id.empty() || id.size() > 256) return false;
+  for (const char c : id) if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+      (c >= '0' && c <= '9') || c == '_' || c == '-')) return false;
+  return true;
+}
 } // namespace
 EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request, bool streaming) {
   auto bad = [](std::string message) -> EncodeResult { return Error{ErrorKind::InvalidRequest, std::move(message)}; };
@@ -61,6 +93,23 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (request.messages.size() > resources.request_messages || request.tools.size() > resources.request_tools ||
       request.hosted_tools.size() > resources.request_tools - request.tools.size())
     return bad("request count limit exceeded");
+  if (request.previous_response_id && !cursor_valid(*request.previous_response_id)) return bad("invalid previous response cursor");
+  if (!request.previous_response_id && !request.previous_response_history.empty()) return bad("previous response history requires a cursor");
+  if (request.previous_response_history.size() > resources.request_messages) return bad("previous response history count limit exceeded");
+  for (const auto& message : request.previous_response_history)
+    if (message.parts.size() > resources.request_parts) return bad("previous response part count limit exceeded");
+  if (!request.previous_response_history.empty()) {
+    const auto& previous = request.previous_response_history.back();
+    if (previous.role != Role::Assistant || !previous.native || !previous.wire_output ||
+        !previous.wire_output->root().is_array() || previous.id != *request.previous_response_id) return replay_bad();
+  }
+  if (request.verbosity && verbosity_name(*request.verbosity).empty()) return bad("invalid verbosity");
+  if (request.truncation && truncation_name(*request.truncation).empty()) return bad("invalid truncation");
+  if (request.include) {
+    std::set<Include> selections;
+    for (const auto selection : *request.include)
+      if (include_name(selection).empty() || !selections.insert(selection).second) return bad("invalid or duplicate include selection");
+  }
   if (request.provider)
     if (auto error = request_controls::validate_routing(descriptor, *request.provider)) return bad(std::move(*error));
   if (request.response_format)
@@ -108,6 +157,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   std::optional<Error> image_error;
   for (const auto& message : request.messages) {
     if (message.parts.size() > resources.request_parts) return bad("request part count limit exceeded");
+    if (request.previous_response_id && (message.native || message.wire_output || message.role == Role::Assistant)) return replay_bad();
     if (message.native) {
       if (message.role != Role::Assistant || !message.wire_output || !message.wire_output->root().is_array()) return replay_bad();
     } else {
@@ -141,8 +191,20 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     auto invalid = [](std::string message) { return Error{ErrorKind::InvalidRequest, std::move(message)}; };
     body.raw("{").quoted(descriptor.request_model_member()).raw(":").quoted(request.model);
     body.raw(",").quoted(descriptor.request_stream_member()).raw(streaming ? ":true" : ":false");
-    body.raw(",\"store\":").raw(request.store.value_or(false) ? "true" : "false")
-        .raw(",\"include\":[\"reasoning.encrypted_content\"]");
+    body.raw(",\"store\":").raw(request.store.value_or(false) ? "true" : "false");
+    if (request.previous_response_id) body.raw(",\"previous_response_id\":").quoted(*request.previous_response_id);
+    if (request.parallel_tool_calls) body.raw(",\"parallel_tool_calls\":").raw(*request.parallel_tool_calls ? "true" : "false");
+    if (request.truncation) body.raw(",\"truncation\":").quoted(truncation_name(*request.truncation));
+    body.raw(",\"include\":[");
+    if (request.include) {
+      bool comma = false;
+      for (const auto selection : *request.include) {
+        if (comma) body.raw(",");
+        comma = true;
+        body.quoted(include_name(selection));
+      }
+    } else body.quoted("reasoning.encrypted_content");
+    body.raw("]");
     auto number = [&](std::string_view key, double value) {
       char bytes[64];
       const auto converted = std::to_chars(bytes, bytes + sizeof bytes, value);
@@ -154,9 +216,16 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       body.raw(",\"provider\":");
       request_controls::write_routing(body, *request.provider);
     }
-    if (request.response_format) {
-      body.raw(",\"text\":{\"format\":");
-      request_controls::write_response_format(body, *request.response_format, true);
+    if (request.response_format || request.verbosity) {
+      body.raw(",\"text\":{");
+      if (request.response_format) {
+        body.raw("\"format\":");
+        request_controls::write_response_format(body, *request.response_format, true);
+      }
+      if (request.verbosity) {
+        if (request.response_format) body.raw(",");
+        body.raw("\"verbosity\":").quoted(verbosity_name(*request.verbosity));
+      }
       body.raw("}");
     }
     if (!request.instructions.empty()) body.raw(",\"instructions\":").quoted(request.instructions);
@@ -225,8 +294,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     std::set<std::string_view> item_ids, call_ids, pending;
     bool input_comma = false;
     auto separator = [&] { if (input_comma) body.raw(","); input_comma = true; };
-    for (const auto& message : request.messages) {
-      if (message.native) {
+    auto captured = [&](const Message& message, bool emit_items) -> std::optional<Error> {
         if (!pending.empty()) return invalid("client tool results must precede the next captured assistant group");
         std::map<std::string_view, const ToolCall*> calls;
         for (const auto& part : message.parts) {
@@ -253,9 +321,16 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
             if (found == calls.end() || found->second->name != name.as_string()) return invalid("captured function item lacks unique client ownership");
             calls.erase(found);
           }
-          separator(); body.value(item, 2);
+          if (emit_items) { separator(); body.value(item, 2); }
         }
         if (!calls.empty()) return invalid("captured function call is missing its output item");
+        return std::nullopt;
+    };
+    if (!request.previous_response_history.empty())
+      if (auto error = captured(request.previous_response_history.back(), false)) return error;
+    for (const auto& message : request.messages) {
+      if (message.native) {
+        if (auto error = captured(message, true)) return error;
       } else {
         if (message.parts.empty()) return invalid("plain input messages require content");
         const auto role = role_name(message.role);

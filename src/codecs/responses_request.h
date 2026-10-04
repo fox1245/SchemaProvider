@@ -22,6 +22,12 @@ struct SkillReference { std::string skill_id; };
 struct ContainerAutoEnvironment { std::vector<SkillReference> skills; };
 struct ShellTool { ContainerAutoEnvironment environment; };
 using HostedTool = std::variant<WebSearchTool, ImageGenerationTool, FileSearchTool, ToolSearchTool, ShellTool>;
+enum class Verbosity { Low, Medium, High };
+enum class Truncation { Disabled, Auto };
+enum class Include {
+  ReasoningEncryptedContent, WebSearchSources, FileSearchResults,
+  MessageOutputTextLogprobs, ComputerCallOutputImageUrl, CodeInterpreterCallOutputs
+};
 struct Request {
   std::string model, account_scope, instructions;
   std::vector<sp::Message> messages;
@@ -36,6 +42,18 @@ struct Request {
   std::optional<sp::OpenRouterRouting> provider;
   std::vector<HostedTool> hosted_tools;
   std::optional<std::uint64_t> max_tool_calls;
+  // Bounded provider-held cursor; messages contains only new input. A cursor
+  // alone admits text/image input, not client tool-result or NativeReplay authority.
+  std::optional<std::string> previous_response_id;
+  // To authorize tool results, supply the original prefix plus the authentic
+  // terminal response, or one authentic in-process cursor-produced response.
+  // The last response id must equal the cursor. This history is never sent.
+  std::vector<sp::Message> previous_response_history;
+  std::optional<bool> parallel_tool_calls;
+  std::optional<Verbosity> verbosity;
+  std::optional<Truncation> truncation;
+  // Absent keeps reasoning.encrypted_content; an explicit empty vector sends [].
+  std::optional<std::vector<Include>> include;
 };
 struct EncodedRequest {
   std::string method, path;

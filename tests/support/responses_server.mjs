@@ -12,7 +12,8 @@ let unexpected = 0;
 const reply = value => process.stdout.write(`${JSON.stringify(value)}\n`);
 const notify = () => { for (const wake of [...waiters]) wake(); };
 const snapshot = c => ({ count: c.count, invalid: c.invalid, unexpected, faults: c.faults,
-  held: c.held.size, closed: c.closed, bytes: c.bytes, replayed: c.replayed });
+  held: c.held.size, closed: c.closed, bytes: c.bytes, replayed: c.replayed,
+  stored: c.history.size, continued: c.continued });
 const reasoning = () => ({ id: 'rs_native', type: 'reasoning', status: 'completed',
   summary: [{ type: 'summary_text', text: 'Use the lookup result' }], encrypted_content: cipher });
 const call = () => ({ id: 'fc_item', type: 'function_call', status: 'completed',
@@ -22,14 +23,14 @@ const message = text => ({ id: 'msg_native', type: 'message', status: 'completed
 const grouped = () => [reasoning(), call(), message('need lookup')];
 const usage = { input_tokens: 10, output_tokens: 7, total_tokens: 17,
   input_tokens_details: { cached_tokens: 4 }, output_tokens_details: { reasoning_tokens: 3 } };
-function response(model, output, status = 'completed', counters = usage) {
-  return { id: 'resp_native', object: 'response', created_at: 1, model, status, output, usage: counters,
+function response(model, output, status = 'completed', counters = usage, id = 'resp_native') {
+  return { id, object: 'response', created_at: 1, model, status, output, usage: counters,
     incomplete_details: status === 'incomplete' ? { reason: 'max_output_tokens' } : null, error: null };
 }
-function frames(model, output, status = 'completed', counters = usage) {
+function frames(model, output, status = 'completed', counters = usage, id = 'resp_native') {
   let sequence = 0;
   const frame = (type, fields) => `event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: sequence++, ...fields })}\n\n`;
-  let wire = frame('response.created', { response: response(model, [], 'in_progress', null) });
+  let wire = frame('response.created', { response: response(model, [], 'in_progress', null, id) });
   for (const [output_index, item] of output.entries()) {
     const initial = item.type === 'message' ? { ...item, status: 'in_progress', content: [] }
       : item.type === 'reasoning' ? { id: item.id, type: item.type, summary: [] }
@@ -59,7 +60,7 @@ function frames(model, output, status = 'completed', counters = usage) {
   const aggregate = structuredClone(output);
   for (const item of aggregate) if (item.type === 'reasoning') item.encrypted_content = 'TERMINAL_ONLY_REPRESENTATION';
   wire += frame(status === 'incomplete' ? 'response.incomplete' : 'response.completed',
-    { response: response(model, aggregate, status, counters) });
+    { response: response(model, aggregate, status, counters, id) });
   return wire;
 }
 function prefix(model) {
@@ -69,19 +70,60 @@ function prefix(model) {
     + event('response.content_part.added', { item_id: 'msg_native', output_index: 0, content_index: 0, part: { type: 'output_text', text: '', annotations: [] } })
     + event('response.output_text.delta', { item_id: 'msg_native', output_index: 0, content_index: 0, delta: 'partial owned' });
 }
-function valid(req, body) {
+function valid(req, body, stateful = false) {
   return req.method === 'POST' && req.url === '/v1/responses' && req.headers.authorization === `Bearer ${key}`
-    && typeof body.stream === 'boolean' && Array.isArray(body.input) && body.store === false
-    && isDeepStrictEqual(body.include, ['reasoning.encrypted_content']) && body.max_output_tokens === 128
+    && typeof body.stream === 'boolean' && Array.isArray(body.input) && body.store === stateful
+    && (stateful || isDeepStrictEqual(body.include, ['reasoning.encrypted_content'])) && body.max_output_tokens === 128
     && body.instructions === 'Answer briefly' && isDeepStrictEqual(body.reasoning, { effort: 'low', summary: 'auto' })
     && body.tools?.length === 1 && body.tools[0].type === 'function' && body.tools[0].name === 'lookup'
     && body.tools[0].description === 'Find a value' && body.tools[0].strict === true
     && isDeepStrictEqual(body.tools[0].parameters, { type: 'object', properties: { x: { type: 'integer' } }, required: ['x'], additionalProperties: false })
-    && !('previous_response_id' in body) && !('conversation' in body) && !('background' in body) && !('service_tier' in body);
+    && (stateful || !('previous_response_id' in body)) && !('conversation' in body) && !('background' in body) && !('service_tier' in body);
 }
 function replay(body) {
   return body.input.length === 5 && grouped().every((item, index) => isDeepStrictEqual(body.input[index + 1], item))
     && isDeepStrictEqual(body.input[4], { type: 'function_call_output', call_id: 'call_owned', output: 'one' });
+}
+function stateful(req, res, body, c) {
+  if (!valid(req, body, true) || body.parallel_tool_calls !== false ||
+      body.text?.verbosity !== 'high' || body.truncation !== 'auto' ||
+      !isDeepStrictEqual(body.include, [])) ++c.invalid;
+  const previous = body.previous_response_id;
+  const prior = previous === undefined ? [] : c.history.get(previous);
+  if (!prior) {
+    ++c.faults;
+    res.writeHead(404, { 'Content-Type': 'application/json', Connection: 'close' });
+    res.end(JSON.stringify({ error: { type: 'invalid_request_error', code: 'response_not_found', message: 'Unknown response cursor' } }));
+    return;
+  }
+  let output;
+  if (c.scenario === 'stateful-text') {
+    const expected = c.history.size === 0 ? 'Remember blue' : c.history.size === 1 ? 'What color?' : 'What did I ask?';
+    if (!isDeepStrictEqual(body.input, [{ role: 'user', content: [{ type: 'input_text', text: expected }] }])) ++c.invalid;
+    const remembered = prior.find(item => item.role === 'user')?.content[0].text;
+    const question = [...prior].reverse().find(item => item.role === 'user')?.content[0].text;
+    output = [message(!previous ? 'remembered' : expected === 'What color?' ? remembered?.slice(9) : question)];
+  } else {
+    if (!previous) {
+      if (!isDeepStrictEqual(body.input, [{ role: 'user', content: [{ type: 'input_text', text: 'synthetic question' }] }])) ++c.invalid;
+      output = [call()];
+    } else {
+      const pending = [...prior].reverse().find(item => item.type === 'function_call');
+      const expected = { type: 'function_call_output', call_id: pending?.call_id, output: pending?.call_id === 'call_owned' ? 'one' : 'two' };
+      if (!isDeepStrictEqual(body.input, [expected])) ++c.invalid;
+      output = pending?.call_id === 'call_owned'
+        ? [{ ...call(), id: 'fc_next', call_id: 'call_next', arguments: '{"x":2}' }]
+        : [message(prior.filter(item => item.type === 'function_call_output').map(item => item.output).concat(body.input[0].output).join('+'))];
+    }
+  }
+  if (previous) ++c.continued;
+  const id = `resp_state_${c.history.size + 1}`;
+  c.history.set(id, structuredClone([...prior, ...body.input, ...output]));
+  const data = body.stream ? frames(body.model, output, 'completed', usage, id)
+    : JSON.stringify(response(body.model, output, 'completed', usage, id));
+  c.bytes += Buffer.byteLength(data);
+  res.writeHead(200, { 'Content-Type': body.stream ? 'text/event-stream' : 'application/json', Connection: 'close' });
+  res.end(data);
 }
 const server = http.createServer(async (req, res) => {
   let c;
@@ -92,6 +134,10 @@ const server = http.createServer(async (req, res) => {
     c = cases.get(body.model);
     if (!c) { ++unexpected; res.writeHead(400); res.end(); return; }
     ++c.count;
+    if (c.scenario.startsWith('stateful-')) {
+      res.on('close', () => { ++c.closed; notify(); });
+      stateful(req, res, body, c); notify(); return;
+    }
     if (!valid(req, body)) ++c.invalid;
     if (c.scenario === 'forced' && !isDeepStrictEqual(body.tool_choice, { type: 'function', name: 'lookup' })) ++c.invalid;
     if (c.count === 1) c.prefix = body.input[0];
@@ -160,7 +206,7 @@ control.on('line', async line => {
     if (command.arm) {
       if (cases.has(command.arm)) throw new Error('duplicate');
       cases.set(command.arm, { scenario: command.scenario, text: command.text, count: 0, invalid: 0,
-        faults: 0, held: new Map(), closed: 0, bytes: 0, replayed: 0 }); reply({ armed: true }); return;
+        faults: 0, held: new Map(), closed: 0, bytes: 0, replayed: 0, history: new Map(), continued: 0 }); reply({ armed: true }); return;
     }
     const c = cases.get(command.model); if (!c) throw new Error('unknown');
     if (command.wait) await new Promise((resolve, reject) => {

@@ -12,6 +12,8 @@ class Accumulator {
   explicit Accumulator(SemanticLimits limits = {}, Sink sink = {},
                        std::size_t source_bytes_limit = config_defaults::defaults_max_response_bytes);
   // A known transport failure takes precedence over errors in deferred decoding.
+  // The sink observes normalized semantic Stops, including invalid client-call
+  // intent; specific vendor terminal reasons and server-executed calls survive.
   bool accept(const Event& event, const Error* failure_override = nullptr);
   const std::optional<Outcome>& outcome() const { return outcome_; }
   // Terminal ownership transfer; discard the accumulator after taking its outcome.

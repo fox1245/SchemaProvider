@@ -134,6 +134,16 @@ void prefix_and_origin_binding() {
   const auto descriptor = descriptor_value(); auto request = base_request(); add_client_tools(request);
   request.system = "original"; request.max_tokens = 2048; request.thinking_budget = 1024;
   request.messages.push_back(capture(descriptor, request, thinking_content)); request.messages.push_back(user("second"));
+  const auto original_native = request.messages[1].native;
+  for (const uint64_t cap : {2048ULL, 4096ULL, 8192ULL, 16384ULL}) {
+    request.max_tokens = cap;
+    const auto growth_wire = encoded(descriptor, request);
+    CHECK(growth_wire.max_output_tokens == cap);
+    const auto growth_body = document(growth_wire.body);
+    CHECK(growth_body->root().get("max_tokens").as_uint() == cap);
+    CHECK(json::equal(growth_body->root().get("messages").at(1).get("content"), document(thinking_content)->root()));
+    CHECK(request.messages[1].native == original_native);
+  }
   request.messages.push_back(capture(descriptor, request, R"([{"type":"text","text":"second answer"}])", "end_turn", true, "msg_second"));
   request.messages.push_back(user("third"));
   const auto body = document(encoded(descriptor, request).body);
@@ -447,7 +457,9 @@ void effective_policy_lineage() {
   request.max_tokens = 257; // Explicit and admitted default encode identically.
   encoded(original, request);
   request.max_tokens = 258;
-  rejected(original, request);
+  CHECK(document(encoded(original, request).body)->root().get("max_tokens").as_uint() == 258);
+  CHECK(request.messages[1].native == sealed.native);
+  CHECK(json::equal(document(encoded(original, request).body)->root().get("messages").at(1).get("content"), document(thinking_content)->root()));
   request.max_tokens = 257;
   auto reloaded = policy_descriptor(messages_policy("258"));
   rejected(reloaded, request); // A changed semantic policy is not old authority.
@@ -467,6 +479,84 @@ void effective_policy_lineage() {
       config_defaults::codec_defaults_json);
   CHECK(std::holds_alternative<descriptor::ConfigError>(closed));
 }
+void thinking_cache_tool_controls() {
+  const auto descriptor = descriptor_value();
+  auto request = base_request(); request.max_tokens = 2048; request.thinking_budget = 1024;
+  request.thinking_mode = messages::ThinkingMode::Manual; request.temperature = 0.7; request.top_p = 0.95;
+  auto wire = document(encoded(descriptor, request).body);
+  CHECK(!wire->root().get("temperature").valid());
+  CHECK(wire->root().get("top_p").as_double() == 0.95);
+  CHECK(wire->root().get("thinking").get("budget_tokens").as_uint() == 1024);
+  request.thinking_mode = messages::ThinkingMode::Adaptive;
+  rejected(descriptor, request, ErrorKind::InvalidRequest);
+  request.thinking_budget.reset(); request.output_effort = messages::OutputEffort::Max;
+  request.cache_control = messages::CacheControl{messages::CacheTtl::OneHour};
+  add_client_tools(request);
+  request.tool_choice = messages::ToolChoice{messages::ToolChoiceMode::Auto, {}, false};
+  wire = document(encoded(descriptor, request).body);
+  CHECK(wire->root().get("thinking").get("type").as_string() == "adaptive");
+  CHECK(!wire->root().get("thinking").get("budget_tokens").valid());
+  CHECK(!wire->root().get("temperature").valid());
+  CHECK(wire->root().get("output_config").get("effort").as_string() == "max");
+  CHECK(wire->root().get("cache_control").get("type").as_string() == "ephemeral");
+  CHECK(wire->root().get("cache_control").get("ttl").as_string() == "1h");
+  CHECK(!wire->root().get("tool_choice").get("disable_parallel_tool_use").as_bool());
+  auto changed = request; changed.top_p = 0.9; rejected(descriptor, changed, ErrorKind::InvalidRequest);
+  changed = request; changed.model = "Anthropic/CLAUDE-OPUS-4-7"; rejected(descriptor, changed, ErrorKind::InvalidRequest);
+  changed = request; changed.temperature = std::numeric_limits<double>::quiet_NaN(); rejected(descriptor, changed, ErrorKind::InvalidRequest);
+  changed = request; changed.thinking_mode = static_cast<messages::ThinkingMode>(99); rejected(descriptor, changed, ErrorKind::InvalidRequest);
+  changed = request; changed.output_effort = static_cast<messages::OutputEffort>(99); rejected(descriptor, changed, ErrorKind::InvalidRequest);
+  changed = request; changed.cache_control->ttl = static_cast<messages::CacheTtl>(99); rejected(descriptor, changed, ErrorKind::InvalidRequest);
+  request.thinking_mode = messages::ThinkingMode::Disabled;
+  request.tool_choice = messages::ToolChoice{messages::ToolChoiceMode::Tool, "f", true};
+  wire = document(encoded(descriptor, request).body);
+  CHECK(wire->root().get("thinking").get("type").as_string() == "disabled");
+  CHECK(wire->root().get("temperature").as_double() == 0.7);
+  CHECK(wire->root().get("tool_choice").get("name").as_string() == "f");
+  CHECK(wire->root().get("tool_choice").get("disable_parallel_tool_use").as_bool());
+  changed = request; changed.thinking_budget = 1024; rejected(descriptor, changed, ErrorKind::InvalidRequest);
+  changed = request; changed.tool_choice->name = "unknown"; rejected(descriptor, changed, ErrorKind::InvalidRequest);
+  changed = request; changed.tool_choice->mode = static_cast<messages::ToolChoiceMode>(99); rejected(descriptor, changed, ErrorKind::InvalidRequest);
+  changed = request; changed.tool_choice->mode = messages::ToolChoiceMode::Auto; rejected(descriptor, changed, ErrorKind::InvalidRequest);
+  request.tool_choice = messages::ToolChoice{messages::ToolChoiceMode::Any, {}, {}};
+  CHECK(document(encoded(descriptor, request).body)->root().get("tool_choice").get("type").as_string() == "any");
+  request.tool_choice = messages::ToolChoice{messages::ToolChoiceMode::None, {}, {}};
+  CHECK(document(encoded(descriptor, request).body)->root().get("tool_choice").get("type").as_string() == "none");
+  for (const auto& [value, name] : std::vector<std::pair<messages::OutputEffort, std::string_view>>{
+      {messages::OutputEffort::Low, "low"}, {messages::OutputEffort::Medium, "medium"},
+      {messages::OutputEffort::High, "high"}, {messages::OutputEffort::Max, "max"}}) {
+    auto effort_request = request; effort_request.output_effort = value;
+    CHECK(document(encoded(descriptor, effort_request).body)->root().get("output_config").get("effort").as_string() == name);
+  }
+  auto cache_request = request; cache_request.cache_control->ttl = messages::CacheTtl::FiveMinutes;
+  CHECK(document(encoded(descriptor, cache_request).body)->root().get("cache_control").get("ttl").as_string() == "5m");
+  cache_request.cache_control->ttl.reset();
+  CHECK(!document(encoded(descriptor, cache_request).body)->root().get("cache_control").get("ttl").valid());
+  changed = request; changed.tool_choice->disable_parallel_tool_use = false; rejected(descriptor, changed, ErrorKind::InvalidRequest);
+  changed = request; changed.thinking_mode = messages::ThinkingMode::Manual; rejected(descriptor, changed, ErrorKind::InvalidRequest);
+  request.messages.push_back(capture(descriptor, request, R"([{"type":"text","text":"answer"}])"));
+  request.messages.push_back(user("continue"));
+  CHECK(std::holds_alternative<messages::EncodedRequest>(messages::encode(descriptor, request, false)));
+  for (int field = 0; field != 3; ++field) {
+    changed = request;
+    if (field == 0) changed.thinking_mode = messages::ThinkingMode::Adaptive;
+    if (field == 1) changed.output_effort = messages::OutputEffort::Low;
+    if (field == 2) changed.cache_control->ttl = messages::CacheTtl::FiveMinutes;
+    rejected(descriptor, changed);
+  }
+  changed = request; changed.tool_choice = messages::ToolChoice{messages::ToolChoiceMode::Auto, {}, true};
+  CHECK(std::holds_alternative<messages::EncodedRequest>(messages::encode(descriptor, changed, false)));
+  auto routing = base_request(); routing.provider = OpenRouterRouting{};
+  routing.provider->order = {"anthropic"};
+  rejected(descriptor, routing, ErrorKind::InvalidRequest);
+  const auto gateway = descriptor_value("https://openrouter.ai", "/api/v1/messages");
+  CHECK(document(encoded(gateway, routing).body)->root().get("provider").get("order").at(0).as_string() == "anthropic");
+  routing.messages.push_back(capture(gateway, routing, R"([{"type":"text","text":"answer"}])"));
+  routing.messages.push_back(user("continue"));
+  CHECK(std::holds_alternative<messages::EncodedRequest>(messages::encode(gateway, routing, false)));
+  routing.provider->order = {"other"};
+  rejected(gateway, routing);
+}
 } // namespace
 int main() {
   try {
@@ -475,6 +565,7 @@ int main() {
     invalid_calls_are_not_repaired();
     bounded_json_serialization(); request_encoded_byte_boundaries(); request_json_encoding_and_depth();
     effective_policy_lineage();
+    thinking_cache_tool_controls();
     std::cout << "Messages replay properties passed\n"; return 0;
   } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

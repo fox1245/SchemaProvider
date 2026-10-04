@@ -22,7 +22,7 @@ function wire(c, model, streaming, messages) {
   const text = c.text ?? (c.scenario === 'burst' || c.scenario === 'burst-held'
     ? Array.from({ length: 2048 }, (_, index) => index.toString().padStart(8, '0') + ':' + 'x'.repeat(4096 - 9)).join('')
     : 'hello');
-  const content = c.scenario === 'reasoning'
+  const content = c.scenario === 'reasoning' || c.scenario === 'native-cap'
     ? [{ type: 'thinking', thinking: marker, signature: 'synthetic-signature' }, { type: 'text', text }]
     : c.scenario === 'parts'
       ? [{ type: 'text', text: 'one' }, { type: 'text', text: 'two' }]
@@ -85,6 +85,33 @@ const server = http.createServer(async (req, res) => {
     res.on('close', () => { ++c.closed; c.held.delete(res); notify(); });
     notify();
     const scenario = c.scenario;
+    if (scenario === 'native-cap') {
+      const cap = [2048, 4096, 8192, 16384][c.count - 1];
+      if (!messages || body.max_tokens !== cap || body.thinking?.budget_tokens !== 1024) ++c.invalid;
+      if (c.count > 1) {
+        const retained = body.messages?.[1]?.content;
+        if (body.messages?.length !== 3 || retained?.length !== 2 ||
+            retained?.[0]?.type !== 'thinking' || retained?.[0]?.thinking !== marker ||
+            retained?.[0]?.signature !== 'synthetic-signature' ||
+            retained?.[1]?.type !== 'text' || retained?.[1]?.text !== 'hello' ||
+            body.messages?.[2]?.content?.[0]?.text !== 'next') ++c.invalid;
+      }
+    }
+    if (scenario.startsWith('preserved-')) {
+      const mode = scenario.slice('preserved-'.length);
+      const expected = mode === 'manual' ? 'enabled' : mode;
+      if (!messages || req.headers['anthropic-workspace-id'] !== 'workspace-local' ||
+          req.headers['anthropic-beta'] !== 'host-override' || req.headers['anthropic-version'] !== '2023-06-01' ||
+          body.max_tokens !== 4096 || body.thinking?.type !== expected ||
+          (mode === 'manual' ? body.thinking?.budget_tokens !== 1024 : body.thinking?.budget_tokens !== undefined) ||
+          (mode === 'disabled' ? body.temperature !== 0.7 : body.temperature !== undefined) ||
+          body.output_config?.effort !== 'high' || body.cache_control?.type !== 'ephemeral' ||
+          body.cache_control?.ttl !== '1h' || body.tools?.length !== 1 ||
+          body.tools?.[0]?.name !== 'lookup' || body.tools?.[0]?.input_schema?.type !== 'object' ||
+          body.tool_choice?.type !== (mode === 'disabled' ? 'tool' : 'auto') ||
+          body.tool_choice?.disable_parallel_tool_use !== true ||
+          (mode === 'disabled' && body.tool_choice?.name !== 'lookup')) ++c.invalid;
+    }
     if (scenario === 'typeless-buffered-error') {
       if (!messages || body.stream) ++c.invalid;
       res.writeHead(200, { 'Content-Type': 'application/json', Connection: 'close' });

@@ -69,6 +69,13 @@ void native_group_and_replay() {
     auto wire = owned(std::get<gemini::EncodedRequest>(encoded).body);
     CHECK(json::equal(wire->root().get("contents").at(1).get("parts"), owned(parts)->root()));
     CHECK(wire->root().get("contents").at(2).get("parts").at(0).get("functionResponse").get("id").as_string() == "call_owned");
+    auto portable = r; portable.history_mode = gemini::HistoryMode::PortableForeign;
+    const auto unchanged = gemini::encode(desc(), portable, o == &b);
+    CHECK(std::holds_alternative<gemini::EncodedRequest>(unchanged));
+    CHECK(std::get<gemini::EncodedRequest>(unchanged).body == std::get<gemini::EncodedRequest>(encoded).body);
+    auto compromised = portable; std::get<Thinking>(compromised.messages[1].parts[0]).signature = "changed";
+    const auto denied = gemini::encode(desc(), compromised, true);
+    CHECK(std::holds_alternative<Error>(denied) && std::get<Error>(denied).kind == ErrorKind::ReplayIneligible);
     auto reject = [&](gemini::Request bad) { auto e = gemini::encode(desc(), bad, true); CHECK(std::holds_alternative<Error>(e) && std::get<Error>(e).kind == ErrorKind::ReplayIneligible); };
     auto bad = r; std::get<Text>(bad.messages[0].parts[0]).value = "edited prefix"; reject(bad);
     bad = r; std::get<Thinking>(bad.messages[1].parts[0]).signature = "edited"; reject(bad);
@@ -81,7 +88,10 @@ void native_group_and_replay() {
     bad = r; bad.thinking_budget = 0; reject(bad);
     bad = r; bad.tools[0].description += "edit"; reject(bad);
     bad = r; bad.include_thoughts = false; reject(bad);
-    bad = r; bad.max_output_tokens = 2049; reject(bad);
+    bad = r; bad.max_output_tokens = 2049;
+    const auto larger = gemini::encode(desc(), bad, true);
+    CHECK(std::holds_alternative<gemini::EncodedRequest>(larger));
+    CHECK(std::get<gemini::EncodedRequest>(larger).max_output_tokens == 2049);
     bad = r; bad.messages.pop_back(); CHECK(std::holds_alternative<Error>(gemini::encode(desc(), bad, false)));
     bad = r; std::get<ToolResult>(bad.messages[2].parts[0]).tool_use_id = "foreign"; CHECK(std::holds_alternative<Error>(gemini::encode(desc(), bad, false)));
   }
@@ -237,8 +247,119 @@ void named_error_raw_ownership() {
   }();
   CHECK(failure(bounded, ErrorKind::RemoteFailure).partial.raw_events.empty());
 }
+void portable_foreign_history() {
+  auto r = request();
+  r.messages.push_back(Message{"foreign-text", Role::Assistant, {Text{"prior answer"}}});
+  auto rejected = gemini::encode(desc(), r, false);
+  CHECK(std::holds_alternative<Error>(rejected) && std::get<Error>(rejected).kind == ErrorKind::ReplayIneligible);
+  r.history_mode = gemini::HistoryMode::PortableForeign;
+  auto encoded = gemini::encode(desc(), r, false);
+  CHECK(std::holds_alternative<gemini::EncodedRequest>(encoded));
+  auto wire = owned(std::get<gemini::EncodedRequest>(encoded).body);
+  CHECK(json::equal(wire->root().get("contents").at(1), owned(R"({"role":"model","parts":[{"text":"prior answer"}]})")->root()));
+  r.tools.push_back({"other", "Other value", owned(R"({"type":"object"})")});
+  r.messages.push_back(Message{"foreign-calls", Role::Assistant,
+      {Text{"checking"}, ToolCall{"foreign-a", "lookup", ToolCallKind::ClientExecuted, owned(R"({"x":1})")},
+       Text{"also"}, ToolCall{"foreign-b", "other", ToolCallKind::ClientExecuted, owned(R"({"y":2})")}}});
+  r.messages.push_back(Message{"", Role::Tool, {ToolResult{"foreign-b", R"({"second":2})"}, ToolResult{"foreign-a", R"({"first":1})", true}}});
+  encoded = gemini::encode(desc(), r, true);
+  CHECK(std::holds_alternative<gemini::EncodedRequest>(encoded));
+  wire = owned(std::get<gemini::EncodedRequest>(encoded).body);
+  const auto calls = wire->root().get("contents").at(2).get("parts");
+  CHECK(!calls.at(0).get("thoughtSignature").valid() && !calls.at(2).get("thoughtSignature").valid());
+  CHECK(calls.at(1).get("thoughtSignature").as_string() == "skip_thought_signature_validator");
+  CHECK(!calls.at(3).get("thoughtSignature").valid());
+  CHECK(calls.at(1).get("functionCall").get("id").as_string() == "foreign-a");
+  CHECK(calls.at(3).get("functionCall").get("args").get("y").as_uint() == 2);
+  const auto results = wire->root().get("contents").at(3).get("parts");
+  CHECK(results.at(0).get("functionResponse").get("name").as_string() == "other");
+  CHECK(results.at(0).get("functionResponse").get("id").as_string() == "foreign-b");
+  CHECK(results.at(1).get("functionResponse").get("response").get("error").get("first").as_uint() == 1);
+  for (const auto& message : r.messages) CHECK(!message.native && !message.wire_output);
+  auto refuse = [&](const gemini::Request& bad, ErrorKind kind) {
+    auto e = gemini::encode(desc(), bad, false);
+    CHECK(std::holds_alternative<Error>(e) && std::get<Error>(e).kind == kind);
+  };
+  auto bad = r; bad.messages[1].parts.push_back(Thinking{"private", "signature"}); refuse(bad, ErrorKind::ReplayIneligible);
+  for (const Part& part : std::vector<Part>{RedactedThinking{"private"}, Reasoning{"reasoning-id", {"summary"}},
+      Thought{{"summary"}, "signature"}, Opaque{"foreign", owned(R"({"private":true})")}, Refusal{"refusal", ""},
+      InvalidToolCall{"bad", "lookup", ToolCallKind::ClientExecuted, "{", InvalidReason::NotJson}}) {
+    bad = r; bad.messages[1].parts.push_back(part); refuse(bad, ErrorKind::ReplayIneligible);
+  }
+  bad = r; bad.messages[1].wire_output = owned(R"([{"text":"prior answer"}])"); refuse(bad, ErrorKind::ReplayIneligible);
+  bad = r; std::get<ToolCall>(bad.messages[2].parts[1]).wire_metadata = owned(R"({"thoughtSignature":"captured"})"); refuse(bad, ErrorKind::ReplayIneligible);
+  bad = r; std::get<ToolCall>(bad.messages[2].parts[1]).wire_type = "function"; refuse(bad, ErrorKind::ReplayIneligible);
+  bad = r; std::get<ToolCall>(bad.messages[2].parts[1]).kind = ToolCallKind::ServerExecuted; refuse(bad, ErrorKind::ReplayIneligible);
+  bad = r; std::get<ToolCall>(bad.messages[2].parts[3]).id = "foreign-a"; refuse(bad, ErrorKind::InvalidRequest);
+  bad = r; std::get<ToolCall>(bad.messages[2].parts[1]).input = owned("[]"); refuse(bad, ErrorKind::InvalidRequest);
+  bad = r; std::get<ToolResult>(bad.messages[3].parts[1]).tool_use_id = "foreign-b"; refuse(bad, ErrorKind::InvalidRequest);
+  bad = r; bad.messages[3].parts.pop_back(); refuse(bad, ErrorKind::InvalidRequest);
+  bad = r; bad.messages.pop_back(); refuse(bad, ErrorKind::InvalidRequest);
+  // A real newly decoded output binds the imported prefix but grants no
+  // authority to the caller-created messages themselves.
+  Accumulator a; gemini::Codec codec(desc(), gemini::Mode::Buffered, a, std::get<gemini::EncodedRequest>(encoded).context);
+  codec.buffered(body(R"([{"text":"new native"}])"), {}); CHECK(a.outcome());
+  r.messages.push_back(complete(*a.outcome()).messages[0]); CHECK(r.messages.back().native->complete());
+  CHECK(std::holds_alternative<gemini::EncodedRequest>(gemini::encode(desc(), r, false)));
+  bad = r; std::get<Text>(bad.messages[1].parts[0]).value = "changed import"; refuse(bad, ErrorKind::ReplayIneligible);
+  bad = r; bad.account_scope = "foreign origin"; refuse(bad, ErrorKind::ReplayIneligible);
+}
+void typed_generation_controls() {
+  auto r = request(); r.thinking_budget.reset(); r.temperature = 0.25; r.include_thoughts = false;
+  r.safety_settings = {{gemini::SafetyCategory::Harassment, gemini::SafetyThreshold::BlockNone},
+      {gemini::SafetyCategory::HateSpeech, gemini::SafetyThreshold::BlockOnlyHigh},
+      {gemini::SafetyCategory::SexuallyExplicit, gemini::SafetyThreshold::BlockMediumAndAbove},
+      {gemini::SafetyCategory::DangerousContent, gemini::SafetyThreshold::BlockLowAndAbove},
+      {gemini::SafetyCategory::CivicIntegrity, gemini::SafetyThreshold::Off}};
+  const auto expected = owned(R"([{"category":"HARM_CATEGORY_HARASSMENT","threshold":"BLOCK_NONE"},{"category":"HARM_CATEGORY_HATE_SPEECH","threshold":"BLOCK_ONLY_HIGH"},{"category":"HARM_CATEGORY_SEXUALLY_EXPLICIT","threshold":"BLOCK_MEDIUM_AND_ABOVE"},{"category":"HARM_CATEGORY_DANGEROUS_CONTENT","threshold":"BLOCK_LOW_AND_ABOVE"},{"category":"HARM_CATEGORY_CIVIC_INTEGRITY","threshold":"OFF"}])");
+  for (auto [level, name] : {std::pair{gemini::ThinkingLevel::Minimal, "minimal"}, {gemini::ThinkingLevel::Low, "low"},
+      {gemini::ThinkingLevel::Medium, "medium"}, {gemini::ThinkingLevel::High, "high"}}) {
+    r.thinking_level = level;
+    auto e = gemini::encode(desc(), r, false); CHECK(std::holds_alternative<gemini::EncodedRequest>(e));
+    const auto wire = owned(std::get<gemini::EncodedRequest>(e).body);
+    const auto config = wire->root().get("generationConfig");
+    CHECK(config.get("temperature").as_double() == 0.25);
+    CHECK(config.get("thinkingConfig").get("thinkingLevel").as_string() == name);
+    CHECK(!config.get("thinkingConfig").get("thinkingBudget").valid());
+    CHECK(!config.get("thinkingConfig").get("includeThoughts").as_bool());
+    CHECK(json::equal(wire->root().get("safetySettings"), expected->root()));
+  }
+  for (auto [mode, name] : {std::pair{gemini::ToolChoiceMode::Auto, "AUTO"}, {gemini::ToolChoiceMode::Any, "ANY"},
+      {gemini::ToolChoiceMode::None, "NONE"}, {gemini::ToolChoiceMode::Validated, "VALIDATED"}}) {
+    r.tool_choice = gemini::ToolChoice{mode, {}};
+    if (mode == gemini::ToolChoiceMode::Any || mode == gemini::ToolChoiceMode::Validated) r.tool_choice->allowed_function_names = {"lookup"};
+    const auto e = gemini::encode(desc(), r, true); CHECK(std::holds_alternative<gemini::EncodedRequest>(e));
+    const auto wire = owned(std::get<gemini::EncodedRequest>(e).body);
+    const auto choice = wire->root().get("toolConfig").get("functionCallingConfig");
+    CHECK(choice.get("mode").as_string() == name);
+    if (!r.tool_choice->allowed_function_names.empty()) CHECK(choice.get("allowedFunctionNames").at(0).as_string() == "lookup");
+    else CHECK(!choice.get("allowedFunctionNames").valid());
+  }
+  const auto seeded = gemini::encode(desc(), r, false); CHECK(std::holds_alternative<gemini::EncodedRequest>(seeded));
+  Accumulator a; gemini::Codec codec(desc(), gemini::Mode::Buffered, a, std::get<gemini::EncodedRequest>(seeded).context);
+  codec.buffered(body(R"([{"text":"answer"}])"), {}); CHECK(a.outcome());
+  auto continuation = r; continuation.messages.push_back(complete(*a.outcome()).messages[0]);
+  continuation.tool_choice = gemini::ToolChoice{gemini::ToolChoiceMode::None, {}};
+  CHECK(std::holds_alternative<gemini::EncodedRequest>(gemini::encode(desc(), continuation, true)));
+  continuation.tool_choice.reset(); continuation.required_tool = "lookup";
+  CHECK(std::holds_alternative<gemini::EncodedRequest>(gemini::encode(desc(), continuation, false)));
+  auto refuse = [&](gemini::Request bad) { const auto e = gemini::encode(desc(), bad, false); CHECK(std::holds_alternative<Error>(e) && std::get<Error>(e).kind == ErrorKind::InvalidRequest); };
+  auto bad = r; bad.thinking_budget = 0; refuse(bad);
+  bad = r; bad.history_mode = static_cast<gemini::HistoryMode>(99); refuse(bad);
+  bad = r; bad.thinking_level = static_cast<gemini::ThinkingLevel>(99); refuse(bad);
+  bad = r; bad.temperature = 3; refuse(bad);
+  bad = r; bad.safety_settings.push_back(bad.safety_settings[0]); refuse(bad);
+  bad = r; bad.safety_settings[0].category = static_cast<gemini::SafetyCategory>(99); refuse(bad);
+  bad = r; bad.safety_settings[0].threshold = static_cast<gemini::SafetyThreshold>(99); refuse(bad);
+  bad = r; bad.tool_choice->mode = static_cast<gemini::ToolChoiceMode>(99); refuse(bad);
+  bad = r; bad.required_tool = "lookup"; refuse(bad);
+  bad = r; bad.tool_choice->allowed_function_names = {"lookup", "lookup"}; refuse(bad);
+  bad = r; bad.tool_choice->allowed_function_names = {"undeclared"}; refuse(bad);
+  bad = r; bad.tool_choice->mode = gemini::ToolChoiceMode::None; refuse(bad);
+  bad = r; bad.tool_choice->mode = gemini::ToolChoiceMode::Auto; refuse(bad);
+}
 }
 int main() {
-  try { raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); successive_unidentified_calls(); native_group_and_replay(); nullable_usage(); invalid_model_calls(); errors_and_terminals(); std::cout << "Gemini semantic invariants passed\n"; }
+  try { portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); successive_unidentified_calls(); native_group_and_replay(); nullable_usage(); invalid_model_calls(); errors_and_terminals(); std::cout << "Gemini semantic invariants passed\n"; }
   catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

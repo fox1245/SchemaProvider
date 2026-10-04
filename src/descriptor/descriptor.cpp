@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <cstdlib>
 #include <limits>
 #include <optional>
 #include <span>
@@ -411,6 +412,98 @@ StopKind ValidatedDescriptor::stop_kind(std::string_view raw) const {
 const FamilyPolicy& ValidatedDescriptor::family_policy() const noexcept { return *policy_->family(family_); }
 LoadResult load(std::string_view source, PolicySnapshot policy) { return Loader{std::move(policy)}.run(source); }
 LoadResult load(std::string_view source) { return load(source, builtin_policy()); }
+
+LoadResult load_with_deployment_headers(
+    std::string_view source,
+    const std::vector<std::pair<std::string, std::string>>& overrides,
+    const DeploymentHeaderEnvironment& environment, PolicySnapshot policy) {
+    if (!policy) policy = builtin_policy();
+    const auto& limits = policy->resources();
+    auto bad = [](std::string expected) -> LoadResult {
+        return ConfigError{"/connection/headers", std::move(expected), 0, "deployment headers rejected before descriptor admission"};
+    };
+    auto parsed = json::parse(source, {limits.descriptor_bytes, limits.descriptor_depth});
+    const auto* document = std::get_if<json::Document>(&parsed);
+    if (!document || !document->root().is_object()) return load(source, std::move(policy));
+    const auto root = document->root(), connection = root.get("connection");
+    if (!connection.is_object()) return load(source, std::move(policy));
+    const auto existing = connection.get("headers");
+    if (existing.valid() && !existing.is_object()) return bad("literal headers object");
+    std::vector<std::pair<std::string, std::string>> headers;
+    std::unordered_set<std::string> names;
+    if (existing.valid()) for (auto member : existing.members()) {
+        if (!member.value.is_string() || !names.insert(lower(member.key)).second)
+            return bad("unique case-insensitive literal headers");
+        headers.emplace_back(member.key, member.value.as_string());
+    }
+    auto replace = [&](std::string_view name, std::string_view value) {
+        const auto key = lower(name);
+        for (auto& header : headers) if (lower(header.first) == key) {
+            header.first = name; header.second = value; return;
+        }
+        headers.emplace_back(name, value);
+    };
+    // Existing explicit descriptor headers outrank optional host environment.
+    if (root.get("family").is_string() && root.get("family").as_string() == "anthropic.messages") {
+        if (environment.anthropic_workspace_id && !environment.anthropic_workspace_id->empty() &&
+            !names.contains("anthropic-workspace-id"))
+            replace("anthropic-workspace-id", *environment.anthropic_workspace_id);
+        if (environment.anthropic_beta && !environment.anthropic_beta->empty() &&
+            !names.contains("anthropic-beta"))
+            replace("anthropic-beta", *environment.anthropic_beta);
+    }
+    names.clear();
+    if (overrides.size() > 32) return bad("at most 32 explicit overrides");
+    for (const auto& [name, value] : overrides) {
+        if (!names.insert(lower(name)).second) return bad("unique case-insensitive explicit overrides");
+        replace(name, value);
+    }
+    auto build = [&](json::BoundedWriter& body) {
+    body.raw("{");
+    bool comma = false;
+    for (auto member : root.members()) {
+        if (comma) body.raw(",");
+        comma = true;
+        body.quoted(member.key).raw(":");
+        if (member.key != "connection") { body.value(member.value, 1); continue; }
+        body.raw("{");
+        bool connection_comma = false;
+        for (auto item : connection.members()) {
+            if (item.key == "headers") continue;
+            if (connection_comma) body.raw(",");
+            connection_comma = true;
+            body.quoted(item.key).raw(":").value(item.value, 2);
+        }
+        if (connection_comma) body.raw(",");
+        body.raw("\"headers\":{");
+        bool header_comma = false;
+        for (const auto& [name, value] : headers) {
+            if (header_comma) body.raw(",");
+            header_comma = true;
+            body.quoted(name).raw(":").quoted(value);
+        }
+        body.raw("}}");
+    }
+    body.raw("}");
+    };
+    json::BoundedWriter measure({limits.descriptor_bytes, limits.descriptor_depth});
+    build(measure);
+    if (!measure.ok()) return bad("bounded encodable descriptor");
+    std::string encoded;
+    encoded.reserve(measure.size());
+    json::BoundedWriter writer({limits.descriptor_bytes, limits.descriptor_depth}, &encoded);
+    build(writer);
+    if (!writer.ok()) return bad("bounded encodable descriptor");
+    return load(encoded, std::move(policy));
+}
+LoadResult load_with_environment_headers(
+    std::string_view source,
+    const std::vector<std::pair<std::string, std::string>>& overrides, PolicySnapshot policy) {
+    DeploymentHeaderEnvironment environment;
+    if (const char* value = std::getenv("ANTHROPIC_WORKSPACE_ID")) environment.anthropic_workspace_id = value;
+    if (const char* value = std::getenv("ANTHROPIC_BETA")) environment.anthropic_beta = value;
+    return load_with_deployment_headers(source, overrides, environment, std::move(policy));
+}
 
 } // namespace sp::descriptor
 

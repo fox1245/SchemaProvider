@@ -160,7 +160,10 @@ void effective_digest(Hash& hash, const descriptor::EffectiveChoices& choices) {
   auto integer = [&](const auto& value) { hash.number(value.has_value()); if (value) hash.number(*value); };
   auto text = [&](const auto& value) { hash.number(value.has_value()); if (value) hash.text(*value); };
   auto number = [&](const auto& value) { hash.number(value.has_value()); if (value) hash.number(std::bit_cast<uint64_t>(*value)); };
-  integer(choices.max_output_tokens); integer(choices.thinking_budget);
+  // Generation cap governs this dispatch's resource admission, not consumption
+  // of already-sealed history. Reasoning budget and every lineage control remain
+  // bound; the encoded request separately retains its actual generation cap.
+  integer(choices.thinking_budget);
   integer(choices.include_thoughts); integer(choices.thinking_summaries);
   hash.number(choices.reasoning_enabled);
   if (choices.reasoning_enabled) { text(choices.reasoning_effort); text(choices.reasoning_summary); }
@@ -194,6 +197,16 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
   hash.text(request.model);
   routing_digest(hash, request.provider);
   response_format_digest(hash, request.response_format);
+  hash.number(request.reasoning.has_value());
+  if (request.reasoning) {
+    hash.number(request.reasoning->effort.has_value()); if (request.reasoning->effort) hash.text(*request.reasoning->effort);
+    hash.number(request.reasoning->max_tokens.has_value()); if (request.reasoning->max_tokens) hash.number(*request.reasoning->max_tokens);
+    hash.number(request.reasoning->exclude.has_value()); if (request.reasoning->exclude) hash.number(*request.reasoning->exclude);
+    hash.number(request.reasoning->enabled.has_value()); if (request.reasoning->enabled) hash.number(*request.reasoning->enabled);
+  }
+  hash.number(request.include_reasoning.has_value()); if (request.include_reasoning) hash.number(*request.include_reasoning);
+  hash.number(request.usage_include.has_value()); if (request.usage_include) hash.number(*request.usage_include);
+  hash.number(request.models.size()); for (const auto& model : request.models) hash.text(model);
   hash.number(request.tools.size());
   for (const auto& tool : request.tools) {
     hash.text(tool.name); hash.text(tool.description); hash.document(tool.parameters);
@@ -204,6 +217,14 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
   Hash hash(descriptor.policy()->resources()); hash.text("sp.messages.configuration.v1");
   effective_digest(hash, choices);
   hash.text(request.model); hash.text(request.account_scope); hash.text(request.system);
+  hash.number(request.thinking_mode.has_value()); if (request.thinking_mode) hash.number(static_cast<unsigned>(*request.thinking_mode));
+  hash.number(request.output_effort.has_value()); if (request.output_effort) hash.number(static_cast<unsigned>(*request.output_effort));
+  hash.number(request.cache_control.has_value());
+  if (request.cache_control) {
+    hash.number(request.cache_control->ttl.has_value());
+    if (request.cache_control->ttl) hash.number(static_cast<unsigned>(*request.cache_control->ttl));
+  }
+  routing_digest(hash, request.provider);
   hash.number(request.tools.size());
   for (const auto& tool : request.tools) {
     hash.text(tool.name); hash.text(tool.description); hash.document(tool.input_schema); hash.text(tool.type);
@@ -219,6 +240,14 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
   hash.number(request.max_tool_calls.has_value()); if (request.max_tool_calls) hash.number(*request.max_tool_calls);
   routing_digest(hash, request.provider);
   response_format_digest(hash, request.response_format);
+  hash.number(request.parallel_tool_calls.has_value()); if (request.parallel_tool_calls) hash.number(*request.parallel_tool_calls);
+  hash.number(request.verbosity.has_value()); if (request.verbosity) hash.number(static_cast<unsigned>(*request.verbosity));
+  hash.number(request.truncation.has_value()); if (request.truncation) hash.number(static_cast<unsigned>(*request.truncation));
+  hash.number(request.include.has_value());
+  if (request.include) {
+    hash.number(request.include->size());
+    for (const auto value : *request.include) hash.number(static_cast<unsigned>(value));
+  }
   hash.number(request.hosted_tools.size());
   for (const auto& hosted : request.hosted_tools) {
     hash.number(hosted.index());
@@ -251,6 +280,11 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
   Hash hash(descriptor.policy()->resources()); hash.text("sp.gemini.configuration.v1");
   effective_digest(hash, choices);
   hash.text(request.model); hash.text(request.account_scope); hash.text(request.system);
+  hash.number(request.safety_settings.size());
+  for (const auto& setting : request.safety_settings) {
+    hash.number(static_cast<unsigned>(setting.category));
+    hash.number(static_cast<unsigned>(setting.threshold));
+  }
   // required_tool is a per-turn choice, not continuation lineage.
   hash.number(request.tools.size());
   for (const auto& tool : request.tools) {
@@ -326,7 +360,40 @@ NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, 
 NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, const responses::Request& request, const descriptor::EffectiveChoices& choices, bool streaming)
     : family_(Family::Responses), model_(request.model), route_(descriptor.path(streaming)), prefix_count_(request.messages.size()), policy_(descriptor.policy()) {
   valid_ = descriptor.family() == "openai.responses" && origin_digest(descriptor, origin_) && configuration_digest(descriptor, request, choices, prefix_);
-  if (valid_) bind_history(request.messages);
+  if (!valid_) return;
+  configuration_ = prefix_;
+  if (request.previous_response_id) {
+    replay_eligible_ = false;
+    cursor_authority_ = true;
+    if (!request.previous_response_history.empty()) {
+      const auto& previous = request.previous_response_history.back();
+      if (previous.role != Role::Assistant || previous.id != *request.previous_response_id ||
+          !previous.native || !previous.wire_output || !previous.wire_output->root().is_array()) {
+        history_valid_ = false; return;
+      }
+      const auto& seal = *previous.native;
+      if (seal.context_ && seal.context_->cursor_authority_) {
+        Digest content{};
+        if (request.previous_response_history.size() != 1 || !seal.continuation_complete_ ||
+            !seal.context_->valid_ || !seal.context_->history_valid_ ||
+            seal.context_->family_ != family_ || seal.context_->model_ != model_ ||
+            seal.context_->route_ != route_ || seal.context_->origin_ != origin_ ||
+            seal.context_->configuration_ != configuration_ ||
+            !content_digest(previous, content, family_name(family_), policy_->resources()) ||
+            content != seal.content_) { history_valid_ = false; return; }
+        prefix_ = seal.context_->prefix_;
+        if (!append_prefix(prefix_, content, 0, family_name(family_), policy_->resources())) { valid_ = false; return; }
+      } else {
+        bind_history(request.previous_response_history);
+        if (!valid_ || !history_valid_) return;
+      }
+    }
+    Hash cursor(policy_->resources());
+    cursor.text("sp.responses.cursor.v1"); cursor.bytes(prefix_.data(), prefix_.size());
+    cursor.text(*request.previous_response_id);
+    if (!cursor.finish(prefix_)) { valid_ = false; return; }
+  }
+  bind_history(request.messages);
 }
 NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, const gemini::Request& request, const descriptor::EffectiveChoices& choices, bool)
     : family_(Family::Gemini), model_(request.model), route_(descriptor.path(false)), prefix_count_(request.messages.size()), policy_(descriptor.policy()) {
@@ -335,7 +402,7 @@ NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, 
     client_tools_.reserve(request.tools.size());
     for (const auto& tool : request.tools) client_tools_.push_back(tool.name);
     std::sort(client_tools_.begin(), client_tools_.end());
-    bind_history(request.messages);
+    bind_history(request.messages, request.history_mode == gemini::HistoryMode::PortableForeign);
   }
 }
 NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, const interactions::Request& request, const descriptor::EffectiveChoices& choices, bool streaming)
@@ -380,7 +447,7 @@ NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, 
     if (!hash.finish(content) || !append_prefix(prefix_, content, index, family_name(family_), policy_->resources())) { valid_ = false; return; }
   }
 }
-void NativeContext::bind_history(const std::vector<Message>& messages) {
+void NativeContext::bind_history(const std::vector<Message>& messages, bool portable_gemini) {
   std::map<std::string, std::string> pending;
   for (size_t index = 0; index < messages.size(); ++index) {
     const auto& message = messages[index];
@@ -393,8 +460,15 @@ void NativeContext::bind_history(const std::vector<Message>& messages) {
           history_valid_ = false; return;
         }
       } else {
-        if (message.role == Role::Assistant || message.wire_output ||
-            std::any_of(message.parts.begin(), message.parts.end(), [](const Part& part) {
+        const bool portable = family_ == Family::Gemini && portable_gemini && message.role == Role::Assistant;
+        if (message.wire_output || (message.role == Role::Assistant && !portable) ||
+            std::any_of(message.parts.begin(), message.parts.end(), [portable](const Part& part) {
+              if (portable) {
+                if (std::holds_alternative<Text>(part)) return false;
+                const auto* call = std::get_if<ToolCall>(&part);
+                return !call || call->kind != ToolCallKind::ClientExecuted ||
+                    !call->wire_type.empty() || call->wire_metadata;
+              }
               return !std::holds_alternative<Text>(part) && !std::holds_alternative<Image>(part) && !std::holds_alternative<ToolResult>(part);
             })) { history_valid_ = false; return; }
       }
@@ -442,17 +516,21 @@ NativeReplay::NativeReplay(std::shared_ptr<const NativeContext> context, const M
       std::any_of(message.parts.begin(), message.parts.end(), [](const Part& part) {
         return std::holds_alternative<InvalidToolCall>(part);
       });
-  complete_ = complete && eligible && !invalid_call && context_ && context_->valid_ && context_->history_valid_ && context_->replay_eligible_ && stop &&
+  const bool terminal = complete && eligible && !invalid_call && context_ && context_->valid_ &&
+      context_->history_valid_ && stop &&
       content_digest(message, content_, NativeContext::family_name(context_->family_), context_->policy_->resources());
+  complete_ = terminal && context_->replay_eligible_;
+  continuation_complete_ = terminal && context_->family_ == NativeContext::Family::Responses &&
+      context_->cursor_authority_;
 }
 InterfaceContract core_interface_contract() noexcept {
   std::uint64_t capabilities = capability::NullableUsage |
       capability::All5Native | capability::TrustedArchive | capability::OrderedWireEvents;
   if (json::retained_size_contract() == 1) capabilities |= capability::RetainedJsonSize;
 #if defined(__unix__) || defined(__APPLE__)
-  return {3, capabilities | capability::PosixRuntime};
+  return {4, capabilities | capability::PosixRuntime};
 #else
-  return {3, capabilities};
+  return {4, capabilities};
 #endif
 }
 } // namespace sp

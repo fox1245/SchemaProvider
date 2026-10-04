@@ -105,6 +105,7 @@ void images_and_cross_mode(Peer& peer) {
     bad = r; std::get<sp::ToolResult>(bad.messages[2].parts[0]).tool_use_id = "foreign"; failure(client.complete(bad, run(!sse)), sp::ErrorKind::InvalidRequest); peer.count(model, 1);
     bad = r; std::get<sp::ToolResult>(bad.messages[2].parts[0]).content = "not JSON"; failure(client.complete(bad, run(!sse)), sp::ErrorKind::InvalidRequest); peer.count(model, 1);
     r.required_tool.reset();
+    r.history_mode = sp::gemini::HistoryMode::PortableForeign;
     const auto second = client.complete(r, run(!sse)); require(text(complete(second).messages) == "{\"result\":" + std::to_string(scene->weighted) + "}", "image loop final answer wrong");
     peer.count(model, 2); const auto stats = peer.stats(model);
     require(stats.root().get("replayed").as_uint() == 1 && stats.root().get("images").as_uint() == 2, "actual peer did not verify images and native replay");
@@ -155,9 +156,75 @@ void invalid_and_nullable(Peer& peer) {
     require(usage.input_total->value == 10 && !usage.output_total && !usage.reasoning && !usage.total && usage.provider_reported_total->value == 20, "unknown thought usage guessed"); peer.count(model, 1);
   }
 }
+void portable_controls_on_wire(Peer& peer) {
+  for (bool sse : {false, true}) for (const auto scenario : {"portable-text", "portable"}) {
+    const auto model = peer.arm(scenario); sp::runtime::Client client(descriptor(peer, model), options());
+    auto r = request(model); r.thinking_budget.reset(); r.thinking_level = sp::gemini::ThinkingLevel::High;
+    r.include_thoughts = false; r.temperature = 0.25; r.history_mode = sp::gemini::HistoryMode::PortableForeign;
+    r.safety_settings = {{sp::gemini::SafetyCategory::Harassment, sp::gemini::SafetyThreshold::BlockNone},
+        {sp::gemini::SafetyCategory::HateSpeech, sp::gemini::SafetyThreshold::BlockOnlyHigh},
+        {sp::gemini::SafetyCategory::SexuallyExplicit, sp::gemini::SafetyThreshold::BlockMediumAndAbove},
+        {sp::gemini::SafetyCategory::DangerousContent, sp::gemini::SafetyThreshold::BlockLowAndAbove},
+        {sp::gemini::SafetyCategory::CivicIntegrity, sp::gemini::SafetyThreshold::Off}};
+    r.tool_choice = sp::gemini::ToolChoice{sp::gemini::ToolChoiceMode::Validated, {"lookup"}};
+    r.messages.push_back(sp::Message{"", sp::Role::Assistant, {sp::Text{"foreign answer"}}});
+    if (std::string_view(scenario) == "portable") {
+      r.messages.push_back(sp::Message{"", sp::Role::Assistant, {sp::Text{"checking"},
+          sp::ToolCall{"foreign-a", "lookup", sp::ToolCallKind::ClientExecuted, owned(R"({"x":1})")},
+          sp::ToolCall{"foreign-b", "lookup", sp::ToolCallKind::ClientExecuted, owned(R"({"x":2})")}}});
+      r.messages.push_back(sp::Message{"", sp::Role::Tool, {
+          sp::ToolResult{"foreign-b", R"({"result":2})"}, sp::ToolResult{"foreign-a", R"({"result":1})"}}});
+    }
+    auto refuse = [&](sp::gemini::Request bad, sp::ErrorKind kind, size_t count) {
+      const auto result = client.complete(std::move(bad), run(sse));
+      const auto& f = failure(result, kind);
+      require(!f.error.attempt.request_may_have_left && f.error.attempt.request_body_bytes == 0, "invalid portable controls dispatched");
+      peer.count(model, count);
+    };
+    auto bad = r; bad.history_mode = sp::gemini::HistoryMode::NativeOnly; refuse(bad, sp::ErrorKind::ReplayIneligible, 0);
+    bad = r; bad.history_mode = static_cast<sp::gemini::HistoryMode>(99); refuse(bad, sp::ErrorKind::InvalidRequest, 0);
+    bad = r; bad.thinking_level = static_cast<sp::gemini::ThinkingLevel>(99); refuse(bad, sp::ErrorKind::InvalidRequest, 0);
+    bad = r; bad.thinking_budget = 1024; refuse(bad, sp::ErrorKind::InvalidRequest, 0);
+    bad = r; bad.temperature = 3; refuse(bad, sp::ErrorKind::InvalidRequest, 0);
+    bad = r; bad.safety_settings[0].category = static_cast<sp::gemini::SafetyCategory>(99); refuse(bad, sp::ErrorKind::InvalidRequest, 0);
+    bad = r; bad.safety_settings[0].threshold = static_cast<sp::gemini::SafetyThreshold>(99); refuse(bad, sp::ErrorKind::InvalidRequest, 0);
+    bad = r; bad.safety_settings.push_back(bad.safety_settings[0]); refuse(bad, sp::ErrorKind::InvalidRequest, 0);
+    bad = r; bad.tool_choice->mode = static_cast<sp::gemini::ToolChoiceMode>(99); refuse(bad, sp::ErrorKind::InvalidRequest, 0);
+    bad = r; bad.tool_choice->allowed_function_names = {"lookup", "lookup"}; refuse(bad, sp::ErrorKind::InvalidRequest, 0);
+    bad = r; bad.tool_choice->allowed_function_names = {"missing"}; refuse(bad, sp::ErrorKind::InvalidRequest, 0);
+    bad = r; bad.tool_choice->mode = sp::gemini::ToolChoiceMode::Auto; refuse(bad, sp::ErrorKind::InvalidRequest, 0);
+    bad = r; bad.required_tool = "lookup"; refuse(bad, sp::ErrorKind::InvalidRequest, 0);
+    bad = r; bad.messages[1].parts.push_back(sp::Thinking{"foreign reasoning", "captured"}); refuse(bad, sp::ErrorKind::ReplayIneligible, 0);
+    bad = r; bad.messages[1].wire_output = owned("[]"); refuse(bad, sp::ErrorKind::ReplayIneligible, 0);
+    if (std::string_view(scenario) == "portable") {
+      bad = r; std::get<sp::ToolCall>(bad.messages[2].parts[1]).wire_metadata = owned(R"({"thoughtSignature":"captured"})");
+      refuse(bad, sp::ErrorKind::ReplayIneligible, 0);
+      bad = r; std::get<sp::ToolResult>(bad.messages[3].parts[1]).tool_use_id = "foreign-b";
+      refuse(bad, sp::ErrorKind::InvalidRequest, 0);
+    }
+    const auto first = client.complete(r, run(sse));
+    require(text(complete(first).messages) == "portable accepted", "foreign history not accepted on wire");
+    peer.count(model, 1);
+    for (const auto& message : r.messages) require(!message.native && !message.wire_output, "import gained native authority");
+    r.messages.push_back(complete(first).messages[0]);
+    require(r.messages.back().native && r.messages.back().native->complete(), "new output lacks authentic seal");
+    bad = r; std::get<sp::Text>(bad.messages[1].parts[0]).value = "changed imported prefix";
+    refuse(bad, sp::ErrorKind::ReplayIneligible, 1);
+    bad = r; bad.messages.back().wire_output = owned(R"([{"text":"changed native","thoughtSignature":"NEW_NATIVE_SIG"}])");
+    refuse(bad, sp::ErrorKind::ReplayIneligible, 1);
+    bad = r; bad.temperature = 0.5; refuse(bad, sp::ErrorKind::ReplayIneligible, 1);
+    bad = r; bad.thinking_level = sp::gemini::ThinkingLevel::Low; refuse(bad, sp::ErrorKind::ReplayIneligible, 1);
+    bad = r; bad.safety_settings[0].threshold = sp::gemini::SafetyThreshold::Off; refuse(bad, sp::ErrorKind::ReplayIneligible, 1);
+    sp::runtime::Client foreign(descriptor(peer, model, true), options());
+    failure(foreign.complete(r, run(!sse)), sp::ErrorKind::ReplayIneligible); peer.count(model, 1);
+    require(text(complete(client.complete(r, run(!sse))).messages) == "portable accepted", "authentic continuation after import changed");
+    peer.count(model, 2);
+    require(peer.stats(model).root().get("replayed").as_uint() == 1, "peer did not verify authentic replay following import");
+  }
+}
 }
 int main(int argc, char** argv) {
   if (argc != 3) return 2;
-  try { Peer peer(argv[1], argv[2]); images_and_cross_mode(peer); terminals_and_ownership(peer); invalid_and_nullable(peer); std::cout << "Gemini native HTTP/SSE scenarios passed\n"; }
+  try { Peer peer(argv[1], argv[2]); portable_controls_on_wire(peer); images_and_cross_mode(peer); terminals_and_ownership(peer); invalid_and_nullable(peer); std::cout << "Gemini native HTTP/SSE scenarios passed\n"; }
   catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

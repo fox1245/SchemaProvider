@@ -78,9 +78,11 @@ std::optional<std::string> validate(const FamilyPolicy& f, const EffectiveChoice
   auto valid_number=[](const auto& value,const auto& bounds){return !value || (std::isfinite(*value) && *value>=bounds[0] && *value<=bounds[1]);};
   if(!valid_number(c.temperature,f.temperature_range) || !valid_number(c.top_p,f.top_p_range)) return "sampling parameter outside admitted range";
   if(c.thinking_budget && (*c.thinking_budget<f.thinking_minimum || (c.max_output_tokens && (f.family=="anthropic.messages" ? *c.thinking_budget>=*c.max_output_tokens : *c.thinking_budget>*c.max_output_tokens)))) return "thinking budget incompatible with output cap";
+  if (f.family=="google.generate" && c.thinking_budget && c.thinking_level) return "thinking budget and level are mutually exclusive";
   if(f.family=="anthropic.messages" && c.thinking_budget && (c.temperature || (c.top_p && *c.top_p<f.thinking_top_p_minimum))) return "manual thinking sampling parameters are incompatible";
   auto valid_text=[](const auto& value,const auto& allowed){return !value || contains(allowed,*value);};
-  if ((f.family=="google.generate" || f.family=="google.interactions") && (c.temperature || c.top_p)) return "sampling control unsupported by typed request";
+  if (f.family=="google.interactions" && (c.temperature || c.top_p)) return "sampling control unsupported by typed request";
+  if (f.family=="google.generate" && c.top_p) return "top_p unsupported by typed Generate request";
   if(!valid_text(c.reasoning_effort,f.reasoning_efforts) || !valid_text(c.reasoning_summary,f.reasoning_summaries) || !valid_text(c.thinking_level,f.thinking_levels) || !valid_text(c.service_tier,f.service_tiers)) return "unsupported typed semantic control";
   if(c.reasoning_enabled && f.family!="openai.responses") return "reasoning object unsupported for family";
   if(c.reasoning_enabled && (!c.reasoning_effort || !c.reasoning_summary)) return "complete effective reasoning options required";
@@ -89,7 +91,7 @@ std::optional<std::string> validate(const FamilyPolicy& f, const EffectiveChoice
   if(c.thinking_budget && f.family!="anthropic.messages" && f.family!="google.generate")return "thinking budget unsupported for family";
   if(c.reasoning_effort && f.family!="openai.chat" && f.family!="openai.responses") return "reasoning effort unsupported for family";
   if(c.reasoning_summary && f.family!="openai.responses") return "reasoning summary unsupported for family";
-  if(c.thinking_level && f.family!="google.interactions") return "thinking level unsupported for family";
+  if(c.thinking_level && f.family!="google.interactions" && f.family!="google.generate") return "thinking level unsupported for family";
   if(c.service_tier && f.family!="openai.chat" && f.family!="openai.responses" && f.family!="google.interactions") return "service tier unsupported for family";
   return {};
 }
@@ -126,7 +128,7 @@ class PolicyLoader {
         fail("", "configured policy depth limit");
       auto families=root.get("families"); if(!families.is_array() || families.size()!=5)fail("/families","all five typed families");
       for(auto v:families.elements()) {
-        closed(v,{"family","bindings","stop_reasons","defaults","required_output_cap","temperature_range","top_p_range","thinking_minimum","thinking_top_p_minimum","reasoning_efforts","reasoning_summaries","thinking_levels","service_tiers","header_versions","header_version","server_tools","openrouter_origins"},"/families");
+        closed(v,{"family","bindings","stop_reasons","defaults","required_output_cap","temperature_range","top_p_range","thinking_minimum","thinking_top_p_minimum","reasoning_efforts","reasoning_summaries","thinking_levels","service_tiers","header_versions","header_version","server_tools","openrouter_origins","temperature_forbidden_model_prefixes"},"/families");
         FamilyPolicy f; f.family=text(v.get("family"),"/families");
         if(f.family!="openai.chat" && f.family!="anthropic.messages" && f.family!="openai.responses" && f.family!="google.generate" && f.family!="google.interactions")fail("/families","typed family");
         if(policy->family(f.family))fail("/families","unique families");
@@ -139,7 +141,13 @@ class PolicyLoader {
         f.temperature_range=range(v.get("temperature_range")); f.top_p_range=range(v.get("top_p_range")); f.thinking_minimum=integer(v.get("thinking_minimum"),"/thinking_minimum"); f.thinking_top_p_minimum=number(v.get("thinking_top_p_minimum"),"/thinking_top_p_minimum");
         f.reasoning_efforts=strings(v.get("reasoning_efforts"),"/reasoning_efforts"); f.reasoning_summaries=strings(v.get("reasoning_summaries"),"/reasoning_summaries"); f.thinking_levels=strings(v.get("thinking_levels"),"/thinking_levels"); f.service_tiers=strings(v.get("service_tiers"),"/service_tiers"); f.header_versions=strings(v.get("header_versions"),"/header_versions"); f.header_version=optional_text(v.get("header_version"),"/header_version");
         f.openrouter_origins = strings(v.get("openrouter_origins"), "/openrouter_origins");
-        if (!f.openrouter_origins.empty() && f.family != "openai.chat" && f.family != "openai.responses")
+        f.temperature_forbidden_model_prefixes = strings(v.get("temperature_forbidden_model_prefixes"), "/temperature_forbidden_model_prefixes");
+        for (const auto& prefix : f.temperature_forbidden_model_prefixes)
+          if (prefix.find('/') != std::string::npos ||
+              std::any_of(prefix.begin(), prefix.end(), [](unsigned char c) {
+                return !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.');
+              })) fail("/temperature_forbidden_model_prefixes", "lowercase model prefixes without gateway namespace");
+        if (!f.openrouter_origins.empty() && f.family != "openai.chat" && f.family != "openai.responses" && f.family != "anthropic.messages")
           fail("/openrouter_origins", "routing only for declared OpenRouter API families");
         for (const auto& route : f.openrouter_origins)
           if (!valid_origin(route) || route.ends_with('/'))
@@ -221,6 +229,25 @@ PolicySnapshot builtin_policy(){static const auto value=[] {auto r=load_policy(c
 std::optional<std::string_view> borrowed(const std::optional<std::string>& value){if(value)return *value;return {};}
 bool contains(const std::vector<std::string>& values,std::string_view value){return std::find(values.begin(),values.end(),value)!=values.end();}
 EffectiveChoices effective_defaults(const ValidatedDescriptor& d,std::string_view model){return choices(d.policy()->defaults(d.family(),model));}
-std::optional<std::string> validate_choices(const ValidatedDescriptor& d,std::string_view model,const EffectiveChoices& c){return validate(d.family_policy(),c,d.policy()->output_limit(d.family(),model),true);}
-std::uint32_t interface_revision() noexcept { return 3; }
+bool temperature_forbidden(const ValidatedDescriptor& d, std::string_view model) {
+  const auto slash = model.rfind('/');
+  const auto suffix = slash == std::string_view::npos ? model : model.substr(slash + 1);
+  auto starts = [](std::string_view value, std::string_view prefix) {
+    if (value.size() < prefix.size()) return false;
+    for (std::size_t i = 0; i < prefix.size(); ++i) {
+      auto c = value[i];
+      if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + ('a' - 'A'));
+      if (c != prefix[i]) return false;
+    }
+    return true;
+  };
+  for (const auto& prefix : d.family_policy().temperature_forbidden_model_prefixes)
+    if (starts(model, prefix) || starts(suffix, prefix)) return true;
+  return false;
+}
+std::optional<std::string> validate_choices(const ValidatedDescriptor& d,std::string_view model,const EffectiveChoices& c) {
+  if (c.temperature && temperature_forbidden(d, model)) return "temperature is prohibited for the admitted model";
+  return validate(d.family_policy(),c,d.policy()->output_limit(d.family(),model),true);
+}
+std::uint32_t interface_revision() noexcept { return 4; }
 } // namespace sp::descriptor

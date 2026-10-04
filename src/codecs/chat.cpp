@@ -228,9 +228,9 @@ bool Codec::reasoning_details(json::Value value, bool streaming) {
       !emit(PartSeal{id, {}})) return false;
   if (!streaming) return true;
   reasoning_frames_.push_back(std::move(metadata));
-  // OpenRouter's official accumulator joins consecutive text/summary deltas;
-  // encrypted objects are discrete blobs and are never concatenated.
-  // https://github.com/OpenRouterTeam/ai-sdk-provider/blob/main/src/chat/index.ts
+  // Indexed text/summary deltas can interleave; keep each binding at its first
+  // arrival position. Unindexed deltas join only a compatible consecutive item.
+  // Encrypted objects are discrete blobs and are never concatenated.
   for (auto detail : reasoning_frames_.back()->root().get("details").elements()) {
     const auto detail_type = detail.get("type");
     if (!detail_type.is_string() || detail_type.as_string().empty())
@@ -254,19 +254,32 @@ bool Codec::reasoning_details(json::Value value, bool streaming) {
     if ((fragment.valid() && !fragment.is_null() && !fragment.is_string()) ||
         (signature.valid() && !signature.is_null() && !signature.is_string()))
       return fail(ErrorKind::ProtocolCorrupt, "invalid reasoning text or signature fragment");
-    bool join = !reasoning_bindings_.empty() && reasoning_bindings_.back().payload_key == key;
-    if (join) for (const auto identity_key : {"id", "index"}) {
-      const auto previous = reasoning_bindings_.back().fields.find(identity_key);
-      const auto next = detail.get(identity_key);
-      if (previous != reasoning_bindings_.back().fields.end() && !previous->second.is_null() &&
-          next.valid() && !next.is_null() && !json::equal(previous->second, next)) join = false;
+    std::optional<size_t> binding_index;
+    if (index.valid()) {
+      const auto found = reasoning_indices_.find(uint_value(index));
+      if (found != reasoning_indices_.end()) binding_index = found->second;
     }
-    if (!join) {
+    if (!binding_index && !reasoning_bindings_.empty())
+      binding_index = reasoning_bindings_.size() - 1;
+    if (binding_index) {
+      const auto& previous_binding = reasoning_bindings_[*binding_index];
+      bool compatible = previous_binding.payload_key == key;
+      for (const auto identity_key : {"id", "index"}) {
+        const auto previous = previous_binding.fields.find(identity_key);
+        const auto next = detail.get(identity_key);
+        if (previous != previous_binding.fields.end() && !previous->second.is_null() &&
+            next.valid() && !next.is_null() && !json::equal(previous->second, next)) compatible = false;
+      }
+      if (!compatible) binding_index.reset();
+    }
+    if (!binding_index) {
       if (reasoning_bindings_.size() >= limits_.max_parts)
         return fail(ErrorKind::ResourceLimit, "reasoning detail count limit");
+      binding_index = reasoning_bindings_.size();
       reasoning_bindings_.push_back({detail, {}, key, {}});
     }
-    auto& binding = reasoning_bindings_.back();
+    if (index.valid()) reasoning_indices_[uint_value(index)] = *binding_index;
+    auto& binding = reasoning_bindings_[*binding_index];
     for (auto member : detail.members()) {
       if (member.key == key) continue;
       auto [found, inserted] = binding.fields.emplace(member.key, member.value);

@@ -8,15 +8,32 @@
 // Transport::start() (and the multi handle in the constructor before any I/O thread exists); an
 // easy handle that has not been added yet is owned by the caller alone, so that is not shared state.
 //
-// Linux/POSIX only in the current implementation: sockets owned by libcurl are watched through
-// asio::posix::stream_descriptor and released (never closed) when libcurl removes them.
+// POSIX sockets are borrowed stream descriptors. Windows watches Winsock network-event
+// HANDLEs instead: no Asio socket takes ownership of, or attaches IOCP to, a libcurl socket.
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#endif
 #include "transport/http_transport.h"
 
 #include <asio/bind_executor.hpp>
 #include <asio/executor_work_guard.hpp>
 #include <asio/io_context.hpp>
 #include <asio/post.hpp>
+#ifdef _WIN32
+#include <asio/windows/object_handle.hpp>
+#else
 #include <asio/posix/stream_descriptor.hpp>
+#endif
 #include <asio/steady_timer.hpp>
 #include <asio/strand.hpp>
 
@@ -34,9 +51,11 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#ifndef _WIN32
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <sys/socket.h>
+#endif
 
 #include <deque>
 
@@ -46,9 +65,36 @@ namespace {
 
 thread_local bool tl_io_thread = false;
 
+#ifdef _WIN32
+// Resolver threads may outlive the transport. Keep their Winsock reference alive until the
+// last lookup returns, and keep the core's reference until its sockets and io_context are gone.
+struct WinsockRuntime {
+  WinsockRuntime() {
+    WSADATA data{};
+    const int rc = WSAStartup(MAKEWORD(2, 2), &data);
+    if (rc != 0) throw std::runtime_error("WSAStartup failed");
+    if (data.wVersion != MAKEWORD(2, 2)) {
+      WSACleanup();
+      throw std::runtime_error("Winsock 2.2 is required");
+    }
+  }
+  ~WinsockRuntime() { WSACleanup(); }
+  WinsockRuntime(const WinsockRuntime&) = delete;
+  WinsockRuntime& operator=(const WinsockRuntime&) = delete;
+};
+#endif
+
 void ensure_curl_global_init() {
   static std::once_flag once;
-  std::call_once(once, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
+  std::call_once(once, [] {
+#ifdef _WIN32
+    // Winsock belongs to WinsockRuntime, not to libcurl's process-lifetime global state.
+    const CURLcode rc = curl_global_init(CURL_GLOBAL_DEFAULT & ~CURL_GLOBAL_WIN32);
+#else
+    const CURLcode rc = curl_global_init(CURL_GLOBAL_DEFAULT);
+#endif
+    if (rc != CURLE_OK) throw std::runtime_error("curl_global_init failed");
+  });
 }
 
 std::string lower(std::string_view s) {
@@ -137,17 +183,41 @@ std::vector<std::string> default_resolve(const std::string& host) {
 // ownership of this state, so a lookup stuck in getaddrinfo can never block Transport destruction
 // or touch a destroyed transport (results are posted through a weak reference).
 struct ResolverPool : std::enable_shared_from_this<ResolverPool> {
+  enum class SubmitStatus { Queued, Stopped, ResourceFailure };
+
   ResolverPool(unsigned thread_count, ResolveFn fn) : n(thread_count), resolve(std::move(fn)) {}
 
-  void submit(std::function<void()> job) {
-    std::lock_guard lock(mu);
-    if (stopping) return;
+  SubmitStatus submit(std::function<void()> job) {
+    std::unique_lock lock(mu);
+    if (stopping) return startup_failed ? SubmitStatus::ResourceFailure : SubmitStatus::Stopped;
     if (!started) {
-      started = true;
-      for (unsigned i = 0; i < n; ++i) std::thread([self = shared_from_this()] { self->run(); }).detach();
+      // Do not detach a partial pool. All workers wait for this lock until the complete
+      // configured pool exists, so startup failure can join them without running a lookup.
+      std::vector<std::thread> workers;
+      try {
+        workers.reserve(n);
+        for (unsigned i = 0; i < n; ++i)
+          workers.emplace_back([self = shared_from_this()] { self->run(); });
+        for (auto& worker : workers) worker.detach();
+        started = true;
+      } catch (...) {
+        startup_failed = true;
+        stopping = true;
+        jobs.clear();
+        cv.notify_all();
+        lock.unlock();
+        for (auto& worker : workers)
+          if (worker.joinable()) worker.join();
+        return SubmitStatus::ResourceFailure;
+      }
     }
-    jobs.push_back(std::move(job));
+    try {
+      jobs.push_back(std::move(job));
+    } catch (...) {
+      return SubmitStatus::ResourceFailure;
+    }
     cv.notify_one();
+    return SubmitStatus::Queued;
   }
 
   void stop() {
@@ -171,6 +241,9 @@ struct ResolverPool : std::enable_shared_from_this<ResolverPool> {
     }
   }
 
+#ifdef _WIN32
+  std::shared_ptr<WinsockRuntime> winsock_runtime;
+#endif
   const unsigned n;
   ResolveFn resolve;
   std::mutex mu;
@@ -178,6 +251,7 @@ struct ResolverPool : std::enable_shared_from_this<ResolverPool> {
   std::deque<std::function<void()>> jobs;
   bool started = false;
   bool stopping = false;
+  bool startup_failed = false;
 };
 
 }  // namespace
@@ -261,6 +335,38 @@ struct TransportCore : std::enable_shared_from_this<TransportCore> {
   using Strand = asio::strand<asio::io_context::executor_type>;
 
   struct SockWatch {
+#ifdef _WIN32
+    SockWatch(asio::io_context& ctx, curl_socket_t s) : event(ctx), fd(s) {
+      // A private manual-reset event is interoperable with WSAEventSelect. Asio owns only
+      // this HANDLE, so cancellation/destruction cannot close libcurl's SOCKET.
+      HANDLE native = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+      if (!native)
+        throw asio::system_error(asio::error_code(GetLastError(), asio::error::get_system_category()),
+                                 "CreateEventW");
+      asio::error_code ec;
+      event.assign(native, ec);
+      if (ec) {
+        CloseHandle(native);
+        throw asio::system_error(ec, "event handle assignment");
+      }
+    }
+    ~SockWatch() { release_quiet(); }
+    void release_quiet() noexcept {
+      if (selected_events != 0) {
+        // REMOVE may arrive after libcurl closed the socket. Ignore that error, and never
+        // repeat this socket operation from a delayed handler or destructor after reuse.
+        WSAEventSelect(fd, nullptr, 0);
+        selected_events = 0;
+      }
+      asio::error_code ignored;
+      event.close(ignored);  // unregisters the native wait and closes only the event HANDLE
+    }
+    asio::windows::object_handle event;
+    long selected_events = 0;
+    std::uint64_t generation = 0;
+    bool armed = false;
+    bool failed = false;
+#else
     SockWatch(asio::io_context& ctx, curl_socket_t s) : desc(ctx, s), fd(s) {}
     ~SockWatch() { release_quiet(); }
     void release_quiet() noexcept {
@@ -270,11 +376,12 @@ struct TransportCore : std::enable_shared_from_this<TransportCore> {
       }
     }
     asio::posix::stream_descriptor desc;
+    bool armed_read = false;
+    bool armed_write = false;
+#endif
     curl_socket_t fd;
     bool want_read = false;
     bool want_write = false;
-    bool armed_read = false;
-    bool armed_write = false;
     bool removed = false;
   };
 
@@ -284,6 +391,10 @@ struct TransportCore : std::enable_shared_from_this<TransportCore> {
         guard(asio::make_work_guard(ctx)),
         timer(ctx) {}
 
+#ifdef _WIN32
+  // Declared before ctx so cleanup occurs after every Asio service and borrowed socket watch.
+  std::shared_ptr<WinsockRuntime> winsock_runtime = std::make_shared<WinsockRuntime>();
+#endif
   TransportOptions opts;
   asio::io_context ctx;
   Strand strand;
@@ -335,6 +446,10 @@ struct TransportCore : std::enable_shared_from_this<TransportCore> {
   void on_socket(CURL* easy, curl_socket_t s, int what);
   void arm(const std::shared_ptr<SockWatch>& w);
   void on_socket_event(const std::shared_ptr<SockWatch>& w, int flags);
+#ifdef _WIN32
+  bool watch_failure_pending = false;
+  void fail_watches_later();
+#endif
   void note_pause(OperationState& op);
   void note_resume(OperationState& op);
   bool read_suppressed(curl_socket_t s) const;
@@ -342,7 +457,18 @@ struct TransportCore : std::enable_shared_from_this<TransportCore> {
   void shutdown();
 
   static int socket_cb(CURL* easy, curl_socket_t s, int what, void* userp, void*) {
+#ifdef _WIN32
+    auto* self = static_cast<TransportCore*>(userp);
+    try {
+      self->on_socket(easy, s, what);
+    } catch (...) {
+      // Native event allocation/registration failures must not escape a C callback or
+      // leave an unmonitored transfer waiting for peer progress.
+      self->fail_watches_later();
+    }
+#else
     static_cast<TransportCore*>(userp)->on_socket(easy, s, what);
+#endif
     return 0;
   }
   static int timer_cb(CURLM*, long ms, void* userp) {
@@ -616,6 +742,9 @@ void TransportCore::init() {
   ensure_curl_global_init();
   resolver = std::make_shared<ResolverPool>(std::max(1u, opts.resolver_threads),
                                             opts.resolve ? opts.resolve : ResolveFn(default_resolve));
+#ifdef _WIN32
+  resolver->winsock_runtime = winsock_runtime;
+#endif
   const curl_version_info_data* info = curl_version_info(CURLVERSION_NOW);
   if (info->version_num < 0x075800) {  // 7.88.0: PREREQFUNCTION, PROTOCOLS_STR, *_TIME_T infos
     throw std::runtime_error("libcurl 7.88.0 or newer is required");
@@ -631,11 +760,26 @@ void TransportCore::init() {
     curl_multi_setopt(multi, CURLMOPT_MAX_HOST_CONNECTIONS, opts.max_host_connections);
 
   const unsigned n = std::max(1u, opts.io_threads);
-  for (unsigned i = 0; i < n; ++i) {
-    threads.emplace_back([this] {
-      tl_io_thread = true;
-      ctx.run();
-    });
+  try {
+    threads.reserve(n);  // never allocate a vector entry after starting a joinable worker
+    for (unsigned i = 0; i < n; ++i) {
+      threads.emplace_back([this] {
+        tl_io_thread = true;
+        ctx.run();
+      });
+    }
+  } catch (...) {
+    // Transport construction has not published this core or queued any operation. Stop
+    // directly instead of posting normal shutdown to a pool that may be incomplete.
+    stopped = true;
+    guard.reset();
+    ctx.stop();
+    for (auto& worker : threads)
+      if (worker.joinable()) worker.join();
+    threads.clear();
+    curl_multi_cleanup(multi);
+    multi = nullptr;
+    throw;
   }
 }
 
@@ -678,33 +822,51 @@ void TransportCore::add_to_multi(const std::shared_ptr<OperationState>& op) {
 }
 
 void TransportCore::lookup(const std::shared_ptr<OperationState>& op) {
-  const std::string key = lower(op->host);
-  const auto cached = dns_cache.find(key);
-  if (cached != dns_cache.end()) {
-    if (cached->second.expires > std::chrono::steady_clock::now()) {
-      apply_addrs_and_add(op, cached->second.addrs);
-      return;
+  std::string key;
+  bool owns_submission = false;
+  ResolverPool::SubmitStatus status = ResolverPool::SubmitStatus::ResourceFailure;
+  try {
+    key = lower(op->host);
+    const auto cached = dns_cache.find(key);
+    if (cached != dns_cache.end()) {
+      if (cached->second.expires > std::chrono::steady_clock::now()) {
+        apply_addrs_and_add(op, cached->second.addrs);
+        return;
+      }
+      dns_cache.erase(cached);
     }
-    dns_cache.erase(cached);
+    auto& pending = dns_pending[key];
+    pending.waiters.push_back(op);
+    if (pending.in_flight) return;  // single-flight: a resolver job for this host is running
+    owns_submission = true;
+    pending.in_flight = true;
+    std::weak_ptr<TransportCore> weak = shared_from_this();
+    auto pool = resolver;
+    status = pool->submit([weak, pool, key] {
+      std::vector<std::string> addrs;
+      try {
+        addrs = pool->resolve(key);
+      } catch (...) {
+      }
+      if (auto core = weak.lock()) {
+        asio::post(core->strand, [weak, key, addrs = std::move(addrs)]() mutable {
+          if (auto self = weak.lock()) self->on_resolved(key, std::move(addrs));
+        });
+      }
+    });
+    if (status == ResolverPool::SubmitStatus::Queued) return;
+  } catch (...) {
+    // Covers pending-waiter/callable allocation as well as submit's locking failures.
+    // An existing in-flight lookup still belongs to its other waiters.
   }
-  auto& pending = dns_pending[key];
-  pending.waiters.push_back(op);
-  if (pending.in_flight) return;  // single-flight: a lookup for this host is already running
-  pending.in_flight = true;
-  std::weak_ptr<TransportCore> weak = shared_from_this();
-  auto pool = resolver;
-  pool->submit([weak, pool, key] {
-    std::vector<std::string> addrs;
-    try {
-      addrs = pool->resolve(key);
-    } catch (...) {
-    }
-    if (auto core = weak.lock()) {
-      asio::post(core->strand, [weak, key, addrs = std::move(addrs)]() mutable {
-        if (auto self = weak.lock()) self->on_resolved(key, std::move(addrs));
-      });
-    }
-  });
+  const auto pending = dns_pending.find(key);
+  if (pending != dns_pending.end() &&
+      (owns_submission || (!pending->second.in_flight && pending->second.waiters.empty())))
+    dns_pending.erase(pending);
+  if (status == ResolverPool::SubmitStatus::Stopped)
+    finish(op, Status::Cancelled, FailureKind::None, CURLE_OK, "transport shutdown");
+  else
+    finish(op, Status::Failed, FailureKind::Other, CURLE_FAILED_INIT, "resolver scheduling failed");
 }
 
 void TransportCore::on_resolved(const std::string& host, std::vector<std::string> addrs) {
@@ -860,6 +1022,9 @@ void TransportCore::note_pause(OperationState& op) {
       op.sock == CURL_SOCKET_BAD || op.counted_pause) return;
   op.counted_pause = true;
   paused_h1_socks.insert(op.sock);
+#ifdef _WIN32
+  rearm_socket(op.sock);  // remove FD_READ/FD_CLOSE interest before another event can drain data
+#endif
 }
 
 void TransportCore::note_resume(OperationState& op) {
@@ -1014,6 +1179,93 @@ void TransportCore::on_socket(CURL* easy, curl_socket_t s, int what) {
 
 void TransportCore::arm(const std::shared_ptr<SockWatch>& w) {
   if (w->removed) return;
+#ifdef _WIN32
+  if (w->failed) return;
+  const bool read = w->want_read && !read_suppressed(w->fd);
+  const long desired = (read ? FD_READ | FD_CLOSE : 0L) |
+                       (w->want_write ? FD_WRITE | FD_CONNECT | FD_CLOSE : 0L);
+  if (desired != w->selected_events) {
+    // Interest changes can race a completion already queued on the strand. Cancel only the
+    // event wait; the generation fence prevents its handler from touching a reused socket
+    // or clearing the armed flag of the replacement wait.
+    ++w->generation;
+    asio::error_code ignored;
+    w->event.cancel(ignored);
+    w->armed = false;
+    if (WSAEventSelect(w->fd, w->event.native_handle(), desired) == SOCKET_ERROR) {
+      w->failed = true;
+      fail_watches_later();
+      return;
+    }
+    w->selected_events = desired;
+  }
+  if (desired == 0 || w->armed) return;
+
+  // FD_WRITE is edge-triggered, unlike the level-triggered POSIX wait. Probe current
+  // readiness once before each one-shot wait, and post genuinely ready sockets to the
+  // strand. Otherwise the Winsock event wakes Asio with no timer or polling thread.
+  // Unlike resetting FD_WRITE with send(..., 0), this also works for QUIC/UDP sockets
+  // and cannot emit an empty datagram.
+  fd_set reads, writes, errors;
+  FD_ZERO(&reads);
+  FD_ZERO(&writes);
+  FD_ZERO(&errors);
+  if (read) FD_SET(w->fd, &reads);
+  if (w->want_write) FD_SET(w->fd, &writes);
+  FD_SET(w->fd, &errors);
+  timeval immediate{};
+  const int ready = select(0, read ? &reads : nullptr, w->want_write ? &writes : nullptr,
+                           &errors, &immediate);
+  if (ready == SOCKET_ERROR) {
+    w->failed = true;
+    fail_watches_later();
+    return;
+  }
+  int flags = 0;
+  if (FD_ISSET(w->fd, &reads)) flags |= CURL_CSELECT_IN;
+  if (FD_ISSET(w->fd, &writes)) flags |= CURL_CSELECT_OUT;
+  if (FD_ISSET(w->fd, &errors)) flags |= CURL_CSELECT_ERR;
+  w->armed = true;
+  const std::uint64_t generation = w->generation;
+  if (flags != 0) {
+    // Never drive curl inline from its socket callback, even for immediate readiness.
+    asio::post(strand, [self = shared_from_this(), w, generation, flags]() mutable {
+      if (w->removed || w->generation != generation) return;
+      w->armed = false;
+      if (!w->want_read || self->read_suppressed(w->fd)) flags &= ~CURL_CSELECT_IN;
+      if (!w->want_write) flags &= ~CURL_CSELECT_OUT;
+      if (flags != 0) self->on_socket_event(w, flags);
+      else self->arm(w);
+    });
+    return;
+  }
+  w->event.async_wait(asio::bind_executor(
+      strand, [self = shared_from_this(), w, generation](const asio::error_code& ec) {
+        if (w->removed || w->generation != generation) return;
+        w->armed = false;
+        if (ec == asio::error::operation_aborted) return;
+        WSANETWORKEVENTS events{};
+        if (ec || WSAEnumNetworkEvents(w->fd, w->event.native_handle(), &events) == SOCKET_ERROR) {
+          w->failed = true;
+          self->fail_watches_later();
+          return;
+        }
+        // EnumNetworkEvents atomically clears both the record and the manual-reset event.
+        // Recheck current interest: a paused HTTP/1.x response must stay in the kernel.
+        int observed = 0;
+        if (w->want_read && !self->read_suppressed(w->fd) &&
+            (events.lNetworkEvents & (FD_READ | FD_CLOSE)))
+          observed |= CURL_CSELECT_IN;
+        if (w->want_write && (events.lNetworkEvents & (FD_WRITE | FD_CONNECT | FD_CLOSE)))
+          observed |= CURL_CSELECT_OUT;
+        for (const int bit : {FD_READ_BIT, FD_WRITE_BIT, FD_CONNECT_BIT, FD_CLOSE_BIT}) {
+          if ((events.lNetworkEvents & (1L << bit)) && events.iErrorCode[bit] != 0)
+            observed |= CURL_CSELECT_ERR;
+        }
+        if (observed != 0) self->on_socket_event(w, observed);
+        else self->arm(w);
+      }));
+#else
   if (w->want_read && !w->armed_read && !read_suppressed(w->fd)) {
     w->armed_read = true;
     w->desc.async_wait(asio::posix::stream_descriptor::wait_read,
@@ -1033,6 +1285,7 @@ void TransportCore::arm(const std::shared_ptr<SockWatch>& w) {
                          self->on_socket_event(w, ec ? CURL_CSELECT_ERR : CURL_CSELECT_OUT);
                        }));
   }
+#endif
 }
 
 void TransportCore::on_socket_event(const std::shared_ptr<SockWatch>& w, int flags) {
@@ -1042,6 +1295,30 @@ void TransportCore::on_socket_event(const std::shared_ptr<SockWatch>& w, int fla
   check_multi_info();
   if (!w->removed) arm(w);  // one-shot waits: re-arm whatever libcurl still wants
 }
+
+#ifdef _WIN32
+void TransportCore::fail_watches_later() {
+  if (stopped || watch_failure_pending) return;
+  watch_failure_pending = true;
+  // A socket callback is inside a libcurl call. Finish outside that call, on the same
+  // strand, rather than re-entering curl or waiting indefinitely on an unmonitored socket.
+  asio::post(strand, [self = shared_from_this()] {
+    self->watch_failure_pending = false;
+    if (self->stopped) return;
+    std::vector<std::shared_ptr<OperationState>> remaining;
+    remaining.reserve(self->active.size());
+    for (const auto& entry : self->active) remaining.push_back(entry.second);
+    for (const auto& op : remaining)
+      self->finish(op, Status::Failed, FailureKind::Other, CURLE_FAILED_INIT,
+                   "socket readiness monitoring failed");
+    for (auto& entry : self->socks) {
+      entry.second->removed = true;
+      entry.second->release_quiet();
+    }
+    self->socks.clear();
+  });
+}
+#endif
 
 void TransportCore::shutdown() {
   if (resolver) resolver->stop();

@@ -36,7 +36,18 @@ function examine(req, body, model, c) {
   if (req.method !== 'POST' || req.headers['x-goog-api-key'] !== key || req.headers.authorization || req.headers['x-api-key']) throw new Error('auth');
   if (req.url !== `/v1beta/models/${model}:generateContent` && req.url !== `/v1beta/models/${model}:streamGenerateContent?alt=sse`) throw new Error('path');
   if (!equal(body.systemInstruction, { parts: [{ text: 'Answer briefly' }] })) throw new Error('system');
-  if (!equal(body.generationConfig, { maxOutputTokens: 2048, thinkingConfig: { includeThoughts: true, thinkingBudget: 1024 } })) throw new Error('thinking');
+  const portable = c.scenario === 'portable' || c.scenario === 'portable-text';
+  const settings = [
+    { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+    { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_ONLY_HIGH' },
+    { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
+    { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_LOW_AND_ABOVE' },
+    { category: 'HARM_CATEGORY_CIVIC_INTEGRITY', threshold: 'OFF' }];
+  if (!equal(body.generationConfig, portable
+    ? { maxOutputTokens: 2048, temperature: 0.25, thinkingConfig: { includeThoughts: false, thinkingLevel: 'high' } }
+    : { maxOutputTokens: 2048, thinkingConfig: { includeThoughts: true, thinkingBudget: 1024 } })) throw new Error('thinking');
+  if (portable && (!equal(body.safetySettings, settings) ||
+      !equal(body.toolConfig, { functionCallingConfig: { mode: 'VALIDATED', allowedFunctionNames: ['lookup'] } }))) throw new Error('controls');
   const tool = body.tools?.[0]?.functionDeclarations?.[0];
   if (!equal(tool, { name: 'lookup', description: 'Find value', parametersJsonSchema: { type: 'object', properties: { x: { type: 'integer' } } } })) throw new Error('function');
   const prefix = body.contents?.[0];
@@ -48,11 +59,28 @@ function examine(req, body, model, c) {
   if (c.scenario === 'scene-b' && scene.name !== 'scene-b') throw new Error('changed image');
   ++c.images;
   if (c.count === 1) { c.prefix = prefix; c.scene = scene; }
-  else {
+  else if (!portable) {
     const tr = body.contents?.[2]?.parts?.[0]?.functionResponse;
     if (!equal(prefix, c.prefix) || !equal(body.contents?.[1], { role: 'model', parts: group(c.scene) })
       || !equal(tr, { name: 'lookup', id: 'call_owned', response: { result: c.scene.expected.weighted } }) || body.contents.length !== 3) throw new Error('replay ownership');
     ++c.replayed;
+  }
+  if (portable) {
+    const foreignText = { role: 'model', parts: [{ text: 'foreign answer' }] };
+    if (!equal(body.contents?.[1], foreignText)) throw new Error('foreign text');
+    let expected = [prefix, foreignText];
+    if (c.scenario === 'portable') {
+      expected.push({ role: 'model', parts: [
+        { text: 'checking' },
+        { functionCall: { id: 'foreign-a', name: 'lookup', args: { x: 1 } }, thoughtSignature: 'skip_thought_signature_validator' },
+        { functionCall: { id: 'foreign-b', name: 'lookup', args: { x: 2 } } }] });
+      expected.push({ role: 'user', parts: [
+        { functionResponse: { name: 'lookup', id: 'foreign-b', response: { result: 2 } } },
+        { functionResponse: { name: 'lookup', id: 'foreign-a', response: { result: 1 } } }] });
+    }
+    if (c.count > 1) expected.push({ role: 'model', parts: [{ text: 'portable accepted', thoughtSignature: 'NEW_NATIVE_SIG' }] });
+    if (!equal(body.contents, expected) || !equal(prefix, c.prefix)) throw new Error('portable ownership');
+    if (c.count > 1) ++c.replayed;
   }
   return scene;
 }
@@ -75,6 +103,8 @@ const server = http.createServer(async (req, res) => {
     let parts = c.count === 1 ? group(scene) : [{ text: JSON.stringify({ result: scene.expected.weighted }) }];
     if (['close-gate', 'completed-reset', 'completed-error', 'short-close', 'hold'].includes(c.scenario)) parts = [{ thought: true, text: 'Thinking', thoughtSignature: 'THOUGHT_SIG' }, { text: 'hello' }];
     if (c.scenario === 'invalid-args') parts = [{ functionCall: { id: 'bad', name: 'lookup', args: [] } }];
+    if (c.scenario === 'portable' || c.scenario === 'portable-text')
+      parts = [{ text: 'portable accepted', thoughtSignature: 'NEW_NATIVE_SIG' }];
     const counters = c.scenario === 'nullable-usage' ? { promptTokenCount: 10, candidatesTokenCount: 7, thoughtsTokenCount: null, totalTokenCount: 20 } : usage;
     const data = streaming ? sse(model, parts, 'STOP', counters) : JSON.stringify(response(model, parts, 'STOP', counters));
     const headers = { 'Content-Type': streaming ? 'text/event-stream' : 'application/json', Connection: 'close' };
