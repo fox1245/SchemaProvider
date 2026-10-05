@@ -2,7 +2,7 @@
 
 This is a behavioral acceptance catalogue, not a blanket pass report. The current typed SDK uses interface/shared-library generation 4 and remains pre-stable. [Usage](USAGE.md) defines current controls and ownership. The [interface 4 execution record](#interface-4-execution-record) below is separate from [earlier interface 3 provenance](POC_PLAN.md#current-typed-c-cutover-provenance); no historical count is relabeled.
 
-Earlier interface 3 Linux cohorts exercised optional HTTP/3 under plain, ASan+UBSan and TSan; [D1's historical evidence](decisions/D1-transport.md#evidence) records those backends and instrumentation limits. Current interface 4 has no fresh HTTP/3, ASan/TSan or Windows/macOS/ARM64 qualification. WebSocket properties below remain deferred future specifications, outside current SDK/release gates and never counted as passes.
+Earlier interface 3 Linux cohorts exercised optional HTTP/3 under plain, ASan+UBSan and TSan; [D1's historical evidence](decisions/D1-transport.md#evidence) records those backends and instrumentation limits. The standalone interface 4 SDK cohort below did not exercise HTTP/3, ASan/TSan or Windows/macOS/ARM64. Integrated NeoGraph diagnostics and release-matrix checks have separate scopes. WebSocket properties below remain deferred future specifications, outside current SDK/release gates and never counted as passes.
 
 Scope (decision D2): chat completion APIs and the artifacts that arrive inside chat responses. Long-running operations, standalone image endpoints and the OpenRouter decisions endpoint have no cell, no property and no fixture here, and none may be advertised as supported. The earlier operation-lifecycle property is dropped for that reason.
 
@@ -19,6 +19,8 @@ All14 C++ fragments in USAGE were syntax-compiled with `g++ -std=c++20 -fsyntax-
 The exact documented Responses cursor fragment also ran in a standalone installed-interface4 consumer against an independent owned HTTP peer. The peer observed two requests: initial input, then `previous_response_id` with only the new follow-up input. Inherited store/parallel/verbosity/truncation/include controls matched, the response reflected the peer's held conversation state, and the cursor outcome remained ineligible for full native replay. No hosted endpoint or credential was used.
 
 These observations establish no new hosted-vendor, signature-consumption, Windows/macOS/ARM64, HTTP/3 or sanitizer qualification. Archive format remains3. Native NeoGraph/wheel and publication were separate pending integration work at this checkpoint; no paid calls were made.
+
+The runtime target now declares its own private `OpenSSL::Crypto` dependency, supplying the headers and link library used by `client.cpp` rather than relying on another target's private dependency. After this build correction, the local shared SDK was rebuilt and installed, and the exact README consumer passed reported-zero, missing-count and HTTP400 Failure scenarios. Interface generation and archive formats are unchanged; those local observations do not qualify the corrected Windows or macOS wheels.
 
 
 ## 1. Purpose

@@ -143,7 +143,7 @@ endif()
 
 add_library(sp_runtime src/runtime/client.cpp src/runtime/policy.cpp src/configuration/runtime_policy.cpp)
 target_compile_options(sp_runtime PRIVATE ${SP_WARNING_OPTIONS})
-target_link_libraries(sp_runtime PUBLIC sp_core sp_codecs sp_transport sp_descriptor sp_json)
+target_link_libraries(sp_runtime PUBLIC sp_core sp_codecs sp_transport sp_descriptor sp_json PRIVATE OpenSSL::Crypto)
 
 if(APPLE)
   set(SP_LIBRARY_INSTALL_RPATH "@loader_path")

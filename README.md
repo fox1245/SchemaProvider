@@ -6,7 +6,7 @@ The current package is **0.1.0 alpha**, with interface revision **4** and shared
 
 ## Install and use the unstable C++ SDK
 
-Build prerequisites are CMake 3.20+, a C++20 compiler, Python 3 for configuration generation, standalone Asio headers, libcurl 7.88+, OpenSSL Crypto and yyjson. Supply an installed yyjson library or its source tree; configuration does not download dependencies.
+Build prerequisites are CMake 3.20+, a C++20 compiler and standard library implementing `std::stop_token`, Python 3 for configuration generation, standalone Asio headers, libcurl 7.88+, OpenSSL Crypto and yyjson. Supply an installed yyjson library or its source tree; configuration does not download dependencies.
 
 ```sh
 cmake -S . -B build-sdk -DSP_BUILD_TESTS=OFF -DSP_BUILD_CANARY=OFF \
