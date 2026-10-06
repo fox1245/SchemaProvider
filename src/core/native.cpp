@@ -527,8 +527,8 @@ InterfaceContract core_interface_contract() noexcept {
   std::uint64_t capabilities = capability::NullableUsage |
       capability::All5Native | capability::TrustedArchive | capability::OrderedWireEvents;
   if (json::retained_size_contract() == 1) capabilities |= capability::RetainedJsonSize;
-#if defined(__unix__) || defined(__APPLE__)
-  return {4, capabilities | capability::PosixRuntime};
+#if defined(__unix__) || defined(__APPLE__) || defined(_WIN32)
+  return {4, capabilities | capability::NativeSocketRuntime};
 #else
   return {4, capabilities};
 #endif

@@ -180,9 +180,15 @@ void arithmetic_and_bucket() {
   TokenBucket extremes(1, 1, SteadyTime::min());
   CHECK(extremes.consume(SteadyTime::min())); CHECK(extremes.consume(SteadyTime::max()));
 }
+// A ceiling is narrowed to `long` when it is handed to libcurl. LLP64 platforms have a 32-bit
+// `long`, so the shipped ceiling must stay inside the portable range; Linux alone cannot see this.
+void shipped_ceilings_fit_the_narrowest_long() {
+  const auto policy = configuration::builtin_runtime_policy();
+  CHECK(policy->admission().max_host_connections <= 0x7fffffffULL);
+}
 }  // namespace
 int main() {
-  classification(); safety_and_budget(); hints(); arithmetic_and_bucket();
+  classification(); safety_and_budget(); hints(); arithmetic_and_bucket(); shipped_ceilings_fit_the_narrowest_long();
   if (failures) return 1;
   std::puts("runtime policy: classification, safety, hints, arithmetic and bucket passed");
 }

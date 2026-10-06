@@ -17,11 +17,14 @@ inline constexpr std::uint64_t NullableUsage = 1ULL << 2;
 inline constexpr std::uint64_t All5Native = 1ULL << 3;
 inline constexpr std::uint64_t TrustedArchive = 1ULL << 4;
 inline constexpr std::uint64_t OrderedWireEvents = 1ULL << 5;
-inline constexpr std::uint64_t PosixRuntime = 1ULL << 6;
+// The transport has a native socket implementation for this platform: POSIX descriptors on
+// Linux and macOS, Winsock events on Windows. A platform without one is not granted this bit,
+// so provider construction fails closed there.
+inline constexpr std::uint64_t NativeSocketRuntime = 1ULL << 6;
 inline constexpr std::uint64_t RetainedJsonSize = 1ULL << 7;
 inline constexpr std::uint64_t CompleteAttemptEvidence = 1ULL << 8;
 inline constexpr std::uint64_t RequiredProvider = TypedRuntime | PreparedAdmission |
-    NullableUsage | All5Native | TrustedArchive | OrderedWireEvents | PosixRuntime |
+    NullableUsage | All5Native | TrustedArchive | OrderedWireEvents | NativeSocketRuntime |
     RetainedJsonSize | CompleteAttemptEvidence;
 }
 InterfaceContract core_interface_contract() noexcept;

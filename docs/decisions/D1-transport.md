@@ -67,7 +67,7 @@ The operational rules are:
 ## Consequences
 - libcurl is a required dependency; the current installed SDK uses a7.88.0 baseline floor and was exercised with system8.5.0 and the isolated capable8.16.0-DEV combination. Broader version/backend/platform qualification and distribution strategy remain open, not an increase to the baseline floor.
 - TLS trust and verification follow libcurl's TLS backend. The custom-CA and certificate-failure matrix passes on the tested OpenSSL backend (M1b, risk R4); public OS trust stores and other platforms/backends remain unmeasured.
-- The original spike was POSIX-only (`asio::posix::stream_descriptor`). Windows/macOS portability work must earn separate native socket/custody and dependency/CI evidence; those platforms are not qualified by the Linux cohort.
+- The original spike was POSIX-only (`asio::posix::stream_descriptor`). Windows now has a Winsock event path and holds the `NativeSocketRuntime` gate; Windows/macOS must still earn separate native socket/custody and dependency/CI evidence, and are not qualified by the Linux cohort.
 - libcurl 8.5.0 specifics found by the PoC (pause under `multi_socket`, resend, resolver threads) are workarounds in the transport and must be re-verified when the supported libcurl range changes.
 - Proxies are not supported: the transport sets an empty `CURLOPT_PROXY` so that environment proxy variables cannot redirect traffic or start libcurl resolver threads outside the bounded pool.
 - Optional HTTP/3 adds a separately validated dependency/build matrix and the admission gate above. Failure of that lane must not disable the baseline HTTP/2/HTTP/1.1 build; HTTP/3 preference is a protocol policy within libcurl, not the rejected runtime backend selector.

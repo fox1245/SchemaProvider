@@ -33,7 +33,7 @@
     "workers": 8,
     "io_threads": 8,
     "resolver_threads": 8,
-    "max_host_connections": 9223372036854775807,
+    "max_host_connections": 2147483647,
     "max_head_bytes": 9223372036854775807,
     "dns_ttl_seconds": 9223372036854775807,
     "max_operations": 9223372036854775807,
