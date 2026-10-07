@@ -331,12 +331,17 @@ struct OperationState {
 // ---------------------------------------------------------------------------------------------
 // Core: owns the io_context, the strand, the CURLM and the I/O threads
 // ---------------------------------------------------------------------------------------------
+#ifdef _WIN32
+constexpr std::chrono::milliseconds kWritePollInitial{2};
+constexpr std::chrono::milliseconds kWritePollMax{16};
+#endif
+
 struct TransportCore : std::enable_shared_from_this<TransportCore> {
   using Strand = asio::strand<asio::io_context::executor_type>;
 
   struct SockWatch {
 #ifdef _WIN32
-    SockWatch(asio::io_context& ctx, curl_socket_t s) : event(ctx), fd(s) {
+    SockWatch(asio::io_context& ctx, curl_socket_t s) : event(ctx), write_poll(ctx), fd(s) {
       // A private manual-reset event is interoperable with WSAEventSelect. Asio owns only
       // this HANDLE, so cancellation/destruction cannot close libcurl's SOCKET.
       HANDLE native = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -358,10 +363,17 @@ struct TransportCore : std::enable_shared_from_this<TransportCore> {
         WSAEventSelect(fd, nullptr, 0);
         selected_events = 0;
       }
+      try {
+        write_poll.cancel();
+      } catch (...) {
+      }
       asio::error_code ignored;
       event.close(ignored);  // unregisters the native wait and closes only the event HANDLE
     }
     asio::windows::object_handle event;
+    // Bounded fallback while a write wait is pending; see TransportCore::poll_write_readiness.
+    asio::steady_timer write_poll;
+    std::chrono::milliseconds write_poll_delay{0};
     long selected_events = 0;
     std::uint64_t generation = 0;
     bool armed = false;
@@ -449,6 +461,7 @@ struct TransportCore : std::enable_shared_from_this<TransportCore> {
 #ifdef _WIN32
   bool watch_failure_pending = false;
   void fail_watches_later();
+  void poll_write_readiness(const std::shared_ptr<SockWatch>& w, std::uint64_t generation);
 #endif
   void note_pause(OperationState& op);
   void note_resume(OperationState& op);
@@ -1239,6 +1252,15 @@ void TransportCore::arm(const std::shared_ptr<SockWatch>& w) {
     });
     return;
   }
+  // The probe above found the socket not writable, so wait for FD_WRITE. Winsock records FD_WRITE
+  // only after a send() has failed with WSAEWOULDBLOCK and buffer space has returned. libcurl sends
+  // one chunk per socket action: when that send succeeded and left the socket not writable, no
+  // send has failed, FD_WRITE is never recorded, and the event wait alone would last until the
+  // operation deadline although the peer has drained the buffer. Poll select() as a bound.
+  if (w->want_write) {
+    w->write_poll_delay = kWritePollInitial;
+    poll_write_readiness(w, generation);
+  }
   w->event.async_wait(asio::bind_executor(
       strand, [self = shared_from_this(), w, generation](const asio::error_code& ec) {
         if (w->removed || w->generation != generation) return;
@@ -1297,6 +1319,45 @@ void TransportCore::on_socket_event(const std::shared_ptr<SockWatch>& w, int fla
 }
 
 #ifdef _WIN32
+// Probes a pending write wait with select() on a short, growing interval. The interval stays small
+// because a missed FD_WRITE otherwise costs the whole interval per filled buffer, and bounded
+// because thousands of blocked uploads must not turn into a polling storm. Once the event fires,
+// the wait is replaced or the interest drops, the chain ends: a single timer per watch means a
+// newer wait replaces a pending poll instead of adding a second chain.
+void TransportCore::poll_write_readiness(const std::shared_ptr<SockWatch>& w, std::uint64_t generation) {
+  w->write_poll.expires_after(w->write_poll_delay);
+  w->write_poll_delay = (std::min)(w->write_poll_delay * 2, kWritePollMax);
+  w->write_poll.async_wait(asio::bind_executor(
+      strand, [self = shared_from_this(), w, generation](const asio::error_code& ec) {
+        if (ec || w->removed || w->failed || w->generation != generation || !w->armed || !w->want_write) return;
+        fd_set writes, errors;
+        FD_ZERO(&writes);
+        FD_ZERO(&errors);
+        FD_SET(w->fd, &writes);
+        FD_SET(w->fd, &errors);
+        timeval immediate{};
+        if (select(0, nullptr, &writes, &errors, &immediate) == SOCKET_ERROR) {
+          w->failed = true;
+          self->fail_watches_later();
+          return;
+        }
+        int flags = 0;
+        if (FD_ISSET(w->fd, &writes)) flags |= CURL_CSELECT_OUT;
+        if (FD_ISSET(w->fd, &errors)) flags |= CURL_CSELECT_ERR;
+        if (flags == 0) {
+          self->poll_write_readiness(w, generation);
+          return;
+        }
+        // The event wait is still pending. Retire it, then drive libcurl as the event would have;
+        // on_socket_event re-arms whatever libcurl still wants.
+        ++w->generation;
+        asio::error_code ignored;
+        w->event.cancel(ignored);
+        w->armed = false;
+        self->on_socket_event(w, flags);
+      }));
+}
+
 void TransportCore::fail_watches_later() {
   if (stopped || watch_failure_pending) return;
   watch_failure_pending = true;
