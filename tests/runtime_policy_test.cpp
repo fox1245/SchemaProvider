@@ -186,9 +186,47 @@ void shipped_ceilings_fit_the_narrowest_long() {
   const auto policy = configuration::builtin_runtime_policy();
   CHECK(policy->admission().max_host_connections <= 0x7fffffffULL);
 }
+
+// A bad Google API key arrives as HTTP 400 INVALID_ARGUMENT; only the ErrorInfo
+// reason tells it from a malformed request. Interactions wraps the envelope in an array.
+void google_api_key_errors() {
+  const std::string invalid_key =
+      R"({"error":{"code":400,"message":"API key not valid. Please pass a valid API key.","status":"INVALID_ARGUMENT",)"
+      R"("details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"API_KEY_INVALID","domain":"googleapis.com",)"
+      R"("metadata":{"service":"generativelanguage.googleapis.com"}},)"
+      R"({"@type":"type.googleapis.com/google.rpc.LocalizedMessage","locale":"en-US","message":"API key not valid."}]}})";
+  const std::string bad_request =
+      R"({"error":{"code":400,"message":"Invalid JSON payload received.","status":"INVALID_ARGUMENT",)"
+      R"("details":[{"@type":"type.googleapis.com/google.rpc.BadRequest","fieldViolations":[{"field":"contents","description":"x"}]}]}})";
+  const std::string other_reason =
+      R"({"error":{"code":400,"status":"INVALID_ARGUMENT","details":[{"reason":"SERVICE_DISABLED","domain":"googleapis.com"}]}})";
+  const std::string odd_details =
+      R"({"error":{"code":400,"status":"INVALID_ARGUMENT","details":[1,"API_KEY_INVALID",{"reason":7},{"reason":["API_KEY_INVALID"]}]}})";
+  for (const std::string_view family : {"google.generate", "google.interactions"}) {
+    for (const auto& body : {invalid_key, "[" + invalid_key + "]"}) {
+      const auto info = inspect(400, body, {}, family);
+      CHECK(info.kind == ErrorKind::Authentication && info.retry_class == RetryClass::Never);
+      CHECK(info.vendor_code == "API_KEY_INVALID");
+    }
+    for (const auto& body : {bad_request, other_reason, odd_details, "[" + bad_request + "]",
+                             "[" + invalid_key + "," + invalid_key + "]", std::string("[]")}) {
+      const auto info = inspect(400, body, {}, family);
+      CHECK(info.kind == ErrorKind::InvalidRequest && info.retry_class == RetryClass::Never);
+      CHECK(info.vendor_code.empty());
+    }
+    CHECK(inspect(400, {}, {}, family).kind == ErrorKind::InvalidRequest);
+    CHECK(inspect(403, R"({"error":{"details":[{"reason":"API_KEY_SERVICE_BLOCKED"}]}})", {}, family).kind ==
+          ErrorKind::Permission);
+  }
+  // The reason is Google's, not another family's: the same body is just a bad request elsewhere.
+  CHECK(inspect(400, invalid_key, {}, "openai.chat").kind == ErrorKind::InvalidRequest);
+  CHECK(inspect(400, invalid_key, {}, "anthropic.messages").kind == ErrorKind::InvalidRequest);
+  // A one-element array unwraps for every family; a vendor code in it is read the same way.
+  CHECK(inspect(429, R"([{"error":{"code":"insufficient_quota"}}])").kind == ErrorKind::QuotaExhausted);
+}
 }  // namespace
 int main() {
-  classification(); safety_and_budget(); hints(); arithmetic_and_bucket(); shipped_ceilings_fit_the_narrowest_long();
+  classification(); google_api_key_errors(); safety_and_budget(); hints(); arithmetic_and_bucket(); shipped_ceilings_fit_the_narrowest_long();
   if (failures) return 1;
   std::puts("runtime policy: classification, safety, hints, arithmetic and bucket passed");
 }

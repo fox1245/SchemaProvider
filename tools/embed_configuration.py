@@ -97,7 +97,7 @@ def validate(runtime, errors):
         seen.add(family['family'])
         if not isinstance(family['root_error_type'], str) or not family['root_error_type']:
             raise ValueError('root error discriminator rejected')
-        for key, allowed in [('error_paths', {'error', 'response.error', 'root_error'}), ('code_fields', {'type', 'code'})]:
+        for key, allowed in [('error_paths', {'error', 'response.error', 'root_error'}), ('code_fields', {'type', 'code', 'details.reason'})]:
             values = family[key]
             if not isinstance(values, list) or not values or any(v not in allowed for v in values) or len(set(values)) != len(values):
                 raise ValueError('error extraction rejected')

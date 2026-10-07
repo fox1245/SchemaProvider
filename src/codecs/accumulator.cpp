@@ -327,7 +327,10 @@ bool Accumulator::apply(const MessageSeal& e) {
   m->second.sealed = true; return true;
 }
 bool Accumulator::apply(const RawWire& e) {
-  if (e.type.empty() || !e.payload || !e.payload->root().is_object())
+  // An HTTP error body may wrap its envelope in a one-element array; keep it as received.
+  const bool wrapped_error = e.payload && e.type == "http.error" && e.payload->root().is_array() &&
+      e.payload->root().size() == 1 && e.payload->root().at(0).is_object();
+  if (e.type.empty() || !e.payload || (!e.payload->root().is_object() && !wrapped_error))
     return reject(ErrorKind::ProtocolCorrupt, "invalid raw wire event");
   const auto bytes = add_size(add_size(e.payload->retained_bytes(), sizeof(RawWire)),
       add_size(e.type.capacity(), sizeof(std::shared_ptr<const json::Document>) + 1));
