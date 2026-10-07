@@ -358,8 +358,31 @@ void typed_generation_controls() {
   bad = r; bad.tool_choice->mode = gemini::ToolChoiceMode::None; refuse(bad);
   bad = r; bad.tool_choice->mode = gemini::ToolChoiceMode::Auto; refuse(bad);
 }
+
+// An HTTP error body can wrap its envelope in a one-element array (Google Interactions).
+// The raw event keeps it exactly as received; anything else that is not an object stays rejected.
+void http_error_envelope_in_an_array_is_retained() {
+  const Error error{ErrorKind::Authentication, "authentication failed"};
+  for (const std::string body : {R"({"error":{"code":400,"status":"INVALID_ARGUMENT"}})",
+                                 R"([{"error":{"code":400,"status":"INVALID_ARGUMENT"}}])"}) {
+    Accumulator a;
+    CHECK(a.accept(RawWire{"http.error", owned(body)}, &error));
+    CHECK(a.accept(Fail{error}));
+    CHECK(a.outcome());
+    const auto& partial = failure(*a.outcome(), ErrorKind::Authentication).partial;
+    CHECK(partial.raw_events.size() == 1 && partial.raw_events[0].type == "http.error");
+    CHECK(partial.raw_events[0].payload->root().dump() == body);
+  }
+  for (const std::string body : {"[]", "[1]", R"([[{"error":{}}]])", R"([{"a":1},{"b":2}])", "\"text\"", "1"}) {
+    Accumulator a;
+    CHECK(!a.accept(RawWire{"http.error", owned(body)}, &error));
+  }
+  Accumulator elsewhere;  // only an HTTP error body is allowed this shape
+  CHECK(!elsewhere.accept(RawWire{"message", owned(R"([{"a":1}])")}, &error));
+}
+
 }
 int main() {
-  try { portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); successive_unidentified_calls(); native_group_and_replay(); nullable_usage(); invalid_model_calls(); errors_and_terminals(); std::cout << "Gemini semantic invariants passed\n"; }
+  try { http_error_envelope_in_an_array_is_retained(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); successive_unidentified_calls(); native_group_and_replay(); nullable_usage(); invalid_model_calls(); errors_and_terminals(); std::cout << "Gemini semantic invariants passed\n"; }
   catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

@@ -100,7 +100,7 @@ ErrorPolicy error_policy(Value root) {
     if (!families.insert(family).second) fail("/errors/families/family", "unique family");
     FamilyRules rules{std::move(family), text(value.get("root_error_type"), "/errors/families/root_error_type"),
         selections(value.get("error_paths"), {"error", "response.error", "root_error"}, "/errors/families/error_paths"),
-        selections(value.get("code_fields"), {"type", "code"}, "/errors/families/code_fields"), {}};
+        selections(value.get("code_fields"), {"type", "code", "details.reason"}, "/errors/families/code_fields"), {}};
     array(value.get("codes"), "/errors/families/codes");
     std::unordered_set<std::string> codes;
     for (auto code : value.get("codes").elements()) {

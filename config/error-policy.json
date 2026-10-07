@@ -182,6 +182,40 @@
           "retry": "Transient"
         }
       ]
+    },
+    {
+      "family": "google.generate",
+      "root_error_type": "error",
+      "error_paths": [
+        "error"
+      ],
+      "code_fields": [
+        "details.reason"
+      ],
+      "codes": [
+        {
+          "value": "API_KEY_INVALID",
+          "kind": "Authentication",
+          "retry": "Never"
+        }
+      ]
+    },
+    {
+      "family": "google.interactions",
+      "root_error_type": "error",
+      "error_paths": [
+        "error"
+      ],
+      "code_fields": [
+        "details.reason"
+      ],
+      "codes": [
+        {
+          "value": "API_KEY_INVALID",
+          "kind": "Authentication",
+          "retry": "Never"
+        }
+      ]
     }
   ],
   "headers": [

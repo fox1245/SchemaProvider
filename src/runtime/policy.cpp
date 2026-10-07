@@ -138,6 +138,9 @@ ResponseInfo inspect_document_response(const configuration::RuntimePolicy& polic
   }
   auto family_rules = std::find_if(facts.families.begin(), facts.families.end(),
       [&](const auto& rule) { return rule.family == family; });
+  // Some vendors wrap the error envelope in a one-element array
+  // (`[{"error": {...}}]`, seen on Google Interactions). Read the envelope itself.
+  if (document.is_array() && document.size() == 1 && document.at(0).is_object()) document = document.at(0);
   if (document.valid() && family_rules != facts.families.end()) {
     json::Value error;
     for (const auto& path : family_rules->error_paths) {
@@ -147,9 +150,8 @@ ResponseInfo inspect_document_response(const configuration::RuntimePolicy& polic
       if (error.is_object()) break;
     }
     if (error.is_object()) {
-      for (const auto& field : family_rules->code_fields) {
-        const auto value = error.get(field);
-        if (!value.is_string()) continue;
+      auto apply_code = [&](json::Value value) {
+        if (!value.is_string()) return;
         for (const auto& rule : family_rules->codes) {
           if (value.as_string() != rule.value || info.kind == ErrorKind::QuotaExhausted) continue;
           info.kind = rule.kind;
@@ -157,6 +159,15 @@ ResponseInfo inspect_document_response(const configuration::RuntimePolicy& polic
           info.vendor_code = rule.value;
           break;
         }
+      };
+      for (const auto& field : family_rules->code_fields) {
+        // `details.reason` selects `reason` of every object in the `details` array
+        // (Google's google.rpc.ErrorInfo); every other field is read from the error itself.
+        if (field == "details.reason") {
+          const auto details = error.get("details");
+          if (!details.is_array()) continue;
+          for (auto detail : details.elements()) if (detail.is_object()) apply_code(detail.get("reason"));
+        } else apply_code(error.get(field));
       }
     }
   }
