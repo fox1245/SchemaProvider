@@ -328,6 +328,7 @@ std::shared_ptr<const NativeContext> NativeContext::decoding_only() const {
   context->pending_server_tools_ = pending_server_tools_;
   context->client_tools_ = client_tools_;
   context->replay_eligible_ = false;
+  context->thinking_disabled_ = thinking_disabled_;
   return context;
 }
 NativeReplay::NativeReplay(std::shared_ptr<const NativeContext> context, StopKind stop, Digest content, bool complete)
@@ -398,6 +399,7 @@ NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, 
 NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, const gemini::Request& request, const descriptor::EffectiveChoices& choices, bool)
     : family_(Family::Gemini), model_(request.model), route_(descriptor.path(false)), prefix_count_(request.messages.size()), policy_(descriptor.policy()) {
   valid_ = descriptor.family() == family_name(family_) && origin_digest(descriptor, origin_) && configuration_digest(descriptor, request, choices, prefix_);
+  thinking_disabled_ = choices.thinking_budget && *choices.thinking_budget == 0 && !choices.thinking_level;
   if (valid_) {
     client_tools_.reserve(request.tools.size());
     for (const auto& tool : request.tools) client_tools_.push_back(tool.name);

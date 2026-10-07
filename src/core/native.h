@@ -24,6 +24,9 @@ class NativeContext final {
   // Drops issuing authority permanently while retaining typed decode scope.
   std::shared_ptr<const NativeContext> decoding_only() const;
   bool replay_eligible() const noexcept { return replay_eligible_; }
+  // The request explicitly set Gemini's thinking budget to zero, so the vendor
+  // cannot have generated thoughts for it.
+  bool thinking_disabled() const noexcept { return thinking_disabled_; }
  private:
   enum class Family { Messages, Responses, Gemini, Interactions, Chat };
   static std::string_view family_name(Family);
@@ -46,6 +49,7 @@ class NativeContext final {
   bool valid_ = false;
   bool history_valid_ = true;
   bool replay_eligible_ = true;
+  bool thinking_disabled_ = false;
   std::vector<std::pair<std::string, std::string>> pending_server_tools_;
   std::vector<std::string> client_tools_;
   friend messages::EncodeResult messages::encode(const descriptor::ValidatedDescriptor&, const messages::Request&, bool);

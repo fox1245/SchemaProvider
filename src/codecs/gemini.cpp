@@ -237,10 +237,15 @@ bool Codec::usage(json::Value v) {
   auto conflict = [&](std::string key, std::string detail) { next.quality = UsageQuality::Inconsistent; next.conflicts.push_back({std::move(key), std::move(detail)}); };
   // Generated billable output is candidates + thoughts, not candidates with
   // thoughts treated as an inclusive subset. Missing thoughts remain unknown.
-  if (candidates && next.reasoning) {
-    if (next.reasoning->value > std::numeric_limits<uint64_t>::max() - candidates->value)
+  // When the request set the thinking budget to zero the vendor cannot have
+  // generated thoughts, and it then omits thoughtsTokenCount: the candidates are
+  // the whole output. Without that request evidence a missing count stays unknown.
+  const bool no_thoughts = !next.reasoning && context_ && context_->thinking_disabled();
+  if (candidates && (next.reasoning || no_thoughts)) {
+    const uint64_t thoughts = next.reasoning ? next.reasoning->value : 0;
+    if (thoughts > std::numeric_limits<uint64_t>::max() - candidates->value)
       return fail(ErrorKind::ProtocolCorrupt, "Gemini usage sum overflow");
-    const auto sum = candidates->value + next.reasoning->value;
+    const auto sum = candidates->value + thoughts;
     next.output_total = Count{sum, Evidence::Derived};
   }
   if (next.input_total && next.cache_read) {

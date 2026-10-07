@@ -381,8 +381,36 @@ void http_error_envelope_in_an_array_is_retained() {
   CHECK(!elsewhere.accept(RawWire{"message", owned(R"([{"a":1}])")}, &error));
 }
 
+// Gemini omits thoughtsTokenCount when thinking is off. output_total is then the candidates
+// count, but only when the request set the thinking budget to zero.
+void output_total_without_thoughts() {
+  auto thinking_off = [](std::optional<uint64_t> budget) {
+    auto r = request(); r.thinking_budget = budget;
+    auto e = gemini::encode(desc(), r, false); CHECK(std::holds_alternative<gemini::EncodedRequest>(e));
+    return std::get<gemini::EncodedRequest>(e).context;
+  };
+  const auto usage = R"({"promptTokenCount":8,"candidatesTokenCount":3,"totalTokenCount":11})";
+  auto run = [&](std::shared_ptr<const NativeContext> context, std::string_view counters) {
+    Accumulator a; gemini::Codec c(desc(), gemini::Mode::Buffered, a, std::move(context));
+    c.buffered(body(R"([{"text":"ok"}])", "STOP", counters), {}); CHECK(a.outcome());
+    return complete(*a.outcome()).usage;
+  };
+  auto off = run(thinking_off(0), usage);
+  CHECK(off.output_total && off.output_total->value == 3 && off.output_total->evidence == Evidence::Derived);
+  CHECK(off.total && off.total->value == 11 && !off.reasoning);
+  // thinking enabled (explicit budget, or none at all) and no thoughts count: still unknown
+  for (auto budget : {std::optional<uint64_t>(1024), std::optional<uint64_t>()}) {
+    auto on = run(thinking_off(budget), usage);
+    CHECK(!on.output_total && !on.total && on.provider_reported_total && on.provider_reported_total->value == 11);
+  }
+  // a reported thoughts count always wins, even with the budget at zero
+  auto reported = run(thinking_off(0), R"({"promptTokenCount":8,"candidatesTokenCount":3,"thoughtsTokenCount":2})");
+  CHECK(reported.output_total && reported.output_total->value == 5 && reported.reasoning->value == 2);
+  // the flag survives dropping issuing authority, which is what the runtime keeps while decoding
+  CHECK(run(thinking_off(0)->decoding_only(), usage).output_total);
+}
 }
 int main() {
-  try { http_error_envelope_in_an_array_is_retained(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); successive_unidentified_calls(); native_group_and_replay(); nullable_usage(); invalid_model_calls(); errors_and_terminals(); std::cout << "Gemini semantic invariants passed\n"; }
+  try { http_error_envelope_in_an_array_is_retained(); output_total_without_thoughts(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); successive_unidentified_calls(); native_group_and_replay(); nullable_usage(); invalid_model_calls(); errors_and_terminals(); std::cout << "Gemini semantic invariants passed\n"; }
   catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }
