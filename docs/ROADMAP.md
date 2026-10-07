@@ -1,6 +1,6 @@
 # Roadmap and release gates
 
-Current package0.1.0 alpha uses typed interface/shared-library generation4 with five HTTP/SSE families and the NeoGraph adapter. [Usage](USAGE.md) defines new preserved controls, Responses provider-held cursors and explicit Generate portable imports. [Recorded provenance](POC_PLAN.md#current-typed-c-cutover-provenance) keeps previous interface3 runs unchanged; implementation, fresh wire proof and release/support admission are separate claims.
+Current package0.1.1 alpha uses typed interface/shared-library generation4 with five HTTP/SSE families and the NeoGraph adapter. [Usage](USAGE.md) defines new preserved controls, Responses provider-held cursors and explicit Generate portable imports. [Recorded provenance](POC_PLAN.md#current-typed-c-cutover-provenance) keeps previous interface3 runs unchanged; implementation, fresh wire proof and release/support admission are separate claims.
 
 ## Owner-requested next work
 
