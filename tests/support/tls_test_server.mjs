@@ -4,6 +4,7 @@ import http2 from 'node:http2';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
 
 const names = ['good', 'wrong', 'expired', 'untrusted'];
 const counters = Object.fromEntries(names.map(name => [name, {
@@ -50,7 +51,7 @@ startupTimer.unref();
 function openssl(...args) {
   const remaining = startupDeadline - Date.now();
   if (remaining <= 0) throw new Error('certificate generation deadline exceeded');
-  const result = spawnSync('openssl', args, {
+  const result = spawnSync(process.env.SP_OPENSSL || 'openssl', args, {
     cwd: directory,
     stdio: ['ignore', 'pipe', 'pipe'],
     timeout: Math.min(10_000, remaining),
@@ -116,8 +117,7 @@ function requestHandler(name, req, res) {
 }
 
 async function start() {
-  // A fixed space-free parent makes the machine-readable ca=<path> token unambiguous.
-  directory = mkdtempSync('/tmp/schemaprovider-tls-');
+  directory = mkdtempSync(join(tmpdir(), 'schemaprovider-tls-'));
   openssl('req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-sha256',
     '-keyout', 'ca.key', '-out', 'ca.pem', '-days', '2',
     '-subj', '/CN=SchemaProvider ephemeral test CA',
@@ -145,11 +145,11 @@ async function start() {
 [ca]
 default_ca = test_ca
 [test_ca]
-database = ${directory}/index.txt
-serial = ${directory}/serial
-new_certs_dir = ${directory}
-certificate = ${directory}/ca.pem
-private_key = ${directory}/ca.key
+database = index.txt
+serial = serial
+new_certs_dir = .
+certificate = ./ca.pem
+private_key = ca.key
 default_md = sha256
 default_days = 2
 policy = subject_policy

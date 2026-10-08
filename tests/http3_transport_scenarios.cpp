@@ -3,6 +3,7 @@
 #include "transport/http_transport.h"
 #include "transport/sse_framer.h"
 #include "support/posix_owner.h"
+#include "support/portable.h"
 
 #include <atomic>
 #include <chrono>
@@ -333,6 +334,11 @@ void no_progress(Peer& peer) {
 }
 
 long rss_bytes() {
+#ifdef __APPLE__
+  const auto observed = portable::darwin_resident_bytes();
+  require(observed <= (std::numeric_limits<long>::max)(), "RSS exceeds observation range");
+  return static_cast<long>(observed);
+#else
   std::ifstream input("/proc/self/smaps_rollup");
   std::string line;
   while (std::getline(input, line)) {
@@ -340,6 +346,7 @@ long rss_bytes() {
     if (std::sscanf(line.c_str(), "Rss: %ld kB", &kib) == 1) return kib * 1024;
   }
   throw std::runtime_error("cannot observe client RSS");
+#endif
 }
 
 struct Flood {

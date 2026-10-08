@@ -89,17 +89,17 @@ struct ResponseHead {
   std::vector<Header> headers;  // names lower-cased; bounded by TransportOptions::max_head_bytes
 };
 
-// Furthest point the attempt provably reached, derived from libcurl's timing marks (zero for
-// phases that did not happen) and the header callback. libcurl records the connect time only once
-// the whole connection chain is up (TCP and, for https, TLS), so a stall in the TCP connect and a
-// stall in the TLS handshake are both reported as Resolved; the distinction is not observable here.
+// Furthest point the attempt provably reached, derived from the prerequisite/header callbacks and
+// libcurl's connection timing marks. PRETRANSFER_TIME is not evidence: libcurl may fill it on failures
+// before any request write. Connect time covers the whole TCP/TLS chain, so TCP-connect and
+// TLS-handshake stalls both report Resolved; their distinction is not observable here.
 // RequestStarted is the conservative "request bytes MAY have left the client" mark; anything below
 // it guarantees that nothing was written (retry safety NotSent).
 enum class Stage : std::uint8_t {
   Queued,            // no name lookup finished yet
   Resolved,          // name resolved; TCP connect and TLS handshake not both finished
   Connected,         // TCP and TLS (if any) established; nothing written yet
-  RequestStarted,    // pre-transfer reached: request bytes MAY have left the client
+  RequestStarted,    // prerequisite callback reached: request bytes MAY have left the client
   ResponseStarted,   // the first response header line arrived
 };
 

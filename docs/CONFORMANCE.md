@@ -30,6 +30,18 @@ The entries cover the optional connect, first-byte and idle bounds (`stall_*`), 
 
 A separate scratch-tree campaign (not a registered test) applied seven single-line production mutants, one for each test added after an independent review, and every mutant was caught by its test: validating a dangling UTF-8 sequence when the stream was cut instead of when it ended; losing the idle watchdog after a pause; waiting for the complete head before clearing the first-byte bound; ignoring the client-wide first-byte default; ignoring a per-run connect override; flooring a Retry-After date to whole seconds; and accepting group-writable meter directories.
 
+### Native platform follow-up
+
+The SDK's own suite now runs on native Windows, not only through NeoGraph integration. On Windows 11 x64, MSVC 19.44.35228, Node.js 24.18.0, libcurl 8.21.0 with HTTP/2/OpenSSL 3.6.3 and nghttp2 1.70.0, all 41 registered Release tests passed. This includes all five 141-cell lifecycle matrices (705 cells), four stall suites, runtime scheduling/ownership, real TLS/ALPN and multiplexing/backpressure/resend checks, crypto vectors and OpenSSL differential checks, and the native archive portability consumer. Peers used only local loopback ports and synthetic credentials.
+
+The same platform-adapted source passed all 49 registered Release tests on Linux x86_64 with GCC 13.3, Node.js 24.21.0 and libcurl 8.5.0, including the additional native archive portability consumer and the real key-residue check. Transport assertions require the typed failure, correct framing, exactly one outcome and no late callbacks rather than pinning incidental backend return codes.
+
+The Windows canary/qualification and POSIX archive custody/restart tests remain excluded because their file-custody/fork contracts are POSIX-specific; the Linux-only process-maps probes and forensic heap scan are not Windows coverage. Windows `crypto_golden` checks policy identities, not the POSIX canary digests. MSVC selects the portable SHA-256 backend; Windows randomness uses `BCryptGenRandom`.
+
+Native execution exposed libcurl 8.21's synthesized completion timings on pre-dispatch failures. `PRETRANSFER_TIME` is no longer used as send evidence: the actual prereq callback/upload/response observations distinguish `NotSent` from `PossiblyAccepted`. The constructor-resource test initializes the exact native directory-rejection path before its ownership baseline: a direct `CreateProcessW` control, with no SDK helper pipes/job, reproduced the same one-time OS handle growth; subsequent direct and helper failures added none. Strict helper constructor/unwind resource assertions remain intact.
+
+The `SDK macOS` workflow executes the complete SDK suite on a standard native macOS runner. It does not relabel Windows/Linux execution, Darling compatibility-layer behavior or cross-compilation as macOS runtime proof; its actual result and platform versions must accompany the tested commit.
+
 
 ## 1. Purpose
 

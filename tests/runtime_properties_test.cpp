@@ -5,8 +5,18 @@
 #include "descriptor/descriptor.h"
 #include "json/json.h"
 #include "support/runtime_peer.h"
+#include "support/portable.h"
+#ifdef _WIN32
+#include <tlhelp32.h>
+#endif
 
+#ifndef _WIN32
 #include <arpa/inet.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
@@ -14,19 +24,16 @@
 #include <condition_variable>
 #include <csignal>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <poll.h>
 #include <stdexcept>
 #include <string>
-#include <sys/socket.h>
-#include <sys/wait.h>
 #include <thread>
-#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -36,7 +43,9 @@ using sp::runtime::Client;
 using sp::runtime::Operation;
 using sp::runtime::Result;
 using runtime_test::Peer;
+#ifndef _WIN32
 using runtime_test::write_all;
+#endif
 constexpr std::string_view marker = "RUNTIME_SECRET_MARKER_62c490";
 void require(bool yes, std::string_view message) {
   if (!yes) throw std::runtime_error(std::string(message));
@@ -120,10 +129,74 @@ Result finish(Operation& op, Capture& capture) {
   return result;
 }
 
-void owner_exception_paths(const char* script) {
+void owner_exception_paths(const char* node, const char* script) {
+#ifdef _WIN32
+  auto handles = [] {
+    DWORD count = 0;
+    require(::GetProcessHandleCount(::GetCurrentProcess(), &count) != 0, "cannot count owned handles");
+    return count;
+  };
+  // A direct CreateProcessW directory rejection (without our pipes/job) initializes
+  // persistent native failure-reporting handles on Windows. Establish that exact
+  // OS path first, so the assertion below measures our launcher resource cleanup.
+  // The native control reproduced the same type/count growth; a second native
+  // rejection and a subsequent helper rejection added no handles.
+  STARTUPINFOW native_startup{};
+  native_startup.cb = sizeof(native_startup);
+  PROCESS_INFORMATION native_child{};
+  wchar_t native_command[] = L"\".\"";
+  const bool native_admitted = ::CreateProcessW(
+      L".", native_command, nullptr, nullptr, FALSE, CREATE_SUSPENDED,
+      nullptr, nullptr, &native_startup, &native_child) != 0;
+  if (native_admitted) {
+    runtime_test::Handle process(native_child.hProcess), thread(native_child.hThread);
+    ::TerminateProcess(process.get(), 1);
+    ::WaitForSingleObject(process.get(), 10000);
+  }
+  require(!native_admitted, "native directory rejection control was admitted");
+  const auto before = handles();
+  bool rejected = false;
+  std::string rejection;
+  try { Peer invalid(".", script); } // A directory cannot be launched.
+  catch (const std::runtime_error& error) { rejected = true; rejection = error.what(); }
+  require(rejected, "failed peer exec was admitted");
+  const auto after_failed_constructor = handles();
+  require(after_failed_constructor == before,
+          "failed peer constructor leaked owned handles: before=" + std::to_string(before) +
+          ", after=" + std::to_string(after_failed_constructor) + ", rejection=" + rejection);
+  struct Unwind {};
+  {
+    runtime_test::Handle observed;
+    try {
+      auto child = runtime_test::spawn_with_pipes(node, {"-e", "setInterval(() => {}, 1000)"});
+      require(child.process.running(), "exception ownership child did not start");
+      HANDLE copy = nullptr;
+      require(::DuplicateHandle(::GetCurrentProcess(), child.process.native(), ::GetCurrentProcess(),
+                                &copy, SYNCHRONIZE, FALSE, 0) != 0, "cannot observe exception ownership child");
+      observed.reset(copy);
+      throw Unwind{};
+    } catch (const Unwind&) {}
+    require(::WaitForSingleObject(observed.get(), 0) == WAIT_OBJECT_0,
+            "exception unwinding retained a running child");
+  }
+  try {
+    runtime_test::LogCapture nested;
+    std::cout << marker; // Deliberately buffered; must not escape during unwinding.
+    throw Unwind{};
+  } catch (const Unwind&) {}
+  const auto after_unwinding = handles();
+  require(after_unwinding == before,
+          "exception unwinding leaked owned handles: before=" + std::to_string(before) +
+          ", after=" + std::to_string(after_unwinding));
+#else
+  (void)node;
   auto descriptors = [] {
+#ifdef __APPLE__
+    return portable::darwin_descriptor_count();
+#else
     return std::distance(std::filesystem::directory_iterator("/proc/self/fd"),
                          std::filesystem::directory_iterator{});
+#endif
   };
   const auto before = descriptors();
   bool rejected = false;
@@ -140,6 +213,7 @@ void owner_exception_paths(const char* script) {
     throw Unwind{};
   } catch (const Unwind&) {}
   require(descriptors() == before, "exception unwinding leaked owned descriptors");
+#endif
 }
 
 void quota_abnormal_close(Peer& peer) {
@@ -277,12 +351,12 @@ void retry_policy(Peer& peer) {
 void safe_connect_retry() {
   // Reserve a port without listening: the kernel refuses connections, and no
   // unrelated listener can claim it between attempts.
-  runtime_test::Fd guard(socket(AF_INET, SOCK_STREAM, 0));
+  portable::Socket guard(socket(AF_INET, SOCK_STREAM, 0));
   const auto fd = guard.get();
-  require(fd >= 0, "cannot reserve refused-connect port");
+  require(static_cast<bool>(guard), "cannot reserve refused-connect port");
   sockaddr_in address{}; address.sin_family = AF_INET; address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
   require(bind(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0, "cannot bind refused-connect port");
-  socklen_t size = sizeof(address);
+  portable::socklen size = sizeof(address);
   require(getsockname(fd, reinterpret_cast<sockaddr*>(&address), &size) == 0, "cannot inspect refused-connect port");
   for (bool enabled : {false, true}) {
     auto loaded = sp::descriptor::load(descriptor_source(ntohs(address.sin_port), false));
@@ -527,9 +601,24 @@ void callback_fences_and_diagnostics(Peer& peer) {
   success(terminal_op.join()); require(client.diagnostics().callback_exceptions == 2, "callback exception diagnostics not exact");
 }
 int thread_count() {
+#ifdef _WIN32
+  runtime_test::Handle snapshot(::CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0));
+  THREADENTRY32 entry{}; entry.dwSize = sizeof(entry);
+  require(snapshot && ::Thread32First(snapshot.get(), &entry), "cannot enumerate native process threads");
+  int count = 0;
+  do {
+    if (entry.th32OwnerProcessID == ::GetCurrentProcessId()) ++count;
+    entry.dwSize = sizeof(entry);
+  } while (::Thread32Next(snapshot.get(), &entry));
+  require(::GetLastError() == ERROR_NO_MORE_FILES, "native thread enumeration failed");
+  return count;
+#elif defined(__APPLE__)
+  return portable::darwin_thread_count();
+#else
   std::ifstream input("/proc/self/status"); std::string line;
   while (std::getline(input, line)) if (line.starts_with("Threads:")) return std::stoi(line.substr(8));
   throw std::runtime_error("cannot inspect process thread count");
+#endif
 }
 void held_stream_gate(Peer& peer) {
   const int baseline = thread_count();
@@ -624,7 +713,11 @@ int cycle_child(const char* node, const char* script) {
   const auto model = peer.arm("normal");
   auto op = client.start(request(model), run(), {{}, [&](Result) {
     std::unique_lock lock(mutex); callback = true; cv.notify_all(); cv.wait(lock, [&] { return joining; });
+#ifdef _WIN32
+    runtime_test::write_pipe(::GetStdHandle(STD_OUTPUT_HANDLE), "CYCLE_ARMED\n");
+#else
     write_all(STDOUT_FILENO, "CYCLE_ARMED\n");
+#endif
     cv.wait(lock, [&] { return joined; });
   }});
   { std::unique_lock lock(mutex); cv.wait(lock, [&] { return callback; }); joining = true; cv.notify_all(); }
@@ -633,6 +726,23 @@ int cycle_child(const char* node, const char* script) {
   return 7;
 }
 void guarded_cycle(const char* executable, const char* node, const char* script) {
+#ifdef _WIN32
+  auto child = runtime_test::spawn_with_pipes(executable, {node, script, "--join-cycle-child"});
+  std::string received;
+  const auto deadline = Clock::now() + 15s;
+  while (received.find('\n') == std::string::npos) {
+    const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
+    require(left > 0, "unsupported cross-thread cycle was not armed");
+    char buffer[64];
+    const auto count = runtime_test::read_pipe(child.from_child.get(), buffer, sizeof(buffer), left);
+    received.append(buffer, count);
+    require(received.size() <= 64, "cycle child output exceeded bound");
+  }
+  require(received == "CYCLE_ARMED\n", "unsupported cross-thread cycle was not armed");
+  char buffer[64];
+  require(runtime_test::read_pipe(child.from_child.get(), buffer, sizeof(buffer), 100) == 0 &&
+          child.process.running(), "unsupported cross-thread cycle did not remain blocked under guard");
+#else
   runtime_test::Pipe output;
   auto pid = fork();
   if (pid == 0) {
@@ -657,17 +767,49 @@ void guarded_cycle(const char* executable, const char* node, const char* script)
   int ready;
   do { ready = poll(&fd, 1, 100); } while (ready < 0 && errno == EINTR);
   require(ready == 0 && child.running(), "unsupported cross-thread cycle did not remain blocked under guard");
+#endif
 }
+#ifdef _WIN32
+class AlarmGuard {
+ public:
+  AlarmGuard() : thread_([this] {
+    std::unique_lock lock(mutex_);
+    if (!cv_.wait_for(lock, 150s, [this] { return stopped_; })) {
+      ::TerminateProcess(::GetCurrentProcess(), 124);
+      std::abort();
+    }
+  }) {}
+  ~AlarmGuard() {
+    { std::lock_guard lock(mutex_); stopped_ = true; }
+    cv_.notify_one();
+    thread_.join();
+  }
+  AlarmGuard(const AlarmGuard&) = delete;
+  AlarmGuard& operator=(const AlarmGuard&) = delete;
+ private:
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  bool stopped_ = false;
+  std::thread thread_;
+};
+#else
 struct AlarmGuard {
   AlarmGuard() { alarm(150); }
   ~AlarmGuard() { alarm(0); }
 };
+#endif
 } // namespace
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+  runtime_test::Arguments arguments(argc, argv);
+  argc = arguments.argc(); argv = arguments.argv();
+#endif
   if (argc == 4 && std::string_view(argv[3]) == "--join-cycle-child") return cycle_child(argv[1], argv[2]);
   if (argc != 3) { std::cerr << "usage: sp_runtime_tests <node> <runtime_server.mjs>\n"; return 2; }
+#ifndef _WIN32
   std::signal(SIGPIPE, SIG_IGN);
+#endif
   // Broad process-level guard also bounds accidental join deadlocks, independently
   // of operation deadlines. There are no per-request test threads.
   AlarmGuard alarm_guard;
@@ -676,7 +818,7 @@ int main(int argc, char** argv) {
   auto check = [&](std::string_view name, auto&& body) { section = name; body(); };
   try {
     guarded_cycle(argv[0], argv[1], argv[2]);
-    check("RAII exception ownership", [&] { owner_exception_paths(argv[2]); });
+    check("RAII exception ownership", [&] { owner_exception_paths(argv[1], argv[2]); });
     Peer peer(argv[1], argv[2]);
     check("quota abnormal close", [&] { quota_abnormal_close(peer); });
     check("family modes", [&] { family_modes(peer); });

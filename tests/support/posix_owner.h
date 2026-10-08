@@ -48,8 +48,16 @@ struct Pipe {
   Fd reader, writer;
   Pipe() {
     int descriptors[2];
+#ifdef __linux__
     if (::pipe2(descriptors, O_CLOEXEC) != 0) throw std::runtime_error("pipe creation failed");
+#else
+    if (::pipe(descriptors) != 0) throw std::runtime_error("pipe creation failed");
+#endif
     reader.reset(descriptors[0]); writer.reset(descriptors[1]);
+#ifndef __linux__
+    if (::fcntl(reader.get(), F_SETFD, FD_CLOEXEC) < 0 || ::fcntl(writer.get(), F_SETFD, FD_CLOEXEC) < 0)
+      throw std::runtime_error("pipe inheritance setup failed");
+#endif
   }
 };
 

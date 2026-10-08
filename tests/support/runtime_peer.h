@@ -1,18 +1,24 @@
 #pragma once
 #include "json/json.h"
+#ifdef _WIN32
+#include "win_owner.h"
+#else
 #include "posix_owner.h"
+#endif
 
 #include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
 #include <optional>
-#include <poll.h>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#ifndef _WIN32
+#include <poll.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 namespace runtime_test {
 using Clock = std::chrono::steady_clock;
@@ -25,6 +31,7 @@ inline sp::json::Document parse(std::string_view text) {
   require(std::holds_alternative<sp::json::Document>(value), "invalid peer JSON");
   return std::get<sp::json::Document>(std::move(value));
 }
+#ifndef _WIN32
 inline void write_all(int fd, std::string_view value) {
   while (!value.empty()) {
     auto n = ::write(fd, value.data(), value.size());
@@ -33,8 +40,21 @@ inline void write_all(int fd, std::string_view value) {
     value.remove_prefix(static_cast<std::size_t>(n));
   }
 }
+#endif
 class Peer {
  public:
+#ifdef _WIN32
+  // Pipes have no outstanding kernel I/O when a call returns; destruction closes them before the job.
+  Peer(const char* node, const char* script) {
+    auto spawned = spawn_with_pipes(node, script);
+    process_ = std::move(spawned.process);
+    in_ = std::move(spawned.to_child);
+    out_ = std::move(spawned.from_child);
+    auto ready = line();
+    port = ready.root().get("port").as_uint();
+    require(port != 0, "peer startup failed");
+  }
+#else
   Peer(const char* node, const char* script) {
     Pipe input, output;
     const auto pid = fork();
@@ -53,11 +73,12 @@ class Peer {
     port = ready.root().get("port").as_uint();
     require(port != 0, "peer startup failed");
   }
+#endif
   ~Peer() = default;
   Peer(const Peer&) = delete;
   Peer& operator=(const Peer&) = delete;
   sp::json::Document command(std::string command) {
-    write_all(in_.get(), command + '\n');
+    write_control(command + '\n');
     auto result = line();
     require(!result.root().get("error").valid(), "peer rejected control command");
     return result;
@@ -82,6 +103,28 @@ class Peer {
   }
   std::uint64_t port = 0;
  private:
+#ifdef _WIN32
+  void write_control(const std::string& text) { write_pipe(in_.get(), text); }
+  // Returns 0 only when the bounded wait found no bytes. No stack buffer or OVERLAPPED can outlive it.
+  std::size_t read_some(char* buffer, std::size_t size, long long milliseconds) {
+    const auto got = read_pipe(out_.get(), buffer, size, milliseconds);
+    require(got > 0, "peer control did not respond");
+    return got;
+  }
+#else
+  void write_control(const std::string& text) { write_all(in_.get(), text); }
+  // Returns the number of bytes read, or 0 when the wait or read was interrupted and must be retried.
+  std::size_t read_some(char* buffer, std::size_t size, long long milliseconds) {
+    pollfd fd{out_.get(), POLLIN, 0};
+    auto ready = poll(&fd, 1, static_cast<int>(milliseconds));
+    if (ready < 0 && errno == EINTR) return 0;
+    require(ready > 0, "peer control did not respond");
+    auto n = ::read(out_.get(), buffer, size);
+    if (n < 0 && errno == EINTR) return 0;
+    require(n > 0, "peer exited before reply");
+    return static_cast<std::size_t>(n);
+  }
+#endif
   sp::json::Document line() {
     auto deadline = Clock::now() + 15s;
     for (;;) {
@@ -90,19 +133,19 @@ class Peer {
       }
       auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
       require(left > 0, "peer control timed out");
-      pollfd fd{out_.get(), POLLIN, 0};
-      auto ready = poll(&fd, 1, static_cast<int>(left));
-      if (ready < 0 && errno == EINTR) continue;
-      require(ready > 0, "peer control did not respond");
-      char buffer[4096]; auto n = ::read(out_.get(), buffer, sizeof(buffer));
-      if (n < 0 && errno == EINTR) continue;
-      require(n > 0, "peer exited before reply");
-      pending_.append(buffer, static_cast<std::size_t>(n));
+      char buffer[4096];
+      const auto n = read_some(buffer, sizeof(buffer), left);
+      if (n == 0) continue;
+      pending_.append(buffer, n);
       require(pending_.size() <= (1U << 20), "peer reply exceeded bound");
     }
   }
   Process process_;
+#ifdef _WIN32
+  Handle in_, out_;
+#else
   Fd in_, out_;
+#endif
   std::size_t sequence_ = 0;
   std::string pending_;
 };

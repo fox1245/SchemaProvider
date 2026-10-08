@@ -146,6 +146,10 @@ void close_cancel_deadline_and_retention(Peer& peer) {
 }
 }
 int main(int argc, char** argv) {
+#ifdef _WIN32
+  runtime_test::Arguments arguments(argc, argv);
+  argc = arguments.argc(); argv = arguments.argv();
+#endif
   try {
     require(argc == 3, "usage: sp_interactions_runtime_tests <node> <interactions_server.mjs>"); runtime_test::LogCapture logs;
     { Peer peer(argv[1], argv[2]); two_turn_vision_and_mutations(peer); terminals_nullable_and_errors(peer); close_cancel_deadline_and_retention(peer); }

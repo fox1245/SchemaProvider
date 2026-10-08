@@ -227,6 +227,10 @@ void safe_remote_errors(Peer& peer) {
 }
 } // namespace
 int main(int argc, char** argv) {
+#ifdef _WIN32
+  runtime_test::Arguments arguments(argc, argv);
+  argc = arguments.argc(); argv = arguments.argv();
+#endif
   try {
     require(argc == 3, "usage: sp_vision_campaign_tests <node> <vision_server.mjs>"); runtime_test::LogCapture diagnostics;
     { Peer peer(argv[1], argv[2]); changed_images_and_controls(peer); native_tool_loop(peer); ownership_close_and_errors(peer); safe_remote_errors(peer); }
