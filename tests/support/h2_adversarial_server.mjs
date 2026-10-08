@@ -1,5 +1,5 @@
 // Model-free HTTP/2 peers for multiplexing, retry, and resolver tests.
-// /ok responds with "peer A\n" or "peer B\n"; keyed stats identify its session/stream.
+// /ok responds with "peer A\n", "peer B\n" or "peer V6\n"; keyed stats identify its session/stream.
 // /flood writes 'z' bytes, stopping immediately when write() reports backpressure.
 // Per-key written counts bytes accepted by write/end; done counts writable finish;
 // closed counts stream close. Session/stream record the most recent keyed request.
@@ -181,6 +181,7 @@ function createPeer(peer) {
 
 const peerA = createPeer('A');
 const peerB = createPeer('B');
+const peerV6 = createPeer('V6');
 const stats = http.createServer(async (request, response) => {
   request.on('error', () => {});
   response.on('error', () => {});
@@ -222,12 +223,12 @@ function shutdown(code = 0) {
   stopping = true;
   for (const session of sessions.keys()) session.destroy();
   for (const socket of sockets) socket.destroy();
-  for (const server of [peerA, peerB, stats]) server.close();
+  for (const server of [peerA, peerB, peerV6, stats]) server.close();
   // Explicit exit also bounds shutdown when HTTP/2 flow control holds a stream open.
   process.exit(code);
 }
 
-for (const server of [peerA, peerB, stats]) {
+for (const server of [peerA, peerB, peerV6, stats]) {
   server.on('error', (error) => {
     console.error(`HTTP fixture listener failure: ${error.code ?? 'unknown'}`);
     shutdown(1);
@@ -242,8 +243,10 @@ process.on('SIGINT', () => shutdown());
 peerA.listen(0, '127.0.0.1', () => {
   const port = peerA.address().port;
   peerB.listen(port, '127.0.0.2', () => {
-    stats.listen(0, '127.0.0.1', () => {
-      console.log(`PORTS h2=${port} stats=${stats.address().port}`);
+    peerV6.listen({ port, host: '::1', ipv6Only: true }, () => {
+      stats.listen(0, '127.0.0.1', () => {
+        console.log(`PORTS h2=${port} stats=${stats.address().port}`);
+      });
     });
   });
 });

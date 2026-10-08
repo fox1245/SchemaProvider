@@ -47,6 +47,7 @@
 #include <future>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <thread>
 #include <unordered_map>
@@ -466,6 +467,7 @@ struct TransportCore : std::enable_shared_from_this<TransportCore> {
 
   // strand-confined
   CURLM* multi = nullptr;
+  bool ipv6_resolve_hosts = false;  // CURLOPT_RESOLVE accepts an IPv6 HOST starting in curl 8.13.
   asio::steady_timer timer;
   bool stopped = false;
   std::unordered_map<curl_socket_t, std::shared_ptr<SockWatch>> socks;
@@ -497,7 +499,7 @@ struct TransportCore : std::enable_shared_from_this<TransportCore> {
   void add_to_multi(const std::shared_ptr<OperationState>& op);
   void lookup(const std::shared_ptr<OperationState>& op);
   void on_resolved(const std::string& host, std::vector<std::string> addrs);
-  void apply_addrs_and_add(const std::shared_ptr<OperationState>& op, const std::vector<std::string>& addrs);
+  void apply_addrs_and_add(const std::shared_ptr<OperationState>& op, std::span<const std::string> addrs);
   void begin(const std::shared_ptr<OperationState>& op);
   void finish(std::shared_ptr<OperationState> op, Status status, FailureKind failure, CURLcode code,
               const char* detail);
@@ -844,6 +846,7 @@ void TransportCore::init() {
   if (info->version_num < 0x075800) {  // 7.88.0: PREREQFUNCTION, PROTOCOLS_STR, *_TIME_T infos
     throw std::runtime_error("libcurl 7.88.0 or newer is required");
   }
+  ipv6_resolve_hosts = info->version_num >= 0x080D00;
   multi = curl_multi_init();
   if (!multi) throw std::runtime_error("curl_multi_init failed");
   curl_multi_setopt(multi, CURLMOPT_SOCKETFUNCTION, &TransportCore::socket_cb);
@@ -905,8 +908,18 @@ void TransportCore::begin(const std::shared_ptr<OperationState>& op) {
 
   arm_stall_timers(op);
 
-  if (op->needs_resolve) lookup(op);
-  else add_to_multi(op);
+  if (op->needs_resolve) {
+    lookup(op);
+  } else if (op->host.front() != '[' || ipv6_resolve_hosts) {
+    // A literal is already an exact resolved address. Install it just like an SDK resolver
+    // answer: Darwin libcurl otherwise sends even numeric hosts to its own growing DNS pool.
+    // Exact host+port entries also keep concurrent literal origins isolated.
+    apply_addrs_and_add(op, std::span<const std::string>(&op->host, 1));
+  } else {
+    // Older curl cannot parse IPv6 HOST rules. Preserve working IPv6 connections on those
+    // libraries; their native numeric resolver cannot be bypassed with this cache API.
+    add_to_multi(op);
+  }
 }
 
 void TransportCore::add_to_multi(const std::shared_ptr<OperationState>& op) {
@@ -982,7 +995,7 @@ void TransportCore::on_resolved(const std::string& host, std::vector<std::string
 }
 
 void TransportCore::apply_addrs_and_add(const std::shared_ptr<OperationState>& op,
-                                        const std::vector<std::string>& addrs) {
+                                        std::span<const std::string> addrs) {
   std::string joined;
   for (const std::string& a : addrs) {
     if (!joined.empty()) joined += ',';
