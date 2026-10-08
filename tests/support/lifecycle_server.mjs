@@ -33,7 +33,7 @@ const notify = () => { for (const wake of [...waiters]) wake(); };
 const now = () => Number(process.hrtime.bigint()) / 1e6;
 const snapshot = c => ({ count: c.count, times: c.times, held: c.held.size, closed: c.closed, faults: c.faults,
   invalid: c.invalid, unexpected, bytes: c.bytes, h2: c.h2, tls: c.tls, conns: c.conns.size, reused: c.reused,
-  blackhole: blackholeConnections });
+  blackhole: blackholeConnections, not_before: c.notBefore ?? null });
 
 // ---- wire shapes -------------------------------------------------------------------------------
 const usageGoogle = { promptTokenCount: 10, candidatesTokenCount: 7, totalTokenCount: 17 };
@@ -212,7 +212,12 @@ async function perform(c, a, x) {
     case 'status': {
       const headers = { 'content-type': a.body === 'html' ? 'text/html' : 'application/json' };
       if (a.retry_after !== undefined) headers['retry-after'] = String(a.retry_after);
-      if (a.retry_after_date_s !== undefined) headers['retry-after'] = httpDate(a.retry_after_date_s);
+      if (a.retry_after_date_s !== undefined) {
+        const date = httpDate(a.retry_after_date_s);
+        headers['retry-after'] = date;
+        // The earliest instant the client may retry, on this peer's monotonic clock (the date has whole-second resolution).
+        c.notBefore = now() + (Date.parse(date) - Date.now());
+      }
       let data = '';
       if (a.body === 'html') data = '<html><body>Bad Gateway</body></html>';
       else if (a.body !== 'empty') {

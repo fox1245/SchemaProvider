@@ -608,6 +608,11 @@ void retry_after_honoured(Matrix& m, bool date, bool streaming) {
   // HTTP-date has one-second resolution: +2 s truncates to between 1 and 2 s ahead.
   require(gap >= (date ? 800.0 : 980.0), "retry dispatched " + std::to_string(gap) + " ms after the 503, before Retry-After");
   require(gap < 8000.0, "retry waited far longer than Retry-After");
+  if (date) {
+    // The exact advertised instant, not the loose floor above: a retry before it ignored the Retry-After date.
+    const auto not_before = report.root().get("not_before").as_double();
+    require(times.at(1).as_double() >= not_before - 50.0, "retry dispatched before the advertised Retry-After date");
+  }
 }
 
 void retry_after_beyond_deadline(Matrix& m) {

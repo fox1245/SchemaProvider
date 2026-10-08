@@ -502,6 +502,15 @@ void storage_fail_closed(const std::filesystem::path& source) {
     CHECK(std::holds_alternative<Error>(Meter::open(f.root.string())));
     CHECK(read_file(f.root / "build/m5-live.ledger") == f.original);
   }
+  // Every directory the meter opens must refuse group and world write access, whatever the umask was.
+  for (const char* name : {"", "config", "build"}) {
+    for (const mode_t writable : {static_cast<mode_t>(0020), static_cast<mode_t>(0002)}) {
+      Fixture f(source);
+      const auto path = *name ? f.root / name : f.root;
+      if (::chmod(path.c_str(), 0700 | writable)) std::abort();
+      CHECK(std::holds_alternative<Error>(Meter::open(f.root.string())));
+    }
+  }
 }
 }  // namespace
 int main(int argc, char** argv) {
