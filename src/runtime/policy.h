@@ -48,6 +48,8 @@ Error classify_failure(const transport::Result&, const ResponseInfo&,
                        bool semantic_output, std::uint32_t attempts, SteadyTime now);
 std::string_view safe_message(ErrorKind) noexcept;
 bool valid_retry_policy(const RetryPolicy&) noexcept;
+// A stall bound is zero (disabled) or a positive duration within the admitted ceiling (milliseconds).
+bool valid_stall_bound(std::chrono::milliseconds value, std::uint64_t ceiling_ms) noexcept;
 
 // uniform01 is in [0,1]. No token is consumed by planning; recheck at dispatch.
 std::optional<SteadyTime> retry_at(const Error&, const RetryPolicy&,

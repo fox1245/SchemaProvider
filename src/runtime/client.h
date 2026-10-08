@@ -36,6 +36,15 @@ struct RunOptions {
   std::optional<SteadyTime> deadline;
   std::stop_token stop_token;
   std::optional<RetryPolicy> retry;
+  // Per-run overrides of the client-wide stall bounds in Options::transport (transport::
+  // TransportOptions documents each). Unset = the client default; zero = disabled for this run;
+  // otherwise a positive duration no longer than the admitted ceiling (the default_timeout_ms
+  // admission ceiling), else the run starts as an InvalidRequest failure. The bounds apply to every
+  // attempt and never extend `deadline`. Typical use: raise `deadline` for a long generation and set
+  // idle_timeout so a stalled stream is still noticed in seconds.
+  std::optional<std::chrono::milliseconds> connect_timeout;
+  std::optional<std::chrono::milliseconds> first_byte_timeout;
+  std::optional<std::chrono::milliseconds> idle_timeout;
 };
 
 struct Limits {

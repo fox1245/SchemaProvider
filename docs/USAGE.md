@@ -351,6 +351,37 @@ auto result = operation.join();  // Use a caller thread, never a library callbac
 
 An absolute `steady_clock` deadline includes preparation time, retained-handle waiting, DNS/connect/TLS, request/response I/O and any retry delay. Omitting it computes `now + Options::default_timeout` before encoding in `prepare`; moving the handle does not renew it. A stop requested before preparation or an already expired deadline is inspectable as an initial error; expiry during preparation is still checked before sending. Later cancellation cancels local work without waiting for peer progress. It cannot promise the remote service stops generating or billing. If the outcome was decided before cancellation was observed, that terminal outcome remains.
 
+### Stall bounds for long generations
+
+The deadline is the only time bound by default, so a stream that keeps its connection open and trickles bytes, or goes silent after its headers, runs until the whole deadline expires. That is acceptable at the 30 s default and costly once you raise the deadline for a long generation. Three optional bounds detect a stalled peer without touching the deadline. All are `std::chrono::milliseconds`, **off by default** (zero), and each is measured from the start of every attempt:
+
+| Bound | Fires when | Outcome |
+|---|---|---|
+| `connect_timeout` | the connection (TCP and TLS) is not established in time | `Failure(Transport)`, `retry_safety == NotSent` |
+| `first_byte_timeout` | no response header line arrives in time (includes connect, upload and the server's think time) | `Failure(Transport)`, `NotSent` before possible dispatch, otherwise `PossiblyAccepted` |
+| `idle_timeout` | no byte moves in either direction for this long: request headers/body sent, response headers, body chunks and SSE comments or keep-alives all refresh activity | `Failure(Truncated)` once the response head was seen, else `Failure(Transport)` |
+
+Set a client-wide default in `Options::transport`, and override it for one call in `RunOptions` (unset inherits, zero disables for that call). These bounds overlap: idle detection starts with the attempt, not after the first byte. A run with a long overall generation budget but bounded connection, initial response and stream silence:
+
+```cpp
+#include <chrono>
+#include <runtime/client.h>
+
+sp::runtime::Options options;                          // client-wide defaults
+options.transport.connect_timeout = std::chrono::seconds(5);
+// options.transport.idle_timeout = std::chrono::seconds(60);   // or for every call
+sp::runtime::Client client(std::move(descriptor), options);
+
+sp::runtime::RunOptions run;
+run.streaming = true;
+run.deadline = std::chrono::steady_clock::now() + std::chrono::minutes(10);  // long generation
+run.first_byte_timeout = std::chrono::seconds(20);     // response headers must arrive within 20 s
+run.idle_timeout = std::chrono::seconds(30);           // includes pre-head silence; later SSE heartbeats count
+auto result = client.complete(std::move(request), run);
+```
+
+Pick an `idle_timeout` comfortably above the longest silence a healthy stream can have, including a reasoning model's pause between events; SSE comments and pings from the server count as activity. The bounds never extend the deadline and are never later than it: when the deadline is earlier the outcome stays `DeadlineExceeded`. A stall is not `DeadlineExceeded`, because you still have time budget; it is a retryable `Transport` or `Truncated` failure whose `retry_safety` and `attempt` evidence are exactly those of any other failure at that point. After the request may have been accepted, an automatic retry still needs the duplicate-billing opt-in, and once semantic output was observed there is no retry and the partial message stays on the `Failure`. Values must be non-negative and not exceed the `default_timeout_ms` admission ceiling: bad client-wide values throw `ConfigError` from the `Client` constructor, bad per-run values give an `InvalidRequest` failure before anything is sent. Pausing delivery through backpressure (a slow consumer) is not counted as peer silence.
+
 `Operation` is move-only. Destruction requests nonblocking cancellation; it does not wait for an already running callback. `detach()` relinquishes the handle without cancellation, so use it only when another owner will observe completion. Destroying a client requests shutdown and drains off-worker; retain outcomes independently of the client.
 
 Wire queues have chunk and byte bounds (`queued_body_chunks`, `queued_body_bytes`), separate response/error limits and semantic/SSE bounds. The runtime pauses transport delivery while its actor drains the bounded queue. This does not make blocking callbacks safe or bound a consumer's own unbounded queue. Limit exhaustion produces a typed failure. Slow-callback and callback-exception counters are available through `Client::diagnostics()`; they report misuse, not preemption.
