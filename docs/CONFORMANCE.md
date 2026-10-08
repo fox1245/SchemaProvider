@@ -551,6 +551,8 @@ Connection-reset accounting distinguishes a **refused resend proposal** from an 
 
 For HTTP/2 cancellation/deadline cells, the terminal callback and `join()` must finish promptly **while the Client is still alive**. Only after proving this does the cell destroy the Client to fence eventual peer stream cleanup. The current libcurl transport can leave that stream open until connection destruction rather than sending RST_STREAM immediately; peer cleanup is not substituted for operation cancellation proof.
 
+Backoff-cancellation cells fence the runtime actor's actual retry-wait transition through the private test seam before cancelling; a peer's completed-response counter is not treated as that state fence. Idle HTTP/2 connection-reset cells retain the underlying accepted TCP socket and inject RST directly, rather than substituting orderly GOAWAY teardown.
+
 This inventory describes registered regression checks, not proof that a verification run succeeded. Qualification requires the named cells to execute, the applicable mutation checks to fail, and the full-suite/sanitizer gates to be recorded separately.
 
 ## 12. Staged ladder and release gates

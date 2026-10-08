@@ -45,6 +45,7 @@ struct OperationStats {
   std::size_t queued_chunks = 0;
   std::uint64_t pauses = 0;
   std::uint32_t attempts = 0;
+  bool backing_off = false;
 };
 
 class ClientAccess {
@@ -57,6 +58,8 @@ class ClientAccess {
                      std::function<double()> random01 = {},
                      RealTransportFactory real_transport = nullptr);
   static OperationStats stats(const Operation&);
+  // Test-only state fence; a completed peer response does not prove retry backoff has begun.
+  static bool wait_for_backoff(const Operation&, std::chrono::milliseconds timeout);
   // Private qualification seam: freeze a bounded body-only negative control
   // before spending admission. Changed native requests cannot mint replay seals.
   static PreparedRequest prepare_control(Client&, Request, RunOptions,
