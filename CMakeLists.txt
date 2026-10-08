@@ -371,6 +371,17 @@ if(SP_BUILD_TESTS)
   set_tests_properties(runtime_policy runtime_scheduler runtime_properties PROPERTIES TIMEOUT 300)
   set_tests_properties(sse_properties descriptor_properties chat_properties chat_fixtures
                        messages_properties messages_replay native_continuation_bounds messages_fixtures PROPERTIES TIMEOUT 300)
+
+  # Transport stall bounds (connect / first byte / idle): one binary, one CTest entry per suite. A suite
+  # that cannot build its black hole prints STALL_SKIPPED and is reported as skipped, never as passed.
+  add_executable(sp_stall_tests tests/stall_timeouts_test.cpp)
+  target_compile_options(sp_stall_tests PRIVATE ${SP_WARNING_OPTIONS})
+  target_link_libraries(sp_stall_tests PRIVATE sp_runtime sp_transport sp_codecs sp_descriptor sp_json Threads::Threads)
+  foreach(stall_suite transport tls_h2 connect runtime)
+    add_test(NAME stall_${stall_suite} COMMAND ${sp_test_runner} $<TARGET_FILE:sp_stall_tests>
+             ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/stall_server.mjs ${stall_suite})
+    set_tests_properties(stall_${stall_suite} PROPERTIES TIMEOUT 300 SKIP_REGULAR_EXPRESSION "STALL_SKIPPED")
+  endforeach()
 endif()
 
 if(SP_BUILD_RUNTIME_TESTS)

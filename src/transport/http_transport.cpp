@@ -118,6 +118,20 @@ std::string_view trim(std::string_view s) {
   return s;
 }
 
+
+// Effective stall bound for one attempt: the request's override, else the transport default. A bound
+// that is disabled, or would expire no earlier than the deadline, is reported as zero because it
+// can never fire first (the idle bound's expiry only ever moves later). The comparison is done in
+// milliseconds so an absurdly large bound cannot overflow the clock's tick type.
+std::chrono::milliseconds effective_bound(std::optional<std::chrono::milliseconds> request_value,
+                                          std::chrono::milliseconds fallback,
+                                          std::chrono::steady_clock::time_point from,
+                                          std::chrono::steady_clock::time_point deadline) {
+  const std::chrono::milliseconds bound = request_value.value_or(fallback);
+  if (bound.count() <= 0 || deadline <= from) return std::chrono::milliseconds{0};
+  const auto room = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - from);
+  return bound >= room ? std::chrono::milliseconds{0} : bound;
+}
 }  // namespace
 
 struct TransportCore;
@@ -261,12 +275,16 @@ struct ResolverPool : std::enable_shared_from_this<ResolverPool> {
 // ---------------------------------------------------------------------------------------------
 struct OperationState {
   OperationState(std::weak_ptr<TransportCore> core, HttpRequest request, Callbacks callbacks,
-                 std::size_t head_limit)
+                 const TransportOptions& options)
       : owner(std::move(core)),
         req(std::move(request)),
         cb(std::move(callbacks)),
-        max_head_bytes(head_limit),
-        started(std::chrono::steady_clock::now()) {}
+        max_head_bytes(options.max_head_bytes),
+        started(std::chrono::steady_clock::now()),
+        connect_bound(effective_bound(req.connect_timeout, options.connect_timeout, started, req.deadline)),
+        first_byte_bound(effective_bound(req.first_byte_timeout, options.first_byte_timeout, started, req.deadline)),
+        idle_bound(effective_bound(req.idle_timeout, options.idle_timeout, started, req.deadline)),
+        last_activity(started) {}
 
   ~OperationState() {
     if (easy) curl_easy_cleanup(easy);  // before freeing lists libcurl may still reference
@@ -290,6 +308,17 @@ struct OperationState {
   FailureKind setup_failure = FailureKind::Other;
   CURLcode setup_code = CURLE_OK;
   std::optional<asio::steady_timer> deadline_timer;
+  // Optional stall bounds (zero = disabled, or unable to expire before the deadline). Timers and
+  // flags are strand-confined once the operation is active; the *_armed flags (not the timer
+  // objects) tell a handler that already ran its wait whether the bound was satisfied meanwhile.
+  const std::chrono::milliseconds connect_bound;
+  const std::chrono::milliseconds first_byte_bound;
+  const std::chrono::milliseconds idle_bound;
+  std::optional<asio::steady_timer> connect_timer, first_byte_timer, idle_timer;
+  bool connect_armed = false;
+  bool first_byte_armed = false;
+  std::chrono::steady_clock::time_point last_activity;  // read only when idle_bound > 0
+  curl_off_t seen_dl = 0, seen_ul = 0;                  // progress counters at the last activity
   bool in_multi = false;
   bool paused = false;
   bool finished = false;
@@ -323,9 +352,31 @@ struct OperationState {
 
   void setup();
 
+  // Stall-bound bookkeeping, called from libcurl callbacks on the strand. None of them completes
+  // the operation: that is left to the timers' handlers.
+  void note_activity() noexcept {
+    if (idle_bound.count() > 0) last_activity = std::chrono::steady_clock::now();
+  }
+  void note_connected() {  // the connection (TCP and TLS) is established, or was reused
+    connect_armed = false;
+    if (connect_timer) {
+      connect_timer->cancel();
+      connect_timer.reset();
+    }
+  }
+  void note_response_started() {  // the first response header line arrived
+    first_byte_armed = false;
+    if (first_byte_timer) {
+      first_byte_timer->cancel();
+      first_byte_timer.reset();
+    }
+  }
+
   static std::size_t header_cb(char* buf, std::size_t size, std::size_t n, void* ud);
   static std::size_t write_cb(char* ptr, std::size_t size, std::size_t n, void* ud);
   static int prereq_cb(void* ud, char* primary_ip, char* local_ip, int primary_port, int local_port);
+  static int xferinfo_cb(void* ud, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow);
+  static int debug_cb(CURL*, curl_infotype type, char*, std::size_t size, void* ud);
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -454,6 +505,8 @@ struct TransportCore : std::enable_shared_from_this<TransportCore> {
   void complete_from_curl(const std::shared_ptr<OperationState>& op, CURLcode code);
   void check_multi_info();
   void on_timeout();
+  void arm_stall_timers(const std::shared_ptr<OperationState>& op);
+  void on_idle_expired(const std::shared_ptr<OperationState>& op);
   void set_timer(long ms);
   void on_socket(CURL* easy, curl_socket_t s, int what);
   void arm(const std::shared_ptr<SockWatch>& w);
@@ -514,7 +567,16 @@ void OperationState::setup() {
   set(CURLOPT_PROTOCOLS_STR, "http,https");
   set(CURLOPT_FOLLOWLOCATION, 0L);
   set(CURLOPT_NOSIGNAL, 1L);
-  set(CURLOPT_NOPROGRESS, 1L);
+  set(CURLOPT_NOPROGRESS, idle_bound.count() > 0 ? 0L : 1L);
+  if (idle_bound.count() > 0) {
+    // Upload progress tracks body bytes handed to the socket. Outbound headers do not change that
+    // counter, so consume HEADER_OUT notifications too, without retaining or logging their bytes.
+    set(CURLOPT_XFERINFOFUNCTION, &OperationState::xferinfo_cb);
+    set(CURLOPT_XFERINFODATA, static_cast<void*>(this));
+    set(CURLOPT_VERBOSE, 1L);
+    set(CURLOPT_DEBUGFUNCTION, &OperationState::debug_cb);
+    set(CURLOPT_DEBUGDATA, static_cast<void*>(this));
+  }
   set(CURLOPT_PROXY, "");  // proxies are not supported: an empty value also disables environment proxies
   set(CURLOPT_PRIVATE, static_cast<void*>(this));
   set(CURLOPT_HEADERFUNCTION, &OperationState::header_cb);
@@ -656,6 +718,8 @@ BodyFraming derive_framing(const ResponseHead& head, bool head_request) {
 std::size_t OperationState::header_cb(char* buf, std::size_t size, std::size_t n, void* ud) {
   auto* op = static_cast<OperationState*>(ud);
   const std::size_t len = size * n;
+  op->note_activity();
+  op->note_response_started();  // any response header line means the peer answered
   if (op->head_delivered) return len;  // trailers: not interpreted
   op->head_bytes += len;
   if (op->head_bytes > op->max_head_bytes) {
@@ -722,6 +786,7 @@ std::size_t OperationState::header_cb(char* buf, std::size_t size, std::size_t n
 std::size_t OperationState::write_cb(char* ptr, std::size_t size, std::size_t n, void* ud) {
   auto* op = static_cast<OperationState*>(ud);
   const std::size_t len = size * n;
+  op->note_activity();
   if (!op->cb.on_body) return len;
   try {
     if (op->cb.on_body(std::string_view(ptr, len))) return len;
@@ -734,8 +799,25 @@ std::size_t OperationState::write_cb(char* ptr, std::size_t size, std::size_t n,
   return CURL_WRITEFUNC_PAUSE;
 }
 
+int OperationState::xferinfo_cb(void* ud, curl_off_t, curl_off_t dlnow, curl_off_t, curl_off_t ulnow) {
+  auto* op = static_cast<OperationState*>(ud);
+  if (dlnow != op->seen_dl || ulnow != op->seen_ul) {
+    op->seen_dl = dlnow;
+    op->seen_ul = ulnow;
+    op->note_activity();
+  }
+  return 0;
+}
+
+int OperationState::debug_cb(CURL*, curl_infotype type, char*, std::size_t size, void* ud) {
+  if (type == CURLINFO_HEADER_OUT && size > 0)
+    static_cast<OperationState*>(ud)->note_activity();
+  return 0;  // Suppress every debug record, including credentials and payloads.
+}
+
 int OperationState::prereq_cb(void* ud, char*, char*, int, int) {
   auto* op = static_cast<OperationState*>(ud);
+  op->note_connected();  // also reached for a reused connection; a second visit is harmless
   // The prerequisite point is reached once per request write. A second arrival means libcurl is
   // about to resend on a fresh connection after a reused one died. One attempt is one write.
   if (++op->prereq_count > 1) {
@@ -820,6 +902,8 @@ void TransportCore::begin(const std::shared_ptr<OperationState>& op) {
           if (!ec) self->finish(op, Status::DeadlineExceeded, FailureKind::None, CURLE_OK, "deadline exceeded");
         }));
   }
+
+  arm_stall_timers(op);
 
   if (op->needs_resolve) lookup(op);
   else add_to_multi(op);
@@ -925,6 +1009,15 @@ void TransportCore::finish(std::shared_ptr<OperationState> op, Status status, Fa
     op->deadline_timer->cancel();
     op->deadline_timer.reset();
   }
+  // Same rule for the stall timers: destroyed here, on the strand. Clearing the armed flags makes
+  // a handler whose wait already completed (and is queued) a no-op.
+  op->connect_armed = op->first_byte_armed = false;
+  for (auto* timer : {&op->connect_timer, &op->first_byte_timer, &op->idle_timer}) {
+    if (*timer) {
+      (*timer)->cancel();
+      timer->reset();
+    }
+  }
 
   Result r;
   r.status = status;
@@ -1007,8 +1100,10 @@ void TransportCore::finish(std::shared_ptr<OperationState> op, Status status, Fa
     }
   }
   // Break callback-owned cycles now that no callback can run again, then release join().
-  Callbacks released = std::move(op->cb);
-  op->cb = Callbacks{};
+  {
+    Callbacks released = std::move(op->cb);
+    op->cb = Callbacks{};
+  }  // Destroy callback storage before join() can return.
   {
     std::lock_guard lock(op->mu);
     op->done = true;
@@ -1019,6 +1114,7 @@ void TransportCore::finish(std::shared_ptr<OperationState> op, Status status, Fa
 void TransportCore::resume(const std::shared_ptr<OperationState>& op) {
   if (op->finished || !op->paused || !multi) return;
   op->paused = false;
+  if (op->idle_bound.count() > 0) op->last_activity = std::chrono::steady_clock::now();
   note_resume(*op);
   // Unpausing redelivers the retained bytes synchronously; an error from that delivery (for
   // example on_body throwing) comes back here and produces no completion message of its own.
@@ -1133,6 +1229,69 @@ void TransportCore::on_timeout() {
   int running = 0;
   curl_multi_socket_action(multi, CURL_SOCKET_TIMEOUT, 0, &running);
   check_multi_info();
+}
+
+// Stall bounds. Each bound owns one timer, started at the attempt's start (OperationState::started).
+// A timer handler runs on the strand, so it observes a consistent view of the operation; the
+// handler of a wait that already completed when its bound was satisfied sees the cleared armed flag
+// (connect, first byte) or an expiry that moved later (idle) and does nothing. Completion goes
+// through finish(), which makes the first outcome win against the deadline, cancel and completion.
+void TransportCore::arm_stall_timers(const std::shared_ptr<OperationState>& op) {
+  if (op->connect_bound.count() > 0) {
+    op->connect_armed = true;
+    op->connect_timer.emplace(ctx);
+    op->connect_timer->expires_at(op->started + op->connect_bound);
+    op->connect_timer->async_wait(asio::bind_executor(
+        strand, [self = shared_from_this(), op](const asio::error_code& ec) {
+          if (ec || op->finished || !op->connect_armed) return;
+          self->finish(op, Status::Failed, FailureKind::ConnectTimeout, CURLE_OPERATION_TIMEDOUT,
+                       "connect timeout");
+        }));
+  }
+  if (op->first_byte_bound.count() > 0) {
+    op->first_byte_armed = true;
+    op->first_byte_timer.emplace(ctx);
+    op->first_byte_timer->expires_at(op->started + op->first_byte_bound);
+    op->first_byte_timer->async_wait(asio::bind_executor(
+        strand, [self = shared_from_this(), op](const asio::error_code& ec) {
+          if (ec || op->finished || !op->first_byte_armed) return;
+          self->finish(op, Status::Failed, FailureKind::FirstByteTimeout, CURLE_OPERATION_TIMEDOUT,
+                       "first byte timeout");
+        }));
+  }
+  if (op->idle_bound.count() > 0) {
+    op->last_activity = op->started;
+    op->idle_timer.emplace(ctx);
+    op->idle_timer->expires_at(op->started + op->idle_bound);
+    op->idle_timer->async_wait(asio::bind_executor(
+        strand, [self = shared_from_this(), op](const asio::error_code& ec) {
+          if (!ec) self->on_idle_expired(op);
+        }));
+  }
+}
+
+// One timer serves the whole transfer: activity only stores a timestamp, and the timer is re-armed
+// here to last_activity + idle instead of once per chunk.
+void TransportCore::on_idle_expired(const std::shared_ptr<OperationState>& op) {
+  if (op->finished || !op->idle_timer) return;
+  const auto now = std::chrono::steady_clock::now();
+  // A paused transfer is the application applying backpressure, not the peer going silent.
+  if (op->paused) op->last_activity = now;
+  // Compare milliseconds before adding: an admitted bound may be enormous, and activity can move
+  // its expiry beyond the clock's representable range even when started + bound was safe.
+  if (op->idle_bound >= std::chrono::duration_cast<std::chrono::milliseconds>(op->req.deadline - op->last_activity))
+    return;  // The immutable deadline is earlier (also avoids overflowing last_activity + bound).
+  const auto due = op->last_activity + op->idle_bound;
+  if (due <= now) {
+    finish(op, Status::Failed, FailureKind::IdleTimeout, CURLE_OPERATION_TIMEDOUT, "idle timeout");
+    return;
+  }
+  if (due >= op->req.deadline) return;  // the deadline is earlier and activity only moves `due` later
+  op->idle_timer->expires_at(due);
+  op->idle_timer->async_wait(asio::bind_executor(
+      strand, [self = shared_from_this(), op](const asio::error_code& ec) {
+        if (!ec) self->on_idle_expired(op);
+      }));
 }
 
 void TransportCore::set_timer(long ms) {
@@ -1493,8 +1652,7 @@ Transport::~Transport() {
 }
 
 Operation Transport::start(HttpRequest request, Callbacks callbacks) {
-  auto op = std::make_shared<OperationState>(core_, std::move(request), std::move(callbacks),
-                                             core_->opts.max_head_bytes);
+  auto op = std::make_shared<OperationState>(core_, std::move(request), std::move(callbacks), core_->opts);
   op->core = core_.get();
   op->setup();
   asio::post(core_->strand, [core = core_, op] { core->begin(op); });

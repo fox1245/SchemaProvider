@@ -252,6 +252,16 @@ Error classify_failure(const transport::Result& result, const ResponseInfo& info
       case F::Truncated: error.kind = ErrorKind::Truncated; error.retry_class = RetryClass::Transient; break;
       case F::Resolve: case F::Connect: case F::Tls: case F::Send: case F::Receive: case F::ResendRefused:
         error.kind = ErrorKind::Transport; error.retry_class = RetryClass::Transient; break;
+      // Stall bounds are transport failures of the attempt, not the operation deadline: the caller
+      // may still hold time budget. Connect and first-byte stalls share Receive/Connect's
+      // classification. An idle stall after the response head is an abnormal end of the response
+      // (Truncated, like an EOF mid-body); one before it, a transport failure. Retry safety comes from
+      // the attempt evidence below, exactly as for those failures.
+      case F::ConnectTimeout: case F::FirstByteTimeout:
+        error.kind = ErrorKind::Transport; error.retry_class = RetryClass::Transient; break;
+      case F::IdleTimeout:
+        error.kind = result.attempt.response_head_seen ? ErrorKind::Truncated : ErrorKind::Transport;
+        error.retry_class = RetryClass::Transient; break;
       default: error.kind = ErrorKind::Transport; error.retry_class = RetryClass::Unknown; break;
     }
   }
@@ -285,6 +295,9 @@ Error classify_failure(const transport::Result& result, const ResponseInfo& info
 
 bool valid_retry_policy(const RetryPolicy& p) noexcept {
   return p.max_attempts > 0 && p.base_delay >= Ms::zero() && p.max_delay >= p.base_delay;
+}
+bool valid_stall_bound(Ms value, std::uint64_t ceiling_ms) noexcept {
+  return value.count() >= 0 && static_cast<std::uint64_t>(value.count()) <= ceiling_ms;
 }
 std::optional<SteadyTime> retry_at(const Error& e, const RetryPolicy& p,
     std::uint32_t attempts, SteadyTime now, SteadyTime deadline, double uniform01) {

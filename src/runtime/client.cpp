@@ -210,6 +210,11 @@ void validate(const descriptor::ValidatedDescriptor& descriptor, const Options& 
   if (options.transport.max_host_connections < 0 || static_cast<std::uint64_t>(options.transport.max_host_connections) > ceiling.max_host_connections) reject("/max_host_connections");
   if (options.transport.max_head_bytes == 0 || options.transport.max_head_bytes > ceiling.max_head_bytes) reject("/max_head_bytes");
   if (options.transport.dns_ttl.count() < 0 || static_cast<std::uint64_t>(options.transport.dns_ttl.count()) > ceiling.dns_ttl_seconds) reject("/dns_ttl_seconds");
+  // The stall bounds are durations no longer than the longest admissible operation deadline, so
+  // they share that ceiling; zero disables a bound.
+  if (!detail::valid_stall_bound(options.transport.connect_timeout, ceiling.default_timeout_ms)) reject("/connect_timeout_ms");
+  if (!detail::valid_stall_bound(options.transport.first_byte_timeout, ceiling.default_timeout_ms)) reject("/first_byte_timeout_ms");
+  if (!detail::valid_stall_bound(options.transport.idle_timeout, ceiling.default_timeout_ms)) reject("/idle_timeout_ms");
   if (options.default_timeout.count() <= 0 || static_cast<std::uint64_t>(options.default_timeout.count()) > ceiling.default_timeout_ms) reject("/default_timeout_ms");
   if (options.slow_callback_threshold.count() < 0 || static_cast<std::uint64_t>(options.slow_callback_threshold.count()) > ceiling.slow_callback_threshold_ms) reject("/slow_callback_threshold_ms");
   if (options.retry_tokens > ceiling.retry_tokens) reject("/retry_tokens");
@@ -1232,7 +1237,11 @@ PreparedRequest Client::prepare(Request request, RunOptions options) {
   if (admission) throw AdmissionError(*admission);
   std::optional<Error> error;
   const auto& retry_ceiling = client->options.policy->admission();
+  const auto& stall_ceiling = retry_ceiling.default_timeout_ms;
   if (!detail::valid_retry_policy(*operation->options.retry) || deadline == SteadyTime::max() ||
+      (operation->options.connect_timeout && !detail::valid_stall_bound(*operation->options.connect_timeout, stall_ceiling)) ||
+      (operation->options.first_byte_timeout && !detail::valid_stall_bound(*operation->options.first_byte_timeout, stall_ceiling)) ||
+      (operation->options.idle_timeout && !detail::valid_stall_bound(*operation->options.idle_timeout, stall_ceiling)) ||
       operation->options.retry->max_attempts > retry_ceiling.retry_max_attempts ||
       static_cast<std::uint64_t>(operation->options.retry->base_delay.count()) > retry_ceiling.retry_base_delay_ms ||
       static_cast<std::uint64_t>(operation->options.retry->max_delay.count()) > retry_ceiling.retry_max_delay_ms)
@@ -1274,6 +1283,11 @@ PreparedRequest Client::prepare(Request request, RunOptions options) {
         else wire.headers.push_back({"Authorization", "Bearer " + client->options.api_key});
       }
       wire.deadline = deadline;
+      // Resolved here, once, so every attempt (and any backend) sees the same effective bounds:
+      // the per-run override, else the client-wide default. Zero means disabled.
+      wire.connect_timeout = operation->options.connect_timeout.value_or(client->options.transport.connect_timeout);
+      wire.first_byte_timeout = operation->options.first_byte_timeout.value_or(client->options.transport.first_byte_timeout);
+      wire.idle_timeout = operation->options.idle_timeout.value_or(client->options.transport.idle_timeout);
       wire.http_version = client->options.http_version;
       wire.ca_file = client->options.ca_file;
       operation->native_context = std::move(value.context);

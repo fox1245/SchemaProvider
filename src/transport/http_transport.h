@@ -13,7 +13,12 @@
 //  * It reports what happened on the wire (AttemptObservation); it never interprets semantics.
 //  * A response is a success only if the HTTP framing ended normally. A body delimited only by
 //    connection close is NOT a normal end (Failed/Truncated).
-//  * Cancellation and the deadline complete without peer progress.
+//  * Cancellation, the deadline and the stall bounds complete without peer progress.
+//  * The absolute deadline is the only mandatory time bound. Three OPTIONAL stall bounds, all
+//    disabled by default (TransportOptions, HttpRequest), end an attempt whose peer stops making
+//    progress while the deadline is still far away: connect_timeout, first_byte_timeout and
+//    idle_timeout. Each ends the attempt as Status::Failed with its own FailureKind; the earliest
+//    bound wins, and the deadline (Status::DeadlineExceeded) wins when it is the earliest.
 #pragma once
 #include "sp/config_defaults.h"
 
@@ -22,6 +27,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -51,8 +57,14 @@ struct HttpRequest {
   std::vector<Header> headers;     // curl's own default headers are suppressed
   std::string body;
   // Absolute monotonic deadline covering DNS, connect, TLS, send and the whole response.
-  // time_point::max() means "none"; every production call site must set one.
+  // time_point::max() means "none"; every production call site must set one. The optional stall
+  // bounds below never extend it: a bound that would expire at or after the deadline never fires.
   std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max();
+  // Per-attempt overrides of the TransportOptions defaults (std::nullopt = use the default;
+  // zero or negative = disabled). Each bound is measured from the start of this attempt.
+  std::optional<std::chrono::milliseconds> connect_timeout;
+  std::optional<std::chrono::milliseconds> first_byte_timeout;
+  std::optional<std::chrono::milliseconds> idle_timeout;
   HttpVersion http_version = HttpVersion::Auto;
   std::string ca_file;             // optional extra trust anchor file (tests, private CAs)
 };
@@ -119,6 +131,9 @@ enum class FailureKind : std::uint8_t {
   ResponseTooLarge, // response head exceeded max_head_bytes
   CallbackError,    // a user callback threw
   Misuse,           // contract violation by the caller (for example join() on an I/O thread)
+  ConnectTimeout,   // connect_timeout expired before the connection (TCP and TLS) was established
+  FirstByteTimeout, // first_byte_timeout expired before the first response header line arrived
+  IdleTimeout,      // idle_timeout: no byte moved in either direction for that long
   Other,
 };
 
@@ -162,6 +177,28 @@ struct TransportOptions {
   unsigned resolver_threads = static_cast<unsigned>(config_defaults::defaults_resolver_threads);
   std::chrono::seconds dns_ttl{config_defaults::defaults_dns_ttl_seconds};
   ResolveFn resolve;                    // empty: getaddrinfo
+  // Optional stall bounds, applied to every attempt unless HttpRequest overrides them. Zero (the
+  // default) disables a bound, so a transport built without them behaves exactly as before: the
+  // absolute HttpRequest::deadline is then the only time bound. Each is measured from the start of
+  // the attempt, with its own timer on the transport's event loop, and ends the attempt without
+  // waiting for peer progress.
+  //  * connect_timeout: attempt start until the connection is established. libcurl records
+  //    "connected" only once the whole chain (TCP and, for https, TLS) is up, so a stalled TCP
+  //    connect and a stalled TLS handshake are both bounded by this one value and reported as
+  //    FailureKind::ConnectTimeout (the distinction is not observable, see Stage). Name lookup
+  //    time counts. A reused connection satisfies it at once.
+  //  * first_byte_timeout: attempt start until the first response header line arrives. It
+  //    includes connect_timeout's span, the request upload and the peer's think time.
+  //  * idle_timeout: no byte moved for this long, in either direction, counted from the start of
+  //    the attempt and re-armed by every request header sent, request body byte sent, response header
+  //    line or body byte received (SSE comments and keep-alives count; HTTP/2 activity is per transfer,
+  //    not per connection). TLS handshake bytes and HTTP framing that carries no payload are not
+  //    counted. Time the application keeps a transfer paused (on_body returned false) is not
+  //    peer silence and is excluded. This is the bound to set when the deadline is raised for a
+  //    long generation.
+  std::chrono::milliseconds connect_timeout{0};
+  std::chrono::milliseconds first_byte_timeout{0};
+  std::chrono::milliseconds idle_timeout{0};
 };
 
 struct RuntimeInfo {
