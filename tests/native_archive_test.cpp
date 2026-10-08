@@ -27,7 +27,14 @@ using namespace sp;
 #define CHECK(c) do { if (!(c)) throw std::runtime_error("archive check failed at " + std::to_string(__LINE__)); } while(false)
 struct Fixture {
   std::string root;
-  Fixture() { char path[]="/tmp/sp-native-archive-XXXXXX";auto* p=::mkdtemp(path);CHECK(p);root=p; }
+  Fixture() {
+    // Custody rejects symlink traversal, including macOS /tmp and /var aliases.
+    const auto parent = std::filesystem::canonical(std::filesystem::temp_directory_path());
+    auto path = (parent / "sp-native-archive-XXXXXX").string();
+    const auto* directory = ::mkdtemp(path.data());
+    CHECK(directory);
+    root = directory;
+  }
   ~Fixture() { std::error_code e;std::filesystem::remove_all(root,e); }
   std::string directory() const { return root+"/records"; }
   std::string key() const { return root+"/activation"; }

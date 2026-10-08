@@ -18,6 +18,7 @@
 #include "descriptor/descriptor.h"
 #include "json/json.h"
 #include "support/runtime_peer.h"
+#include "transport/http_transport.h"
 
 #include "support/portable.h"
 #include <algorithm>
@@ -580,7 +581,27 @@ void connect_refused(Matrix& m, bool retry) {
   RefusedPort refused;
   Cell c(m.lab, m.fam, R"([{"a":"ok"}])", {.streaming = false, .retry = retry, .attempts = 3, .port = refused.port});
   c.start();
-  expect_failure(c.finish(), Want(ErrorKind::Transport, RetryClass::Transient, RetrySafety::NotSent).head_seen(false).sent(false).tries(retry ? 3U : 1U));
+  try {
+    expect_failure(c.finish(), Want(ErrorKind::Transport, RetryClass::Transient, RetrySafety::NotSent).head_seen(false).sent(false).tries(retry ? 3U : 1U));
+  } catch (...) {
+    // Runtime errors deliberately hide backend details. Probe the same reserved, non-listening
+    // endpoint only on failure; emit numeric wire observations, never headers or request bodies.
+    try {
+      sp::transport::Transport transport;
+      sp::transport::HttpRequest request;
+      request.url = "http://127.0.0.1:" + std::to_string(refused.port) + "/";
+      request.deadline = Clock::now() + 5s;
+      const auto wire = transport.start(std::move(request), {{}, {}, [](const auto&) {}}).join();
+      std::cerr << "connect-refused wire: status=" << static_cast<unsigned>(wire.status)
+                << " failure=" << static_cast<unsigned>(wire.failure)
+                << " curl_code=" << wire.curl_code
+                << " reached=" << static_cast<unsigned>(wire.attempt.reached)
+                << " http_status=" << wire.http_status << '\n';
+    } catch (const std::exception&) {
+      std::cerr << "connect-refused wire: probe could not start\n";
+    }
+    throw;
+  }
   c.peer(0, 0);
 }
 

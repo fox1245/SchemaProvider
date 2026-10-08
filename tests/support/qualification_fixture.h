@@ -29,8 +29,9 @@ struct Campaign {
   std::filesystem::path root;
   std::string baseline;
   Campaign(const std::filesystem::path& source, const std::vector<std::string>& models) {
-    char pattern[] = "/tmp/sp-runner-qualification-XXXXXX";
-    const auto* directory = ::mkdtemp(pattern); require(directory, "campaign fixture failed"); root = directory;
+    const auto parent = std::filesystem::canonical(std::filesystem::temp_directory_path());
+    auto pattern = (parent / "sp-runner-qualification-XXXXXX").string();
+    const auto* directory = ::mkdtemp(pattern.data()); require(directory, "campaign fixture failed"); root = directory;
     private_directory(root / "config");
     private_directory(root / "build");
     save(root / "config/qualification-authorization.json",

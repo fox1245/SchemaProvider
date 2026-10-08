@@ -56,10 +56,9 @@ struct Fixture {
   std::filesystem::path root;
   std::string original;
   explicit Fixture(const std::filesystem::path& source) {
-    std::array<char, 40> name{};
-    std::string pattern = "/tmp/sp-qualification-XXXXXX";
-    std::copy(pattern.begin(), pattern.end(), name.begin());
-    auto* result = ::mkdtemp(name.data());
+    const auto parent = std::filesystem::canonical(std::filesystem::temp_directory_path());
+    auto pattern = (parent / "sp-qualification-XXXXXX").string();
+    auto* result = ::mkdtemp(pattern.data());
     if (!result) std::abort();
     root = result;
     private_directory(root / "config");
@@ -516,15 +515,25 @@ void storage_fail_closed(const std::filesystem::path& source) {
 int main(int argc, char** argv) {
   if (argc != 2) { std::fprintf(stderr, "usage: qualification_meter_test <source-root>\n"); return 2; }
   const std::filesystem::path source(argv[1]);
+  std::fprintf(stderr, "[qualification_meter] catalog_behavior\n");
   catalog_behavior(source);
+  std::fprintf(stderr, "[qualification_meter] settlement_and_restart\n");
   settlement_and_restart(source);
+  std::fprintf(stderr, "[qualification_meter] nullable_usage_liability\n");
   nullable_usage_liability(source);
+  std::fprintf(stderr, "[qualification_meter] money_boundary\n");
   money_boundary(source);
+  std::fprintf(stderr, "[qualification_meter] call_boundary_and_process_race\n");
   call_boundary_and_process_race(source);
+  std::fprintf(stderr, "[qualification_meter] thread_money_race\n");
   thread_money_race(source);
+  std::fprintf(stderr, "[qualification_meter] extension_activation_and_restart\n");
   extension_activation_and_restart(source);
+  std::fprintf(stderr, "[qualification_meter] extension_money_and_unknown_hold\n");
   extension_money_and_unknown_hold(source);
+  std::fprintf(stderr, "[qualification_meter] extension_tamper_denies\n");
   extension_tamper_denies(source);
+  std::fprintf(stderr, "[qualification_meter] storage_fail_closed\n");
   storage_fail_closed(source);
   return failures ? 1 : 0;
 }
