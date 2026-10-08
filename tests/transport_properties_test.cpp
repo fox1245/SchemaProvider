@@ -490,8 +490,15 @@ TEST(abnormal_close_is_never_success) {
   for (const Row& row : rows) {
     auto c = std::make_shared<Collector>();
     Result r = t.start(post(g_server.url(row.path)), c->callbacks()).join();
-    CHECK_MSG(r.status == row.status && (!row.kind_must_match || r.failure == row.kind),
-              "%s -> %s/%s (curl %d: %s)", row.path, name_of(r.status), name_of(r.failure), r.curl_code,
+    bool as_expected = r.status == row.status && (!row.kind_must_match || r.failure == row.kind);
+#ifdef _WIN32
+    // Windows discards received-but-unread data when an abortive close (RST) arrives, so the head can
+    // legitimately never reach the transport. The honest observation is then a Receive failure before
+    // any response; a head that was delivered must still end as Truncated.
+    if (!as_expected && std::strcmp(row.path, "/reset-mid-body") == 0)
+      as_expected = r.status == Status::Failed && r.failure == FailureKind::Receive && !c->head && c->body.empty();
+#endif
+    CHECK_MSG(as_expected, "%s -> %s/%s (curl %d: %s)", row.path, name_of(r.status), name_of(r.failure), r.curl_code,
               r.detail.c_str());
     CHECK(c->outcomes == 1);
     if (row.kind == FailureKind::ResponseTooLarge) {
