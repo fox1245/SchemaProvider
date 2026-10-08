@@ -39,6 +39,35 @@ class Writer {
   void digest(const Digest& v) { raw({reinterpret_cast<const char*>(v.data()),v.size()}); }
   NativeArchiveLimits limits; std::string data;
 };
+// The activation record is key material: the raw archive key is its first 32 bytes. It is built in fixed
+// storage that is wiped on every exit path, never in a growing std::string, because each reallocation of a
+// string would copy the key into a new heap block and free the old one unwiped.
+class ActivationRecord {
+ public:
+  static constexpr size_t kSize = 96;
+  explicit ActivationRecord(const NativeArchiveLimits& limits) : max_bytes_(limits.max_bytes) {}
+  ActivationRecord(const ActivationRecord&) = delete;
+  ActivationRecord& operator=(const ActivationRecord&) = delete;
+  ~ActivationRecord() { wipe(); }
+  void number(uint64_t n) { unsigned char b[8]; for (unsigned i=0;i<8;++i) b[7-i]=static_cast<unsigned char>(n>>(i*8)); raw(b,8); }
+  void digest(const Digest& v) { raw(v.data(),v.size()); }
+  std::string_view bytes() const { return {reinterpret_cast<const char*>(bytes_.data()),used_}; }
+  void wipe() noexcept { crypto::cleanse(bytes_.data(),bytes_.size()); used_=0; }
+ private:
+  // The same bound the generic Writer applies, so a configured max_bytes below the record size still refuses.
+  void raw(const unsigned char* p,size_t n) { require(n <= max_bytes_ - used_ && n <= bytes_.size() - used_); std::memcpy(bytes_.data()+used_,p,n); used_+=n; }
+  size_t max_bytes_;
+  std::array<unsigned char,kSize> bytes_{};
+  size_t used_=0;
+};
+// Wipes a secret-bearing string when the scope ends, including when a Rejected unwinds through it.
+struct ScopedWipe {
+  std::string& bytes;
+  ScopedWipe(const ScopedWipe&) = delete;
+  ScopedWipe& operator=(const ScopedWipe&) = delete;
+  explicit ScopedWipe(std::string& value) noexcept : bytes(value) {}
+  ~ScopedWipe() { crypto::cleanse(bytes.data(),bytes.size()); }
+};
 class Reader {
  public:
   Reader(std::string_view data, NativeArchiveLimits limits) : data(data), limits(limits) {}
@@ -117,7 +146,7 @@ struct NativeArchive::State {
   ~State() { crypto::cleanse(key.data(),key.size()); crypto::cleanse(activation.data(),activation.size()); }
   void verify() const {
     auto d=locate(directory);auto root_now=open_directory(d.parent,d.name);private_directory(root_now);require(same_file(root_identity,status(root_now)));
-    auto k=locate(key_file);private_directory(k.parent);independent_key_parent(root,k);auto key_now=open_file(k.parent,k.name);private_file(key_now,true);require(unchanged(key_identity,status(key_now)));auto bytes=read_all(key_now,96);require(bytes.size()==activation.size() && crypto::constant_time_equal(bytes.data(),activation.data(),bytes.size()));crypto::cleanse(bytes.data(),bytes.size());
+    auto k=locate(key_file);private_directory(k.parent);independent_key_parent(root,k);auto key_now=open_file(k.parent,k.name);private_file(key_now,true);require(unchanged(key_identity,status(key_now)));auto bytes=read_all(key_now,96);ScopedWipe wipe(bytes);require(bytes.size()==activation.size() && crypto::constant_time_equal(bytes.data(),activation.data(),bytes.size()));
   }
 };
 NativeArchive::NativeArchive(std::unique_ptr<State> state):state_(std::move(state)) {}
@@ -162,8 +191,8 @@ NativeArchive::Activation NativeArchive::activate(std::string d,std::string k,st
       auto fd=create_file(key.parent,key.name);private_file(fd,false);
       state->key_identity=status(fd);
       Writer identity(l);identity.text(state->owner);identity.text(state->descriptor_identity);identity.number(state->root_identity.device);identity.number(state->root_identity.inode);identity.number(state->key_identity.device);identity.number(state->key_identity.inode);
-      Writer activation(l);activation.digest(state->key);activation.number(state->root_identity.device);activation.number(state->root_identity.inode);activation.number(state->key_identity.device);activation.number(state->key_identity.inode);activation.digest(mac(state->key,identity.data));
-      write_all(fd,activation.data);crypto::cleanse(activation.data.data(),activation.data.size());seal_file(fd);sync(fd);sync(key.parent);sync(dir.parent);
+      ActivationRecord activation(l);activation.digest(state->key);activation.number(state->root_identity.device);activation.number(state->root_identity.inode);activation.number(state->key_identity.device);activation.number(state->key_identity.inode);activation.digest(mac(state->key,identity.data));
+      write_all(fd,activation.bytes());activation.wipe();seal_file(fd);sync(fd);sync(key.parent);sync(dir.parent);
     }
     state->key_fd=open_file(key.parent,key.name);private_file(state->key_fd,true);state->key_identity=status(state->key_fd);state->activation=read_all(state->key_fd,96);require(state->activation.size()==96);
     Reader activation(state->activation,l);state->key=activation.digest();require(activation.number()==state->root_identity.device && activation.number()==state->root_identity.inode && activation.number()==state->key_identity.device && activation.number()==state->key_identity.inode);

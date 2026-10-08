@@ -1,4 +1,5 @@
 #include "core/native_archive_fs.h"
+#include "crypto/crypto.h"
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -361,6 +362,12 @@ void write_all(const Handle& handle, std::string_view bytes) {
 }
 std::string read_all(const Handle& handle, size_t limit) {
   const auto before = status(handle); require(before.size <= limit); std::string bytes(static_cast<size_t>(before.size), '\0'); size_t done = 0;
+  // The file may be the activation record, whose first 32 bytes are the archive key: a read that fails or is
+  // interrupted must not leave its partial content behind in the freed buffer.
+  struct WipeUnlessDelivered {
+    std::string& bytes; bool delivered = false;
+    ~WipeUnlessDelivered() { if (!delivered) crypto::cleanse(bytes.data(), bytes.size()); }
+  } wipe{bytes};
 #ifdef _WIN32
   LARGE_INTEGER offset{}; require(::SetFilePointerEx(handle.get(), offset, nullptr, FILE_BEGIN));
 #endif
@@ -373,7 +380,7 @@ std::string read_all(const Handle& handle, size_t limit) {
     require(count > 0); done += static_cast<size_t>(count);
 #endif
   }
-  require(unchanged(before, status(handle))); return bytes;
+  require(unchanged(before, status(handle))); wipe.delivered = true; return bytes;
 }
 void seal_file(const Handle& handle) {
 #ifdef _WIN32

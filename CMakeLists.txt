@@ -242,6 +242,15 @@ if(SP_BUILD_TESTS)
   target_link_libraries(sp_native_archive_tests PRIVATE sp_core sp_codecs Threads::Threads)
   add_test(NAME native_archive COMMAND ${sp_test_runner} $<TARGET_FILE:sp_native_archive_tests>)
   set_tests_properties(native_archive PROPERTIES TIMEOUT 180)
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # Scans the test process's own memory (/proc/self/mem) for copies of the archive key after provisioning.
+    add_executable(sp_native_archive_key_residue_tests tests/native_archive_key_residue_test.cpp)
+    target_compile_options(sp_native_archive_key_residue_tests PRIVATE ${SP_WARNING_OPTIONS})
+    target_link_libraries(sp_native_archive_key_residue_tests PRIVATE sp_core sp_codecs Threads::Threads)
+    add_test(NAME native_archive_key_residue COMMAND ${sp_test_runner} $<TARGET_FILE:sp_native_archive_key_residue_tests>)
+    # Exit code 77 is unsupported scanning; sanitizer failure exits must not be hidden by output text.
+    set_tests_properties(native_archive_key_residue PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77)
+  endif()
 
 
   # A positive control separates const-view failures from broken include/toolchain setup.
