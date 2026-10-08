@@ -1517,6 +1517,51 @@ HttpRequest h2_post(const NodeServer& node, const std::string& path, int deadlin
   return req;
 }
 
+TEST(literal_origins_bypass_custom_resolver_and_remain_isolated) {
+  NodeServer node;
+  const bool started = node.start(g_h2_adversarial_script);
+  CHECK(started);
+  if (!started) return;
+  std::atomic<unsigned> resolve_calls{0};
+  TransportOptions options;
+  options.io_threads = 2;
+  options.resolver_threads = 2;
+  options.max_host_connections = 1;
+  options.resolve = [&](const std::string&) -> std::vector<std::string> {
+    ++resolve_calls;
+    throw std::runtime_error("literal origin reached the custom name resolver");
+  };
+  Transport t(options);
+  // All three listeners use the same port. Their real response bodies distinguish the address,
+  // so a wildcard/cross-origin cache entry cannot accidentally satisfy the connection oracle.
+  constexpr std::array<const char*, 3> hosts{"127.0.0.1", "127.0.0.2", "[::1]"};
+  constexpr std::array<const char*, 3> bodies{"peer A\n", "peer B\n", "peer V6\n"};
+  constexpr std::size_t count = 24;
+  std::array<std::string, count> keys;
+  std::vector<std::shared_ptr<Collector>> collectors;
+  std::vector<Operation> operations;
+  collectors.reserve(count);
+  operations.reserve(count);
+  for (std::size_t i = 0; i < count; ++i) {
+    keys[i] = "literal_" + std::to_string(i);
+    auto c = std::make_shared<Collector>();
+    operations.push_back(t.start(h2_post(node, "/ok?key=" + keys[i], 15000, hosts[i % hosts.size()]), c->callbacks()));
+    collectors.push_back(std::move(c));
+  }
+  for (std::size_t i = 0; i < count; ++i) {
+    const Result r = operations[i].join();
+    CHECK_MSG(r.status == Status::Completed, "%s/%s curl=%d", name_of(r.status), name_of(r.failure), r.curl_code);
+    CHECK(r.attempt.version == ResponseVersion::Http2 && r.attempt.transport_internal_resends == 0);
+    CHECK(collectors[i]->body == bodies[i % bodies.size()]);
+    CHECK(collectors[i]->outcomes == 1 && collectors[i]->late_callbacks == 0);
+  }
+  CHECK(resolve_calls == 0);
+  const Stats stats = node.stats_request();
+  CHECK(stats["total_requests"] == static_cast<long>(count));
+  CHECK(stats["peer_A_requests"] == 8 && stats["peer_B_requests"] == 8 && stats["peer_V6_requests"] == 8);
+  for (const auto& key : keys) CHECK(stats[key + "_requests"] == 1);
+}
+
 // Count bytes without retaining them, so RSS measures the transport rather than the consumer.
 struct FloodCollector {
   Collector result;
