@@ -9,6 +9,7 @@
 // for all five families; where a family legitimately differs the difference is encoded in
 // `shape()` and cites config/error-policy.json.
 #include "runtime/client.h"
+#include "runtime/testing.h"
 #include "codecs/chat.h"
 #include "codecs/gemini_request.h"
 #include "codecs/interactions_request.h"
@@ -148,9 +149,10 @@ struct Lab {
     require(plain && h2c_port && tls && black && !ca.empty(), "peer info incomplete");
   }
   std::uint64_t port(const Wire& w) const { return w.tls ? tls : w.h2 ? h2c_port : plain; }
-  std::string arm(Fam f, std::string_view plan) {
+  std::string arm(Fam f, std::string_view plan, bool streaming) {
     const auto model = "matrix-" + std::to_string(++sequence);
-    peer.command("{\"arm\":" + sp::json::quote(model) + ",\"family\":" + sp::json::quote(peer_family(f)) + ",\"plan\":" + std::string(plan) + "}");
+    peer.command("{\"arm\":" + sp::json::quote(model) + ",\"family\":" + sp::json::quote(peer_family(f))
+                 + ",\"streaming\":" + (streaming ? "true" : "false") + ",\"plan\":" + std::string(plan) + "}");
     return model;
   }
   sp::json::Document stats(const std::string& model) { return peer.stats(model); }
@@ -283,7 +285,7 @@ const sp::Failure& expect_failure(const Result& result, const Want& w) {
 class Cell {
  public:
   Cell(Lab& lab, Fam fam, std::string_view plan, Opts opts) : lab_(lab), fam_(fam), opts_(opts) {
-    model = lab.arm(fam, plan);
+    model = lab.arm(fam, plan, opts.streaming);
     sp::runtime::Options o;
     o.api_key = std::string(marker);
     o.default_timeout = 15s;
@@ -328,7 +330,7 @@ class Cell {
   void wait_peer(const char* key, std::size_t n = 1) { lab_.peer.wait(model, key, n); }
   void wait_delta() {
     std::unique_lock lock(cap->mutex);
-    require(cap->cv.wait_for(lock, 10s, [&] { return cap->deltas != 0; }), "semantic output never arrived");
+    require(cap->cv.wait_for(lock, 10s, [&] { return !cap->text.empty(); }), "nonempty semantic output never arrived");
   }
   // Peer accounting: exact request count, injected faults, protocol actually spoken, nothing invalid.
   void peer(std::uint64_t count, std::uint64_t faults) {
@@ -530,12 +532,9 @@ void cancel_in_backoff(Matrix& m, Mech mech) {
   c.start();
   c.wait_peer("faults");
   c.wait_peer("closed");
-  // A completed response alone does not expose the runtime's backoff state. Give the actor a
-  // bounded settling window and fail if it terminalizes instead of holding the scheduled retry.
-  {
-    std::unique_lock lock(c.cap->mutex);
-    require(!c.cap->cv.wait_for(lock, 100ms, [&] { return c.cap->outcomes != 0; }), "operation did not remain pending for backoff cancellation");
-  }
+  // Fence the actor's actual backoff transition, not merely the peer's response completion.
+  require(sp::runtime::detail::ClientAccess::wait_for_backoff(c.op, 3s),
+          "operation did not enter retry backoff before cancellation");
   const auto fired = Clock::now();
   if (mech == Mech::Handle) c.op.cancel(); else c.stop.request_stop();
   const auto result = c.finish(late_bound);
@@ -684,6 +683,8 @@ void reuse_idle_reset(Matrix& m, Wire w) {
   // prereq_count - 1 as transport_internal_resends. Thus a refused proposal is counted as 1, not 0.
   Cell c(m.lab, m.fam, R"([{"a":"ok","then":"reset-idle"},{"a":"ok"}])", {.wire = w, .streaming = true});
   c.start(); succeeded(c.finish());
+  // The response is consumed before the peer resets the now-idle connection.
+  c.lab().peer.command("{\"model\":" + sp::json::quote(c.model) + ",\"reset_idle\":true}");
   c.wait_peer("faults");
   c.start();
   const auto result = c.finish();

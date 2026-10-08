@@ -25,6 +25,8 @@ import { join } from 'node:path';
 
 const key = 'MATRIX_SECRET_MARKER_5d1e90';
 const cases = new Map(), waiters = new Set(), sockets = new Set(), ids = new WeakMap();
+const tcpSockets = new Map();
+const tcpKey = socket => `${socket.localPort}:${socket.remotePort}`;
 let unexpected = 0, nextId = 0, blackholeConnections = 0, directory;
 const reply = value => process.stdout.write(`${JSON.stringify(value)}\n`);
 const notify = () => { for (const wake of [...waiters]) wake(); };
@@ -186,8 +188,9 @@ async function perform(c, a, x) {
   const send = data => { c.bytes += Buffer.byteLength(data); res.write(data); };
   const fault = () => { ++c.faults; notify(); };
   const kill = () => { if (h2) res.stream.close(NGHTTP2_CANCEL); else raw.destroy(); };
-  // TCP RST (SO_LINGER 0). A TLS socket wraps the raw socket, which owns the descriptor.
-  const raw = h2 ? undefined : (res.socket._parent ?? res.socket);
+  // Retain the real TCP socket at connection acceptance; HTTP/2 exposes only a session proxy.
+  const raw = tcpSockets.get(tcpKey(res.socket));
+  if (!raw) throw new Error('untracked TCP connection');
   const rst = () => raw.resetAndDestroy();
   const abort = () => { if (h2) res.stream.close(NGHTTP2_INTERNAL_ERROR); else rst(); };
   const hold = release => { c.held.set(res, release ?? kill); notify(); };
@@ -200,13 +203,9 @@ async function perform(c, a, x) {
       res.writeHead(200, { 'content-type': type });
       res.end(data);
       if (a.then === 'reset-idle') {
-        // Reset the idle keep-alive connection after the response completed.
-        // (HTTP/2: the whole connection is dropped without GOAWAY.)
-        const session = h2 ? res.stream.session : undefined;
-        // `faults` counts only once the connection is really gone, so the client's next request cannot race the RST.
-        res.on('finish', () => setTimeout(() => {
-          if (h2) { session.once('close', fault); session.destroy(); } else { raw.once('close', fault); rst(); }
-        }, 20));
+        // The client requests this fault only after consuming the completed response.
+        // Reset the owned TCP socket; HTTP/2 session.destroy() would send orderly GOAWAY.
+        c.idleReset = () => { raw.once('close', fault); rst(); };
       }
       return;
     }
@@ -281,7 +280,7 @@ async function handle(req, res, tls) {
     if (c.conns.has(ids.get(connection))) ++c.reused;
     c.conns.add(ids.get(connection));
     if (req.method !== 'POST' || known.family !== c.family || !authorized(known.family, req.headers)
-        || body === undefined || typeof stream !== 'boolean') ++c.invalid;
+        || body === undefined || typeof stream !== 'boolean' || stream !== c.streaming) ++c.invalid;
     res.on('close', () => { ++c.closed; c.held.delete(res); notify(); });
     notify();
     const action = c.plan[Math.min(c.count, c.plan.length) - 1];
@@ -300,7 +299,14 @@ function openssl(...args) {
   if (result.error || result.status !== 0) throw new Error(`openssl ${args[0]} failed`);
 }
 function track(server) {
-  server.on('connection', socket => { sockets.add(socket); socket.on('error', () => {}); socket.once('close', () => sockets.delete(socket)); });
+  server.on('connection', socket => {
+    const key = tcpKey(socket);
+    tcpSockets.set(key, socket); sockets.add(socket); socket.on('error', () => {});
+    socket.once('close', () => {
+      sockets.delete(socket);
+      if (tcpSockets.get(key) === socket) tcpSockets.delete(key);
+    });
+  });
   server.on('secureConnection', socket => { socket.on('error', () => {}); });
   server.on('clientError', (_error, socket) => socket.destroy());
   server.on('tlsClientError', (_error, socket) => socket.destroy());
@@ -339,13 +345,18 @@ control.on('line', async line => {
       return;
     }
     if (command.arm) {
-      if (cases.has(command.arm) || !Array.isArray(command.plan) || command.plan.length === 0) throw new Error('bad arm');
-      cases.set(command.arm, { family: command.family, plan: command.plan, count: 0, times: [], held: new Map(), closed: 0,
+      if (cases.has(command.arm) || !Array.isArray(command.plan) || command.plan.length === 0
+          || typeof command.streaming !== 'boolean') throw new Error('bad arm');
+      cases.set(command.arm, { family: command.family, streaming: command.streaming, plan: command.plan, count: 0, times: [], held: new Map(), closed: 0,
         faults: 0, invalid: 0, bytes: 0, h2: 0, tls: 0, conns: new Set(), reused: 0 });
       reply({ armed: true }); return;
     }
     const c = cases.get(command.model);
     if (!c) throw new Error('unknown model');
+    if (command.reset_idle) {
+      if (typeof c.idleReset !== 'function') throw new Error('idle reset not armed');
+      const reset = c.idleReset; delete c.idleReset; reset();
+    }
     if (command.wait) await new Promise((resolve, reject) => {
       const ready = () => {
         const s = snapshot(c);

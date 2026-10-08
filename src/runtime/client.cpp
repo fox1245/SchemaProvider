@@ -561,6 +561,7 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
         pending_failure.reset();
       }
       stage = Stage::InFlight;
+      statistics.backing_off = false;
       generation = epoch;
       accepting = true;
       head_received = done_received = paused = false;
@@ -760,6 +761,11 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
         terminal_wire.reset();
         buffered.clear(); response.reset();
         retry_timer.arm(*executor, *at, [weak = weak_from_this()] { if (auto self = weak.lock()) self->timer(true); });
+        {
+          std::lock_guard lock(mutex);
+          statistics.backing_off = true;
+        }
+        joined.notify_all();
         return;
       }
     }
@@ -795,6 +801,7 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
       accepting = false;
       result = std::make_shared<const Outcome>(std::move(outcome));
       stage = Stage::Terminal;
+      statistics.backing_off = false;
       body_input.clear(); head_input.reset(); done_input.reset();
       statistics.queued_bytes = statistics.queued_chunks = 0;
     }
@@ -1029,6 +1036,13 @@ OperationStats ClientAccess::stats(const Operation& operation) {
   if (!operation.state_) return {};
   std::lock_guard lock(operation.state_->mutex);
   return operation.state_->statistics;
+}
+bool ClientAccess::wait_for_backoff(const Operation& operation, std::chrono::milliseconds timeout) {
+  if (!operation.state_ || runtime_depth || pool_thread || transport::on_io_thread()) return false;
+  auto state = operation.state_;
+  std::unique_lock lock(state->mutex);
+  state->joined.wait_for(lock, timeout, [&] { return state->statistics.backing_off || state->finished; });
+  return state->statistics.backing_off;
 }
 }  // namespace sp::runtime::detail
 
