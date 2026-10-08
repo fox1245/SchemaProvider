@@ -224,6 +224,10 @@ void portable_controls_on_wire(Peer& peer) {
 }
 }
 int main(int argc, char** argv) {
+#ifdef _WIN32
+  runtime_test::Arguments arguments(argc, argv);
+  argc = arguments.argc(); argv = arguments.argv();
+#endif
   if (argc != 3) return 2;
   try { Peer peer(argv[1], argv[2]); portable_controls_on_wire(peer); images_and_cross_mode(peer); terminals_and_ownership(peer); invalid_and_nullable(peer); std::cout << "Gemini native HTTP/SSE scenarios passed\n"; }
   catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }

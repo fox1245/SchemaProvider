@@ -1033,19 +1033,18 @@ void TransportCore::finish(std::shared_ptr<OperationState> op, Status status, Fa
     long http_status = 0;
     curl_easy_getinfo(op->easy, CURLINFO_RESPONSE_CODE, &http_status);
     r.http_status = static_cast<int>(http_status);
-    curl_off_t t_name = 0, t_conn = 0, t_pre = 0, uploaded = 0;
+    curl_off_t t_name = 0, t_conn = 0, uploaded = 0;
     curl_easy_getinfo(op->easy, CURLINFO_NAMELOOKUP_TIME_T, &t_name);
     curl_easy_getinfo(op->easy, CURLINFO_CONNECT_TIME_T, &t_conn);
-    curl_easy_getinfo(op->easy, CURLINFO_PRETRANSFER_TIME_T, &t_pre);
     curl_easy_getinfo(op->easy, CURLINFO_SIZE_UPLOAD_T, &uploaded);
     r.attempt.request_body_bytes = uploaded;
     r.attempt.connection_reused = op->first_write_reused;
-    // Stage evidence. STARTTRANSFER_TIME is set even when the peer closes without a single byte and
-    // the header parser's state resets after a 1xx block, so the response start is the monotonic
-    // `response_seen`. The prerequisite callback fires before any request byte is written, so it is
-    // a latch for "the request may have left"; the pretransfer timing mark is only a second witness.
+    // The prerequisite callback runs before any request write, and is the conservative latch for
+    // "request bytes may have left". PRETRANSFER_TIME is not a send witness: newer libcurl also
+    // populates it while completing failures that never reached the request phase (connect/TLS).
+    // Response and upload observations remain independent positive evidence, never error-text rules.
     if (op->response_seen) r.attempt.reached = Stage::ResponseStarted;
-    else if (op->prereq_count > 0 || t_pre > 0) r.attempt.reached = Stage::RequestStarted;
+    else if (op->prereq_count > 0 || uploaded > 0) r.attempt.reached = Stage::RequestStarted;
     else if (t_conn > 0) r.attempt.reached = Stage::Connected;
     else if (t_name > 0) r.attempt.reached = Stage::Resolved;
     if (r.attempt.version == ResponseVersion::Unknown) {
@@ -1175,7 +1174,11 @@ void TransportCore::complete_from_curl(const std::shared_ptr<OperationState>& op
       else if (op->head_overflow) kind = FailureKind::ResponseTooLarge;
       else kind = FailureKind::Receive;
       break;
-    case CURLE_OUT_OF_MEMORY:  // libcurl's own 100 KB per-header-line limit reports this code
+    // Older libcurl reports its header-line bound as OOM; 8.6+ uses TOO_LARGE.
+#if LIBCURL_VERSION_NUM >= 0x080600
+    case CURLE_TOO_LARGE:
+#endif
+    case CURLE_OUT_OF_MEMORY:
       kind = (op->head_started && !op->head_delivered) ? FailureKind::ResponseTooLarge : FailureKind::Other;
       break;
     case CURLE_COULDNT_RESOLVE_HOST:
@@ -1203,6 +1206,7 @@ void TransportCore::complete_from_curl(const std::shared_ptr<OperationState>& op
       kind = op->head_delivered ? FailureKind::Truncated : FailureKind::Protocol;
       break;
     case CURLE_WEIRD_SERVER_REPLY:
+    case CURLE_BAD_CONTENT_ENCODING:
     case CURLE_HTTP2:
     case CURLE_UNSUPPORTED_PROTOCOL: kind = FailureKind::Protocol; break;
     default: break;

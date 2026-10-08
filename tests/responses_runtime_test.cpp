@@ -388,6 +388,10 @@ void incomplete_and_opaque(Peer& peer) {
 }
 } // namespace
 int main(int argc, char** argv) {
+#ifdef _WIN32
+  runtime_test::Arguments arguments(argc, argv);
+  argc = arguments.argc(); argv = arguments.argv();
+#endif
   try {
     require(argc == 3, "usage: sp_responses_runtime_tests <node> <responses_server.mjs>");
     runtime_test::LogCapture logs;

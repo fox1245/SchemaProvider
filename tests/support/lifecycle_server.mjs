@@ -251,7 +251,11 @@ async function perform(c, a, x) {
       // right after HEADERS, a well-framed empty body.
       if (h2) { head(200); fault(); res.end(); return; }
       head(200, stream ? {} : { 'content-length': '4096' });
-      fault(); raw.end(); return;
+      // Fence the actual HTTP/TLS stream's queued head before orderly close. Ending its underlying
+      // TCP socket can overtake encrypted writes and turn this cell into a before-head failure.
+      const socket = res.socket;
+      socket.write('', () => { fault(); socket.end(); });
+      return;
     case 'reset':
       if (a.at === 'body') {
         head(200); send(partial());

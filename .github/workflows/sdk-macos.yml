@@ -1,0 +1,66 @@
+name: SDK macOS
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'tools/embed_configuration.py'
+      - 'config/**'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - '.github/workflows/sdk-macos.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sdk-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-tests:
+    runs-on: macos-15
+    timeout-minutes: 25
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out pinned header and parser sources
+        uses: actions/checkout@v4
+        with:
+          repository: fox1245/NeoGraph
+          ref: 7ec45b68474fd3ecf20a0a5b8516f45fef93f88f
+          path: dependencies
+          sparse-checkout: |
+            deps/asio
+            deps/yyjson
+      - name: Prepare native transport and toolchain
+        run: |
+          brew install curl openssl@3 ninja
+          echo "PATH=$(brew --prefix curl)/bin:$(brew --prefix openssl@3)/bin:$PATH" >> "$GITHUB_ENV"
+          echo "SDK_PREFIXES=$(brew --prefix curl);$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+      - name: Record platform and backend capabilities
+        run: |
+          sw_vers
+          uname -m
+          clang++ --version
+          cmake --version
+          node --version
+          curl --version
+          curl --version | grep -q 'HTTP2'
+          openssl version
+      - name: Configure complete SDK suite
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$SDK_PREFIXES" \
+            -DASIO_ROOT="$PWD/dependencies/deps/asio" \
+            -DYYJSON_ROOT="$PWD/dependencies/deps/yyjson" \
+            -DSP_NODE="$(command -v node)" \
+            -DSP_OPENSSL="$(command -v openssl)" \
+            -DSP_BUILD_TESTS=ON -DSP_BUILD_CANARY=ON -DSP_BUILD_RUNTIME_TESTS=ON
+      - name: Build SDK and consumers
+        run: cmake --build build --parallel 3
+      - name: Execute SDK runtime, lifecycle, crypto and custody tests
+        run: ctest --test-dir build --parallel 2 --timeout 600 --output-on-failure

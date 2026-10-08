@@ -723,6 +723,10 @@ void real_paused_redelivery(const char* node, const char* script) {
 }  // namespace
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+  runtime_test::Arguments arguments(argc, argv);
+  argc = arguments.argc(); argv = arguments.argv();
+#endif
   try {
     if (argc != 3) throw std::runtime_error("usage: runtime_scheduler_tests NODE PEER_SCRIPT");
     terminal_interleavings();

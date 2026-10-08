@@ -5,13 +5,13 @@
 // Prints one line on stdout once listening:
 //   PORTS http=<p> silent=<p> blackhole=<p>
 // and exits when stdin reaches EOF. Counters are served by GET /__stats ("name value" lines).
+#include "portable.h"
 #include <asio.hpp>
 
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
+#ifdef _WIN32
+#include <windows.h>
+#include <thread>
+#endif
 
 #include <cstdio>
 #include <cstdlib>
@@ -19,6 +19,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <stdexcept>
 #include <vector>
 
 using asio::ip::tcp;
@@ -294,26 +295,50 @@ void accept_loop(tcp::acceptor& acceptor, bool silent, std::vector<std::shared_p
   });
 }
 
-// A listener whose accept queue is already full and whose SYNs are therefore dropped: connect()
-// stalls without any server participation. Fillers stay open for the process lifetime.
-unsigned short make_blackhole(std::vector<int>& keep) {
-  const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+#ifndef _WIN32
+// Linux's overflowing accept queue drops SYNs. Keep every filler alive, and probe the
+// saturated listener before advertising it: kernel backlog policy can make this unavailable.
+unsigned short make_blackhole(std::vector<portable::Socket>& keep, std::string& unsupported_reason) {
+  portable::Socket listener(::socket(AF_INET, SOCK_STREAM, 0));
+  if (!listener) throw std::runtime_error("blackhole listener socket failed");
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
   addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
   addr.sin_port = 0;
-  ::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr);
-  ::listen(fd, 0);
-  socklen_t len = sizeof addr;
-  ::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len);
-  keep.push_back(fd);
+  portable::socklen len = sizeof addr;
+  if (::bind(listener.get(), reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0 ||
+      ::listen(listener.get(), 0) != 0 ||
+      ::getsockname(listener.get(), reinterpret_cast<sockaddr*>(&addr), &len) != 0)
+    throw std::runtime_error("blackhole listener setup failed");
+  keep.push_back(std::move(listener));
   for (int i = 0; i < 8; ++i) {
-    const int c = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
-    ::connect(c, reinterpret_cast<sockaddr*>(&addr), sizeof addr);  // EINPROGRESS; some stay in SYN_SENT
-    keep.push_back(c);
+    portable::Socket filler(::socket(AF_INET, SOCK_STREAM, 0));
+    if (!filler || !portable::set_nonblocking(filler.get()))
+      throw std::runtime_error("blackhole filler setup failed");
+    if (::connect(filler.get(), reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0 &&
+        !portable::connect_in_progress())
+      throw std::runtime_error("blackhole filler connect failed");
+    keep.push_back(std::move(filler));
   }
+  portable::Socket probe(::socket(AF_INET, SOCK_STREAM, 0));
+  if (!probe || !portable::set_nonblocking(probe.get()))
+    throw std::runtime_error("blackhole probe setup failed");
+  const int connected = ::connect(probe.get(), reinterpret_cast<sockaddr*>(&addr), sizeof addr);
+  if (connected != 0 && !portable::connect_in_progress())
+    throw std::runtime_error("blackhole probe connect failed");
+  portable::PollFd ready{probe.get(), POLLOUT, 0};
+  int result;
+  do { result = portable::poll(&ready, 1, 300); } while (result < 0 && errno == EINTR);
+  if (result < 0) throw std::runtime_error("blackhole probe poll failed");
+  if (connected == 0 || result != 0) {
+    unsupported_reason = "Linux accept-queue saturation probe completed connect or reported an error within 300 ms; "
+                         "this kernel does not provide the required stalled SYN handshake";
+    return 0;
+  }
+  keep.push_back(std::move(probe));
   return ntohs(addr.sin_port);
 }
+#endif
 
 }  // namespace
 
@@ -322,12 +347,32 @@ int main() {
   tcp::acceptor http(ctx, tcp::endpoint(asio::ip::make_address("127.0.0.1"), 0));
   tcp::acceptor silent(ctx, tcp::endpoint(asio::ip::make_address("127.0.0.1"), 0));
   std::vector<std::shared_ptr<tcp::socket>> parked;
-  std::vector<int> blackhole_fds;
-  const unsigned short blackhole_port = make_blackhole(blackhole_fds);
+  std::string blackhole_reason;
+#ifdef _WIN32
+  // Winsock does not expose Linux's accept-queue-overflow SYN-drop mechanism. A silent
+  // accepted connection would stall TLS/response, not connect, so it cannot substitute.
+  const unsigned short blackhole_port = 0;
+  blackhole_reason = "Windows Winsock has no supported Linux accept-queue-overflow SYN-drop fixture; "
+                     "a silent accepted socket is not a connect blackhole";
+#else
+  std::vector<portable::Socket> blackhole_sockets;
+  const unsigned short blackhole_port = make_blackhole(blackhole_sockets, blackhole_reason);
+#endif
 
   accept_loop(http, false, parked);
   accept_loop(silent, true, parked);
 
+#ifdef _WIN32
+  // The inherited stdin pipe is synchronous, not an Asio-overlapped HANDLE. A dedicated
+  // guardian waits for actual parent EOF and stops the I/O loop without touching its state.
+  std::thread guardian([&ctx] {
+    char byte;
+    DWORD count = 0;
+    const HANDLE input = ::GetStdHandle(STD_INPUT_HANDLE);
+    while (::ReadFile(input, &byte, 1, &count, nullptr) && count != 0) {}
+    ctx.stop();
+  });
+#else
   asio::posix::stream_descriptor in(ctx, ::dup(STDIN_FILENO));
   char byte;
   std::function<void()> watch_stdin = [&] {
@@ -337,10 +382,15 @@ int main() {
     });
   };
   watch_stdin();
+#endif
 
-  std::printf("PORTS http=%u silent=%u blackhole=%u\n", http.local_endpoint().port(),
-              silent.local_endpoint().port(), blackhole_port);
+  std::printf("PORTS http=%u silent=%u blackhole=%u%s%s\n", http.local_endpoint().port(),
+              silent.local_endpoint().port(), blackhole_port,
+              blackhole_reason.empty() ? "" : " blackhole_reason=", blackhole_reason.c_str());
   std::fflush(stdout);
   ctx.run();
+#ifdef _WIN32
+  guardian.join();
+#endif
   return 0;
 }

@@ -30,6 +30,7 @@ import readline from 'node:readline';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 const cases = new Map();
 const sockets = new Set();
@@ -274,7 +275,7 @@ function attach(server) {
 const listen = server => new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
 
 function certificate() {
-  directory = mkdtempSync('/tmp/schemaprovider-stall-');
+  directory = mkdtempSync(join(tmpdir(), 'schemaprovider-stall-'));
   const result = spawnSync(process.env.SP_OPENSSL || 'openssl', ['req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1',
     '-nodes', '-sha256', '-keyout', 'key.pem', '-out', 'cert.pem', '-days', '2', '-subj', '/CN=localhost',
     '-addext', 'basicConstraints=critical,CA:TRUE', '-addext', 'keyUsage=critical,digitalSignature,keyCertSign',
@@ -288,9 +289,13 @@ function certificate() {
 function shutdown() {
   for (const timer of timers) { clearInterval(timer); clearTimeout(timer); }
   for (const socket of sockets) socket.destroy();
-  if (directory) rmSync(directory, { recursive: true, force: true });
+  cleanup();
   process.exit(0);
 }
+function cleanup() {
+  if (directory) { rmSync(directory, { recursive: true, force: true }); directory = undefined; }
+}
+process.on('exit', cleanup);
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 

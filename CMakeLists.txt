@@ -18,9 +18,18 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   set(SP_TOP_LEVEL ON)
 endif()
 option(SP_BUILD_TESTS "Build the property tests, fixture runner and loopback peers" ${SP_TOP_LEVEL})
-option(SP_BUILD_CANARY "Build hosted-API qualification diagnostics (POSIX)" ${SP_TOP_LEVEL})
+# The canary/qualification diagnostics (and the tests that need them) keep files under POSIX custody
+# (open(O_NOFOLLOW), fstat owner/mode checks, flock), so they are not built on Windows.
+set(SP_CANARY_DEFAULT ${SP_TOP_LEVEL})
+if(WIN32)
+  set(SP_CANARY_DEFAULT OFF)
+endif()
+option(SP_BUILD_CANARY "Build hosted-API qualification diagnostics (POSIX)" ${SP_CANARY_DEFAULT})
 option(SP_BUILD_RUNTIME_TESTS "Build portable native-archive consumer tests" OFF)
-if(SP_BUILD_TESTS AND NOT SP_BUILD_CANARY)
+if(WIN32 AND SP_BUILD_CANARY)
+  message(FATAL_ERROR "SP_BUILD_CANARY is POSIX-only: its file custody uses open(O_NOFOLLOW), fstat owner/mode checks and flock")
+endif()
+if(SP_BUILD_TESTS AND NOT SP_BUILD_CANARY AND NOT WIN32)
   message(FATAL_ERROR "The complete SDK property suite requires SP_BUILD_CANARY=ON")
 endif()
 option(BUILD_SHARED_LIBS "Build shared SchemaProvider libraries" OFF)
@@ -30,6 +39,8 @@ set(SP_HTTP3_PYTHON "" CACHE FILEPATH "Isolated Python with aioquic and h2 for o
 
 if(MSVC)
   set(SP_WARNING_OPTIONS /W4)
+  # Every source is UTF-8; conforming macro lexing is also required by raw JSON fixture literals.
+  add_compile_options(/utf-8 /Zc:preprocessor)
 else()
   set(SP_WARNING_OPTIONS -Wall -Wextra -Wpedantic)
 endif()
@@ -207,11 +218,19 @@ if(SP_BUILD_TESTS)
       set(sp_test_runner ${SP_SETARCH} ${CMAKE_SYSTEM_PROCESSOR} -R)
     endif()
   endif()
-  add_executable(sp_qualification_meter_test tests/qualification_meter_test.cpp)
-  target_compile_options(sp_qualification_meter_test PRIVATE ${SP_WARNING_OPTIONS})
-  target_link_libraries(sp_qualification_meter_test PRIVATE sp_qualification sp_json Threads::Threads)
-  add_test(NAME qualification_meter COMMAND ${sp_test_runner} $<TARGET_FILE:sp_qualification_meter_test> "${CMAKE_CURRENT_SOURCE_DIR}")
-  set_tests_properties(qualification_meter PROPERTIES TIMEOUT 120)
+  if(MSVC)
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+  endif()
+  if(WIN32)
+    add_compile_definitions(_WIN32_WINNT=0x0601)
+  endif()
+  if(SP_BUILD_CANARY)
+    add_executable(sp_qualification_meter_test tests/qualification_meter_test.cpp)
+    target_compile_options(sp_qualification_meter_test PRIVATE ${SP_WARNING_OPTIONS})
+    target_link_libraries(sp_qualification_meter_test PRIVATE sp_qualification sp_json Threads::Threads)
+    add_test(NAME qualification_meter COMMAND ${sp_test_runner} $<TARGET_FILE:sp_qualification_meter_test> "${CMAKE_CURRENT_SOURCE_DIR}")
+    set_tests_properties(qualification_meter PROPERTIES TIMEOUT 120)
+  endif()
   # In-tree SHA-256/HMAC/entropy primitives: published vectors, hashlib-generated tables, both the
   # accelerated and the portable path, streaming, misuse, constant-time and randomness behavior.
   add_executable(sp_crypto_tests tests/crypto_test.cpp)
@@ -224,7 +243,14 @@ if(SP_BUILD_TESTS)
   # Persisted identities and fingerprints must equal what the OpenSSL-backed code produced.
   add_executable(sp_crypto_golden_tests tests/crypto_golden_test.cpp)
   target_compile_options(sp_crypto_golden_tests PRIVATE ${SP_WARNING_OPTIONS})
-  target_link_libraries(sp_crypto_golden_tests PRIVATE sp_canary_core sp_descriptor sp_json)
+  if(SP_BUILD_CANARY)
+    target_link_libraries(sp_crypto_golden_tests PRIVATE sp_canary_core sp_descriptor sp_json)
+  else()
+    # Without the canary library only the policy-identity goldens can run; the canary digest cases
+    # include canary/qualification.h, which is POSIX-only.
+    target_link_libraries(sp_crypto_golden_tests PRIVATE sp_descriptor sp_json)
+    target_compile_definitions(sp_crypto_golden_tests PRIVATE SP_GOLDEN_WITHOUT_CANARY)
+  endif()
   add_test(NAME crypto_golden COMMAND ${sp_test_runner} $<TARGET_FILE:sp_crypto_golden_tests>)
   # Differential check against OpenSSL's libcrypto. OpenSSL is linked into this one test only.
   find_package(OpenSSL COMPONENTS Crypto)
@@ -237,18 +263,20 @@ if(SP_BUILD_TESTS)
   else()
     message(STATUS "crypto_openssl_differential skipped: OpenSSL development files not found (test-only dependency)")
   endif()
-  add_executable(sp_native_archive_tests tests/native_archive_test.cpp)
-  target_compile_options(sp_native_archive_tests PRIVATE ${SP_WARNING_OPTIONS})
-  target_link_libraries(sp_native_archive_tests PRIVATE sp_core sp_codecs Threads::Threads)
-  add_test(NAME native_archive COMMAND ${sp_test_runner} $<TARGET_FILE:sp_native_archive_tests>)
-  set_tests_properties(native_archive PROPERTIES TIMEOUT 180)
+  if(NOT WIN32)
+    # Permission, symlink, rename and restart custody of the archive directory is POSIX semantics.
+    add_executable(sp_native_archive_tests tests/native_archive_test.cpp)
+    target_compile_options(sp_native_archive_tests PRIVATE ${SP_WARNING_OPTIONS})
+    target_link_libraries(sp_native_archive_tests PRIVATE sp_core sp_codecs Threads::Threads)
+    add_test(NAME native_archive COMMAND ${sp_test_runner} $<TARGET_FILE:sp_native_archive_tests>)
+    set_tests_properties(native_archive PROPERTIES TIMEOUT 180)
+  endif()
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    # Scans the test process's own memory (/proc/self/mem) for copies of the archive key after provisioning.
     add_executable(sp_native_archive_key_residue_tests tests/native_archive_key_residue_test.cpp)
     target_compile_options(sp_native_archive_key_residue_tests PRIVATE ${SP_WARNING_OPTIONS})
     target_link_libraries(sp_native_archive_key_residue_tests PRIVATE sp_core sp_codecs Threads::Threads)
     add_test(NAME native_archive_key_residue COMMAND ${sp_test_runner} $<TARGET_FILE:sp_native_archive_key_residue_tests>)
-    # Exit code 77 is unsupported scanning; sanitizer failure exits must not be hidden by output text.
+    # Unsupported forensic heaps return 77; sanitizer failure exits remain failures.
     set_tests_properties(native_archive_key_residue PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77)
   endif()
 
@@ -279,17 +307,27 @@ if(SP_BUILD_TESTS)
   target_compile_definitions(sp_loopback_server PRIVATE ASIO_STANDALONE ASIO_NO_DEPRECATED)
   target_compile_options(sp_loopback_server PRIVATE ${SP_WARNING_OPTIONS})
   target_link_libraries(sp_loopback_server PRIVATE Threads::Threads)
+  if(WIN32)
+    target_link_libraries(sp_loopback_server PRIVATE ws2_32)
+    target_compile_definitions(sp_loopback_server PRIVATE _WIN32_WINNT=0x0601)
+  endif()
 
   add_executable(sp_transport_tests tests/transport_properties_test.cpp)
   target_compile_options(sp_transport_tests PRIVATE ${SP_WARNING_OPTIONS})
   target_link_libraries(sp_transport_tests PRIVATE sp_transport)
-  add_executable(sp_http3_scenarios tests/http3_transport_scenarios.cpp)
-  target_compile_options(sp_http3_scenarios PRIVATE ${SP_WARNING_OPTIONS})
-  target_link_libraries(sp_http3_scenarios PRIVATE sp_transport)
-  if(SP_HTTP3_PYTHON)
-    add_test(NAME http3_scenarios COMMAND ${sp_test_runner} $<TARGET_FILE:sp_http3_scenarios>
-      "${SP_HTTP3_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/support/http3_peer.py" all)
-    set_tests_properties(http3_scenarios PROPERTIES TIMEOUT 180)
+  if(WIN32)
+    target_link_libraries(sp_transport_tests PRIVATE psapi ws2_32)
+  endif()
+  if(NOT WIN32)
+    # The optional real-QUIC scenarios drive a Python peer through fork/exec.
+    add_executable(sp_http3_scenarios tests/http3_transport_scenarios.cpp)
+    target_compile_options(sp_http3_scenarios PRIVATE ${SP_WARNING_OPTIONS})
+    target_link_libraries(sp_http3_scenarios PRIVATE sp_transport)
+    if(SP_HTTP3_PYTHON)
+      add_test(NAME http3_scenarios COMMAND ${sp_test_runner} $<TARGET_FILE:sp_http3_scenarios>
+        "${SP_HTTP3_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/support/http3_peer.py" all)
+      set_tests_properties(http3_scenarios PROPERTIES TIMEOUT 180)
+    endif()
   endif()
 
   add_executable(sp_sse_tests tests/sse_framer_test.cpp)
@@ -329,14 +367,16 @@ if(SP_BUILD_TESTS)
   foreach(target sp_gemini_tests sp_gemini_runtime_tests sp_interactions_tests sp_interactions_runtime_tests sp_vision_campaign_tests)
     target_compile_options(${target} PRIVATE ${SP_WARNING_OPTIONS})
   endforeach()
-  add_executable(sp_fixture_runner tests/fixture_runner.cpp)
-  target_link_libraries(sp_fixture_runner PRIVATE sp_codecs sp_descriptor sp_json sp_transport)
+    add_executable(sp_fixture_runner tests/fixture_runner.cpp)
+    target_link_libraries(sp_fixture_runner PRIVATE sp_codecs sp_descriptor sp_json sp_transport)
+    target_compile_options(sp_fixture_runner PRIVATE ${SP_WARNING_OPTIONS})
   add_executable(sp_runtime_policy_tests tests/runtime_policy_test.cpp)
   target_link_libraries(sp_runtime_policy_tests PRIVATE sp_runtime sp_json)
   add_executable(sp_runtime_scheduler_tests tests/runtime_scheduler_test.cpp)
   target_link_libraries(sp_runtime_scheduler_tests PRIVATE sp_runtime sp_transport sp_json)
-  add_executable(sp_runtime_tests tests/runtime_properties_test.cpp)
-  target_link_libraries(sp_runtime_tests PRIVATE sp_runtime sp_transport sp_json)
+    add_executable(sp_runtime_tests tests/runtime_properties_test.cpp)
+    target_link_libraries(sp_runtime_tests PRIVATE sp_runtime sp_transport sp_json)
+    target_compile_options(sp_runtime_tests PRIVATE ${SP_WARNING_OPTIONS})
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(sp_runtime_footprint_probe tests/runtime_footprint_probe.cpp)
     target_link_libraries(sp_runtime_footprint_probe PRIVATE sp_runtime)
@@ -352,27 +392,29 @@ if(SP_BUILD_TESTS)
              ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/lifecycle_server.mjs ${SP_OPENSSL} ${matrix_family})
     set_tests_properties(matrix_${matrix_family} PROPERTIES TIMEOUT 300)
   endforeach()
-  add_executable(sp_canary_tests tests/canary_test.cpp)
-  target_compile_options(sp_canary_tests PRIVATE ${SP_WARNING_OPTIONS})
-  target_link_libraries(sp_canary_tests PRIVATE sp_canary_core sp_json Threads::Threads)
-  add_executable(sp_vision_canary_tests tests/vision_canary_test.cpp)
-  target_compile_options(sp_vision_canary_tests PRIVATE ${SP_WARNING_OPTIONS})
-  target_link_libraries(sp_vision_canary_tests PRIVATE sp_canary_core sp_json Threads::Threads)
-  add_executable(sp_vision_control_runtime_tests tests/vision_control_runtime_test.cpp)
-  target_compile_options(sp_vision_control_runtime_tests PRIVATE ${SP_WARNING_OPTIONS})
-  target_link_libraries(sp_vision_control_runtime_tests PRIVATE sp_canary_core sp_json)
-  foreach(target sp_runtime_policy_tests sp_runtime_scheduler_tests sp_runtime_tests)
+  if(SP_BUILD_CANARY)
+    add_executable(sp_canary_tests tests/canary_test.cpp)
+    target_compile_options(sp_canary_tests PRIVATE ${SP_WARNING_OPTIONS})
+    target_link_libraries(sp_canary_tests PRIVATE sp_canary_core sp_json Threads::Threads)
+    add_executable(sp_vision_canary_tests tests/vision_canary_test.cpp)
+    target_compile_options(sp_vision_canary_tests PRIVATE ${SP_WARNING_OPTIONS})
+    target_link_libraries(sp_vision_canary_tests PRIVATE sp_canary_core sp_json Threads::Threads)
+    add_executable(sp_vision_control_runtime_tests tests/vision_control_runtime_test.cpp)
+    target_compile_options(sp_vision_control_runtime_tests PRIVATE ${SP_WARNING_OPTIONS})
+    target_link_libraries(sp_vision_control_runtime_tests PRIVATE sp_canary_core sp_json)
+  endif()
+  foreach(target sp_runtime_policy_tests sp_runtime_scheduler_tests)
     target_compile_options(${target} PRIVATE ${SP_WARNING_OPTIONS})
   endforeach()
-  foreach(target sp_sse_tests sp_descriptor_tests sp_chat_tests sp_messages_tests sp_messages_replay_tests sp_native_continuation_tests sp_fixture_runner)
+  foreach(target sp_sse_tests sp_descriptor_tests sp_chat_tests sp_messages_tests sp_messages_replay_tests sp_native_continuation_tests)
     target_compile_options(${target} PRIVATE ${SP_WARNING_OPTIONS})
   endforeach()
 
 
-  add_test(NAME transport_properties
-           COMMAND ${sp_test_runner} $<TARGET_FILE:sp_transport_tests> $<TARGET_FILE:sp_loopback_server>
-                   ${CMAKE_CURRENT_SOURCE_DIR}/tests/support)
-  set_tests_properties(transport_properties PROPERTIES TIMEOUT 300)
+    add_test(NAME transport_properties
+             COMMAND ${sp_test_runner} $<TARGET_FILE:sp_transport_tests> $<TARGET_FILE:sp_loopback_server>
+                     ${CMAKE_CURRENT_SOURCE_DIR}/tests/support)
+    set_tests_properties(transport_properties PROPERTIES TIMEOUT 300 ENVIRONMENT "SP_NODE=${SP_NODE};SP_OPENSSL=${SP_OPENSSL}")
   add_test(NAME sse_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_sse_tests>)
   add_test(NAME descriptor_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_descriptor_tests>)
   add_test(NAME chat_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_chat_tests>)
@@ -394,31 +436,35 @@ if(SP_BUILD_TESTS)
   add_test(NAME vision_campaign COMMAND ${sp_test_runner} $<TARGET_FILE:sp_vision_campaign_tests>
            ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/vision_server.mjs)
   set_tests_properties(vision_inputs gemini_properties gemini_runtime interactions_properties interactions_runtime vision_campaign PROPERTIES TIMEOUT 300)
-  add_test(NAME chat_fixtures COMMAND ${sp_test_runner} $<TARGET_FILE:sp_fixture_runner> ${SP_NODE}
-           ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/fixture_server.mjs
-           ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/chat
-           ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/openai-chat-descriptor.json)
-  add_test(NAME messages_fixtures COMMAND ${sp_test_runner} $<TARGET_FILE:sp_fixture_runner> ${SP_NODE}
-           ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/fixture_server.mjs
-           ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/messages
-           ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/anthropic-messages-descriptor.json)
+    add_test(NAME chat_fixtures COMMAND ${sp_test_runner} $<TARGET_FILE:sp_fixture_runner> ${SP_NODE}
+             ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/fixture_server.mjs
+             ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/chat
+             ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/openai-chat-descriptor.json)
+    add_test(NAME messages_fixtures COMMAND ${sp_test_runner} $<TARGET_FILE:sp_fixture_runner> ${SP_NODE}
+             ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/fixture_server.mjs
+             ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/messages
+             ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/anthropic-messages-descriptor.json)
+    set_tests_properties(chat_fixtures messages_fixtures PROPERTIES TIMEOUT 300)
   add_test(NAME runtime_policy COMMAND ${sp_test_runner} $<TARGET_FILE:sp_runtime_policy_tests>)
   add_test(NAME runtime_scheduler COMMAND ${sp_test_runner} $<TARGET_FILE:sp_runtime_scheduler_tests>
            ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/runtime_server.mjs)
-  add_test(NAME runtime_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_runtime_tests>
-           ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/runtime_server.mjs)
-  add_test(NAME canary_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_canary_tests>
-           ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/canary_server.mjs $<TARGET_FILE:sp_canary>)
-  set_tests_properties(canary_properties PROPERTIES TIMEOUT 300)
-  add_test(NAME vision_canary COMMAND ${sp_test_runner} $<TARGET_FILE:sp_vision_canary_tests>
-           ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/vision_server.mjs $<TARGET_FILE:sp_canary>)
-  set_tests_properties(vision_canary PROPERTIES TIMEOUT 300)
-  add_test(NAME vision_control_runtime COMMAND ${sp_test_runner} $<TARGET_FILE:sp_vision_control_runtime_tests>
-           ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/vision_server.mjs $<TARGET_FILE:sp_canary>)
-  set_tests_properties(vision_control_runtime PROPERTIES TIMEOUT 300)
-  set_tests_properties(runtime_policy runtime_scheduler runtime_properties PROPERTIES TIMEOUT 300)
-  set_tests_properties(sse_properties descriptor_properties chat_properties chat_fixtures
-                       messages_properties messages_replay native_continuation_bounds messages_fixtures PROPERTIES TIMEOUT 300)
+    add_test(NAME runtime_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_runtime_tests>
+             ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/runtime_server.mjs)
+    set_tests_properties(runtime_properties PROPERTIES TIMEOUT 300)
+  if(SP_BUILD_CANARY)
+    add_test(NAME canary_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_canary_tests>
+             ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/canary_server.mjs $<TARGET_FILE:sp_canary>)
+    set_tests_properties(canary_properties PROPERTIES TIMEOUT 300)
+    add_test(NAME vision_canary COMMAND ${sp_test_runner} $<TARGET_FILE:sp_vision_canary_tests>
+             ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/vision_server.mjs $<TARGET_FILE:sp_canary>)
+    set_tests_properties(vision_canary PROPERTIES TIMEOUT 300)
+    add_test(NAME vision_control_runtime COMMAND ${sp_test_runner} $<TARGET_FILE:sp_vision_control_runtime_tests>
+             ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/vision_server.mjs $<TARGET_FILE:sp_canary>)
+    set_tests_properties(vision_control_runtime PROPERTIES TIMEOUT 300)
+  endif()
+  set_tests_properties(runtime_policy runtime_scheduler PROPERTIES TIMEOUT 300)
+  set_tests_properties(sse_properties descriptor_properties chat_properties
+                       messages_properties messages_replay native_continuation_bounds PROPERTIES TIMEOUT 300)
 
   # Transport stall bounds (connect / first byte / idle): one binary, one CTest entry per suite. A suite
   # that cannot build its black hole prints STALL_SKIPPED and is reported as skipped, never as passed.

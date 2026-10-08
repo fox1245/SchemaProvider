@@ -5,13 +5,17 @@
 // Usage: sp_transport_tests <path-to-sp_loopback_server> <fixture-directory> [test-name-substring]
 #include "transport/http_transport.h"
 
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <poll.h>
-#include <sys/socket.h>
+#include "support/portable.h"
+#ifdef _WIN32
+#include "support/win_owner.h"
+#include <psapi.h>
+#include <tlhelp32.h>
+#else
 #include <sys/wait.h>
-#include <unistd.h>
+#include "support/posix_owner.h"
+#endif
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cerrno>
@@ -82,7 +86,9 @@ struct Registrar {
     }                                                                                    \
   } while (0)
 
+#if defined(__GNUC__) || defined(__clang__)
 void note(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+#endif
 void note(const char* fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
@@ -107,15 +113,45 @@ double ms_since(steady_clock::time_point t) {
 }
 
 int thread_count() {
+#ifdef _WIN32
+  runtime_test::Handle snapshot(::CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0));
+  THREADENTRY32 entry{};
+  entry.dwSize = sizeof entry;
+  if (!snapshot || !::Thread32First(snapshot.get(), &entry)) {
+    CHECK_MSG(false, "cannot enumerate native process threads (Win32 error %lu)", ::GetLastError());
+    return -1;
+  }
+  int count = 0;
+  do {
+    if (entry.th32OwnerProcessID == ::GetCurrentProcessId()) ++count;
+    entry.dwSize = sizeof entry;
+  } while (::Thread32Next(snapshot.get(), &entry));
+  CHECK_MSG(::GetLastError() == ERROR_NO_MORE_FILES, "native thread enumeration failed");
+  return count;
+#elif defined(__APPLE__)
+  return portable::darwin_thread_count();
+#else
   std::ifstream in("/proc/self/status");
   std::string line;
   while (std::getline(in, line)) {
     if (line.rfind("Threads:", 0) == 0) return std::atoi(line.c_str() + 8);
   }
   return -1;
+#endif
 }
 
-long rss_bytes() {
+long long rss_bytes() {
+#ifdef _WIN32
+  PROCESS_MEMORY_COUNTERS counters{};
+  counters.cb = sizeof counters;
+  if (!::GetProcessMemoryInfo(::GetCurrentProcess(), &counters, sizeof counters)) {
+    CHECK_MSG(false, "cannot read native process working set (Win32 error %lu)", ::GetLastError());
+    return 0;
+  }
+  return static_cast<long long>(counters.WorkingSetSize);
+#elif defined(__APPLE__)
+  return portable::darwin_resident_bytes();
+#else
   // statm/VmRSS are approximate kernel counters. Keep the existing memory gates,
   // but measure actual resident pages, including sanitizer overhead.
   std::ifstream in("/proc/self/smaps_rollup");
@@ -125,22 +161,40 @@ long rss_bytes() {
     char unit[3]{};
     if (std::sscanf(line.c_str(), "Rss: %ld %2s", &kib, unit) == 2 &&
         kib > 0 && std::strcmp(unit, "kB") == 0) {
-      return kib * 1024;
+      return static_cast<long long>(kib) * 1024;
     }
   }
   CHECK_MSG(false, "cannot read RSS from /proc/self/smaps_rollup");
   return 0;
+#endif
 }
 
 // ------------------------------------------------------------------------------------------
 // Server process + raw stats client (shares no code with the transport)
 // ------------------------------------------------------------------------------------------
 struct Server {
+#ifdef _WIN32
+  runtime_test::Spawned child;
+#else
   pid_t pid = -1;
   int stdin_fd = -1;
+#endif
   unsigned http = 0, silent = 0, blackhole = 0;
+  std::string blackhole_reason;
 
   void start(const char* path) {
+#ifdef _WIN32
+    child = runtime_test::spawn_with_pipes(path, std::initializer_list<std::string_view>{});
+    std::string line;
+    const auto deadline = steady_clock::now() + std::chrono::seconds(5);
+    while (line.find('\n') == std::string::npos && line.size() < 8192) {
+      const auto remaining = std::chrono::duration_cast<milliseconds>(deadline - steady_clock::now()).count();
+      if (remaining <= 0) break;
+      char c;
+      if (runtime_test::read_pipe(child.from_child.get(), &c, 1, remaining) == 0) break;
+      line.push_back(c);
+    }
+#else
     int in_pipe[2], out_pipe[2];
     if (pipe(in_pipe) != 0 || pipe(out_pipe) != 0) std::abort();
     pid = fork();
@@ -163,14 +217,31 @@ struct Server {
       line.push_back(c);
     }
     close(out_pipe[0]);
+#endif
     if (std::sscanf(line.c_str(), "PORTS http=%u silent=%u blackhole=%u", &http, &silent, &blackhole) != 3) {
       std::fprintf(stderr, "loopback server did not report ports: '%s'\n", line.c_str());
       std::exit(2);
     }
+    const auto reason = line.find(" blackhole_reason=");
+    if (reason != std::string::npos) {
+      blackhole_reason = line.substr(reason + std::strlen(" blackhole_reason="));
+      if (!blackhole_reason.empty() && blackhole_reason.back() == '\n') blackhole_reason.pop_back();
+    }
+    if (blackhole == 0 && blackhole_reason.empty()) {
+      std::fprintf(stderr, "loopback server omitted the unsupported blackhole reason\n");
+      stop();
+      std::exit(2);
+    }
   }
   void stop() {
-    if (stdin_fd >= 0) close(stdin_fd);
-    if (pid > 0) waitpid(pid, nullptr, 0);
+#ifdef _WIN32
+    child.to_child.reset();
+    child.from_child.reset();
+    child.process.reset();
+#else
+    if (stdin_fd >= 0) { close(stdin_fd); stdin_fd = -1; }
+    if (pid > 0) { waitpid(pid, nullptr, 0); pid = -1; }
+#endif
   }
   std::string url(const std::string& path_and_query) const {
     return "http://127.0.0.1:" + std::to_string(http) + path_and_query;
@@ -186,28 +257,81 @@ struct Stats {
   }
 };
 
-Stats fetch_stats() {
-  const int fd = socket(AF_INET, SOCK_STREAM, 0);
+bool socket_retry() {
+#ifdef _WIN32
+  const auto error = ::WSAGetLastError();
+  return error == WSAEWOULDBLOCK || error == WSAEINTR;
+#else
+  return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR;
+#endif
+}
+
+bool socket_ready(portable::socket_t socket, short events, steady_clock::time_point deadline) {
+  for (;;) {
+    const auto remaining = std::chrono::duration_cast<milliseconds>(deadline - steady_clock::now()).count();
+    if (remaining <= 0) return false;
+    portable::PollFd fd{socket, events, 0};
+    const int ready = portable::poll(&fd, 1, static_cast<int>(remaining));
+    if (ready > 0) return (fd.revents & (events | POLLERR | POLLHUP)) != 0;
+    if (ready == 0 || !socket_retry()) return false;
+  }
+}
+
+// A separate, bounded raw HTTP client: nonblocking connect/send/receive share one deadline.
+// Socket ownership also covers every error path; failure is never mistaken for empty peer counters.
+Stats stats_request(unsigned port, const char* path) {
+  const auto deadline = steady_clock::now() + std::chrono::seconds(3);
+  portable::Socket socket(::socket(AF_INET, SOCK_STREAM, 0));
+  auto fail = [&](const char* phase) {
+    CHECK_MSG(false, "raw stats request to port %u failed or timed out during %s", port, phase);
+    return Stats{};
+  };
+  if (!socket || !portable::set_nonblocking(socket.get())) return fail("socket setup");
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
   addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  addr.sin_port = htons(static_cast<uint16_t>(g_server.http));
-  if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0) std::abort();
-  const char req[] = "GET /__stats HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
-  if (write(fd, req, sizeof req - 1) < 0) std::abort();
-  std::string resp;
-  char buf[2048];
-  ssize_t n;
-  while ((n = read(fd, buf, sizeof buf)) > 0) resp.append(buf, static_cast<size_t>(n));
-  close(fd);
-  Stats s;
-  const auto body = resp.find("\r\n\r\n");
-  std::istringstream in(body == std::string::npos ? "" : resp.substr(body + 4));
-  std::string k;
-  long val;
-  while (in >> k >> val) s.v[k] = val;
-  return s;
+  addr.sin_port = htons(static_cast<uint16_t>(port));
+  if (::connect(socket.get(), reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0) {
+    if (!portable::connect_in_progress() || !socket_ready(socket.get(), POLLOUT, deadline))
+      return fail("connect");
+    int error = 0;
+    portable::socklen size = sizeof error;
+    if (::getsockopt(socket.get(), SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&error), &size) != 0 || error)
+      return fail("connect completion");
+  }
+  const std::string request = std::string("GET ") + path + " HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+  std::size_t sent = 0;
+  while (sent < request.size()) {
+    if (!socket_ready(socket.get(), POLLOUT, deadline)) return fail("send readiness");
+    const auto n = portable::send_quiet(socket.get(), request.data() + sent, request.size() - sent);
+    if (n > 0) sent += static_cast<std::size_t>(n);
+    else if (n == 0 || !socket_retry()) return fail("send");
+  }
+  std::string response;
+  char buffer[2048];
+  for (;;) {
+    if (!socket_ready(socket.get(), POLLIN, deadline)) return fail("receive readiness");
+    const auto n = portable::receive(socket.get(), buffer, sizeof buffer);
+    if (n == 0) break;
+    if (n < 0) {
+      if (socket_retry()) continue;
+      return fail("receive");
+    }
+    response.append(buffer, static_cast<std::size_t>(n));
+    if (response.size() > (1U << 20)) return fail("response bound");
+  }
+  const auto body = response.find("\r\n\r\n");
+  if (body == std::string::npos || response.rfind("HTTP/1.1 200 ", 0) != 0) return fail("HTTP response");
+  std::istringstream in(response.substr(body + 4));
+  Stats result;
+  std::string key;
+  long value;
+  while (in >> key >> value) result.v[key] = value;
+  if (result.v.empty()) return fail("stats body");
+  return result;
 }
+
+Stats fetch_stats() { return stats_request(g_server.http, "/__stats"); }
 
 // ------------------------------------------------------------------------------------------
 // Callback collector: records everything and counts contract violations
@@ -370,6 +494,11 @@ TEST(abnormal_close_is_never_success) {
               "%s -> %s/%s (curl %d: %s)", row.path, name_of(r.status), name_of(r.failure), r.curl_code,
               r.detail.c_str());
     CHECK(c->outcomes == 1);
+    if (row.kind == FailureKind::ResponseTooLarge) {
+      CHECK(!c->head);
+      CHECK(c->body.empty());
+      CHECK(c->body_bytes == 0);
+    }
     note("%-18s -> %s/%s reached=%s", row.path, name_of(r.status), name_of(r.failure), name_of(r.attempt.reached));
   }
 }
@@ -381,6 +510,7 @@ struct WaitingState {
   std::function<void(Collector&, const Stats&)> reached;
   Stage max_stage;
   Stage min_stage;
+  std::string unsupported_reason;
 };
 
 std::vector<WaitingState> waiting_states() {
@@ -395,7 +525,7 @@ std::vector<WaitingState> waiting_states() {
                Stage::ResponseStarted, Stage::ResponseStarted});
   s.push_back({"connect_stall", "http://127.0.0.1:" + std::to_string(g_server.blackhole) + "/",
                [](Collector&, const Stats&) { std::this_thread::sleep_for(milliseconds(250)); }, Stage::Resolved,
-               Stage::Queued});
+               Stage::Queued, g_server.blackhole_reason});
   s.push_back({"tls_handshake_stall", "https://127.0.0.1:" + std::to_string(g_server.silent) + "/",
                [](Collector&, const Stats& before) {
                  CHECK(wait_until([&] { return fetch_stats()["silent_accepted"] > before["silent_accepted"]; }, 3000));
@@ -409,6 +539,10 @@ std::vector<WaitingState> waiting_states() {
 TEST(deadline_in_each_waiting_state) {
   Transport t;
   for (const WaitingState& s : waiting_states()) {
+    if (!s.unsupported_reason.empty()) {
+      note("SKIP CELL %s/%s: %s", g_current.c_str(), s.name, s.unsupported_reason.c_str());
+      continue;
+    }
     auto c = std::make_shared<Collector>();
     const auto start = steady_clock::now();
     Result r = t.start(post(s.url, "{}", 300), c->callbacks()).join();
@@ -426,6 +560,10 @@ TEST(deadline_in_each_waiting_state) {
 TEST(cancel_without_peer_progress) {
   Transport t;
   for (const WaitingState& s : waiting_states()) {
+    if (!s.unsupported_reason.empty()) {
+      note("SKIP CELL %s/%s: %s", g_current.c_str(), s.name, s.unsupported_reason.c_str());
+      continue;
+    }
     auto c = std::make_shared<Collector>();
     const Stats before = fetch_stats();
     Operation op = t.start(post(s.url, "{}", 30000), c->callbacks());
@@ -565,7 +703,7 @@ TEST(backpressure_http1_pause_resume) {
     return true;
   };
   const Stats before = fetch_stats();
-  const long rss_before = rss_bytes();
+  const long long rss_before = rss_bytes();
   Operation op = t.start(post(g_server.url("/flood?total=" + std::to_string(kTotal)), "{}", 60000), std::move(cb));
 
   CHECK(wait_until([&] { return received.load() >= kAccept - (32 << 10); }, 5000));
@@ -573,12 +711,12 @@ TEST(backpressure_http1_pause_resume) {
   const long w1 = fetch_stats()["flood_written"] - before["flood_written"];
   std::this_thread::sleep_for(milliseconds(500));
   const long w2 = fetch_stats()["flood_written"] - before["flood_written"];
-  const long rss_growth = rss_bytes() - rss_before;
-  note("paused: client consumed %ld B; server wrote %ld then %ld B of %ld; RSS +%ld B", received.load(), w1, w2, kTotal,
+  const long long rss_growth = rss_bytes() - rss_before;
+  note("paused: client consumed %ld B; server wrote %ld then %ld B of %ld; RSS +%lld B", received.load(), w1, w2, kTotal,
        rss_growth);
   CHECK_MSG(w1 == w2, "server writes still growing while the client is paused (%ld -> %ld)", w1, w2);
   CHECK_MSG(w2 < kTotal / 2, "server was able to push %ld of %ld bytes into a paused client", w2, kTotal);
-  CHECK_MSG(rss_growth < (24L << 20), "client RSS grew %ld B while paused", rss_growth);
+  CHECK_MSG(rss_growth < (24L << 20), "client RSS grew %lld B while paused", rss_growth);
   CHECK(!c->done);
 
   unlimited = true;
@@ -875,16 +1013,33 @@ TEST(dns_real_getaddrinfo_failures_are_bounded) {
 // Regression tests for the independent review of the transport (docs/POC_PLAN.md section 5).
 // ------------------------------------------------------------------------------------------
 
-// A transfer coding overrides Content-Length, an unusable Content-Length gives no framing, and an
-// obs-fold continuation is part of the previous field. In every case EOF must not become success.
+// A transfer coding overrides Content-Length unless libcurl rejects that coding before
+// completing the head (8.21 rejects unsolicited gzip with CURLE_BAD_CONTENT_ENCODING).
+// An unusable Content-Length gives no framing; obs-fold belongs to the previous field.
+// Neither early rejection nor close-delimited EOF may become success.
 TEST(framing_follows_effective_message_boundaries) {
   Transport t;
+  // Result exposes numeric CURLcodes without exposing libcurl headers to callers.
+  constexpr int curl_bad_content_encoding = 61;
   for (const char* path : {"/te-gzip-cl", "/cl-overflow", "/folded-cl"}) {
     auto c = std::make_shared<Collector>();
     Result r = t.start(post(g_server.url(path)), c->callbacks()).join();
-    CHECK_MSG(r.status == Status::Failed && r.failure == FailureKind::Truncated, "%s -> %s/%s (curl %d)", path,
-              name_of(r.status), name_of(r.failure), r.curl_code);
-    CHECK_MSG(c->head && c->head->framing == BodyFraming::CloseDelimited, "%s framing", path);
+    if (std::strcmp(path, "/te-gzip-cl") == 0 && r.curl_code == curl_bad_content_encoding) {
+      // content_encoding.c: Curl_build_unencoding_stack rejects an unsolicited coding
+      // while http.c parses Transfer-Encoding, before the terminating blank line.
+      CHECK(r.status == Status::Failed);
+      CHECK(r.failure == FailureKind::Protocol);
+      CHECK(!c->head);
+      CHECK(!c->head_seen);
+      CHECK(c->body.empty());
+      CHECK(c->body_bytes == 0);
+    } else {
+      CHECK_MSG(r.status == Status::Failed && r.failure == FailureKind::Truncated, "%s -> %s/%s (curl %d)", path,
+                name_of(r.status), name_of(r.failure), r.curl_code);
+      CHECK_MSG(c->head && c->head->framing == BodyFraming::CloseDelimited, "%s framing", path);
+    }
+    CHECK(c->outcomes == 1);
+    CHECK(c->late_callbacks == 0);
   }
   auto c = std::make_shared<Collector>();
   t.start(post(g_server.url("/folded-cl")), c->callbacks()).join();
@@ -919,13 +1074,13 @@ TEST(request_bodies_are_sent_for_every_body_method) {
 
 // Ambient proxy variables must not redirect traffic, and so must not bypass the bounded resolver.
 TEST(ambient_proxy_environment_is_ignored) {
-  setenv("http_proxy", "http://127.0.0.1:9", 1);
-  setenv("all_proxy", "http://sp-proxy.invalid:3128", 1);
+  portable::set_env("http_proxy", "http://127.0.0.1:9");
+  portable::set_env("all_proxy", "http://sp-proxy.invalid:3128");
   Transport t;
   auto c = std::make_shared<Collector>();
   Result r = t.start(post(g_server.url("/ok")), c->callbacks()).join();
-  unsetenv("http_proxy");
-  unsetenv("all_proxy");
+  portable::unset_env("http_proxy");
+  portable::unset_env("all_proxy");
   CHECK_MSG(r.status == Status::Completed && c->body == "ok", "%s/%s (curl %d)", name_of(r.status), name_of(r.failure), r.curl_code);
 }
 
@@ -988,7 +1143,7 @@ void expect_paused_plateau(Transport& t, const std::string& flood_url, long acce
     return true;
   };
   const Stats before = fetch_stats();
-  const long rss_before = rss_bytes();
+  const long long rss_before = rss_bytes();
   Operation op = t.start(post(flood_url + "?total=" + std::to_string(kTotal), "{}", 60000), std::move(cb));
   CHECK_MSG(wait_until([&] { return refused.load(); }, 5000), "%s: the consumer was never asked to pause", label);
   // Pausing the consumer does not instantly stop writes into kernel socket buffers.
@@ -1007,11 +1162,11 @@ void expect_paused_plateau(Transport& t, const std::string& flood_url, long acce
       break;
     }
   }
-  const long growth = rss_bytes() - rss_before;
-  note("%s: consumed %ld B; server wrote %ld then %ld of %ld; RSS +%ld B", label, received.load(), w1, w2, kTotal, growth);
+  const long long growth = rss_bytes() - rss_before;
+  note("%s: consumed %ld B; server wrote %ld then %ld of %ld; RSS +%lld B", label, received.load(), w1, w2, kTotal, growth);
   CHECK_MSG(plateau, "%s: server did not plateau while paused (last samples %ld -> %ld)", label, w1, w2);
   CHECK_MSG(w2 < kTotal / 2, "%s: server pushed %ld bytes into a paused client", label, w2);
-  CHECK_MSG(growth < (24L << 20), "%s: client RSS grew %ld B while paused", label, growth);
+  CHECK_MSG(growth < (24L << 20), "%s: client RSS grew %lld B while paused", label, growth);
   unlimited = true;
   op.resume();
   Result r = op.join();
@@ -1072,7 +1227,7 @@ TEST(stuck_lookup_does_not_retain_cancelled_operations) {
   auto fr = std::make_shared<FakeResolver>();
   fr->block();
   Transport t(options_with(fr));
-  const long rss_before = rss_bytes();
+  const long long rss_before = rss_bytes();
   const std::string big(1 << 20, 'r');
   for (int i = 0; i < 200; ++i) {
     auto c = std::make_shared<Collector>();
@@ -1080,14 +1235,14 @@ TEST(stuck_lookup_does_not_retain_cancelled_operations) {
     op.cancel();
     CHECK(op.join().status == Status::Cancelled);
   }
-  const long growth = rss_bytes() - rss_before;
-  note("200 cancelled 1 MiB requests behind one stuck lookup: RSS +%ld B", growth);
+  const long long growth = rss_bytes() - rss_before;
+  note("200 cancelled 1 MiB requests behind one stuck lookup: RSS +%lld B", growth);
 #if defined(__SANITIZE_ADDRESS__)
   // AddressSanitizer parks freed blocks in a quarantine of up to 256 MB, so RSS cannot show a
   // release there; the plain and TSan builds carry this check.
   note("RSS bound not asserted under AddressSanitizer (quarantine)");
 #else
-  CHECK_MSG(growth < (64L << 20), "cancelled operations stay referenced by the stuck lookup (RSS +%ld B)", growth);
+  CHECK_MSG(growth < (64L << 20), "cancelled operations stay referenced by the stuck lookup (RSS +%lld B)", growth);
 #endif
   fr->release();
 }
@@ -1117,11 +1272,15 @@ TEST(shutdown_cancels_active_operations) {
 // ------------------------------------------------------------------------------------------
 // HTTP/2 backpressure (risk R3): libcurl reads and buffers a paused stream because its socket is
 // shared with live streams. The buffering must at least be bounded (curl_easy_pause documents the
-// stream window); this experiment measures it. Requires `node`; reported as skipped without it.
+// stream window); this experiment measures it. Node and HTTP/2 capability are required, not skipped.
 // ------------------------------------------------------------------------------------------
 struct NodeServer {
+#ifdef _WIN32
+  runtime_test::Spawned child;
+#else
   pid_t pid = -1;
   int stdin_fd = -1;
+#endif
   unsigned h2 = 0, stats = 0;
   std::map<std::string, std::string> fields;
 
@@ -1133,18 +1292,45 @@ struct NodeServer {
   }
 
   bool start(const std::string& script) {
-    int in_pipe[2], out_pipe[2];
-    if (pipe2(in_pipe, O_CLOEXEC) != 0) return false;
-    if (pipe2(out_pipe, O_CLOEXEC) != 0) {
-      close(in_pipe[0]); close(in_pipe[1]);
+#ifdef _WIN32
+    const auto configured_node = runtime_test::environment("SP_NODE");
+    const char* node = configured_node.empty() ? "node.exe" : configured_node.c_str();
+#else
+    const char* node = std::getenv("SP_NODE");
+    if (!node || !*node) node = "node";
+#endif
+#ifdef _WIN32
+    try {
+      child = runtime_test::spawn_with_pipes(node, {script});
+    } catch (const std::exception& error) {
+      note("node launch failed: %s", error.what());
       return false;
     }
+    std::string line;
+    const auto deadline = steady_clock::now() + std::chrono::seconds(20);
+    try {
+      while (line.find('\n') == std::string::npos && line.size() < 8192) {
+        const auto remaining = std::chrono::duration_cast<milliseconds>(deadline - steady_clock::now()).count();
+        if (remaining <= 0) break;
+        char c;
+        if (runtime_test::read_pipe(child.from_child.get(), &c, 1, remaining) == 0) break;
+        line.push_back(c);
+      }
+    } catch (const std::exception& error) {
+      note("node startup failed: %s", error.what());
+      stop();
+      return false;
+    }
+#else
+    runtime_test::Pipe input, output;
+    int in_pipe[2] = {input.reader.release(), input.writer.release()};
+    int out_pipe[2] = {output.reader.release(), output.writer.release()};
     pid = fork();
     if (pid == 0) {
       dup2(in_pipe[0], 0);
       dup2(out_pipe[1], 1);
       close(in_pipe[0]); close(in_pipe[1]); close(out_pipe[0]); close(out_pipe[1]);
-      execlp("node", "node", script.c_str(), static_cast<char*>(nullptr));
+      execlp(node, node, script.c_str(), static_cast<char*>(nullptr));
       _exit(127);
     }
     close(in_pipe[0]);
@@ -1165,7 +1351,16 @@ struct NodeServer {
       line.push_back(c);
     }
     close(out_pipe[0]);
-    std::istringstream tokens(line);
+#endif
+    if (line.find('\n') == std::string::npos) { stop(); return false; }
+    // TLS peers put ca= last; its remainder is a path, not whitespace-delimited tokens.
+    const auto ca = line.find(" ca=");
+    if (ca != std::string::npos) {
+      auto path = line.substr(ca + 4);
+      while (!path.empty() && (path.back() == '\n' || path.back() == '\r')) path.pop_back();
+      fields.emplace("ca", std::move(path));
+    }
+    std::istringstream tokens(line.substr(0, ca));
     std::string token;
     if (!(tokens >> token) || token != "PORTS") return false;
     while (tokens >> token) {
@@ -1178,6 +1373,11 @@ struct NodeServer {
     return stats != 0 && (h2 != 0 || port("good") != 0);
   }
   void stop() {
+#ifdef _WIN32
+    child.to_child.reset();
+    child.from_child.reset();
+    child.process.reset();
+#else
     if (stdin_fd >= 0) {
       close(stdin_fd);
       stdin_fd = -1;
@@ -1186,38 +1386,10 @@ struct NodeServer {
       while (waitpid(pid, nullptr, 0) < 0 && errno == EINTR) {}
       pid = -1;
     }
+#endif
   }
   Stats stats_request(const char* path = "/") const {
-    const int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (fd < 0) return {};
-    timeval timeout{3, 0};
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof timeout);
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof timeout);
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = htons(static_cast<uint16_t>(stats));
-    if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0) {
-      close(fd);
-      return {};
-    }
-    const std::string req = std::string("GET ") + path + " HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
-    if (send(fd, req.data(), req.size(), MSG_NOSIGNAL) != static_cast<ssize_t>(req.size())) {
-      close(fd);
-      return {};
-    }
-    std::string resp;
-    char buf[2048];
-    ssize_t n;
-    while ((n = read(fd, buf, sizeof buf)) > 0) resp.append(buf, static_cast<size_t>(n));
-    close(fd);
-    const auto body = resp.find("\r\n\r\n");
-    std::istringstream in(body == std::string::npos ? "" : resp.substr(body + 4));
-    Stats result;
-    std::string key;
-    long value;
-    while (in >> key >> value) result.v[key] = value;
-    return result;
+    return ::stats_request(stats, path);
   }
   long stat(const char* key) const {
     const Stats snapshot = stats_request();
@@ -1229,10 +1401,9 @@ std::string g_h2c_script, g_tls_script, g_h2_adversarial_script;
 
 TEST(backpressure_http2_paused_stream_buffering_is_bounded) {
   NodeServer node;
-  if (!node.start(g_h2c_script)) {
-    note("SKIPPED: could not start `node %s`", g_h2c_script.c_str());
-    return;
-  }
+  const bool started = node.start(g_h2c_script);
+  CHECK_MSG(started, "could not start node peer %s", g_h2c_script.c_str());
+  if (!started) return;
   const long kTotal = 64L << 20;
   const long kAccept = 1L << 20;
   Transport t;
@@ -1247,17 +1418,17 @@ TEST(backpressure_http2_paused_stream_buffering_is_bounded) {
   };
   HttpRequest req = post("http://127.0.0.1:" + std::to_string(node.h2) + "/flood?total=" + std::to_string(kTotal), "{}", 60000);
   req.http_version = HttpVersion::Http2PriorKnowledge;
-  const long rss_before = rss_bytes();
+  const long long rss_before = rss_bytes();
   Operation op = t.start(std::move(req), std::move(cb));
   CHECK(wait_until([&] { return received.load() >= kAccept - (32 << 10); }, 5000));
   std::this_thread::sleep_for(milliseconds(1000));
   const long w1 = node.stat("written");
   std::this_thread::sleep_for(milliseconds(500));
   const long w2 = node.stat("written");
-  const long rss_growth = rss_bytes() - rss_before;
-  note("h2 paused: client consumed %ld B; server handed %ld then %ld B of %ld to its socket; RSS +%ld B", received.load(),
+  const long long rss_growth = rss_bytes() - rss_before;
+  note("h2 paused: client consumed %ld B; server handed %ld then %ld B of %ld to its socket; RSS +%lld B", received.load(),
        w1, w2, kTotal, rss_growth);
-  CHECK_MSG(rss_growth < (32L << 20), "paused HTTP/2 stream grew client RSS by %ld B", rss_growth);
+  CHECK_MSG(rss_growth < (32L << 20), "paused HTTP/2 stream grew client RSS by %lld B", rss_growth);
   CHECK(!c->done);
   CHECK(c->head && c->head->framing == BodyFraming::Stream);
 
@@ -1384,7 +1555,7 @@ TEST(http2_paused_stream_has_live_multiplexed_siblings) {
   constexpr long total = 64L << 20, sibling_total = 4L << 20;
   FloodCollector held;
   held.accept_before_pause = 1L << 20;
-  const long rss_before = rss_bytes();
+  const long long rss_before = rss_bytes();
   Operation paused = t.start(h2_post(node, "/flood?key=held&total=" + std::to_string(total), 60000), held.callbacks());
   CHECK(wait_until([&] { return held.paused.load(); }, 5000));
   const long consumed_at_pause = held.bytes.load();
@@ -1406,7 +1577,7 @@ TEST(http2_paused_stream_has_live_multiplexed_siblings) {
   const long written1 = node.stat("held_written");
   std::this_thread::sleep_for(milliseconds(200));
   const long written2 = node.stat("held_written");
-  const long growth = rss_bytes() - rss_before;
+  const long long growth = rss_bytes() - rss_before;
   const Stats stats = node.stats_request();
   CHECK(stats["sessions"] == 1);
   CHECK(stats["held_requests"] == 1 && stats["held_done"] == 0);
@@ -1419,9 +1590,9 @@ TEST(http2_paused_stream_has_live_multiplexed_siblings) {
   }
   CHECK(written1 == written2);
   CHECK(written2 > consumed_at_pause && written2 < (32L << 20));
-  CHECK_MSG(growth < (32L << 20), "multiplexed pause grew RSS by %ld B", growth);
+  CHECK_MSG(growth < (32L << 20), "multiplexed pause grew RSS by %lld B", growth);
   CHECK(held.bytes == consumed_at_pause && !held.result.done);
-  note("shared h2 session: 3 siblings completed %ld B each; paused received=%ld written=%ld->%ld RSS +%ld",
+  note("shared h2 session: 3 siblings completed %ld B each; paused received=%ld written=%ld->%ld RSS +%lld",
        sibling_total, consumed_at_pause, written1, written2, growth);
   held.released = true;
   paused.resume();
@@ -1538,6 +1709,10 @@ TEST(http2_dns_refresh_and_connection_retirement) {
 }  // namespace
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+  runtime_test::Arguments arguments(argc, argv);
+  argc = arguments.argc(); argv = arguments.argv();
+#endif
   if (argc < 3) {
     std::fprintf(stderr, "usage: %s <sp_loopback_server> <fixture-directory> [filter]\n", argv[0]);
     return 2;

@@ -8,6 +8,9 @@
 #include "json/json.h"
 #include "transport/http_transport.h"
 #include "transport/sse_framer.h"
+#ifdef _WIN32
+#include "support/win_owner.h"
+#endif
 
 #include <algorithm>
 #include <cerrno>
@@ -20,15 +23,17 @@
 #include <map>
 #include <limits>
 #include <optional>
+#ifndef _WIN32
 #include <poll.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 #include <random>
 #include <stdexcept>
 #include <set>
 #include <string>
 #include <string_view>
-#include <sys/wait.h>
 #include <type_traits>
-#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -40,7 +45,9 @@ void require(bool condition, const std::string& message) {
 std::string read_file(const std::filesystem::path& path) {
   require(std::filesystem::file_size(path) <= (16U << 20), "fixture file exceeds size bound");
   std::ifstream input(path, std::ios::binary);
-  require(static_cast<bool>(input), "cannot read fixture file: " + path.string());
+  const auto utf8_path = path.u8string();
+  require(static_cast<bool>(input), "cannot read fixture file: " +
+      std::string(reinterpret_cast<const char*>(utf8_path.data()), utf8_path.size()));
   std::string result((std::istreambuf_iterator<char>(input)), {});
   require(result.size() <= (16U << 20), "fixture file exceeds size bound");
   return result;
@@ -482,6 +489,17 @@ std::string offline(const Fixture& fixture, const sp::descriptor::ValidatedDescr
 class Peer {
  public:
   Peer(const char* node, const char* script, const std::filesystem::path& fixtures, const std::filesystem::path& descriptor) {
+#ifdef _WIN32
+    const auto fixture_path = fixtures.u8string();
+    const auto descriptor_path = descriptor.u8string();
+    auto child = runtime_test::spawn_with_pipes(node, {
+        script,
+        std::string_view(reinterpret_cast<const char*>(fixture_path.data()), fixture_path.size()),
+        std::string_view(reinterpret_cast<const char*>(descriptor_path.data()), descriptor_path.size())});
+    process_ = std::move(child.process);
+    input_ = std::move(child.to_child);
+    output_ = std::move(child.from_child);
+#else
     int to_child[2], from_child[2];
     require(pipe(to_child) == 0, "creating child stdin failed");
     if (pipe(from_child) != 0) { close(to_child[0]); close(to_child[1]); throw std::runtime_error("creating child stdout failed"); }
@@ -495,6 +513,7 @@ class Peer {
     close(to_child[0]); close(from_child[1]);
     input_ = to_child[1]; output_ = from_child[0];
     if (pid_ < 0) { close(input_); close(output_); throw std::runtime_error("fork failed"); }
+#endif
     try {
       auto ready = line();
       require(ready.root().get("port").is_uint(), "fixture peer did not start");
@@ -507,6 +526,9 @@ class Peer {
   Peer& operator=(const Peer&) = delete;
   sp::json::Document command(std::string text) {
     text += '\n';
+#ifdef _WIN32
+    runtime_test::write_pipe(input_.get(), text);
+#else
     size_t sent = 0;
     while (sent < text.size()) {
       const auto count = write(input_, text.data() + sent, text.size() - sent);
@@ -514,6 +536,7 @@ class Peer {
       require(count > 0, "fixture peer control write failed");
       sent += static_cast<size_t>(count);
     }
+#endif
     return line();
   }
   void arm(const Fixture& fixture, bool negative = false) {
@@ -534,27 +557,43 @@ class Peer {
       }
       const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
       require(left > 0, "fixture peer control timeout");
+      char buffer[4096];
+#ifdef _WIN32
+      const auto count = runtime_test::read_pipe(output_.get(), buffer, sizeof(buffer), left);
+      require(count > 0, "fixture peer did not respond");
+#else
       pollfd fd{output_, POLLIN, 0};
       const int result = poll(&fd, 1, static_cast<int>(left));
       if (result < 0 && errno == EINTR) continue;
       require(result > 0, "fixture peer did not respond");
-      char buffer[4096];
       const auto count = read(output_, buffer, sizeof(buffer));
       if (count < 0 && errno == EINTR) continue;
       require(count > 0, "fixture peer exited before response");
+#endif
       pending_.append(buffer, static_cast<size_t>(count));
       require(pending_.size() < (1U << 20), "fixture peer response exceeds bound");
     }
   }
   void stop() {
+#ifdef _WIN32
+    input_.reset();
+    output_.reset();
+    process_.reset(); // Terminate the contained tree; never wait for Node to notice closed stdin.
+#else
     if (pid_ <= 0) return;
     close(input_); close(output_);
     int status;
     while (waitpid(pid_, &status, 0) < 0 && errno == EINTR) {}
     pid_ = -1;
+#endif
   }
+#ifdef _WIN32
+  runtime_test::Process process_;
+  runtime_test::Handle input_, output_;
+#else
   pid_t pid_ = -1;
   int input_ = -1, output_ = -1;
+#endif
   std::string pending_;
 };
 template<class Encoded>
@@ -687,11 +726,17 @@ void verify_matcher(const Fixture& fixture, const PreparedRequest& prepared, Pee
 } // namespace
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+  runtime_test::Arguments arguments(argc, argv);
+  argc = arguments.argc(); argv = arguments.argv();
+#endif
   if (argc < 5 || argc > 6) { std::cerr << "usage: sp_fixture_runner <node> <peer.mjs> <fixture-dir> <descriptor> [--offline-only]\n"; return 2; }
+#ifndef _WIN32
   std::signal(SIGPIPE, SIG_IGN);
+#endif
   try {
-    const std::filesystem::path directory = argv[3];
-    const std::filesystem::path descriptor_path = argv[4];
+    const auto directory = std::filesystem::u8path(argv[3]);
+    const auto descriptor_path = std::filesystem::u8path(argv[4]);
     auto loaded = sp::descriptor::load(read_file(descriptor_path));
     if (const auto* error = std::get_if<sp::descriptor::ConfigError>(&loaded)) throw std::runtime_error("descriptor rejected at " + error->pointer + ": " + error->expected);
     const auto& descriptor = std::get<sp::descriptor::ValidatedDescriptor>(loaded);

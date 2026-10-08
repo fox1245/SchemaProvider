@@ -14,12 +14,7 @@
 #include "configuration/runtime_policy.h"
 #include "sp/config_defaults.h"
 
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <poll.h>
-#include <sys/socket.h>
-#include <unistd.h>
+#include "support/portable.h"
 
 #include <algorithm>
 #include <atomic>
@@ -53,15 +48,9 @@ struct Skip { std::string why; };
 // ---------------------------------------------------------------------------------------------
 // Raw loopback sockets
 // ---------------------------------------------------------------------------------------------
-struct Fd {
-  int fd = -1;
-  Fd() = default;
-  explicit Fd(int value) : fd(value) {}
-  Fd(Fd&& other) noexcept : fd(std::exchange(other.fd, -1)) {}
-  Fd& operator=(Fd&& other) noexcept { reset(); fd = std::exchange(other.fd, -1); return *this; }
-  ~Fd() { reset(); }
-  void reset() { if (fd >= 0) ::close(fd); fd = -1; }
-};
+// Sockets are owned through portable::Socket (POSIX descriptors, Winsock SOCKETs).
+using portable::PollFd;
+using portable::Socket;
 
 sockaddr_in loopback(std::uint16_t port) {
   sockaddr_in addr{};
@@ -77,18 +66,18 @@ sockaddr_in loopback(std::uint16_t port) {
 class Blackhole {
  public:
   Blackhole() {
-    listener_ = Fd(::socket(AF_INET, SOCK_STREAM, 0));
-    CHECK(listener_.fd >= 0);
+    listener_ = Socket(::socket(AF_INET, SOCK_STREAM, 0));
+    CHECK(listener_);
     auto addr = loopback(0);
-    CHECK(::bind(listener_.fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr) == 0);
-    CHECK(::listen(listener_.fd, 0) == 0);
-    socklen_t len = sizeof addr;
-    CHECK(::getsockname(listener_.fd, reinterpret_cast<sockaddr*>(&addr), &len) == 0);
+    CHECK(::bind(listener_.get(), reinterpret_cast<sockaddr*>(&addr), sizeof addr) == 0);
+    CHECK(::listen(listener_.get(), 0) == 0);
+    portable::socklen len = sizeof addr;
+    CHECK(::getsockname(listener_.get(), reinterpret_cast<sockaddr*>(&addr), &len) == 0);
     port = ntohs(addr.sin_port);
     // Fill the queue: connections that complete are parked; the first one that stays pending proves
     // saturation. Every later connect hangs until the listener goes away.
     for (int i = 0; i < 6; ++i) {
-      Fd probe = begin_connect();
+      Socket probe = begin_connect();
       if (!completes_within(probe, 250ms)) {
         pending_.push_back(std::move(probe));
         break;
@@ -96,25 +85,36 @@ class Blackhole {
       parked_.push_back(std::move(probe));
     }
     // Confirm: a fresh connect must not complete over a longer window.
-    Fd confirm = begin_connect();
+    Socket confirm = begin_connect();
     if (completes_within(confirm, 400ms)) throw Skip{"this kernel does not drop SYNs for a full accept queue"};
   }
   std::uint16_t port = 0;
  private:
-  Fd begin_connect() const {
-    Fd c(::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0));
-    CHECK(c.fd >= 0);
+  Socket begin_connect() const {
+    Socket c(::socket(AF_INET, SOCK_STREAM, 0));
+    CHECK(c);
+    CHECK(portable::set_nonblocking(c.get()));
     auto addr = loopback(port);
-    const int rc = ::connect(c.fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr);
-    CHECK(rc == 0 || errno == EINPROGRESS);
+    const int rc = ::connect(c.get(), reinterpret_cast<sockaddr*>(&addr), sizeof addr);
+    CHECK(rc == 0 || portable::connect_in_progress());
     return c;
   }
-  static bool completes_within(const Fd& c, Ms limit) {
-    pollfd p{c.fd, POLLOUT, 0};
-    return ::poll(&p, 1, static_cast<int>(limit.count())) == 1 && (p.revents & POLLOUT) && !(p.revents & (POLLERR | POLLHUP));
+  static bool completes_within(const Socket& c, Ms limit) {
+    PollFd p{c.get(), POLLOUT, 0};
+    const auto ready = portable::poll(&p, 1, static_cast<int>(limit.count()));
+    CHECK(ready >= 0);
+    if (ready == 0) return false;
+    if (p.revents & (POLLERR | POLLHUP | POLLNVAL))
+      throw Skip{"full accept queue rejects connects instead of leaving them pending"};
+    CHECK(p.revents & POLLOUT);
+    int error = 0;
+    portable::socklen size = sizeof(error);
+    CHECK(::getsockopt(c.get(), SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&error), &size) == 0);
+    if (error != 0) throw Skip{"full accept queue rejects connects instead of leaving them pending"};
+    return true;
   }
-  Fd listener_;
-  std::vector<Fd> parked_, pending_;
+  Socket listener_;
+  std::vector<Socket> parked_, pending_;
 };
 
 // Accepts connections, reads each request head, writes a fragment of a status line and then stays
@@ -122,52 +122,65 @@ class Blackhole {
 class HalfHeadServer {
  public:
   HalfHeadServer() {
-    listener_ = Fd(::socket(AF_INET, SOCK_STREAM, 0));
-    CHECK(listener_.fd >= 0);
+    listener_ = Socket(::socket(AF_INET, SOCK_STREAM, 0));
+    CHECK(listener_);
     int one = 1;
-    ::setsockopt(listener_.fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    ::setsockopt(listener_.get(), SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&one), sizeof one);
     auto addr = loopback(0);
-    CHECK(::bind(listener_.fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr) == 0);
-    CHECK(::listen(listener_.fd, 16) == 0);
-    socklen_t len = sizeof addr;
-    CHECK(::getsockname(listener_.fd, reinterpret_cast<sockaddr*>(&addr), &len) == 0);
+    CHECK(::bind(listener_.get(), reinterpret_cast<sockaddr*>(&addr), sizeof addr) == 0);
+    CHECK(::listen(listener_.get(), 16) == 0);
+    CHECK(portable::set_nonblocking(listener_.get()));
+    portable::socklen len = sizeof addr;
+    CHECK(::getsockname(listener_.get(), reinterpret_cast<sockaddr*>(&addr), &len) == 0);
     port = ntohs(addr.sin_port);
     thread_ = std::thread([this] { run(); });
   }
   ~HalfHeadServer() {
     stop_ = true;
-    ::shutdown(listener_.fd, SHUT_RDWR);
     if (thread_.joinable()) thread_.join();
   }
   std::uint16_t port = 0;
   std::atomic<int> requests{0};
  private:
   void run() {
-    std::vector<Fd> held;
+    std::vector<Socket> held;
     while (!stop_) {
-      pollfd p{listener_.fd, POLLIN, 0};
-      if (::poll(&p, 1, 50) <= 0) continue;
-      Fd c(::accept(listener_.fd, nullptr, nullptr));
-      if (c.fd < 0) continue;
+      PollFd p{listener_.get(), POLLIN, 0};
+      if (portable::poll(&p, 1, 50) <= 0 || !(p.revents & POLLIN) || stop_) continue;
+      Socket c(::accept(listener_.get(), nullptr, nullptr));
+      if (!c) continue;
+      if (!portable::set_nonblocking(c.get())) continue;
       std::string seen;
       char buffer[1024];
-      while (seen.find("\r\n\r\n") == std::string::npos) {
-        pollfd q{c.fd, POLLIN, 0};
-        if (::poll(&q, 1, 2000) <= 0) break;
-        const auto n = ::read(c.fd, buffer, sizeof buffer);
+      const auto deadline = Clock::now() + 2s;
+      while (!stop_ && Clock::now() < deadline && seen.size() <= (64U << 10) &&
+             seen.find("\r\n\r\n") == std::string::npos) {
+        PollFd q{c.get(), POLLIN, 0};
+        const auto ready = portable::poll(&q, 1, 50);
+        if (ready < 0 || (q.revents & (POLLERR | POLLHUP | POLLNVAL))) break;
+        if (ready == 0) continue;
+        const auto n = portable::receive(c.get(), buffer, sizeof buffer);
         if (n <= 0) break;
         seen.append(buffer, static_cast<std::size_t>(n));
       }
-      if (seen.find("\r\n\r\n") == std::string::npos) continue;
+      if (stop_ || seen.size() > (64U << 10) || seen.find("\r\n\r\n") == std::string::npos) continue;
       ++requests;
       // An incomplete status line: libcurl's header callback runs per complete line, so no head yet.
       constexpr std::string_view fragment = "HTTP/1.1 20";
-      (void)!::send(c.fd, fragment.data(), fragment.size(), MSG_NOSIGNAL);
+      std::string_view remaining = fragment;
+      while (!remaining.empty() && !stop_ && Clock::now() < deadline) {
+        PollFd q{c.get(), POLLOUT, 0};
+        if (portable::poll(&q, 1, 50) <= 0) continue;
+        const auto n = portable::send_quiet(c.get(), remaining.data(), remaining.size());
+        if (n <= 0) break;
+        remaining.remove_prefix(static_cast<std::size_t>(n));
+      }
+      if (!remaining.empty()) continue;
       held.push_back(std::move(c));
     }
   }
   std::atomic<bool> stop_{false};
-  Fd listener_;
+  Socket listener_;
   std::thread thread_;
 };
 
@@ -1275,6 +1288,10 @@ const Case kCases[] = {
 }  // namespace
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+  runtime_test::Arguments arguments(argc, argv);
+  argc = arguments.argc(); argv = arguments.argv();
+#endif
   if (argc < 4) {
     std::fprintf(stderr, "usage: sp_stall_tests <node> <stall_server.mjs> <suite> [case-substring]\n");
     return 2;

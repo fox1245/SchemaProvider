@@ -19,7 +19,7 @@
 #include "json/json.h"
 #include "support/runtime_peer.h"
 
-#include <arpa/inet.h>
+#include "support/portable.h"
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
@@ -29,13 +29,12 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
-#include <netinet/in.h>
 #include <optional>
 #include <set>
 #include <stdexcept>
 #include <stop_token>
 #include <string>
-#include <sys/socket.h>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -565,17 +564,17 @@ void close_after_head(Matrix& m, Wire w, bool streaming, Want want) {
 // A port that is bound but never listens: the kernel refuses every connection.
 class RefusedPort {
  public:
-  RefusedPort() : fd_(::socket(AF_INET, SOCK_STREAM, 0)) {
-    require(fd_.get() >= 0, "cannot reserve a refused port");
+  RefusedPort() : socket_(::socket(AF_INET, SOCK_STREAM, 0)) {
+    require(static_cast<bool>(socket_), "cannot reserve a refused port");
     sockaddr_in a{}; a.sin_family = AF_INET; a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    require(::bind(fd_.get(), reinterpret_cast<sockaddr*>(&a), sizeof(a)) == 0, "cannot bind the refused port");
-    socklen_t size = sizeof(a);
-    require(::getsockname(fd_.get(), reinterpret_cast<sockaddr*>(&a), &size) == 0, "cannot inspect the refused port");
+    require(::bind(socket_.get(), reinterpret_cast<sockaddr*>(&a), sizeof(a)) == 0, "cannot bind the refused port");
+    portable::socklen size = sizeof(a);
+    require(::getsockname(socket_.get(), reinterpret_cast<sockaddr*>(&a), &size) == 0, "cannot inspect the refused port");
     port = ntohs(a.sin_port);
   }
   std::uint16_t port = 0;
  private:
-  runtime_test::Fd fd_;
+  portable::Socket socket_;
 };
 void connect_refused(Matrix& m, bool retry) {
   RefusedPort refused;
@@ -834,13 +833,30 @@ std::optional<Fam> parse_family(std::string_view value) {
   for (const Fam f : {Fam::Chat, Fam::Responses, Fam::Messages, Fam::Gemini, Fam::Interactions}) if (value == label(f)) return f;
   return std::nullopt;
 }
+#ifdef _WIN32
+// No alarm(2): a watchdog thread ends the process if the matrix is still running after 280 s.
+struct AlarmGuard {
+  std::jthread watchdog{[](std::stop_token stop) {
+    std::mutex mutex;
+    std::condition_variable_any ready;
+    std::unique_lock lock(mutex);
+    ready.wait_for(lock, stop, 280s, [] { return false; });
+    if (!stop.stop_requested()) ::TerminateProcess(::GetCurrentProcess(), 142);
+  }};
+};
+#else
 struct AlarmGuard {
   AlarmGuard() { alarm(280); }
   ~AlarmGuard() { alarm(0); }
 };
+#endif
 }  // namespace
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+  runtime_test::Arguments arguments(argc, argv);
+  argc = arguments.argc(); argv = arguments.argv();
+#endif
   if (argc < 5) { std::cerr << "usage: sp_matrix_tests <node> <lifecycle_server.mjs> <openssl> <family> [--list]\n"; return 2; }
   const auto fam = parse_family(argv[4]);
   if (!fam) { std::cerr << "unknown family\n"; return 2; }
@@ -850,9 +866,11 @@ int main(int argc, char** argv) {
     for (const auto& entry : table) std::cout << entry.name << '\n';
     return 0;
   }
+#ifndef _WIN32
   std::signal(SIGPIPE, SIG_IGN);
+#endif
   AlarmGuard alarm_guard;
-  ::setenv("SP_OPENSSL", argv[3], 1);
+  portable::set_env("SP_OPENSSL", argv[3]);
   std::size_t failed = 0;
   std::size_t ran = 0;
   try {
