@@ -1,5 +1,6 @@
 // Real, model-free runtime properties. Usage: sp_runtime_tests <node> <runtime_server.mjs>
 // Optional isolated causal diagnostics: --held-stream-diagnostic | --held-stream-native-resolver-control
+// macOS debugger snapshot while requests remain held: --held-stream-debug-stop
 #include "runtime/client.h"
 #include "runtime/testing.h"
 #include "core/native.h"
@@ -661,7 +662,8 @@ int thread_count() {
   throw std::runtime_error("cannot inspect process thread count");
 #endif
 }
-void held_stream_gate(Peer& peer, bool diagnostic = false, bool native_resolve_control = false) {
+void held_stream_gate(Peer& peer, bool diagnostic = false, bool native_resolve_control = false,
+                      bool debugger_stop = false) {
   const int before_control = thread_count();
   if (native_resolve_control) {
     // A causal control, not a client/request warmup: invoke the OS resolver directly for the
@@ -695,6 +697,16 @@ void held_stream_gate(Peer& peer, bool diagnostic = false, bool native_resolve_c
                 << " client_constructed=" << constructed << " held=" << count
                 << " measured=" << measured << " first_held=" << first << " configured=" << threads << '\n';
     }
+#ifdef __APPLE__
+    // Only the explicit debugger mode stops. Capture producer stacks before any exception
+    // unwinds the live client/held operations; the parent's debugger/job deadline bounds capture.
+    if (debugger_stop && measured > baseline + static_cast<int>(threads)) {
+      std::cerr << "held-stream debugger snapshot: held operations remain active\n";
+      std::raise(SIGSTOP);
+    }
+#else
+    (void)debugger_stop;
+#endif
     require(measured <= baseline + static_cast<int>(threads),
             "held requests allocated per-request threads: baseline=" + std::to_string(baseline)
             + " constructed=" + std::to_string(constructed) + " held=" + std::to_string(count)
@@ -876,6 +888,19 @@ int main(int argc, char** argv) {
   if (argc == 4 && std::string_view(argv[3]) == "--join-cycle-child") return cycle_child(argv[1], argv[2]);
 #ifndef _WIN32
   std::signal(SIGPIPE, SIG_IGN);
+#endif
+#ifdef __APPLE__
+  if (argc == 4 && std::string_view(argv[3]) == "--held-stream-debug-stop") {
+    AlarmGuard alarm_guard;
+    try {
+      Peer peer(argv[1], argv[2]);
+      held_stream_gate(peer, true, false, true);
+      return 0;
+    } catch (const std::exception& error) {
+      std::cerr << "held-stream debugger diagnostic failed: " << error.what() << '\n';
+      return 1;
+    }
+  }
 #endif
   if (argc == 4 && (std::string_view(argv[3]) == "--held-stream-diagnostic" ||
                     std::string_view(argv[3]) == "--held-stream-native-resolver-control")) {
