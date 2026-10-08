@@ -35,6 +35,10 @@ class AttemptTransport {
   virtual void shutdown() noexcept = 0;
 };
 
+using RealTransportFactory = std::shared_ptr<AttemptTransport> (*)(transport::TransportOptions);
+// The libcurl backend. Defined by sp_transport, which sp_runtime does not link, so a program that
+// only uses an existing Client never loads libcurl.
+std::shared_ptr<AttemptTransport> make_real_attempt_transport(transport::TransportOptions);
 struct OperationStats {
   std::size_t queued_bytes = 0;
   std::size_t peak_queued_bytes = 0;
@@ -45,11 +49,13 @@ struct OperationStats {
 
 class ClientAccess {
  public:
-  // Empty transport selects the real backend. Empty random01 uses production RNG.
+  // An empty transport is built by `real_transport`; with neither, the call is rejected. Empty
+  // random01 uses production RNG.
   static Client make(descriptor::ValidatedDescriptor, Options,
                      std::shared_ptr<Executor>,
                      std::shared_ptr<AttemptTransport> = {},
-                     std::function<double()> random01 = {});
+                     std::function<double()> random01 = {},
+                     RealTransportFactory real_transport = nullptr);
   static OperationStats stats(const Operation&);
   // Private qualification seam: freeze a bounded body-only negative control
   // before spending admission. Changed native requests cannot mint replay seals.

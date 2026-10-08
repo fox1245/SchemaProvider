@@ -20,7 +20,7 @@ if(@SP_EXTERNAL_YYJSON@ AND NOT TARGET yyjson::yyjson)
 endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/SchemaProviderTargets.cmake")
-foreach(_SchemaProvider_component core json descriptor codecs transport runtime)
+foreach(_SchemaProvider_component core json descriptor codecs wire transport runtime)
   set(SchemaProvider_${_SchemaProvider_component}_FOUND TRUE)
 endforeach()
 check_required_components(SchemaProvider)

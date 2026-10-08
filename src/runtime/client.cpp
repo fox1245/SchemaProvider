@@ -190,32 +190,6 @@ class ScopedTimer {
   Executor::Timer id_ = 0;
 };
 
-class RealAttempt final : public Attempt {
-  transport::Operation operation_;
- public:
-  explicit RealAttempt(transport::Operation operation) : operation_(std::move(operation)) {}
-  void cancel() noexcept override { operation_.cancel(); }
-  void resume() noexcept override { operation_.resume(); }
-};
-class RealTransport final : public AttemptTransport {
-  std::unique_ptr<transport::Transport> transport_;
- public:
-  explicit RealTransport(transport::TransportOptions options) {
-    if (options.resolve) {
-      auto resolve = std::move(options.resolve);
-      options.resolve = [resolve = std::move(resolve)](const std::string& host) {
-        RuntimeScope scope;
-        return resolve(host);
-      };
-    }
-    transport_ = std::make_unique<transport::Transport>(std::move(options));
-  }
-  std::unique_ptr<Attempt> start(transport::HttpRequest request, transport::Callbacks callbacks) override {
-    return std::make_unique<RealAttempt>(transport_->start(std::move(request), std::move(callbacks)));
-  }
-  void shutdown() noexcept override { transport_.reset(); }
-};
-
 bool equal_ascii(std::string_view a, std::string_view b) {
   if (a.size() != b.size()) return false;
   for (std::size_t i = 0; i < a.size(); ++i) {
@@ -999,10 +973,22 @@ void ClientState::shutdown() noexcept {
 
 Client ClientAccess::make(descriptor::ValidatedDescriptor descriptor, Options options,
                           std::shared_ptr<Executor> executor, std::shared_ptr<AttemptTransport> transport,
-                          std::function<double()> random01) {
+                          std::function<double()> random01, RealTransportFactory real_transport) {
   validate(descriptor, options);
+  if (!transport && !real_transport)
+    throw descriptor::ConfigError{"/transport", "a transport backend", 1, "runtime options rejected"};
   if (!executor) executor = std::make_shared<PoolExecutor>(options.workers);
-  if (!transport) transport = std::make_shared<RealTransport>(options.transport);
+  if (!transport) {
+    auto wire = options.transport;
+    if (wire.resolve) {
+      auto resolve = std::move(wire.resolve);
+      wire.resolve = [resolve = std::move(resolve)](const std::string& host) {
+        RuntimeScope scope;
+        return resolve(host);
+      };
+    }
+    transport = real_transport(std::move(wire));
+  }
   return Client(std::make_shared<ClientState>(std::move(descriptor), std::move(options),
       std::move(executor), std::move(transport), std::move(random01)));
 }
@@ -1115,9 +1101,6 @@ void require_interface_contract(std::uint32_t expected_revision, std::uint64_t r
       (actual.capabilities & required_capabilities) != required_capabilities)
     throw InterfaceContractError();
 }
-Client::Client(descriptor::ValidatedDescriptor descriptor, Options options)
-    : Client((require_interface_contract(EXPECTED_INTERFACE_REVISION, capability::RequiredProvider),
-              detail::ClientAccess::make(std::move(descriptor), std::move(options), {}))) {}
 Client::Client(std::shared_ptr<detail::ClientState> state) : state_(std::move(state)) {}
 Client::~Client() { if (state_) state_->shutdown(); }
 Client::Client(Client&& other) noexcept : state_(std::move(other.state_)) {}

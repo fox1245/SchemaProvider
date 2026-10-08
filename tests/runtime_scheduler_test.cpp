@@ -675,7 +675,8 @@ void real_paused_redelivery(const char* node, const char* script) {
   options.api_key = "RUNTIME_SECRET_MARKER_62c490";
   options.limits.queued_body_chunks = 2;
   options.limits.queued_body_bytes = 32 << 10;
-  auto client = detail::ClientAccess::make(descriptor_value(peer.port), options, executor);
+  auto client = detail::ClientAccess::make(descriptor_value(peer.port), options, executor, {}, {},
+                                          &detail::make_real_attempt_transport);
   Result observed;
   std::size_t outcomes = 0;
   auto run = buffered(executor);

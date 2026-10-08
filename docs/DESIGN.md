@@ -41,7 +41,9 @@ Arrows mean "depends on" (compile-time), not call flow.
 graph TD
   App[Application or NeoGraph adapter] --> Runtime[sp_runtime: admission, client, retry, lifecycle]
   Runtime --> Codecs[sp_codecs: typed encoders, decoders, accumulator]
-  Runtime --> Transport[sp_transport: HTTP and SSE framing]
+  Runtime --> Wire[sp_wire: wire types, SSE framing, I/O-thread marker]
+  Transport[sp_transport: libcurl backend and the public Client constructor] --> Runtime
+  Transport --> Wire
   Codecs --> Core[sp_core: values and native custody]
   Codecs --> Desc[sp_descriptor: closed loader and policies]
   Core --> Desc
@@ -51,6 +53,8 @@ graph TD
 ```
 
 Codecs consume frames and emit events; they do not perform sockets, sleeps or retries. Transport reports one attempt's wire evidence without interpreting provider semantics. The runtime owns retry, deadlines, cancellation and operation workers. NeoGraph-specific coroutines, cancellation bridging, budgets and journals live in NeoGraph.
+
+The runtime does not link the libcurl backend. It talks to an attempt-level transport interface, `sp_wire` holds the libcurl-free wire types and SSE framing both sides share, and `sp_transport` implements the interface over libcurl and defines the public `Client(descriptor, Options)` constructor. A program that only uses an existing `Client` (the NeoGraph engine core, for one) links `sp_runtime` alone and never loads libcurl or the roughly 25 libraries it needs; a program that constructs a `Client` links `SchemaProvider::transport`, which brings the runtime. Constructing a `Client` without the backend is a link error, not a runtime failure.
 
 `sp_core` now includes native/archive implementations and links JSON/descriptor code plus private OpenSSL Crypto. Earlier standard-library-only core sketches do not describe the installed target graph.
 
@@ -71,8 +75,9 @@ Private scheduler/testing seams, canaries and qualification grants are not insta
 | `sp_json` | yyjson (private; never in a public header) |
 | `sp_descriptor` | `sp_json`, private OpenSSL Crypto for policy identity |
 | `sp_codecs` | `sp_core`, `sp_json`, `sp_descriptor`; private OpenSSL Crypto for M3 replay fingerprints |
-| `sp_transport` | libcurl (`multi_socket`) driven by a private standalone Asio loop; TLS through libcurl's backend (D1, FIRM) |
-| `sp_runtime` | the above, standard threads, `std::stop_token` |
+| `sp_wire` | standard library only (wire types, SSE framing, I/O-thread marker) |
+| `sp_transport` | `sp_runtime`, `sp_wire`; libcurl (`multi_socket`) driven by a private standalone Asio loop; TLS through libcurl's backend (D1, FIRM) |
+| `sp_runtime` | the above except `sp_transport`, standard threads, `std::stop_token` |
 | public headers | standard library only |
 
 Native fingerprinting and archive integrity authenticate local binding/custody, not the vendor issuer. Neither OpenSSL nor yyjson implementation types appear in public signatures.
@@ -87,6 +92,7 @@ CI MUST fail when any of these hold (property `InstallAndDependencyDAG`). The fo
 
 - an installed header includes yyjson, asio, OpenSSL, `httplib`, curl, a QUIC-backend header, or any `src/` header;
 - `sp_core` or `sp_descriptor` depends on codecs, transport or runtime, or codecs depend on transport;
+- `sp_runtime` depends on `sp_transport` or libcurl (property `RuntimeWithoutLibcurl`; the `runtime_links_no_libcurl` test links the runtime alone and checks that libcurl is not mapped into the process);
 - private external implementation types leak through installed headers or exported usage requirements;
 - a clean consumer project fails to `find_package`, compile each public header standalone, link, and complete one loopback request against the installed tree.
 

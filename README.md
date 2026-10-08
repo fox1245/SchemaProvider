@@ -23,11 +23,11 @@ cmake_minimum_required(VERSION 3.20)
 project(first_request LANGUAGES CXX)
 find_package(SchemaProvider 0.1.1 EXACT CONFIG REQUIRED)
 add_executable(first_request main.cpp)
-target_link_libraries(first_request PRIVATE SchemaProvider::runtime)
+target_link_libraries(first_request PRIVATE SchemaProvider::transport)
 target_compile_features(first_request PRIVATE cxx_std_20)
 ```
 
-For a reproducible deployment, pin the exact package version you built. The installed targets are `SchemaProvider::{core,json,descriptor,codecs,transport,runtime}`. Most applications need only `SchemaProvider::runtime`, which brings its dependencies. Public headers use names such as `<runtime/client.h>` and `<core/value.h>`; the target exports the `include/SchemaProvider` include root.
+For a reproducible deployment, pin the exact package version you built. The installed targets are `SchemaProvider::{core,json,descriptor,codecs,wire,transport,runtime}`. An application that constructs a `Client` links `SchemaProvider::transport`, the libcurl backend, which brings the runtime and everything below it. `SchemaProvider::runtime` alone is for code that only uses a `Client` somebody else constructed and must not load libcurl. Public headers use names such as `<runtime/client.h>` and `<core/value.h>`; the target exports the `include/SchemaProvider` include root.
 
 ## First request
 
