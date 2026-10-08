@@ -1,6 +1,6 @@
 # Roadmap and release gates
 
-Current package0.1.1 alpha uses typed interface/shared-library generation4 with five HTTP/SSE families and the NeoGraph adapter. [Usage](USAGE.md) defines new preserved controls, Responses provider-held cursors and explicit Generate portable imports. [Recorded provenance](POC_PLAN.md#current-typed-c-cutover-provenance) keeps previous interface3 runs unchanged; implementation, fresh wire proof and release/support admission are separate claims.
+Current package 0.2.0 alpha uses typed interface/shared-library generation 5 with five HTTP/SSE families and the NeoGraph adapter. [Usage](USAGE.md) defines new preserved controls, Responses provider-held cursors and explicit Generate portable imports. [Recorded provenance](POC_PLAN.md#current-typed-c-cutover-provenance) keeps previous interface 3 runs unchanged; implementation, fresh wire proof and release/support admission are separate claims.
 
 ## Owner-requested next work
 
@@ -37,7 +37,9 @@ A release manifest must state the actual package version, interface revision, to
 
 Current executed runtime/custody evidence of this SDK's own suite is Linux/POSIX scoped; that suite uses `fork` and `unistd.h` and does not build on Windows. The provider-construction gate `NativeSocketRuntime` is granted wherever the transport has a native socket implementation: POSIX descriptors (Linux, macOS) and Winsock event objects (Windows). Windows has been executed only through NeoGraph's native-MSVC integration suite, and macOS/ARM64 has not been re-run for this revision; source changes alone do not qualify those platforms. Neither platform gets silently advertised as qualified or removed from another product's package metadata on the strength of this SDK note.
 
-[Current interface4 local execution](CONFORMANCE.md#interface-4-execution-record) records all27 cases covered by25 initial and2 corrected focused passes, plus unchanged installed Stop and exact README consumer observations. It is not a second full-suite run, hosted/platform qualification or a replacement for earlier interface3 benchmarks.
+[Interface 4 local execution](CONFORMANCE.md#interface-4-execution-record) records all 27 cases covered by 25 initial and 2 corrected focused passes, plus unchanged installed Stop and exact README consumer observations. It is not a second full-suite run, hosted/platform qualification or a replacement for earlier interface 3 benchmarks.
+
+[Interface 5 local execution](CONFORMANCE.md#interface-5-execution-record) records the 47 registered ctest entries passing in Release (six full runs), AddressSanitizer+UBSan and ThreadSanitizer builds on Linux x86_64 with local loopback peers. It is not hosted-vendor, HTTP/3, Windows, macOS or ARM64 qualification.
 
 HTTP/3 remains optional. Baseline builds must work without QUIC dependencies; capable claims require actual negotiated QUIC, one-request connection-stage fallback, unchanged deadline/cancel/retry safety, reset/truncation and shared-stream bounds. [D1](decisions/D1-transport.md) separates capable proof from uninstrumented release-backend coverage and hosted-provider support.
 

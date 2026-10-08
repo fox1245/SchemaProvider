@@ -1103,8 +1103,8 @@ Result Operation::join() const {
 InterfaceContract interface_contract() noexcept {
   const auto core = ::sp::core_interface_contract();
   // Literal implementation revision is independent of the consumer's headers.
-  if (core.revision != 4 || codec_interface_revision() != 4 || descriptor::interface_revision() != 4) return {0, 0};
-  return {4, core.capabilities | capability::TypedRuntime | capability::PreparedAdmission |
+  if (core.revision != 5 || codec_interface_revision() != 5 || descriptor::interface_revision() != 5) return {0, 0};
+  return {5, core.capabilities | capability::TypedRuntime | capability::PreparedAdmission |
       capability::CompleteAttemptEvidence};
 }
 const char* InterfaceContractError::what() const noexcept {

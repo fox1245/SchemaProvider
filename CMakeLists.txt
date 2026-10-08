@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(SchemaProvider VERSION 0.1.1 LANGUAGES C CXX)
+project(SchemaProvider VERSION 0.2.0 LANGUAGES C CXX)
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
@@ -170,7 +170,7 @@ foreach(component core json descriptor codecs wire transport runtime)
   set_target_properties(sp_${component} PROPERTIES
     EXPORT_NAME ${component}
     POSITION_INDEPENDENT_CODE ON
-    SOVERSION 4
+    SOVERSION 5
     INSTALL_RPATH "${SP_LIBRARY_INSTALL_RPATH}"
     WINDOWS_EXPORT_ALL_SYMBOLS ON)
 endforeach()
