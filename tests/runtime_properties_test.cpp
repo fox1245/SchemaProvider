@@ -1,4 +1,5 @@
 // Real, model-free runtime properties. Usage: sp_runtime_tests <node> <runtime_server.mjs>
+// Optional isolated causal diagnostics: --held-stream-diagnostic | --held-stream-native-resolver-control
 #include "runtime/client.h"
 #include "runtime/testing.h"
 #include "core/native.h"
@@ -12,6 +13,7 @@
 
 #ifndef _WIN32
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
@@ -348,7 +350,23 @@ void retry_policy(Peer& peer) {
     else { require(failure(result).error.retry_safety == sp::RetrySafety::PossiblyAccepted, "reset safety underestimated"); peer.count(model, 1, 1); }
   }
 }
+bool wait_reservation_socket(portable::socket_t socket, short events, Clock::time_point deadline) {
+  for (;;) {
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
+    if (remaining <= 0) return false;
+    portable::PollFd fd{socket, events, 0};
+    const int ready = portable::poll(&fd, 1, static_cast<int>(remaining));
+    if (ready > 0) return (fd.revents & (events | POLLERR | POLLHUP)) != 0;
+    if (ready == 0) return false;
+#ifdef _WIN32
+    if (::WSAGetLastError() != WSAEINTR) return false;
+#else
+    if (errno != EINTR) return false;
+#endif
+  }
+}
 void safe_connect_retry() {
+  const auto deadline = Clock::now() + 5s;
   // Keep an established outbound connection on the reserved port. A bound but
   // unconnected socket silently drops incoming SYNs on Darwin, rather than refusing them.
   portable::Socket guard(socket(AF_INET, SOCK_STREAM, 0));
@@ -360,6 +378,8 @@ void safe_connect_retry() {
   require(getsockname(fd, reinterpret_cast<sockaddr*>(&address), &size) == 0, "cannot inspect refused-connect port");
   portable::Socket listener(socket(AF_INET, SOCK_STREAM, 0));
   require(static_cast<bool>(listener), "cannot create refused-connect reservation peer");
+  require(portable::set_nonblocking(fd) && portable::set_nonblocking(listener.get()),
+          "cannot make refused-connect reservation nonblocking");
   sockaddr_in peer{}; peer.sin_family = AF_INET; peer.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
   require(bind(listener.get(), reinterpret_cast<sockaddr*>(&peer), sizeof(peer)) == 0,
           "cannot bind refused-connect reservation peer");
@@ -367,8 +387,15 @@ void safe_connect_retry() {
   size = sizeof(peer);
   require(getsockname(listener.get(), reinterpret_cast<sockaddr*>(&peer), &size) == 0,
           "cannot inspect refused-connect reservation peer");
-  require(connect(fd, reinterpret_cast<sockaddr*>(&peer), sizeof(peer)) == 0,
-          "cannot connect refused-connect reservation");
+  if (connect(fd, reinterpret_cast<sockaddr*>(&peer), sizeof(peer)) != 0) {
+    require(portable::connect_in_progress() && wait_reservation_socket(fd, POLLOUT, deadline),
+            "refused-connect reservation connect failed or timed out");
+  }
+  int error = 0;
+  size = sizeof(error);
+  require(getsockopt(fd, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&error), &size) == 0 && error == 0,
+          "refused-connect reservation connect completion failed");
+  require(wait_reservation_socket(listener.get(), POLLIN, deadline), "refused-connect reservation accept timed out");
   portable::Socket accepted(accept(listener.get(), nullptr, nullptr));
   require(static_cast<bool>(accepted), "cannot accept refused-connect reservation");
   listener.reset();
@@ -634,20 +661,47 @@ int thread_count() {
   throw std::runtime_error("cannot inspect process thread count");
 #endif
 }
-void held_stream_gate(Peer& peer) {
+void held_stream_gate(Peer& peer, bool diagnostic = false, bool native_resolve_control = false) {
+  const int before_control = thread_count();
+  if (native_resolve_control) {
+    // A causal control, not a client/request warmup: invoke the OS resolver directly for the
+    // same owned numeric loopback address before constructing any SDK client.
+    addrinfo hints{}; hints.ai_family = AF_UNSPEC; hints.ai_socktype = SOCK_STREAM;
+    addrinfo* raw = nullptr;
+    const int status = ::getaddrinfo("127.0.0.1", nullptr, &hints, &raw);
+    std::unique_ptr<addrinfo, decltype(&::freeaddrinfo)> resolved(raw, &::freeaddrinfo);
+    require(status == 0 && resolved, "native loopback resolver control failed");
+  }
   const int baseline = thread_count();
   auto opts = options(); opts.limits.max_operations = 256;
   opts.workers = 2; opts.transport.io_threads = 2; opts.transport.resolver_threads = 2;
   const std::size_t threads = opts.workers + opts.transport.io_threads + opts.transport.resolver_threads;
   const std::size_t k = 4 * threads + 64;
   Client client(descriptor(peer, false), opts);
+  const int constructed = thread_count();
+  if (diagnostic) {
+    std::cerr << "held-stream threads: control=" << (native_resolve_control ? "native-loopback-getaddrinfo" : "none")
+              << " before_control=" << before_control << " baseline=" << baseline
+              << " client_constructed=" << constructed << " configured=" << threads << '\n';
+  }
   int first = 0;
   for (auto count : {k, 2 * k}) {
     const auto held = peer.arm("hold"); std::vector<Operation> operations; operations.reserve(count);
     for (std::size_t i = 0; i < count; ++i) operations.push_back(client.start(request(held)));
     peer.wait(held, "held", count);
-    const int measured = thread_count(); require(measured <= baseline + static_cast<int>(threads), "held requests allocated per-request threads");
-    if (first) require(measured <= first, "thread count increased from K to 2K held requests"); else first = measured;
+    const int measured = thread_count();
+    if (diagnostic || measured > baseline + static_cast<int>(threads) || (first && measured > first)) {
+      std::cerr << "held-stream threads: before_control=" << before_control << " baseline=" << baseline
+                << " client_constructed=" << constructed << " held=" << count
+                << " measured=" << measured << " first_held=" << first << " configured=" << threads << '\n';
+    }
+    require(measured <= baseline + static_cast<int>(threads),
+            "held requests allocated per-request threads: baseline=" + std::to_string(baseline)
+            + " constructed=" + std::to_string(constructed) + " held=" + std::to_string(count)
+            + " measured=" + std::to_string(measured) + " configured=" + std::to_string(threads));
+    require(!first || measured <= first, "thread count increased from K to 2K held requests: K="
+            + std::to_string(first) + " 2K=" + std::to_string(measured));
+    if (!first) first = measured;
     const auto short_model = peer.arm("normal"); auto short_run = run(); short_run.deadline = Clock::now() + 5s;
     success(client.complete(request(short_model), short_run)); peer.count(short_model, 1);
     peer.release(held);
@@ -820,10 +874,25 @@ int main(int argc, char** argv) {
   argc = arguments.argc(); argv = arguments.argv();
 #endif
   if (argc == 4 && std::string_view(argv[3]) == "--join-cycle-child") return cycle_child(argv[1], argv[2]);
-  if (argc != 3) { std::cerr << "usage: sp_runtime_tests <node> <runtime_server.mjs>\n"; return 2; }
 #ifndef _WIN32
   std::signal(SIGPIPE, SIG_IGN);
 #endif
+  if (argc == 4 && (std::string_view(argv[3]) == "--held-stream-diagnostic" ||
+                    std::string_view(argv[3]) == "--held-stream-native-resolver-control")) {
+    AlarmGuard alarm_guard;
+    try {
+      Peer peer(argv[1], argv[2]);
+      held_stream_gate(peer, true, std::string_view(argv[3]) == "--held-stream-native-resolver-control");
+      return 0;
+    } catch (const std::exception& error) {
+      std::cerr << "held-stream diagnostic failed: " << error.what() << '\n';
+      return 1;
+    }
+  }
+  if (argc != 3) {
+    std::cerr << "usage: sp_runtime_tests <node> <runtime_server.mjs> [--held-stream-diagnostic | --held-stream-native-resolver-control]\n";
+    return 2;
+  }
   // Broad process-level guard also bounds accidental join deadlocks, independently
   // of operation deadlines. There are no per-request test threads.
   AlarmGuard alarm_guard;

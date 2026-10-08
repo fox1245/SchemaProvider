@@ -562,11 +562,28 @@ void close_after_head(Matrix& m, Wire w, bool streaming, Want want) {
   c.peer(1, 1);
 }
 
+bool wait_reservation_socket(portable::socket_t socket, short events, Clock::time_point deadline) {
+  for (;;) {
+    const auto remaining = std::chrono::duration_cast<Ms>(deadline - Clock::now()).count();
+    if (remaining <= 0) return false;
+    portable::PollFd fd{socket, events, 0};
+    const int ready = portable::poll(&fd, 1, static_cast<int>(remaining));
+    if (ready > 0) return (fd.revents & (events | POLLERR | POLLHUP)) != 0;
+    if (ready == 0) return false;
+#ifdef _WIN32
+    if (::WSAGetLastError() != WSAEINTR) return false;
+#else
+    if (errno != EINTR) return false;
+#endif
+  }
+}
+
 // An established outbound socket reserves the port without a listening/wildcard PCB.
 // Merely binding an unconnected socket silently drops SYNs on Darwin (TCPS_CLOSED).
 class RefusedPort {
  public:
   RefusedPort() : socket_(::socket(AF_INET, SOCK_STREAM, 0)) {
+    const auto deadline = Clock::now() + 5s;
     require(static_cast<bool>(socket_), "cannot reserve a refused port");
     sockaddr_in a{}; a.sin_family = AF_INET; a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     require(::bind(socket_.get(), reinterpret_cast<sockaddr*>(&a), sizeof(a)) == 0, "cannot bind the refused port");
@@ -575,6 +592,8 @@ class RefusedPort {
     port = ntohs(a.sin_port);
     portable::Socket listener(::socket(AF_INET, SOCK_STREAM, 0));
     require(static_cast<bool>(listener), "cannot create refused-port reservation peer");
+    require(portable::set_nonblocking(socket_.get()) && portable::set_nonblocking(listener.get()),
+            "cannot make refused-port reservation nonblocking");
     sockaddr_in peer{}; peer.sin_family = AF_INET; peer.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     require(::bind(listener.get(), reinterpret_cast<sockaddr*>(&peer), sizeof(peer)) == 0,
             "cannot bind refused-port reservation peer");
@@ -582,8 +601,15 @@ class RefusedPort {
     size = sizeof(peer);
     require(::getsockname(listener.get(), reinterpret_cast<sockaddr*>(&peer), &size) == 0,
             "cannot inspect refused-port reservation peer");
-    require(::connect(socket_.get(), reinterpret_cast<sockaddr*>(&peer), sizeof(peer)) == 0,
-            "cannot connect refused-port reservation");
+    if (::connect(socket_.get(), reinterpret_cast<sockaddr*>(&peer), sizeof(peer)) != 0) {
+      require(portable::connect_in_progress() && wait_reservation_socket(socket_.get(), POLLOUT, deadline),
+              "refused-port reservation connect failed or timed out");
+    }
+    int error = 0;
+    size = sizeof(error);
+    require(::getsockopt(socket_.get(), SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&error), &size) == 0 && error == 0,
+            "refused-port reservation connect completion failed");
+    require(wait_reservation_socket(listener.get(), POLLIN, deadline), "refused-port reservation accept timed out");
     peer_ = portable::Socket(::accept(listener.get(), nullptr, nullptr));
     require(static_cast<bool>(peer_), "cannot accept refused-port reservation");
   }

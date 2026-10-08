@@ -193,9 +193,9 @@ const stats = http.createServer(async (request, response) => {
     for (const [session, state] of sessions) {
       if (state.active !== 0 || state.retiring || session.destroyed || session.closed) continue;
       state.retiring = true;
-      // session.destroy() queues GOAWAY before FIN, so its local close event alone does not
-      // establish that a client's idle connection cache has seen the retirement. Reset the TCP
-      // socket instead: no buffered protocol frames can make this retired session look reusable.
+      // Reset the idle TCP socket rather than queueing GOAWAY before FIN as session.destroy()
+      // would. The local close acknowledgment bounds server teardown; it does not prove that
+      // the client's independent connection cache has observed the reset.
       try {
         const socket = session.socket;
         closed.push(new Promise(resolve => socket.once('close', resolve)));

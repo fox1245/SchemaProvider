@@ -1665,6 +1665,9 @@ TEST(http2_one_attempt_survives_goaway_and_refused_stream) {
 
 // M1b R2: refreshed addresses may leave a healthy pooled connection alive, but any newly
 // established connection must use the fresh resolver answer rather than curl's stale DNS entry.
+// libcurl may briefly cache a connection's previous health result (8.22 checks at most once
+// per second). If it selects a retired socket, one logical attempt must refuse its automatic
+// resend without sending duplicate HTTP; a separate explicit attempt must then route to peer B.
 TEST(http2_dns_refresh_and_connection_retirement) {
   NodeServer node;
   const bool started = node.start(g_h2_adversarial_script);
@@ -1689,19 +1692,45 @@ TEST(http2_dns_refresh_and_connection_retirement) {
   const Result second = t.start(h2_post(node, "/ok?key=second", 15000, "protocol-peer.invalid"), reused->callbacks()).join();
   CHECK(second.status == Status::Completed);
   CHECK(reused->body == (second.attempt.connection_reused ? "peer A\n" : "peer B\n"));
+  // Client completion is not the peer's stream-close callback. /close retires only idle sessions.
+  CHECK(wait_until([&] { return node.stat("first_closed") == 1 && node.stat("second_closed") == 1; }, 5000));
   const Stats retirement = node.stats_request("/close");
   CHECK(retirement["retired"] >= 1);
   CHECK(wait_until([&] { return node.stat("active_sessions") == 0; }, 5000));
   auto b = std::make_shared<Collector>();
   const Result third = t.start(h2_post(node, "/ok?key=third", 15000, "protocol-peer.invalid"), b->callbacks()).join();
-  CHECK_MSG(third.status == Status::Completed, "%s/%s", name_of(third.status), name_of(third.failure));
-  CHECK(b->body == "peer B\n");
-  CHECK(!third.attempt.connection_reused && third.attempt.transport_internal_resends == 0);
-  CHECK(lookups == 3);
+  const bool refused = third.failure == FailureKind::ResendRefused;
+  if (refused) {
+    CHECK(third.status == Status::Failed);
+    CHECK(third.attempt.connection_reused && third.attempt.transport_internal_resends == 1);
+    CHECK(third.http_status == 0 && !third.attempt.response_head_seen && !b->head_seen);
+    CHECK(b->body.empty() && b->body_bytes == 0);
+    CHECK(node.stat("third_requests") == 0);
+    // This is a distinct caller-authorized logical attempt, not a transport retry of "third".
+    auto fresh = std::make_shared<Collector>();
+    const Result fourth = t.start(h2_post(node, "/ok?key=fresh", 15000, "protocol-peer.invalid"), fresh->callbacks()).join();
+    CHECK_MSG(fourth.status == Status::Completed, "%s/%s", name_of(fourth.status), name_of(fourth.failure));
+    CHECK(fresh->body == "peer B\n");
+    CHECK(!fourth.attempt.connection_reused && fourth.attempt.transport_internal_resends == 0);
+    CHECK(fresh->outcomes == 1 && fresh->late_callbacks == 0);
+    note("DNS retirement explicit attempt: %s/%s curl=%d reused=%d resends=%u reached_peer_B=%d",
+         name_of(fourth.status), name_of(fourth.failure), fourth.curl_code, fourth.attempt.connection_reused,
+         fourth.attempt.transport_internal_resends, fresh->body == "peer B\n");
+  } else {
+    CHECK_MSG(third.status == Status::Completed, "%s/%s", name_of(third.status), name_of(third.failure));
+    CHECK(b->body == "peer B\n");
+    CHECK(!third.attempt.connection_reused && third.attempt.transport_internal_resends == 0);
+  }
+  CHECK(lookups == (refused ? 4 : 3));
   CHECK(a->outcomes == 1 && reused->outcomes == 1 && b->outcomes == 1);
+  CHECK(a->late_callbacks == 0 && reused->late_callbacks == 0 && b->late_callbacks == 0);
   const Stats stats = node.stats_request();
-  CHECK(stats["first_requests"] == 1 && stats["second_requests"] == 1 && stats["third_requests"] == 1);
-  CHECK(stats["third_session"] != stats["first_session"]);
+  CHECK(stats["first_requests"] == 1 && stats["second_requests"] == 1);
+  CHECK(stats["third_requests"] == (refused ? 0 : 1) && stats["fresh_requests"] == (refused ? 1 : 0));
+  CHECK(stats["total_requests"] == 3);
+  const long expected_a = reused->body == "peer A\n" ? 2 : 1;
+  CHECK(stats["peer_A_requests"] == expected_a && stats["peer_B_requests"] == 3 - expected_a);
+  CHECK(stats[refused ? "fresh_session" : "third_session"] != stats["first_session"]);
   note("DNS refresh: %d lookups, second reused=%d; retired=%ld; third=%s/%s curl=%d reused=%d resends=%u reached_peer_B=%d",
        lookups.load(), second.attempt.connection_reused, retirement["retired"],
        name_of(third.status), name_of(third.failure), third.curl_code, third.attempt.connection_reused,

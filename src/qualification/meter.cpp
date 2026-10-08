@@ -302,7 +302,9 @@ struct State {
   std::string bytes, chain;
   std::uint64_t rows{};
   Totals totals;
-  std::array<Entry, maximum_calls> entries{};
+  // Replays move between frames; keep fixed-capacity storage off consumer stacks
+  // and transfer ownership without copying entries or their views into bytes.
+  std::unique_ptr<Entry[]> entries = std::make_unique<Entry[]>(maximum_calls);
 };
 void prefix_binding(const Extension& approved_extension, const State& state, std::string_view prefix) {
   if (hash(prefix) != approved_extension.prefix_hash || state.rows != approved_extension.prefix_rows ||

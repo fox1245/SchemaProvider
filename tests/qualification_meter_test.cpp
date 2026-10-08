@@ -7,12 +7,11 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <functional>
 #include <fcntl.h>
+#include <pthread.h>
 #include <string>
 #include <sys/stat.h>
 #include <sys/wait.h>
-#include <thread>
 #include <unistd.h>
 
 using namespace sp::qualification;
@@ -274,6 +273,35 @@ void call_boundary_and_process_race(const std::filesystem::path& source) {
   meter.reset(); meter = f.open();
   CHECK(denied(meter->reserve(binding(800)), Denial::Calls));
 }
+pthread_t start_consumer_thread(void* (*entry)(void*), void* context) {
+  pthread_attr_t attributes;
+  if (::pthread_attr_init(&attributes)) std::abort();
+  // Match normal Darwin secondary threads, including when this regression runs on Linux.
+  if (::pthread_attr_setstacksize(&attributes, 512U * 1024U)) std::abort();
+  pthread_t thread;
+  if (::pthread_create(&thread, &attributes, entry, context)) std::abort();
+  if (::pthread_attr_destroy(&attributes)) std::abort();
+  return thread;
+}
+void bounded_stack_consumer(const std::filesystem::path& source) {
+  struct Context { const std::filesystem::path* source; } context{&source};
+  auto entry = [](void* raw) -> void* {
+    const auto& context = *static_cast<Context*>(raw);
+    Fixture fixture(*context.source);
+    auto meter = fixture.open();
+    auto claim = reserve(*meter, binding(1, 600, 30));
+    CHECK(totals(*meter).calls == 1 && totals(*meter).held_micro_usd == claim.reserved_micro_usd());
+    CHECK(settlement(meter->settle(claim, known(600, 30, 20))).charged_micro_usd == 75);
+    meter.reset();
+    meter = fixture.open();
+    CHECK(settlement(meter->settle(claim, known(600, 30, 20))).totals.spent_micro_usd == 75);
+    CHECK(totals(*meter).calls == 1 && totals(*meter).held_micro_usd == 0);
+    CHECK(read_file(fixture.root / "build/m5-live.ledger") == fixture.original);
+    return nullptr;
+  };
+  const auto thread = start_consumer_thread(entry, &context);
+  if (::pthread_join(thread, nullptr)) std::abort();
+}
 void thread_money_race(const std::filesystem::path& source) {
   Fixture f(source);
   auto meter = f.open();
@@ -281,12 +309,19 @@ void thread_money_race(const std::filesystem::path& source) {
     (void)reserve(*meter, binding(i, 0, 64000, "claude-haiku-4-5-20251001", "anthropic.messages"));
   auto second = f.open();
   std::array<int, 2> outcome{};
-  auto attempt = [&](std::size_t i, Meter& m) {
-    auto r = m.reserve(binding(50 + i, 0, 8000, "claude-haiku-4-5-20251001", "anthropic.messages"));
-    outcome[i] = std::holds_alternative<Claim>(r) ? 1 : denied(r, Denial::Money) ? 2 : 3;
+  struct Attempt { std::size_t index; Meter* meter; std::array<int, 2>* outcome; };
+  std::array<Attempt, 2> attempts{{{0, meter.get(), &outcome}, {1, second.get(), &outcome}}};
+  auto attempt = [](void* raw) -> void* {
+    const auto& context = *static_cast<Attempt*>(raw);
+    auto r = context.meter->reserve(binding(50 + context.index, 0, 8000,
+        "claude-haiku-4-5-20251001", "anthropic.messages"));
+    (*context.outcome)[context.index] = std::holds_alternative<Claim>(r) ? 1 : denied(r, Denial::Money) ? 2 : 3;
+    return nullptr;
   };
-  std::thread a(attempt, 0, std::ref(*meter)), b(attempt, 1, std::ref(*second));
-  a.join(); b.join();
+  std::array<pthread_t, 2> threads{};
+  for (std::size_t i = 0; i < threads.size(); ++i)
+    threads[i] = start_consumer_thread(attempt, &attempts[i]);
+  for (auto thread : threads) if (::pthread_join(thread, nullptr)) std::abort();
   CHECK((outcome[0] == 1 && outcome[1] == 2) || (outcome[0] == 2 && outcome[1] == 1));
   CHECK(totals(*meter).calls == 4 && totals(*meter).held_micro_usd == 1000000);
 }
@@ -536,6 +571,8 @@ int main(int argc, char** argv) {
   money_boundary(source);
   std::fprintf(stderr, "[qualification_meter] call_boundary_and_process_race\n");
   call_boundary_and_process_race(source);
+  std::fprintf(stderr, "[qualification_meter] bounded_stack_consumer\n");
+  bounded_stack_consumer(source);
   std::fprintf(stderr, "[qualification_meter] thread_money_race\n");
   thread_money_race(source);
   std::fprintf(stderr, "[qualification_meter] extension_activation_and_restart\n");
