@@ -1705,7 +1705,7 @@ TEST(http2_dns_refresh_and_connection_retirement) {
     CHECK(third.attempt.connection_reused && third.attempt.transport_internal_resends == 1);
     CHECK(third.http_status == 0 && !third.attempt.response_head_seen && !b->head_seen);
     CHECK(b->body.empty() && b->body_bytes == 0);
-    CHECK(node.stat("third_requests") == 0);
+    CHECK(node.stats_request()["third_requests"] == 0);
     // This is a distinct caller-authorized logical attempt, not a transport retry of "third".
     auto fresh = std::make_shared<Collector>();
     const Result fourth = t.start(h2_post(node, "/ok?key=fresh", 15000, "protocol-peer.invalid"), fresh->callbacks()).join();

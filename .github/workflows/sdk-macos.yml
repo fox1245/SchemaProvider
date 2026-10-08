@@ -89,3 +89,12 @@ jobs:
         if: failure() && steps.sdk-tests.outcome == 'failure'
         timeout-minutes: 3
         run: ./build/sp_runtime_tests "$(command -v node)" "$GITHUB_WORKSPACE/tests/support/runtime_server.mjs" --held-stream-native-resolver-control
+      - name: Identify actual held-request thread producers
+        if: failure() && steps.sdk-tests.outcome == 'failure'
+        timeout-minutes: 3
+        run: |
+          lldb --batch \
+            -o 'settings set target.process.stop-on-sharedlibrary-events false' \
+            -o run -o 'thread backtrace all -c 20' \
+            -o 'process handle SIGSTOP -s false -n false -p false' -o continue \
+            -- ./build/sp_runtime_tests "$(command -v node)" "$GITHUB_WORKSPACE/tests/support/runtime_server.mjs" --held-stream-debug-stop
