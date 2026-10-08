@@ -28,6 +28,8 @@ The SDK 0.2.0 tree (interface revision 5, shared-library generation 5) was built
 
 The entries cover the optional connect, first-byte and idle bounds (`stall_*`), five API families across real transport lifecycle states (`matrix_*`), and the in-tree SHA-256, HMAC-SHA256 and entropy primitives with their differential check against OpenSSL (`crypto_*`; `crypto_runtime_links_no_libcrypto` guards the runtime's process maps). They do not qualify HTTP/3, Windows, macOS, ARM64 or any hosted vendor, and the 47 ctest entries are not the 27 registered cases counted in the interface 4 record above.
 
+A separate scratch-tree campaign (not a registered test) applied seven single-line production mutants, one for each test added after an independent review, and every mutant was caught by its test: validating a dangling UTF-8 sequence when the stream was cut instead of when it ended; losing the idle watchdog after a pause; waiting for the complete head before clearing the first-byte bound; ignoring the client-wide first-byte default; ignoring a per-run connect override; flooring a Retry-After date to whole seconds; and accepting group-writable meter directories.
+
 
 ## 1. Purpose
 
@@ -558,6 +560,8 @@ Connection-reset accounting distinguishes a **refused resend proposal** from an 
 For HTTP/2 cancellation/deadline cells, the terminal callback and `join()` must finish promptly **while the Client is still alive**. Only after proving this does the cell destroy the Client to fence eventual peer stream cleanup. The current libcurl transport can leave that stream open until connection destruction rather than sending RST_STREAM immediately; peer cleanup is not substituted for operation cancellation proof.
 
 Backoff-cancellation cells fence the runtime actor's actual retry-wait transition through the private test seam before cancelling; a peer's completed-response counter is not treated as that state fence. Idle HTTP/2 connection-reset cells retain the underlying accepted TCP socket and inject RST directly, rather than substituting orderly GOAWAY teardown.
+
+After-head and buffered mid-body cancellation cells fence on the peer having flushed the head (or the body prefix), not on the client having consumed it, so the client may still be before head delivery when the cancellation lands. They assert the outcome and its retry safety and do not assert `response_head_seen`; a streaming mid-body cell fences on the first delivered semantic delta instead.
 
 This inventory describes registered regression checks, not proof that a verification run succeeded. Qualification requires the named cells to execute, the applicable mutation checks to fail, and the full-suite/sanitizer gates to be recorded separately.
 
