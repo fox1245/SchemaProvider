@@ -522,6 +522,37 @@ Scheduled:
 
 Semantic release notes are required for any change to stop, usage, retry or replay meaning, even if labelled a bug fix, with fixture and journal-identity impact reviewed.
 
+### 11.1 Lifecycle matrix
+
+`matrix_chat`, `matrix_responses`, `matrix_messages`, `matrix_gemini` and `matrix_interactions` run the same real-transport cell table in `tests/matrix_lifecycle_test.cpp`. The local scripted peer (`tests/support/lifecycle_server.mjs`) verifies each family's endpoint, authentication, request mode, request/fault counts and actual HTTP/TLS protocol. No provider credentials or hosted calls are used. TLS trust is supplied through `ca_file`; the OpenSSL command-line program generates an ephemeral self-signed loopback certificate and is a test prerequisite, not a library crypto linkage.
+
+Inventory per family (141 cells; 705 across the five families):
+
+| Wire / lifecycle group | Cells per family | Pinned cases |
+|---|---:|---|
+| HTTP/1.1 normal | 2 | Buffered and SSE completion, semantic text and EndTurn |
+| HTTP/1.1 HTTP failures | 38 | 400/401/403/404/429/500/503/529, each with family-shaped and empty bodies in buffered/SSE modes; 429/500 array envelopes and 503 HTML |
+| HTTP/1.1 Retry-After metadata | 10 | 429 seconds/date, 503 seconds, 529 date and malformed hints, each buffered/SSE |
+| HTTP/1.1 retry scheduling | 3 | Honour seconds and HTTP-date minima; reject a retry whose delay exceeds the immutable total deadline |
+| HTTP/1.1 explicit retry policy | 5 | Duplicate-billing risk not authorized, family-specific 429 policy, attempt cap, original deadline carried into a subsequent attempt, no retry after semantic output |
+| HTTP/1.1 total deadline | 9 | Before head, after head, mid-body in both modes; valid SSE trickle; incomplete SSE frame after valid output; raw TCP peer that never responds |
+| HTTP/1.1 cancellation | 11 | Before head, after head and mid-body via handle/stop token for SSE and handle for buffered; both mechanisms during retry backoff |
+| HTTP/1.1 peer close/reset | 6 | Reset before head, reset mid-body and close after head, each buffered/SSE |
+| HTTP/1.1 connect refusal | 2 | Default single attempt and explicitly enabled three-attempt retry |
+| TLS certificate rejection | 1 | Untrusted self-signed peer fails before sending a provider request |
+| Each of TLS HTTP/1.1, h2c and TLS ALPN HTTP/2 | 14 each | Both normal modes; 503 seconds, 429 date and bare 401; deadline before head/mid-body/trickle; cancellation in three states; reset before head/mid-body; close after head |
+| Reuse on all four wires | 12 | Two sequential requests on one connection; idle connection reset between requests; reset while serving the second request on the reused connection |
+
+Accepted operations are fenced with `join()` and must produce exactly one outcome callback, the same owned result from callback/join, no terminal semantic event and no semantic callback after the outcome. Failure cells assert kind, retry class/safety, status, vendor code, Retry-After presence/range, attempt/send/head evidence and transport resend accounting; reset/stall cells also retain the delivered semantic prefix. Peer counters independently prove expected request counts (one unless the cell explicitly permits retries), injected faults, correct wire protocol and valid request semantics. Waits and overall test execution are bounded; a filtered invocation matching no cells fails rather than reporting a vacuous pass. `--list` exposes the complete named inventory and `--only <substring>` selects targeted cells.
+
+Policy differences are intentional, not normalized away: `config/error-policy.json` leaves Google 429 as `LimitUnknown/Unknown`, so enabling retry still does not resend it; Chat/Responses/Messages classify their recognized rate-limit bodies as `RateLimited/AfterReset`. Messages' `api_error` 500 is `RemoteFailure/Transient`; the other families' supplied 500 envelopes use `Overloaded/Transient`. Shared scheduled-retry cells use 503 so they exercise a real retry in every family. HTTP/1.1 short-body FIN is abnormal (`Truncated/Transient`), whereas HTTP/2 END_STREAM after HEADERS is normally framed but lacks a semantic terminal (`Truncated/Never`).
+
+Connection-reset accounting distinguishes a **refused resend proposal** from an actual duplicate dispatch. `OperationState::prereq_cb` in `src/transport/http_transport.cpp` aborts libcurl's second write proposal before it writes; `TransportCore::finish` nevertheless reports `prereq_count - 1` as `transport_internal_resends`, and runtime `OperationState::done` includes that count in `attempts`. The HTTP/1.1 reused-connection reset therefore pins counter 1/attempts 2 together with exactly two total peer requests, not a false counter-0 claim. Successful reuse and ordinary cells pin counter 0. An idle-reset race may instead select a fresh connection before writing (success, counter 0, two peer requests) or hit the refusal guard (failure, counter 1, only the first request reached the peer); no branch permits a duplicate request.
+
+For HTTP/2 cancellation/deadline cells, the terminal callback and `join()` must finish promptly **while the Client is still alive**. Only after proving this does the cell destroy the Client to fence eventual peer stream cleanup. The current libcurl transport can leave that stream open until connection destruction rather than sending RST_STREAM immediately; peer cleanup is not substituted for operation cancellation proof.
+
+This inventory describes registered regression checks, not proof that a verification run succeeded. Qualification requires the named cells to execute, the applicable mutation checks to fail, and the full-suite/sanitizer gates to be recorded separately.
+
 ## 12. Staged ladder and release gates
 
 Release criteria are stage gates, defined with their dates, cells and property subsets in `ROADMAP.md`; this file does not repeat the stage content. The rules that hold at every stage:
