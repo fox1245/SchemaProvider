@@ -20,7 +20,7 @@ The exact documented Responses cursor fragment also ran in a standalone installe
 
 These observations establish no new hosted-vendor, signature-consumption, Windows/macOS/ARM64, HTTP/3 or sanitizer qualification. Archive format remains3. Native NeoGraph/wheel and publication were separate pending integration work at this checkpoint; no paid calls were made.
 
-The runtime target now declares its own private `OpenSSL::Crypto` dependency, supplying the headers and link library used by `client.cpp` rather than relying on another target's private dependency. After this build correction, the local shared SDK was rebuilt and installed, and the exact README consumer passed reported-zero, missing-count and HTTP400 Failure scenarios. Interface generation and archive formats are unchanged; those local observations do not qualify the corrected Windows or macOS wheels.
+Historically, the runtime target declared a private `OpenSSL::Crypto` dependency for `client.cpp`; after that build correction, the local shared SDK was rebuilt and installed, and the exact README consumer passed reported-zero, missing-count and HTTP400 Failure scenarios. Those observations do not qualify Windows or macOS wheels. The SDK's direct OpenSSL dependency has since been removed: SHA-256, HMAC-SHA256, constant-time comparison and operating-system entropy are implemented in-tree (`src/crypto`). Production targets and package exports no longer request libcrypto; libcurl's TLS backend remains unchanged and may itself use OpenSSL. Persisted digest/archive/ledger formats are unchanged, and `crypto_runtime_links_no_libcrypto` guards the runtime-only process maps.
 
 
 ## 1. Purpose
@@ -315,7 +315,7 @@ Historical SDK journal-projection proposal, not an installed serializer/consumer
 
 ### 5.14 InstallAndDependencyDAG
 
-- Statement: a clean consumer compiles, links and sends a loopback request using only installed headers/targets. Public signatures expose no yyjson, Asio, OpenSSL or curl implementation types. The current package exports six component targets; applications normally link `SchemaProvider::runtime`. Private target direction follows DESIGN section 2.4.
+- Statement: a clean consumer compiles, links and sends a loopback request using only installed headers/targets. Public signatures expose no yyjson, Asio, OpenSSL or curl implementation types. The current package exports seven component targets; network applications link `SchemaProvider::transport`, while runtime-only consumers can link `SchemaProvider::runtime` without libcurl or libcrypto. Private target direction follows DESIGN section 2.4.
 - Exercised by: install-tree consumer build in CI, a standalone compile of each public header, include-direction checks from the compiler's dependency output and the CMake target graph (PRIVATE linking alone does not stop a stray include). The C++ toolchain floor (standard library support for `std::stop_token`) is checked by a configure-time test on each supported compiler.
 - Fault injected: a planted forbidden include in a public header, a planted reverse include between private targets, a planted install of a private header.
 - Mutants: the same three plants, each must fail the gate.

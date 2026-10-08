@@ -1,6 +1,6 @@
 #include "descriptor/policy.h"
+#include "crypto/crypto.h"
 #include "sp/config_defaults.h"
-#include <openssl/evp.h>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -196,15 +196,11 @@ class PolicyLoader {
       }
       const auto family_identity = pd->root().dump();
       const auto resource_identity = rd->root().dump();
-      std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> hash(EVP_MD_CTX_new(), EVP_MD_CTX_free);
-      std::array<unsigned char, 32> digest{};
-      unsigned length = 0;
-      if (!hash || EVP_DigestInit_ex(hash.get(), EVP_sha256(), nullptr) != 1 ||
-          EVP_DigestUpdate(hash.get(), family_identity.data(), family_identity.size()) != 1 ||
-          EVP_DigestUpdate(hash.get(), "\n", 1) != 1 ||
-          EVP_DigestUpdate(hash.get(), resource_identity.data(), resource_identity.size()) != 1 ||
-          EVP_DigestFinal_ex(hash.get(), digest.data(), &length) != 1 || length != digest.size())
-        fail("", "available semantic policy digest");
+      crypto::Sha256 hash;
+      hash.update(family_identity);
+      hash.update("\n");
+      hash.update(resource_identity);
+      const auto digest = hash.finish();
       policy->identity_.assign(reinterpret_cast<const char*>(digest.data()), digest.size());
       // Reuse descriptor admission for slot collisions, escaped usage segments,
       // and reserved wire fields instead of introducing a second convention.

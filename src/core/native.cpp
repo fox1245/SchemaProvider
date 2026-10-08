@@ -1,7 +1,7 @@
 #include "core/native.h"
 #include "core/interface_contract.h"
+#include "crypto/crypto.h"
 #include "json/json.h"
-#include <openssl/evp.h>
 #include <algorithm>
 #include <bit>
 #include <map>
@@ -24,16 +24,14 @@ const Domains* domains(std::string_view family) {
   return nullptr;
 }
 // Domain-separated, typed, length-prefixed values avoid delimiter collisions.
-// EVP is implementation-private; neither OpenSSL types nor digests grant provenance.
+// Digests are implementation-private and grant no provenance.
 class Hash {
  public:
-  explicit Hash(const descriptor::CodecResources& limits) : limits_(limits), context_(EVP_MD_CTX_new(), EVP_MD_CTX_free) {
-    valid_ = context_ && EVP_DigestInit_ex(context_.get(), EVP_sha256(), nullptr) == 1;
-  }
+  explicit Hash(const descriptor::CodecResources& limits) : limits_(limits) {}
   void bytes(const void* data, size_t size) {
     if (!valid_ || size > limits_.native_bytes - consumed_) { valid_ = false; return; }
     consumed_ += size;
-    if (size && EVP_DigestUpdate(context_.get(), data, size) != 1) valid_ = false;
+    context_.update(data, size);
   }
   void number(uint64_t value) {
     unsigned char data[8];
@@ -109,14 +107,15 @@ class Hash {
     if (message.wire_output) { text(output_domain); document(message.wire_output); }
   }
   bool finish(Digest& digest) {
-    unsigned size = 0;
-    return valid_ && EVP_DigestFinal_ex(context_.get(), digest.data(), &size) == 1 && size == digest.size();
+    if (!valid_) return false;
+    digest = context_.finish();
+    return true;
   }
  private:
   const descriptor::CodecResources& limits_;
-  std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> context_;
+  crypto::Sha256 context_;
   size_t consumed_ = 0;
-  bool valid_ = false;
+  bool valid_ = true;
 };
 std::string lower(std::string_view text) {
   std::string result(text);

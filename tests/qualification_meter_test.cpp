@@ -1,3 +1,4 @@
+#include "crypto/crypto.h"
 #include "qualification/meter.h"
 
 #include <algorithm>
@@ -8,7 +9,6 @@
 #include <fstream>
 #include <functional>
 #include <fcntl.h>
-#include <openssl/evp.h>
 #include <string>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -118,10 +118,7 @@ Settlement settlement(const Result<Settlement>& result) {
   return std::get<Settlement>(result);
 }
 std::string sha256(std::string_view bytes) {
-  std::array<unsigned char, 32> digest{};
-  unsigned int size = 0;
-  if (!EVP_Digest(bytes.data(), bytes.size(), digest.data(), &size, EVP_sha256(), nullptr) || size != 32)
-    std::abort();
+  const auto digest = sp::crypto::sha256(bytes);
   constexpr char hex[] = "0123456789abcdef";
   std::string result(64, '\0');
   for (std::size_t i = 0; i < digest.size(); ++i) {
