@@ -1,6 +1,6 @@
 set(SP_INSTALL_CMAKE_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/SchemaProvider")
 
-install(TARGETS sp_core sp_json sp_descriptor sp_codecs sp_transport sp_runtime
+install(TARGETS sp_core sp_json sp_descriptor sp_codecs sp_wire sp_transport sp_runtime
   EXPORT SchemaProviderTargets
   ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
   LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
@@ -18,7 +18,8 @@ install(DIRECTORY
   "${CMAKE_CURRENT_SOURCE_DIR}/src/configuration"
   DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/SchemaProvider"
   FILES_MATCHING PATTERN "*.h"
-  PATTERN "native_archive_fs.h" EXCLUDE)
+  PATTERN "native_archive_fs.h" EXCLUDE
+  PATTERN "io_thread.h" EXCLUDE)
 install(FILES
   "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/client.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/policy.h"

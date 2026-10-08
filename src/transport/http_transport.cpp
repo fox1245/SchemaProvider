@@ -24,6 +24,7 @@
 #include <ws2tcpip.h>
 #endif
 #include "transport/http_transport.h"
+#include "transport/io_thread.h"
 
 #include <asio/bind_executor.hpp>
 #include <asio/executor_work_guard.hpp>
@@ -63,7 +64,6 @@ namespace sp::transport {
 
 namespace {
 
-thread_local bool tl_io_thread = false;
 
 #ifdef _WIN32
 // Resolver threads may outlive the transport. Keep their Winsock reference alive until the
@@ -777,7 +777,7 @@ void TransportCore::init() {
     threads.reserve(n);  // never allocate a vector entry after starting a joinable worker
     for (unsigned i = 0; i < n; ++i) {
       threads.emplace_back([this] {
-        tl_io_thread = true;
+        detail::mark_io_thread();
         ctx.run();
       });
     }
@@ -1464,7 +1464,7 @@ Result Operation::join() {
     r.detail = "join() on an empty handle";
     return r;
   }
-  if (tl_io_thread) {
+  if (on_io_thread()) {
     Result r;
     r.failure = FailureKind::Misuse;
     r.detail = "join() called from an I/O thread";
@@ -1481,7 +1481,7 @@ Transport::Transport(TransportOptions options) : core_(std::make_shared<Transpor
 
 Transport::~Transport() {
   if (!core_) return;
-  if (tl_io_thread) {
+  if (on_io_thread()) {
     // Destroyed from inside an operation callback (or a callback's captured state): joining an I/O
     // thread from an I/O thread would deadlock. Hand the teardown to a detached reaper that owns the
     // core until the threads are joined; the destructor returns at once, and the strand runs the
@@ -1514,6 +1514,5 @@ RuntimeInfo Transport::runtime_info() const {
 
 unsigned Transport::io_threads() const noexcept { return static_cast<unsigned>(core_->threads.size()); }
 
-bool on_io_thread() noexcept { return tl_io_thread; }
 
 }  // namespace sp::transport
