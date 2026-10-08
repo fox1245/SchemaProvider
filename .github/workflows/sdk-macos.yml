@@ -38,8 +38,14 @@ jobs:
             deps/yyjson
       - name: Prepare native transport and toolchain
         run: |
-          brew install curl openssl@3 ninja
-          echo "PATH=$(brew --prefix curl)/bin:$(brew --prefix openssl@3)/bin:$PATH" >> "$GITHUB_ENV"
+          brew install curl openssl@3 ninja llvm@20
+          llvm_prefix="$(brew --prefix llvm@20)"
+          echo "PATH=$llvm_prefix/bin:$(brew --prefix curl)/bin:$(brew --prefix openssl@3)/bin:$PATH" >> "$GITHUB_ENV"
+          echo "CC=$llvm_prefix/bin/clang" >> "$GITHUB_ENV"
+          echo "CXX=$llvm_prefix/bin/clang++" >> "$GITHUB_ENV"
+          # Match libc++ headers and runtime, as NeoGraph's native macOS wheel does.
+          echo "CXXFLAGS=-stdlib=libc++ -nostdinc++ -isystem $llvm_prefix/include/c++/v1" >> "$GITHUB_ENV"
+          echo "LDFLAGS=-L$llvm_prefix/lib/c++ -L$llvm_prefix/lib/unwind -Wl,-rpath,$llvm_prefix/lib/c++ -Wl,-rpath,$llvm_prefix/lib/unwind -lunwind" >> "$GITHUB_ENV"
           echo "SDK_PREFIXES=$(brew --prefix curl);$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
       - name: Record platform and backend capabilities
         run: |
