@@ -5,8 +5,8 @@
 #include "codecs/responses.h"
 #include "codecs/gemini.h"
 #include "codecs/interactions.h"
+#include "crypto/crypto.h"
 
-#include <openssl/sha.h>
 #include <array>
 #include <algorithm>
 #include <atomic>
@@ -1002,11 +1002,7 @@ PreparedRequest ClientAccess::prepare_control(Client& client, Request request, R
   auto preparation = client.prepare(std::move(request), std::move(options));
   if (preparation.error() || !transform) return preparation;
   auto& state = *preparation.state_;
-  const auto digest = [](std::string_view bytes) {
-    std::array<unsigned char, SHA256_DIGEST_LENGTH> result{};
-    SHA256(reinterpret_cast<const unsigned char*>(bytes.data()), bytes.size(), result.data());
-    return result;
-  };
+  const auto digest = [](std::string_view bytes) { return crypto::sha256(bytes); };
   const auto before = digest(state.request.body);
   std::optional<ErrorKind> error;
   try {

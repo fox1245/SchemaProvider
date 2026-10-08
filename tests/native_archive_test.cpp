@@ -9,8 +9,8 @@
 #include "codecs/interactions.h"
 #include "codecs/interactions_request.h"
 #include "codecs/responses_request.h"
+#include "crypto/crypto.h"
 #include "json/json.h"
-#include <openssl/evp.h>
 #include <array>
 #include <filesystem>
 #include <fstream>
@@ -53,7 +53,7 @@ Message genuine(const descriptor::ValidatedDescriptor& d,const messages::Request
   CHECK(std::holds_alternative<Failure>(*a.outcome()));auto m=std::get<Failure>(*a.outcome()).partial.messages.at(0);CHECK(m.native && !m.native->complete());return m;
 }
 std::string digest(std::string_view bytes) {
-  std::array<unsigned char,32> h{};unsigned n=0;CHECK(EVP_Digest(bytes.data(),bytes.size(),h.data(),&n,EVP_sha256(),nullptr)==1 && n==h.size());std::string s;constexpr char digits[]="0123456789abcdef";for(auto c:h){s+=digits[c>>4];s+=digits[c&15];}return s;
+  const auto h=sp::crypto::sha256(bytes);std::string s;constexpr char digits[]="0123456789abcdef";for(auto c:h){s+=digits[c>>4];s+=digits[c&15];}return s;
 }
 void same_document(const std::shared_ptr<const json::Document>& a,const std::shared_ptr<const json::Document>& b) {CHECK(bool(a)==bool(b));if(a)CHECK(json::equal(a->root(),b->root()));}
 void same_part(const Part& a,const Part& b) {

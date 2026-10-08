@@ -56,7 +56,7 @@ Codecs consume frames and emit events; they do not perform sockets, sleeps or re
 
 The runtime does not link the libcurl backend. It talks to an attempt-level transport interface, `sp_wire` holds the libcurl-free wire types and SSE framing both sides share, and `sp_transport` implements the interface over libcurl and defines the public `Client(descriptor, Options)` constructor. A program that only uses an existing `Client` (the NeoGraph engine core, for one) links `sp_runtime` alone and never loads libcurl or the roughly 25 libraries it needs; a program that constructs a `Client` links `SchemaProvider::transport`, which brings the runtime. Constructing a `Client` without the backend is a link error, not a runtime failure.
 
-`sp_core` now includes native/archive implementations and links JSON/descriptor code plus private OpenSSL Crypto. Earlier standard-library-only core sketches do not describe the installed target graph.
+`sp_core` now includes native/archive implementations and links JSON/descriptor code and uses the in-tree `sp::crypto` primitives (hosted by `sp_json`, see 2.3); no SDK target links OpenSSL. Earlier standard-library-only core sketches do not describe the installed target graph.
 
 
 ### 2.2 Public vs private
@@ -71,16 +71,18 @@ Private scheduler/testing seams, canaries and qualification grants are not insta
 
 | Layer | Allowed dependencies |
 |---|---|
-| `sp_core` | standard library, `sp_json`, `sp_descriptor`, private OpenSSL Crypto for native/archive custody |
-| `sp_json` | yyjson (private; never in a public header) |
-| `sp_descriptor` | `sp_json`, private OpenSSL Crypto for policy identity |
-| `sp_codecs` | `sp_core`, `sp_json`, `sp_descriptor`; private OpenSSL Crypto for M3 replay fingerprints |
+| `sp_core` | standard library, `sp_json`, `sp_descriptor`; in-tree `sp::crypto` for native/archive custody |
+| `sp_json` | yyjson (private; never in a public header); also hosts the in-tree `sp::crypto` primitives (`src/crypto`: SHA-256, HMAC-SHA256, constant-time compare, wipe, OS entropy), which need only the standard library and the platform's entropy call (`getrandom`, `arc4random_buf`, `BCryptGenRandom`) |
+| `sp_descriptor` | `sp_json` (`sp::crypto` for policy identity) |
+| `sp_codecs` | `sp_core`, `sp_json`, `sp_descriptor`; `sp::crypto` for M3 replay fingerprints |
 | `sp_wire` | standard library only (wire types, SSE framing, I/O-thread marker) |
 | `sp_transport` | `sp_runtime`, `sp_wire`; libcurl (`multi_socket`) driven by a private standalone Asio loop; TLS through libcurl's backend (D1, FIRM) |
 | `sp_runtime` | the above except `sp_transport`, standard threads, `std::stop_token` |
 | public headers | standard library only |
 
-Native fingerprinting and archive integrity authenticate local binding/custody, not the vendor issuer. Neither OpenSSL nor yyjson implementation types appear in public signatures.
+Native fingerprinting and archive integrity authenticate local binding/custody, not the vendor issuer. No yyjson implementation types appear in public signatures, and no SDK library directly links OpenSSL: SHA-256 is a portable FIPS 180-4 implementation with a run-time-detected x86 SHA-extension fast path (GCC/Clang, CPUID; the portable code is the reference and always selectable), and `src/crypto/crypto.h` is private and not installed. These primitives authenticate local binding and custody only. libcurl's chosen TLS backend remains unchanged and may itself load libcrypto when the transport is linked.
+
+Crypto contexts are stack-owned per invocation, with no heap allocation or shared mutable digest state. HMAC uses RFC 2104 key reduction and wipes its local key, pad, digest and hash contexts on scope exit, including exceptions; wiping does not promise to erase compiler register copies or compression-function scratch. OS randomness has no weak fallback: Linux retries interrupted/short `getrandom` reads, Windows uses `BCryptGenRandom`, and supported BSD/macOS platforms use `arc4random_buf`; an unavailable/failing source refuses nonempty requests. Fixed-length equality reads every byte through volatile pointers and accumulates XOR differences without a content-dependent exit. This source-level review plus defined-input semantic tests is not a timing or microarchitectural guarantee.
 
 libcurl remains the HTTP stack with private Asio integration; no stateful descriptor interpreter, general schema validator or second HTTP stack is introduced. Embedded defaults are generated at configure time. Callers can explicitly load closed runtime/error and descriptor/codec snapshots; existing clients retain admitted values. No globbing/fetch is needed. WebSocket is deferred, not an available build switch.
 
@@ -92,6 +94,7 @@ CI MUST fail when any of these hold (property `InstallAndDependencyDAG`). The fo
 
 - an installed header includes yyjson, asio, OpenSSL, `httplib`, curl, a QUIC-backend header, or any `src/` header;
 - `sp_core` or `sp_descriptor` depends on codecs, transport or runtime, or codecs depend on transport;
+- an SDK library directly links OpenSSL's libcrypto, or a runtime-only consumer maps libcrypto (`crypto_runtime_links_no_libcrypto` guards the latter); libcurl's transitive TLS backend is not replaced by this rule;
 - `sp_runtime` depends on `sp_transport` or libcurl (property `RuntimeWithoutLibcurl`; the `runtime_links_no_libcurl` test links the runtime alone and checks that libcurl is not mapped into the process);
 - private external implementation types leak through installed headers or exported usage requirements;
 - a clean consumer project fails to `find_package`, compile each public header standalone, link, and complete one loopback request against the installed tree.

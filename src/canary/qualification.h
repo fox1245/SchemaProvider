@@ -2,25 +2,22 @@
 
 #include "canary/canary.h"
 #include "canary/io.h"
+#include "crypto/crypto.h"
 #include "runtime/client.h"
 #include <algorithm>
 #include <array>
-#include <openssl/evp.h>
 #include <initializer_list>
-#include <openssl/rand.h>
 
 namespace sp::canary::detail {
 inline std::string digest(std::initializer_list<std::string_view> fields) {
-  auto context = std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)>(EVP_MD_CTX_new(), EVP_MD_CTX_free);
-  if (!context || EVP_DigestInit_ex(context.get(), EVP_sha256(), nullptr) != 1) fail();
+  crypto::Sha256 hash;
   for (auto field : fields) {
     const auto size = std::to_string(field.size());
-    if (EVP_DigestUpdate(context.get(), size.data(), size.size()) != 1 ||
-        EVP_DigestUpdate(context.get(), ":", 1) != 1 ||
-        EVP_DigestUpdate(context.get(), field.data(), field.size()) != 1) fail();
+    hash.update(size);
+    hash.update(":");
+    hash.update(field);
   }
-  std::array<unsigned char, 32> bytes{}; unsigned size{};
-  if (EVP_DigestFinal_ex(context.get(), bytes.data(), &size) != 1 || size != bytes.size()) fail();
+  const auto bytes = hash.finish();
   constexpr char hex[] = "0123456789abcdef";
   std::string result(64, '0');
   for (std::size_t i = 0; i < bytes.size(); ++i) {
@@ -98,7 +95,7 @@ class Qualification {
     const auto input = std::min({profile.bounds().input_tokens, model->max_input,
                                model->context_window - output});
     std::array<unsigned char, 32> nonce{};
-    if (RAND_bytes(nonce.data(), static_cast<int>(nonce.size())) != 1) fail();
+    if (!crypto::random_bytes(nonce.data(), nonce.size())) fail();
     const auto identity = digest({std::string_view(reinterpret_cast<const char*>(nonce.data()), nonce.size())});
     const auto fingerprint = digest({prepared.family(), prepared.model(), profile.origin(),
         prepared.encoded_body(), streaming ? "sse" : "buffered", item.name,

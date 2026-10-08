@@ -1,4 +1,5 @@
 #include "qualification/meter.h"
+#include "crypto/crypto.h"
 #include "json/json.h"
 
 #include <algorithm>
@@ -8,7 +9,6 @@
 #include <filesystem>
 #include <fcntl.h>
 #include <mutex>
-#include <openssl/evp.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -95,10 +95,7 @@ void append(int fd, std::string_view bytes) {
   sync(fd); // A partial/failed transaction is left in place and fails closed.
 }
 std::string hash(std::string_view bytes) {
-  std::array<unsigned char, 32> digest{};
-  unsigned int size = 0;
-  if (!EVP_Digest(bytes.data(), bytes.size(), digest.data(), &size, EVP_sha256(), nullptr) || size != 32)
-    fail(Denial::Storage);
+  const auto digest = crypto::sha256(bytes);
   constexpr char hex[] = "0123456789abcdef";
   std::string out(64, '\0');
   for (std::size_t i = 0; i < digest.size(); ++i) {

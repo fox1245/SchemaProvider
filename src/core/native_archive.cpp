@@ -1,11 +1,8 @@
 #include "core/native_archive.h"
 #include "core/native_archive_fs.h"
 #include "core/native.h"
+#include "crypto/crypto.h"
 #include "json/json.h"
-#include <openssl/crypto.h>
-#include <openssl/evp.h>
-#include <openssl/hmac.h>
-#include <openssl/rand.h>
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -21,8 +18,7 @@ using namespace archive_fs;
 Error error() { Error e; e.kind = ErrorKind::Permission; e.safe_message = "Trusted local native archive admission failed"; e.retry_safety = RetrySafety::NotSent; return e; }
 using Fd = archive_fs::Handle;
 Digest mac(const Digest& key, std::string_view bytes) {
-  Digest result{}; unsigned size = 0;
-  require(HMAC(EVP_sha256(), key.data(), static_cast<int>(key.size()), reinterpret_cast<const unsigned char*>(bytes.data()), bytes.size(), result.data(), &size) && size == result.size()); return result;
+  return crypto::hmac_sha256(key.data(), key.size(), bytes.data(), bytes.size());
 }
 std::string hex(const Digest& bytes) { static constexpr char digits[] = "0123456789abcdef"; std::string text; text.reserve(64); for (auto b : bytes) { text += digits[b>>4]; text += digits[b&15]; } return text; }
 class Writer {
@@ -105,7 +101,7 @@ std::string descriptor_binding(const descriptor::ValidatedDescriptor& d, NativeA
   w.text(d.request_model_member());w.text(d.request_messages_member());w.text(d.request_stream_member());w.text(d.max_output_tokens_member());
   w.number(d.usage_path().size());for(const auto& segment:d.usage_path())w.text(segment);
   w.number(d.stop_mappings().size());for(const auto& [raw,kind]:d.stop_mappings()){w.text(raw);w.number(static_cast<unsigned>(kind));}
-  Digest digest{};unsigned size=0;require(EVP_Digest(w.data.data(),w.data.size(),digest.data(),&size,EVP_sha256(),nullptr)==1 && size==digest.size());return {reinterpret_cast<const char*>(digest.data()),digest.size()};
+  const Digest digest=crypto::sha256(w.data);return {reinterpret_cast<const char*>(digest.data()),digest.size()};
 }
 } // namespace
 struct NativeArchive::State {
@@ -118,10 +114,10 @@ struct NativeArchive::State {
   Digest key{};
   State(std::string d,std::string k,std::string o,descriptor::ValidatedDescriptor descriptor,NativeArchiveLimits l)
       :directory(std::move(d)),key_file(std::move(k)),owner(std::move(o)),descriptor_identity(descriptor_binding(descriptor,l)),descriptor(std::move(descriptor)),limits(l) {}
-  ~State() { OPENSSL_cleanse(key.data(),key.size()); OPENSSL_cleanse(activation.data(),activation.size()); }
+  ~State() { crypto::cleanse(key.data(),key.size()); crypto::cleanse(activation.data(),activation.size()); }
   void verify() const {
     auto d=locate(directory);auto root_now=open_directory(d.parent,d.name);private_directory(root_now);require(same_file(root_identity,status(root_now)));
-    auto k=locate(key_file);private_directory(k.parent);independent_key_parent(root,k);auto key_now=open_file(k.parent,k.name);private_file(key_now,true);require(unchanged(key_identity,status(key_now)));auto bytes=read_all(key_now,96);require(bytes.size()==activation.size() && CRYPTO_memcmp(bytes.data(),activation.data(),bytes.size())==0);OPENSSL_cleanse(bytes.data(),bytes.size());
+    auto k=locate(key_file);private_directory(k.parent);independent_key_parent(root,k);auto key_now=open_file(k.parent,k.name);private_file(key_now,true);require(unchanged(key_identity,status(key_now)));auto bytes=read_all(key_now,96);require(bytes.size()==activation.size() && crypto::constant_time_equal(bytes.data(),activation.data(),bytes.size()));crypto::cleanse(bytes.data(),bytes.size());
   }
 };
 NativeArchive::NativeArchive(std::unique_ptr<State> state):state_(std::move(state)) {}
@@ -133,7 +129,7 @@ bool NativeArchive::matches_descriptor(const descriptor::ValidatedDescriptor& de
     state_->verify();
     const auto binding = descriptor_binding(descriptor, state_->limits);
     return binding.size() == state_->descriptor_identity.size() &&
-        CRYPTO_memcmp(binding.data(), state_->descriptor_identity.data(), binding.size()) == 0;
+        crypto::constant_time_equal(binding.data(), state_->descriptor_identity.data(), binding.size());
   } catch (...) { return false; }
 }
 NativeArchive::Activation NativeArchive::provision(std::string d,std::string k,std::string o,descriptor::ValidatedDescriptor v,NativeArchiveLimits l) {return activate(std::move(d),std::move(k),std::move(o),std::move(v),l,true);}
@@ -162,16 +158,16 @@ NativeArchive::Activation NativeArchive::activate(std::string d,std::string k,st
     // The independent activation must remain outside the entire archive tree.
     independent_key_parent(state->root,key);
     if(create) {
-      require(RAND_bytes(state->key.data(),static_cast<int>(state->key.size()))==1);
+      require(crypto::random_bytes(state->key.data(),state->key.size()));
       auto fd=create_file(key.parent,key.name);private_file(fd,false);
       state->key_identity=status(fd);
       Writer identity(l);identity.text(state->owner);identity.text(state->descriptor_identity);identity.number(state->root_identity.device);identity.number(state->root_identity.inode);identity.number(state->key_identity.device);identity.number(state->key_identity.inode);
       Writer activation(l);activation.digest(state->key);activation.number(state->root_identity.device);activation.number(state->root_identity.inode);activation.number(state->key_identity.device);activation.number(state->key_identity.inode);activation.digest(mac(state->key,identity.data));
-      write_all(fd,activation.data);OPENSSL_cleanse(activation.data.data(),activation.data.size());seal_file(fd);sync(fd);sync(key.parent);sync(dir.parent);
+      write_all(fd,activation.data);crypto::cleanse(activation.data.data(),activation.data.size());seal_file(fd);sync(fd);sync(key.parent);sync(dir.parent);
     }
     state->key_fd=open_file(key.parent,key.name);private_file(state->key_fd,true);state->key_identity=status(state->key_fd);state->activation=read_all(state->key_fd,96);require(state->activation.size()==96);
     Reader activation(state->activation,l);state->key=activation.digest();require(activation.number()==state->root_identity.device && activation.number()==state->root_identity.inode && activation.number()==state->key_identity.device && activation.number()==state->key_identity.inode);
-    Writer identity(l);identity.text(state->owner);identity.text(state->descriptor_identity);identity.number(state->root_identity.device);identity.number(state->root_identity.inode);identity.number(state->key_identity.device);identity.number(state->key_identity.inode);const auto expected=mac(state->key,identity.data);const auto actual=activation.digest();require(CRYPTO_memcmp(expected.data(),actual.data(),expected.size())==0);
+    Writer identity(l);identity.text(state->owner);identity.text(state->descriptor_identity);identity.number(state->root_identity.device);identity.number(state->root_identity.inode);identity.number(state->key_identity.device);identity.number(state->key_identity.inode);const auto expected=mac(state->key,identity.data);const auto actual=activation.digest();require(crypto::constant_time_equal(expected.data(),actual.data(),expected.size()));
     state->verify();
     return std::shared_ptr<NativeArchive>(new NativeArchive(std::move(state)));
   }catch(const Rejected&){return error();}
@@ -202,7 +198,7 @@ NativeArchive::Saved NativeArchive::save(const std::vector<Message>& messages,st
     check_capacity(state_->root,state_->limits.max_records,state_->limits.max_store_bytes,w.data.size());
     // Stage under an unpredictable private name, then atomically publish without
     // overwrite. An interrupted write can never expose a partial archive record.
-    Digest random{};require(RAND_bytes(random.data(),static_cast<int>(random.size()))==1);const auto temporary=".pending-"+hex(random);
+    Digest random{};require(crypto::random_bytes(random.data(),random.size()));const auto temporary=".pending-"+hex(random);
     auto fd=create_file(state_->root,temporary);bool published=false;
     try {
       private_file(fd,false);write_all(fd,w.data);seal_file(fd);sync(fd);
@@ -215,7 +211,7 @@ NativeArchive::Saved NativeArchive::save(const std::vector<Message>& messages,st
 NativeArchive::Loaded NativeArchive::load(std::string_view reference,std::string_view binding) const {
   try {
     state_->verify();require(reference.size()==70 && reference.substr(0,6)=="spna3:");const std::string name(reference.substr(6));require(std::all_of(name.begin(),name.end(),[](char c){return(c>='0'&&c<='9')||(c>='a'&&c<='f');}));
-    auto fd=open_file(state_->root,name);private_file(fd,true);const auto identity=status(fd);auto bytes=read_all(fd,state_->limits.max_bytes);const auto expected=hex(mac(state_->key,bytes));require(CRYPTO_memcmp(expected.data(),name.data(),64)==0);
+    auto fd=open_file(state_->root,name);private_file(fd,true);const auto identity=status(fd);auto bytes=read_all(fd,state_->limits.max_bytes);const auto expected=hex(mac(state_->key,bytes));require(crypto::constant_time_equal(expected.data(),name.data(),64));
     Reader r(bytes,state_->limits);require(r.text()=="sp.native.local-custody.archive.v3" && r.text()==state_->owner && r.text()==state_->descriptor_identity && r.text()==binding);auto count=r.count(state_->limits.max_messages);std::vector<Message> messages;messages.reserve(count);size_t parts=0;
     while(count--) {
       Message m;m.id=r.text();m.role=r.enumeration<Role>(4);auto n=r.count(state_->limits.max_parts-parts);parts+=n;m.parts.reserve(n);while(n--)m.parts.push_back(read_part(r));m.wire_output=r.document(true);

@@ -6,7 +6,7 @@ The current package is **0.1.1 alpha**, with interface revision **4** and shared
 
 ## Install and use the unstable C++ SDK
 
-Build prerequisites are CMake 3.20+, a C++20 compiler and standard library implementing `std::stop_token`, Python 3 for configuration generation, standalone Asio headers, libcurl 7.88+, OpenSSL Crypto and yyjson. Supply an installed yyjson library or its source tree; configuration does not download dependencies.
+Build prerequisites are CMake 3.20+, a C++20 compiler and standard library implementing `std::stop_token`, Python 3 for configuration generation, standalone Asio headers, libcurl 7.88+ and yyjson. Supply an installed yyjson library or its source tree; configuration does not download dependencies. The SDK libraries have no OpenSSL dependency: SHA-256, HMAC-SHA256, constant-time comparison and operating-system entropy are implemented in-tree (`src/crypto`). TLS comes from your libcurl's backend, and the test suite uses the `openssl` command-line tool only to generate throwaway certificates (its optional `crypto_openssl_differential` check also links OpenSSL's libcrypto into that one test when the development files are installed).
 
 ```sh
 cmake -S . -B build-sdk -DSP_BUILD_TESTS=OFF -DSP_BUILD_CANARY=OFF \
