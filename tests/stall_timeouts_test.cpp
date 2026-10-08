@@ -437,6 +437,31 @@ void idle_pause_is_not_peer_silence(Env& e) {
   (void)op.join();
   CHECK(fetch->result.status == tr::Status::Cancelled);
 }
+void idle_rearms_after_a_pause_ends(Env& e) {
+  tr::Transport transport;
+  // A valid event, then silence. Refusing the first body chunk pauses the transfer, so the application
+  // is idle for longer than the bound while the peer has said everything it will say. After the resume
+  // the refused chunk must be delivered and the idle bound must be armed again from that moment, so a
+  // watchdog that stayed disabled after the pause would run to the 10 s deadline instead.
+  const auto name = e.peer.arm("prefix-silent");
+  auto fetch = std::make_shared<Fetch>();
+  fetch->refuse_body = true;
+  Req r{.url = url_for(e.ports.http, name), .deadline = 10s, .idle = 300ms};
+  auto op = begin(transport, r, fetch);
+  const auto limit = Clock::now() + 5s;
+  while (fetch->body_calls == 0 && Clock::now() < limit) std::this_thread::sleep_for(5ms);
+  CHECK(fetch->body_calls >= 1);
+  std::this_thread::sleep_for(1000ms);  // more than three idle bounds of application backpressure
+  CHECK(!fetch->done && fetch->body_bytes == 0);
+  fetch->refuse_body = false;
+  const auto resumed = Clock::now();
+  op.resume();
+  (void)op.join();
+  const double since_resume = ms_since(resumed);
+  CHECK(fetch->body_bytes > 0);  // the chunk refused before the pause was delivered after the resume
+  CHECK(fetch->result.status == tr::Status::Failed && fetch->result.failure == tr::FailureKind::IdleTimeout);
+  CHECK(since_resume >= 250 && since_resume < 3000);
+}
 
 void first_byte_never_responding(Env& e) {
   tr::Transport transport;
@@ -476,6 +501,15 @@ void first_byte_half_a_status_line_is_not_a_head(Env& e) {
   auto f = run(transport, r);
   expect_failed(*f, tr::FailureKind::FirstByteTimeout, 395, 2400);
   CHECK(!f->head && server.requests == 1);
+}
+void first_byte_cleared_by_the_first_header_line(Env& e) {
+  tr::Transport transport;
+  // The status line arrives at once, the rest of the head takes about 800 ms, and then the body is
+  // silent. The first byte is the first response header line, so the bound is satisfied immediately
+  // and only the deadline ends the attempt; a bound that waited for the complete head would fire at 400 ms.
+  const auto name = e.peer.arm("slow-head:100");
+  auto f = run(transport, Req{.url = url_for(e.ports.http, name), .deadline = 1500ms, .first_byte = 400ms});
+  expect_deadline(*f, 1500);
 }
 
 void deadline_earlier_than_every_bound_wins(Env& e) {
@@ -861,20 +895,23 @@ std::string text_of(const std::vector<sp::Message>& messages) {
 }
 
 void family_idle_stall_after_output(Env& e) {
-  for (const Fam fam : kFamilies) {
-    std::fprintf(stderr, "  family %s\n", family_name(fam));
-    const auto model = e.peer.arm("prefix-silent");
-    auto options = base_options();
-    options.transport.idle_timeout = 400ms;  // client-wide default
-    // Retries are allowed and permissive: only the attempt evidence may stop one.
-    auto out = complete(fam, e.ports.http, model, options, run_options(true, true, 3));
-    const auto& f = failure_of(out.result, sp::ErrorKind::Truncated);
-    CHECK(out.ms >= 395 && out.ms < 4000);
-    CHECK(f.error.retry_class == sp::RetryClass::Transient);
-    CHECK(f.error.retry_safety == sp::RetrySafety::OutputObserved);
-    CHECK(f.error.attempt.request_may_have_left && f.error.attempt.response_head_seen && f.error.attempt.attempts == 1);
-    CHECK(text_of(f.partial.messages).find("partial") != std::string::npos);  // the partial message survives
-    e.peer.count(model, 1);  // no automatic retry after output was observed
+  // utf8-silent stops inside a multi-byte character: the stall, not malformed UTF-8, is the cause.
+  for (const char* scenario : {"prefix-silent", "utf8-silent"}) {
+    for (const Fam fam : kFamilies) {
+      std::fprintf(stderr, "  family %s (%s)\n", family_name(fam), scenario);
+      const auto model = e.peer.arm(scenario);
+      auto options = base_options();
+      options.transport.idle_timeout = 400ms;  // client-wide default
+      // Retries are allowed and permissive: only the attempt evidence may stop one.
+      auto out = complete(fam, e.ports.http, model, options, run_options(true, true, 3));
+      const auto& f = failure_of(out.result, sp::ErrorKind::Truncated);
+      CHECK(out.ms >= 395 && out.ms < 4000);
+      CHECK(f.error.retry_class == sp::RetryClass::Transient);
+      CHECK(f.error.retry_safety == sp::RetrySafety::OutputObserved);
+      CHECK(f.error.attempt.request_may_have_left && f.error.attempt.response_head_seen && f.error.attempt.attempts == 1);
+      CHECK(text_of(f.partial.messages).find("partial") != std::string::npos);  // the partial message survives
+      e.peer.count(model, 1);  // no automatic retry after output was observed
+    }
   }
 }
 void family_first_byte_stall_by_run_override(Env& e) {
@@ -917,6 +954,27 @@ void family_connect_stall(Env&) {
     CHECK(f.error.retry_safety == sp::RetrySafety::NotSent);
     CHECK(!f.error.attempt.request_may_have_left && !f.error.attempt.response_head_seen && f.error.attempt.attempts == 2);
     CHECK(out.ms >= 2 * 295 && out.ms < 6000);
+  }
+}
+void runtime_run_connect_override_alone(Env&) {
+  Blackhole hole;
+  {  // only the run enables a connect bound
+    auto run = run_options();
+    run.connect_timeout = 300ms;
+    auto out = complete(Fam::Chat, hole.port, "connect-run", base_options(), run);
+    const auto& f = failure_of(out.result, sp::ErrorKind::Transport);
+    CHECK(f.error.retry_safety == sp::RetrySafety::NotSent && !f.error.attempt.request_may_have_left);
+    CHECK(out.ms >= 295 && out.ms < 3000);
+  }
+  {  // an explicit zero in the run disables the enabled client default
+    auto options = base_options();
+    options.transport.connect_timeout = 300ms;
+    auto run = run_options();
+    run.connect_timeout = 0ms;
+    run.deadline = Clock::now() + 900ms;
+    auto out = complete(Fam::Chat, hole.port, "connect-zero", options, run);
+    failure_of(out.result, sp::ErrorKind::DeadlineExceeded);
+    CHECK(out.ended >= *run.deadline && out.ended < *run.deadline + 2s);
   }
 }
 
@@ -991,6 +1049,27 @@ void runtime_run_override_beats_client_default(Env& e) {
     auto out = complete(Fam::Messages, e.ports.http, model, base_options(), run);
     const auto& f = failure_of(out.result, sp::ErrorKind::Transport);
     CHECK(f.error.retry_safety == sp::RetrySafety::PossiblyAccepted && !f.error.attempt.response_head_seen);
+  }
+}
+void runtime_client_default_first_byte_alone(Env& e) {
+  auto options = base_options();
+  options.transport.first_byte_timeout = 400ms;  // the client-wide default is the only bound enabled
+  {
+    const auto model = e.peer.arm("none");
+    auto out = complete(Fam::Chat, e.ports.http, model, options, run_options());
+    const auto& f = failure_of(out.result, sp::ErrorKind::Transport);
+    CHECK(f.error.retry_safety == sp::RetrySafety::PossiblyAccepted && !f.error.attempt.response_head_seen);
+    CHECK(out.ms >= 395 && out.ms < 3000);
+    e.peer.count(model, 1);
+  }
+  {  // an explicit zero in the run disables the enabled default
+    const auto model = e.peer.arm("none");
+    auto run = run_options();
+    run.first_byte_timeout = 0ms;
+    run.deadline = Clock::now() + 800ms;
+    auto out = complete(Fam::Chat, e.ports.http, model, options, run);
+    failure_of(out.result, sp::ErrorKind::DeadlineExceeded);
+    CHECK(out.ended >= *run.deadline && out.ended < *run.deadline + 2s);
   }
 }
 void runtime_retries_keep_the_original_deadline(Env& e) {
@@ -1149,11 +1228,13 @@ const Case kCases[] = {
     {"transport", "stall_idle_slow_upload_counts_as_activity", idle_slow_upload_counts_as_activity},
     {"transport", "stall_idle_normal_completion_and_reset_unaffected", idle_normal_completion_and_reset_unaffected},
     {"transport", "stall_idle_pause_is_not_peer_silence", idle_pause_is_not_peer_silence},
+    {"transport", "stall_idle_rearms_after_a_pause_ends", idle_rearms_after_a_pause_ends},
     {"transport", "stall_first_byte_never_responding", first_byte_never_responding},
     {"transport", "stall_first_byte_head_in_time_completes", first_byte_head_in_time_completes},
     {"transport", "stall_first_byte_head_too_late_fails", first_byte_head_too_late_fails},
     {"transport", "stall_first_byte_slow_body_after_head_unaffected", first_byte_slow_body_after_head_unaffected},
     {"transport", "stall_first_byte_half_a_status_line_is_not_a_head", first_byte_half_a_status_line_is_not_a_head},
+    {"transport", "stall_first_byte_cleared_by_the_first_header_line", first_byte_cleared_by_the_first_header_line},
     {"transport", "stall_first_byte_cleared_by_the_head", first_byte_cleared_by_the_head},
     {"transport", "stall_connect_cleared_once_connected", connect_cleared_once_connected},
     {"transport", "stall_deadline_earlier_than_every_bound_wins", deadline_earlier_than_every_bound_wins},
@@ -1177,11 +1258,13 @@ const Case kCases[] = {
     {"connect", "stall_connect_black_hole_times_out", connect_black_hole_times_out},
     {"connect", "stall_connect_black_hole_pinned_default_and_other_bounds", connect_black_hole_pinned_default_and_other_bounds},
     {"connect", "stall_family_connect_stall", family_connect_stall},
+    {"connect", "stall_runtime_run_connect_override_alone", runtime_run_connect_override_alone},
     {"runtime", "stall_family_idle_stall_after_output", family_idle_stall_after_output},
     {"runtime", "stall_family_first_byte_stall_by_run_override", family_first_byte_stall_by_run_override},
     {"runtime", "stall_runtime_pin_default_behaviour", runtime_pin_default_behaviour},
     {"runtime", "stall_runtime_trickle_and_comments_are_not_cut", runtime_trickle_and_comments_are_not_cut},
     {"runtime", "stall_runtime_run_override_beats_client_default", runtime_run_override_beats_client_default},
+    {"runtime", "stall_runtime_client_default_first_byte_alone", runtime_client_default_first_byte_alone},
     {"runtime", "stall_runtime_deadline_wins_and_cancel", runtime_deadline_wins_and_cancel},
     {"runtime", "stall_runtime_retries_keep_the_original_deadline", runtime_retries_keep_the_original_deadline},
     {"runtime", "stall_runtime_normal_completion_unaffected", runtime_normal_completion_unaffected},
