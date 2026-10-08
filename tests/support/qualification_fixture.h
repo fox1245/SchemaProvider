@@ -4,6 +4,7 @@
 #include "qualification/meter.h"
 #include "runtime_peer.h"
 #include <filesystem>
+#include <sys/stat.h>
 #include <vector>
 
 namespace qualification_test {
@@ -15,14 +16,23 @@ inline void save(const std::filesystem::path& path, std::string_view bytes) {
 inline std::string load(const std::filesystem::path& path) {
   return sp::canary::detail::read_file(path.string(), 1U << 20, true);
 }
+// The meter refuses group/world-writable directories (fail-closed), so fixtures set 0700 explicitly
+// instead of inheriting the caller's umask.
+inline void private_directory(const std::filesystem::path& path) {
+  std::filesystem::create_directory(path);
+  require(::chmod(path.c_str(), 0700) == 0, "fixture chmod 0700 failed");
+  struct stat s{};
+  require(::stat(path.c_str(), &s) == 0 && !(s.st_mode & 022),
+      "fixture directory is group-writable or world-writable (meter refuses it): " + path.string());
+}
 struct Campaign {
   std::filesystem::path root;
   std::string baseline;
   Campaign(const std::filesystem::path& source, const std::vector<std::string>& models) {
     char pattern[] = "/tmp/sp-runner-qualification-XXXXXX";
     const auto* directory = ::mkdtemp(pattern); require(directory, "campaign fixture failed"); root = directory;
-    std::filesystem::create_directory(root / "config");
-    std::filesystem::create_directory(root / "build");
+    private_directory(root / "config");
+    private_directory(root / "build");
     save(root / "config/qualification-authorization.json",
         sp::canary::detail::read_file((source / "config/qualification-authorization.json").string(), 16384, false));
     baseline = "SPCANARY1\n";

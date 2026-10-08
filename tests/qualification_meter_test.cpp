@@ -34,6 +34,24 @@ void write_file(const std::filesystem::path& path, std::string_view bytes, bool 
   }
   if (::fsync(fd) || ::close(fd)) std::abort();
 }
+// Same synthetic baseline as the campaign fixture: 99 vision calls, 18979680 micro-USD exposure.
+std::string synthetic_baseline() {
+  std::string baseline = "SPCANARY1\n";
+  for (std::uint64_t i = 1; i <= 99; ++i)
+    baseline += "4 " + std::to_string(i) + ' ' + std::to_string(i * 100) + ' ' +
+        std::to_string(i == 99 ? 18979680 : i * (18979680 / 99)) + '\n';
+  return baseline;
+}
+// The meter refuses group/world-writable directories (fail-closed): set 0700 explicitly, not via umask.
+void private_directory(const std::filesystem::path& path) {
+  std::filesystem::create_directory(path);
+  if (::chmod(path.c_str(), 0700)) std::abort();
+  struct stat s{};
+  if (::stat(path.c_str(), &s) || (s.st_mode & 022)) {
+    std::fprintf(stderr, "fixture directory is group-writable or world-writable (meter refuses it): %s\n", path.c_str());
+    std::abort();
+  }
+}
 struct Fixture {
   std::filesystem::path root;
   std::string original;
@@ -44,11 +62,11 @@ struct Fixture {
     auto* result = ::mkdtemp(name.data());
     if (!result) std::abort();
     root = result;
-    std::filesystem::create_directory(root / "config");
-    std::filesystem::create_directory(root / "build");
+    private_directory(root / "config");
+    private_directory(root / "build");
     write_file(root / "config/qualification-authorization.json", read_file(source / "config/qualification-authorization.json"));
     write_file(root / "config/model-catalog.json", read_file(source / "config/model-catalog.json"));
-    original = read_file(source / "build/m5-live.ledger");
+    original = synthetic_baseline();
     write_file(root / "build/m5-live.ledger", original);
   }
   ~Fixture() { std::filesystem::remove_all(root); }
