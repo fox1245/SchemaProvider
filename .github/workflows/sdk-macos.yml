@@ -44,7 +44,7 @@ jobs:
           echo "CC=$llvm_prefix/bin/clang" >> "$GITHUB_ENV"
           echo "CXX=$llvm_prefix/bin/clang++" >> "$GITHUB_ENV"
           # Match libc++ headers and runtime, as NeoGraph's native macOS wheel does.
-          echo "CXXFLAGS=-stdlib=libc++ -nostdinc++ -isystem $llvm_prefix/include/c++/v1 -g1 -fno-omit-frame-pointer" >> "$GITHUB_ENV"
+          echo "CXXFLAGS=-stdlib=libc++ -nostdinc++ -isystem $llvm_prefix/include/c++/v1" >> "$GITHUB_ENV"
           echo "LDFLAGS=-L$llvm_prefix/lib/c++ -L$llvm_prefix/lib/unwind -Wl,-rpath,$llvm_prefix/lib/c++ -Wl,-rpath,$llvm_prefix/lib/unwind -lunwind" >> "$GITHUB_ENV"
           echo "SDK_PREFIXES=$(brew --prefix curl);$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
       - name: Record platform and backend capabilities
@@ -71,30 +71,7 @@ jobs:
       - name: Prepare distinct-address loopback fixture
         run: sudo ifconfig lo0 alias 127.0.0.2 netmask 255.0.0.0
       - name: Execute SDK runtime, lifecycle, crypto and custody tests
-        id: sdk-tests
         run: ctest --test-dir build --parallel 2 --timeout 600 --output-on-failure
-      - name: Diagnose native qualification crash
-        if: failure() && steps.sdk-tests.outcome == 'failure'
-        timeout-minutes: 3
-        run: |
-          lldb --batch \
-            -o 'settings set target.process.stop-on-sharedlibrary-events false' \
-            -o run -k 'thread backtrace all -c 20' -k 'register read pc sp fp' \
-            -- ./build/sp_qualification_meter_test "$GITHUB_WORKSPACE" --section thread_money_race
-      - name: Observe cold native runtime thread ownership
-        if: failure() && steps.sdk-tests.outcome == 'failure'
-        timeout-minutes: 3
-        run: ./build/sp_runtime_tests "$(command -v node)" "$GITHUB_WORKSPACE/tests/support/runtime_server.mjs" --held-stream-diagnostic
-      - name: Isolate native resolver thread initialization
-        if: failure() && steps.sdk-tests.outcome == 'failure'
-        timeout-minutes: 3
-        run: ./build/sp_runtime_tests "$(command -v node)" "$GITHUB_WORKSPACE/tests/support/runtime_server.mjs" --held-stream-native-resolver-control
-      - name: Identify actual held-request thread producers
-        if: failure() && steps.sdk-tests.outcome == 'failure'
-        timeout-minutes: 3
-        run: |
-          lldb --batch \
-            -o 'settings set target.process.stop-on-sharedlibrary-events false' \
-            -o run -o 'thread backtrace all -c 20' \
-            -o 'process handle SIGSTOP -s false -n false -p false' -o continue \
-            -- ./build/sp_runtime_tests "$(command -v node)" "$GITHUB_WORKSPACE/tests/support/runtime_server.mjs" --held-stream-debug-stop
+      - name: Report capability skips
+        if: always()
+        run: ctest --test-dir build -R '^stall_' -V | grep -E '\[ SKIP \]|STALL_SKIPPED' || true

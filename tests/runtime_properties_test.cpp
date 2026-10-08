@@ -1,6 +1,4 @@
 // Real, model-free runtime properties. Usage: sp_runtime_tests <node> <runtime_server.mjs>
-// Optional isolated causal diagnostics: --held-stream-diagnostic | --held-stream-native-resolver-control
-// macOS debugger snapshot while requests remain held: --held-stream-debug-stop
 #include "runtime/client.h"
 #include "runtime/testing.h"
 #include "core/native.h"
@@ -14,7 +12,6 @@
 
 #ifndef _WIN32
 #include <arpa/inet.h>
-#include <netdb.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
@@ -662,18 +659,7 @@ int thread_count() {
   throw std::runtime_error("cannot inspect process thread count");
 #endif
 }
-void held_stream_gate(Peer& peer, bool diagnostic = false, bool native_resolve_control = false,
-                      bool debugger_stop = false) {
-  const int before_control = thread_count();
-  if (native_resolve_control) {
-    // A causal control, not a client/request warmup: invoke the OS resolver directly for the
-    // same owned numeric loopback address before constructing any SDK client.
-    addrinfo hints{}; hints.ai_family = AF_UNSPEC; hints.ai_socktype = SOCK_STREAM;
-    addrinfo* raw = nullptr;
-    const int status = ::getaddrinfo("127.0.0.1", nullptr, &hints, &raw);
-    std::unique_ptr<addrinfo, decltype(&::freeaddrinfo)> resolved(raw, &::freeaddrinfo);
-    require(status == 0 && resolved, "native loopback resolver control failed");
-  }
+void held_stream_gate(Peer& peer) {
   const int baseline = thread_count();
   auto opts = options(); opts.limits.max_operations = 256;
   opts.workers = 2; opts.transport.io_threads = 2; opts.transport.resolver_threads = 2;
@@ -681,32 +667,12 @@ void held_stream_gate(Peer& peer, bool diagnostic = false, bool native_resolve_c
   const std::size_t k = 4 * threads + 64;
   Client client(descriptor(peer, false), opts);
   const int constructed = thread_count();
-  if (diagnostic) {
-    std::cerr << "held-stream threads: control=" << (native_resolve_control ? "native-loopback-getaddrinfo" : "none")
-              << " before_control=" << before_control << " baseline=" << baseline
-              << " client_constructed=" << constructed << " configured=" << threads << '\n';
-  }
   int first = 0;
   for (auto count : {k, 2 * k}) {
     const auto held = peer.arm("hold"); std::vector<Operation> operations; operations.reserve(count);
     for (std::size_t i = 0; i < count; ++i) operations.push_back(client.start(request(held)));
     peer.wait(held, "held", count);
     const int measured = thread_count();
-    if (diagnostic || measured > baseline + static_cast<int>(threads) || (first && measured > first)) {
-      std::cerr << "held-stream threads: before_control=" << before_control << " baseline=" << baseline
-                << " client_constructed=" << constructed << " held=" << count
-                << " measured=" << measured << " first_held=" << first << " configured=" << threads << '\n';
-    }
-#ifdef __APPLE__
-    // Only the explicit debugger mode stops. Capture producer stacks before any exception
-    // unwinds the live client/held operations; the parent's debugger/job deadline bounds capture.
-    if (debugger_stop && measured > baseline + static_cast<int>(threads)) {
-      std::cerr << "held-stream debugger snapshot: held operations remain active\n";
-      std::raise(SIGSTOP);
-    }
-#else
-    (void)debugger_stop;
-#endif
     require(measured <= baseline + static_cast<int>(threads),
             "held requests allocated per-request threads: baseline=" + std::to_string(baseline)
             + " constructed=" + std::to_string(constructed) + " held=" + std::to_string(count)
@@ -889,35 +855,7 @@ int main(int argc, char** argv) {
 #ifndef _WIN32
   std::signal(SIGPIPE, SIG_IGN);
 #endif
-#ifdef __APPLE__
-  if (argc == 4 && std::string_view(argv[3]) == "--held-stream-debug-stop") {
-    AlarmGuard alarm_guard;
-    try {
-      Peer peer(argv[1], argv[2]);
-      held_stream_gate(peer, true, false, true);
-      return 0;
-    } catch (const std::exception& error) {
-      std::cerr << "held-stream debugger diagnostic failed: " << error.what() << '\n';
-      return 1;
-    }
-  }
-#endif
-  if (argc == 4 && (std::string_view(argv[3]) == "--held-stream-diagnostic" ||
-                    std::string_view(argv[3]) == "--held-stream-native-resolver-control")) {
-    AlarmGuard alarm_guard;
-    try {
-      Peer peer(argv[1], argv[2]);
-      held_stream_gate(peer, true, std::string_view(argv[3]) == "--held-stream-native-resolver-control");
-      return 0;
-    } catch (const std::exception& error) {
-      std::cerr << "held-stream diagnostic failed: " << error.what() << '\n';
-      return 1;
-    }
-  }
-  if (argc != 3) {
-    std::cerr << "usage: sp_runtime_tests <node> <runtime_server.mjs> [--held-stream-diagnostic | --held-stream-native-resolver-control]\n";
-    return 2;
-  }
+  if (argc != 3) { std::cerr << "usage: sp_runtime_tests <node> <runtime_server.mjs>\n"; return 2; }
   // Broad process-level guard also bounds accidental join deadlocks, independently
   // of operation deadlines. There are no per-request test threads.
   AlarmGuard alarm_guard;
