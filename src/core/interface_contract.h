@@ -9,7 +9,7 @@ struct InterfaceContract {
   std::uint32_t revision;
   std::uint64_t capabilities;
 };
-inline constexpr std::uint32_t EXPECTED_INTERFACE_REVISION = 4;
+inline constexpr std::uint32_t EXPECTED_INTERFACE_REVISION = 5;
 namespace capability {
 inline constexpr std::uint64_t TypedRuntime = 1ULL << 0;
 inline constexpr std::uint64_t PreparedAdmission = 1ULL << 1;

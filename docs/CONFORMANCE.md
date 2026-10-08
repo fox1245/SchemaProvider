@@ -1,6 +1,6 @@
 # Conformance plan
 
-This is a behavioral acceptance catalogue, not a blanket pass report. The current typed SDK uses interface/shared-library generation 4 and remains pre-stable. [Usage](USAGE.md) defines current controls and ownership. The [interface 4 execution record](#interface-4-execution-record) below is separate from [earlier interface 3 provenance](POC_PLAN.md#current-typed-c-cutover-provenance); no historical count is relabeled.
+This is a behavioral acceptance catalogue, not a blanket pass report. The current typed SDK uses interface/shared-library generation 5 and remains pre-stable. [Usage](USAGE.md) defines current controls and ownership. The [interface 5](#interface-5-execution-record) and [interface 4](#interface-4-execution-record) execution records below are separate from [earlier interface 3 provenance](POC_PLAN.md#current-typed-c-cutover-provenance); no historical count is relabeled.
 
 Earlier interface 3 Linux cohorts exercised optional HTTP/3 under plain, ASan+UBSan and TSan; [D1's historical evidence](decisions/D1-transport.md#evidence) records those backends and instrumentation limits. The standalone interface 4 SDK cohort below did not exercise HTTP/3, ASan/TSan or Windows/macOS/ARM64. Integrated NeoGraph diagnostics and release-matrix checks have separate scopes. WebSocket properties below remain deferred future specifications, outside current SDK/release gates and never counted as passes.
 
@@ -21,6 +21,12 @@ The exact documented Responses cursor fragment also ran in a standalone installe
 These observations establish no new hosted-vendor, signature-consumption, Windows/macOS/ARM64, HTTP/3 or sanitizer qualification. Archive format remains3. Native NeoGraph/wheel and publication were separate pending integration work at this checkpoint; no paid calls were made.
 
 Historically, the runtime target declared a private `OpenSSL::Crypto` dependency for `client.cpp`; after that build correction, the local shared SDK was rebuilt and installed, and the exact README consumer passed reported-zero, missing-count and HTTP400 Failure scenarios. Those observations do not qualify Windows or macOS wheels. The SDK's direct OpenSSL dependency has since been removed: SHA-256, HMAC-SHA256, constant-time comparison and operating-system entropy are implemented in-tree (`src/crypto`). Production targets and package exports no longer request libcrypto; libcurl's TLS backend remains unchanged and may itself use OpenSSL. Persisted digest/archive/ledger formats are unchanged, and `crypto_runtime_links_no_libcrypto` guards the runtime-only process maps.
+
+## Interface 5 execution record
+
+The SDK 0.2.0 tree (interface revision 5, shared-library generation 5) was built and exercised on Linux x86_64/WSL2 (kernel 6.18, AMD Ryzen 7 5800X) with GNU 13.3.0, CMake 3.28.3, Ninja 1.11.1, libcurl 8.5.0 and Node.js 22.14.0 for the local peers. All 47 registered ctest entries passed in a Release build (`-g1 -fno-omit-frame-pointer`), in five further full Release runs, in an AddressSanitizer+UBSan build and in a ThreadSanitizer build (both Debug `-O1`; the latter started through `setarch x86_64 -R`), with no sanitizer report. The four `stall_*` entries also passed 20 consecutive repetitions. Every peer was a local process on an owned ephemeral loopback port (HTTP/1.1, cleartext HTTP/2, and TLS with an ephemeral private CA); no hosted endpoint, credential or paid call was used.
+
+The entries cover the optional connect, first-byte and idle bounds (`stall_*`), five API families across real transport lifecycle states (`matrix_*`), and the in-tree SHA-256, HMAC-SHA256 and entropy primitives with their differential check against OpenSSL (`crypto_*`; `crypto_runtime_links_no_libcrypto` guards the runtime's process maps). They do not qualify HTTP/3, Windows, macOS, ARM64 or any hosted vendor, and the 47 ctest entries are not the 27 registered cases counted in the interface 4 record above.
 
 
 ## 1. Purpose

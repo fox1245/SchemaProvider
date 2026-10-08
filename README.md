@@ -2,7 +2,7 @@
 
 SchemaProvider is a C++20 client for five LLM API families: Chat Completions, Responses, Messages, Gemini generate and Interactions. A **family** is a wire protocol, not a model or endpoint operator. Each family has a typed request encoder and response codec; the runtime supplies HTTP/SSE transport, deadlines, cancellation and owned results.
 
-The current package is **0.1.1 alpha**, with interface revision **4** and shared-library generation **4**. These are separate version domains: neither the linked-interface check nor shared-library version promises source or cross-toolchain ABI compatibility. [Current Linux execution evidence](docs/CONFORMANCE.md#interface-4-execution-record) is separate from [earlier interface 3 cohorts](docs/POC_PLAN.md#current-typed-c-cutover-provenance); neither establishes every platform/vendor/model combination as qualified.
+The current package is **0.2.0 alpha**, with interface revision **5** and shared-library generation **5**. This is a rebuild boundary: timeout controls change the public request/options layouts, so rebuild and reinstall SDK consumers with matching headers and libraries. Native archives remain v3 and portable history remains v2. These are separate version domains: neither the linked-interface check nor shared-library version promises source or cross-toolchain ABI compatibility. [Earlier Linux interface-4 evidence](docs/CONFORMANCE.md#interface-4-execution-record) and [interface-3 cohorts](docs/POC_PLAN.md#current-typed-c-cutover-provenance) retain their original scope; neither retroactively qualifies this build or every platform/vendor/model combination.
 
 ## Install and use the unstable C++ SDK
 
@@ -21,7 +21,7 @@ Use a separate build directory and `-DBUILD_SHARED_LIBS=ON` for shared libraries
 ```cmake
 cmake_minimum_required(VERSION 3.20)
 project(first_request LANGUAGES CXX)
-find_package(SchemaProvider 0.1.1 EXACT CONFIG REQUIRED)
+find_package(SchemaProvider 0.2.0 EXACT CONFIG REQUIRED)
 add_executable(first_request main.cpp)
 target_link_libraries(first_request PRIVATE SchemaProvider::transport)
 target_compile_features(first_request PRIVATE cxx_std_20)
@@ -123,9 +123,9 @@ The old NeoGraph `Provider::complete`, `OpenAIProvider`, `RateLimitedProvider` a
 ## Documentation and evidence
 
 - [Usage](docs/USAGE.md): runnable local first use, configuration, request controls and result handling.
-- [Migration](docs/MIGRATION.md): interface 4, preserved controls and the NeoGraph adapter cutover.
+- [Migration](docs/MIGRATION.md): interfaces 4 and 5, preserved controls and the NeoGraph adapter cutover.
 - [Design](docs/DESIGN.md): current architecture, with labeled historical proposals.
-- [Conformance](docs/CONFORMANCE.md): current interface 4 execution record, behavioral properties and remaining gates.
+- [Conformance](docs/CONFORMANCE.md): interface 4 and 5 execution records, behavioral properties and remaining gates.
 - [PoC and historical evidence](docs/POC_PLAN.md): separate cohort-scoped results, including the old-ABI lossless NO-GO and interface 3 typed-cutover provenance.
 - [Roadmap](docs/ROADMAP.md): implemented work versus unclaimed release/platform/vendor gates.
 - [Research](docs/RESEARCH.md) and [decisions](docs/decisions/): source-linked rationale; external papers are not proof of SDK behavior.
