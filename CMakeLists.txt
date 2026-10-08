@@ -419,7 +419,8 @@ if(SP_BUILD_TESTS)
   foreach(stall_suite transport tls_h2 connect runtime)
     add_test(NAME stall_${stall_suite} COMMAND ${sp_test_runner} $<TARGET_FILE:sp_stall_tests>
              ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/stall_server.mjs ${stall_suite})
-    set_tests_properties(stall_${stall_suite} PROPERTIES TIMEOUT 300 SKIP_REGULAR_EXPRESSION "STALL_SKIPPED")
+    set_tests_properties(stall_${stall_suite} PROPERTIES TIMEOUT 300 SKIP_REGULAR_EXPRESSION "STALL_SKIPPED"
+                         ENVIRONMENT "SP_OPENSSL=${SP_OPENSSL}")
   endforeach()
 endif()
 

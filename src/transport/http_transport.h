@@ -60,13 +60,15 @@ struct HttpRequest {
   // time_point::max() means "none"; every production call site must set one. The optional stall
   // bounds below never extend it: a bound that would expire at or after the deadline never fires.
   std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max();
+  HttpVersion http_version = HttpVersion::Auto;
+  std::string ca_file;             // optional extra trust anchor file (tests, private CAs)
   // Per-attempt overrides of the TransportOptions defaults (std::nullopt = use the default;
-  // zero or negative = disabled). Each bound is measured from the start of this attempt.
+  // zero or negative = disabled). Each bound is measured from the start of this attempt. Declared
+  // last so the member order, and with it any positional initializer, of the earlier fields is
+  // unchanged.
   std::optional<std::chrono::milliseconds> connect_timeout;
   std::optional<std::chrono::milliseconds> first_byte_timeout;
   std::optional<std::chrono::milliseconds> idle_timeout;
-  HttpVersion http_version = HttpVersion::Auto;
-  std::string ca_file;             // optional extra trust anchor file (tests, private CAs)
 };
 
 enum class ResponseVersion : std::uint8_t { Unknown, Http1_0, Http1_1, Http2, Http3 };

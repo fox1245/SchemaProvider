@@ -1,6 +1,6 @@
-# Migrating to interface 4
+# Migrating to interface 5
 
-Use the [current first-request example](../README.md#first-request) before adapting an older caller. Interface 4 preserves the typed outcome/prepare contract while adding declared controls and explicit cursor/portable-history paths. Rebuild with matching headers and loaded generation 4 libraries; migrate every removed caller rather than adding a legacy adapter, descriptor interpreter or alias.
+Use the [current first-request example](../README.md#first-request) before adapting an older caller. Interface 5 keeps the typed outcome/prepare contract of interface 4 (declared controls, explicit cursor/portable-history paths) and adds optional stall bounds; the sections below cover the step from interface 4 to 5 and, for older callers, from interface 3 to 4. Rebuild with matching headers and loaded generation 5 libraries; migrate every removed caller rather than adding a legacy adapter, descriptor interpreter or alias.
 
 The SDK declarations are [runtime/client.h](../src/runtime/client.h) and [core/value.h](../src/core/value.h). The adapter declarations live in NeoGraph's [`provider.h`](https://github.com/fox1245/NeoGraph/blob/feat/schemaprovider-cutover/include/neograph/provider.h) and [`llm/schema_provider.h`](https://github.com/fox1245/NeoGraph/blob/feat/schemaprovider-cutover/include/neograph/llm/schema_provider.h); deployment must pin the released repository/package combination rather than treating a branch URL as an immutable version.
 

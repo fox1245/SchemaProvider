@@ -15,6 +15,7 @@
 //   none               read the whole request, never answer
 //   head-silent        200 + SSE headers, then silence
 //   prefix-silent      200 + SSE headers + the family's valid first events, then silence
+//   utf8-silent        prefix, then ": " and only the first byte of a three-byte UTF-8 character, then silence
 //   trickle:p1         prefix, then one valid delta event every p1 ms until the client goes away
 //   comments:p1        200 + SSE headers, then an SSE comment every p1 ms (no events)
 //   late-head:p1       wait p1 ms, then the complete response
@@ -171,6 +172,8 @@ function handle(req, res) {
         return;
       case 'head-silent': head(); return;
       case 'prefix-silent': head(); send(prefix(info.family, info.model)); return;
+      case 'utf8-silent':
+        head(); send(prefix(info.family, info.model)); send(Buffer.from([0x3a, 0x20, 0xe2])); return;
       case 'slow-head': {
         // Use raw H1 response-head bytes so each header line moves independently of the body.
         const socket = res.socket;
@@ -272,7 +275,7 @@ const listen = server => new Promise(resolve => server.listen(0, '127.0.0.1', ()
 
 function certificate() {
   directory = mkdtempSync('/tmp/schemaprovider-stall-');
-  const result = spawnSync('openssl', ['req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1',
+  const result = spawnSync(process.env.SP_OPENSSL || 'openssl', ['req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1',
     '-nodes', '-sha256', '-keyout', 'key.pem', '-out', 'cert.pem', '-days', '2', '-subj', '/CN=localhost',
     '-addext', 'basicConstraints=critical,CA:TRUE', '-addext', 'keyUsage=critical,digitalSignature,keyCertSign',
     '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1'],

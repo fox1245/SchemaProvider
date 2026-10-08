@@ -716,7 +716,9 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
         if (!accumulator->terminal()) accumulator->accept(Fail{close_error});
       }
       else if (options.streaming) {
-        framer->finish();
+        // Validate a dangling multi-byte sequence only when the stream really ended. A stall bound, reset or
+        // truncation cuts it wherever it was, and that is the transport's error, not malformed server output.
+        if (normal) framer->finish();
         if (framer->error() != transport::SseError::None)
           fail_semantic(framer->error() == transport::SseError::ResourceLimit ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt);
         else if (chat_codec) chat_codec->finish({normal, close_error.kind});
@@ -1038,8 +1040,10 @@ OperationStats ClientAccess::stats(const Operation& operation) {
   return operation.state_->statistics;
 }
 bool ClientAccess::wait_for_backoff(const Operation& operation, std::chrono::milliseconds timeout) {
-  if (!operation.state_ || runtime_depth || pool_thread || transport::on_io_thread()) return false;
   auto state = operation.state_;
+  if (!state || runtime_depth || pool_thread || transport::on_io_thread() ||
+      (state->executor && state->executor->in_thread()))
+    return false;
   std::unique_lock lock(state->mutex);
   state->joined.wait_for(lock, timeout, [&] { return state->statistics.backing_off || state->finished; });
   return state->statistics.backing_off;
