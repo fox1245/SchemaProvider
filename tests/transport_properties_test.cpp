@@ -1543,7 +1543,7 @@ TEST(literal_origins_bypass_custom_resolver_and_remain_isolated) {
   collectors.reserve(count);
   operations.reserve(count);
   for (std::size_t i = 0; i < count; ++i) {
-    keys[i] = "literal_" + std::to_string(i);
+    keys[i] = "literal" + std::to_string(i);  // the peer accepts only [A-Za-z0-9]{1,32}
     auto c = std::make_shared<Collector>();
     operations.push_back(t.start(h2_post(node, "/ok?key=" + keys[i], 15000, hosts[i % hosts.size()]), c->callbacks()));
     collectors.push_back(std::move(c));
