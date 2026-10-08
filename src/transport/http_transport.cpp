@@ -121,15 +121,15 @@ std::string_view trim(std::string_view s) {
 
 // Effective stall bound for one attempt: the request's override, else the transport default. A bound
 // that is disabled, or would expire no earlier than the deadline, is reported as zero because it
-// can never fire first (the idle bound's expiry only ever moves later). The comparison is done in
-// milliseconds so an absurdly large bound cannot overflow the clock's tick type.
+// can never fire first (the idle bound's expiry only ever moves later). Round positive slack upward
+// to milliseconds, preserving fractional slack without overflowing the clock's tick type.
 std::chrono::milliseconds effective_bound(std::optional<std::chrono::milliseconds> request_value,
                                           std::chrono::milliseconds fallback,
                                           std::chrono::steady_clock::time_point from,
                                           std::chrono::steady_clock::time_point deadline) {
   const std::chrono::milliseconds bound = request_value.value_or(fallback);
   if (bound.count() <= 0 || deadline <= from) return std::chrono::milliseconds{0};
-  const auto room = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - from);
+  const auto room = std::chrono::ceil<std::chrono::milliseconds>(deadline - from);
   return bound >= room ? std::chrono::milliseconds{0} : bound;
 }
 }  // namespace
@@ -1277,9 +1277,9 @@ void TransportCore::on_idle_expired(const std::shared_ptr<OperationState>& op) {
   const auto now = std::chrono::steady_clock::now();
   // A paused transfer is the application applying backpressure, not the peer going silent.
   if (op->paused) op->last_activity = now;
-  // Compare milliseconds before adding: an admitted bound may be enormous, and activity can move
-  // its expiry beyond the clock's representable range even when started + bound was safe.
-  if (op->idle_bound >= std::chrono::duration_cast<std::chrono::milliseconds>(op->req.deadline - op->last_activity))
+  // Round positive slack upward before adding: preserve sub-millisecond deadline slack while
+  // rejecting enormous bounds that would overflow the clock's representable range.
+  if (op->idle_bound >= std::chrono::ceil<std::chrono::milliseconds>(op->req.deadline - op->last_activity))
     return;  // The immutable deadline is earlier (also avoids overflowing last_activity + bound).
   const auto due = op->last_activity + op->idle_bound;
   if (due <= now) {

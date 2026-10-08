@@ -837,12 +837,13 @@ sp::runtime::RunOptions run_options(bool retry = false, bool risk = false, std::
 struct Outcome {
   sp::runtime::Result result;
   double ms = 0;
+  Clock::time_point ended;
 };
 Outcome complete(Fam fam, std::uint64_t port, const std::string& model, sp::runtime::Options options, sp::runtime::RunOptions run) {
   sp::runtime::Client client(make_descriptor(fam, port, model), std::move(options));
   const auto t0 = Clock::now();
   auto result = client.complete(make_request(fam, model), std::move(run));
-  return {result, ms_since(t0)};
+  return {result, ms_since(t0), Clock::now()};
 }
 const sp::Failure& failure_of(const sp::runtime::Result& result, sp::ErrorKind kind) {
   CHECK(result && std::holds_alternative<sp::Failure>(*result));
@@ -926,7 +927,7 @@ void runtime_pin_default_behaviour(Env& e) {
     run.deadline = Clock::now() + 900ms;
     auto out = complete(Fam::Chat, e.ports.http, model, base_options(), run);
     const auto& f = failure_of(out.result, sp::ErrorKind::DeadlineExceeded);
-    CHECK(out.ms >= 895 && out.ms < 2500);
+    CHECK(out.ended >= *run.deadline && out.ended < *run.deadline + 2s);
     CHECK(f.error.retry_safety == sp::RetrySafety::OutputObserved);
     const auto partial = text_of(f.partial.messages);
     CHECK(partial.find("partial") != std::string::npos && partial.size() > std::string("partial").size() + 3);
@@ -938,7 +939,7 @@ void runtime_pin_default_behaviour(Env& e) {
     run.deadline = Clock::now() + 700ms;
     auto out = complete(Fam::Chat, e.ports.http, model, base_options(), run);
     failure_of(out.result, sp::ErrorKind::DeadlineExceeded);
-    CHECK(out.ms >= 695 && out.ms < 2500);
+    CHECK(out.ended >= *run.deadline && out.ended < *run.deadline + 2s);
   }
 }
 void runtime_trickle_and_comments_are_not_cut(Env& e) {
@@ -950,7 +951,7 @@ void runtime_trickle_and_comments_are_not_cut(Env& e) {
     run.deadline = Clock::now() + 1600ms;
     auto out = complete(Fam::Chat, e.ports.http, model, options, run);
     failure_of(out.result, sp::ErrorKind::DeadlineExceeded);
-    CHECK(out.ms >= 1595 && out.ms < 3500);
+    CHECK(out.ended >= *run.deadline && out.ended < *run.deadline + 2s);
   }
 }
 void runtime_run_override_beats_client_default(Env& e) {
@@ -971,7 +972,7 @@ void runtime_run_override_beats_client_default(Env& e) {
     run.deadline = Clock::now() + 800ms;
     auto out = complete(Fam::Chat, e.ports.http, model, options, run);
     failure_of(out.result, sp::ErrorKind::DeadlineExceeded);
-    CHECK(out.ms >= 795);
+    CHECK(out.ended >= *run.deadline && out.ended < *run.deadline + 2s);
   }
   {  // default long, run tighter
     const auto model = e.peer.arm("head-silent");
@@ -1020,7 +1021,7 @@ void runtime_deadline_wins_and_cancel(Env& e) {
     run.deadline = Clock::now() + 500ms;
     auto out = complete(Fam::Chat, e.ports.http, model, options, run);
     failure_of(out.result, sp::ErrorKind::DeadlineExceeded);
-    CHECK(out.ms >= 495 && out.ms < 2000);
+    CHECK(out.ended >= *run.deadline && out.ended < *run.deadline + 2s);
   }
   {
     const auto model = e.peer.arm("head-silent");
