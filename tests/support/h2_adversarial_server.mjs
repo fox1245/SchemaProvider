@@ -4,7 +4,7 @@
 // Per-key written counts bytes accepted by write/end; done counts writable finish;
 // closed counts stream close. Session/stream record the most recent keyed request.
 // GET /close on the stats listener closes only sessions with zero live streams.
-// Active sessions are untouched; idle sockets are closed without waiting for a client GOAWAY.
+// Active sessions are untouched; idle TCP sockets are reset without waiting for a client GOAWAY.
 import http from 'node:http';
 import http2 from 'node:http2';
 
@@ -181,7 +181,7 @@ function createPeer(peer) {
 
 const peerA = createPeer('A');
 const peerB = createPeer('B');
-const stats = http.createServer((request, response) => {
+const stats = http.createServer(async (request, response) => {
   request.on('error', () => {});
   response.on('error', () => {});
   request.resume();
@@ -189,19 +189,26 @@ const stats = http.createServer((request, response) => {
   response.setHeader('content-type', 'text/plain');
   if (request.method === 'GET' && request.url === '/close') {
     let retired = 0;
+    const closed = [];
     for (const [session, state] of sessions) {
       if (state.active !== 0 || state.retiring || session.destroyed || session.closed) continue;
       state.retiring = true;
-      // destroy() sends GOAWAY and closes this idle socket without waiting for the client's
-      // reciprocal close. A connection cache need not monitor sockets with no active handle.
+      // session.destroy() queues GOAWAY before FIN, so its local close event alone does not
+      // establish that a client's idle connection cache has seen the retirement. Reset the TCP
+      // socket instead: no buffered protocol frames can make this retired session look reusable.
       try {
-        session.destroy();
+        const socket = session.socket;
+        closed.push(new Promise(resolve => socket.once('close', resolve)));
+        socket.resetAndDestroy();
         increment('retired_sessions');
         retired += 1;
       } catch {
-        // A concurrent peer close requires no further action.
+        response.statusCode = 500;
+        response.end('retirement-failed\n');
+        return;
       }
     }
+    await Promise.all(closed);
     response.end(`retired ${retired}\n`);
     return;
   }

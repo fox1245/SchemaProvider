@@ -80,4 +80,4 @@ jobs:
           lldb --batch \
             -o 'settings set target.process.stop-on-sharedlibrary-events false' \
             -o run -k 'thread backtrace all -c 20' -k 'register read pc sp fp' \
-            -- ./build/sp_qualification_meter_test "$GITHUB_WORKSPACE"
+            -- ./build/sp_qualification_meter_test "$GITHUB_WORKSPACE" --section thread_money_race

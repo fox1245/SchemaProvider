@@ -1702,8 +1702,10 @@ TEST(http2_dns_refresh_and_connection_retirement) {
   const Stats stats = node.stats_request();
   CHECK(stats["first_requests"] == 1 && stats["second_requests"] == 1 && stats["third_requests"] == 1);
   CHECK(stats["third_session"] != stats["first_session"]);
-  note("DNS refresh: %d lookups, second reused=%d; retired=%ld; fresh connection reached peer B",
-       lookups.load(), second.attempt.connection_reused, retirement["retired"]);
+  note("DNS refresh: %d lookups, second reused=%d; retired=%ld; third=%s/%s curl=%d reused=%d resends=%u reached_peer_B=%d",
+       lookups.load(), second.attempt.connection_reused, retirement["retired"],
+       name_of(third.status), name_of(third.failure), third.curl_code, third.attempt.connection_reused,
+       third.attempt.transport_internal_resends, b->body == "peer B\n");
 }
 
 }  // namespace

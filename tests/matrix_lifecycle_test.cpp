@@ -562,7 +562,8 @@ void close_after_head(Matrix& m, Wire w, bool streaming, Want want) {
   c.peer(1, 1);
 }
 
-// A port that is bound but never listens: the kernel refuses every connection.
+// An established outbound socket reserves the port without a listening/wildcard PCB.
+// Merely binding an unconnected socket silently drops SYNs on Darwin (TCPS_CLOSED).
 class RefusedPort {
  public:
   RefusedPort() : socket_(::socket(AF_INET, SOCK_STREAM, 0)) {
@@ -572,36 +573,47 @@ class RefusedPort {
     portable::socklen size = sizeof(a);
     require(::getsockname(socket_.get(), reinterpret_cast<sockaddr*>(&a), &size) == 0, "cannot inspect the refused port");
     port = ntohs(a.sin_port);
+    portable::Socket listener(::socket(AF_INET, SOCK_STREAM, 0));
+    require(static_cast<bool>(listener), "cannot create refused-port reservation peer");
+    sockaddr_in peer{}; peer.sin_family = AF_INET; peer.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    require(::bind(listener.get(), reinterpret_cast<sockaddr*>(&peer), sizeof(peer)) == 0,
+            "cannot bind refused-port reservation peer");
+    require(::listen(listener.get(), 1) == 0, "cannot listen for refused-port reservation");
+    size = sizeof(peer);
+    require(::getsockname(listener.get(), reinterpret_cast<sockaddr*>(&peer), &size) == 0,
+            "cannot inspect refused-port reservation peer");
+    require(::connect(socket_.get(), reinterpret_cast<sockaddr*>(&peer), sizeof(peer)) == 0,
+            "cannot connect refused-port reservation");
+    peer_ = portable::Socket(::accept(listener.get(), nullptr, nullptr));
+    require(static_cast<bool>(peer_), "cannot accept refused-port reservation");
   }
   std::uint16_t port = 0;
  private:
   portable::Socket socket_;
+  portable::Socket peer_;
 };
 void connect_refused(Matrix& m, bool retry) {
   RefusedPort refused;
+  {
+    // Assert the fixture really refuses TCP, rather than silently blackholing it. Keep backend
+    // observations in failure diagnostics; the public runtime deliberately exposes only safe text.
+    sp::transport::Transport transport;
+    sp::transport::HttpRequest request;
+    request.url = "http://127.0.0.1:" + std::to_string(refused.port) + "/";
+    request.deadline = Clock::now() + 5s;
+    const auto wire = transport.start(std::move(request), {{}, {}, [](const auto&) {}}).join();
+    if (wire.status != sp::transport::Status::Failed || wire.failure != sp::transport::FailureKind::Connect ||
+        wire.attempt.reached >= sp::transport::Stage::RequestStarted || wire.http_status != 0) {
+      require(false, "connect-refused wire: status=" + std::to_string(static_cast<unsigned>(wire.status))
+              + " failure=" + std::to_string(static_cast<unsigned>(wire.failure))
+              + " curl_code=" + std::to_string(wire.curl_code)
+              + " reached=" + std::to_string(static_cast<unsigned>(wire.attempt.reached))
+              + " http_status=" + std::to_string(wire.http_status));
+    }
+  }
   Cell c(m.lab, m.fam, R"([{"a":"ok"}])", {.streaming = false, .retry = retry, .attempts = 3, .port = refused.port});
   c.start();
-  try {
-    expect_failure(c.finish(), Want(ErrorKind::Transport, RetryClass::Transient, RetrySafety::NotSent).head_seen(false).sent(false).tries(retry ? 3U : 1U));
-  } catch (...) {
-    // Runtime errors deliberately hide backend details. Probe the same reserved, non-listening
-    // endpoint only on failure; emit numeric wire observations, never headers or request bodies.
-    try {
-      sp::transport::Transport transport;
-      sp::transport::HttpRequest request;
-      request.url = "http://127.0.0.1:" + std::to_string(refused.port) + "/";
-      request.deadline = Clock::now() + 5s;
-      const auto wire = transport.start(std::move(request), {{}, {}, [](const auto&) {}}).join();
-      std::cerr << "connect-refused wire: status=" << static_cast<unsigned>(wire.status)
-                << " failure=" << static_cast<unsigned>(wire.failure)
-                << " curl_code=" << wire.curl_code
-                << " reached=" << static_cast<unsigned>(wire.attempt.reached)
-                << " http_status=" << wire.http_status << '\n';
-    } catch (const std::exception&) {
-      std::cerr << "connect-refused wire: probe could not start\n";
-    }
-    throw;
-  }
+  expect_failure(c.finish(), Want(ErrorKind::Transport, RetryClass::Transient, RetrySafety::NotSent).head_seen(false).sent(false).tries(retry ? 3U : 1U));
   c.peer(0, 0);
 }
 

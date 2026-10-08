@@ -513,8 +513,19 @@ void storage_fail_closed(const std::filesystem::path& source) {
 }
 }  // namespace
 int main(int argc, char** argv) {
-  if (argc != 2) { std::fprintf(stderr, "usage: qualification_meter_test <source-root>\n"); return 2; }
+  const bool diagnostic = argc == 4 && std::string_view(argv[2]) == "--section" &&
+      std::string_view(argv[3]) == "thread_money_race";
+  if (argc != 2 && !diagnostic) {
+    std::fprintf(stderr, "usage: qualification_meter_test <source-root> [--section thread_money_race]\n");
+    return 2;
+  }
   const std::filesystem::path source(argv[1]);
+  // Temporary crash isolation for LLDB; the registered full-suite invocation is unchanged.
+  if (diagnostic) {
+    std::fprintf(stderr, "[qualification_meter] diagnostic thread_money_race\n");
+    thread_money_race(source);
+    return failures ? 1 : 0;
+  }
   std::fprintf(stderr, "[qualification_meter] catalog_behavior\n");
   catalog_behavior(source);
   std::fprintf(stderr, "[qualification_meter] settlement_and_restart\n");
