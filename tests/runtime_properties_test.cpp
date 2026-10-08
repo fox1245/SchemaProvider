@@ -349,8 +349,8 @@ void retry_policy(Peer& peer) {
   }
 }
 void safe_connect_retry() {
-  // Reserve a port without listening: the kernel refuses connections, and no
-  // unrelated listener can claim it between attempts.
+  // Keep an established outbound connection on the reserved port. A bound but
+  // unconnected socket silently drops incoming SYNs on Darwin, rather than refusing them.
   portable::Socket guard(socket(AF_INET, SOCK_STREAM, 0));
   const auto fd = guard.get();
   require(static_cast<bool>(guard), "cannot reserve refused-connect port");
@@ -358,6 +358,20 @@ void safe_connect_retry() {
   require(bind(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0, "cannot bind refused-connect port");
   portable::socklen size = sizeof(address);
   require(getsockname(fd, reinterpret_cast<sockaddr*>(&address), &size) == 0, "cannot inspect refused-connect port");
+  portable::Socket listener(socket(AF_INET, SOCK_STREAM, 0));
+  require(static_cast<bool>(listener), "cannot create refused-connect reservation peer");
+  sockaddr_in peer{}; peer.sin_family = AF_INET; peer.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  require(bind(listener.get(), reinterpret_cast<sockaddr*>(&peer), sizeof(peer)) == 0,
+          "cannot bind refused-connect reservation peer");
+  require(listen(listener.get(), 1) == 0, "cannot listen for refused-connect reservation");
+  size = sizeof(peer);
+  require(getsockname(listener.get(), reinterpret_cast<sockaddr*>(&peer), &size) == 0,
+          "cannot inspect refused-connect reservation peer");
+  require(connect(fd, reinterpret_cast<sockaddr*>(&peer), sizeof(peer)) == 0,
+          "cannot connect refused-connect reservation");
+  portable::Socket accepted(accept(listener.get(), nullptr, nullptr));
+  require(static_cast<bool>(accepted), "cannot accept refused-connect reservation");
+  listener.reset();
   for (bool enabled : {false, true}) {
     auto loaded = sp::descriptor::load(descriptor_source(ntohs(address.sin_port), false));
     require(std::holds_alternative<sp::descriptor::ValidatedDescriptor>(loaded), "connect descriptor rejected");
