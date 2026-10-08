@@ -81,3 +81,11 @@ jobs:
             -o 'settings set target.process.stop-on-sharedlibrary-events false' \
             -o run -k 'thread backtrace all -c 20' -k 'register read pc sp fp' \
             -- ./build/sp_qualification_meter_test "$GITHUB_WORKSPACE" --section thread_money_race
+      - name: Observe cold native runtime thread ownership
+        if: failure() && steps.sdk-tests.outcome == 'failure'
+        timeout-minutes: 3
+        run: ./build/sp_runtime_tests "$(command -v node)" "$GITHUB_WORKSPACE/tests/support/runtime_server.mjs" --held-stream-diagnostic
+      - name: Isolate native resolver thread initialization
+        if: failure() && steps.sdk-tests.outcome == 'failure'
+        timeout-minutes: 3
+        run: ./build/sp_runtime_tests "$(command -v node)" "$GITHUB_WORKSPACE/tests/support/runtime_server.mjs" --held-stream-native-resolver-control
