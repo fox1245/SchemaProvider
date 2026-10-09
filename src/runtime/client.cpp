@@ -29,6 +29,7 @@ namespace {
 bool prior_attempt_proves_no_usage(const Failure& failed) noexcept {
   const auto& attempt = failed.error.attempt;
   const auto& usage = failed.partial.usage;
+  const auto& cost = usage.provider_cost;
   return failed.error.retry_safety == RetrySafety::NotSent &&
       !attempt.request_may_have_left && attempt.request_body_bytes == 0 &&
       !attempt.response_head_seen && attempt.transport_internal_resends == 0 &&
@@ -36,7 +37,11 @@ bool prior_attempt_proves_no_usage(const Failure& failed) noexcept {
       failed.partial.raw_events.empty() && usage.stage == UsageStage::Missing &&
       usage.quality == UsageQuality::Consistent && !usage.input_total && !usage.output_total &&
       !usage.total && !usage.provider_reported_total && !usage.input_uncached &&
-      !usage.cache_read && !usage.cache_write && !usage.reasoning && usage.extra.empty() && usage.conflicts.empty();
+      !usage.cache_read && !usage.cache_write && !usage.reasoning && usage.extra.empty() && usage.conflicts.empty() &&
+      !cost.total && !cost.upstream_total && !cost.upstream_input && !cost.upstream_output &&
+      !cost.is_byok && cost.byok_status == CostStatus::Missing && cost.source == CostSource::None &&
+      cost.quality == UsageQuality::Consistent &&
+      std::all_of(cost.status.begin(), cost.status.end(), [](CostStatus status) { return status == CostStatus::Missing; });
 }
 thread_local unsigned runtime_depth = 0;
 thread_local const void* pool_thread = nullptr;
@@ -63,6 +68,7 @@ class PoolExecutor final : public Executor {
     Timers timers;
     std::unordered_map<Timer, std::map<Key, Task>::iterator> timer_index;
     Timer next_timer = 1;
+    std::size_t sleepers = 0;
     bool stopping = false;
   };
   std::shared_ptr<Core> core_ = std::make_shared<Core>();
@@ -76,8 +82,8 @@ class PoolExecutor final : public Executor {
       {
         std::unique_lock lock(core->mutex);
         for (;;) {
-          const auto now = std::chrono::steady_clock::now();
-          if (!core->timers.empty() && core->timers.begin()->first.first <= now) {
+          if (!core->timers.empty() &&
+              core->timers.begin()->first.first <= std::chrono::steady_clock::now()) {
             auto timer = core->timers.begin();
             core->timer_index.erase(timer->first.second);
             task = std::move(timer->second);
@@ -90,11 +96,13 @@ class PoolExecutor final : public Executor {
             break;
           }
           if (core->stopping) { pool_thread = nullptr; return; }
+          ++core->sleepers;
           if (core->timers.empty()) core->wake.wait(lock);
           else {
             const auto wake_at = core->timers.begin()->first.first;
             core->wake.wait_until(lock, wake_at);
           }
+          --core->sleepers;
         }
       }
       try { task(); } catch (...) { /* An operation boundary owns error delivery. */ }
@@ -110,40 +118,57 @@ class PoolExecutor final : public Executor {
   }
   ~PoolExecutor() override { shutdown(); }
   void post(Task task) override {
+    bool wake;
     {
       std::lock_guard lock(core_->mutex);
       if (core_->stopping) return;
       core_->ready.push_back(std::move(task));
+      wake = core_->sleepers != 0;
     }
-    core_->wake.notify_one();
+    // Wait admission and queue publication share the mutex: an active worker
+    // cannot miss this task when it next checks the queue before sleeping.
+    if (wake) core_->wake.notify_one();
   }
   Timer schedule(SteadyTime at, Task task) override {
     Timer id;
+    bool wake = false;
     Core::Timers::node_type rollback;
     {
       std::lock_guard lock(core_->mutex);
       if (core_->stopping) return 0;
+      const bool earlier = core_->timers.empty() || at < core_->timers.begin()->first.first;
       id = core_->next_timer++;
       auto entry = core_->timers.emplace(Core::Key{at, id}, std::move(task)).first;
       try { core_->timer_index.emplace(id, entry); }
       catch (...) { rollback = core_->timers.extract(entry); throw; }
+      if (earlier) wake = core_->sleepers != 0;
     }
-    core_->wake.notify_all();
+    // Broadcast even when only one sleeper was observed: after unlocking,
+    // another worker may enter wait and steal notify_one from an old sleeper
+    // whose timeout predates this update (or whose wait was indefinite).
+    if (wake) core_->wake.notify_all();
     return id;
   }
   void cancel(Timer id) noexcept override {
     // Destroy cancelled captures outside the queue lock: their destructors may
     // release an operation or executor. No stale timer heap retains requests.
     Task released;
+    bool wake = false;
     {
       std::lock_guard lock(core_->mutex);
       auto found = core_->timer_index.find(id);
       if (found == core_->timer_index.end()) return;
+      const bool first = found->second == core_->timers.begin();
+      const auto at = found->second->first.first;
       released = std::move(found->second->second);
       core_->timers.erase(found->second);
       core_->timer_index.erase(found);
+      if (first && (core_->timers.empty() || core_->timers.begin()->first.first != at))
+        wake = core_->sleepers != 0;
     }
-    core_->wake.notify_all();
+    // The same unlocked sleeper-count race applies when recomputing the bound
+    // after earliest removal. Do not choose a single arbitrary waiter.
+    if (wake) core_->wake.notify_all();
   }
   SteadyTime now() const noexcept override { return std::chrono::steady_clock::now(); }
   WallTime wall_now() const noexcept override { return std::chrono::system_clock::now(); }
@@ -835,32 +860,41 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
   }
   void run() noexcept {
     RuntimeScope scope;
-    try { step(); }
-    catch (const CallbackAbort&) {
-      stopping_error = error_for(ErrorKind::Misuse);
-      fail_semantic(ErrorKind::Misuse);
-      if (!attempt) finish_interrupted();
-    } catch (const StopObserved&) {
-      bool cancelled;
-      { std::lock_guard lock(mutex); cancelled = cancellation; }
-      stop(cancelled ? ErrorKind::Cancelled : ErrorKind::DeadlineExceeded);
-      // A callback can interrupt decoding the already-final wire event.
-      if (stage == Stage::InFlight && !attempt) finish_interrupted();
-    } catch (...) {
-      if (stage != Stage::Terminal) {
-        stopping_error = error_for(ErrorKind::ResourceLimit);
-        if (attempt) attempt->cancel();
-        deliver(Outcome{Failure{*stopping_error, {}}});
+    // Drain a small bounded batch without returning through the executor for
+    // every body chunk and terminal wire event. Each step still rechecks stop
+    // controls; the bound preserves scheduling opportunities for other actors.
+    constexpr unsigned max_steps = 4;
+    for (unsigned steps = 0; ; ++steps) {
+      try { step(); }
+      catch (const CallbackAbort&) {
+        stopping_error = error_for(ErrorKind::Misuse);
+        fail_semantic(ErrorKind::Misuse);
+        if (!attempt) finish_interrupted();
+      } catch (const StopObserved&) {
+        bool cancelled;
+        { std::lock_guard lock(mutex); cancelled = cancellation; }
+        stop(cancelled ? ErrorKind::Cancelled : ErrorKind::DeadlineExceeded);
+        // A callback can interrupt decoding the already-final wire event.
+        if (stage == Stage::InFlight && !attempt) finish_interrupted();
+      } catch (...) {
+        if (stage != Stage::Terminal) {
+          stopping_error = error_for(ErrorKind::ResourceLimit);
+          if (attempt) attempt->cancel();
+          deliver(Outcome{Failure{*stopping_error, {}}});
+        }
       }
+      bool again;
+      {
+        std::lock_guard lock(mutex);
+        again = !finished && (head_input || !body_input.empty() || done_input || input_error ||
+            control_pending || retry_fired);
+        if (!again) scheduled = false;
+      }
+      if (!again) return;
+      // Keep scheduled set throughout the batch and the queued continuation,
+      // so producers cannot start a second concurrent actor.
+      if (steps + 1 == max_steps) { post_actor(); return; }
     }
-    bool again = false;
-    {
-      std::lock_guard lock(mutex);
-      if (!finished && (head_input || !body_input.empty() || done_input || input_error ||
-          control_pending || retry_fired)) again = true;
-      else scheduled = false;
-    }
-    if (again) post_actor();
   }
   void finish_interrupted() {
     if (!accumulator->terminal()) accumulator->accept(Fail{*stopping_error});
@@ -985,13 +1019,17 @@ void ClientState::shutdown() noexcept {
   drained.wait(lock, [this] { return closed; });
 }
 
+std::shared_ptr<Executor> make_pool_executor(std::size_t workers) {
+  return std::make_shared<PoolExecutor>(workers);
+}
+
 Client ClientAccess::make(descriptor::ValidatedDescriptor descriptor, Options options,
                           std::shared_ptr<Executor> executor, std::shared_ptr<AttemptTransport> transport,
                           std::function<double()> random01, RealTransportFactory real_transport) {
   validate(descriptor, options);
   if (!transport && !real_transport)
     throw descriptor::ConfigError{"/transport", "a transport backend", 1, "runtime options rejected"};
-  if (!executor) executor = std::make_shared<PoolExecutor>(options.workers);
+  if (!executor) executor = make_pool_executor(options.workers);
   if (!transport) {
     auto wire = options.transport;
     if (wire.resolve) {
@@ -1107,8 +1145,8 @@ Result Operation::join() const {
 InterfaceContract interface_contract() noexcept {
   const auto core = ::sp::core_interface_contract();
   // Literal implementation revision is independent of the consumer's headers.
-  if (core.revision != 5 || codec_interface_revision() != 5 || descriptor::interface_revision() != 5) return {0, 0};
-  return {5, core.capabilities | capability::TypedRuntime | capability::PreparedAdmission |
+  if (core.revision != 6 || codec_interface_revision() != 6 || descriptor::interface_revision() != 6) return {0, 0};
+  return {6, core.capabilities | capability::TypedRuntime | capability::PreparedAdmission |
       capability::CompleteAttemptEvidence};
 }
 const char* InterfaceContractError::what() const noexcept {

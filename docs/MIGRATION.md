@@ -1,6 +1,6 @@
-# Migrating to interface 5
+# Migrating to interface 6
 
-Use the [current first-request example](../README.md#first-request) before adapting an older caller. Interface 5 keeps the typed outcome/prepare contract of interface 4 (declared controls, explicit cursor/portable-history paths) and adds optional stall bounds; the sections below cover the step from interface 4 to 5 and, for older callers, from interface 3 to 4. Rebuild with matching headers and loaded generation 5 libraries; migrate every removed caller rather than adding a legacy adapter, descriptor interpreter or alias.
+Use the [current first-request example](../README.md#first-request) before adapting an older caller. Interface 6 keeps the typed outcome/prepare and stall-bound contracts and appends provider-reported monetary usage. Rebuild with matching headers and loaded generation 6 libraries. Earlier interface 3–5 migrations remain below as historical steps; migrate removed callers rather than adding a legacy adapter or shim.
 
 The SDK declarations are [runtime/client.h](../src/runtime/client.h) and [core/value.h](../src/core/value.h). The adapter declarations live in NeoGraph's [`provider.h`](https://github.com/fox1245/NeoGraph/blob/feat/schemaprovider-cutover/include/neograph/provider.h) and [`llm/schema_provider.h`](https://github.com/fox1245/NeoGraph/blob/feat/schemaprovider-cutover/include/neograph/llm/schema_provider.h); deployment must pin the released repository/package combination rather than treating a branch URL as an immutable version.
 
@@ -20,6 +20,14 @@ closed descriptor + immutable policies + typed family request
 Family C++ code now owns request structure, tool/native checks, stream correlation, usage arithmetic and terminal decisions. Closed JSON supplies admitted values. Adding an endpoint speaking an existing family can change routes or allowed bindings, but JSON cannot invent a new event lifecycle. New wire semantics require a codec change and corresponding evidence.
 
 `sp::runtime::Request` is the five-family typed variant. `Result` is `std::shared_ptr<const sp::Outcome>`, not a flat successful completion object. This lets callers retain ordered parts, native sidecars, raw observations and failure partials without borrowing a client or callback.
+
+## From interface 5 to 6
+
+Package 0.3.0 alpha adds `Usage::provider_cost` and the fixed-size `ProviderReportedCost`, `UsdAmount`, `CostSource`, `CostStatus` and `CostRounding` types. Existing field access remains source-compatible, but `Usage`, `UsageUpdate`, `Completion`, `PartialCompletion` and the containing `Event` layouts grow. Rebuild every consumer against the same headers and generation 6 libraries (`libsp_*.so.6`); interface 5 binaries must not load interface 6 libraries. CMake consumers select `SchemaProvider 0.3.0 EXACT`.
+
+Money is not a token counter. Do not read `cost` from `Usage::extra` or add it to token totals. The amount unit is nanoUSD (1e-9 USD), conservatively rounded upward from the parsed binary64 number, not the unavailable original decimal lexeme. Read each field's status and source, preserve missing versus reported zero, and use the enclosing usage stage to distinguish partial from final observations. A provider report is not an invoice, a catalogue estimate, or authority to settle/renew a spending grant; existing qualification ledgers and nonrenewable holds are unchanged. See [reported costs](USAGE.md#provider-reported-costs).
+
+The Responses codec admits a direct OpenAI base-model alias resolving to the same model with a valid dated snapshot suffix, while retaining requested context and stable served-stream identity. Explicit snapshots and unrelated origins stay exact. The Chat codec accepts a semantically empty idempotent repeated terminal choice carrying usage, without another Stop/content/outcome; contradictory/new post-terminal data remains invalid. These repairs do not admit foreign native replay authority or extend operation deadlines.
 
 ## From interface 4 to 5
 

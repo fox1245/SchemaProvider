@@ -6,7 +6,7 @@
 #include <utility>
 #include <limits>
 
-std::uint32_t sp::codec_interface_revision() noexcept { return 5; }
+std::uint32_t sp::codec_interface_revision() noexcept { return 6; }
 namespace sp {
 namespace {
 bool incomplete(std::string_view s) {

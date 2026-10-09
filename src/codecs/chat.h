@@ -89,7 +89,7 @@ class Codec {
   Diagnostics diagnostics_;
   bool begun_ = false, stopped_ = false, done_ = false, closed_ = false, body_seen_ = false;
   std::optional<Error> buffered_failure_;
-  std::string generation_, model_;
+  std::string generation_, model_, finish_reason_;
   uint64_t created_ = 0;
   std::optional<bool> indexed_tools_;
   uint32_t next_part_ = 1;

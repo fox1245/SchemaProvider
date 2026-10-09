@@ -1,8 +1,22 @@
-# Using the interface 5 SDK
+# Using the interface 6 SDK
 
 Start with the complete [README program](../README.md#first-request). This guide explains what that program owns and how to extend it. Installed declarations, not historical sketches in DESIGN, define the API.
 
 Source references: [runtime request/handle API](../src/runtime/client.h), [owned values/outcomes](../src/core/value.h), [descriptor admission](../src/descriptor/descriptor.h), [immutable policy](../src/descriptor/policy.h) and [native archive](../src/core/native_archive.h). Request-family headers named below define the controls; historical names such as `JsonValue`, `Client::option` and `ForeignReasoning` are not current declarations.
+
+## Provider-reported costs
+
+`Completion::usage.provider_cost` and `Failure::partial.usage.provider_cost` separate monetary metadata from integer token counts. The fixed-size object has optional `total`, `upstream_total`, `upstream_input` and `upstream_output` amounts, four matching `CostStatus` entries in that order, optional `is_byok`/`byok_status`, `CostSource` and independent `UsageQuality`. Amounts carry `Evidence::Reported` and `CostRounding::CeilingParsedBinary64`. No monetary leaves enter `Usage::extra` or token totals.
+
+One `UsdAmount::nano_usd` is 1e-9 USD. Conversion computes the upward integer bound of the already-parsed binary64 USD number with stack-only integer arithmetic; it does not reconstruct an exact original JSON decimal. For example parsed `0.1` projects to `100000001` nanoUSD. Positive subnano amounts round up to one; reported zero stays present zero. Amounts above 2^53 nanoUSD lack the admitted precision, and values reaching the uint64 range overflow. `Missing`, `Malformed`, `PrecisionExceeded`, `Overflow`, `UnknownCurrency` and `Conflict` remain explicit unavailable statuses, not invented zero. Only policy-admitted OpenRouter origins have known USD monetary semantics; arbitrary gateways retain unknown-currency status and raw metadata.
+
+Each reported usage object replaces its monetary snapshot, clearing stale omitted values. The enclosing `Usage::stage` is partial for updates/failures and final on successful commit. Read status/source/stage before using any amount; malformed monetary metadata does not discard otherwise-valid text or relax token-counter validation. Raw envelopes/events remain available. The JSON parser remains strict, so invalid nonfinite JSON and overflow-to-infinity can fail before cost projection; numeric lexical precision already lost during binary64 parsing cannot be recovered.
+
+OpenRouter Chat reports upstream input/output using `upstream_inference_prompt_cost` / `upstream_inference_completions_cost`; Responses uses `upstream_inference_input_cost` / `upstream_inference_output_cost`. They project into the same typed `upstream_input` / `upstream_output` fields. When both spellings are supplied they must agree as parsed binary64 values before quantization; different values become `Conflict`, unavailable amount and inconsistent monetary quality even if both would round into the same nanoUSD bucket. A null/missing primary can use a known alternate. Both raw values remain retained; no arbitrary winner or arithmetic guess is introduced.
+
+Provider-reported costs are not invoices, catalogue estimates or budget authority. This projection does not change a grant, refund an unknown hold, estimate a missing amount, or settle cumulative spending automatically. The qualification catalogue/meter keeps its existing integer microUSD arithmetic, conservative unknown holds and nonrenewable authorization lineage.
+
+The monetary snapshot describes the currently observed wire attempt, not an automatically accumulated bill for every retry of one logical operation. Keep `AttemptEvidence::prior_usage_unknown` alongside it: an earlier attempt can incur unreported usage, even when the final attempt reports zero. Cost-only metadata (including reported zero or BYOK false) prevents the runtime from proving that a prior attempt had no usage. Do not infer a refund, free retry or complete logical-call invoice from one reported amount.
 
 ## Run the first request without a hosted API
 

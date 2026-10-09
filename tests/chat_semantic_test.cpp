@@ -687,9 +687,116 @@ void gateway_request_controls() {
     CHECK(std::get<Error>(chat::encode(gateway, changed, false)).kind == ErrorKind::ReplayIneligible);
   }
 }
+void idempotent_terminal_money_tail() {
+  auto loaded = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"tail-money","family":"openai.chat","connection":{"base_url":"https://openrouter.ai","paths":{"buffered":"/api/v1/chat/completions","streaming":"/api/v1/chat/completions"}}})");
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
+  const auto& gateway = std::get<descriptor::ValidatedDescriptor>(loaded);
+  const std::string money = R"({"prompt_tokens":16,"completion_tokens":6,"total_tokens":22,"cost":0.000004,"is_byok":false,"cost_details":{"upstream_inference_cost":4e-6,"upstream_inference_prompt_cost":1.6e-6,"upstream_inference_completions_cost":2.4e-6}})";
+  const auto tail = [&](std::string_view delta, std::string_view finish = "\"stop\"", std::string_view counters = "") {
+    auto wire = chunk(delta, finish); wire.pop_back();
+    return wire + ",\"usage\":" + std::string(counters.empty() ? std::string_view(money) : counters) + "}";
+  };
+  const auto decode = [&](const std::vector<std::string>& wires) {
+    Accumulator acc; chat::Codec codec(gateway, chat::Mode::Sse, acc);
+    for (const auto& wire : wires) if (!codec.frame("message", wire)) break;
+    codec.finish(); CHECK(acc.outcome()); return *acc.outcome();
+  };
+  for (const auto& empty : {"{}", R"({"content":""})", R"({"content":null})", R"({"content":"","role":"assistant"})", R"({"role":"assistant"})"}) {
+    size_t stops = 0, commits = 0, deltas = 0;
+    Accumulator acc({}, [&](const Event& event) {
+      if (std::holds_alternative<Stop>(event)) ++stops;
+      if (std::holds_alternative<Commit>(event)) ++commits;
+      if (std::holds_alternative<PartDelta>(event)) ++deltas;
+    });
+    chat::Codec codec(gateway, chat::Mode::Sse, acc);
+    CHECK(codec.frame("message", chunk(R"({"content":"hello"})")));
+    CHECK(codec.frame("message", chunk("{}", "\"stop\"")));
+    CHECK(codec.frame("message", tail(empty)));
+    CHECK(codec.frame("message", tail(empty)));
+    CHECK(codec.frame("message", "[DONE]")); codec.finish();
+    const auto& c = completed(*acc.outcome());
+    CHECK(stops == 1 && commits == 1 && deltas == 1 && text_of(c.messages) == "hello");
+    CHECK(c.messages.size() == 1 && c.messages[0].parts.size() == 1 && c.usage.total->value == 22);
+    CHECK(c.usage.provider_cost.total->nano_usd == 4000 && c.usage.provider_cost.upstream_input->nano_usd == 1600);
+    CHECK(c.usage.provider_cost.upstream_output->nano_usd == 2400 && c.usage.provider_cost.is_byok && !*c.usage.provider_cost.is_byok);
+    CHECK(c.usage.provider_cost.upstream_total->nano_usd == 4000);
+    for (const auto status : c.usage.provider_cost.status) CHECK(status == CostStatus::Available);
+    CHECK(c.usage.provider_cost.source == CostSource::OpenRouterUsd && c.usage.stage == UsageStage::Final && c.usage.extra.empty());
+    CHECK(c.raw_events.size() == 4 && c.raw_events.back().payload->root().get("usage").get("cost").is_number());
+  }
+  const auto no_content = decode({chunk("{}", "\"stop\""), tail(R"({"content":""})"), "[DONE]"});
+  CHECK(completed(no_content).messages[0].parts.empty());
+  const auto standard = decode({chunk(R"({"content":"hello"})", "\"stop\""), usage_frame(money), "[DONE]"});
+  CHECK(completed(standard).usage.provider_cost.total->nano_usd == 4000);
+  const auto buffered_outcome = [&] {
+    Accumulator acc; chat::Codec codec(gateway, chat::Mode::Buffered, acc);
+    codec.buffered(body(R"({"role":"assistant","content":"hello"})", "\"stop\"", money), {});
+    CHECK(acc.outcome()); return *acc.outcome();
+  }();
+  CHECK(completed(buffered_outcome).usage.provider_cost.total->nano_usd == 4000);
+  CHECK(completed(buffered_outcome).usage.provider_cost.upstream_input->nano_usd == 1600);
+  CHECK(completed(buffered_outcome).usage.provider_cost.upstream_output->nano_usd == 2400);
+  for (const auto status : completed(buffered_outcome).usage.provider_cost.status) CHECK(status == CostStatus::Available);
+  CHECK(text_of(completed(buffered_outcome).messages) == "hello");
+  for (const auto& delta : {R"({"content":"late"})", R"({"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]})",
+      R"({"role":"user"})", R"({"role":null})", R"({"role":7})", R"({"reasoning":"late"})", R"({"content":7})", R"({"vendor":"late"})"}) {
+    failed(decode({chunk(R"({"content":"hello"})", "\"stop\""), tail(delta), "[DONE]"}), ErrorKind::ProtocolCorrupt);
+  }
+  for (const auto& [input_alias, expected] : std::vector<std::pair<std::string, CostStatus>>{
+      {"1e-10", CostStatus::Available}, {"2e-10", CostStatus::Conflict}, {"\"invalid\"", CostStatus::Malformed}}) {
+    const std::string counters = R"({"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"cost":4e-6,"cost_details":{"upstream_inference_prompt_cost":1e-10,"upstream_inference_input_cost":)"
+        + input_alias + R"(,"upstream_inference_completions_cost":2.4e-6,"upstream_inference_output_cost":2.4e-6}})";
+    const auto result = decode({chunk(R"({"content":"hello"})", "\"stop\""), tail(R"({"content":"","role":"assistant"})", "\"stop\"", counters), "[DONE]"});
+    const auto& cost = completed(result).usage.provider_cost;
+    CHECK(cost.total->nano_usd == 4000 && cost.upstream_output->nano_usd == 2400 && cost.status[2] == expected);
+    CHECK(completed(result).usage.extra.empty() && text_of(completed(result).messages) == "hello");
+    if (expected == CostStatus::Available) CHECK(cost.upstream_input->nano_usd == 1 && cost.quality == UsageQuality::Consistent);
+    else CHECK(!cost.upstream_input && cost.quality == UsageQuality::Inconsistent);
+    CHECK(completed(result).raw_events.back().payload->root().get("usage").get("cost_details").get("upstream_inference_input_cost").valid());
+  }
+  const auto alternative_names = decode({chunk("{}", "\"stop\""), tail(R"({"content":"","role":"assistant"})", "\"stop\"",
+      R"({"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"cost_details":{"upstream_inference_prompt_cost":null,"upstream_inference_input_cost":1.6e-6,"upstream_inference_output_cost":2.4e-6}})"), "[DONE]"});
+  CHECK(completed(alternative_names).usage.provider_cost.upstream_input->nano_usd == 1600);
+  CHECK(completed(alternative_names).usage.provider_cost.upstream_output->nano_usd == 2400);
+  const auto output_conflict = decode({chunk("{}", "\"stop\""), tail(R"({"content":"","role":"assistant"})", "\"stop\"",
+      R"({"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"cost_details":{"upstream_inference_completions_cost":2.4e-6,"upstream_inference_output_cost":2.5e-6}})"), "[DONE]"});
+  CHECK(completed(output_conflict).usage.provider_cost.status[3] == CostStatus::Conflict);
+  CHECK(!completed(output_conflict).usage.provider_cost.upstream_output && completed(output_conflict).usage.provider_cost.quality == UsageQuality::Inconsistent);
+  failed(decode({chunk("{}", "\"stop\""), tail("{}", "\"length\""), "[DONE]"}), ErrorKind::ProtocolCorrupt);
+  failed(decode({chunk("{}", "\"stop\""), tail("{}", "null"), "[DONE]"}), ErrorKind::ProtocolCorrupt);
+  failed(decode({chunk("{}", "\"stop\""), chunk("{}", "\"stop\""), "[DONE]"}), ErrorKind::ProtocolCorrupt);
+  failed(decode({chunk("{}", "\"stop\""), tail("{}", "\"error\""), "[DONE]"}), ErrorKind::RemoteFailure);
+  failed(decode({chunk("{}", "\"stop\""), tail("{}"), R"({"error":{"message":"late"}})"}), ErrorKind::RemoteFailure);
+  auto changed_identity = tail("{}");
+  changed_identity.replace(changed_identity.find("generation-1"), std::string("generation-1").size(), "generation-2");
+  failed(decode({chunk("{}", "\"stop\""), changed_identity, "[DONE]"}), ErrorKind::ProtocolCorrupt);
+  const auto truncated = decode({chunk("{}", "\"stop\""), tail("{}")});
+  const auto& partial = failed(truncated, ErrorKind::Truncated).partial;
+  CHECK(partial.usage.stage == UsageStage::Partial && partial.usage.provider_cost.total->nano_usd == 4000);
+  const auto cleared = decode({chunk("{}", "\"stop\""), tail("{}"), usage_frame(full_usage), "[DONE]"});
+  CHECK(!completed(cleared).usage.provider_cost.total && completed(cleared).usage.provider_cost.source == CostSource::None);
+  for (const auto& [amount, expected] : std::vector<std::pair<std::string, CostStatus>>{
+      {"0", CostStatus::Available}, {"null", CostStatus::Missing}, {"-0.1", CostStatus::Malformed},
+      {"\"4e-6\"", CostStatus::Malformed}, {"9007199.5", CostStatus::PrecisionExceeded}, {"1e100", CostStatus::Overflow}}) {
+    const auto counters = "{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2,\"cost\":" + amount + "}";
+    const auto result = decode({chunk(R"({"content":"hello"})", "\"stop\""), tail("{}", "\"stop\"", counters), "[DONE]"});
+    const auto& c = completed(result);
+    CHECK(text_of(c.messages) == "hello" && c.usage.provider_cost.status[0] == expected);
+    CHECK(c.usage.extra.empty());
+    if (expected == CostStatus::Available) CHECK(c.usage.provider_cost.total->nano_usd == 0);
+    else CHECK(!c.usage.provider_cost.total);
+  }
+  failed(decode({chunk("{}", "\"stop\""), tail("{}", "\"stop\"", R"({"prompt_tokens":1.5,"completion_tokens":1,"total_tokens":2,"cost":4e-6})"), "[DONE]"}), ErrorKind::ProtocolCorrupt);
+  const auto unknown = frames({chunk("{}", "\"stop\""), usage_frame(money), "[DONE]"});
+  CHECK(completed(unknown).usage.provider_cost.source == CostSource::UnknownCurrency);
+  CHECK(completed(unknown).usage.provider_cost.status[0] == CostStatus::UnknownCurrency && !completed(unknown).usage.provider_cost.total);
+  const auto missing = frames({chunk("{}", "\"stop\""), usage_frame(full_usage), "[DONE]"});
+  CHECK(!completed(missing).usage.provider_cost.total && completed(missing).usage.provider_cost.source == CostSource::None);
+}
 } // namespace
 int main() {
   try {
+    idempotent_terminal_money_tail();
     owned_raw_observations(); raw_failure_evidence();
     chunk_partition_invariant(); no_terminal_no_success(); transport_projection_parity(); known_corrupt_never_ignored();
     invalid_tools_and_compatibility(); usage_knowledge(); accumulator_transitions_and_seals(); typed_request_encoding();

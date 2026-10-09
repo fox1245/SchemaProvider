@@ -1,4 +1,5 @@
 #include "codecs/chat.h"
+#include "codecs/provider_cost.h"
 #include "core/native.h"
 #include "descriptor/descriptor.h"
 #include "json/json.h"
@@ -122,7 +123,7 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
   if (choices.size() == 0) {
     if (!streaming || !usage_value.valid() || usage_value.is_null()) return fail(ErrorKind::ProtocolCorrupt, "empty choices without usage");
   } else {
-    if (stopped_) return fail(ErrorKind::ProtocolCorrupt, "choice after finish reason");
+    const bool terminal_tail = stopped_;
     auto choice = choices.at(0);
     if (!choice.is_object()) return fail(ErrorKind::ProtocolCorrupt, "choice must be object");
     unknown(choice, {"index", "message", "delta", "finish_reason", "logprobs"});
@@ -137,14 +138,33 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
     }
     auto reason = choice.get("finish_reason");
     if (!reason.valid() || (!reason.is_null() && !reason.is_string())) return fail(ErrorKind::ProtocolCorrupt, "invalid finish reason");
-    if (!item(choice.get(streaming ? "delta" : "message"), streaming)) return false;
-    if (reason.is_string()) {
+    const auto delta = choice.get(streaming ? "delta" : "message");
+    if (terminal_tail) {
+      if (reason.is_string() && reason.as_string() == "error")
+        return fail(ErrorKind::RemoteFailure, "remote failure terminal");
+      if (!streaming || !usage_value.is_object() || !reason.is_string() || reason.as_string() != finish_reason_ || !delta.is_object())
+        return fail(ErrorKind::ProtocolCorrupt, "contradictory terminal usage tail");
+      // Do not call item(): empty content could create a new semantic part.
+      for (auto member : delta.members()) {
+        if (member.key == "role") {
+          if (!member.value.is_string() || member.value.as_string() != "assistant")
+            return fail(ErrorKind::ProtocolCorrupt, "role changed after finish reason");
+          continue;
+        }
+        const bool text_channel = member.key == "content" || member.key == "refusal" ||
+            member.key == "reasoning" || member.key == "reasoning_content";
+        if (!text_channel || (!member.value.is_null() && (!member.value.is_string() || !member.value.as_string().empty())))
+          return fail(ErrorKind::ProtocolCorrupt, "data after finish reason");
+      }
+    } else if (!item(delta, streaming)) return false;
+    if (reason.is_string() && !terminal_tail) {
       if (reason.as_string().empty()) return fail(ErrorKind::ProtocolCorrupt, "empty finish reason");
       if (reason.as_string() == "error") return fail(ErrorKind::RemoteFailure, "remote failure terminal");
       auto kind = stop_kind(descriptor_.stop_kind(reason.as_string()));
       if (streaming && !finish_reasoning_details()) return false;
       if (!emit(Stop{{kind, std::string(reason.as_string())}})) return false;
       stopped_ = true;
+      finish_reason_ = reason.as_string();
     }
   }
   if (usage_value.valid() && !usage_value.is_null() && !usage(usage_value)) return false;
@@ -396,10 +416,11 @@ bool Codec::tool(json::Value value, bool streaming, uint64_t position) {
 }
 bool Codec::usage(json::Value value) {
   if (!value.is_object()) return fail(ErrorKind::ProtocolCorrupt, "usage must be object");
-  unknown(value, {"prompt_tokens", "completion_tokens", "total_tokens", "prompt_tokens_details", "completion_tokens_details"});
+  unknown(value, {"prompt_tokens", "completion_tokens", "total_tokens", "prompt_tokens_details", "completion_tokens_details", "cost", "cost_details", "is_byok"});
   for (auto key : {"prompt_tokens", "completion_tokens", "total_tokens"})
     if (!value.get(key).valid()) return fail(ErrorKind::ProtocolCorrupt, "required usage counter missing");
   Usage result; result.stage = UsageStage::Partial;
+  result.provider_cost = codecs::provider_cost(value, descriptor_);
   auto counter = [&](json::Value parent, std::string_view key, std::optional<Count>& destination) {
     auto v = parent.get(key);
     if (!v.valid()) return true;
