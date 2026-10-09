@@ -1,4 +1,6 @@
 #include "codecs/responses.h"
+#include "codecs/provider_cost.h"
+#include "codecs/responses_model.h"
 #include "core/native.h"
 #include "descriptor/descriptor.h"
 #include <algorithm>
@@ -284,7 +286,8 @@ bool Codec::identity(json::Value v) {
   auto id = v.get("id"), object = v.get("object"), model = v.get("model"), created = v.get("created_at");
   if (!nonempty(id) || !object.is_string() || object.as_string() != "response" || !nonempty(model) || !created.is_number() || !std::isfinite(created.as_double()) || created.as_double() < 0)
     return fail(ErrorKind::ProtocolCorrupt, "invalid response identity metadata");
-  if (model.as_string() != context_->model()) return fail(ErrorKind::ProtocolCorrupt, "response model differs from request");
+  if (!requested_model_matches(context_->model(), model.as_string(), descriptor_.base_url()))
+    return fail(ErrorKind::ProtocolCorrupt, "response model differs from request");
   if (begun_ && (id.as_string() != generation_ || model.as_string() != model_ || created.as_double() != created_at_)) return fail(ErrorKind::ProtocolCorrupt, "response identity changed");
   return true;
 }
@@ -641,7 +644,10 @@ bool Codec::counter(json::Value v, std::optional<Count>& target, std::string_vie
 }
 bool Codec::usage_leaves(json::Value v, const std::string& prefix) {
   if (v.is_object()) {
-    for (auto m : v.members()) if (!usage_leaves(m.value, prefix.empty() ? std::string(m.key) : prefix + "." + std::string(m.key))) return false;
+    for (auto m : v.members()) {
+      if (prefix.empty() && codecs::monetary_member(m.key)) continue;
+      if (!usage_leaves(m.value, prefix.empty() ? std::string(m.key) : prefix + "." + std::string(m.key))) return false;
+    }
   } else if (v.is_array()) {
     size_t n = 0; for (auto child : v.elements()) if (!usage_leaves(child, prefix + "." + std::to_string(n++))) return false;
   } else if (v.is_number()) {
@@ -664,6 +670,7 @@ bool Codec::usage(json::Value v) {
   if ((input.valid() && !input.is_null() && !input.is_object()) || (output.valid() && !output.is_null() && !output.is_object())) return fail(ErrorKind::ProtocolCorrupt, "usage details must be object or null");
   usage_.stage = UsageStage::Partial;
   usage_.extra.clear();
+  usage_.provider_cost = codecs::provider_cost(v, descriptor_);
   if (!counter(v.get("input_tokens"), usage_.input_total, "input_tokens") || !counter(v.get("output_tokens"), usage_.output_total, "output_tokens") ||
       !counter(v.get("total_tokens"), usage_.provider_reported_total, "total_tokens") || !counter(input.get("cached_tokens"), usage_.cache_read, "cached_tokens") ||
       !counter(input.get("cache_write_tokens"), usage_.cache_write, "cache_write_tokens") || !counter(output.get("reasoning_tokens"), usage_.reasoning, "reasoning_tokens") || !usage_leaves(v, "")) return false;

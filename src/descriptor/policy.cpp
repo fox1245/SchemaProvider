@@ -245,5 +245,5 @@ std::optional<std::string> validate_choices(const ValidatedDescriptor& d,std::st
   if (c.temperature && temperature_forbidden(d, model)) return "temperature is prohibited for the admitted model";
   return validate(d.family_policy(),c,d.policy()->output_limit(d.family(),model),true);
 }
-std::uint32_t interface_revision() noexcept { return 5; }
+std::uint32_t interface_revision() noexcept { return 6; }
 } // namespace sp::descriptor

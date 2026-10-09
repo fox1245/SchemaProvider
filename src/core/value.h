@@ -2,6 +2,7 @@
 
 #include "core/image.h"
 #include "sp/config_defaults.h"
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -80,6 +81,26 @@ struct Count { uint64_t value = 0; Evidence evidence = Evidence::Reported; };
 enum class UsageStage { Missing, Partial, Final };
 enum class UsageQuality { Consistent, Inconsistent };
 struct UsageConflict { std::string counter, detail; };
+enum class CostSource { None, OpenRouterUsd, UnknownCurrency };
+enum class CostStatus { Missing, Available, Malformed, PrecisionExceeded, Overflow, UnknownCurrency, Conflict };
+enum class CostRounding { CeilingParsedBinary64 };
+struct UsdAmount {
+  uint64_t nano_usd = 0;
+  Evidence evidence = Evidence::Reported;
+  CostRounding rounding = CostRounding::CeilingParsedBinary64;
+};
+// Provider-reported usage metadata, not an invoice, estimate, or budget authority.
+// One nanoUSD is 1e-9 USD. Amounts round upward from the parsed binary64 value,
+// not the unavailable original decimal lexeme; stage is the enclosing Usage.stage.
+struct ProviderReportedCost {
+  std::optional<UsdAmount> total, upstream_total, upstream_input, upstream_output;
+  // Status order: total, upstream_total, upstream_input, upstream_output.
+  std::array<CostStatus, 4> status{};
+  std::optional<bool> is_byok;
+  CostStatus byok_status = CostStatus::Missing;
+  CostSource source = CostSource::None;
+  UsageQuality quality = UsageQuality::Consistent;
+};
 struct Usage {
   std::optional<Count> input_total, output_total, total, provider_reported_total;
   std::optional<Count> input_uncached, cache_read, cache_write, reasoning;
@@ -87,6 +108,7 @@ struct Usage {
   UsageStage stage = UsageStage::Missing;
   UsageQuality quality = UsageQuality::Consistent;
   std::vector<UsageConflict> conflicts;
+  ProviderReportedCost provider_cost;
 };
 enum class StopKind { EndTurn, ToolUse, MaxTokens, StopSequence, ContentFilter, Refusal, PauseTurn, ContextLimit, MalformedCall, Unknown };
 struct StopReason {

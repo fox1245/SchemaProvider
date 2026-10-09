@@ -21,6 +21,9 @@ class Executor {
   virtual void shutdown() noexcept = 0;
 };
 
+// Production pool, exposed only to private behavioral scheduling tests.
+std::shared_ptr<Executor> make_pool_executor(std::size_t workers);
+
 class Attempt {
  public:
   virtual ~Attempt() = default;

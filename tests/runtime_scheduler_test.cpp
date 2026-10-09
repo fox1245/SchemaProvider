@@ -4,8 +4,10 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <future>
 #include <iostream>
 #include <map>
 #include <mutex>
@@ -454,6 +456,120 @@ void paused_redelivery() {
   std::cout << "bounded redelivery bytes=" << expected.size() << " pauses=" << wire->calls.front()->pauses << '\n';
 }
 
+void pool_timer_wake_transitions() {
+  for (const auto workers : {std::size_t{1}, std::size_t{3}}) {
+    auto executor = detail::make_pool_executor(workers);
+    auto cancelled_calls = std::make_shared<std::atomic<unsigned>>(0);
+    auto unused = [cancelled_calls] { ++*cancelled_calls; };
+    auto completion = [] {
+      return std::make_shared<std::promise<void>>();
+    };
+    auto long_timer = executor->schedule(executor->now() + 5s, unused);
+    // Let idle workers enter the long timed wait before installing an earlier
+    // expiry. A missed wake must fail the bounded wait, not wait for five seconds.
+    std::this_thread::sleep_for(20ms);
+    auto early = completion();
+    auto early_ready = early->get_future();
+    executor->schedule(executor->now() + 30ms, [early] { early->set_value(); });
+    const auto later = executor->schedule(executor->now() + 3s, unused);
+    executor->cancel(later);
+    CHECK(early_ready.wait_for(1s) == std::future_status::ready);
+    executor->cancel(long_timer);
+
+    auto equal = completion();
+    auto equal_ready = equal->get_future();
+    const auto same_time = executor->now() + 60ms;
+    const auto first = executor->schedule(same_time, unused);
+    executor->schedule(same_time, [equal] { equal->set_value(); });
+    std::this_thread::sleep_for(20ms);
+    executor->cancel(first);  // the next timer has the very same expiry
+    CHECK(equal_ready.wait_for(1s) == std::future_status::ready);
+
+    auto next = completion();
+    auto next_ready = next->get_future();
+    const auto removed = executor->schedule(executor->now() + 60ms, unused);
+    executor->schedule(executor->now() + 90ms, [next] { next->set_value(); });
+    std::this_thread::sleep_for(20ms);
+    executor->cancel(removed);  // every sleeper must recompute the next expiry
+    CHECK(next_ready.wait_for(1s) == std::future_status::ready);
+
+    long_timer = executor->schedule(executor->now() + 5s, unused);
+    std::this_thread::sleep_for(20ms);
+    executor->cancel(long_timer);  // transition back to an indefinite wait
+    for (unsigned i = 0; i < 16; ++i) {
+      auto posted = completion();
+      auto posted_ready = posted->get_future();
+      executor->post([posted] { posted->set_value(); });
+      CHECK(posted_ready.wait_for(1s) == std::future_status::ready);
+    }
+    auto nested = completion();
+    auto nested_ready = nested->get_future();
+    executor->post([executor, nested] {
+      executor->post([nested] { nested->set_value(); });
+    });
+    CHECK(nested_ready.wait_for(1s) == std::future_status::ready);
+    executor->shutdown();
+    CHECK(cancelled_calls->load() == 0);
+  }
+}
+
+void batched_actor_controls_and_fairness() {
+  for (const bool deadline : {false, true}) {
+    auto executor = std::make_shared<ManualExecutor>();
+    auto wire = std::make_shared<ModelTransport>();
+    auto client = detail::ClientAccess::make(descriptor_value(), {}, executor, wire);
+    auto run = buffered(executor);
+    run.streaming = true;
+    Result observed;
+    std::size_t outcomes = 0, deltas = 0;
+    Operation operation;
+    operation = client.start(request(), run, {
+      [&](const Event& event) {
+        if (!std::holds_alternative<PartDelta>(event)) return;
+        ++deltas;
+        if (deadline) executor->advance(2s);
+        else operation.cancel();
+      },
+      [&](Result result) { observed = std::move(result); ++outcomes; }
+    });
+    executor->drain();
+    auto& call = *wire->calls.front();
+    call.head(200);
+    call.chunks.push_back(R"(data: {"id":"scheduler","model":"fixture-model","created":7,"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"first"},"finish_reason":null}]})" "\n\n");
+    call.chunks.push_back(R"(data: {"id":"scheduler","model":"fixture-model","created":7,"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"second"},"finish_reason":"stop"}]})" "\n\n");
+    call.chunks.push_back("data: [DONE]\n\n");
+    call.ending = true;
+    call.flush();  // body and terminal wire events are queued together
+    executor->drain();
+    failure(operation.join(), deadline ? ErrorKind::DeadlineExceeded : ErrorKind::Cancelled);
+    CHECK(observed && outcomes == 1 && deltas == 1);
+    CHECK(detail::ClientAccess::stats(operation).queued_bytes == 0);
+  }
+
+  auto executor = std::make_shared<ManualExecutor>();
+  auto wire = std::make_shared<ModelTransport>();
+  Options options;
+  options.limits.queued_body_chunks = 2;
+  options.limits.queued_body_bytes = 128;
+  auto client = detail::ClientAccess::make(descriptor_value(), options, executor, wire);
+  Result bulk_result, peer_result;
+  bool peer_first = false;
+  auto bulk = client.start(request("bulk"), buffered(executor), {{}, [&](Result result) {
+    bulk_result = std::move(result);
+  }});
+  auto peer = client.start(request("peer"), buffered(executor), {{}, [&](Result result) {
+    peer_first = !bulk_result;
+    peer_result = std::move(result);
+  }});
+  executor->drain();
+  const std::string expected(8192, 'q');
+  wire->calls[0]->reply(200, body(expected), 64);
+  wire->calls[1]->reply(200, body(), 64);
+  executor->drain();
+  CHECK(peer_first && peer_result && bulk_result);
+  CHECK(text_of(peer.join()) == "ok" && text_of(bulk.join()) == expected);
+}
+
 void seeded_shared_budget() {
   std::size_t dispatches = 0, terminal_outcomes = 0;
   for (std::uint64_t seed = 1; seed <= 64; ++seed) {
@@ -731,6 +847,8 @@ int main(int argc, char** argv) {
     if (argc != 3) throw std::runtime_error("usage: runtime_scheduler_tests NODE PEER_SCRIPT");
     terminal_interleavings();
     paused_redelivery();
+    pool_timer_wake_transitions();
+    batched_actor_controls_and_fairness();
     seeded_shared_budget();
     callback_and_start_boundaries();
     admission_and_preflight();

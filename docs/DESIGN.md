@@ -2,7 +2,7 @@
 
 ## 0. Status and reading boundary
 
-The current SDK uses interface revision 5/shared-library generation 5 and five typed HTTP/SSE request families in package 0.2.0 alpha. The interface gate is not a source or cross-toolchain ABI promise. [README](../README.md), [Usage](USAGE.md) and [Migration](MIGRATION.md) describe actual names and boundaries. Earlier interface 3 observations remain archived, not relabeled interface 4 or 5 qualification.
+The current source SDK uses interface revision 6/shared-library generation 6 and five typed HTTP/SSE request families in package 0.3.0 alpha. Typed provider-reported monetary metadata is distinct from token counters and financial authority. The interface gate is not a source or cross-toolchain ABI promise. [README](../README.md), [Usage](USAGE.md) and [Migration](MIGRATION.md) describe actual names and boundaries. Earlier interface 3–5 observations remain archived, not relabeled interface 6 qualification.
 
 [Current typed-cutover provenance](POC_PLAN.md#current-typed-c-cutover-provenance) records earlier executed Linux SDK/static/shared/consumer cohorts and their limits. M5's old-ABI strict lossless NO-GO is historical, not a rejection of the current typed result contract. Model-free local replay does not prove vendor signature validation; paid baseline results were 293/300 pairs, not universal qualification. No further paid calls are authorized by this document. HTTP/3 and remote TSan limits remain attached to their recorded cohorts.
 
@@ -726,7 +726,7 @@ Earlier `descriptors/manifest.json`, `src/codecs/registry.cpp`, flat `types.h` a
 
 ## 10. Versioning and stability
 
-- **Source API.** Package 0.2.0 is alpha; interface 5 and shared generation 5 identify this typed source cutover, not SemVer major 5. Rebuild and migrate exhaustive visitors/consumers for the selected release. The older major/minor sketch is not a pre-stability compatibility promise; historical interface 3 proof is not current interface 5 verification.
+- **Source API.** Package 0.3.0 is alpha; interface 6 and shared generation 6 identify the typed provider-reported-cost outcome layout, not SemVer major 6. Rebuild and migrate consumers for the selected release. The older major/minor sketch is not a pre-stability compatibility promise; historical interface 3–5 proof is not current interface 6 verification.
 - **ABI.** No stable cross-compiler ABI is promised. Shared builds are supported only with the same toolchain, standard library and flags; consumers rebuild per release.
 - **Descriptor.** `descriptor_version` (grammar) and `revision` (vendor facts) are separate. Grammar growth or any new rule bumps the descriptor major; correcting a fact bumps `revision` and must add fixture evidence. Exact-version support: newer versions and unknown keys are rejected. Changing a retention or usage-inclusion rule in data is still a semantic release.
 - **Fixtures and projection.** `fixture_version`, `projection_version` and NeoGraph `provider-completion` version are independent. Changing a fixture's expected meaning needs a justification and a reviewed old/new diff; expected files are never regenerated and approved unread. Old serialized artifacts are read by version-specific readers; no aliases or shims to the live API.

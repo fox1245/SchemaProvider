@@ -41,6 +41,7 @@
 #include <curl/curl.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <condition_variable>
 #include <exception>
@@ -323,6 +324,10 @@ struct OperationState {
   bool in_multi = false;
   bool paused = false;
   bool finished = false;
+  // A monotonic cross-thread no-op fence, not outcome/join publication. Publish
+  // at finish admission so callback-driven handle teardown cannot queue another
+  // cancel after the strand already chose the sole outcome.
+  std::atomic<bool> finishing{false};
 
   // response parsing (strand-confined; invoked from inside libcurl calls)
   ResponseHead head;
@@ -469,6 +474,11 @@ struct TransportCore : std::enable_shared_from_this<TransportCore> {
   CURLM* multi = nullptr;
   bool ipv6_resolve_hosts = false;  // CURLOPT_RESOLVE accepts an IPv6 HOST starting in curl 8.13.
   asio::steady_timer timer;
+  enum class TimerMode { Inactive, Immediate, Delayed };
+  TimerMode timer_mode = TimerMode::Inactive;
+  std::uint64_t timer_generation = 0;
+  bool timeout_posted = false;
+  bool defer_start_kick = false;
   bool stopped = false;
   std::unordered_map<curl_socket_t, std::shared_ptr<SockWatch>> socks;
   std::unordered_map<OperationState*, std::shared_ptr<OperationState>> active;
@@ -924,11 +934,31 @@ void TransportCore::begin(const std::shared_ptr<OperationState>& op) {
 
 void TransportCore::add_to_multi(const std::shared_ptr<OperationState>& op) {
   if (op->finished || stopped || !multi) return;  // shutdown finishes every active operation
-  if (curl_multi_add_handle(multi, op->easy) != CURLM_OK) {
-    finish(op, Status::Failed, FailureKind::Other, CURLE_OK, "curl_multi_add_handle failed");
-    return;
+  CURLMcode added;
+  {
+    // With no other active operation to batch, a zero-time kick can run after
+    // add_handle returns instead of taking another turn through the strand.
+    // Never call socket_action inside libcurl's timer callback itself.
+    defer_start_kick = active.size() == 1 && !timeout_posted;
+    struct ResetKick {
+      bool& flag;
+      ~ResetKick() { flag = false; }
+    } reset{defer_start_kick};
+    added = curl_multi_add_handle(multi, op->easy);
   }
-  op->in_multi = true;
+  if (added != CURLM_OK)
+    finish(op, Status::Failed, FailureKind::Other, CURLE_OK, "curl_multi_add_handle failed");
+  else
+    op->in_multi = true;  // publish before a kick can complete/remove this handle
+  // DNS completion or handle setup may have consumed the remaining slack.
+  // An eager kick must not overtake an already-due operation deadline.
+  if (timer_mode == TimerMode::Immediate && !timeout_posted && !op->finished &&
+      op->req.deadline <= std::chrono::steady_clock::now())
+    finish(op, Status::DeadlineExceeded, FailureKind::None, CURLE_OK, "deadline exceeded before dispatch");
+  if (timer_mode == TimerMode::Immediate && !timeout_posted) {
+    timer_mode = TimerMode::Inactive;
+    on_timeout();
+  }
 }
 
 void TransportCore::lookup(const std::shared_ptr<OperationState>& op) {
@@ -1016,6 +1046,7 @@ void TransportCore::finish(std::shared_ptr<OperationState> op, Status status, Fa
                            CURLcode code, const char* detail) {
   if (op->finished) return;  // exactly one outcome: cancel, deadline and completion race here
   op->finished = true;
+  op->finishing.store(true, std::memory_order_relaxed);
   if (op->deadline_timer) {
     // The timer references the io_context's services, which die with the transport while an
     // Operation handle may outlive it: destroy it here, on the strand, never in ~OperationState.
@@ -1312,15 +1343,31 @@ void TransportCore::on_idle_expired(const std::shared_ptr<OperationState>& op) {
 }
 
 void TransportCore::set_timer(long ms) {
-  timer.cancel();
-  if (ms < 0) return;
-  if (ms == 0) {  // libcurl forbids calling socket_action from inside this callback
-    asio::post(strand, [self = shared_from_this()] { self->on_timeout(); });
+  const auto generation = ++timer_generation;
+  if (ms <= 0) {
+    if (timer_mode == TimerMode::Delayed) timer.cancel();
+    timer_mode = ms < 0 ? TimerMode::Inactive : TimerMode::Immediate;
+    if (ms < 0 || timeout_posted || defer_start_kick) return;
+    // libcurl forbids re-entering socket_action inside its timer callback.
+    // Several zero-time updates before this strand turn need only one kick;
+    // a subsequent negative/positive update supersedes that queued kick.
+    timeout_posted = true;
+    asio::post(strand, [self = shared_from_this()] {
+      self->timeout_posted = false;
+      if (self->timer_mode != TimerMode::Immediate) return;
+      self->timer_mode = TimerMode::Inactive;
+      self->on_timeout();
+    });
     return;
   }
+  timer_mode = TimerMode::Delayed;
+  // expires_after already cancels the preceding wait; do not cancel it twice.
   timer.expires_after(std::chrono::milliseconds(ms));
-  timer.async_wait(asio::bind_executor(strand, [self = shared_from_this()](const asio::error_code& ec) {
-    if (!ec) self->on_timeout();
+  timer.async_wait(asio::bind_executor(strand, [self = shared_from_this(), generation](const asio::error_code& ec) {
+    // Cancellation cannot retract a successful handler already on the strand.
+    if (ec || generation != self->timer_generation || self->timer_mode != TimerMode::Delayed) return;
+    self->timer_mode = TimerMode::Inactive;
+    self->on_timeout();
   }));
 }
 
@@ -1470,7 +1517,7 @@ void TransportCore::arm(const std::shared_ptr<SockWatch>& w) {
                        asio::bind_executor(strand, [self = shared_from_this(), w](const asio::error_code& ec) {
                          w->armed_read = false;
                          if (w->removed || ec == asio::error::operation_aborted) return;
-                         if (self->read_suppressed(w->fd)) return;  // paused: leave the data in the kernel
+                         if (!w->want_read || self->read_suppressed(w->fd)) return;  // keep paused data in the kernel
                          self->on_socket_event(w, ec ? CURL_CSELECT_ERR : CURL_CSELECT_IN);
                        }));
   }
@@ -1480,6 +1527,7 @@ void TransportCore::arm(const std::shared_ptr<SockWatch>& w) {
                        asio::bind_executor(strand, [self = shared_from_this(), w](const asio::error_code& ec) {
                          w->armed_write = false;
                          if (w->removed || ec == asio::error::operation_aborted) return;
+                         if (!w->want_write) return;  // a queued wait may outlive libcurl's write interest
                          self->on_socket_event(w, ec ? CURL_CSELECT_ERR : CURL_CSELECT_OUT);
                        }));
   }
@@ -1570,7 +1618,7 @@ void TransportCore::shutdown() {
       finish(op, Status::Cancelled, FailureKind::None, CURLE_OK, "transport shutdown");
     dns_pending.clear();  // waiters were finished above; drop their references
     dns_cache.clear();
-    timer.cancel();
+    set_timer(-1);
     for (auto& entry : socks) {
       entry.second->removed = true;
       entry.second->release_quiet();
@@ -1606,6 +1654,7 @@ Operation::~Operation() {
 
 void Operation::cancel() noexcept {
   if (!state_) return;
+  if (state_->finishing.load(std::memory_order_relaxed)) return;
   auto core = state_->owner.lock();
   if (!core) return;  // transport gone: shutdown already delivered the outcome
   try {
@@ -1620,6 +1669,7 @@ void Operation::cancel() noexcept {
 
 void Operation::resume() noexcept {
   if (!state_) return;
+  if (state_->finishing.load(std::memory_order_relaxed)) return;
   auto core = state_->owner.lock();
   if (!core) return;
   try {

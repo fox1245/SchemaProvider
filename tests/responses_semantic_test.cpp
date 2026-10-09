@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <tuple>
 #include <vector>
 
 namespace {
@@ -474,6 +475,175 @@ void usage_boundaries() {
   const auto& x = completed(conflict).usage; CHECK(x.quality == UsageQuality::Inconsistent && !x.conflicts.empty()); CHECK(x.provider_reported_total->value == 99 && !x.input_uncached);
   failed(buffered(body("[]", "completed", R"({"input_tokens":-1})")), ErrorKind::ProtocolCorrupt);
 }
+void provider_money_and_snapshot_aliases() {
+  const auto descriptor_for = [](std::string_view origin) {
+    auto loaded = descriptor::load("{\"descriptor_version\":1,\"revision\":1,\"id\":\"cost-alias\",\"family\":\"openai.responses\",\"connection\":{\"base_url\":" +
+        json::quote(origin) + ",\"paths\":{\"buffered\":\"/v1/responses\",\"streaming\":\"/v1/responses\"}}}");
+    CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
+    return std::get<descriptor::ValidatedDescriptor>(std::move(loaded));
+  };
+  const auto gateway = descriptor_for("https://openrouter.ai");
+  const auto direct = descriptor_for("https://api.openai.com");
+  const auto replace_model = [](std::string wire, std::string_view model) {
+    const auto pos = wire.find("\"model\":\"fixture-model\""); CHECK(pos != std::string::npos);
+    wire.replace(pos, std::string("\"model\":\"fixture-model\"").size(), "\"model\":" + json::quote(model));
+    return wire;
+  };
+  const auto decode = [&](const descriptor::ValidatedDescriptor& d, const responses::Request& r,
+                          const std::vector<Frame>& wires, bool sse) {
+    auto encoded = responses::encode(d, r, sse); CHECK(std::holds_alternative<responses::EncodedRequest>(encoded));
+    Accumulator acc;
+    responses::Codec codec(d, sse ? responses::Mode::Sse : responses::Mode::Buffered, acc,
+        std::get<responses::EncodedRequest>(encoded).context);
+    if (sse) { for (const auto& [name, wire] : wires) if (!codec.frame(name, wire)) break; codec.finish(); }
+    else codec.buffered(wires.front().second, {});
+    CHECK(acc.outcome()); return *acc.outcome();
+  };
+  const std::string money = R"({"input_tokens":16,"output_tokens":6,"total_tokens":22,"cost":4e-6,"is_byok":false,"cost_details":{"upstream_inference_cost":0.000004,"upstream_inference_input_cost":1.6e-6,"upstream_inference_output_cost":2.4e-6}})";
+  for (bool sse : {false, true}) {
+    const auto wire = body("[" + message + "]", "completed", money);
+    const auto outcome = decode(gateway, request(), sse ? std::vector<Frame>{created(), added(0, message), item_done(0, message),
+        terminal("[" + message + "]", "completed", money)} : std::vector<Frame>{{"", wire}}, sse);
+    const auto& c = completed(outcome); const auto& cost = c.usage.provider_cost;
+    CHECK(text(c.messages) == "hello" && c.usage.total->value == 22 && c.usage.extra.empty());
+    CHECK(c.usage.stage == UsageStage::Final && cost.source == CostSource::OpenRouterUsd && cost.quality == UsageQuality::Consistent);
+    CHECK(cost.total->nano_usd == 4000 && cost.upstream_total->nano_usd == 4000);
+    CHECK(cost.upstream_input->nano_usd == 1600 && cost.upstream_output->nano_usd == 2400);
+    CHECK(cost.total->evidence == Evidence::Reported && cost.total->rounding == CostRounding::CeilingParsedBinary64);
+    CHECK(cost.is_byok && !*cost.is_byok && cost.byok_status == CostStatus::Available);
+    CHECK(c.wire_envelope->root().get("usage").get("cost_details").is_object());
+  }
+  for (const auto& [amount, status, nanos] : std::vector<std::tuple<std::string, CostStatus, uint64_t>>{
+      {"0", CostStatus::Available, 0}, {"0.125", CostStatus::Available, 125000000},
+      {"0.1", CostStatus::Available, 100000001}, {"1e-10", CostStatus::Available, 1},
+      {"5e-324", CostStatus::Available, 1}, {"null", CostStatus::Missing, 0},
+      {"-1", CostStatus::Malformed, 0}, {"\"0.5\"", CostStatus::Malformed, 0},
+      {"true", CostStatus::Malformed, 0}, {"{}", CostStatus::Malformed, 0},
+      {"\"NaN\"", CostStatus::Malformed, 0}, {"\"Infinity\"", CostStatus::Malformed, 0},
+      {"9007199", CostStatus::Available, 9007199000000000},
+      {"20000000000", CostStatus::Overflow, 0},
+      {"9007199.5", CostStatus::PrecisionExceeded, 0}, {"1e100", CostStatus::Overflow, 0}}) {
+    const auto outcome = decode(gateway, request(), {{"", body("[" + message + "]", "completed", "{\"cost\":" + amount + "}")}}, false);
+    const auto& c = completed(outcome); const auto& cost = c.usage.provider_cost;
+    CHECK(text(c.messages) == "hello" && cost.status[0] == status);
+    if (status == CostStatus::Available) CHECK(cost.total && cost.total->nano_usd == nanos);
+    else CHECK(!cost.total);
+    CHECK(cost.quality == (status == CostStatus::Available || status == CostStatus::Missing ? UsageQuality::Consistent : UsageQuality::Inconsistent));
+    CHECK(c.usage.extra.empty());
+  }
+  const auto partial_fields = decode(gateway, request(), {{"", body("[]", "completed",
+      R"({"cost_details":{"upstream_inference_input_cost":0,"upstream_inference_output_cost":-1,"future_price":0.25},"is_byok":true})")}}, false);
+  const auto& fields = completed(partial_fields).usage.provider_cost;
+  CHECK(!fields.total && !fields.upstream_total && fields.upstream_input->nano_usd == 0 && !fields.upstream_output);
+  CHECK(fields.status[0] == CostStatus::Missing && fields.status[1] == CostStatus::Missing);
+  CHECK(fields.status[2] == CostStatus::Available && fields.status[3] == CostStatus::Malformed && fields.quality == UsageQuality::Inconsistent);
+  CHECK(fields.is_byok && *fields.is_byok && completed(partial_fields).usage.extra.empty());
+  for (const auto& [prompt_alias, expected] : std::vector<std::pair<std::string, CostStatus>>{
+      {"1e-10", CostStatus::Available}, {"2e-10", CostStatus::Conflict}, {"false", CostStatus::Malformed}}) {
+    const std::string counters = R"({"cost":4e-6,"cost_details":{"upstream_inference_input_cost":1e-10,"upstream_inference_prompt_cost":)"
+        + prompt_alias + R"(,"upstream_inference_output_cost":2.4e-6,"upstream_inference_completions_cost":2.4e-6}})";
+    for (bool sse : {false, true}) {
+      const auto outcome = decode(gateway, request(), sse ? std::vector<Frame>{created(), terminal("[]", "completed", counters)}
+          : std::vector<Frame>{{"", body("[]", "completed", counters)}}, sse);
+      const auto& cost = completed(outcome).usage.provider_cost;
+      CHECK(cost.total->nano_usd == 4000 && cost.upstream_output->nano_usd == 2400 && cost.status[2] == expected);
+      CHECK(completed(outcome).usage.extra.empty());
+      if (expected == CostStatus::Available) CHECK(cost.upstream_input->nano_usd == 1 && cost.quality == UsageQuality::Consistent);
+      else CHECK(!cost.upstream_input && cost.quality == UsageQuality::Inconsistent);
+      CHECK(completed(outcome).wire_envelope->root().get("usage").get("cost_details").get("upstream_inference_prompt_cost").valid());
+    }
+  }
+  const auto chat_names = decode(gateway, request(), {{"", body("[]", "completed",
+      R"({"cost_details":{"upstream_inference_prompt_cost":1.6e-6,"upstream_inference_completions_cost":2.4e-6}})")}}, false);
+  CHECK(completed(chat_names).usage.provider_cost.upstream_input->nano_usd == 1600);
+  CHECK(completed(chat_names).usage.provider_cost.upstream_output->nano_usd == 2400);
+  const auto unknown = decode(desc(), request(), {{"", body("[]", "completed", money)}}, false);
+  CHECK(completed(unknown).usage.provider_cost.source == CostSource::UnknownCurrency);
+  CHECK(completed(unknown).usage.provider_cost.status[0] == CostStatus::UnknownCurrency);
+  CHECK(!completed(unknown).usage.provider_cost.total && completed(unknown).usage.provider_cost.quality == UsageQuality::Inconsistent);
+  const auto malformed = decode(gateway, request(), {{"", body("[]", "completed", R"({"cost_details":[],"is_byok":"false"})")}}, false);
+  CHECK(completed(malformed).usage.provider_cost.status[1] == CostStatus::Malformed);
+  CHECK(completed(malformed).usage.provider_cost.byok_status == CostStatus::Malformed);
+  CHECK(!completed(malformed).usage.provider_cost.is_byok);
+  for (const auto& final_usage : {std::string("null"), usage}) {
+    const auto cleared = decode(gateway, request(), {event("response.created", ",\"response\":" + body("[]", "in_progress", money)),
+        terminal("[]", "completed", final_usage)}, true);
+    CHECK(!completed(cleared).usage.provider_cost.total && completed(cleared).usage.provider_cost.source == CostSource::None);
+  }
+  const auto partial = decode(gateway, request(), {event("response.created", ",\"response\":" + body("[]", "in_progress", money))}, true);
+  CHECK(failed(partial, ErrorKind::Truncated).partial.usage.stage == UsageStage::Partial);
+  CHECK(failed(partial, ErrorKind::Truncated).partial.usage.provider_cost.total->nano_usd == 4000);
+  failed(decode(gateway, request(), {{"", body("[]", "completed", R"({"cost":0.25,"input_tokens":1.5})")}}, false), ErrorKind::ProtocolCorrupt);
+  failed(decode(gateway, request(), {{"", body("[]", "completed", R"({"cost":0.25,"unknown_tokens":1.5})")}}, false), ErrorKind::ProtocolCorrupt);
+
+  auto alias = request(); alias.model = "gpt-4.1-nano";
+  const std::string snapshot = "gpt-4.1-nano-2025-04-14";
+  const auto output = "[" + reasoning + "," + call + "," + message + "]";
+  for (bool sse : {false, true}) {
+    auto wires = sse ? std::vector<Frame>{created(), added(0, reasoning), item_done(0, reasoning),
+        added(1, call), item_done(1, call), added(2, message), item_done(2, message), terminal(output)}
+        : std::vector<Frame>{{"", body(output)}};
+    for (auto& [name, wire] : wires) if (wire.find("\"model\":\"fixture-model\"") != std::string::npos) wire = replace_model(wire, snapshot);
+    const auto first = decode(direct, alias, wires, sse); const auto& c = completed(first);
+    CHECK(c.messages[0].native && c.messages[0].native->complete());
+    CHECK(c.wire_envelope->root().get("model").as_string() == snapshot);
+    auto replay = alias; replay.messages.push_back(c.messages[0]);
+    replay.messages.push_back(Message{"", Role::Tool, {ToolResult{"call_1", "one"}}});
+    auto encoded = responses::encode(direct, replay, false); CHECK(std::holds_alternative<responses::EncodedRequest>(encoded));
+    CHECK(parse(std::get<responses::EncodedRequest>(encoded).body).root().get("model").as_string() == alias.model);
+    const std::string next_reasoning = R"({"id":"rs_2","type":"reasoning","status":"completed","summary":[{"type":"summary_text","text":"Continue carefully"}],"encrypted_content":"SEALED_NATIVE_MARKER_second"})";
+    const std::string next_message = R"({"id":"msg_2","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"continued","annotations":[]}]})";
+    auto next_reply_wire = replace_model(body("[" + next_reasoning + "," + next_message + "]"), snapshot);
+    next_reply_wire.replace(next_reply_wire.find("resp_1"), std::string("resp_1").size(), "resp_2");
+    const auto replay_reply = decode(direct, replay, {{"", next_reply_wire}}, false);
+    CHECK(completed(replay_reply).messages[0].id == "resp_2");
+    CHECK(completed(replay_reply).messages[0].wire_output->root().at(0).get("id").as_string() == "rs_2");
+    CHECK(completed(replay_reply).messages[0].wire_output->root().at(1).get("id").as_string() == "msg_2");
+    CHECK(text(completed(replay_reply).messages) == "continued");
+    auto replay_next = replay; replay_next.messages.push_back(completed(replay_reply).messages[0]);
+    replay_next.messages.push_back(Message{"", Role::User, {Text{"continue"}}});
+    CHECK(std::holds_alternative<responses::EncodedRequest>(responses::encode(direct, replay_next, false)));
+    auto changed = replay; changed.model = snapshot;
+    CHECK(std::get<Error>(responses::encode(direct, changed, false)).kind == ErrorKind::ReplayIneligible);
+    auto cursor = alias; cursor.previous_response_id = c.messages[0].id;
+    cursor.previous_response_history = cursor.messages; cursor.previous_response_history.push_back(c.messages[0]);
+    cursor.messages = {Message{"", Role::Tool, {ToolResult{"call_1", "one"}}}};
+    encoded = responses::encode(direct, cursor, false); CHECK(std::holds_alternative<responses::EncodedRequest>(encoded));
+    const auto cursor_wire = parse(std::get<responses::EncodedRequest>(encoded).body);
+    CHECK(cursor_wire.root().get("model").as_string() == alias.model && cursor_wire.root().get("previous_response_id").as_string() == "resp_1");
+    const auto cursor_reply = decode(direct, cursor, {{"", next_reply_wire}}, false);
+    const auto& cursor_message = completed(cursor_reply).messages[0];
+    CHECK(cursor_message.native && completed(cursor_reply).wire_envelope->root().get("model").as_string() == snapshot);
+    auto cursor_next = alias; cursor_next.previous_response_id = cursor_message.id;
+    cursor_next.previous_response_history = {cursor_message};
+    cursor_next.messages = {Message{"", Role::User, {Text{"continue"}}}};
+    CHECK(std::holds_alternative<responses::EncodedRequest>(responses::encode(direct, cursor_next, false)));
+    auto cursor_mismatch = cursor_next; cursor_mismatch.model = snapshot;
+    CHECK(std::get<Error>(responses::encode(direct, cursor_mismatch, false)).kind == ErrorKind::ReplayIneligible);
+    changed = cursor; changed.model = snapshot;
+    CHECK(std::get<Error>(responses::encode(direct, changed, false)).kind == ErrorKind::ReplayIneligible);
+    changed = cursor; changed.previous_response_id = "foreign";
+    CHECK(std::get<Error>(responses::encode(direct, changed, false)).kind == ErrorKind::ReplayIneligible);
+    auto explicit_request = alias; explicit_request.model = snapshot;
+    completed(decode(direct, explicit_request, wires, sse));
+    failed(decode(gateway, alias, wires, sse), ErrorKind::ProtocolCorrupt);
+    if (sse) {
+      wires.back().second = replace_model(terminal(output).second, "gpt-4.1-nano-2025-04-15");
+      failed(decode(direct, alias, wires, true), ErrorKind::ProtocolCorrupt);
+      wires.back().second = replace_model(terminal(output).second, alias.model);
+      failed(decode(direct, alias, wires, true), ErrorKind::ProtocolCorrupt);
+    }
+  }
+  for (const auto& served : {"gpt-4.1-mini-2025-04-14", "gpt-4.1-nano-2025-02-29", "gpt-4.1-nano-2025-04-31", "gpt-4.1-nano-2025-04-14-extra"}) {
+    failed(decode(direct, alias, {{"", replace_model(body("[]"), served)}}, false), ErrorKind::ProtocolCorrupt);
+  }
+  auto explicit_request = alias; explicit_request.model = snapshot;
+  failed(decode(direct, explicit_request, {{"", replace_model(body("[]"), "gpt-4.1-nano-2025-04-15")}}, false), ErrorKind::ProtocolCorrupt);
+  auto namespaced = alias; namespaced.model = "openai/gpt-4.1-nano";
+  failed(decode(direct, namespaced, {{"", replace_model(body("[]"), "openai/gpt-4.1-nano-2025-04-14")}}, false), ErrorKind::ProtocolCorrupt);
+  const auto leap = replace_model(body("[]"), "gpt-4.1-nano-2024-02-29");
+  completed(decode(direct, alias, {{"", leap}}, false));
+}
 void corruption_and_bounds() {
   auto frames = text_frames(); frames[3] = text_delta("foreign", 0, "hel"); failed(stream(frames), ErrorKind::ProtocolCorrupt);
   frames = text_frames(); frames.back() = terminal("[]"); failed(stream(frames), ErrorKind::ProtocolCorrupt);
@@ -539,7 +709,7 @@ void reviewed_wire_boundaries() {
 }
 } // namespace
 int main() {
-  try { named_error_precedence(); named_error_raw_capacity(); completed_reasoning_ciphertext_authority(); reviewed_wire_boundaries(); typed_encode(); controls_and_cursor_boundaries(); previous_response_ownership(); grouped_native_and_owned_outcomes(); normal_close_required(); cancellation_observation_boundary(); reasoning_stream_snapshots(); tools_interleaving_and_ownership(); incomplete_and_server_items(); unknown_hosted_item_ownership(); unknown_wire_observation_boundary(); usage_boundaries(); corruption_and_bounds();
+  try { provider_money_and_snapshot_aliases(); named_error_precedence(); named_error_raw_capacity(); completed_reasoning_ciphertext_authority(); reviewed_wire_boundaries(); typed_encode(); controls_and_cursor_boundaries(); previous_response_ownership(); grouped_native_and_owned_outcomes(); normal_close_required(); cancellation_observation_boundary(); reasoning_stream_snapshots(); tools_interleaving_and_ownership(); incomplete_and_server_items(); unknown_hosted_item_ownership(); unknown_wire_observation_boundary(); usage_boundaries(); corruption_and_bounds();
     std::cout << "Responses semantic contracts passed\n"; return 0;
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

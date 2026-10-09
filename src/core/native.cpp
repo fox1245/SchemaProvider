@@ -529,9 +529,9 @@ InterfaceContract core_interface_contract() noexcept {
       capability::All5Native | capability::TrustedArchive | capability::OrderedWireEvents;
   if (json::retained_size_contract() == 1) capabilities |= capability::RetainedJsonSize;
 #if defined(__unix__) || defined(__APPLE__) || defined(_WIN32)
-  return {5, capabilities | capability::NativeSocketRuntime};
+  return {6, capabilities | capability::NativeSocketRuntime};
 #else
-  return {5, capabilities};
+  return {6, capabilities};
 #endif
 }
 } // namespace sp

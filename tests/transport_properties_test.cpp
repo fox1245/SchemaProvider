@@ -22,6 +22,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdarg>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -38,6 +39,20 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#if defined(__SANITIZE_THREAD__)
+#define SP_TRANSPORT_TEST_TSAN 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define SP_TRANSPORT_TEST_TSAN 1
+#endif
+#endif
+
+#ifdef SP_TRANSPORT_TEST_TSAN
+// GCC's installed sanitizer headers omit allocator_interface.h, but its
+// instrumented runtime exports this common sanitizer allocation API.
+extern "C" std::size_t __sanitizer_get_current_allocated_bytes();
+#endif
 
 using namespace sp::transport;
 using std::chrono::milliseconds;
@@ -459,6 +474,36 @@ TEST(basic_roundtrip_and_connection_reuse) {
   CHECK_MSG(r3.attempt.request_body_bytes == (1 << 20), "uploaded %lld bytes", static_cast<long long>(r3.attempt.request_body_bytes));
 }
 
+TEST(single_active_starts_keep_callback_order_and_reuse) {
+  Transport t;
+  for (unsigned i = 0; i < 16; ++i) {
+    unsigned heads = 0, outcomes = 0;
+    bool valid = true;
+    std::string body;
+    Callbacks callbacks;
+    callbacks.on_head = [&](const ResponseHead&) {
+      valid = valid && heads == 0 && outcomes == 0;
+      ++heads;
+    };
+    callbacks.on_body = [&](std::string_view bytes) {
+      valid = valid && heads == 1 && outcomes == 0;
+      body.append(bytes);
+      return true;
+    };
+    callbacks.on_done = [&](const Result&) {
+      valid = valid && heads == 1 && outcomes == 0;
+      ++outcomes;
+    };
+    auto operation = t.start(post(g_server.url("/ok")), std::move(callbacks));
+    const auto result = operation.join();  // also fences callback storage release
+    CHECK(result.status == Status::Completed && body == "ok");
+    CHECK(valid && heads == 1 && outcomes == 1);
+    CHECK(result.attempt.connection_reused == (i != 0));
+    operation.cancel();  // terminal teardown must not affect the following start
+  }
+}
+
+
 TEST(sse_chunked_stream_framing) {
   Transport t;
   auto c = std::make_shared<Collector>();
@@ -562,6 +607,43 @@ TEST(deadline_in_each_waiting_state) {
     note("%-24s deadline fired after %.0f ms at stage %s", s.name, took, name_of(r.attempt.reached));
   }
 }
+
+// Replacing curl's pending timer during queued starts/cancellations must not
+// strand a live transfer or postpone the independent deadline of a quiet peer.
+TEST(timer_replacement_during_start_cancel_keeps_live_operations) {
+  Transport t;
+  for (unsigned round = 0; round < 6; ++round) {
+    auto quiet = std::make_shared<Collector>();
+    auto held = t.start(post(g_server.url("/stall-header"), "{}", 350), quiet->callbacks());
+    std::vector<std::shared_ptr<Collector>> cancelled, live;
+    std::vector<Operation> cancelled_ops, live_ops;
+    for (unsigned i = 0; i < 8; ++i) {
+      auto dropped = std::make_shared<Collector>();
+      auto completed = std::make_shared<Collector>();
+      cancelled_ops.push_back(t.start(post(g_server.url("/stall-header"), "{}", 5000), dropped->callbacks()));
+      cancelled_ops.back().cancel();
+      live_ops.push_back(t.start(post(g_server.url("/ok"), "{}", 2000), completed->callbacks()));
+      cancelled.push_back(std::move(dropped));
+      live.push_back(std::move(completed));
+    }
+    for (std::size_t i = 0; i < live_ops.size(); ++i) {
+      CHECK(wait_until([&] { return live[i]->done.load(); }, 2500));
+      CHECK(live_ops[i].join().status == Status::Completed);
+      CHECK(live[i]->body_bytes > 0 && live[i]->outcomes == 1 && live[i]->late_callbacks == 0);
+      CHECK(wait_until([&] { return cancelled[i]->done.load(); }, 1000));
+      CHECK(cancelled_ops[i].join().status == Status::Cancelled);
+      CHECK(cancelled[i]->outcomes == 1 && cancelled[i]->late_callbacks == 0);
+    }
+    CHECK(wait_until([&] { return quiet->done.load(); }, 2000));
+    const auto result = held.join();
+    CHECK(result.status == Status::DeadlineExceeded);
+    const auto elapsed = std::chrono::duration<double, std::milli>(result.elapsed).count();
+    CHECK_MSG(elapsed >= 300 && elapsed < 1500,
+              "quiet deadline lost behind timer replacement in round %u: %.0f ms", round, elapsed);
+    CHECK(quiet->outcomes == 1 && quiet->late_callbacks == 0);
+  }
+}
+
 
 // CancelWithoutPeerProgress: the peer sends nothing after the state is reached; cancel alone ends it.
 TEST(cancel_without_peer_progress) {
@@ -1601,57 +1683,84 @@ TEST(http2_paused_stream_has_live_multiplexed_siblings) {
   if (!started) return;
   TransportOptions options;
   options.max_host_connections = 1;
-  Transport t(options);
-  auto warm = std::make_shared<Collector>();
-  CHECK(t.start(h2_post(node, "/ok?key=warm"), warm->callbacks()).join().status == Status::Completed);
-  constexpr long total = 64L << 20, sibling_total = 4L << 20;
-  FloodCollector held;
-  held.accept_before_pause = 1L << 20;
-  const long long rss_before = rss_bytes();
-  Operation paused = t.start(h2_post(node, "/flood?key=held&total=" + std::to_string(total), 60000), held.callbacks());
-  CHECK(wait_until([&] { return held.paused.load(); }, 5000));
-  const long consumed_at_pause = held.bytes.load();
-  std::array<FloodCollector, 3> siblings;
-  std::vector<Operation> operations;
-  for (std::size_t i = 0; i < siblings.size(); ++i) {
-    siblings[i].released = true;
-    operations.push_back(t.start(h2_post(node, "/flood?key=s" + std::to_string(i) +
-                                              "&total=" + std::to_string(sibling_total)), siblings[i].callbacks()));
-  }
-  for (std::size_t i = 0; i < operations.size(); ++i) {
-    const Result r = operations[i].join();
-    CHECK_MSG(r.status == Status::Completed, "sibling %zu: %s/%s", i, name_of(r.status), name_of(r.failure));
-    CHECK(r.attempt.version == ResponseVersion::Http2);
-    CHECK(siblings[i].bytes == sibling_total && siblings[i].valid);
-    CHECK(siblings[i].result.outcomes == 1 && siblings[i].result.late_callbacks == 0);
-  }
-  std::this_thread::sleep_for(milliseconds(200));
-  const long written1 = node.stat("held_written");
-  std::this_thread::sleep_for(milliseconds(200));
-  const long written2 = node.stat("held_written");
-  const long long growth = rss_bytes() - rss_before;
-  const Stats stats = node.stats_request();
-  CHECK(stats["sessions"] == 1);
-  CHECK(stats["held_requests"] == 1 && stats["held_done"] == 0);
-  CHECK(stats["held_session"] == stats["warm_session"]);
-  for (std::size_t i = 0; i < siblings.size(); ++i) {
-    const std::string key = "s" + std::to_string(i);
-    CHECK(stats[key + "_session"] == stats["held_session"]);
-    CHECK(stats[key + "_stream"] != stats["held_stream"]);
-    CHECK(stats[key + "_requests"] == 1 && stats[key + "_done"] == 1);
-  }
-  CHECK(written1 == written2);
-  CHECK(written2 > consumed_at_pause && written2 < (32L << 20));
-  CHECK_MSG(growth < (32L << 20), "multiplexed pause grew RSS by %lld B", growth);
-  CHECK(held.bytes == consumed_at_pause && !held.result.done);
-  note("shared h2 session: 3 siblings completed %ld B each; paused received=%ld written=%ld->%ld RSS +%lld",
-       sibling_total, consumed_at_pause, written1, written2, growth);
-  held.released = true;
-  paused.resume();
-  const Result r = paused.join();
-  CHECK(r.status == Status::Completed);
-  CHECK(held.bytes == total && held.valid);
-  CHECK(held.result.outcomes == 1 && held.result.late_callbacks == 0);
+#ifdef SP_TRANSPORT_TEST_TSAN
+  std::size_t live_before = 0, live_plateau = 0;
+  long long instrumented_rss_before = 0;
+#endif
+  {
+    Transport t(options);
+    auto warm = std::make_shared<Collector>();
+    CHECK(t.start(h2_post(node, "/ok?key=warm"), warm->callbacks()).join().status == Status::Completed);
+    constexpr long total = 64L << 20, sibling_total = 4L << 20;
+    FloodCollector held;
+    held.accept_before_pause = 1L << 20;
+    const long long rss_before = rss_bytes();
+#ifdef SP_TRANSPORT_TEST_TSAN
+    live_before = __sanitizer_get_current_allocated_bytes();
+    instrumented_rss_before = rss_before;
+#endif
+    Operation paused = t.start(h2_post(node, "/flood?key=held&total=" + std::to_string(total), 60000), held.callbacks());
+    CHECK(wait_until([&] { return held.paused.load(); }, 5000));
+    const long consumed_at_pause = held.bytes.load();
+    std::array<FloodCollector, 3> siblings;
+    std::vector<Operation> operations;
+    for (std::size_t i = 0; i < siblings.size(); ++i) {
+      siblings[i].released = true;
+      operations.push_back(t.start(h2_post(node, "/flood?key=s" + std::to_string(i) +
+                                                "&total=" + std::to_string(sibling_total)), siblings[i].callbacks()));
+    }
+    for (std::size_t i = 0; i < operations.size(); ++i) {
+      const Result r = operations[i].join();
+      CHECK_MSG(r.status == Status::Completed, "sibling %zu: %s/%s", i, name_of(r.status), name_of(r.failure));
+      CHECK(r.attempt.version == ResponseVersion::Http2);
+      CHECK(siblings[i].bytes == sibling_total && siblings[i].valid);
+      CHECK(siblings[i].result.outcomes == 1 && siblings[i].result.late_callbacks == 0);
+    }
+    std::this_thread::sleep_for(milliseconds(200));
+    const long written1 = node.stat("held_written");
+    std::this_thread::sleep_for(milliseconds(200));
+    const long written2 = node.stat("held_written");
+    const long long growth = rss_bytes() - rss_before;
+    const Stats stats = node.stats_request();
+    CHECK(stats["sessions"] == 1);
+    CHECK(stats["held_requests"] == 1 && stats["held_done"] == 0);
+    CHECK(stats["held_session"] == stats["warm_session"]);
+    for (std::size_t i = 0; i < siblings.size(); ++i) {
+      const std::string key = "s" + std::to_string(i);
+      CHECK(stats[key + "_session"] == stats["held_session"]);
+      CHECK(stats[key + "_stream"] != stats["held_stream"]);
+      CHECK(stats[key + "_requests"] == 1 && stats[key + "_done"] == 1);
+    }
+    CHECK(written1 == written2);
+    CHECK(written2 > consumed_at_pause && written2 < (32L << 20));
+#ifdef SP_TRANSPORT_TEST_TSAN
+    // Instrumented resident pages are logged, not treated as the product RSS
+    // budget. Bound actual live allocation growth with the same 32 MiB ceiling.
+    live_plateau = __sanitizer_get_current_allocated_bytes();
+    const auto live_growth = live_plateau > live_before ? live_plateau - live_before : std::size_t{0};
+    CHECK_MSG(live_growth < (32L << 20), "multiplexed pause grew TSan live allocations by %zu B", live_growth);
+    note("TSan paused live allocations: before=%zu plateau=%zu growth=%zu B; instrumented RSS delta=%lld B",
+         live_before, live_plateau, live_growth, growth);
+#else
+    CHECK_MSG(growth < (32L << 20), "multiplexed pause grew RSS by %lld B", growth);
+#endif
+    CHECK(held.bytes == consumed_at_pause && !held.result.done);
+    note("shared h2 session: 3 siblings completed %ld B each; paused received=%ld written=%ld->%ld RSS +%lld",
+         sibling_total, consumed_at_pause, written1, written2, growth);
+    held.released = true;
+    paused.resume();
+    const Result r = paused.join();
+    CHECK(r.status == Status::Completed);
+    CHECK(held.bytes == total && held.valid);
+    CHECK(held.result.outcomes == 1 && held.result.late_callbacks == 0);
+  }  // Operation handles, callback collectors and the transport are destroyed.
+#ifdef SP_TRANSPORT_TEST_TSAN
+  const auto live_destroyed = __sanitizer_get_current_allocated_bytes();
+  CHECK_MSG(live_destroyed <= live_before,
+            "TSan teardown retained live allocations: before=%zu destroyed=%zu B", live_before, live_destroyed);
+  note("TSan teardown live allocations: before=%zu plateau=%zu destroyed=%zu B; instrumented RSS delta=%lld B",
+       live_before, live_plateau, live_destroyed, rss_bytes() - instrumented_rss_before);
+#endif
 }
 
 TEST(http2_cancelling_paused_stream_preserves_sibling) {
