@@ -464,38 +464,91 @@ void pool_timer_wake_transitions() {
     auto completion = [] {
       return std::make_shared<std::promise<void>>();
     };
-    auto long_timer = executor->schedule(executor->now() + 5s, unused);
-    // Let idle workers enter the long timed wait before installing an earlier
-    // expiry. A missed wake must fail the bounded wait, not wait for five seconds.
+    // Timer expiry is not a cancellation fence: a descheduled test driver
+    // may return after any sleep's intended deadline. Occupy every worker
+    // before installing/cancelling timers whose callbacks must never execute.
+    auto fenced = [&](auto&& action) {
+      struct Gate {
+        std::mutex mutex;
+        std::condition_variable changed;
+        std::size_t entered = 0;
+        bool open = false;
+      };
+      auto gate = std::make_shared<Gate>();
+      struct OpenGate {
+        std::shared_ptr<Gate> gate;
+        ~OpenGate() {
+          {
+            std::lock_guard lock(gate->mutex);
+            gate->open = true;
+          }
+          gate->changed.notify_all();
+        }
+      } release{gate};  // Unblock workers even if posting or an assertion throws.
+      for (std::size_t i = 0; i < workers; ++i) {
+        executor->post([gate] {
+          std::unique_lock lock(gate->mutex);
+          ++gate->entered;
+          gate->changed.notify_all();
+          gate->changed.wait(lock, [&] { return gate->open; });
+        });
+      }
+      {
+        std::unique_lock lock(gate->mutex);
+        CHECK(gate->changed.wait_for(lock, 1s, [&] { return gate->entered == workers; }));
+      }
+      action();
+    };
+
+    detail::Executor::Timer long_timer = 0;
+    fenced([&] {
+      // This wait-bound sentinel may legitimately expire if the driver stalls;
+      // it is not one of the callbacks asserted to have been cancelled.
+      long_timer = executor->schedule(executor->now() + 5s, [] {});
+    });
+    // Give released workers an opportunity to enter the long timed wait before
+    // installing an earlier expiry. This sleep carries no cancellation proof.
     std::this_thread::sleep_for(20ms);
     auto early = completion();
     auto early_ready = early->get_future();
     executor->schedule(executor->now() + 30ms, [early] { early->set_value(); });
-    const auto later = executor->schedule(executor->now() + 3s, unused);
-    executor->cancel(later);
     CHECK(early_ready.wait_for(1s) == std::future_status::ready);
     executor->cancel(long_timer);
 
+    auto nearer = completion();
+    auto nearer_ready = nearer->get_future();
+    fenced([&] {
+      const auto at = executor->now() + 30ms;
+      executor->schedule(at, [nearer] { nearer->set_value(); });
+      const auto later = executor->schedule(at + 3s, unused);
+      executor->cancel(later);  // non-earliest cancellation
+    });
+    CHECK(nearer_ready.wait_for(1s) == std::future_status::ready);
+
     auto equal = completion();
     auto equal_ready = equal->get_future();
-    const auto same_time = executor->now() + 60ms;
-    const auto first = executor->schedule(same_time, unused);
-    executor->schedule(same_time, [equal] { equal->set_value(); });
-    std::this_thread::sleep_for(20ms);
-    executor->cancel(first);  // the next timer has the very same expiry
+    fenced([&] {
+      const auto same_time = executor->now() + 60ms;
+      const auto first = executor->schedule(same_time, unused);
+      executor->schedule(same_time, [equal] { equal->set_value(); });
+      executor->cancel(first);  // the next timer has the very same expiry
+    });
     CHECK(equal_ready.wait_for(1s) == std::future_status::ready);
 
     auto next = completion();
     auto next_ready = next->get_future();
-    const auto removed = executor->schedule(executor->now() + 60ms, unused);
-    executor->schedule(executor->now() + 90ms, [next] { next->set_value(); });
-    std::this_thread::sleep_for(20ms);
-    executor->cancel(removed);  // every sleeper must recompute the next expiry
+    fenced([&] {
+      const auto at = executor->now() + 60ms;
+      const auto removed = executor->schedule(at, unused);
+      executor->schedule(at + 30ms, [next] { next->set_value(); });
+      executor->cancel(removed);  // remove the earliest, retain the next bound
+    });
     CHECK(next_ready.wait_for(1s) == std::future_status::ready);
 
-    long_timer = executor->schedule(executor->now() + 5s, unused);
-    std::this_thread::sleep_for(20ms);
-    executor->cancel(long_timer);  // transition back to an indefinite wait
+    fenced([&] {
+      const auto last = executor->schedule(executor->now() + 5s, unused);
+      executor->cancel(last);  // release workers with no remaining timer
+    });
     for (unsigned i = 0; i < 16; ++i) {
       auto posted = completion();
       auto posted_ready = posted->get_future();
