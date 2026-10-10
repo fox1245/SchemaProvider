@@ -37,27 +37,27 @@ template<class Result> void error(Result result, ErrorKind kind) {
   CHECK(std::holds_alternative<Error>(result));
   CHECK(std::get<Error>(result).kind == kind);
 }
-chat::Request chat_request(const Image& image) {
+chat::Request chat_request(const Media& image) {
   chat::Request r; r.model = "fixture-model";
-  chat::InputMessage user; user.role = Role::User; user.images.push_back(image);
+  chat::InputMessage user; user.role = Role::User; user.media.push_back(image);
   r.messages.push_back(std::move(user)); return r;
 }
-messages::Request messages_request(const Image& image) {
+messages::Request messages_request(const Media& image) {
   messages::Request r; r.model = "fixture-model"; r.account_scope = "fixture-account";
   r.messages.push_back(Message{{}, Role::User, {image}}); return r;
 }
-responses::Request responses_request(const Image& image) {
+responses::Request responses_request(const Media& image) {
   responses::Request r; r.model = "fixture-model"; r.account_scope = "fixture-account";
   r.messages.push_back(Message{{}, Role::User, {image}}); return r;
 }
-void reject_all(const Image& image) {
-  error(chat::encode(desc("chat"), chat_request(image), false), ErrorKind::InvalidRequest);
-  error(messages::encode(desc("messages"), messages_request(image), false), ErrorKind::InvalidRequest);
-  error(responses::encode(desc("responses"), responses_request(image), false), ErrorKind::InvalidRequest);
+void reject_all(const Media& image, ErrorKind kind = ErrorKind::InvalidRequest) {
+  error(chat::encode(desc("chat"), chat_request(image), false), kind);
+  error(messages::encode(desc("messages"), messages_request(image), false), kind);
+  error(responses::encode(desc("responses"), responses_request(image), false), kind);
 }
 // Structural admission deliberately does not promise a pixel decoder. Generate
 // canonical base64 with PNG magic and zero padding to isolate decoded-byte bounds.
-Image boundary_image(size_t bytes) {
+Media boundary_image(size_t bytes) {
   constexpr std::array<unsigned char, 8> magic{137,80,78,71,13,10,26,10};
   constexpr std::string_view alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
   auto data = std::make_shared<std::string>(); data->reserve(((bytes + 2) / 3) * 4);
@@ -68,7 +68,7 @@ Image boundary_image(size_t bytes) {
     data->push_back(i + 1 < bytes ? alphabet[(n >> 6) & 63] : '=');
     data->push_back(i + 2 < bytes ? alphabet[n & 63] : '=');
   }
-  return Image{"image/png", std::move(data)};
+  return Media::image("image/png", std::move(data));
 }
 void admission_and_budgets() {
   const auto fixture = vision_test::scene_a().image();
@@ -81,16 +81,16 @@ void admission_and_budgets() {
     invalid = fixture; invalid.data = std::make_shared<const std::string>(malformed); reject_all(invalid);
   }
   const auto at_limit = boundary_image(5U << 20);
-  CHECK(valid_image(at_limit));
+  CHECK(check_media(at_limit, 5U << 20) == MediaFault::None);
   for (bool streaming : {false, true}) {
     take<chat::EncodedRequest>(chat::encode(desc("chat"), chat_request(at_limit), streaming));
     take<messages::EncodedRequest>(messages::encode(desc("messages"), messages_request(at_limit), streaming));
     take<responses::EncodedRequest>(responses::encode(desc("responses"), responses_request(at_limit), streaming));
   }
-  reject_all(boundary_image((5U << 20) + 1));
+  reject_all(boundary_image((5U << 20) + 1), ErrorKind::ResourceLimit);
   // Each image is individually admitted; the complete request still has one
   // aggregate 16 MiB budget across all parts, not a budget per image.
-  auto c = chat_request(at_limit); c.messages[0].images.assign(3, at_limit);
+  auto c = chat_request(at_limit); c.messages[0].media.assign(3, at_limit);
   CHECK(std::holds_alternative<Error>(chat::encode(desc("chat"), c, false)));
   auto m = messages_request(at_limit); m.messages[0].parts = {at_limit, at_limit, at_limit};
   CHECK(std::holds_alternative<Error>(messages::encode(desc("messages"), m, false)));
@@ -125,7 +125,7 @@ void role_and_control_admission() {
 void semantic_order_and_integrity() {
   const auto a = vision_test::scene_a().image(), b = vision_test::scene_b().image();
   for (bool streaming : {false, true}) {
-    auto c = chat_request(a); c.messages[0].images.push_back(b); c.messages[0].text = std::string(vision_test::question);
+    auto c = chat_request(a); c.messages[0].media.push_back(b); c.messages[0].text = std::string(vision_test::question);
     c.reasoning_effort = "max";
     auto cw = take<chat::EncodedRequest>(chat::encode(desc("chat"), c, streaming)); auto cd = parse(cw.body);
     const auto content = cd.root().get("messages").at(0).get("content");
@@ -151,7 +151,7 @@ void semantic_order_and_integrity() {
   std::weak_ptr<const std::string> weak; responses::Request retained;
   {
     auto local = std::make_shared<const std::string>(*a.data); weak = local;
-    Image image{"image/png", local}; retained = responses_request(image);
+    auto image = Media::image("image/png", local); retained = responses_request(image);
   }
   CHECK(!weak.expired());
   auto wire = take<responses::EncodedRequest>(responses::encode(desc("responses"), retained, false));
@@ -176,7 +176,7 @@ Message capture_responses(const responses::EncodedRequest& wire) {
   CHECK(message.native && message.native->complete()); return message;
 }
 void prefix_mutation(Message& message, unsigned mutation) {
-  auto& image = std::get<Image>(message.parts.at(0));
+  auto& image = std::get<Media>(message.parts.at(0));
   switch (mutation) {
     case 0: image.data = vision_test::scene_b().base64; break;
     case 1: image.mime = "image/jpeg"; break;
@@ -203,9 +203,9 @@ void exact_native_image_prefix_binding() {
     error(responses::encode(desc("responses"), changed_r, false), ErrorKind::ReplayIneligible);
   }
   // Replacing immutable ownership with equal bytes must not change lineage.
-  auto same_m = m; std::get<Image>(same_m.messages[0].parts[0]).data = std::make_shared<const std::string>(*image.data);
+  auto same_m = m; std::get<Media>(same_m.messages[0].parts[0]).data = std::make_shared<const std::string>(*image.data);
   take<messages::EncodedRequest>(messages::encode(desc("messages"), same_m, false));
-  auto same_r = r; std::get<Image>(same_r.messages[0].parts[0]).data = std::make_shared<const std::string>(*image.data);
+  auto same_r = r; std::get<Media>(same_r.messages[0].parts[0]).data = std::make_shared<const std::string>(*image.data);
   take<responses::EncodedRequest>(responses::encode(desc("responses"), same_r, false));
 }
 } // namespace

@@ -1,11 +1,23 @@
 {
   "version": 1,
-  "revision": 4,
+  "revision": 5,
   "families": [
     {
       "family": "openai.chat",
       "openrouter_origins": ["https://openrouter.ai"],
       "temperature_forbidden_model_prefixes": ["gpt-5", "gpt-6", "o1", "o3", "o4"],
+      "media": {
+        "image": {"mime": ["image/png", "image/jpeg", "image/webp", "image/gif"], "sources": ["inline", "url"]},
+        "audio": {"mime": ["audio/wav", "audio/mp3", "audio/mpeg"], "sources": ["inline"]},
+        "video": {"mime": [], "sources": []},
+        "document": {"mime": ["application/pdf"], "sources": ["inline", "file"]}
+      },
+      "openrouter_media": {
+        "image": {"mime": ["image/png", "image/jpeg", "image/webp", "image/gif"], "sources": ["inline", "url"]},
+        "audio": {"mime": ["audio/wav", "audio/mp3", "audio/mpeg", "audio/aiff", "audio/aac", "audio/ogg", "audio/flac", "audio/m4a", "audio/l16", "audio/l24"], "sources": ["inline"]},
+        "video": {"mime": ["video/mp4", "video/mpeg", "video/mov", "video/webm"], "sources": ["inline", "url"]},
+        "document": {"mime": ["application/pdf"], "sources": ["inline", "url", "file"]}
+      },
       "bindings": {
         "model": "model",
         "messages": "messages",
@@ -73,6 +85,13 @@
       "family": "anthropic.messages",
       "openrouter_origins": ["https://openrouter.ai"],
       "temperature_forbidden_model_prefixes": ["claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-sonnet-5", "claude-fable-"],
+      "media": {
+        "image": {"mime": ["image/jpeg", "image/png", "image/gif", "image/webp"], "sources": ["inline", "url", "file"]},
+        "audio": {"mime": [], "sources": []},
+        "video": {"mime": [], "sources": []},
+        "document": {"mime": ["application/pdf", "text/plain"], "sources": ["inline", "url", "file"]}
+      },
+      "openrouter_media": null,
       "bindings": {
         "model": "model",
         "messages": "messages",
@@ -196,6 +215,18 @@
       "family": "openai.responses",
       "openrouter_origins": ["https://openrouter.ai"],
       "temperature_forbidden_model_prefixes": ["gpt-5", "gpt-6", "o1", "o3", "o4"],
+      "media": {
+        "image": {"mime": ["image/png", "image/jpeg", "image/webp", "image/gif"], "sources": ["inline", "url", "file"]},
+        "audio": {"mime": [], "sources": []},
+        "video": {"mime": [], "sources": []},
+        "document": {"mime": ["application/pdf", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/vnd.ms-excel", "text/csv", "application/csv", "text/tsv", "text/x-iif", "application/x-iif", "application/vnd.google-apps.spreadsheet", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/msword", "application/rtf", "text/rtf", "application/vnd.oasis.opendocument.text", "application/vnd.apple.pages", "application/vnd.google-apps.document", "application/vnd.apple.iwork", "application/vnd.openxmlformats-officedocument.presentationml.presentation", "application/vnd.ms-powerpoint", "application/vnd.apple.keynote", "application/vnd.google-apps.presentation", "application/javascript", "application/typescript", "text/xml", "text/x-shellscript", "text/x-rst", "text/x-makefile", "text/x-lisp", "text/x-asm", "text/vbscript", "text/css", "message/rfc822", "application/x-sql", "application/x-scala", "application/x-rust", "application/x-powershell", "text/x-diff", "text/x-patch", "application/x-patch", "text/plain", "text/markdown", "text/x-java", "text/x-script.python", "text/x-python", "text/x-c", "text/x-c++", "text/x-golang", "text/html", "text/x-php", "application/x-php", "application/x-httpd-php", "application/x-httpd-php-source", "text/x-ruby", "text/x-sh", "text/x-bash", "application/x-bash", "text/x-zsh", "text/x-tex", "text/x-csharp", "application/json", "text/x-typescript", "text/javascript", "text/x-go", "text/x-rust", "text/x-scala", "text/x-kotlin", "text/x-swift", "text/x-lua", "text/x-r", "text/x-julia", "text/x-perl", "text/x-objectivec", "text/x-objectivec++", "text/x-erlang", "text/x-elixir", "text/x-haskell", "text/x-clojure", "text/x-groovy", "text/x-dart", "text/x-awk", "application/x-awk", "text/jsx", "text/tsx", "text/x-handlebars", "text/x-mustache", "text/x-ejs", "text/x-jinja2", "text/x-liquid", "text/x-erb", "text/x-twig", "text/x-pug", "text/x-jade", "text/x-tmpl", "text/x-cmake", "text/x-dockerfile", "text/x-gradle", "text/x-ini", "text/x-properties", "text/x-protobuf", "application/x-protobuf", "text/x-sql", "text/x-sass", "text/x-scss", "text/x-less", "text/x-hcl", "text/x-terraform", "application/x-terraform", "text/x-toml", "application/x-toml", "application/graphql", "application/x-graphql", "text/x-graphql", "application/x-ndjson", "application/json5", "application/x-json5", "text/x-yaml", "application/toml", "application/x-yaml", "application/yaml", "text/x-astro", "text/srt", "application/x-subrip", "text/x-subrip", "text/vtt", "text/x-vcard", "text/calendar"], "sources": ["inline", "url", "file"]}
+      },
+      "openrouter_media": {
+        "image": {"mime": ["image/png", "image/jpeg", "image/webp", "image/gif"], "sources": ["inline", "url", "file"]},
+        "audio": {"mime": ["audio/mp3", "audio/mpeg", "audio/wav"], "sources": ["inline"]},
+        "video": {"mime": ["video/mp4", "video/mpeg", "video/mov", "video/webm"], "sources": ["inline", "url"]},
+        "document": {"mime": ["application/pdf"], "sources": ["inline", "url", "file"]}
+      },
       "bindings": {
         "model": "model",
         "messages": "input",
@@ -269,6 +300,13 @@
       "family": "google.generate",
       "openrouter_origins": [],
       "temperature_forbidden_model_prefixes": [],
+      "media": {
+        "image": {"mime": ["image/png", "image/jpeg", "image/jpg", "image/webp", "image/heic", "image/heif", "image/gif", "image/avif", "image/bmp", "image/tiff"], "sources": ["inline", "url", "file"]},
+        "audio": {"mime": ["audio/wav", "audio/mp3", "audio/aiff", "audio/aac", "audio/ogg", "audio/flac", "audio/mpeg", "audio/m4a", "audio/l16", "audio/opus", "audio/alaw", "audio/mulaw", "audio/webm", "video/audio/s16le", "video/audio/wav"], "sources": ["inline", "url", "file"]},
+        "video": {"mime": ["video/mp4", "video/mpeg", "video/mpg", "video/avi", "video/x-flv", "video/webm", "video/wmv", "video/3gpp", "video/mov", "video/quicktime"], "sources": ["inline", "url", "file"]},
+        "document": {"mime": ["application/pdf", "text/plain", "text/html", "text/css", "text/javascript", "text/x-typescript", "text/csv", "text/markdown", "text/x-python", "text/xml", "text/rtf", "application/x-javascript", "application/x-typescript", "application/x-python-code", "application/json", "application/x-ipynb+json", "application/rtf", "video/text/timestamp"], "sources": ["inline", "url", "file"]}
+      },
+      "openrouter_media": null,
       "bindings": {
         "model": "model",
         "messages": "contents",
@@ -287,7 +325,7 @@
       "defaults": {
         "max_output_tokens": 4096,
         "thinking_budget": null,
-        "include_thoughts": true,
+        "include_thoughts": null,
         "thinking_summaries": null,
         "reasoning_enabled": false,
         "reasoning_effort": null,
@@ -321,6 +359,13 @@
       "family": "google.interactions",
       "openrouter_origins": [],
       "temperature_forbidden_model_prefixes": [],
+      "media": {
+        "image": {"mime": ["image/png", "image/jpeg", "image/webp", "image/heic", "image/heif", "image/gif", "image/bmp", "image/tiff"], "sources": ["inline", "url", "file"]},
+        "audio": {"mime": ["audio/wav", "audio/mp3", "audio/aiff", "audio/aac", "audio/ogg", "audio/flac", "audio/mpeg", "audio/m4a", "audio/l16", "audio/opus", "audio/alaw", "audio/mulaw", "audio/webm"], "sources": ["inline", "url", "file"]},
+        "video": {"mime": ["video/mp4", "video/mpeg", "video/mpg", "video/mov", "video/avi", "video/x-flv", "video/webm", "video/wmv", "video/3gpp"], "sources": ["inline", "url", "file"]},
+        "document": {"mime": ["application/pdf", "text/csv"], "sources": ["inline", "url", "file"]}
+      },
+      "openrouter_media": null,
       "bindings": {
         "model": "model",
         "messages": "input",
@@ -339,7 +384,7 @@
         "max_output_tokens": 4096,
         "thinking_budget": null,
         "include_thoughts": null,
-        "thinking_summaries": true,
+        "thinking_summaries": null,
         "reasoning_enabled": false,
         "reasoning_effort": null,
         "reasoning_summary": null,

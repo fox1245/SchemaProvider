@@ -3,8 +3,10 @@
 #include "crypto/crypto.h"
 #include "json/json.h"
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <map>
+#include <span>
 #include <type_traits>
 
 namespace sp {
@@ -43,6 +45,20 @@ class Hash {
     number(document ? 1 : 0);
     if (document) value(document->root(), 0);
   }
+  // Inline images without a name, identity or transcript keep their original digest layout, so
+  // histories sealed before typed media verify unchanged. Every other media shape binds all of
+  // its fields behind an empty MIME marker (an original image always carries a MIME type).
+  void media(const Media& m) {
+    if (m.kind == MediaKind::Image && m.source == MediaSource::Inline && m.name.empty() && m.id.empty() &&
+        m.transcript.empty() && m.reference.empty()) {
+      text(m.mime); number(m.data != nullptr); if (m.data) text(*m.data);
+      number(static_cast<uint64_t>(m.detail));
+      return;
+    }
+    text(""); number(static_cast<uint64_t>(m.kind)); number(static_cast<uint64_t>(m.source)); text(m.mime);
+    number(m.data != nullptr); if (m.data) text(*m.data);
+    text(m.reference); text(m.name); number(static_cast<uint64_t>(m.detail)); text(m.id); text(m.transcript);
+  }
   void value(json::Value v, size_t depth) {
     if (depth > limits_.native_depth || !v.valid()) { valid_ = false; return; }
     if (v.is_null()) number(0);
@@ -58,19 +74,36 @@ class Hash {
     } else if (v.is_object()) {
       number(7); number(v.size());
       if (v.size() > limits_.native_members) { valid_ = false; return; }
-      std::vector<json::Member> members; members.reserve(v.size());
-      for (auto member : v.members()) members.push_back(member);
-      std::sort(members.begin(), members.end(), [](const auto& a, const auto& b) { return a.key < b.key; });
-      for (auto member : members) { if (!valid_) break; text(member.key); value(member.value, depth + 1); }
+      // Zero or one member is already in canonical order.
+      if (v.size() < 2) {
+        for (auto member : v.members()) { if (!valid_) break; text(member.key); value(member.value, depth + 1); }
+        return;
+      }
+      auto hash_members = [&](std::span<json::Member> members) {
+        std::sort(members.begin(), members.end(), [](const auto& a, const auto& b) { return a.key < b.key; });
+        for (auto member : members) { if (!valid_) break; text(member.key); value(member.value, depth + 1); }
+      };
+      if (v.size() <= 8) {
+        std::array<json::Member, 8> storage;
+        size_t count = 0;
+        for (auto member : v.members()) storage[count++] = member;
+        hash_members({storage.data(), count});
+      } else {
+        std::vector<json::Member> members; members.reserve(v.size());
+        for (auto member : v.members()) members.push_back(member);
+        hash_members(members);
+      }
     } else valid_ = false;
   }
   void message(const Message& message, std::string_view output_domain) {
     text(message.id); number(static_cast<uint64_t>(message.role)); number(message.parts.size());
     for (const auto& part : message.parts) {
       if (!valid_) break;
-      number(part.index());
       std::visit([&](const auto& p) {
         using P = std::decay_t<decltype(p)>;
+        if constexpr (std::is_same_v<P, ToolResult>)
+          number(p.content_parts.empty() ? part.index() : 13);
+        else number(part.index());
         if constexpr (std::is_same_v<P, Text>) text(p.value);
         else if constexpr (std::is_same_v<P, Refusal>) { text(p.text); text(p.raw_code); }
         else if constexpr (std::is_same_v<P, ToolCall> || std::is_same_v<P, InvalidToolCall>) {
@@ -85,6 +118,21 @@ class Hash {
         else if constexpr (std::is_same_v<P, ToolResult>) {
           text(p.tool_use_id); text(p.content); number(p.is_error); number(p.host.has_value());
           if (p.host) { text(p.host->name); text(p.host->status); number(p.host->retryable); number(p.host->effect_uncertain); }
+          if (!p.content_parts.empty()) {
+            if (p.content_parts.size() > limits_.native_members) { valid_ = false; return; }
+            number(p.content_parts.size());
+            for (const auto& nested : p.content_parts) {
+              if (!valid_) break;
+              number(nested.index());
+              if (const auto* t = std::get_if<Text>(&nested)) text(t->value);
+              else {
+                const auto& m = std::get<Media>(nested);
+                number(static_cast<uint64_t>(m.kind)); number(static_cast<uint64_t>(m.source)); text(m.mime);
+                number(m.data != nullptr); if (m.data) text(*m.data);
+                text(m.reference); text(m.name); number(static_cast<uint64_t>(m.detail)); text(m.id); text(m.transcript);
+              }
+            }
+          }
         }
         else if constexpr (std::is_same_v<P, Reasoning>) {
           text(p.id); number(p.summary.size()); for (const auto& s : p.summary) text(s);
@@ -92,9 +140,8 @@ class Hash {
           number(p.status.has_value()); if (p.status) text(*p.status);
           number(p.content.size()); for (const auto& s : p.content) text(s);
         } else if constexpr (std::is_same_v<P, Opaque>) { text(p.wire_type); document(p.wire_metadata); }
-        else if constexpr (std::is_same_v<P, Image>) {
-          text(p.mime); number(p.data != nullptr); if (p.data) text(*p.data);
-          number(static_cast<uint64_t>(p.detail));
+        else if constexpr (std::is_same_v<P, Media>) {
+          media(p);
         } else if constexpr (std::is_same_v<P, Thought>) {
           number(p.summary.size());
           for (const auto& summary : p.summary) { if (!valid_) break; text(summary); }
@@ -206,6 +253,21 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
   hash.number(request.include_reasoning.has_value()); if (request.include_reasoning) hash.number(*request.include_reasoning);
   hash.number(request.usage_include.has_value()); if (request.usage_include) hash.number(*request.usage_include);
   hash.number(request.models.size()); for (const auto& model : request.models) hash.text(model);
+  hash.number(request.modalities.size());
+  for (const auto modality : request.modalities) hash.number(static_cast<uint64_t>(modality));
+  hash.number(request.audio.has_value());
+  if (request.audio) { hash.text(request.audio->voice); hash.text(request.audio->format); }
+  hash.number(request.image_config.has_value());
+  if (request.image_config) {
+    const auto& image = *request.image_config;
+    for (const auto* field : {&image.aspect_ratio, &image.image_size, &image.size, &image.quality, &image.background,
+                              &image.output_format, &image.moderation}) {
+      hash.number(field->has_value());
+      if (*field) hash.text(**field);
+    }
+    hash.number(image.output_compression.has_value());
+    if (image.output_compression) hash.number(*image.output_compression);
+  }
   hash.number(request.tools.size());
   for (const auto& tool : request.tools) {
     hash.text(tool.name); hash.text(tool.description); hash.document(tool.parameters);
@@ -255,6 +317,7 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
       if constexpr (std::is_same_v<T, responses::ImageGenerationTool>) {
         hash.number(tool.size.has_value()); if (tool.size) hash.text(*tool.size);
         hash.number(tool.quality.has_value()); if (tool.quality) hash.text(*tool.quality);
+        if (tool.output_format) { hash.text("sp.responses.image.output_format.v1"); hash.text(*tool.output_format); }
       } else if constexpr (std::is_same_v<T, responses::FileSearchTool>) {
         hash.number(tool.vector_store_ids.size());
         for (const auto& id : tool.vector_store_ids) hash.text(id);
@@ -289,6 +352,39 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
   for (const auto& tool : request.tools) {
     hash.text(tool.name); hash.text(tool.description); hash.document(tool.parameters);
   }
+  // Absent media controls retain the established text-only configuration layout.
+  if (!request.response_modalities.empty() || request.speech_config || request.image_config || request.audio_transcription_config) {
+    hash.text("sp.gemini.media.configuration.v1");
+    hash.number(request.response_modalities.size());
+    for (auto modality : request.response_modalities) hash.number(static_cast<unsigned>(modality));
+    auto voice_digest = [&](const gemini::VoiceConfig& voice) {
+      hash.number(voice.prebuilt_voice_name.has_value()); if (voice.prebuilt_voice_name) hash.text(*voice.prebuilt_voice_name);
+      hash.number(voice.voice.has_value()); if (voice.voice) hash.text(*voice.voice);
+    };
+    hash.number(request.speech_config.has_value());
+    if (request.speech_config) {
+      const auto& speech = *request.speech_config;
+      hash.number(speech.voice_config.has_value()); if (speech.voice_config) voice_digest(*speech.voice_config);
+      hash.number(speech.speaker_voice_configs.size());
+      for (const auto& speaker : speech.speaker_voice_configs) { hash.text(speaker.speaker); voice_digest(speaker.voice_config); }
+      hash.number(speech.language_code.has_value()); if (speech.language_code) hash.text(*speech.language_code);
+    }
+    hash.number(request.image_config.has_value());
+    if (request.image_config) {
+      const auto& image = *request.image_config;
+      hash.number(image.aspect_ratio.has_value()); if (image.aspect_ratio) hash.text(*image.aspect_ratio);
+      hash.number(image.image_size.has_value()); if (image.image_size) hash.text(*image.image_size);
+    }
+    hash.number(request.audio_transcription_config.has_value());
+    if (request.audio_transcription_config) {
+      const auto& transcription = *request.audio_transcription_config;
+      hash.number(transcription.language_codes.size()); for (const auto& value : transcription.language_codes) hash.text(value);
+      hash.number(transcription.custom_vocabulary.size()); for (const auto& value : transcription.custom_vocabulary) hash.text(value);
+      hash.number(transcription.word_timestamp.has_value()); if (transcription.word_timestamp) hash.number(*transcription.word_timestamp);
+      hash.number(transcription.diarization.has_value()); if (transcription.diarization) hash.number(*transcription.diarization);
+      hash.number(transcription.mode.has_value()); if (transcription.mode) hash.number(static_cast<unsigned>(*transcription.mode));
+    }
+  }
   return hash.finish(digest);
 }
 bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, const interactions::Request& request, const descriptor::EffectiveChoices& choices, Digest& digest) {
@@ -299,6 +395,50 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
   hash.number(request.tools.size());
   for (const auto& tool : request.tools) {
     hash.text(tool.name); hash.text(tool.description); hash.document(tool.parameters);
+  }
+  if (!request.response_format.empty() || request.speech_config || request.transcription_config) {
+    hash.text("sp.interactions.media.configuration.v1");
+    auto optional_text = [&](const std::optional<std::string>& value) { hash.number(value.has_value()); if (value) hash.text(*value); };
+    hash.number(request.response_format.size());
+    for (const auto& format : request.response_format) {
+      hash.number(format.index());
+      std::visit([&](const auto& value) {
+        using T = std::decay_t<decltype(value)>;
+        if constexpr (!std::is_same_v<T, interactions::TextResponseFormat>) {
+          hash.number(value.delivery.has_value()); if (value.delivery) hash.number(static_cast<unsigned>(*value.delivery));
+        }
+        if constexpr (std::is_same_v<T, interactions::AudioResponseFormat>) {
+          optional_text(value.mime_type);
+          hash.number(value.sample_rate.has_value()); if (value.sample_rate) hash.number(static_cast<std::uint64_t>(*value.sample_rate));
+          hash.number(value.bit_rate.has_value()); if (value.bit_rate) hash.number(static_cast<std::uint64_t>(*value.bit_rate));
+        } else if constexpr (std::is_same_v<T, interactions::ImageResponseFormat>) {
+          optional_text(value.mime_type); optional_text(value.aspect_ratio); optional_text(value.image_size);
+        } else if constexpr (std::is_same_v<T, interactions::VideoResponseFormat>) {
+          optional_text(value.aspect_ratio); optional_text(value.resolution); optional_text(value.duration); optional_text(value.gcs_uri);
+        } else { optional_text(value.mime_type); hash.document(value.schema); }
+      }, format);
+    }
+    hash.number(request.speech_config.has_value());
+    if (request.speech_config) {
+      hash.number(request.speech_config->index());
+      auto speakers_digest = [&](const std::vector<interactions::SpeechConfig>& speakers) {
+        hash.number(speakers.size());
+        for (const auto& speaker : speakers) { optional_text(speaker.voice); optional_text(speaker.speaker); optional_text(speaker.language); }
+      };
+      std::visit([&](const auto& value) {
+        using T = std::decay_t<decltype(value)>;
+        if constexpr (std::is_same_v<T, interactions::SpeakerConfig>) { speakers_digest(value.speakers); hash.number(value.conversational); }
+        else speakers_digest(value);
+      }, *request.speech_config);
+    }
+    hash.number(request.transcription_config.has_value());
+    if (request.transcription_config) {
+      const auto& transcription = *request.transcription_config;
+      hash.number(transcription.language_codes.size()); for (const auto& value : transcription.language_codes) hash.text(value);
+      hash.number(transcription.custom_vocabulary.size()); for (const auto& value : transcription.custom_vocabulary) hash.text(value);
+      hash.number(transcription.mode.has_value()); if (transcription.mode) hash.number(static_cast<unsigned>(*transcription.mode));
+      hash.number(transcription.speaker_diarization); hash.number(transcription.word_timestamps);
+    }
   }
   return hash.finish(digest);
 }
@@ -328,6 +468,7 @@ std::shared_ptr<const NativeContext> NativeContext::decoding_only() const {
   context->client_tools_ = client_tools_;
   context->replay_eligible_ = false;
   context->thinking_disabled_ = thinking_disabled_;
+  context->audio_format_ = audio_format_;
   return context;
 }
 NativeReplay::NativeReplay(std::shared_ptr<const NativeContext> context, StopKind stop, Digest content, bool complete)
@@ -421,6 +562,7 @@ NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, 
       prefix_count_(request.canonical_messages.empty() ? request.messages.size() : request.canonical_messages.size()), policy_(descriptor.policy()) {
   valid_ = descriptor.family() == family_name(family_) && origin_digest(descriptor, origin_) && configuration_digest(descriptor, request, choices, prefix_);
   if (!valid_) return;
+  if (request.audio) audio_format_ = request.audio->format;
   if (!request.canonical_messages.empty()) { bind_history(request.canonical_messages); return; }
   // Hash typed portable inputs using the same normalized ordered Message
   // representation without allocating/copying strings or image payloads.
@@ -431,13 +573,9 @@ NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, 
     if (m.role == Role::Tool) {
       hash.number(1); hash.number(7); hash.text(m.tool_call_id); hash.text(m.text); hash.number(0); hash.number(0);
     } else {
-      const bool text = m.images.empty() || !m.text.empty();
-      hash.number(m.images.size() + (text ? 1 : 0) + m.tool_calls.size());
-      for (const auto& image : m.images) {
-        hash.number(10); hash.text(image.mime); hash.number(image.data != nullptr);
-        if (image.data) hash.text(*image.data);
-        hash.number(static_cast<uint64_t>(image.detail));
-      }
+      const bool text = m.media.empty() || !m.text.empty();
+      hash.number(m.media.size() + (text ? 1 : 0) + m.tool_calls.size());
+      for (const auto& media : m.media) { hash.number(10); hash.media(media); }
       if (text) { hash.number(0); hash.text(m.text); }
       for (const auto& call : m.tool_calls) {
         hash.number(2); hash.text(call.id); hash.text(call.name); hash.number(static_cast<uint64_t>(call.kind));
@@ -470,7 +608,7 @@ void NativeContext::bind_history(const std::vector<Message>& messages, bool port
                 return !call || call->kind != ToolCallKind::ClientExecuted ||
                     !call->wire_type.empty() || call->wire_metadata;
               }
-              return !std::holds_alternative<Text>(part) && !std::holds_alternative<Image>(part) && !std::holds_alternative<ToolResult>(part);
+              return !std::holds_alternative<Text>(part) && !std::holds_alternative<Media>(part) && !std::holds_alternative<ToolResult>(part);
             })) { history_valid_ = false; return; }
       }
     }
@@ -529,9 +667,9 @@ InterfaceContract core_interface_contract() noexcept {
       capability::All5Native | capability::TrustedArchive | capability::OrderedWireEvents;
   if (json::retained_size_contract() == 1) capabilities |= capability::RetainedJsonSize;
 #if defined(__unix__) || defined(__APPLE__) || defined(_WIN32)
-  return {6, capabilities | capability::NativeSocketRuntime};
+  return {7, capabilities | capability::NativeSocketRuntime};
 #else
-  return {6, capabilities};
+  return {7, capabilities};
 #endif
 }
 } // namespace sp

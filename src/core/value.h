@@ -1,6 +1,6 @@
 #pragma once
 
-#include "core/image.h"
+#include "core/media.h"
 #include "sp/config_defaults.h"
 #include <array>
 #include <chrono>
@@ -52,6 +52,9 @@ struct ToolResult {
   std::string tool_use_id, content;
   bool is_error = false;
   std::optional<ToolResultHostMetadata> host{};
+  // Ordered typed output; nonempty parts require an empty legacy content string.
+  // Generate partitions these into separately ordered text and media lanes.
+  std::vector<std::variant<Text, Media>> content_parts{};
 };
 struct Reasoning {
   std::string id;
@@ -67,7 +70,7 @@ struct Thought {
   std::vector<std::string> summary;
   std::optional<std::string> signature{};
 };
-using Part = std::variant<Text, Refusal, ToolCall, InvalidToolCall, Thinking, RedactedThinking, ServerToolResult, ToolResult, Reasoning, Opaque, Image, Thought>;
+using Part = std::variant<Text, Refusal, ToolCall, InvalidToolCall, Thinking, RedactedThinking, ServerToolResult, ToolResult, Reasoning, Opaque, Media, Thought>;
 struct Message {
   std::string id;
   Role role = Role::Assistant;
@@ -160,12 +163,15 @@ struct PartialCompletion {
 struct Failure { Error error; PartialCompletion partial; };
 using Outcome = std::variant<Completion, Failure>;
 struct LocalId { uint32_t value = 0; friend bool operator==(LocalId, LocalId) = default; };
-enum class PartKind { Text, Refusal, ToolCall, Thinking, RedactedThinking, ServerToolResult, Reasoning, Opaque, Thought };
+enum class PartKind { Text, Refusal, ToolCall, Thinking, RedactedThinking, ServerToolResult, Reasoning, Opaque, Thought, Media };
 struct PartHeader {
   std::string wire_id, name;
   ToolCallKind tool_kind = ToolCallKind::ClientExecuted;
   std::string wire_type{};
   std::shared_ptr<const json::Document> wire_metadata{};
+  // PartKind::Media only: kind, MIME, source form, reference, name, identity and transcript of
+  // the generated media. Inline payload bytes (canonical base64) arrive as Media deltas.
+  Media media{};
 };
 enum class DeltaChannel { Content, Signature };
 struct DeltaPayload { PartKind kind; std::string_view bytes; DeltaChannel channel = DeltaChannel::Content; };

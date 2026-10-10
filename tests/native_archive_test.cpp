@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <stdexcept>
 #include <type_traits>
 #include <fcntl.h>
@@ -63,6 +64,11 @@ std::string digest(std::string_view bytes) {
   const auto h=sp::crypto::sha256(bytes);std::string s;constexpr char digits[]="0123456789abcdef";for(auto c:h){s+=digits[c>>4];s+=digits[c&15];}return s;
 }
 void same_document(const std::shared_ptr<const json::Document>& a,const std::shared_ptr<const json::Document>& b) {CHECK(bool(a)==bool(b));if(a)CHECK(json::equal(a->root(),b->root()));}
+void same_media(const Media& p,const Media& q) {
+  CHECK(p.kind==q.kind && p.source==q.source && p.mime==q.mime && p.detail==q.detail &&
+        p.reference==q.reference && p.name==q.name && p.id==q.id && p.transcript==q.transcript && bool(p.data)==bool(q.data));
+  if(p.data)CHECK(*p.data==*q.data);
+}
 void same_part(const Part& a,const Part& b) {
   CHECK(a.index()==b.index());std::visit([&](const auto& p){using P=std::decay_t<decltype(p)>;const auto& q=std::get<P>(b);
     if constexpr(std::is_same_v<P,Text>) CHECK(p.value==q.value);
@@ -71,10 +77,19 @@ void same_part(const Part& a,const Part& b) {
     else if constexpr(std::is_same_v<P,Thinking>)CHECK(p.text==q.text && p.signature==q.signature);
     else if constexpr(std::is_same_v<P,RedactedThinking>)CHECK(p.data==q.data);
     else if constexpr(std::is_same_v<P,ServerToolResult>){CHECK(p.tool_use_id==q.tool_use_id && p.wire_type==q.wire_type);same_document(p.content,q.content);}
-    else if constexpr(std::is_same_v<P,ToolResult>){CHECK(p.tool_use_id==q.tool_use_id && p.content==q.content && p.is_error==q.is_error && p.host.has_value()==q.host.has_value());if(p.host)CHECK(p.host->name==q.host->name && p.host->status==q.host->status && p.host->retryable==q.host->retryable && p.host->effect_uncertain==q.host->effect_uncertain);}
+    else if constexpr(std::is_same_v<P,ToolResult>){
+      CHECK(p.tool_use_id==q.tool_use_id && p.content==q.content && p.is_error==q.is_error && p.host.has_value()==q.host.has_value());
+      if(p.host)CHECK(p.host->name==q.host->name && p.host->status==q.host->status && p.host->retryable==q.host->retryable && p.host->effect_uncertain==q.host->effect_uncertain);
+      CHECK(p.content_parts.size()==q.content_parts.size());
+      for(size_t i=0;i<p.content_parts.size();++i) {
+        CHECK(p.content_parts[i].index()==q.content_parts[i].index());
+        if(const auto* text=std::get_if<Text>(&p.content_parts[i]))CHECK(text->value==std::get<Text>(q.content_parts[i]).value);
+        else same_media(std::get<Media>(p.content_parts[i]),std::get<Media>(q.content_parts[i]));
+      }
+    }
     else if constexpr(std::is_same_v<P,Reasoning>)CHECK(p.id==q.id && p.summary==q.summary && p.encrypted_content==q.encrypted_content && p.status==q.status && p.content==q.content);
     else if constexpr(std::is_same_v<P,Opaque>){CHECK(p.wire_type==q.wire_type);same_document(p.wire_metadata,q.wire_metadata);}
-    else if constexpr(std::is_same_v<P,Image>){CHECK(p.mime==q.mime && p.detail==q.detail && bool(p.data)==bool(q.data));if(p.data)CHECK(*p.data==*q.data);}
+    else if constexpr(std::is_same_v<P,Media>)same_media(p,q);
     else if constexpr(std::is_same_v<P,Thought>)CHECK(p.summary==q.summary && p.signature==q.signature);
   },a);
 }
@@ -83,8 +98,18 @@ void full_portable_and_native_roundtrip() {
   auto object=document(R"({"second":[1,true,null],"first":{"x":"value","float":1.0,"negative_zero":-0.0,"signed":-4,"large":18446744073709551615}})");
   ToolCall call{"call","lookup",ToolCallKind::ApprovalRequest,object,"function_call",object};
   InvalidToolCall invalid{"bad","lookup",ToolCallKind::ClientExecuted,"{",InvalidReason::Truncated,"function_call",object};
-  Message portable{"portable",Role::Developer,{Text{std::string("a\0b",3)},Refusal{"no","policy"},call,invalid,Thinking{"t",std::string{}},RedactedThinking{"redacted"},ServerToolResult{"server","search_result",object},ToolResult{"call","error",true},Reasoning{"reason",{"one","two"},"encrypted","completed",{"body"}},Opaque{"future",object},Image{"image/png",std::make_shared<const std::string>("AAEC"),ImageDetail::Original},Thought{{"thought"},"sig"}}, {},document(R"([{"raw":"ordered"},{"raw":"group"}])")};
+  Message portable{"portable",Role::Developer,{Text{std::string("a\0b",3)},Refusal{"no","policy"},call,invalid,Thinking{"t",std::string{}},RedactedThinking{"redacted"},ServerToolResult{"server","search_result",object},ToolResult{"call","error",true},Reasoning{"reason",{"one","two"},"encrypted","completed",{"body"}},Opaque{"future",object},Media::image("image/png",std::make_shared<const std::string>("AAEC"),ImageDetail::Original),Thought{{"thought"},"sig"}}, {},document(R"([{"raw":"ordered"},{"raw":"group"}])")};
   std::get<ToolResult>(portable.parts[7]).host=ToolResultHostMetadata{"lookup","uncertain",true,true};
+  ToolResult extended{"nested","",true,ToolResultHostMetadata{"lookup","uncertain",true,true}};
+  auto audio=Media::audio("audio/l16;rate=24000",std::make_shared<const std::string>("AQID"));
+  audio.name="spoken.raw";audio.id="audio_identity";audio.transcript="spoken text";
+  auto image=Media::image("image/png",std::make_shared<const std::string>("AAEC"),ImageDetail::High);
+  image.name="image.png";
+  extended.content_parts={Text{std::string("nested\0text",11)},audio,
+      Media::url(MediaKind::Video,"https://example.test/clip","video/mp4"),image,
+      Media::file(MediaKind::Document,"file-owned","application/pdf"),Text{"last"}};
+  std::get<Media>(extended.content_parts[4]).name="invoice.pdf";
+  portable.parts.emplace_back(extended);
   const auto ref=saved(a->save({portable},"portable-call"));a.reset();a=admitted(NativeArchive::open(f.directory(),f.key(),"owner-a",d));auto h=loaded(a->load(ref,"portable-call"));CHECK(h.size()==1 && !h[0].native && h[0].id==portable.id && h[0].role==portable.role && h[0].parts.size()==portable.parts.size());same_document(portable.wire_output,h[0].wire_output);for(size_t i=0;i<portable.parts.size();++i)same_part(portable.parts[i],h[0].parts[i]);
   std::get<Text>(h[0].parts[0]).value="edited portable";const auto edited=saved(a->save(h,"portable-call"));CHECK(edited!=ref);CHECK(!loaded(a->load(edited,"portable-call"))[0].native);
   auto r=request();r.messages.push_back(genuine(d,r));r.messages.push_back(user("continue"));auto native_ref=saved(a->save(r.messages,"native-call"));auto restored=loaded(a->load(native_ref,"native-call"));auto replay=r;replay.messages=restored;CHECK(encoded(d,replay).body==encoded(d,r).body);
@@ -212,6 +237,38 @@ void descriptor_semantics_are_archive_authority() {
   }
   CHECK(archive->matches_descriptor(original));
 }
+void extended_tool_result_archive_bounds() {
+  Fixture fixture;auto d=desc();NativeArchiveLimits limits;limits.max_parts=3;
+  auto archive=admitted(NativeArchive::provision(fixture.directory(),fixture.key(),"nested-bounds",d,limits));
+  ToolResult result{"call",""};result.content_parts={Text{"archive-marker"},Text{"last"}};
+  Message message{{},Role::User,{result}};
+  const auto reference=saved(archive->save({message},"nested"));
+  auto restored=loaded(archive->load(reference,"nested"));
+  same_part(message.parts[0],restored[0].parts[0]);
+  auto excessive=message;std::get<ToolResult>(excessive.parts[0]).content_parts.emplace_back(Text{"third"});
+  CHECK(std::holds_alternative<Error>(archive->save({excessive},"nested")));
+  auto exclusive=message;std::get<ToolResult>(exclusive.parts[0]).content="legacy";
+  CHECK(std::holds_alternative<Error>(archive->save({exclusive},"nested")));
+  for(unsigned mutation=0;mutation<3;++mutation) {
+    auto invalid=message;auto media=Media::image("image/png",std::make_shared<const std::string>("AAEC"));
+    if(mutation==0)media.kind=static_cast<MediaKind>(255);
+    if(mutation==1)media.source=static_cast<MediaSource>(255);
+    if(mutation==2)media.detail=static_cast<ImageDetail>(255);
+    std::get<ToolResult>(invalid.parts[0]).content_parts={media};
+    const auto invalid_reference=saved(archive->save({invalid},"invalid-enum"));
+    CHECK(std::holds_alternative<Error>(archive->load(invalid_reference,"invalid-enum")));
+  }
+  // Even a portable typed result never bypasses the archive's keyed authority.
+  const auto path=fixture.directory()+"/"+reference.substr(6);
+  std::ifstream input(path,std::ios::binary);
+  const std::string bytes((std::istreambuf_iterator<char>(input)),std::istreambuf_iterator<char>());
+  const auto offset=bytes.find("archive-marker");CHECK(offset!=std::string::npos);input.close();
+  CHECK(::chmod(path.c_str(),0600)==0);
+  const int fd=::open(path.c_str(),O_RDWR|O_CLOEXEC);CHECK(fd>=0);
+  const char changed='X';CHECK(::pwrite(fd,&changed,1,static_cast<off_t>(offset))==1);
+  CHECK(::fchmod(fd,0400)==0);::close(fd);
+  CHECK(std::holds_alternative<Error>(archive->load(reference,"nested")));
+}
 void process_restart(const char* executable) {
   Fixture f;auto d=desc();auto r=request();r.messages.push_back(genuine(d,r));r.messages.push_back(user("next"));auto a=admitted(NativeArchive::provision(f.directory(),f.key(),"restart-owner",d));const auto ref=saved(a->save(r.messages,"restart-call"));const auto expected=digest(encoded(d,r).body);a.reset();
   const auto child=::fork();CHECK(child>=0);if(child==0){::execl(executable,executable,"--restart",f.root.c_str(),ref.c_str(),expected.c_str(),static_cast<char*>(nullptr));::_exit(127);}int status=0;CHECK(::waitpid(child,&status,0)==child && WIFEXITED(status) && WEXITSTATUS(status)==0);
@@ -236,6 +293,7 @@ void identity_tamper_permissions_and_bounds() {
 int main(int argc,char** argv) {
   try {
     if(argc==5 && std::string_view(argv[1])=="--restart") {const std::string root=argv[2];auto d=desc();auto a=admitted(NativeArchive::open(root+"/records",root+"/activation","restart-owner",d));auto r=request();r.messages=loaded(a->load(argv[3],"restart-call"));CHECK(digest(encoded(d,r).body)==argv[4]);return 0;}
+    extended_tool_result_archive_bounds();
     full_portable_and_native_roundtrip();responses_ordered_restart();chat_encrypted_legacy_to_canonical_restart();google_tool_loop_restart();deprivileged_decode_preserves_result_without_issuing_seals();diagnostic_documents_roundtrip_without_executable_upgrade();descriptor_semantics_are_archive_authority();process_restart(argv[0]);identity_tamper_permissions_and_bounds();std::cout<<"native archive behavioral tests passed\n";return 0;
   }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

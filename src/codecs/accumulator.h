@@ -21,13 +21,20 @@ class Accumulator {
   bool terminal() const { return outcome_.has_value(); }
  private:
   enum class State { Created, Receiving, Draining, Terminal };
+  struct CursorHeader {
+    std::string wire_id, name;
+    ToolCallKind tool_kind = ToolCallKind::ClientExecuted;
+    std::string wire_type;
+    std::shared_ptr<const json::Document> wire_metadata;
+  };
   struct Cursor {
     PartKind kind;
-    PartHeader header;
+    CursorHeader header;
     std::string bytes;
     std::optional<std::string> signature;
     bool google_part = false;
     bool sealed = false;
+    // Media holds its owned description here while open; only sealed values carry payload.
     std::optional<Part> value;
   };
   struct MessageCursor {

@@ -1,5 +1,6 @@
 #include "codecs/chat.h"
 #include "core/native.h"
+#include "codecs/media_input.h"
 #include "descriptor/descriptor.h"
 #include "descriptor/policy.h"
 #include "json/json.h"
@@ -9,6 +10,88 @@
 #include <limits>
 
 namespace sp::chat {
+namespace {
+// Chat Completions content parts: image_url, input_audio, video_url and file. Admission has
+// already established that the family and origin accept this kind and source form.
+void write_media(json::BoundedWriter& body, const Media& media) {
+  switch (media.kind) {
+    case MediaKind::Image:
+      body.raw("{\"type\":\"image_url\",\"image_url\":{\"url\":");
+      media_input::uri_or_url(body, media);
+      body.raw(",\"detail\":").quoted(image_detail_name(media.detail)).raw("}}");
+      break;
+    case MediaKind::Audio:
+      body.raw("{\"type\":\"input_audio\",\"input_audio\":{\"data\":\"").raw(*media.data)
+          .raw("\",\"format\":").quoted(*media_input::audio_format(media.mime)).raw("}}");
+      break;
+    case MediaKind::Video:
+      body.raw("{\"type\":\"video_url\",\"video_url\":{\"url\":");
+      media_input::uri_or_url(body, media);
+      body.raw("}}");
+      break;
+    case MediaKind::Document:
+      body.raw("{\"type\":\"file\",\"file\":{");
+      if (media.source == MediaSource::File) body.raw("\"file_id\":").quoted(media.reference);
+      else {
+        body.raw("\"filename\":").quoted(media_input::document_filename(media)).raw(",\"file_data\":");
+        media_input::uri_or_url(body, media);
+      }
+      body.raw("}}");
+      break;
+  }
+}
+std::optional<Error> admit(const descriptor::ValidatedDescriptor& descriptor, const Media& media) {
+  if (auto error = media_input::admit(descriptor, media)) return error;
+  if (media.kind == MediaKind::Audio && !media_input::audio_format(media.mime))
+    return Error{ErrorKind::Unsupported, "Chat input_audio has no format name for this MIME type"};
+  return std::nullopt;
+}
+std::string_view modality_name(OutputModality modality) noexcept {
+  switch (modality) {
+    case OutputModality::Text: return "text";
+    case OutputModality::Audio: return "audio";
+    case OutputModality::Image: return "image";
+  }
+  return {};
+}
+bool audio_format_name(std::string_view format) noexcept {
+  return format == "wav" || format == "aac" || format == "mp3" || format == "flac" || format == "opus" || format == "pcm16";
+}
+bool config_token(std::string_view text, std::size_t maximum = 64) noexcept {
+  if (text.empty() || text.size() > maximum) return false;
+  for (const unsigned char c : text)
+    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == ':' || c == '.' ||
+          c == '_' || c == '-' || c == '/')) return false;
+  return true;
+}
+// Output media controls: modalities, the OpenAI audio parameters and the OpenRouter image_config.
+std::optional<std::string> validate_output(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
+  unsigned mask = 0;
+  for (const auto modality : request.modalities) {
+    if (static_cast<unsigned>(modality) > static_cast<unsigned>(OutputModality::Image) || (mask & (1U << static_cast<unsigned>(modality))))
+      return "output modalities require unique valid values";
+    mask |= 1U << static_cast<unsigned>(modality);
+  }
+  const bool audio = mask & (1U << static_cast<unsigned>(OutputModality::Audio));
+  const bool image = mask & (1U << static_cast<unsigned>(OutputModality::Image));
+  if (audio != request.audio.has_value()) return "audio output needs both the audio modality and audio parameters";
+  if (request.audio) {
+    const auto& output = *request.audio;
+    if (!config_token(output.voice, 128) || !audio_format_name(output.format)) return "audio output needs a voice and a supported format";
+  }
+  if (request.image_config && !image) return "image_config needs the image modality";
+  if (image && !descriptor::contains(descriptor.family_policy().openrouter_origins, descriptor.base_url()))
+    return "image output requires a declared OpenRouter origin";
+  if (request.image_config) {
+    const auto& config = *request.image_config;
+    for (const auto* field : {&config.aspect_ratio, &config.image_size, &config.size, &config.quality, &config.background,
+                              &config.output_format, &config.moderation})
+      if (*field && !config_token(**field)) return "image_config values must be short tokens";
+    if (config.output_compression && *config.output_compression > 100) return "image_config output_compression is 0 to 100";
+  }
+  return std::nullopt;
+}
+} // namespace
 EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request, bool streaming) {
   auto bad = [](std::string message) { return Error{ErrorKind::InvalidRequest, std::move(message)}; };
   if (descriptor.family() != "openai.chat") return Error{ErrorKind::InvalidConfig, "descriptor family does not match Chat codec"};
@@ -60,24 +143,47 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (request.response_format)
     if (auto error = request_controls::validate_response_format(*request.response_format, resources))
       return bad(std::move(*error));
+  if (auto error = validate_output(descriptor, request)) return bad(std::move(*error));
   if (std::max(request.messages.size(), request.canonical_messages.size()) > resources.request_messages || request.tools.size() > resources.request_tools)
     return bad("request count limit exceeded");
-  bool has_images = false;
+  bool has_media = false;
+  const bool router = descriptor::contains(descriptor.family_policy().openrouter_origins, descriptor.base_url());
   for (const auto& message : request.messages) {
-    if (message.images.size() > resources.request_parts || message.tool_calls.size() > resources.request_parts)
+    if (message.media.size() > resources.request_parts || message.tool_calls.size() > resources.request_parts)
       return bad("request part count limit exceeded");
-    if (!message.images.empty() && message.role != Role::User)
-      return bad("image inputs require user role");
-    for (const auto& image : message.images) {
-      if (!valid_image(image, resources.image_decoded_bytes)) return bad("invalid inline image payload");
-      has_images = true;
+    if (!message.media.empty() && message.role != Role::User && message.role != Role::Assistant)
+      return bad("media inputs require user or supported assistant role");
+    for (const auto& media : message.media) {
+      if (message.role == Role::Assistant && (!router || media.kind != MediaKind::Image))
+        return Error{ErrorKind::Unsupported, "assistant media inputs require OpenRouter images"};
+      if (auto error = admit(descriptor, media)) return std::move(*error);
+      has_media = true;
     }
   }
+  bool captured_history = false;
+  std::optional<Error> media_error;
+  for (const auto& message : request.canonical_messages) {
+    captured_history = captured_history || static_cast<bool>(message.native);
+    for (const auto& part : message.parts) if (const auto* media = std::get_if<Media>(&part)) {
+      if (message.role == Role::User) {
+        if (!media_error) media_error = admit(descriptor, *media);
+        has_media = true;
+      } else if (message.role == Role::Assistant && media->kind == MediaKind::Image) {
+        if (!media_error) media_error = router ? admit(descriptor, *media) :
+            std::optional<Error>{Error{ErrorKind::Unsupported, "assistant images require declared OpenRouter origin"}};
+        has_media = true;
+      }
+    }
+  }
+  // Reject ordinary malformed input before native capture; edited native prefixes
+  // still retain replay-mismatch precedence.
+  if (media_error && !captured_history) return *media_error;
   auto context = std::shared_ptr<const NativeContext>(new NativeContext(descriptor, request, effective, streaming));
   if (!context->history_valid_)
     return Error{ErrorKind::ReplayIneligible, "native replay provenance, binding or content mismatch"};
   if (!context->valid_)
     return Error{ErrorKind::ResourceLimit, "native Chat binding could not be captured"};
+  if (media_error) return *media_error;
   for (const auto& message : request.canonical_messages) {
     if (message.wire_output || (message.native && message.role != Role::Assistant))
       return Error{ErrorKind::ReplayIneligible, "invalid native Chat history representation"};
@@ -85,11 +191,20 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     bool has_thinking = false;
     bool has_details = false;
     bool has_frames = false;
+    bool audio_reply = false;
     for (const auto& part : message.parts) {
-      if (const auto* image = std::get_if<Image>(&part)) {
-        if (message.role != Role::User || !valid_image(*image, resources.image_decoded_bytes))
-          return bad("invalid image or role");
-        has_images = true;
+      if (const auto* media = std::get_if<Media>(&part)) {
+        // A generated audio reply is replayed by its provider-held id, never by its bytes.
+        if (message.role == Role::Assistant && media->kind == MediaKind::Audio && !media->id.empty()) {
+          if (audio_reply) return bad("one audio reply per assistant message");
+          audio_reply = true;
+        } else if (message.role == Role::Assistant && media->kind == MediaKind::Image && router) {
+          has_media = true;
+        } else if (message.role != Role::User) {
+          return Error{ErrorKind::Unsupported, "Chat assistant media requires an audio reply id or OpenRouter image"};
+        } else {
+          has_media = true;
+        }
       } else if (const auto* thinking = std::get_if<Thinking>(&part)) {
         if (message.role != Role::Assistant || has_thinking || thinking->signature)
           return Error{ErrorKind::ReplayIneligible, "Chat requires one plain unsigned assistant thinking part"};
@@ -124,7 +239,9 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     if (has_frames && !has_details)
       return Error{ErrorKind::ReplayIneligible, "reasoning stream lacks complete reconstructed details"};
   }
-  const json::Limits limits{has_images ? resources.request_bytes : resources.chat_text_request_bytes, resources.json_depth};
+  const json::Limits limits{has_media ? resources.request_bytes : resources.chat_text_request_bytes, resources.json_depth};
+  auto limit_error = [&] { return Error{has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest,
+                                       "request exceeds JSON limits or encoding"}; };
   auto build = [&](json::BoundedWriter& body, bool validate) -> std::optional<Error> {
     std::set<std::string_view> pending, names;
     body.raw("{").quoted(descriptor.request_model_member()).raw(":").quoted(request.model);
@@ -149,26 +266,38 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         if (message.parts.size() != 1 || !std::holds_alternative<ToolResult>(message.parts.front()))
           return bad("tool message requires exactly one typed result");
         const auto& result = std::get<ToolResult>(message.parts.front());
+        if (!result.content_parts.empty())
+          return Error{ErrorKind::Unsupported, "Chat tool results do not support typed media content"};
         if (validate && (result.tool_use_id.empty() || pending.erase(result.tool_use_id) != 1))
           return bad("tool result must resolve one pending call");
         body.quoted(result.content).raw(",\"tool_call_id\":").quoted(result.tool_use_id);
       } else {
-        body.raw("[");
-        bool part_comma = false;
+        // A generated audio reply is replayed by id; with no other content the field is null.
+        const Media* audio_reply = nullptr;
+        bool content = false;
         for (const auto& part : message.parts) {
-          if (const auto* text = std::get_if<Text>(&part)) {
-            if (part_comma) body.raw(",");
-            part_comma = true;
-            body.raw("{\"type\":\"text\",\"text\":").quoted(text->value).raw("}");
-          } else if (const auto* image = std::get_if<Image>(&part)) {
-            if (part_comma) body.raw(",");
-            part_comma = true;
-            body.raw("{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:")
-                .raw(image->mime).raw(";base64,").raw(*image->data)
-                .raw("\",\"detail\":").quoted(image_detail_name(image->detail)).raw("}}");
-          } else if (std::holds_alternative<ToolResult>(part)) return bad("tool result requires tool role");
+          if (const auto* media = std::get_if<Media>(&part); media && message.role == Role::Assistant && media->kind == MediaKind::Audio) audio_reply = media;
+          else if (std::holds_alternative<Text>(part) || std::holds_alternative<Media>(part)) content = true;
         }
-        body.raw("]");
+        if (audio_reply && !content) body.raw("null");
+        else {
+          body.raw("[");
+          bool part_comma = false;
+          for (const auto& part : message.parts) {
+            if (const auto* text = std::get_if<Text>(&part)) {
+              if (part_comma) body.raw(",");
+              part_comma = true;
+              body.raw("{\"type\":\"text\",\"text\":").quoted(text->value).raw("}");
+            } else if (const auto* media = std::get_if<Media>(&part)) {
+              if (message.role == Role::Assistant && media->kind == MediaKind::Audio) continue;
+              if (part_comma) body.raw(",");
+              part_comma = true;
+              write_media(body, *media);
+            } else if (std::holds_alternative<ToolResult>(part)) return bad("tool result requires tool role");
+          }
+          body.raw("]");
+        }
+        if (audio_reply) body.raw(",\"audio\":{\"id\":").quoted(audio_reply->id).raw("}");
         for (const auto& part : message.parts)
           if (const auto* thinking = std::get_if<Thinking>(&part))
             body.raw(",\"reasoning_content\":").quoted(thinking->text);
@@ -201,7 +330,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         if (calls) body.raw("]");
       }
       body.raw("}");
-      if (!body.ok()) return bad("request exceeds JSON limits or encoding");
+      if (!body.ok()) return limit_error();
     }
     for (const auto& message : request.messages) {
       std::string_view role;
@@ -227,24 +356,22 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       if (comma) body.raw(",");
       comma = true;
       body.raw("{\"role\":").quoted(role).raw(",\"content\":");
-      if (message.images.empty()) body.quoted(message.text);
+      if (message.media.empty()) body.quoted(message.text);
       else {
         body.raw("[");
-        bool image_comma = false;
-        for (const auto& image : message.images) {
-          if (image_comma) body.raw(",");
-          image_comma = true;
-          // MIME and base64 are validated ASCII; stream the URI without a copy.
-          body.raw("{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:")
-              .raw(image.mime).raw(";base64,").raw(*image.data)
-              .raw("\",\"detail\":").quoted(image_detail_name(image.detail)).raw("}}");
-          if (!body.ok()) return bad("request exceeds JSON limits or encoding");
+        bool media_comma = false;
+        for (const auto& media : message.media) {
+          if (media_comma) body.raw(",");
+          media_comma = true;
+          // MIME and base64 are validated ASCII; stream them without a copy.
+          write_media(body, media);
+          if (!body.ok()) return limit_error();
         }
         if (!message.text.empty())
           body.raw(",{\"type\":\"text\",\"text\":").quoted(message.text).raw("}");
         body.raw("]");
       }
-      if (!body.ok()) return bad("request exceeds JSON limits or encoding");
+      if (!body.ok()) return limit_error();
       if (message.role == Role::Tool) body.raw(",\"tool_call_id\":").quoted(message.tool_call_id);
       if (!message.tool_calls.empty()) {
         body.raw(",\"tool_calls\":[");
@@ -262,12 +389,12 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
           call_comma = true;
           body.raw("{\"id\":").quoted(call.id).raw(",\"type\":\"function\",\"function\":{\"name\":")
               .quoted(call.name).raw(",\"arguments\":").quoted_json(call.input->root()).raw("}}");
-          if (!body.ok()) return bad("request exceeds JSON limits or encoding");
+          if (!body.ok()) return limit_error();
         }
         body.raw("]");
       }
       body.raw("}");
-      if (!body.ok()) return bad("request exceeds JSON limits or encoding");
+      if (!body.ok()) return limit_error();
     }
     if (validate && !pending.empty()) return bad("missing tool results");
     body.raw("],").quoted(descriptor.request_stream_member()).raw(streaming ? ":true" : ":false");
@@ -283,7 +410,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         body.raw("{\"type\":\"function\",\"function\":{\"name\":").quoted(tool.name)
             .raw(",\"description\":").quoted(tool.description).raw(",\"parameters\":")
             .value(tool.parameters->root(), 4).raw("}}");
-        if (!body.ok()) return bad("request exceeds JSON limits or encoding");
+        if (!body.ok()) return limit_error();
       }
       body.raw("]");
     }
@@ -324,8 +451,48 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       body.raw(",\"response_format\":");
       request_controls::write_response_format(body, *request.response_format, false);
     }
+    if (!request.modalities.empty()) {
+      body.raw(",\"modalities\":[");
+      bool modality_comma = false;
+      for (const auto modality : request.modalities) {
+        if (modality_comma) body.raw(",");
+        modality_comma = true;
+        body.quoted(modality_name(modality));
+      }
+      body.raw("]");
+    }
+    if (request.audio) {
+      body.raw(",\"audio\":{\"voice\":");
+      if (request.audio->voice.starts_with("voice_")) body.raw("{\"id\":").quoted(request.audio->voice).raw("}");
+      else body.quoted(request.audio->voice);
+      body.raw(",\"format\":").quoted(request.audio->format).raw("}");
+    }
+    if (request.image_config) {
+      const auto& config = *request.image_config;
+      body.raw(",\"image_config\":{");
+      bool field_comma = false;
+      auto text_field = [&](std::string_view key, const std::optional<std::string>& value) {
+        if (!value) return;
+        if (field_comma) body.raw(",");
+        field_comma = true;
+        body.quoted(key).raw(":").quoted(*value);
+      };
+      text_field("aspect_ratio", config.aspect_ratio);
+      text_field("image_size", config.image_size);
+      text_field("size", config.size);
+      text_field("quality", config.quality);
+      text_field("background", config.background);
+      text_field("output_format", config.output_format);
+      if (config.output_compression) {
+        if (field_comma) body.raw(",");
+        field_comma = true;
+        body.raw("\"output_compression\":").raw(std::to_string(*config.output_compression));
+      }
+      text_field("moderation", config.moderation);
+      body.raw("}");
+    }
     body.raw("}");
-    if (!body.ok()) return bad("request exceeds JSON limits or encoding");
+    if (!body.ok()) return limit_error();
     return {};
   };
   json::BoundedWriter measure(limits);

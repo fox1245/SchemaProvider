@@ -35,6 +35,66 @@ std::vector<std::string> strings(Value v, std::string_view path, bool nonempty =
   for (auto element : v.elements()) { auto s = text(element,path); if (contains(values,s)) fail(path,"unique strings"); values.push_back(std::move(s)); }
   return values;
 }
+// Media admission lists are policy data. Entries are lowercase `type/subtype` essences; the
+// top-level type must agree with the kind (documents are everything outside image/audio/video).
+// generateContent's Blob.mimeType documents three spellings whose top-level type is not their
+// meaning (https://ai.google.dev/api/generate-content); they classify by meaning, and only that
+// family may list them. This file is below sp_core, so the table is local.
+std::optional<std::string_view> generate_alias_kind(std::string_view mime) {
+  if (mime == "video/audio/s16le" || mime == "video/audio/wav") return "audio";
+  if (mime == "video/text/timestamp") return "document";
+  return std::nullopt;
+}
+std::vector<std::string> media_types(Value v, std::string_view path, std::string_view kind, std::string_view family) {
+  if (!v.is_array() || v.size() > 512) fail(path, "bounded MIME array");
+  std::vector<std::string> values;
+  for (auto element : v.elements()) {
+    auto mime = text(element, path);
+    bool valid;
+    if (const auto alias = generate_alias_kind(mime)) {
+      valid = family == "google.generate" && *alias == kind;
+    } else {
+      const auto slash = mime.find('/');
+      valid = slash != std::string::npos && slash > 0 && slash + 1 < mime.size() &&
+              mime.find('/', slash + 1) == std::string::npos;
+      for (unsigned char c : mime) {
+        if (c == '/') continue;
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '!' || c == '#' || c == '$' || c == '%' ||
+              c == '&' || c == '\'' || c == '*' || c == '+' || c == '-' || c == '.' || c == '^' || c == '_' ||
+              c == '`' || c == '|' || c == '~')) valid = false;
+      }
+      if (valid) {
+        const auto top = std::string_view(mime).substr(0, slash);
+        const bool typed_media = top == "image" || top == "audio" || top == "video";
+        valid = kind == "document" ? !typed_media : top == kind;
+      }
+    }
+    if (!valid || contains(values, mime)) fail(path, "unique lowercase MIME essences consistent with the media kind");
+    values.push_back(std::move(mime));
+  }
+  return values;
+}
+MediaPolicy media_admission(Value v, std::string_view path, std::string_view family) {
+  constexpr std::string_view names[]{"image", "audio", "video", "document"};
+  closed(v, {"image", "audio", "video", "document"}, path);
+  MediaPolicy policy;
+  for (std::size_t i = 0; i < policy.kinds.size(); ++i) {
+    const auto kind = v.get(names[i]);
+    closed(kind, {"mime", "sources"}, path);
+    auto& entry = policy.kinds[i];
+    entry.mime = media_types(kind.get("mime"), path, names[i], family);
+    const auto sources = kind.get("sources");
+    if (!sources.is_array() || sources.size() > 3) fail(path, "bounded source array");
+    for (auto source : sources.elements()) {
+      const auto name = text(source, path);
+      const std::uint8_t bit = name == "inline" ? 1 : name == "url" ? 2 : name == "file" ? 4 : 0;
+      if (!bit || (entry.sources & bit)) fail(path, "unique inline, url or file sources");
+      entry.sources = static_cast<std::uint8_t>(entry.sources | bit);
+    }
+    if (entry.mime.empty() != (entry.sources == 0)) fail(path, "an admitted kind lists both MIME types and sources");
+  }
+  return policy;
+}
 RequestDefaults defaults(Value v) {
   constexpr auto path = "/defaults";
   closed(v,{"max_output_tokens","thinking_budget","include_thoughts","thinking_summaries","reasoning_enabled","reasoning_effort","reasoning_summary","thinking_level","service_tier","temperature","top_p","strict_tools"},path);
@@ -118,17 +178,17 @@ class PolicyLoader {
       closed(root,{"version","revision","families","models"},""); closed(rr,{"version","resources","admission"},"/resources");
       if(integer(root.get("version"),"/version")!=1 || integer(rr.get("version"),"/version")!=1 || !integer(root.get("revision"),"/revision"))fail("/version","version 1 and positive revision");
       auto rv=rr.get("resources"), av=rr.get("admission");
-      closed(rv,{"json_bytes","json_depth","request_bytes","chat_text_request_bytes","request_messages","request_tools","request_parts","native_bytes","native_depth","native_members","image_decoded_bytes","descriptor_bytes","descriptor_depth","policy_bytes","policy_depth"},"/resources");
-      closed(av,{"json_bytes","json_depth","request_bytes","chat_text_request_bytes","request_messages","request_tools","request_parts","native_bytes","native_depth","native_members","image_decoded_bytes","descriptor_bytes","descriptor_depth","policy_bytes","policy_depth"},"/admission");
+      closed(rv,{"json_bytes","json_depth","request_bytes","chat_text_request_bytes","request_messages","request_tools","request_parts","native_bytes","native_depth","native_members","image_decoded_bytes","audio_decoded_bytes","video_decoded_bytes","document_decoded_bytes","descriptor_bytes","descriptor_depth","policy_bytes","policy_depth"},"/resources");
+      closed(av,{"json_bytes","json_depth","request_bytes","chat_text_request_bytes","request_messages","request_tools","request_parts","native_bytes","native_depth","native_members","image_decoded_bytes","audio_decoded_bytes","video_decoded_bytes","document_decoded_bytes","descriptor_bytes","descriptor_depth","policy_bytes","policy_depth"},"/admission");
 #define SP_RESOURCE(name) do { auto value=integer(rv.get(#name),"/resources/" #name); auto ceiling=integer(av.get(#name),"/admission/" #name); if(!value || value>ceiling || ceiling>config_defaults::codec_admission_##name || value>std::numeric_limits<std::size_t>::max())fail("/resources/" #name,"positive representable resource within immutable admission"); policy->resources_.name=static_cast<std::size_t>(value); } while(false)
-      SP_RESOURCE(json_bytes); SP_RESOURCE(json_depth); SP_RESOURCE(request_bytes); SP_RESOURCE(chat_text_request_bytes); SP_RESOURCE(request_messages); SP_RESOURCE(request_tools); SP_RESOURCE(request_parts); SP_RESOURCE(native_bytes); SP_RESOURCE(native_depth); SP_RESOURCE(native_members); SP_RESOURCE(image_decoded_bytes); SP_RESOURCE(descriptor_bytes); SP_RESOURCE(descriptor_depth); SP_RESOURCE(policy_bytes); SP_RESOURCE(policy_depth);
+      SP_RESOURCE(json_bytes); SP_RESOURCE(json_depth); SP_RESOURCE(request_bytes); SP_RESOURCE(chat_text_request_bytes); SP_RESOURCE(request_messages); SP_RESOURCE(request_tools); SP_RESOURCE(request_parts); SP_RESOURCE(native_bytes); SP_RESOURCE(native_depth); SP_RESOURCE(native_members); SP_RESOURCE(image_decoded_bytes); SP_RESOURCE(audio_decoded_bytes); SP_RESOURCE(video_decoded_bytes); SP_RESOURCE(document_decoded_bytes); SP_RESOURCE(descriptor_bytes); SP_RESOURCE(descriptor_depth); SP_RESOURCE(policy_bytes); SP_RESOURCE(policy_depth);
 #undef SP_RESOURCE
       if(source.size()>policy->resources_.policy_bytes || resources.size()>policy->resources_.policy_bytes)fail("","configured policy byte limit");
       if (!within_depth(pd->root(), policy->resources_.policy_depth) || !within_depth(rd->root(), policy->resources_.policy_depth))
         fail("", "configured policy depth limit");
       auto families=root.get("families"); if(!families.is_array() || families.size()!=5)fail("/families","all five typed families");
       for(auto v:families.elements()) {
-        closed(v,{"family","bindings","stop_reasons","defaults","required_output_cap","temperature_range","top_p_range","thinking_minimum","thinking_top_p_minimum","reasoning_efforts","reasoning_summaries","thinking_levels","service_tiers","header_versions","header_version","server_tools","openrouter_origins","temperature_forbidden_model_prefixes"},"/families");
+        closed(v,{"family","bindings","stop_reasons","defaults","required_output_cap","temperature_range","top_p_range","thinking_minimum","thinking_top_p_minimum","reasoning_efforts","reasoning_summaries","thinking_levels","service_tiers","header_versions","header_version","server_tools","openrouter_origins","temperature_forbidden_model_prefixes","media","openrouter_media"},"/families");
         FamilyPolicy f; f.family=text(v.get("family"),"/families");
         if(f.family!="openai.chat" && f.family!="anthropic.messages" && f.family!="openai.responses" && f.family!="google.generate" && f.family!="google.interactions")fail("/families","typed family");
         if(policy->family(f.family))fail("/families","unique families");
@@ -152,6 +212,11 @@ class PolicyLoader {
         for (const auto& route : f.openrouter_origins)
           if (!valid_origin(route) || route.ends_with('/'))
             fail("/openrouter_origins", "canonical admitted origin without path");
+        f.media = media_admission(v.get("media"), "/media", f.family);
+        if (!v.get("openrouter_media").is_null()) {
+          if (f.openrouter_origins.empty()) fail("/openrouter_media", "gateway media requires declared OpenRouter origins");
+          f.openrouter_media = media_admission(v.get("openrouter_media"), "/openrouter_media", f.family);
+        }
         if(f.family=="anthropic.messages" && (!f.header_version || !contains(f.header_versions,*f.header_version)))fail("/header_version","admitted Messages version");
         if(f.family!="anthropic.messages" && (f.header_version || !f.header_versions.empty()))fail("/header_version","no unsupported header version");
         auto tools=v.get("server_tools"); if(!tools.is_array() || tools.size()>64)fail("/server_tools","bounded reviewed tool facts");
@@ -225,6 +290,10 @@ PolicySnapshot builtin_policy(){static const auto value=[] {auto r=load_policy(c
 std::optional<std::string_view> borrowed(const std::optional<std::string>& value){if(value)return *value;return {};}
 bool contains(const std::vector<std::string>& values,std::string_view value){return std::find(values.begin(),values.end(),value)!=values.end();}
 EffectiveChoices effective_defaults(const ValidatedDescriptor& d,std::string_view model){return choices(d.policy()->defaults(d.family(),model));}
+const MediaPolicy& media_policy(const ValidatedDescriptor& d) noexcept {
+  const auto& family = d.family_policy();
+  return family.openrouter_media && contains(family.openrouter_origins, d.base_url()) ? *family.openrouter_media : family.media;
+}
 bool temperature_forbidden(const ValidatedDescriptor& d, std::string_view model) {
   const auto slash = model.rfind('/');
   const auto suffix = slash == std::string_view::npos ? model : model.substr(slash + 1);
@@ -245,5 +314,5 @@ std::optional<std::string> validate_choices(const ValidatedDescriptor& d,std::st
   if (c.temperature && temperature_forbidden(d, model)) return "temperature is prohibited for the admitted model";
   return validate(d.family_policy(),c,d.policy()->output_limit(d.family(),model),true);
 }
-std::uint32_t interface_revision() noexcept { return 6; }
+std::uint32_t interface_revision() noexcept { return 7; }
 } // namespace sp::descriptor

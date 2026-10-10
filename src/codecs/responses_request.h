@@ -15,7 +15,7 @@ struct ReasoningOptions {
   std::optional<std::string> effort, summary;
 };
 struct WebSearchTool {};
-struct ImageGenerationTool { std::optional<std::string> size, quality; };
+struct ImageGenerationTool { std::optional<std::string> size, quality, output_format; };
 struct FileSearchTool { std::vector<std::string> vector_store_ids; };
 struct ToolSearchTool {};
 struct SkillReference { std::string skill_id; };

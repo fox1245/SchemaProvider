@@ -232,7 +232,7 @@ void same_part(const Part& a, const Part& b) {
       if (p.host) CHECK(p.host->name == q.host->name && p.host->status == q.host->status && p.host->retryable == q.host->retryable && p.host->effect_uncertain == q.host->effect_uncertain);
     } else if constexpr (std::is_same_v<P, Reasoning>) CHECK(p.id == q.id && p.summary == q.summary && p.encrypted_content == q.encrypted_content && p.status == q.status && p.content == q.content);
     else if constexpr (std::is_same_v<P, Opaque>) { CHECK(p.wire_type == q.wire_type); same_document(p.wire_metadata, q.wire_metadata); }
-    else if constexpr (std::is_same_v<P, Image>) { CHECK(p.mime == q.mime && p.detail == q.detail && bool(p.data) == bool(q.data)); if (p.data) CHECK(*p.data == *q.data); }
+    else if constexpr (std::is_same_v<P, Media>) { CHECK(p.kind == q.kind && p.source == q.source && p.mime == q.mime && p.detail == q.detail && p.reference == q.reference && p.name == q.name && p.id == q.id && p.transcript == q.transcript && bool(p.data) == bool(q.data)); if (p.data) CHECK(*p.data == *q.data); }
     else if constexpr (std::is_same_v<P, Thought>) CHECK(p.summary == q.summary && p.signature == q.signature);
   }, a);
 }
@@ -282,7 +282,7 @@ void roundtrip_and_continuation() {
       Thinking{"unknown", std::nullopt}, Thinking{"empty", std::string{}}, RedactedThinking{"redacted"},
       ServerToolResult{"server", "search_result", object}, ToolResult{"call", "error", true, ToolResultHostMetadata{"lookup", "uncertain", true, true}},
       Reasoning{"reason", {"one", "two"}, "encrypted", "completed", {"body"}}, Opaque{"future", object},
-      Image{"image/png", std::make_shared<const std::string>("AAEC"), ImageDetail::Original}, Thought{{"thought"}, "sig"}}, {}, object};
+      Media::image("image/png", std::make_shared<const std::string>("AAEC"), ImageDetail::Original), Thought{{"thought"}, "sig"}}, {}, object};
   // Archive stores Message, not Outcome. Persist authentic diagnostic envelopes
   // without native authority, then decode them to check usage knowledge survives.
   auto initial = request();

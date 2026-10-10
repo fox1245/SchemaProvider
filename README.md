@@ -2,7 +2,7 @@
 
 SchemaProvider is a C++20 client for five LLM API families: Chat Completions, Responses, Messages, Gemini generate and Interactions. A **family** is a wire protocol, not a model or endpoint operator. Each family has a typed request encoder and response codec; the runtime supplies HTTP/SSE transport, deadlines, cancellation and owned results.
 
-The current source package is **0.3.0 alpha**, with interface revision **6** and shared-library generation **6**. This is a rebuild boundary: `Usage::provider_cost` adds typed provider-reported monetary metadata and changes public outcome/event layouts, so rebuild and reinstall SDK consumers with matching headers and libraries. [Reported costs](docs/USAGE.md#provider-reported-costs) are separate from integer token counts, catalogue estimates, budget holds and invoices. Native archives remain v3 and portable history remains v2. Neither the linked-interface check nor shared-library version promises source or cross-toolchain ABI compatibility. Earlier interface 3–5 execution records retain their original scope and do not retroactively qualify this build or every endpoint/model.
+The current source package is **0.3.0 alpha**, with interface revision **7** and shared-library generation **7**. Rebuild and reinstall consumers with matching headers and libraries: typed `Media` replaces `Image`, request controls grow, and generated media joins owned outcomes/events. See [media inputs and outputs](docs/USAGE.md#media-inputs-and-generated-outputs) and the [interface 6-to-7 migration](docs/MIGRATION.md#from-interface-6-to-7). Provider-reported monetary metadata remains separate from token counts, estimates and invoices. Native archive storage remains v3 and portable history remains v2; policy/native binding compatibility is checked independently. Neither the linked-interface check nor shared-library version promises source or cross-toolchain ABI compatibility. Earlier interface 3–6 execution records retain their original scope.
 
 ## Install and use the unstable C++ SDK
 
@@ -118,14 +118,16 @@ Use `Client::prepare()` when your host must validate and inspect a request befor
 
 SchemaProvider can run without NeoGraph. The SDK owns protocol requests, transport, codecs and outcomes. NeoGraph's `neograph::llm::SchemaProvider` adapter owns the coroutine/cancellation bridge and host delivery policy. Graphs, tool execution, budgets, journals and run identity remain NeoGraph responsibilities. The adapter's `Provider::prepare` plus `dispatch`/`invoke` is distinct from the SDK's `Client::prepare` plus `start`/`complete`.
 
-The old NeoGraph `Provider::complete`, `OpenAIProvider`, `RateLimitedProvider` and descriptor interpreter are removed, without compatibility shims. Standalone image endpoints, Veo operations and OpenRouter Decisions remain separate typed NeoGraph clients; this SDK covers artifacts received within supported chat protocols, not those endpoints. Python consumers use NeoGraph's bindings; this SDK does not ship a separate Python package. Native Bedrock/Vertex authentication and Responses WebSocket are outside the current SDK.
+For other hosts, see the [standalone C++/cppdotenv and shared-library/ctypes/LangGraph examples](examples/README.md). The C ABI shim is example-only and keeps typed history inside C++; it is not a separate SDK Python package or a stable product ABI.
+
+The old NeoGraph `Provider::complete`, `OpenAIProvider`, `RateLimitedProvider` and descriptor interpreter are removed, without compatibility shims. Standalone image endpoints, Veo operations and OpenRouter Decisions remain separate typed NeoGraph clients; this SDK covers artifacts received within supported chat protocols, not those endpoints. NeoGraph ships its own Python bindings; other Python hosts can build the example shim above. Native Bedrock/Vertex authentication and Responses WebSocket are outside the current SDK.
 
 ## Documentation and evidence
 
 - [Usage](docs/USAGE.md): runnable local first use, configuration, request controls and result handling.
-- [Migration](docs/MIGRATION.md): interfaces 4 and 5, preserved controls and the NeoGraph adapter cutover.
+- [Migration](docs/MIGRATION.md): interface 7 media cutover, earlier interfaces and the NeoGraph adapter boundary.
 - [Design](docs/DESIGN.md): current architecture, with labeled historical proposals.
-- [Conformance](docs/CONFORMANCE.md): interface 4 and 5 execution records, behavioral properties and remaining gates.
+- [Conformance](docs/CONFORMANCE.md): separately scoped execution records, behavioral properties and remaining gates.
 - [PoC and historical evidence](docs/POC_PLAN.md): separate cohort-scoped results, including the old-ABI lossless NO-GO and interface 3 typed-cutover provenance.
 - [Roadmap](docs/ROADMAP.md): implemented work versus unclaimed release/platform/vendor gates.
 - [Research](docs/RESEARCH.md) and [decisions](docs/decisions/): source-linked rationale; external papers are not proof of SDK behavior.

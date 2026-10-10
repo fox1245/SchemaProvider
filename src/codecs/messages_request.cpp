@@ -1,4 +1,5 @@
 #include "codecs/messages_request.h"
+#include "codecs/media_input.h"
 #include "core/native.h"
 #include "json/json.h"
 #include "descriptor/policy.h"
@@ -31,7 +32,51 @@ bool matching_result(std::string_view name, std::string_view type) {
 }
 bool native_part(const Part& part) {
   return !std::holds_alternative<Text>(part) && !std::holds_alternative<ToolResult>(part) &&
-      !std::holds_alternative<Refusal>(part) && !std::holds_alternative<Image>(part);
+      !std::holds_alternative<Refusal>(part) && !std::holds_alternative<Media>(part);
+}
+// Messages media blocks: `image` and `document`, each with a base64, url or file source. A
+// text/plain document carries its decoded UTF-8 text rather than base64.
+bool plain_text(const Media& media) { return mime_equal(media.mime, "text/plain"); }
+std::optional<Error> admit(const descriptor::ValidatedDescriptor& descriptor, const Media& media,
+                           std::string& decoded_text, size_t remaining_decoded_bytes) {
+  if (auto error = media_input::admit(descriptor, media)) return error;
+  if (media.kind == MediaKind::Image && media.detail != ImageDetail::Auto)
+    return Error{ErrorKind::Unsupported, "Messages images have no detail control"};
+  if (media.kind != MediaKind::Document) return std::nullopt;
+  if (media.name.size() > 500) return Error{ErrorKind::InvalidRequest, "Messages document title is limited to 500 characters"};
+  if (media.source == MediaSource::Url && !media.mime.empty() && !mime_equal(media.mime, "application/pdf"))
+    return Error{ErrorKind::Unsupported, "Messages URL documents must be PDF"};
+  if (media.source == MediaSource::Inline && plain_text(media)) {
+    if (base64_decoded_size(*media.data) > remaining_decoded_bytes)
+      return Error{ErrorKind::ResourceLimit, "decoded text documents exceed aggregate request budget"};
+    if (!base64_decode(*media.data, decoded_text) || !media_input::valid_utf8(decoded_text))
+      return Error{ErrorKind::InvalidRequest, "Messages text documents must be valid UTF-8"};
+  }
+  return std::nullopt;
+}
+void write_source(json::BoundedWriter& body, const Media& media, std::string_view decoded_text) {
+  switch (media.source) {
+    case MediaSource::Url:
+      body.raw("{\"type\":\"url\",\"url\":").quoted(media.reference).raw("}");
+      break;
+    case MediaSource::File:
+      body.raw("{\"type\":\"file\",\"file_id\":").quoted(media.reference).raw("}");
+      break;
+    case MediaSource::Inline:
+      if (plain_text(media)) {
+        body.raw("{\"type\":\"text\",\"media_type\":\"text/plain\",\"data\":").quoted(decoded_text).raw("}");
+      } else {
+        body.raw("{\"type\":\"base64\",\"media_type\":").quoted(lower(mime_essence(media.mime)))
+            .raw(",\"data\":\"").raw(*media.data).raw("\"}");
+      }
+      break;
+  }
+}
+void write_media(json::BoundedWriter& body, const Media& media, std::string_view decoded_text) {
+  body.raw(media.kind == MediaKind::Image ? "{\"type\":\"image\",\"source\":" : "{\"type\":\"document\",\"source\":");
+  write_source(body, media, decoded_text);
+  if (media.kind == MediaKind::Document && !media.name.empty()) body.raw(",\"title\":").quoted(media.name);
+  body.raw("}");
 }
 } // namespace
 EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request, bool streaming) {
@@ -112,25 +157,55 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   // Check seals before encoding or interpreting the edited contents. Removing a seal
   // never converts native parts or captured tool calls into imported, trusted input.
   bool captured_history = false;
-  std::optional<Error> image_error;
+  std::optional<Error> media_error;
+  bool has_media = false;
+  // Decode text documents once for admission; both bounded writer passes borrow these bytes.
+  std::vector<std::string> decoded_documents;
+  size_t retained_decoded_bytes = 0;
+  auto retain_media = [&](const Media& media) {
+    if (media_error) return;
+    has_media = true;
+    std::string decoded_text;
+    media_error = admit(descriptor, media, decoded_text, resources.request_bytes - retained_decoded_bytes);
+    if (!media_error && media.kind == MediaKind::Document && media.source == MediaSource::Inline && plain_text(media)) {
+      retained_decoded_bytes += decoded_text.size();
+      decoded_documents.push_back(std::move(decoded_text));
+    }
+  };
   for (size_t i = 0; i < request.messages.size(); ++i) {
     const auto& message = request.messages[i];
     if (message.parts.size() > resources.request_parts) return bad("request part count limit exceeded");
     if (!message.native) for (const auto& part : message.parts) if (native_part(part)) return replay_bad();
     captured_history = captured_history || static_cast<bool>(message.native);
-    for (const auto& part : message.parts) if (const auto* image = std::get_if<Image>(&part); image && !image_error) {
-      if (message.role != Role::User) image_error = Error{ErrorKind::InvalidRequest, "image inputs require user role"};
-      else if (!valid_image(*image, resources.image_decoded_bytes)) image_error = Error{ErrorKind::InvalidRequest, "invalid inline image payload"};
-      else if (image->detail != ImageDetail::Auto) image_error = Error{ErrorKind::Unsupported, "Messages images have no detail control"};
+    for (const auto& part : message.parts) {
+      if (const auto* media = std::get_if<Media>(&part); media && !media_error) {
+        if (message.role != Role::User) media_error = Error{ErrorKind::InvalidRequest, "media inputs require user role"};
+        else retain_media(*media);
+      } else if (const auto* tool = std::get_if<ToolResult>(&part); tool && !media_error) {
+        if (!tool->content_parts.empty() && !tool->content.empty())
+          media_error = Error{ErrorKind::InvalidRequest, "tool result content and content_parts are mutually exclusive"};
+        else if (tool->content_parts.size() > resources.request_parts)
+          media_error = Error{ErrorKind::InvalidRequest, "tool result part count limit exceeded"};
+        else if (!tool->content_parts.empty() && message.role != Role::User)
+          media_error = Error{ErrorKind::InvalidRequest, "tool results require user role"};
+        else for (const auto& nested : tool->content_parts) if (const auto* media = std::get_if<Media>(&nested)) {
+          retain_media(*media);
+          if (!media_error && (!media->id.empty() || !media->transcript.empty() ||
+              (media->kind == MediaKind::Image && !media->name.empty()) ||
+              (media->kind == MediaKind::Document && media->detail != ImageDetail::Auto)))
+            media_error = Error{ErrorKind::Unsupported, "tool result media contains unsupported output metadata"};
+          if (media_error) break;
+        }
+      }
     }
   }
   // Invalid ordinary input never reaches hashing. For captured history, retain
   // lineage mismatch precedence even when the edited prefix is no longer valid.
-  if (image_error && !captured_history) return *image_error;
+  if (media_error && !captured_history) return *media_error;
   auto context = std::shared_ptr<const NativeContext>(new NativeContext(descriptor, request, effective, streaming));
   if (!context->history_valid_) return replay_bad();
   if (!context->valid_) return Error{ErrorKind::ResourceLimit, "native binding could not be captured"};
-  if (image_error) return *image_error;
+  if (media_error) return *media_error;
   EncodedRequest result{"POST", std::string(descriptor.path(streaming)), {}, {}, {}};
   std::string_view version = *family.header_version;
   for (const auto& header : descriptor.headers()) {
@@ -142,6 +217,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   result.headers.emplace_back("Accept", streaming ? "text/event-stream" : "application/json");
   result.headers.emplace_back("anthropic-version", version);
   auto build = [&](json::BoundedWriter& body) -> std::optional<Error> {
+  size_t text_document_index = 0;
   auto bad = [](std::string message) { return Error{ErrorKind::InvalidRequest, std::move(message)}; };
   body.raw("{").quoted(descriptor.request_model_member()).raw(":").quoted(request.model);
   body.raw(",").quoted(descriptor.max_output_tokens_member()).raw(":").raw(std::to_string(*effective.max_output_tokens));
@@ -197,7 +273,8 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         if (tool.max_uses) body.raw(",\"max_uses\":").raw(std::to_string(*tool.max_uses));
         body.raw("}");
       }
-      if (!body.ok()) return bad("request exceeds JSON limits or encoding");
+      if (!body.ok()) return Error{has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest,
+                                  "request exceeds JSON limits or encoding"};
     }
     body.raw("]");
   }
@@ -224,11 +301,12 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         if (!assistant && responding_to_tools && server_waiting) return bad("pending server tools require tool-results-only continuation");
         text_seen = true;
         body.raw("{\"type\":\"text\",\"text\":").quoted(text->value).raw("}");
-      } else if (const auto* image = std::get_if<Image>(&part)) {
+      } else if (const auto* media = std::get_if<Media>(&part)) {
         if (responding_to_tools && server_waiting) return bad("pending server tools require tool-results-only continuation");
         text_seen = true; // Tool results, when present, must precede ordinary input.
-        body.raw("{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":")
-            .quoted(image->mime).raw(",\"data\":\"").raw(*image->data).raw("\"}}");
+        const auto decoded_text = media->source == MediaSource::Inline && plain_text(*media)
+            ? std::string_view(decoded_documents.at(text_document_index++)) : std::string_view{};
+        write_media(body, *media, decoded_text);
       } else if (const auto* thinking = std::get_if<Thinking>(&part)) {
         if (!assistant) return bad("thinking belongs to assistant messages");
         body.raw("{\"type\":\"thinking\",\"thinking\":").quoted(thinking->text);
@@ -256,7 +334,27 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         body.raw("}");
       } else if (const auto* tool_result = std::get_if<ToolResult>(&part)) {
         if (assistant || text_seen || client_pending.erase(tool_result->tool_use_id) != 1) return bad("tool result lacks immediate unique client ownership");
-        body.raw("{\"type\":\"tool_result\",\"tool_use_id\":").quoted(tool_result->tool_use_id).raw(",\"content\":").quoted(tool_result->content).raw(",\"is_error\":").raw(tool_result->is_error ? "true}" : "false}");
+        body.raw("{\"type\":\"tool_result\",\"tool_use_id\":").quoted(tool_result->tool_use_id).raw(",\"content\":");
+        if (tool_result->content_parts.empty()) body.quoted(tool_result->content);
+        else {
+          body.raw("["); bool nested_comma = false;
+          for (const auto& nested : tool_result->content_parts) {
+            if (nested_comma) body.raw(",");
+            nested_comma = true;
+            if (const auto* text = std::get_if<Text>(&nested))
+              body.raw("{\"type\":\"text\",\"text\":").quoted(text->value).raw("}");
+            else {
+              const auto& media = std::get<Media>(nested);
+              const auto decoded = media.kind == MediaKind::Document && media.source == MediaSource::Inline && plain_text(media)
+                  ? std::string_view(decoded_documents.at(text_document_index++)) : std::string_view{};
+              write_media(body, media, decoded);
+            }
+            if (!body.ok()) return Error{has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest,
+                                        "request exceeds JSON limits or encoding"};
+          }
+          body.raw("]");
+        }
+        body.raw(",\"is_error\":").raw(tool_result->is_error ? "true}" : "false}");
       } else if (const auto* server_result = std::get_if<ServerToolResult>(&part)) {
         const auto found = server_pending.find(server_result->tool_use_id);
         if (!assistant || found == server_pending.end() || !matching_result(found->second, server_result->wire_type) || !server_result->content) return bad("server result lacks unique server ownership");
@@ -265,7 +363,8 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         server_pending.erase(found);
         body.value(raw, 4);
       } else return Error{ErrorKind::Unsupported, "part cannot be replayed as Messages input"};
-      if (!body.ok()) return bad("request exceeds JSON limits or encoding");
+      if (!body.ok()) return Error{has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest,
+                                  "request exceeds JSON limits or encoding"};
     }
     body.raw("]}");
     if (!assistant && !client_pending.empty()) return bad("all client tool calls need immediate results");
@@ -274,7 +373,8 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   }
   if (!client_pending.empty()) return bad("client tool results are required before dispatch");
   body.raw("]}");
-  if (!body.ok()) return bad("request exceeds JSON limits or encoding");
+  if (!body.ok()) return Error{has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest,
+                              "request exceeds JSON limits or encoding"};
   return std::nullopt;
   };
   // Measure the entire aggregate before allocating its encoded representation.

@@ -476,7 +476,7 @@ Report run_vision(const Profile& profile, const std::string& project_root, std::
       // GPT-6 Luna Chat function calling only supports reasoning_effort:none.
       r.reasoning_effort = on && !tools ? "low" : "none";
       chat::InputMessage m{Role::User, std::string(vision_test::question)};
-      m.images.push_back(scene.image());
+      m.media.push_back(scene.image());
       if (tools) {
         m.text += '\n'; m.text += tool_prompt;
         r.tools.push_back({"vision_score", "Return the inert weighted image score.", schema});

@@ -1,4 +1,5 @@
 #include "codecs/responses_request.h"
+#include "codecs/media_input.h"
 #include "core/native.h"
 #include "json/json.h"
 #include "descriptor/policy.h"
@@ -71,6 +72,43 @@ bool cursor_valid(std::string_view id) {
       (c >= '0' && c <= '9') || c == '_' || c == '-')) return false;
   return true;
 }
+// Responses input content: input_image, input_audio, input_video and input_file. Admission has
+// already established that the family and origin accept this kind and source form.
+void write_media(json::BoundedWriter& body, const Media& media) {
+  switch (media.kind) {
+    case MediaKind::Image:
+      body.raw("{\"type\":\"input_image\",");
+      if (media.source == MediaSource::File) body.raw("\"file_id\":").quoted(media.reference);
+      else { body.raw("\"image_url\":"); media_input::uri_or_url(body, media); }
+      body.raw(",\"detail\":").quoted(image_detail_name(media.detail)).raw("}");
+      break;
+    case MediaKind::Audio:
+      body.raw("{\"type\":\"input_audio\",\"input_audio\":{\"data\":\"").raw(*media.data)
+          .raw("\",\"format\":").quoted(*media_input::audio_format(media.mime)).raw("}}");
+      break;
+    case MediaKind::Video:
+      body.raw("{\"type\":\"input_video\",\"video_url\":");
+      media_input::uri_or_url(body, media);
+      body.raw("}");
+      break;
+    case MediaKind::Document:
+      body.raw("{\"type\":\"input_file\",");
+      if (media.source == MediaSource::File) body.raw("\"file_id\":").quoted(media.reference);
+      else if (media.source == MediaSource::Url) body.raw("\"file_url\":").quoted(media.reference);
+      else {
+        body.raw("\"filename\":").quoted(media_input::document_filename(media)).raw(",\"file_data\":");
+        media_input::data_uri(body, media);
+      }
+      body.raw("}");
+      break;
+  }
+}
+std::optional<Error> admit(const descriptor::ValidatedDescriptor& descriptor, const Media& media) {
+  if (auto error = media_input::admit(descriptor, media)) return error;
+  if (media.kind == MediaKind::Audio && !media_input::audio_format(media.mime))
+    return Error{ErrorKind::Unsupported, "Responses input_audio has no format name for this MIME type"};
+  return std::nullopt;
+}
 } // namespace
 EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request, bool streaming) {
   auto bad = [](std::string message) -> EncodeResult { return Error{ErrorKind::InvalidRequest, std::move(message)}; };
@@ -129,6 +167,9 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       if (image->quality && *image->quality != "auto" && *image->quality != "low" &&
           *image->quality != "medium" && *image->quality != "high")
         return bad("unsupported image generation quality");
+      if (image->output_format && *image->output_format != "png" && *image->output_format != "jpeg" &&
+          *image->output_format != "webp")
+        return bad("unsupported image generation output format");
     }
     if (const auto* files = std::get_if<FileSearchTool>(&tool)) {
       if (files->vector_store_ids.empty() || files->vector_store_ids.size() > resources.request_parts)
@@ -154,7 +195,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   // Captured groups never degrade to caller-imported assistant history when their
   // seal or original items are removed. Only plain input and tool results are imports.
   bool captured_history = false;
-  std::optional<Error> image_error;
+  std::optional<Error> media_error;
   for (const auto& message : request.messages) {
     if (message.parts.size() > resources.request_parts) return bad("request part count limit exceeded");
     if (request.previous_response_id && (message.native || message.wire_output || message.role == Role::Assistant)) return replay_bad();
@@ -164,22 +205,43 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       if (message.role == Role::Assistant || message.wire_output) return replay_bad();
       for (const auto& part : message.parts) {
         if (!std::holds_alternative<Text>(part) && !std::holds_alternative<ToolResult>(part) &&
-            !std::holds_alternative<Image>(part)) return replay_bad();
+            !std::holds_alternative<Media>(part)) return replay_bad();
       }
     }
     captured_history = captured_history || static_cast<bool>(message.native);
-    for (const auto& part : message.parts) if (const auto* image = std::get_if<Image>(&part); image && !image_error) {
-      if (message.role != Role::User) image_error = Error{ErrorKind::InvalidRequest, "image inputs require user role"};
-      else if (!valid_image(*image, resources.image_decoded_bytes)) image_error = Error{ErrorKind::InvalidRequest, "invalid inline image payload"};
+    for (const auto& part : message.parts) {
+      if (const auto* media = std::get_if<Media>(&part); media && !media_error && !message.native) {
+        if (message.role != Role::User) media_error = Error{ErrorKind::InvalidRequest, "media inputs require user role"};
+        else media_error = admit(descriptor, *media);
+      } else if (const auto* tool = std::get_if<ToolResult>(&part); tool && !media_error) {
+        if (!tool->content_parts.empty() && !tool->content.empty())
+          media_error = Error{ErrorKind::InvalidRequest, "tool result content and content_parts are mutually exclusive"};
+        else if (tool->content_parts.size() > resources.request_parts)
+          media_error = Error{ErrorKind::InvalidRequest, "tool result part count limit exceeded"};
+        else for (const auto& nested : tool->content_parts) {
+          if (const auto* media = std::get_if<Media>(&nested)) {
+            if ((media->kind == MediaKind::Audio || media->kind == MediaKind::Video) &&
+                static_cast<unsigned>(media->source) <= 2)
+              media_error = Error{ErrorKind::Unsupported, "Responses function output supports images and files only"};
+            else media_error = admit(descriptor, *media);
+            if (!media_error && (!media->id.empty() || !media->transcript.empty() ||
+                (media->kind == MediaKind::Image && !media->name.empty()) ||
+                (media->kind == MediaKind::Document && media->detail != ImageDetail::Auto) ||
+                (media->kind == MediaKind::Document && media->source != MediaSource::Inline && !media->name.empty())))
+              media_error = Error{ErrorKind::Unsupported, "function output media contains unsupported controls or metadata"};
+            if (media_error) break;
+          }
+        }
+      }
     }
   }
   // Preserve native-prefix mismatch precedence over payload errors in edited
   // captured history, but reject invalid ordinary input before hashing.
-  if (image_error && !captured_history) return *image_error;
+  if (media_error && !captured_history) return *media_error;
   auto context = std::shared_ptr<const NativeContext>(new NativeContext(descriptor, request, effective, streaming));
   if (!context->history_valid_) return replay_bad();
   if (!context->valid_) return Error{ErrorKind::ResourceLimit, "native binding could not be captured"};
-  if (image_error) return *image_error;
+  if (media_error) return *media_error;
   EncodedRequest result{"POST", std::string(descriptor.path(streaming)), {}, {}, {}};
   for (const auto& header : descriptor.headers()) {
     const auto key = lower(header.first);
@@ -259,6 +321,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
           if constexpr (std::is_same_v<T, ImageGenerationTool>) {
             if (value.size) body.raw(",\"size\":").quoted(*value.size);
             if (value.quality) body.raw(",\"quality\":").quoted(*value.quality);
+            if (value.output_format) body.raw(",\"output_format\":").quoted(*value.output_format);
           } else if constexpr (std::is_same_v<T, FileSearchTool>) {
             body.raw(",\"vector_store_ids\":[");
             bool id_comma = false;
@@ -304,7 +367,8 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
                 !call_ids.insert(call->id).second || !calls.emplace(call->id, call).second) return invalid("captured client call has invalid or duplicate ownership");
             pending.insert(call->id);
           } else if (!std::holds_alternative<Text>(part) && !std::holds_alternative<Refusal>(part) &&
-              !std::holds_alternative<Reasoning>(part) && !std::holds_alternative<Opaque>(part)) {
+              !std::holds_alternative<Reasoning>(part) && !std::holds_alternative<Opaque>(part) &&
+              !std::holds_alternative<Media>(part)) {
             return Error{ErrorKind::Unsupported, "foreign or invalid part cannot be replayed as Responses output"};
           }
         }
@@ -341,8 +405,21 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
             const auto* tool_result = std::get_if<ToolResult>(&part);
             if (!tool_result || tool_result->tool_use_id.empty() || pending.erase(tool_result->tool_use_id) != 1) return invalid("tool result lacks exactly one pending client call_id");
             if (tool_result->is_error) return Error{ErrorKind::Unsupported, "Responses tool results have no typed is_error field"};
-            separator(); body.raw("{\"type\":\"function_call_output\",\"call_id\":").quoted(tool_result->tool_use_id)
-                .raw(",\"output\":").quoted(tool_result->content).raw("}");
+            separator(); body.raw("{\"type\":\"function_call_output\",\"call_id\":").quoted(tool_result->tool_use_id).raw(",\"output\":");
+            if (tool_result->content_parts.empty()) body.quoted(tool_result->content);
+            else {
+              body.raw("["); bool nested_comma = false;
+              for (const auto& nested : tool_result->content_parts) {
+                if (nested_comma) body.raw(",");
+                nested_comma = true;
+                if (const auto* text = std::get_if<Text>(&nested))
+                  body.raw("{\"type\":\"input_text\",\"text\":").quoted(text->value).raw("}");
+                else write_media(body, std::get<Media>(nested));
+                if (!body.ok()) return Error{ErrorKind::ResourceLimit, "request exceeds JSON byte, depth or encoding limits"};
+              }
+              body.raw("]");
+            }
+            body.raw("}");
           }
         } else {
           if (role.empty() || !pending.empty()) return invalid("plain input role or pending client tool results are invalid");
@@ -353,11 +430,9 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
             comma = true;
             if (const auto* text = std::get_if<Text>(&part)) {
               body.raw("{\"type\":\"input_text\",\"text\":").quoted(text->value).raw("}");
-            } else if (const auto* image = std::get_if<Image>(&part)) {
-              body.raw("{\"type\":\"input_image\",\"image_url\":\"data:")
-                  .raw(image->mime).raw(";base64,").raw(*image->data)
-                  .raw("\",\"detail\":").quoted(image_detail_name(image->detail)).raw("}");
-            } else return Error{ErrorKind::Unsupported, "plain Responses input supports typed text and images only"};
+            } else if (const auto* media = std::get_if<Media>(&part)) {
+              write_media(body, *media);
+            } else return Error{ErrorKind::Unsupported, "plain Responses input supports typed text and media only"};
             if (!body.ok()) return Error{ErrorKind::ResourceLimit, "request exceeds JSON byte, depth or encoding limits"};
           }
           body.raw("]}");

@@ -249,7 +249,6 @@ void known_corrupt_never_ignored() {
   Accumulator tagged; chat::Codec unknown(descriptor_value(), chat::Mode::Sse, tagged);
   CHECK(!unknown.frame("new.event", chunk("{}", "\"stop\""))); unknown.finish(); failed(*tagged.outcome(), ErrorKind::Unsupported);
   for (auto error : {R"({"error":null})", R"({"error":false,"choices":[]})"}) failed(frames({error}), ErrorKind::RemoteFailure);
-  failed(frames({chunk(R"({"audio":{"id":"x"}})")}), ErrorKind::Unsupported);
   failed(frames({chunk(R"({"audio":17})")}), ErrorKind::ProtocolCorrupt);
 }
 void invalid_tools_and_compatibility() {

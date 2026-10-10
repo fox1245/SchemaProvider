@@ -31,7 +31,7 @@ sp::runtime::Options options() { sp::runtime::Options o; o.api_key = key; o.defa
 sp::runtime::RunOptions run(bool sse) { sp::runtime::RunOptions o; o.streaming = sse; return o; }
 sp::gemini::Request request(const std::string& model, const vision_test::Scene& scene = vision_test::scene_a()) {
   sp::gemini::Request r; r.model = model; r.account_scope = "synthetic-account"; r.system = "Answer briefly";
-  r.max_output_tokens = 2048; r.thinking_budget = 1024;
+  r.max_output_tokens = 2048; r.thinking_budget = 1024; r.include_thoughts = true;
   r.tools.push_back({"lookup", "Find value", owned(R"({"type":"object","properties":{"x":{"type":"integer"}}})")});
   r.messages.push_back(sp::Message{"", sp::Role::User, {sp::Text{std::string(vision_test::question)}, scene.image()}}); return r;
 }
@@ -88,7 +88,7 @@ void images_and_cross_mode(Peer& peer) {
       require(!f.error.attempt.request_may_have_left && f.error.attempt.request_body_bytes == 0, "replay refusal dispatched bytes"); peer.count(model, 1);
     };
     auto bad = r; std::get<sp::Text>(bad.messages[0].parts[0]).value = "foreign prefix"; refuse(bad);
-    bad = r; std::get<sp::Image>(bad.messages[0].parts[1]) = (scene->weighted == 11 ? vision_test::scene_a() : vision_test::scene_b()).image(); refuse(bad);
+    bad = r; std::get<sp::Media>(bad.messages[0].parts[1]) = (scene->weighted == 11 ? vision_test::scene_a() : vision_test::scene_b()).image(); refuse(bad);
     bad = r; std::get<sp::Thinking>(bad.messages[1].parts[0]).signature = "changed"; refuse(bad);
     bad = r; std::get<sp::ToolCall>(bad.messages[1].parts[2]).id = "foreign"; refuse(bad);
     bad = r; bad.messages[1].native.reset(); refuse(bad);

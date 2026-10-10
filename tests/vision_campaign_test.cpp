@@ -107,11 +107,11 @@ void usage(const Result& value, Family family, bool on, bool missing = false) {
   else require(output.usage.reasoning && output.usage.reasoning->evidence == sp::Evidence::Reported && output.usage.reasoning->value == (on ? 3 : 0), "reported reasoning count lost");
   require(output.usage.output_total && output.usage.output_total->value == (family == Family::Gemini || family == Family::Interactions ? (on ? 7 : 4) : 7), "reasoning output algebra incorrect");
 }
-void set_image(sp::runtime::Request& value, sp::Image image) {
+void set_image(sp::runtime::Request& value, sp::Media image) {
   std::visit([&](auto& typed) {
     using T = std::decay_t<decltype(typed)>;
-    if constexpr (std::is_same_v<T, sp::chat::Request>) typed.messages[0].images[0] = image;
-    else std::get<sp::Image>(typed.messages[0].parts[1]) = image;
+    if constexpr (std::is_same_v<T, sp::chat::Request>) typed.messages[0].media[0] = image;
+    else std::get<sp::Media>(typed.messages[0].parts[1]) = image;
   }, value);
 }
 void changed_images_and_controls(Peer& peer) {
@@ -213,7 +213,7 @@ void ownership_close_and_errors(Peer& peer) {
     const auto truncated = peer.arm("short-close"); sp::runtime::Client abnormal(descriptor(peer, family, truncated), options());
     failure(abnormal.complete(request(family, truncated, vision_test::scene_a()), run(true))); peer.count(truncated, 1, 1);
     const auto invalid = peer.arm("vision-a-on"); sp::runtime::Client guarded(descriptor(peer, family, invalid), options());
-    auto bad = request(family, invalid, vision_test::scene_a()); set_image(bad, {"image/png", std::make_shared<const std::string>("not-base64")});
+    auto bad = request(family, invalid, vision_test::scene_a()); set_image(bad, sp::Media::image("image/png", std::make_shared<const std::string>("not-base64")));
     const auto result = guarded.complete(bad, run(true)); require(!failure(result).error.attempt.request_may_have_left, "invalid image dispatched"); peer.count(invalid, 0);
   }
 }
