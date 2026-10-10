@@ -1,4 +1,5 @@
 #include "codecs/interactions.h"
+#include "codecs/media_output.h"
 #include "core/native.h"
 #include "descriptor/descriptor.h"
 #include "json/json.h"
@@ -11,7 +12,23 @@ bool unsigned_count(json::Value v) { return v.is_uint() || (v.is_int() && v.as_i
 uint64_t number(json::Value v) { return v.is_uint() ? v.as_uint() : static_cast<uint64_t>(v.as_int()); }
 bool nonempty(json::Value v) { return v.is_string() && !v.as_string().empty(); }
 bool prefix(std::string_view original, std::string_view final) { return final.starts_with(original); }
+bool media_type(std::string_view type) { return type == "image" || type == "audio" || type == "video" || type == "document"; }
+MediaKind media_kind_of(std::string_view type) {
+  return type == "image" ? MediaKind::Image : type == "audio" ? MediaKind::Audio : type == "video" ? MediaKind::Video : MediaKind::Document;
 }
+bool media_description_field(std::string_view name) {
+  return name == "name" || name == "resolution" || name == "channels" || name == "sample_rate" || name == "processing";
+}
+bool thought_shape(json::Value content) {
+  if (!content.is_object() || !content.get("type").is_string()) return false;
+  if (content.get("type").as_string() == "text") return content.get("text").is_string();
+  if (content.get("type").as_string() != "image") return false;
+  const auto data = content.get("data"), uri = content.get("uri"), mime = content.get("mime_type");
+  const bool inline_data = data.valid() && !data.is_null(), location = uri.valid() && !uri.is_null();
+  return inline_data != location && (!mime.valid() || mime.is_null() || (mime.is_string() && mime_syntax(mime.as_string()))) &&
+      (inline_data ? data.is_string() && canonical_base64(data.as_string()) : uri.is_string() && reference_syntax(uri.as_string()));
+}
+} // namespace
 Codec::Codec(const descriptor::ValidatedDescriptor& descriptor, Mode mode, Accumulator& accumulator,
              std::shared_ptr<const NativeContext> context, SemanticLimits limits)
     : descriptor_(descriptor), mode_(mode), accumulator_(accumulator), context_(std::move(context)), limits_(limits) {}
@@ -50,7 +67,9 @@ bool Codec::frame(std::string_view event, std::string_view data) {
 }
 bool Codec::identity(json::Value resource, bool initial) {
   auto id = resource.get("id");
-  if (!resource.is_object() || !nonempty(resource.get("status")) ||
+  const auto status = resource.get("status");
+  if (!resource.is_object() ||
+      (!nonempty(status) && !(initial && mode_ == Mode::Sse && !status.valid())) ||
       (id.valid() && !id.is_null() && !id.is_string()))
     return fail(ErrorKind::ProtocolCorrupt, "invalid interaction identity or status");
   if (resource.get("agent").valid() || resource.get("environment").valid() || resource.get("environment_id").valid())
@@ -110,7 +129,8 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
     unknown(root, {"event_type", "event_id", "interaction"});
     if (begun_ || !identity(root.get("interaction"), true)) return begun_ ? fail(ErrorKind::ProtocolCorrupt, "duplicate interaction creation") : false;
     auto resource = root.get("interaction");
-    if (resource.get("status").as_string() != "in_progress") return fail(ErrorKind::ProtocolCorrupt, "new interaction must be in progress");
+    if (resource.get("status").valid() && resource.get("status").as_string() != "in_progress")
+      return fail(ErrorKind::ProtocolCorrupt, "new interaction must be in progress");
     if (resource.get("steps").valid() && (!resource.get("steps").is_array() || resource.get("steps").size()))
       return fail(ErrorKind::ProtocolCorrupt, "creation contains unexpected steps");
     generation_ = resource.get("id").as_string(); begun_ = true;
@@ -153,24 +173,15 @@ bool Codec::start(json::Value value, uint64_t index) {
   if (type != "thought" && type != "function_call" && type != "model_output") return fail(ErrorKind::Unsupported, "unsupported critical interaction step");
   if (value.get("error").valid() && !value.get("error").is_null()) return fail(ErrorKind::RemoteFailure, "remote step error");
   Step step; step.type = type; step.original = own(value); if (!step.original) return false;
-  auto begin_part = [&](PartKind kind, PartHeader header, uint64_t offset) {
-    if (next_part_ >= limits_.max_parts || next_part_ == std::numeric_limits<uint32_t>::max()) return fail(ErrorKind::ResourceLimit, "interaction part limit");
-    LocalId id{next_part_++}; step.parts.push_back(id);
-    return emit(PartBegin{{0}, id, kind, std::move(header), index * (static_cast<uint64_t>(limits_.max_parts) + 1) + offset});
-  };
+  auto begin_part = [&](PartKind kind, PartHeader header, uint64_t offset) { return begin(step, index, kind, std::move(header), offset); };
   if (type == "thought") {
     unknown(value, {"type", "signature", "summary"});
     auto signature = value.get("signature"), summary = value.get("summary");
     if (signature.valid()) { if (!signature.is_string()) return fail(ErrorKind::ProtocolCorrupt, "invalid thought signature"); step.signature = signature.as_string(); }
     if (summary.valid() && !summary.is_array()) return fail(ErrorKind::ProtocolCorrupt, "invalid thought summary");
     if (!begin_part(PartKind::Thought, {}, 0)) return false;
-    if (summary.valid()) for (auto content : summary.elements()) {
-      if (!content.is_object() || !content.get("type").is_string()) return fail(ErrorKind::ProtocolCorrupt, "invalid thought summary content");
-      if (content.get("type").as_string() != "text") return fail(ErrorKind::Unsupported, "nontext thought summary unsupported");
-      if (!content.get("text").is_string()) return fail(ErrorKind::ProtocolCorrupt, "thought summary text required");
-      auto doc = own(content); if (!doc) return false; step.summary.push_back(std::move(doc));
-      if (!emit(PartDelta{step.parts[0], {PartKind::Thought, content.get("text").as_string()}})) return false;
-    }
+    if (summary.valid()) for (auto content : summary.elements())
+      if (!thought_content(step, content)) return false;
   } else if (type == "function_call") {
     unknown(value, {"type", "id", "name", "arguments"});
     auto id = value.get("id"), name = value.get("name"), arguments = value.get("arguments");
@@ -184,13 +195,132 @@ bool Codec::start(json::Value value, uint64_t index) {
     if (content.valid() && !content.is_array()) return fail(ErrorKind::ProtocolCorrupt, "invalid model output content");
     if (content.valid()) for (auto item : content.elements()) {
       if (!item.is_object() || !item.get("type").is_string()) return fail(ErrorKind::ProtocolCorrupt, "invalid model output block");
-      if (item.get("type").as_string() != "text") return fail(ErrorKind::Unsupported, "nontext model output unsupported");
+      const auto kind = item.get("type").as_string();
+      if (media_type(kind)) { if (!media_item(step, index, item, false)) return false; continue; }
+      if (kind != "text") return fail(ErrorKind::Unsupported, "unsupported model output content");
       if (!item.get("text").is_string()) return fail(ErrorKind::ProtocolCorrupt, "model output text required");
-      unknown(item, {"type", "text", "annotations"}); step.texts.emplace_back(item.get("text").as_string());
-      if (!begin_part(PartKind::Text, {}, step.texts.size() - 1) || !emit(PartDelta{step.parts.back(), {PartKind::Text, item.get("text").as_string()}})) return false;
+      unknown(item, {"type", "text", "annotations"});
+      Content text; text.type = "text"; text.text = std::string(item.get("text").as_string()); step.content.push_back(std::move(text));
+      if (!annotate(step.content.back(), item.get("annotations"))) return false;
+      if (!begin_part(PartKind::Text, {}, step.content.size() - 1) || !emit(PartDelta{step.parts.back(), {PartKind::Text, step.content.back().text}})) return false;
     }
   }
   steps_.emplace(index, std::move(step)); return true;
+}
+bool Codec::begin(Step& step, uint64_t index, PartKind kind, PartHeader header, uint64_t offset) {
+  if (next_part_ >= limits_.max_parts || next_part_ == std::numeric_limits<uint32_t>::max()) return fail(ErrorKind::ResourceLimit, "interaction part limit");
+  LocalId id{next_part_++}; step.parts.push_back(id);
+  return emit(PartBegin{{0}, id, kind, std::move(header), index * (static_cast<uint64_t>(limits_.max_parts) + 1) + offset});
+}
+// One image, audio, video or document content item of a model_output step. A complete item always
+// begins a content item; a streamed audio delta whose MIME type agrees continues the previous audio run.
+bool Codec::media_item(Step& step, uint64_t, json::Value item, bool streamed) {
+  const auto type = item.get("type").as_string();
+  unknown(item, {"type", "mime_type", "data", "uri", "resolution", "channels", "sample_rate", "rate", "processing", "name"});
+  const auto present = [](json::Value v) { return v.valid() && !v.is_null(); };
+  const auto mime = item.get("mime_type"), data = item.get("data"), uri = item.get("uri");
+  if ((present(mime) && (!mime.is_string() || !mime_syntax(mime.as_string()))) || present(data) == present(uri) ||
+      (present(data) && !data.is_string()) || (present(uri) && !uri.is_string()))
+    return fail(ErrorKind::ProtocolCorrupt, "model output media needs a valid MIME type and exactly one of data or uri");
+  auto description = [&](Content& content) {
+    for (auto member : item.members()) {
+      if (member.key == "type" || member.key == "mime_type" || member.key == "data" || member.key == "uri") continue;
+      auto [field, inserted] = content.fields.emplace(member.key, member.value);
+      if (!inserted && media_description_field(member.key) && !json::equal(field->second, member.value))
+        return fail(ErrorKind::ProtocolCorrupt, "model output media description changed");
+      if (!inserted) field->second = member.value;
+    }
+    return true;
+  };
+  if (streamed && present(data) && type == "audio" && !step.content.empty()) {
+    auto& run = step.content.back();
+    if (run.type == "audio" && run.uri.empty() && (!present(mime) || run.mime.empty() || mime.as_string() == run.mime)) {
+      if (!description(run)) return false;
+      if (present(mime) && run.mime.empty()) run.mime = mime.as_string();
+      if (!canonical_base64(data.as_string())) return fail(ErrorKind::ProtocolCorrupt, "model output audio must be canonical base64");
+      const auto size = base64_decoded_size(run.payload) + base64_decoded_size(data.as_string());
+      if (size > limits_.max_content_bytes / 4 * 3) return fail(ErrorKind::ResourceLimit, "model output audio limit");
+      if (!run.audio_run) run.audio_run = std::make_unique<std::string>(run.payload);
+      media_output::append_audio(*run.audio_run, data.as_string());
+      run.payload = *run.audio_run;
+      return true;
+    }
+  }
+  Content content; content.type = std::string(type);
+  if (present(mime)) content.mime = std::string(mime.as_string());
+  const bool inline_data = present(data);
+  if (inline_data) {
+    if (!canonical_base64(data.as_string())) return fail(ErrorKind::ProtocolCorrupt, "model output media must be canonical base64");
+    content.payload = data.as_string();
+  }
+  else {
+    content.uri = std::string(uri.as_string());
+    if (!reference_syntax(content.uri)) return fail(ErrorKind::ProtocolCorrupt, "model output media location is invalid");
+  }
+  if (!description(content)) return false;
+  step.content.push_back(std::move(content));
+  // Delay the header until reconciliation: the final wire can supply a missing MIME type.
+  if (next_part_ >= limits_.max_parts || next_part_ == std::numeric_limits<uint32_t>::max())
+    return fail(ErrorKind::ResourceLimit, "interaction part limit");
+  step.parts.push_back(LocalId{next_part_++});
+  return true;
+}
+bool Codec::thought_content(Step& step, json::Value content) {
+  if (!thought_shape(content)) return fail(ErrorKind::ProtocolCorrupt, "invalid thought summary content");
+  auto doc = own(content); if (!doc) return false;
+  step.summary.push_back(std::move(doc));
+  return content.get("type").as_string() != "text" ||
+      emit(PartDelta{step.parts[0], {PartKind::Thought, content.get("text").as_string()}});
+}
+bool Codec::annotations(json::Value value, std::string_view text) {
+  if (!value.valid()) return true;
+  if (!value.is_array()) return fail(ErrorKind::ProtocolCorrupt, "text annotations must be an array");
+  for (auto annotation : value.elements()) {
+    if (!annotation.is_object() || !annotation.get("type").is_string())
+      return fail(ErrorKind::ProtocolCorrupt, "text annotation discriminator required");
+    const auto type = annotation.get("type").as_string();
+    if (type != "word_info" && type != "speech_metadata" && type != "url_citation" &&
+        type != "file_citation" && type != "place_citation")
+      return fail(ErrorKind::Unsupported, "unsupported critical text annotation");
+    const auto start = annotation.get("start_index"), end = annotation.get("end_index");
+    for (const auto position : {start, end})
+      if (position.valid() && (!unsigned_count(position) ||
+          number(position) > static_cast<uint64_t>(std::numeric_limits<int32_t>::max()) || number(position) > text.size()))
+        return fail(ErrorKind::ProtocolCorrupt, "text annotation byte index outside content");
+    if (start.valid() && end.valid() && number(start) > number(end))
+      return fail(ErrorKind::ProtocolCorrupt, "text annotation byte range reversed");
+    for (auto member : annotation.members()) {
+      const auto name = member.key;
+      const bool string_field =
+          (type == "word_info" && (name == "text" || name == "speaker" || name == "start_offset" || name == "end_offset")) ||
+          (type == "speech_metadata" && (name == "speaker" || name == "style")) ||
+          (type == "url_citation" && (name == "url" || name == "title")) ||
+          (type == "file_citation" && (name == "document_uri" || name == "file_name" || name == "media_id" || name == "source")) ||
+          (type == "place_citation" && (name == "name" || name == "place_id" || name == "url"));
+      if (string_field && !member.value.is_string())
+        return fail(ErrorKind::ProtocolCorrupt, "invalid text annotation string metadata");
+      if ((type == "file_citation" && name == "custom_metadata" && !member.value.is_object()) ||
+          (type == "place_citation" && name == "review_snippets" && !member.value.is_array()) ||
+          (type == "file_citation" && name == "page_number" && !member.value.is_int() && !member.value.is_uint()))
+        return fail(ErrorKind::ProtocolCorrupt, "invalid text annotation metadata");
+    }
+    const auto word = annotation.get("text");
+    if (type == "word_info" && word.is_string() && start.valid() && end.valid() &&
+        text.substr(static_cast<size_t>(number(start)), static_cast<size_t>(number(end) - number(start))) != word.as_string())
+      return fail(ErrorKind::ProtocolCorrupt, "transcribed word contradicts annotated text");
+    if (type == "word_info" && word.is_string() && (!start.valid() || !end.valid()) &&
+        text.find(word.as_string()) == std::string_view::npos)
+      return fail(ErrorKind::ProtocolCorrupt, "transcribed word missing from annotated text");
+  }
+  return true;
+}
+bool Codec::annotate(Content& content, json::Value value) {
+  if (!annotations(value, content.text)) return false;
+  if (value.valid()) {
+    content.annotations_present = true;
+    for (auto annotation : value.elements()) content.annotations.push_back(annotation);
+  }
+  return true;
 }
 bool Codec::delta(json::Value value, uint64_t index) {
   auto found = steps_.find(index);
@@ -206,22 +336,26 @@ bool Codec::delta(json::Value value, uint64_t index) {
   if (type == "thought_summary" && step.type == "thought") {
     unknown(value, {"type", "content"}); auto content = value.get("content");
     if (!content.valid()) return true;
-    if (!content.is_object() || !content.get("type").is_string()) return fail(ErrorKind::ProtocolCorrupt, "thought summary content required");
-    if (content.get("type").as_string() != "text") return fail(ErrorKind::Unsupported, "nontext thought summary unsupported");
-    if (!content.get("text").is_string()) return fail(ErrorKind::ProtocolCorrupt, "thought summary text required");
-    auto doc = own(content); if (!doc) return false; step.summary.push_back(std::move(doc));
-    return emit(PartDelta{step.parts[0], {PartKind::Thought, content.get("text").as_string()}});
+    return thought_content(step, content);
   }
   if (type == "text" && step.type == "model_output") {
     unknown(value, {"type", "text"}); auto text = value.get("text");
     if (!text.is_string()) return fail(ErrorKind::ProtocolCorrupt, "text delta required");
-    if (step.parts.empty()) {
-      if (next_part_ >= limits_.max_parts) return fail(ErrorKind::ResourceLimit, "interaction part limit");
-      LocalId id{next_part_++}; step.parts.push_back(id); step.texts.emplace_back();
-      if (!emit(PartBegin{{0}, id, PartKind::Text, {}, index * (static_cast<uint64_t>(limits_.max_parts) + 1)})) return false;
+    if (step.content.empty() || step.content.back().type != "text") {
+      Content item; item.type = "text"; step.content.push_back(std::move(item));
+      if (!begin(step, index, PartKind::Text, {}, step.content.size() - 1)) return false;
     }
-    step.texts.back().append(text.as_string()); return emit(PartDelta{step.parts.back(), {PartKind::Text, text.as_string()}});
+    step.content.back().text.append(text.as_string()); return emit(PartDelta{step.parts.back(), {PartKind::Text, text.as_string()}});
   }
+  if (type == "text_annotation_delta") {
+    unknown(value, {"type", "annotations"});
+    // The schema supplies only a step index, not a content index. An annotation belongs to the
+    // current text run; never reach backwards across intervening media or invent a text part.
+    if (step.type != "model_output" || step.content.empty() || step.content.back().type != "text")
+      return fail(ErrorKind::ProtocolCorrupt, "text annotation without current model output text");
+    return annotate(step.content.back(), value.get("annotations"));
+  }
+  if (media_type(type) && step.type == "model_output") return media_item(step, index, value, true);
   if (type == "arguments_delta" && step.type == "function_call") {
     unknown(value, {"type", "arguments"}); auto arguments = value.get("arguments");
     if (arguments.valid() && !arguments.is_string()) return fail(ErrorKind::ProtocolCorrupt, "invalid arguments delta");
@@ -255,19 +389,36 @@ std::shared_ptr<const json::Document> Codec::assembled(const Step& step) {
       writer.raw("]");
     }
   } else if (step.type == "model_output") {
-    if (original.get("content").valid() || !step.texts.empty()) {
+    if (original.get("content").valid() || !step.content.empty()) {
       key("content"); writer.raw("[");
-      for (size_t i = 0; i < step.texts.size(); ++i) {
+      for (size_t i = 0; i < step.content.size(); ++i) {
         if (i) writer.raw(",");
+        const auto& entry = step.content[i];
+        if (entry.type != "text") {
+          writer.raw("{\"type\":").quoted(entry.type);
+          if (!entry.mime.empty()) writer.raw(",\"mime_type\":").quoted(entry.mime);
+          if (entry.uri.empty()) writer.raw(",\"data\":").quoted(entry.payload); else writer.raw(",\"uri\":").quoted(entry.uri);
+          for (const auto& [name, value] : entry.fields) writer.raw(",").quoted(name).raw(":").value(value, 3);
+          writer.raw("}");
+          continue;
+        }
         writer.raw("{"); bool item_comma = false;
         auto item = original.get("content").at(i);
-        for (auto member : item.members()) if (member.key != "text") {
+        for (auto member : item.members()) if (member.key != "text" && member.key != "annotations") {
           if (item_comma) writer.raw(",");
           item_comma = true; writer.quoted(member.key).raw(":").value(member.value, 3);
         }
         if (!item.valid()) { writer.raw("\"type\":\"text\""); item_comma = true; }
         if (item_comma) writer.raw(",");
-        writer.raw("\"text\":").quoted(step.texts[i]).raw("}");
+        if (entry.annotations_present) {
+          writer.raw("\"annotations\":[");
+          for (size_t j = 0; j < entry.annotations.size(); ++j) {
+            if (j) writer.raw(",");
+            writer.value(entry.annotations[j], 4);
+          }
+          writer.raw("],");
+        }
+        writer.raw("\"text\":").quoted(entry.text).raw("}");
       }
       writer.raw("]");
     }
@@ -291,9 +442,7 @@ bool Codec::reconcile(Step& step, json::Value final) {
     if ((!summary.valid() && !step.summary.empty()) || (summary.valid() && summary.size() < step.summary.size())) return fail(ErrorKind::ProtocolCorrupt, "final thought summary lost");
     if (summary.valid()) for (size_t i = 0; i < summary.size(); ++i) {
       auto item = summary.at(i);
-      if (!item.is_object() || !item.get("type").is_string()) return fail(ErrorKind::ProtocolCorrupt, "invalid final thought content");
-      if (item.get("type").as_string() != "text") return fail(ErrorKind::Unsupported, "nontext final thought unsupported");
-      if (!item.get("text").is_string() || (i < step.summary.size() && !json::equal(item, step.summary[i]->root())))
+      if (!thought_shape(item) || (i < step.summary.size() && !json::equal(item, step.summary[i]->root())))
         return fail(ErrorKind::ProtocolCorrupt, "final thought summary mismatch");
     }
     // The final resource signature replaces the streamed value; it is not prose.
@@ -313,17 +462,46 @@ bool Codec::reconcile(Step& step, json::Value final) {
     return true;
   }
   auto content = final.get("content");
-  if (!content.valid() && step.texts.empty()) return true;
-  if (!content.is_array() || content.size() != step.texts.size()) return fail(ErrorKind::ProtocolCorrupt, "final output content mismatch");
+  if (!content.valid() && step.content.empty()) return true;
+  if (!content.is_array() || content.size() != step.content.size()) return fail(ErrorKind::ProtocolCorrupt, "final output content mismatch");
   for (size_t i = 0; i < content.size(); ++i) {
     auto item = content.at(i);
     if (!item.is_object() || !item.get("type").is_string()) return fail(ErrorKind::ProtocolCorrupt, "invalid final output block");
-    if (item.get("type").as_string() != "text") return fail(ErrorKind::Unsupported, "nontext final output unsupported");
-    if (!item.get("text").is_string() || !prefix(step.texts[i], item.get("text").as_string())) return fail(ErrorKind::ProtocolCorrupt, "final output prefix mismatch");
+    const auto type = item.get("type").as_string();
+    const auto& entry = step.content[i];
+    if (type != "text" && !media_type(type)) return fail(ErrorKind::Unsupported, "unsupported final output content");
+    if (type != entry.type) return fail(ErrorKind::ProtocolCorrupt, "final output content type mismatch");
+    if (type == "text") {
+      if (!item.get("text").is_string() || !prefix(entry.text, item.get("text").as_string())) return fail(ErrorKind::ProtocolCorrupt, "final output prefix mismatch");
+      const auto supplied = item.get("annotations");
+      if (!annotations(supplied, item.get("text").as_string())) return false;
+      if ((!supplied.valid() && entry.annotations_present) ||
+          (supplied.valid() && supplied.size() < entry.annotations.size()))
+        return fail(ErrorKind::ProtocolCorrupt, "final text annotations lost");
+      size_t j = 0;
+      for (const auto annotation : supplied.elements()) {
+        if (j == entry.annotations.size()) break;
+        if (!json::equal(entry.annotations[j++], annotation))
+          return fail(ErrorKind::ProtocolCorrupt, "final text annotation prefix mismatch");
+      }
+      continue;
+    }
+    // A streamed description that omitted the MIME type has nothing to contradict.
+    const auto mime = item.get("mime_type"), data = item.get("data"), uri = item.get("uri");
+    const bool inline_data = data.valid() && !data.is_null(), location = uri.valid() && !uri.is_null();
+    if ((mime.valid() && !mime.is_null() && (!mime.is_string() || !mime_syntax(mime.as_string()))) ||
+        (!entry.mime.empty() && (!mime.is_string() || mime.as_string() != entry.mime)))
+      return fail(ErrorKind::ProtocolCorrupt, "final output media type mismatch");
+    if (inline_data == location || (entry.uri.empty() ? !data.is_string() || data.as_string() != entry.payload
+                                                    : !uri.is_string() || uri.as_string() != entry.uri))
+      return fail(ErrorKind::ProtocolCorrupt, "final output media mismatch");
+    for (const auto& [name, value] : entry.fields)
+      if (media_description_field(name) && !json::equal(value, item.get(name)))
+        return fail(ErrorKind::ProtocolCorrupt, "final output media description mismatch");
   }
   return true;
 }
-bool Codec::seal(Step& step, json::Value final) {
+bool Codec::seal(Step& step, json::Value final, uint64_t index) {
   if (step.type == "thought") { auto metadata = own(final); return metadata && emit(PartSeal{step.parts[0], {}, std::move(metadata)}); }
   if (step.type == "function_call") {
     auto arguments = final.get("arguments");
@@ -331,7 +509,24 @@ bool Codec::seal(Step& step, json::Value final) {
     std::string bytes = step.argument_delta ? step.arguments : arguments.dump(); auto metadata = own(final);
     return metadata && emit(PartSeal{step.parts[0], bytes, std::move(metadata)});
   }
-  for (size_t i = 0; i < step.parts.size(); ++i) if (!emit(PartSeal{step.parts[i], final.get("content").at(i).get("text").as_string()})) return false;
+  for (size_t i = 0; i < step.parts.size(); ++i) {
+    const auto item = final.get("content").at(i);
+    std::optional<std::string_view> snapshot;
+    if (step.content[i].type == "text") snapshot = item.get("text").as_string();
+    else {
+      const auto mime = item.get("mime_type"), data = item.get("data"), uri = item.get("uri");
+      PartHeader header; header.wire_type = step.content[i].type;
+      header.media = media_output::describe(mime.is_string() ? mime.as_string() : std::string_view{},
+                                            data.is_string() ? MediaSource::Inline : MediaSource::File,
+                                            uri.is_string() ? uri.as_string() : std::string_view{});
+      header.media.kind = media_kind_of(step.content[i].type);
+      if (auto name = item.get("name"); name.is_string()) header.media.name = std::string(name.as_string());
+      if (!emit(PartBegin{{0}, step.parts[i], PartKind::Media, std::move(header),
+                          index * (static_cast<uint64_t>(limits_.max_parts) + 1) + i})) return false;
+      if (data.is_string()) snapshot = data.as_string();
+    }
+    if (!emit(PartSeal{step.parts[i], snapshot})) return false;
+  }
   return true;
 }
 bool Codec::terminal(json::Value resource, bool streaming) {
@@ -359,7 +554,7 @@ bool Codec::terminal(json::Value resource, bool streaming) {
       assembled_step = assembled(step); if (!assembled_step) return false;
       final = assembled_step->root();
     }
-    if (!reconcile(step, final) || !seal(step, final)) return false;
+    if (!reconcile(step, final) || !seal(step, final, index)) return false;
     if (index) writer.raw(",");
     writer.value(final, 1);
   }

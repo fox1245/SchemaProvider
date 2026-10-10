@@ -191,7 +191,7 @@ std::string part_projection(const sp::Part& part) {
       require(p.content != nullptr, "server result has no native block");
       return "{\"type\":\"server_tool_result\",\"tool_use_id\":" + sp::json::quote(p.tool_use_id)
            + ",\"wire_type\":" + sp::json::quote(p.wire_type) + ",\"content\":" + p.content->root().dump() + '}';
-    } else if constexpr (std::is_same_v<T, sp::ToolResult> || std::is_same_v<T, sp::Image>)
+    } else if constexpr (std::is_same_v<T, sp::ToolResult> || std::is_same_v<T, sp::Media>)
       throw std::runtime_error("request-only part in model output");
     else if constexpr (std::is_same_v<T, sp::Thought>) {
       std::string out = "{\"type\":\"thought\",\"summary\":[";

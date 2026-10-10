@@ -27,6 +27,8 @@ class NativeContext final {
   // The request explicitly set Gemini's thinking budget to zero, so the vendor
   // cannot have generated thoughts for it.
   bool thinking_disabled() const noexcept { return thinking_disabled_; }
+  // The Chat audio output format the request asked for (wav, mp3, ...), empty when none.
+  std::string_view audio_format() const noexcept { return audio_format_; }
  private:
   enum class Family { Messages, Responses, Gemini, Interactions, Chat };
   static std::string_view family_name(Family);
@@ -50,6 +52,7 @@ class NativeContext final {
   bool history_valid_ = true;
   bool replay_eligible_ = true;
   bool thinking_disabled_ = false;
+  std::string audio_format_;
   std::vector<std::pair<std::string, std::string>> pending_server_tools_;
   std::vector<std::string> client_tools_;
   friend messages::EncodeResult messages::encode(const descriptor::ValidatedDescriptor&, const messages::Request&, bool);

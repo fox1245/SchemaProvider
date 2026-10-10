@@ -19,7 +19,8 @@ KINDS = {'InvalidRequest', 'Authentication', 'Permission', 'NotFound', 'RateLimi
          'QuotaExhausted', 'LimitUnknown', 'Overloaded', 'RemoteFailure'}
 RETRIES = {'Never', 'Transient', 'AfterReset', 'Unknown'}
 RESOURCES = ('json_bytes json_depth request_bytes chat_text_request_bytes request_messages request_tools '
-             'request_parts native_bytes native_depth native_members image_decoded_bytes descriptor_bytes '
+             'request_parts native_bytes native_depth native_members image_decoded_bytes audio_decoded_bytes '
+             'video_decoded_bytes document_decoded_bytes descriptor_bytes '
              'descriptor_depth policy_bytes policy_depth').split()
 
 def unique(pairs):

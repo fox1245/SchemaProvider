@@ -28,7 +28,7 @@ sp::runtime::Options options() { sp::runtime::Options o; o.api_key = key; o.defa
 sp::runtime::RunOptions run(bool streaming) { sp::runtime::RunOptions o; o.streaming = streaming; return o; }
 sp::interactions::Request request(const std::string& model, const vision_test::Scene& scene = vision_test::scene_a()) {
   sp::interactions::Request r; r.model = model; r.account_scope = "synthetic-interactions-account";
-  r.system = "Count the actual image"; r.max_output_tokens = 128; r.thinking_level = "low";
+  r.system = "Count the actual image"; r.max_output_tokens = 128; r.thinking_level = "low"; r.thinking_summaries = true;
   r.tools.push_back({"observe_scene", "Return observed geometry", document(R"({"type":"object","properties":{"red_circles":{"type":"integer"},"blue_squares":{"type":"integer"},"weighted":{"type":"integer"}},"required":["red_circles","blue_squares","weighted"]})")});
   r.messages.push_back(sp::Message{"", sp::Role::User, {sp::Text{"Count red circles and blue squares"}, scene.image(), sp::Text{"Use the host function"}}}); return r;
 }
@@ -76,8 +76,8 @@ void two_turn_vision_and_mutations(Peer& peer) {
     bad = next; bad.messages[1].native.reset(); reject(bad);
     bad = next; bad.messages[1].wire_output.reset(); reject(bad);
     bad = next; auto original = bad.messages[1].wire_output->root(); bad.messages[1].wire_output = document("[" + original.at(2).dump() + "," + original.at(1).dump() + "," + original.at(0).dump() + "]"); reject(bad);
-    bad = next; std::get<sp::Image>(bad.messages[0].parts[1]) = scene == &vision_test::scene_a() ? vision_test::scene_b().image() : vision_test::scene_a().image(); reject(bad);
-    bad = next; std::get<sp::Image>(bad.messages[0].parts[1]).detail = sp::ImageDetail::High; reject(bad);
+    bad = next; std::get<sp::Media>(bad.messages[0].parts[1]) = scene == &vision_test::scene_a() ? vision_test::scene_b().image() : vision_test::scene_a().image(); reject(bad);
+    bad = next; std::get<sp::Media>(bad.messages[0].parts[1]).detail = sp::ImageDetail::High; reject(bad);
     bad = next; std::swap(bad.messages[0].parts[0], bad.messages[0].parts[2]); reject(bad);
     bad = next; bad.account_scope = "foreign"; reject(bad);
     bad = next; bad.thinking_level = "high"; reject(bad);

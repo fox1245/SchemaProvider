@@ -1,4 +1,5 @@
 #include "codecs/gemini.h"
+#include "codecs/media_output.h"
 #include "core/native.h"
 #include "descriptor/descriptor.h"
 #include "json/json.h"
@@ -187,10 +188,12 @@ bool Codec::part(json::Value p) {
   PartHeader header; header.wire_type = data_key.empty() ? "empty" : std::string(data_key); header.wire_metadata = retained;
   PartKind kind = PartKind::Opaque;
   std::string content;
+  std::string_view fragment;
+  std::optional<std::string_view> payload;
   if (data_key == "text") {
     if (!p.get("text").is_string()) return fail(ErrorKind::ProtocolCorrupt, "Gemini text must be string");
     kind = thought.is_bool() && thought.as_bool() ? PartKind::Thinking : PartKind::Text;
-    content = p.get("text").as_string();
+    fragment = p.get("text").as_string();
   } else if (data_key == "functionCall") {
     auto call = p.get("functionCall");
     if (!call.is_object() || !nonempty(call.get("name"))) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini function identity");
@@ -208,16 +211,34 @@ bool Codec::part(json::Value p) {
     if (!calls_.insert(header.wire_id).second) return fail(ErrorKind::ProtocolCorrupt, "duplicate Gemini function call id");
     auto args = call.get("args");
     content = args.valid() ? args.dump() : "{}";
+    fragment = content;
     kind = PartKind::ToolCall;
     has_call_ = true;
     unknown(call, {"id", "name", "args"});
+  } else if ((data_key == "inlineData" || data_key == "fileData") && !(thought.is_bool() && thought.as_bool())) {
+    // Generated media becomes a typed part. A thought image is an interim reasoning artifact and
+    // stays opaque wire; the whole part is retained for the native array either way.
+    const auto blob = p.get(data_key);
+    const bool inline_data = data_key == "inlineData";
+    const auto mime = blob.get("mimeType"), data = blob.get(inline_data ? "data" : "fileUri");
+    if (!blob.is_object() || !data.is_string() || (mime.valid() && (!mime.is_string() || !mime_syntax(mime.as_string()))) ||
+        (inline_data && !mime.is_string()) || (!inline_data && !reference_syntax(data.as_string())))
+      return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini media part");
+    if (inline_data) unknown(blob, {"mimeType", "data", "displayName"}); else unknown(blob, {"mimeType", "fileUri", "displayName"});
+    header.media = media_output::describe(mime.is_string() ? mime.as_string() : std::string_view{},
+                                          inline_data ? MediaSource::Inline : MediaSource::File,
+                                          inline_data ? std::string_view{} : data.as_string());
+    if (auto name = blob.get("displayName"); name.is_string()) header.media.name = std::string(name.as_string());
+    header.wire_metadata.reset();
+    kind = PartKind::Media;
+    if (inline_data) payload = data.as_string();
   } else if (!data_key.empty() && !p.get(data_key).is_object()) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini opaque part payload");
   if (!emit(PartBegin{{0}, local, kind, std::move(header), wire_parts_.size()})) return false;
   if (kind == PartKind::Text || kind == PartKind::Thinking || kind == PartKind::ToolCall)
-    if (!emit(PartDelta{local, {kind, content}})) return false;
+    if (!emit(PartDelta{local, {kind, fragment}})) return false;
   if (kind == PartKind::Thinking && signature.valid()) if (!emit(PartDelta{local, {kind, signature.as_string(), DeltaChannel::Signature}})) return false;
   if (kind == PartKind::ToolCall) pending_seals_.push_back(local);
-  else if (!emit(PartSeal{local, {}, {}})) return false;
+  else if (!emit(PartSeal{local, payload, {}})) return false;
   wire_parts_.push_back(std::move(retained));
   return true;
 }

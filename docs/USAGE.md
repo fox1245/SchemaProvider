@@ -1,4 +1,4 @@
-# Using the interface 6 SDK
+# Using the interface 7 SDK
 
 Start with the complete [README program](../README.md#first-request). This guide explains what that program owns and how to extend it. Installed declarations, not historical sketches in DESIGN, define the API.
 
@@ -153,11 +153,11 @@ Family/model defaults are resolved before encoding. An unset request optional us
 
 | Request type / header | Family-specific fields besides model, messages and tools |
 |---|---|
-| `sp::chat::Request`, `<codecs/chat.h>` | `temperature`, `top_p`, `max_output_tokens`, scalar `reasoning_effort`, `service_tier`, `provider`, `response_format`, OpenRouter `reasoning`, `include_reasoning`, `usage_include`, alternative `models`; choose either simple `messages` or ordered `canonical_messages`, never both. |
+| `sp::chat::Request`, `<codecs/chat.h>` | `temperature`, `top_p`, `max_output_tokens`, scalar `reasoning_effort`, `service_tier`, `provider`, `response_format`, `modalities`, `audio`, OpenRouter `image_config`, `reasoning`, `include_reasoning`, `usage_include`, alternative `models`; choose either simple `messages` or ordered `canonical_messages`, never both. |
 | `sp::messages::Request`, `<codecs/messages_request.h>` | `system`, `account_scope`, **`max_tokens`**, `thinking_budget`, `thinking_mode`, `output_effort`, `cache_control`, `tool_choice`, `temperature`, `top_p`, `provider`. |
 | `sp::responses::Request`, `<codecs/responses_request.h>` | `instructions`, `account_scope`, `max_output_tokens`, `reasoning` (`effort`, `summary`), `required_tool`, `service_tier`, `temperature`, `top_p`, `store`, `response_format`, `provider`, `hosted_tools`, `max_tool_calls`, `previous_response_id`, `previous_response_history`, `parallel_tool_calls`, `verbosity`, `truncation`, `include`. |
-| `sp::gemini::Request`, `<codecs/gemini_request.h>` | `system`, `account_scope`, `max_output_tokens`, `thinking_budget`, typed `thinking_level`, `include_thoughts`, `temperature`, `safety_settings`, `tool_choice`, `required_tool`, `history_mode`. |
-| `sp::interactions::Request`, `<codecs/interactions_request.h>` | `system`, `account_scope`, `max_output_tokens`, `thinking_level`, `thinking_summaries`, `service_tier`, `required_tool`. |
+| `sp::gemini::Request`, `<codecs/gemini_request.h>` | `system`, `account_scope`, `max_output_tokens`, `thinking_budget`, typed `thinking_level`, `include_thoughts`, `temperature`, `safety_settings`, `tool_choice`, `required_tool`, `history_mode`, `response_modalities`, `speech_config`, `image_config`, `audio_transcription_config`. |
+| `sp::interactions::Request`, `<codecs/interactions_request.h>` | `system`, `account_scope`, `max_output_tokens`, `thinking_level`, `thinking_summaries`, `service_tier`, `required_tool`, typed `response_format`, `speech_config`, `transcription_config`. |
 
 This lists the C++ surface, not every field's availability on every model. Admitted enum/range/model facts and compiled family constraints still apply. Generate supports temperature; Interactions does not expose temperature/top-p. OpenRouter controls are admitted only at declared origins for the corresponding family, not arbitrary compatible URLs. Explicit model-prohibited temperature rejects before I/O. Messages enabled thinking has a separately documented omission rule, described below.
 
@@ -177,7 +177,7 @@ request.messages.push_back(user);
 request.max_tokens = 128;  // This family uses max_tokens in C++.
 ```
 
-`sp::chat::InputMessage` is the shorter text/tool/image path. Its image vector is emitted in vector order before nonempty text. Use `canonical_messages` for caller-controlled Text/Image part order or retained native history.
+`sp::chat::InputMessage` is the shorter text/tool/media path. Its `media` vector is emitted in vector order before nonempty text. Use `canonical_messages` for caller-controlled Text/Media part order or retained native history.
 
 Structured output uses `sp::ResponseFormat`, not a descriptor program. Tool schemas are owned immutable `sp::json::Document` values. This fragment creates a Responses request with a JSON-object response format:
 
@@ -191,6 +191,69 @@ request.response_format = sp::ResponseFormat{};  // Kind::JsonObject
 ```
 
 For `Kind::JsonSchema`, provide `name`, `schema` and optional `strict`; the encoder validates the supported schema keyword types and bounds. It does not validate a model's returned text against that schema. Refusal remains a `Refusal` part, not repaired JSON. Responses hosted tool variants include `WebSearchTool`, `ImageGenerationTool`, `FileSearchTool`, `ToolSearchTool` and `ShellTool`. Tool admission and bounded invocation facts are family-specific; hosted tools do not become host-executable `ToolCall`s merely because they have a name.
+
+## External runtimes and dotenv
+
+SchemaProvider does not require NeoGraph. The [worked examples](../examples/README.md) build a standalone C++ tool loop using `cppdotenv::dotenv_values` and an example C ABI shared library loaded through Python `ctypes` by a LangGraph node. Both use the installed `SchemaProvider::transport` target and retain assistant history as typed SDK messages. The example is Chat text/client-tool-only; it is not a product Python binding or a typed-media FFI. The README records GIL, lifetime, async and credential-address-space limits and the pending Windows/macOS execution gates.
+
+## Media inputs and generated outputs
+
+`<core/media.h>` defines `MediaKind::{Image,Audio,Video,Document}` and `MediaSource::{Inline,Url,File}`. Inline input owns canonical padded base64 through `shared_ptr<const string>`; URL input carries an HTTPS location, and File carries a provider-held ID or Files-API URI. The SDK never reads, uploads or downloads files/URLs or decodes pixels/samples. The application supplies those bytes/references. `name` supplies a title/filename where representable; `detail` applies where the image wire supports it.
+
+| Family | Input wire | Generated output |
+|---|---|---|
+| Chat | `image_url`, WAV/MP3 `input_audio`, PDF `file`; declared OpenRouter origins add documented audio/video/PDF forms. | `audio` identity/transcript with request-derived format; OpenRouter `images[]`. |
+| Responses | `input_image` and documented `input_file` document formats; declared OpenRouter origins add audio/video forms. | Completed `image_generation_call`; other hosted tool metadata remains typed/opaque. |
+| Messages | `image` and PDF/text `document`, using supported base64/URL/provider-file sources. Inline text documents decode to UTF-8. | No direct image/audio/video generation schema; hosted-tool file references remain in `ServerToolResult`. |
+| Generate | `inlineData`/`fileData` image (HEIC/HEIF/AVIF included), audio, video and documented documents. | Typed `inlineData`/`fileData` preserves reported MIME parameters; thought images remain opaque native parts. |
+| Interactions | Image/audio/video/document `data` or `uri`; HEIC/HEIF included. Its enum `mime_type` receives the lowercase essence, not arbitrary MIME parameters. | Typed model-output media; thought-summary images stay in native JSON, not final images. |
+
+Exact MIME/source lists are in [descriptor-policy.json](../config/descriptor-policy.json), not a promise that every model supports every type. MIME matching compares ASCII-case-insensitive essences. Arbitrary compatible hosts do not receive declared OpenRouter-origin privileges. Unsupported family/source forms return `Unsupported`, malformed input returns `InvalidRequest`, and media resource exhaustion returns `ResourceLimit`. Registered image magic/brand checks are structural; other media containers are not guessed from short prefixes.
+
+`ToolResult::content_parts` is an ordered `std::vector<std::variant<Text, Media>>`; leave legacy `content` empty when supplying typed parts. Supplying both is `InvalidRequest` in families that support typed results. Existing tool-call ownership, role, part-count and media resource checks still apply. Tool output is not a general-purpose copy of the user-input schema:
+
+| Family | Typed tool-result boundary |
+|---|---|
+| Chat | Nonempty `content_parts` returns `Unsupported`; use legacy text `content`. |
+| Responses | Text plus admitted image/document forms in `function_call_output.output`; audio/video are `Unsupported`. |
+| Messages | Text plus admitted image/PDF/text-document forms in user-role `tool_result.content`. |
+| Generate | Text plus admitted inline image/audio/video/PDF bytes; no URL/file references, names, non-default image detail or generated identity/transcript metadata. |
+| Interactions | Text plus admitted images in `function_result.result`; other media kinds, names, non-default image detail and generated identity/transcript metadata are `Unsupported`. |
+
+Generate's legacy `ToolResult::content` must parse as one JSON object, not arbitrary text or a JSON array. Typed text strings go to `functionResponse.response.output` (or `response.error` when `is_error`); inline media goes to the separate `functionResponse.parts` lane. Generate accepts alternating typed text/media and groups them into these separate ordered lanes. Each lane retains its order, but cross-lane positions are not represented; callers must not rely on cross-lane interleaving. Named blobs return `Unsupported`; no synthetic references are invented. Responses and Messages also reject tool-media controls/metadata their output wire cannot represent rather than silently dropping them.
+
+Generate preserves `Media::name` as `displayName` on ordinary `inlineData`/`fileData` input and generated output. Its documented `video/audio/s16le` and `video/audio/wav` aliases classify as Audio, and `video/text/timestamp` as Document. Interactions ordinary input permits `name` only for Video (`Unsupported` otherwise), and emits the lowercase MIME essence.
+
+Default decoded bounds are 5 MiB/image, 10 MiB/audio, 12 MiB/video and 10 MiB/document under one aggregate 16 MiB encoded-request budget. Base64/JSON overhead counts, so an individual bound does not promise that a request of exactly that size fits. External snapshots can select admitted resource bounds, not model capability or financial authority.
+
+Messages decodes inline text documents to UTF-8 once and reuses the owned bytes during encoding. The retained decoded-text cache is bounded by the remaining aggregate request-byte budget as well as each document's decoded-byte bound; nested tool-result documents share that budget.
+
+This function builds a request from an application-owned real HEIC file:
+
+```cpp
+#include <codecs/gemini_request.h>
+#include <core/media.h>
+
+sp::gemini::Request request_with_heic(std::string model, std::string_view file_bytes) {
+    sp::gemini::Request request;
+    request.model = std::move(model);
+    auto bytes = std::make_shared<const std::string>(sp::base64_encode(file_bytes));
+    request.messages.push_back(sp::Message{
+        {}, sp::Role::User, {sp::Media::image("image/heic", std::move(bytes)),
+                            sp::Text{"Describe this image."}}});
+    return request;
+}
+```
+
+Generation controls are explicit: Chat `OutputModality` with `AudioOutput{voice,format}` or declared-origin `ImageOutput`; Generate `ResponseModality`, `SpeechConfig`, `ImageConfig`, `AudioTranscriptionConfig`; Interactions an ordered `response_format` vector of `AudioResponseFormat`, `ImageResponseFormat`, `VideoResponseFormat` or `TextResponseFormat` (one entry emits an object, multiple entries an array), `SpeechConfiguration` and `TranscriptionConfig`. Interactions transcription uses the modern nested Verbatim/Smart mode; incompatible vocabulary/diarization/timestamp combinations reject before I/O. Responses requests images through `hosted_tools` with `ImageGenerationTool::output_format` (png/jpeg/webp). Select a model that supports the requested output.
+
+Generated `Media` lives in `Completion::messages[].parts`: inline `data` is owned canonical base64; URL/file sources use `reference`; audio may carry `id`/`transcript`. Missing format evidence stays an empty MIME, not an assumed PNG/WAV/sample rate. Unsealed failure partials are description-only; sealed parts remain owned. Media descriptions/payloads and controls join native bindings, so copied bytes/provider IDs do not create replay authority.
+
+OpenAI Chat audio SSE has an observed provider variation: metadata heartbeats may omit `choices`, and a late expiry-only audio delta after final usage may omit `finish_reason`. When validated, complete audio, final usage, `audio.expires_at`, `[DONE]` and normal transport close all agree, the SDK derives `StopKind::EndTurn` with raw stop evidence `derived:audio_usage+audio.expires_at+DONE`; it does not invent a provider finish reason. Heartbeats, usage alone, incomplete audio prefixes, missing terminal evidence or abnormal close cannot produce success or complete native replay authority. Ordinary Chat streams still require their chosen choice's finish reason and `[DONE]`.
+
+Retain the owned messages/native sidecars, not just a text projection, when extending history. Chat accepts assistant content arrays and preserves generated-image native history; declared-origin parsed-PDF `file` annotations and URL citations remain owned raw-wire observations, not synthesized semantic parts or file/replay authority. Interactions `text_annotation_delta` transcription annotations merge into the current native text run; they do not reach backward across media or create a missing text part.
+
+Dedicated image/video jobs, uploads/downloads, operation polling and Gemini Live WebSocket remain separate endpoints. Primary references: [OpenAI Chat](https://developers.openai.com/api/reference/resources/chat), [Responses](https://developers.openai.com/api/reference/resources/responses/methods/create), [Anthropic vision](https://platform.claude.com/docs/en/build-with-claude/vision)/[PDFs](https://platform.claude.com/docs/en/build-with-claude/pdf-support), [Gemini media](https://ai.google.dev/gemini-api/docs/image-understanding)/[Interactions](https://ai.google.dev/api/interactions-api), [OpenRouter audio](https://openrouter.ai/docs/guides/overview/multimodal/audio)/[images](https://openrouter.ai/docs/guides/overview/multimodal/image-generation). Schema research is not live API qualification.
 
 ## Reasoning, sampling and tool controls
 
@@ -228,6 +291,8 @@ request.tool_choice = sp::messages::ToolChoice{sp::messages::ToolChoiceMode::Aut
 `OutputEffort` is Low/Medium/High/Max. `CacheControl` requests ephemeral cache control with optional `CacheTtl::FiveMinutes`/`OneHour`; unset TTL emits no duration. This does not promise a cache hit or known cache usage. Tool choice is Auto/Any/None/Tool with an optional parallel-use flag. Named Tool requires a declared client function. The SDK currently rejects forced Any/Tool with enabled thinking, and None cannot carry the parallel-use flag. `provider` routing requires an admitted OpenRouter Messages origin.
 
 Generate's `ThinkingLevel` is Minimal/Low/Medium/High, mutually exclusive with an explicit `thinking_budget`. `ToolChoice` uses Auto/Any/None/Validated and optional `allowed_function_names`; names must be declared and unique, and allow-lists apply only to Any/Validated. Do not combine it with `required_tool`.
+
+Generate `include_thoughts` and Interactions `thinking_summaries` have nullable family defaults: unset means no family-wide thought/summary control is sent, not an implicit `true` or `false`. Exact admitted model policies may still supply defaults; the embedded `gemini-2.5-flash-lite` policies retain `include_thoughts=true` for Generate and `thinking_summaries=true` for Interactions. Explicit caller values, including `false`, override inherited defaults and remain subject to model/family constraints. Nullable family defaults do not disable thinking or silently change known thinking-model defaults; media-only models do not inherit thought controls merely from their family.
 
 ```cpp
 sp::gemini::Request request;

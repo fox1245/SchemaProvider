@@ -92,8 +92,32 @@ class Reader {
   template<class E> E enumeration(unsigned maximum) { auto n=number(); require(n<=maximum); return static_cast<E>(n); }
   std::string_view data; NativeArchiveLimits limits;
 };
-void write_part(Writer& w, const Part& part) {
-  w.number(part.index());
+void write_media(Writer& w, const Media& p) {
+  w.number(static_cast<unsigned>(p.kind));w.number(static_cast<unsigned>(p.source));w.text(p.mime);
+  w.boolean(bool(p.data));if(p.data)w.text(*p.data);
+  w.text(p.reference);w.text(p.name);w.number(static_cast<unsigned>(p.detail));w.text(p.id);w.text(p.transcript);
+}
+Media read_media(Reader& r) {
+  Media p;p.kind=r.enumeration<MediaKind>(3);p.source=r.enumeration<MediaSource>(2);p.mime=r.text();
+  if(r.boolean())p.data=std::make_shared<const std::string>(r.text());
+  p.reference=r.text();p.name=r.text();p.detail=r.enumeration<ImageDetail>(3);p.id=r.text();p.transcript=r.text();
+  return p;
+}
+void write_result(Writer& w, const ToolResult& p) {
+  w.text(p.tool_use_id);w.text(p.content);w.boolean(p.is_error);w.boolean(p.host.has_value());
+  if(p.host){w.text(p.host->name);w.text(p.host->status);w.boolean(p.host->retryable);w.boolean(p.host->effect_uncertain);}
+}
+ToolResult read_result(Reader& r) {
+  ToolResult p;p.tool_use_id=r.text();p.content=r.text();p.is_error=r.boolean();
+  if(r.boolean()){ToolResultHostMetadata host;host.name=r.text();host.status=r.text();host.retryable=r.boolean();host.effect_uncertain=r.boolean();p.host=std::move(host);}
+  return p;
+}
+// Media is variant index 10 but is tagged 12: tag 10 stays the original inline-image layout, which
+// is still read so archives written before typed media load unchanged.
+// Extended tool results use tag 13; absent parts retain tag 7 and its exact layout.
+void write_part(Writer& w, const Part& part, size_t& parts) {
+  const auto* result = std::get_if<ToolResult>(&part);
+  w.number(std::holds_alternative<Media>(part) ? 12 : result && !result->content_parts.empty() ? 13 : part.index());
   std::visit([&](const auto& p) { using P=std::decay_t<decltype(p)>;
     if constexpr(std::is_same_v<P,Text>) w.text(p.value);
     else if constexpr(std::is_same_v<P,Refusal>) { w.text(p.text);w.text(p.raw_code); }
@@ -101,14 +125,26 @@ void write_part(Writer& w, const Part& part) {
     else if constexpr(std::is_same_v<P,Thinking>) {w.text(p.text);w.optional(p.signature);}
     else if constexpr(std::is_same_v<P,RedactedThinking>) w.text(p.data);
     else if constexpr(std::is_same_v<P,ServerToolResult>) {w.text(p.tool_use_id);w.text(p.wire_type);w.document(p.content);}
-    else if constexpr(std::is_same_v<P,ToolResult>) {w.text(p.tool_use_id);w.text(p.content);w.boolean(p.is_error);w.boolean(p.host.has_value());if(p.host){w.text(p.host->name);w.text(p.host->status);w.boolean(p.host->retryable);w.boolean(p.host->effect_uncertain);}}
+    else if constexpr(std::is_same_v<P,ToolResult>) {
+      write_result(w,p);
+      if(!p.content_parts.empty()) {
+        require(p.content.empty() && p.content_parts.size() <= w.limits.max_parts-parts);
+        parts+=p.content_parts.size();
+        w.number(p.content_parts.size());
+        for(const auto& nested:p.content_parts) {
+          w.number(nested.index());
+          if(const auto* text=std::get_if<Text>(&nested))w.text(text->value);
+          else write_media(w,std::get<Media>(nested));
+        }
+      }
+    }
     else if constexpr(std::is_same_v<P,Reasoning>) {w.text(p.id);w.strings(p.summary);w.optional(p.encrypted_content);w.optional(p.status);w.strings(p.content);}
     else if constexpr(std::is_same_v<P,Opaque>) {w.text(p.wire_type);w.document(p.wire_metadata);}
-    else if constexpr(std::is_same_v<P,Image>) {w.text(p.mime);w.boolean(bool(p.data));if(p.data)w.text(*p.data);w.number(static_cast<unsigned>(p.detail));}
+    else if constexpr(std::is_same_v<P,Media>) write_media(w,p);
     else if constexpr(std::is_same_v<P,Thought>) {w.strings(p.summary);w.optional(p.signature);}
   },part);
 }
-Part read_part(Reader& r) {
+Part read_part(Reader& r, size_t& parts) {
   switch(r.number()) {
     case 0:return Text{r.text()};
     case 1:{Refusal p;p.text=r.text();p.raw_code=r.text();return p;}
@@ -117,10 +153,23 @@ Part read_part(Reader& r) {
     case 4:{Thinking p;p.text=r.text();p.signature=r.optional();return p;}
     case 5:return RedactedThinking{r.text()};
     case 6:{ServerToolResult p;p.tool_use_id=r.text();p.wire_type=r.text();p.content=r.document(true);return p;}
-    case 7:{ToolResult p;p.tool_use_id=r.text();p.content=r.text();p.is_error=r.boolean();if(r.boolean()){ToolResultHostMetadata host;host.name=r.text();host.status=r.text();host.retryable=r.boolean();host.effect_uncertain=r.boolean();p.host=std::move(host);}return p;}
+    case 7:return read_result(r);
     case 8:{Reasoning p;p.id=r.text();p.summary=r.strings();p.encrypted_content=r.optional();p.status=r.optional();p.content=r.strings();return p;}
     case 9:{Opaque p;p.wire_type=r.text();p.wire_metadata=r.document(true);return p;}
-    case 10:{Image p;p.mime=r.text();if(r.boolean())p.data=std::make_shared<const std::string>(r.text());p.detail=r.enumeration<ImageDetail>(3);return p;}
+    case 10:{Media p;p.kind=MediaKind::Image;p.mime=r.text();if(r.boolean())p.data=std::make_shared<const std::string>(r.text());p.detail=r.enumeration<ImageDetail>(3);return p;}
+    case 12:return read_media(r);
+    case 13:{
+      auto p=read_result(r);require(p.content.empty());
+      auto count=r.count(r.limits.max_parts-parts);require(count!=0);parts+=count;p.content_parts.reserve(count);
+      while(count--) {
+        switch(r.number()) {
+          case 0:p.content_parts.emplace_back(Text{r.text()});break;
+          case 1:p.content_parts.emplace_back(read_media(r));break;
+          default:throw Rejected{};
+        }
+      }
+      return p;
+    }
     case 11:{Thought p;p.summary=r.strings();p.signature=r.optional();return p;}
     default:throw Rejected{};
   }
@@ -205,7 +254,7 @@ NativeArchive::Saved NativeArchive::save(const std::vector<Message>& messages,st
   try {
     state_->verify();require(messages.size()<=state_->limits.max_messages);Writer w(state_->limits);w.text("sp.native.local-custody.archive.v3");w.text(state_->owner);w.text(state_->descriptor_identity);w.text(binding);w.number(messages.size());size_t parts=0;
     for(const auto& m:messages) {
-      require(m.parts.size()<=state_->limits.max_parts-parts);parts+=m.parts.size();w.text(m.id);w.number(static_cast<unsigned>(m.role));w.number(m.parts.size());for(const auto& p:m.parts)write_part(w,p);w.document(m.wire_output);w.boolean(bool(m.native));
+      require(m.parts.size()<=state_->limits.max_parts-parts);parts+=m.parts.size();w.text(m.id);w.number(static_cast<unsigned>(m.role));w.number(m.parts.size());for(const auto& p:m.parts)write_part(w,p,parts);w.document(m.wire_output);w.boolean(bool(m.native));
       if(m.native) {
         const auto& seal=*m.native;require(seal.archive_valid(m));const auto& c=*seal.context_;require(c.matches_descriptor(state_->descriptor) && c.policy_->identity()==state_->descriptor.policy()->identity());
         w.number(static_cast<unsigned>(c.family_));w.text(c.model_);w.text(c.route_);w.number(c.prefix_count_);w.text(c.policy_->identity());w.digest(c.origin_);w.digest(c.prefix_);w.boolean(c.valid_);w.boolean(c.history_valid_);w.boolean(c.replay_eligible_);w.number(c.pending_server_tools_.size());for(const auto& [a,b]:c.pending_server_tools_){w.text(a);w.text(b);}w.strings(c.client_tools_);w.number(static_cast<unsigned>(seal.stop_));w.digest(seal.content_);w.boolean(seal.complete_);
@@ -243,7 +292,7 @@ NativeArchive::Loaded NativeArchive::load(std::string_view reference,std::string
     auto fd=open_file(state_->root,name);private_file(fd,true);const auto identity=status(fd);auto bytes=read_all(fd,state_->limits.max_bytes);const auto expected=hex(mac(state_->key,bytes));require(crypto::constant_time_equal(expected.data(),name.data(),64));
     Reader r(bytes,state_->limits);require(r.text()=="sp.native.local-custody.archive.v3" && r.text()==state_->owner && r.text()==state_->descriptor_identity && r.text()==binding);auto count=r.count(state_->limits.max_messages);std::vector<Message> messages;messages.reserve(count);size_t parts=0;
     while(count--) {
-      Message m;m.id=r.text();m.role=r.enumeration<Role>(4);auto n=r.count(state_->limits.max_parts-parts);parts+=n;m.parts.reserve(n);while(n--)m.parts.push_back(read_part(r));m.wire_output=r.document(true);
+      Message m;m.id=r.text();m.role=r.enumeration<Role>(4);auto n=r.count(state_->limits.max_parts-parts);parts+=n;m.parts.reserve(n);while(n--)m.parts.push_back(read_part(r,parts));m.wire_output=r.document(true);
       if(r.boolean()) {
         auto family=r.enumeration<NativeContext::Family>(4);auto model=r.text();auto route=r.text();auto prefix=r.number();require(prefix<=state_->limits.max_messages && r.text()==state_->descriptor.policy()->identity());
         auto c=std::shared_ptr<NativeContext>(new NativeContext(family,std::move(model),std::move(route),static_cast<size_t>(prefix),state_->descriptor.policy()));c->origin_=r.digest();c->prefix_=r.digest();c->valid_=r.boolean();c->history_valid_=r.boolean();c->replay_eligible_=r.boolean();auto pending=r.count(state_->limits.max_parts);c->pending_server_tools_.reserve(pending);while(pending--){auto a=r.text();auto b=r.text();c->pending_server_tools_.emplace_back(std::move(a),std::move(b));}c->client_tools_=r.strings();auto stop=r.enumeration<StopKind>(10);auto digest=r.digest();auto complete=r.boolean();m.native=std::shared_ptr<const NativeReplay>(new NativeReplay(std::move(c),stop,digest,complete));require(m.native->archive_valid(m) && m.native->context_->matches_descriptor(state_->descriptor));

@@ -1,4 +1,5 @@
 #include "codecs/responses.h"
+#include "codecs/media_output.h"
 #include "codecs/provider_cost.h"
 #include "codecs/responses_model.h"
 #include "core/native.h"
@@ -28,7 +29,9 @@ bool server_event(std::string_view type) {
          type == "response.file_search_call.in_progress" || type == "response.file_search_call.searching" || type == "response.file_search_call.completed" ||
          type == "response.code_interpreter_call.in_progress" || type == "response.code_interpreter_call.interpreting" || type == "response.code_interpreter_call.completed" ||
          type == "response.mcp_call.in_progress" || type == "response.mcp_call.completed" || type == "response.mcp_call.failed" ||
-         type == "response.mcp_list_tools.in_progress" || type == "response.mcp_list_tools.completed" || type == "response.mcp_list_tools.failed";
+         type == "response.mcp_list_tools.in_progress" || type == "response.mcp_list_tools.completed" || type == "response.mcp_list_tools.failed" ||
+         type == "response.image_generation_call.in_progress" || type == "response.image_generation_call.generating" ||
+         type == "response.image_generation_call.partial_image" || type == "response.image_generation_call.completed";
 }
 uint64_t order(uint64_t output, uint64_t content = 0) { return (output << 32) | content; }
 bool valid_annotation(json::Value value) {
@@ -278,7 +281,13 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
   }
   if (server_event(event)) {
     const auto prefix = std::string("response.") + item->type + ".";
-    return opaque(item->type) && event.starts_with(prefix) ? true : fail(ErrorKind::ProtocolCorrupt, "server event item type mismatch");
+    if (!opaque(item->type) || !event.starts_with(prefix)) return fail(ErrorKind::ProtocolCorrupt, "server event item type mismatch");
+    // A preview frame is an observation retained as raw wire; the finished image arrives with the
+    // completed item, so its payload is only checked for shape here.
+    if (event == "response.image_generation_call.partial_image" &&
+        (!root.get("partial_image_b64").is_string() || !count_value(root.get("partial_image_index"))))
+      return fail(ErrorKind::ProtocolCorrupt, "partial image requires payload and index");
+    return true;
   }
   return fail(ErrorKind::Unsupported, "unsupported semantic Responses event");
 }
@@ -435,7 +444,7 @@ bool Codec::add_item(json::Value v, uint64_t position, bool streaming) {
     if (!begin_part(item.local, PartKind::ToolCall, std::move(header), order(position))) return false;
     item.arguments = v.get("arguments").as_string();
     if (!emit(PartDelta{item.local, {PartKind::ToolCall, item.arguments}})) return false;
-  } else if (item.type == "reasoning" || opaque(item.type)) {
+  } else if (item.type == "reasoning" || (opaque(item.type) && item.type != "image_generation_call")) {
     if (!begin_part(item.local, item.type == "reasoning" ? PartKind::Reasoning : PartKind::Opaque, std::move(header), order(position))) return false;
   }
   auto [where, inserted] = items_.emplace(position, std::move(item)); (void)inserted;
@@ -608,6 +617,10 @@ bool Codec::done_item(json::Value v, uint64_t position, bool streaming) {
     auto previous = item.added->root().get("status"), next = v.get("status");
     if (previous.is_string() && (previous.as_string() == "completed" || previous.as_string() == "incomplete" || previous.as_string() == "failed") &&
         (!next.is_string() || previous.as_string() != next.as_string())) return fail(ErrorKind::ProtocolCorrupt, "item terminal status changed");
+    if (item.type == "image_generation_call" && previous.is_string() &&
+        (previous.as_string() == "completed" || previous.as_string() == "incomplete" || previous.as_string() == "failed") &&
+        !json::equal(item.added->root(), v))
+      return fail(ErrorKind::ProtocolCorrupt, "terminal image item snapshot changed");
   }
   if (item.type == "function_call") {
     auto args = v.get("arguments").as_string();
@@ -623,6 +636,27 @@ bool Codec::done_item(json::Value v, uint64_t position, bool streaming) {
   } else if (item.type == "message") {
     if (!reconcile_parts(item, v.get("content"), false, streaming)) return false;
     item.done = own(v); if (!item.done) return false;
+  } else if (item.type == "image_generation_call") {
+    // A finished image becomes typed media; an unfinished or failed call stays opaque.
+    auto metadata = own(v); if (!metadata) return false;
+    const auto result = v.get("result"), format = v.get("output_format"), status = v.get("status");
+    PartHeader header; header.wire_type = item.type; header.wire_id = item.id;
+    if (result.is_string() && !result.as_string().empty() && status.as_string() == "completed") {
+      std::string_view mime;
+      if (format.is_string()) {
+        const auto name = format.as_string();
+        mime = name == "png" ? "image/png" : name == "jpeg" ? "image/jpeg" : name == "webp" ? "image/webp" : std::string_view{};
+      }
+      header.media = media_output::describe(mime, MediaSource::Inline);
+      header.media.kind = MediaKind::Image;
+      header.media.id = std::string(item.id);
+      if (!begin_part(item.local, PartKind::Media, std::move(header), order(position)) ||
+          !emit(PartSeal{item.local, result.as_string(), nullptr})) return false;
+    } else {
+      if (!begin_part(item.local, PartKind::Opaque, std::move(header), order(position)) ||
+          !emit(PartSeal{item.local, std::nullopt, metadata})) return false;
+    }
+    item.done = std::move(metadata);
   } else {
     auto metadata = own(v); if (!metadata) return false;
     if (!emit(PartSeal{item.local, std::nullopt, metadata})) return false;

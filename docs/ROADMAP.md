@@ -1,6 +1,6 @@
 # Roadmap and release gates
 
-Current source package 0.3.0 alpha uses typed interface/shared-library generation 6 with five HTTP/SSE families. [Usage](USAGE.md) defines separate provider-reported costs, nullable token evidence, preserved controls, Responses provider-held cursors and explicit Generate portable imports. [Recorded provenance](POC_PLAN.md#current-typed-c-cutover-provenance) keeps earlier interface 3–5 runs unchanged; implementation, fresh wire proof and release/support admission are separate claims.
+Current source package 0.3.0 alpha uses typed interface/shared-library generation 7 with five HTTP/SSE families. [Usage](USAGE.md) defines typed media, separate provider-reported costs, nullable token evidence, preserved controls, Responses provider-held cursors and explicit Generate portable imports. [Recorded provenance](POC_PLAN.md#current-typed-c-cutover-provenance) keeps earlier interface 3–5 runs unchanged; implementation, fresh wire proof and release/support admission are separate claims.
 
 ## Owner-requested next work
 
@@ -18,6 +18,17 @@ The heading retains links from the original work sequence. These C++ items are i
 NeoGraph owns its Python binding migration and package verification. This SDK does not ship an independent Python package. Do not use the old “Python after C++ stabilization” proposal as a current NeoGraph implementation restriction.
 
 The preservation cutover adds Chat reasoning/usage/alternative-model controls, Messages mode/output/cache/tool controls, Generate thinking/safety/tool/sampling controls and explicit portable foreign history, Responses cursor/new-input ownership and detail controls, case-insensitive model temperature facts, and host environment-header preprocessing. Parent owns interface4 qualification; earlier interface3 passes/benchmarks are not new passes. `spna3` storage format remains3 while policy/control identity changes can reject old carry.
+
+## External-runtime examples
+
+Owner-requested examples are tracked separately from SDK release gates:
+
+| Item | State |
+|---|---|
+| Standalone C++ Client with cppdotenv key loading | Implemented; local tool-loop and synthetic-credential success/failure paths exercised. [Build and run](../examples/README.md#c-standalone-tool-loop). |
+| Shared-library C ABI → Python ctypes → LangGraph | Implemented as an example, not a product binding; local tool loop, independent parallel conversations and handle-lifetime/rollback paths exercised on Linux x86_64. [Boundary and usage](../examples/README.md#shared-library--ctypes--langgraph). |
+| Windows DLL and macOS dylib execution for these examples | Pending; filenames and build recipes do not establish platform execution. |
+| Other C++ agent frameworks | Primary-source discovery only; no SchemaProvider adapter integration or benchmark claim. [Scope](../examples/README.md#other-c-agent-frameworks). |
 
 ## Historical release ladder
 

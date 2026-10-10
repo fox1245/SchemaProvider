@@ -6,7 +6,7 @@
 #include <utility>
 #include <limits>
 
-std::uint32_t sp::codec_interface_revision() noexcept { return 6; }
+std::uint32_t sp::codec_interface_revision() noexcept { return 7; }
 namespace sp {
 namespace {
 bool incomplete(std::string_view s) {
@@ -105,6 +105,19 @@ bool Accumulator::apply(const PartBegin& e) {
   };
   if (!count_header(e.header.wire_id.size()) || !count_header(e.header.name.size()) || !count_header(e.header.wire_type.size()))
     return reject(ErrorKind::ResourceLimit, "part header limit");
+  if (e.kind == PartKind::Media) {
+    const auto& media = e.header.media;
+    if (static_cast<unsigned>(media.kind) >= media_kind_count ||
+        static_cast<unsigned>(media.source) > static_cast<unsigned>(MediaSource::File))
+      return reject(ErrorKind::ProtocolCorrupt, "invalid generated media header");
+    if (media.data) return reject(ErrorKind::ProtocolCorrupt, "generated media header must not carry payload");
+    if ((!media.mime.empty() && !mime_syntax(media.mime)) ||
+        (media.source == MediaSource::Inline ? !media.reference.empty() : media.reference.empty()))
+      return reject(ErrorKind::ProtocolCorrupt, "invalid generated media description");
+    if (!count_header(media.mime.size()) || !count_header(media.reference.size()) || !count_header(media.name.size()) ||
+        !count_header(media.id.size()) || !count_header(media.transcript.size()))
+      return reject(ErrorKind::ResourceLimit, "part header limit");
+  }
   if (e.header.wire_metadata) {
     const auto root = e.header.wire_metadata->root();
     if (!root.is_object()) return reject(ErrorKind::ProtocolCorrupt, "tool metadata must be object");
@@ -120,8 +133,10 @@ bool Accumulator::apply(const PartBegin& e) {
     if (!count_value(count_value, root, 0)) return reject(ErrorKind::ResourceLimit, "part metadata limit");
   }
   content_bytes_ += header_bytes;
-  parts_.emplace(e.part.value, Cursor{e.kind, e.header, {}, {},
-      m->second.native_context && m->second.native_context->family() == "google.generate", false, {}});
+  Cursor cursor{e.kind, {e.header.wire_id, e.header.name, e.header.tool_kind, e.header.wire_type, e.header.wire_metadata}, {}, {},
+      m->second.native_context && m->second.native_context->family() == "google.generate", false, {}};
+  if (e.kind == PartKind::Media) cursor.value.emplace(e.header.media);
+  parts_.emplace(e.part.value, std::move(cursor));
   m->second.parts_by_order.emplace(e.order, e.part.value);
   return true;
 }
@@ -185,7 +200,19 @@ bool Accumulator::apply(const PartSeal& e) {
       return reject(ErrorKind::ProtocolCorrupt, "invalid thought fields");
     std::string_view prefix(c.bytes);
     for (auto item : summary.elements()) {
-      if (!item.is_object() || item.get("type").as_string() != "text" || !item.get("text").is_string())
+      if (!item.is_object() || !item.get("type").is_string())
+        return reject(ErrorKind::ProtocolCorrupt, "invalid thought summary content");
+      if (item.get("type").as_string() == "image") {
+        const auto data = item.get("data"), uri = item.get("uri"), mime = item.get("mime_type");
+        const bool inline_data = data.valid() && !data.is_null(), location = uri.valid() && !uri.is_null();
+        if (inline_data == location ||
+            (mime.valid() && !mime.is_null() && (!mime.is_string() || !mime_syntax(mime.as_string()))) ||
+            (inline_data ? !data.is_string() || !canonical_base64(data.as_string())
+                         : !uri.is_string() || !reference_syntax(uri.as_string())))
+          return reject(ErrorKind::ProtocolCorrupt, "invalid thought image summary");
+        continue;
+      }
+      if (item.get("type").as_string() != "text" || !item.get("text").is_string())
         return reject(ErrorKind::Unsupported, "unsupported thought summary content");
       const auto text = item.get("text").as_string();
       const auto size = std::min(prefix.size(), text.size());
@@ -214,6 +241,7 @@ bool Accumulator::apply(const PartSeal& e) {
     else if (const auto* refusal = std::get_if<Refusal>(&*c.value)) equal = refusal->text == *e.snapshot;
     else if (const auto* thinking = std::get_if<Thinking>(&*c.value)) equal = thinking->text == *e.snapshot;
     else if (const auto* redacted = std::get_if<RedactedThinking>(&*c.value)) equal = redacted->data == *e.snapshot;
+    else if (const auto* media = std::get_if<Media>(&*c.value)) equal = media->data && *media->data == *e.snapshot;
     else if (const auto* result = std::get_if<ServerToolResult>(&*c.value)) {
       auto snapshot = json::parse(*e.snapshot, {limits_.max_content_bytes, limits_.max_json_depth});
       if (const auto* document = std::get_if<json::Document>(&snapshot))
@@ -233,6 +261,8 @@ bool Accumulator::apply(const PartSeal& e) {
     if (extra > limits_.max_content_bytes - std::min(content_bytes_, limits_.max_content_bytes) || (c.kind == PartKind::ToolCall && e.snapshot->size() > limits_.max_tool_bytes)) return reject(ErrorKind::ResourceLimit, "snapshot limit");
     c.bytes.assign(*e.snapshot); content_bytes_ += extra;
   }
+  if (c.kind == PartKind::Media && (std::get<Media>(*c.value).source == MediaSource::Inline ? !canonical_base64(c.bytes) : !c.bytes.empty()))
+    return reject(ErrorKind::ProtocolCorrupt, "invalid generated media payload");
   c.value = seal_value(c, false); c.sealed = true;
   if (const auto* result = std::get_if<ServerToolResult>(&*c.value); result && !result->content)
     return reject(ErrorKind::ProtocolCorrupt, "invalid server result block");
@@ -243,6 +273,15 @@ Part Accumulator::seal_value(Cursor& c, bool partial) {
   if (c.kind == PartKind::Refusal) return Refusal{std::move(c.bytes), {}};
   if (c.kind == PartKind::Thinking) return Thinking{std::move(c.bytes), std::move(c.signature)};
   if (c.kind == PartKind::RedactedThinking) return RedactedThinking{std::move(c.bytes)};
+  if (c.kind == PartKind::Media) {
+    // A truncated inline payload is never exposed as media: partial output keeps the description only.
+    std::shared_ptr<const std::string> payload;
+    if (std::get<Media>(*c.value).source == MediaSource::Inline && !partial)
+      payload = std::make_shared<const std::string>(std::move(c.bytes));
+    Media media = std::move(std::get<Media>(*c.value));
+    media.data = std::move(payload);
+    return media;
+  }
   if (c.kind == PartKind::Reasoning) {
     Reasoning result;
     result.id = c.header.wire_id;
@@ -268,7 +307,8 @@ Part Accumulator::seal_value(Cursor& c, bool partial) {
     }
     const auto item = c.header.wire_metadata->root();
     result.summary.reserve(item.get("summary").size());
-    for (auto value : item.get("summary").elements()) result.summary.emplace_back(value.get("text").as_string());
+    for (auto value : item.get("summary").elements())
+      if (value.get("type").as_string() == "text") result.summary.emplace_back(value.get("text").as_string());
     if (item.get("signature").is_string()) result.signature = item.get("signature").as_string();
     std::string{}.swap(c.bytes);
     return result;
@@ -386,7 +426,7 @@ std::vector<Message> Accumulator::take_messages(bool partial) {
     for (const auto& [order, part_id] : m.parts_by_order) {
       (void)order;
       auto& p = parts_.at(part_id);
-      m.message.parts.push_back(p.value ? std::move(*p.value) : seal_value(p, partial));
+      m.message.parts.push_back(p.sealed && p.value ? std::move(*p.value) : seal_value(p, partial));
     }
     if (m.native_context && (m.native_context->replay_eligible() || m.native_context->cursor_authority_))
       m.message.native = std::shared_ptr<const NativeReplay>(

@@ -1,6 +1,6 @@
 #pragma once
 // Generated from tools/vision_fixture.mjs geometry; no production encoder goldens.
-#include "core/image.h"
+#include "core/media.h"
 #include <memory>
 #include <string>
 #include <string_view>
@@ -11,7 +11,7 @@ inline constexpr std::string_view private_signature = "VISION_PRIVATE_SIGNATURE"
 struct Scene {
   unsigned red, blue, weighted;
   std::shared_ptr<const std::string> base64;
-  sp::Image image() const { return {"image/png", base64, sp::ImageDetail::Auto}; }
+  sp::Media image() const { return sp::Media::image("image/png", base64); }
   std::string answer() const {
     return "{\"red_circles\":" + std::to_string(red) + ",\"blue_squares\":" + std::to_string(blue) + ",\"weighted\":" + std::to_string(weighted) + '}';
   }

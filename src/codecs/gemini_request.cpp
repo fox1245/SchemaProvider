@@ -1,10 +1,12 @@
 #include "codecs/gemini_request.h"
+#include "codecs/media_input.h"
 #include "core/native.h"
 #include "json/json.h"
 #include "descriptor/policy.h"
 #include <map>
 #include <set>
 #include <charconv>
+#include <initializer_list>
 
 namespace sp::gemini {
 namespace {
@@ -51,6 +53,47 @@ std::string_view tool_choice_name(ToolChoiceMode mode) {
   }
   return {};
 }
+std::string_view modality_name(ResponseModality modality) {
+  switch (modality) {
+    case ResponseModality::Text: return "TEXT";
+    case ResponseModality::Image: return "IMAGE";
+    case ResponseModality::Audio: return "AUDIO";
+  }
+  return {};
+}
+bool one_of(std::string_view value, std::initializer_list<std::string_view> values) {
+  for (auto item : values) if (item == value) return true;
+  return false;
+}
+bool voice_valid(const VoiceConfig& voice) {
+  return !(voice.prebuilt_voice_name && voice.voice);
+}
+void write_voice(json::BoundedWriter& w, const VoiceConfig& voice) {
+  w.raw("{");
+  if (voice.prebuilt_voice_name) w.raw("\"prebuiltVoiceConfig\":{\"voiceName\":").quoted(*voice.prebuilt_voice_name).raw("}");
+  if (voice.voice) w.raw("\"voice\":").quoted(*voice.voice);
+  w.raw("}");
+}
+void write_strings(json::BoundedWriter& w, const std::vector<std::string>& values) {
+  w.raw("["); bool comma = false;
+  for (const auto& value : values) { if (comma) w.raw(","); comma = true; w.quoted(value); }
+  w.raw("]");
+}
+// generateContent media parts: inlineData for inline payloads, fileData for Files-API URIs and
+// public locations. Admission has already established that the family accepts the kind and source.
+void write_media(json::BoundedWriter& w, const Media& media) {
+  if (media.source == MediaSource::Inline) {
+    w.raw("{\"inlineData\":{\"mimeType\":").quoted(media.mime).raw(",\"data\":\"").raw(*media.data).raw("\"");
+    if (!media.name.empty()) w.raw(",\"displayName\":").quoted(media.name);
+    w.raw("}}");
+    return;
+  }
+  w.raw("{\"fileData\":{");
+  if (!media.mime.empty()) w.raw("\"mimeType\":").quoted(media.mime).raw(",");
+  w.raw("\"fileUri\":").quoted(media.reference);
+  if (!media.name.empty()) w.raw(",\"displayName\":").quoted(media.name);
+  w.raw("}}");
+}
 }
 EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request, bool streaming) {
   auto bad = [](std::string message) -> EncodeResult { return Error{ErrorKind::InvalidRequest, std::move(message)}; };
@@ -90,10 +133,67 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       return bad("allowed functions require ANY or VALIDATED mode");
   }
   if (auto error = descriptor::validate_choices(descriptor, request.model, effective)) return bad(std::move(*error));
+  unsigned modalities = 0;
+  for (auto modality : request.response_modalities) {
+    if (modality_name(modality).empty()) return bad("invalid response modality");
+    const auto bit = 1U << static_cast<unsigned>(modality);
+    if (modalities & bit) return bad("response modalities must be unique");
+    modalities |= bit;
+  }
+  if (request.speech_config) {
+    const auto& speech = *request.speech_config;
+    if (speech.voice_config && !speech.speaker_voice_configs.empty())
+      return bad("single and multi-speaker voice configurations are mutually exclusive");
+    if (speech.voice_config && !voice_valid(*speech.voice_config)) return bad("voice alternatives are mutually exclusive");
+    if (speech.speaker_voice_configs.size() > resources.request_parts) return bad("speaker configuration count limit exceeded");
+    for (const auto& speaker : speech.speaker_voice_configs)
+      if (speaker.speaker.empty() || !voice_valid(speaker.voice_config)) return bad("speaker name and exclusive voice configuration required");
+    if (speech.language_code && !one_of(*speech.language_code, {"de-DE","en-AU","en-GB","en-IN","en-US","es-US","fr-FR","hi-IN","pt-BR","ar-XA","es-ES","fr-CA","id-ID","it-IT","ja-JP","tr-TR","vi-VN","bn-IN","gu-IN","kn-IN","ml-IN","mr-IN","ta-IN","te-IN","nl-NL","ko-KR","cmn-CN","pl-PL","ru-RU","th-TH"}))
+      return bad("unsupported speech language code");
+  }
+  if (request.image_config) {
+    const auto& image = *request.image_config;
+    if (image.aspect_ratio && !one_of(*image.aspect_ratio, {"1:1","1:4","4:1","1:8","8:1","2:3","3:2","3:4","4:3","4:5","5:4","9:16","16:9","21:9"}))
+      return bad("unsupported image aspect ratio");
+    if (image.image_size && !one_of(*image.image_size, {"512","1K","2K","4K"})) return bad("unsupported image size");
+  }
+  if (request.audio_transcription_config) {
+    const auto& transcription = *request.audio_transcription_config;
+    if (transcription.language_codes.size() > resources.request_parts || transcription.custom_vocabulary.size() > 1000 ||
+        transcription.custom_vocabulary.size() > resources.request_parts) return bad("transcription list count limit exceeded");
+    if (transcription.mode && *transcription.mode != TranscriptionMode::Verbatim && *transcription.mode != TranscriptionMode::Smart)
+      return bad("invalid transcription mode");
+    const bool annotations = transcription.word_timestamp.value_or(false) || transcription.diarization.value_or(false);
+    if (annotations && (transcription.mode == TranscriptionMode::Smart || !transcription.custom_vocabulary.empty()))
+      return bad("timestamps and diarization cannot combine with SMART or custom vocabulary");
+  }
   if (request.messages.empty() || request.messages.size() > resources.request_messages || request.tools.size() > resources.request_tools)
     return bad("request count limit exceeded");
+  bool has_media = false;
+  bool captured_history = false;
+  std::optional<Error> tool_error;
   for (const auto& message : request.messages) {
     if (message.parts.size() > resources.request_parts) return bad("request part count limit exceeded");
+    captured_history = captured_history || static_cast<bool>(message.native);
+    for (const auto& part : message.parts) if (std::holds_alternative<Media>(part)) has_media = true;
+    else if (const auto* tool = std::get_if<ToolResult>(&part); tool && !tool_error) {
+      if (!tool->content_parts.empty() && !tool->content.empty())
+        tool_error = Error{ErrorKind::InvalidRequest, "tool result content and content_parts are mutually exclusive"};
+      else if (tool->content_parts.size() > resources.request_parts)
+        tool_error = Error{ErrorKind::InvalidRequest, "tool result part count limit exceeded"};
+      else for (const auto& nested : tool->content_parts) if (const auto* media = std::get_if<Media>(&nested)) {
+        has_media = true;
+        if (static_cast<unsigned>(media->kind) < media_kind_count && static_cast<unsigned>(media->source) <= 2 &&
+            (media->source != MediaSource::Inline ||
+             (media->kind == MediaKind::Document && !mime_equal(media->mime, "application/pdf"))))
+          tool_error = Error{ErrorKind::Unsupported, "function response media requires inline nontext bytes"};
+        else tool_error = media_input::admit(descriptor, *media);
+        if (!tool_error && (media->detail != ImageDetail::Auto || !media->name.empty() ||
+                            !media->id.empty() || !media->transcript.empty()))
+          tool_error = Error{ErrorKind::Unsupported, "function response media has unsupported controls or metadata"};
+        if (tool_error) break;
+      }
+    }
     if (!message.native) {
       if (message.wire_output) return replay_bad();
       if (message.role == Role::Assistant) {
@@ -104,14 +204,20 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
           if (!call || call->kind != ToolCallKind::ClientExecuted || !call->wire_type.empty() || call->wire_metadata)
             return replay_bad();
         }
-      } else for (const auto& part : message.parts)
-        if (!std::holds_alternative<Text>(part) && !std::holds_alternative<Image>(part) && !std::holds_alternative<ToolResult>(part))
+      } else for (const auto& part : message.parts) {
+        if (const auto* media = std::get_if<Media>(&part)) {
+          if (message.role != Role::User) return bad("media inputs require user role");
+          if (auto error = media_input::admit(descriptor, *media)) return *error;
+        } else if (!std::holds_alternative<Text>(part) && !std::holds_alternative<ToolResult>(part))
           return replay_bad();
+      }
     }
   }
+  if (tool_error && !captured_history) return *tool_error;
   auto context = std::shared_ptr<const NativeContext>(new NativeContext(descriptor, request, effective, streaming));
   if (!context->history_valid_) return replay_bad();
   if (!context->valid_) return Error{ErrorKind::ResourceLimit, "native binding could not be captured"};
+  if (tool_error) return *tool_error;
   EncodedRequest result{"POST", std::string(descriptor.path(streaming)), {}, {}, {}};
   for (const auto& header : descriptor.headers()) {
     std::string key = header.first;
@@ -147,6 +253,49 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         if (effective.include_thoughts || effective.thinking_budget) w.raw(",");
         w.raw("\"thinkingLevel\":").quoted(*effective.thinking_level);
       }
+      w.raw("}");
+      generation_comma = true;
+    }
+    if (!request.response_modalities.empty()) {
+      if (generation_comma) w.raw(",");
+      w.raw("\"responseModalities\":["); bool comma = false;
+      for (auto modality : request.response_modalities) { if (comma) w.raw(","); comma = true; w.quoted(modality_name(modality)); }
+      w.raw("]"); generation_comma = true;
+    }
+    if (request.speech_config) {
+      if (generation_comma) w.raw(",");
+      const auto& speech = *request.speech_config;
+      w.raw("\"speechConfig\":{"); bool comma = false;
+      if (speech.voice_config) { w.raw("\"voiceConfig\":"); write_voice(w, *speech.voice_config); comma = true; }
+      if (!speech.speaker_voice_configs.empty()) {
+        if (comma) w.raw(",");
+        w.raw("\"multiSpeakerVoiceConfig\":{\"speakerVoiceConfigs\":["); bool speaker_comma = false;
+        for (const auto& speaker : speech.speaker_voice_configs) {
+          if (speaker_comma) w.raw(",");
+          speaker_comma = true;
+          w.raw("{\"speaker\":").quoted(speaker.speaker).raw(",\"voiceConfig\":"); write_voice(w, speaker.voice_config); w.raw("}");
+        }
+        w.raw("]}"); comma = true;
+      }
+      if (speech.language_code) { if (comma) w.raw(","); w.raw("\"languageCode\":").quoted(*speech.language_code); }
+      w.raw("}"); generation_comma = true;
+    }
+    if (request.image_config) {
+      if (generation_comma) w.raw(",");
+      const auto& image = *request.image_config;
+      w.raw("\"imageConfig\":{");
+      if (image.aspect_ratio) w.raw("\"aspectRatio\":").quoted(*image.aspect_ratio);
+      if (image.image_size) { if (image.aspect_ratio) w.raw(","); w.raw("\"imageSize\":").quoted(*image.image_size); }
+      w.raw("}"); generation_comma = true;
+    }
+    if (request.audio_transcription_config) {
+      if (generation_comma) w.raw(",");
+      const auto& transcription = *request.audio_transcription_config;
+      w.raw("\"audioTranscriptionConfig\":{\"languageCodes\":"); write_strings(w, transcription.language_codes);
+      if (!transcription.custom_vocabulary.empty()) { w.raw(",\"customVocabulary\":"); write_strings(w, transcription.custom_vocabulary); }
+      if (transcription.word_timestamp) w.raw(",\"wordTimestamp\":").raw(*transcription.word_timestamp ? "true" : "false");
+      if (transcription.diarization) w.raw(",\"diarization\":").raw(*transcription.diarization ? "true" : "false");
+      if (transcription.mode) w.raw(",\"mode\":").quoted(*transcription.mode == TranscriptionMode::Smart ? "SMART" : "VERBATIM");
       w.raw("}");
     }
     w.raw("}");
@@ -248,31 +397,63 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
           if (auto text = std::get_if<Text>(&p)) {
             if (results_only || m.role == Role::Tool) return invalid("function results must be immediate and complete");
             w.raw("{\"text\":").quoted(text->value).raw("}");
-          } else if (auto image = std::get_if<Image>(&p)) {
-            if (results_only || m.role == Role::Tool || !valid_image(*image, resources.image_decoded_bytes)) return invalid("invalid inline image or image role");
-            w.raw("{\"inlineData\":{\"mimeType\":").quoted(image->mime).raw(",\"data\":\"").raw(*image->data).raw("\"}}");
+          } else if (auto media = std::get_if<Media>(&p)) {
+            if (results_only || m.role == Role::Tool) return invalid("media cannot appear among function results");
+            write_media(w, *media);
           } else if (auto tr = std::get_if<ToolResult>(&p)) {
             auto found = pending.find(tr->tool_use_id);
             if (found == pending.end()) return invalid("function result lacks unique client ownership");
-            auto parsed = json::parse(tr->content, {resources.request_bytes, resources.json_depth});
-            auto doc = std::get_if<json::Document>(&parsed);
-            if (!doc || !doc->root().is_object()) return invalid("function result must be JSON object");
             w.raw("{\"functionResponse\":{\"name\":").quoted(found->second.name);
             if (found->second.wire_id) w.raw(",\"id\":").quoted(tr->tool_use_id);
             w.raw(",\"response\":");
-            if (tr->is_error) w.raw("{\"error\":").value(doc->root(), 6).raw("}");
-            else w.value(doc->root(), 5);
+            if (tr->content_parts.empty()) {
+              // Legacy text content must be one JSON object, exactly as before typed parts existed.
+              auto parsed = json::parse(tr->content, {resources.request_bytes, resources.json_depth});
+              auto doc = std::get_if<json::Document>(&parsed);
+              if (!doc || !doc->root().is_object()) return invalid("function result must be JSON object");
+              if (tr->is_error) w.raw("{\"error\":").value(doc->root(), 6).raw("}");
+              else w.value(doc->root(), 5);
+            } else {
+              // The protocol separates text/JSON response from binary parts. Preserve
+              // each lane's order without inventing cross-lane references: it cannot
+              // express text/media interleaving or named FunctionResponseBlob values.
+              w.raw(tr->is_error ? "{\"error\":[" : "{\"output\":[");
+              bool comma = false; bool binary = false;
+              for (const auto& nested : tr->content_parts) {
+                if (const auto* text = std::get_if<Text>(&nested)) {
+                  if (comma) w.raw(",");
+                  comma = true;
+                  w.quoted(text->value);
+                } else binary = true;
+                if (!w.ok()) return Error{has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest,
+                                         "request exceeds JSON limits or encoding"};
+              }
+              w.raw("]}");
+              if (binary) {
+                w.raw(",\"parts\":["); comma = false;
+                for (const auto& nested : tr->content_parts) if (const auto* media = std::get_if<Media>(&nested)) {
+                  if (comma) w.raw(",");
+                  comma = true;
+                  w.raw("{\"inlineData\":{\"mimeType\":").quoted(media->mime)
+                      .raw(",\"data\":\"").raw(*media->data).raw("\"}}");
+                  if (!w.ok()) return Error{ErrorKind::ResourceLimit, "request exceeds JSON limits or encoding"};
+                }
+                w.raw("]");
+              }
+            }
             w.raw("}}"); pending.erase(found);
           } else return Error{ErrorKind::Unsupported, "unsupported imported Gemini part"};
         }
         w.raw("]}");
         if (results_only && !pending.empty()) return invalid("all function results must appear together");
       } else return Error{ErrorKind::Unsupported, "Gemini supports user, tool and captured model messages"};
-      if (!w.ok()) return invalid("request exceeds JSON limits or encoding");
+      if (!w.ok()) return Error{has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest,
+                               "request exceeds JSON limits or encoding"};
     }
     if (!pending.empty()) return invalid("function results required before dispatch");
     w.raw("]}");
-    if (!w.ok()) return invalid("request exceeds JSON limits or encoding");
+    if (!w.ok()) return Error{has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest,
+                             "request exceeds JSON limits or encoding"};
     return {};
   };
   json::BoundedWriter measured({resources.request_bytes, resources.json_depth});

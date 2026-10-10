@@ -109,7 +109,7 @@ else()
   endif()
 endif()
 
-add_library(sp_core src/core/image.cpp src/core/native.cpp src/core/native_archive.cpp
+add_library(sp_core src/core/media.cpp src/core/native.cpp src/core/native_archive.cpp
                     src/core/native_archive_fs.cpp)
 target_compile_options(sp_core PRIVATE ${SP_WARNING_OPTIONS})
 target_link_libraries(sp_core PUBLIC sp_json sp_descriptor)
@@ -137,7 +137,7 @@ add_library(sp_descriptor src/descriptor/descriptor.cpp src/descriptor/policy.cp
 target_compile_options(sp_descriptor PRIVATE ${SP_WARNING_OPTIONS})
 target_link_libraries(sp_descriptor PUBLIC sp_json)
 
-add_library(sp_codecs src/codecs/accumulator.cpp
+add_library(sp_codecs src/codecs/accumulator.cpp src/codecs/media_input.cpp src/codecs/media_output.cpp
             src/codecs/chat.cpp src/codecs/chat_request.cpp
             src/codecs/messages.cpp src/codecs/messages_request.cpp
             src/codecs/responses.cpp src/codecs/responses_request.cpp
@@ -181,7 +181,7 @@ foreach(component core json descriptor codecs wire transport runtime)
   set_target_properties(sp_${component} PROPERTIES
     EXPORT_NAME ${component}
     POSITION_INDEPENDENT_CODE ON
-    SOVERSION 6
+    SOVERSION 7
     INSTALL_RPATH "${SP_LIBRARY_INSTALL_RPATH}"
     WINDOWS_EXPORT_ALL_SYMBOLS ON)
 endforeach()
@@ -240,18 +240,18 @@ if(SP_BUILD_TESTS)
     add_test(NAME crypto_${group} COMMAND ${sp_test_runner} $<TARGET_FILE:sp_crypto_tests> ${group})
     set_tests_properties(crypto_${group} PROPERTIES TIMEOUT 300)
   endforeach()
-  # Persisted identities and fingerprints must equal what the OpenSSL-backed code produced.
+  # Fixed-input persisted canary fingerprints must keep their OpenSSL-era framing.
   add_executable(sp_crypto_golden_tests tests/crypto_golden_test.cpp)
   target_compile_options(sp_crypto_golden_tests PRIVATE ${SP_WARNING_OPTIONS})
   if(SP_BUILD_CANARY)
     target_link_libraries(sp_crypto_golden_tests PRIVATE sp_canary_core sp_descriptor sp_json)
   else()
-    # Without the canary library only the policy-identity goldens can run; the canary digest cases
-    # include canary/qualification.h, which is POSIX-only.
+    # The fingerprint implementation is POSIX-only; the gate reports its capability skip.
     target_link_libraries(sp_crypto_golden_tests PRIVATE sp_descriptor sp_json)
     target_compile_definitions(sp_crypto_golden_tests PRIVATE SP_GOLDEN_WITHOUT_CANARY)
   endif()
   add_test(NAME crypto_golden COMMAND ${sp_test_runner} $<TARGET_FILE:sp_crypto_golden_tests>)
+  set_tests_properties(crypto_golden PROPERTIES SKIP_RETURN_CODE 77)
   # Differential check against OpenSSL's libcrypto. OpenSSL is linked into this one test only.
   find_package(OpenSSL COMPONENTS Crypto)
   if(OpenSSL_FOUND)
@@ -354,6 +354,18 @@ if(SP_BUILD_TESTS)
   add_executable(sp_vision_inputs_tests tests/vision_inputs_test.cpp)
   target_link_libraries(sp_vision_inputs_tests PRIVATE sp_codecs sp_descriptor sp_json)
   target_compile_options(sp_vision_inputs_tests PRIVATE ${SP_WARNING_OPTIONS})
+  add_executable(sp_media_inputs_tests tests/media_inputs_test.cpp)
+  target_link_libraries(sp_media_inputs_tests PRIVATE sp_codecs sp_descriptor sp_json)
+  target_compile_options(sp_media_inputs_tests PRIVATE ${SP_WARNING_OPTIONS})
+  add_executable(sp_media_outputs_tests tests/media_outputs_test.cpp)
+  target_link_libraries(sp_media_outputs_tests PRIVATE sp_codecs sp_descriptor sp_json)
+  target_compile_options(sp_media_outputs_tests PRIVATE ${SP_WARNING_OPTIONS})
+  add_executable(sp_media_controls_tests tests/media_controls_test.cpp)
+  target_link_libraries(sp_media_controls_tests PRIVATE sp_codecs sp_descriptor sp_json)
+  target_compile_options(sp_media_controls_tests PRIVATE ${SP_WARNING_OPTIONS})
+  add_executable(sp_media_runtime_tests tests/media_runtime_test.cpp)
+  target_link_libraries(sp_media_runtime_tests PRIVATE sp_runtime sp_transport sp_codecs sp_descriptor sp_json)
+  target_compile_options(sp_media_runtime_tests PRIVATE ${SP_WARNING_OPTIONS})
   add_executable(sp_gemini_tests tests/gemini_semantic_test.cpp)
   target_link_libraries(sp_gemini_tests PRIVATE sp_codecs sp_descriptor sp_json)
   add_executable(sp_gemini_runtime_tests tests/gemini_runtime_test.cpp)
@@ -427,6 +439,9 @@ if(SP_BUILD_TESTS)
            ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/responses_server.mjs)
   set_tests_properties(responses_properties responses_runtime PROPERTIES TIMEOUT 300)
   add_test(NAME vision_inputs COMMAND ${sp_test_runner} $<TARGET_FILE:sp_vision_inputs_tests>)
+  add_test(NAME media_inputs COMMAND ${sp_test_runner} $<TARGET_FILE:sp_media_inputs_tests>)
+  add_test(NAME media_outputs COMMAND ${sp_test_runner} $<TARGET_FILE:sp_media_outputs_tests>)
+  add_test(NAME media_controls COMMAND ${sp_test_runner} $<TARGET_FILE:sp_media_controls_tests>)
   add_test(NAME gemini_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_gemini_tests>)
   add_test(NAME gemini_runtime COMMAND ${sp_test_runner} $<TARGET_FILE:sp_gemini_runtime_tests>
            ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/gemini_server.mjs)
@@ -435,7 +450,9 @@ if(SP_BUILD_TESTS)
            ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/interactions_server.mjs)
   add_test(NAME vision_campaign COMMAND ${sp_test_runner} $<TARGET_FILE:sp_vision_campaign_tests>
            ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/vision_server.mjs)
-  set_tests_properties(vision_inputs gemini_properties gemini_runtime interactions_properties interactions_runtime vision_campaign PROPERTIES TIMEOUT 300)
+  add_test(NAME media_runtime COMMAND ${sp_test_runner} $<TARGET_FILE:sp_media_runtime_tests>
+           ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/media_server.mjs)
+  set_tests_properties(vision_inputs gemini_properties gemini_runtime interactions_properties interactions_runtime vision_campaign media_runtime PROPERTIES TIMEOUT 300)
     add_test(NAME chat_fixtures COMMAND ${sp_test_runner} $<TARGET_FILE:sp_fixture_runner> ${SP_NODE}
              ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/fixture_server.mjs
              ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/chat
@@ -487,7 +504,7 @@ if(SP_BUILD_RUNTIME_TESTS)
   if(WIN32)
     target_link_libraries(sp_native_archive_portability_tests PRIVATE advapi32)
   endif()
-  add_test(NAME native_archive_portability COMMAND sp_native_archive_portability_tests)
+  add_test(NAME native_archive_portability COMMAND ${sp_test_runner} $<TARGET_FILE:sp_native_archive_portability_tests>)
   set_tests_properties(native_archive_portability PROPERTIES TIMEOUT 120)
 endif()
 

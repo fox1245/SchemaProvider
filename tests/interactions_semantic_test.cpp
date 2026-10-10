@@ -77,7 +77,7 @@ void exact_steps_and_replay() {
     auto reject = [&](interactions::Request bad) { auto e = interactions::encode(desc(), bad, false); CHECK(std::holds_alternative<Error>(e) && std::get<Error>(e).kind == ErrorKind::ReplayIneligible); };
     auto bad = next; std::get<Thought>(bad.messages[1].parts[0]).signature = "edited"; reject(bad);
     bad = next; std::get<Thought>(bad.messages[1].parts[0]).summary[0] = "edited"; reject(bad);
-    bad = next; std::get<Image>(bad.messages[0].parts[1]) = vision_test::scene_b().image(); reject(bad);
+    bad = next; std::get<Media>(bad.messages[0].parts[1]) = vision_test::scene_b().image(); reject(bad);
     bad = next; bad.messages[1].native.reset(); reject(bad);
     bad = next; bad.messages[1].wire_output.reset(); reject(bad);
     bad = next; std::swap(bad.messages[1].parts[0], bad.messages[1].parts[1]); reject(bad);
@@ -104,7 +104,7 @@ void input_boundaries() {
   CHECK(content.at(0).get("text").as_string() == "before" && content.at(1).get("data").as_string() == *vision_test::scene_a().base64);
   CHECK(content.at(2).get("text").as_string() == "after" && content.at(3).get("data").as_string() == *vision_test::scene_b().base64);
   r.thinking_level = "none"; CHECK(std::holds_alternative<Error>(interactions::encode(desc(), r, false)));
-  r = request(); std::get<Image>(r.messages[0].parts[1]).data = std::make_shared<const std::string>("not base64"); CHECK(std::holds_alternative<Error>(interactions::encode(desc(), r, false)));
+  r = request(); std::get<Media>(r.messages[0].parts[1]).data = std::make_shared<const std::string>("not base64"); CHECK(std::holds_alternative<Error>(interactions::encode(desc(), r, false)));
   r = request(); r.required_tool = "missing"; CHECK(std::holds_alternative<Error>(interactions::encode(desc(), r, false)));
   r = request(); r.messages.push_back(Message{"", Role::Tool, {ToolResult{"orphan", "one"}}}); CHECK(std::holds_alternative<Error>(interactions::encode(desc(), r, false)));
 }
@@ -177,6 +177,54 @@ void stateless_missing_resource_id() {
       frame("interaction.completed", ",\"interaction\":{\"id\":\"\",\"model\":\"fixture-model\",\"status\":\"completed\",\"steps\":[" + output + "],\"usage\":" + counters + "}")});
   CHECK(complete(stateless).messages[0].id.empty() && complete(stateless).messages[0].native->complete());
 }
+void creation_without_status_transcription() {
+  const auto initial = frame("interaction.created", R"(,"interaction":{"object":"interaction","model":"fixture-model"})");
+  const auto words = R"([{"type":"word_info","start_index":0,"end_index":4,"text":"7421","start_offset":"0.300s","end_offset":"1.100s","speaker":"spk:0"}])";
+  const auto annotation = delta(0, std::string(R"({"type":"text_annotation_delta","annotations":)") + words + "}");
+  const auto terminal = frame("interaction.completed", ",\"interaction\":{\"status\":\"completed\",\"usage\":" + counters + "}");
+  const std::vector<Frame> f{
+      initial, frame("interaction.status_update", R"(,"status":"in_progress")"),
+      start(0, R"({"type":"model_output"})"), delta(0, R"({"type":"text","text":"7421"})"),
+      annotation, stop(0), terminal, {"done", "[DONE]"}};
+  const auto outcome = stream(f);
+  const auto& done = complete(outcome);
+  CHECK(done.stop.kind == StopKind::EndTurn && done.messages.size() == 1);
+  const auto& message = done.messages[0];
+  CHECK(std::get<Text>(message.parts[0]).value == "7421");
+  CHECK(message.id.empty() && message.native && message.native->complete());
+  const auto content = message.wire_output->root().at(0).get("content").at(0);
+  CHECK(json::equal(content.get("annotations"), parse(words).root()));
+  auto next = request(); next.messages.push_back(message);
+  const auto encoded = interactions::encode(desc(), next, false);
+  CHECK(std::holds_alternative<interactions::EncodedRequest>(encoded));
+  const auto replay = parse(std::get<interactions::EncodedRequest>(encoded).body);
+  CHECK(json::equal(replay.root().get("input").at(1).get("content").at(0).get("annotations"), content.get("annotations")));
+
+  // Creation alone grants neither completion nor authority to replay its prefix.
+  const auto prefix_outcome = stream({initial, start(0, R"({"type":"model_output"})"),
+                                     delta(0, R"({"type":"text","text":"7421"})"), annotation, stop(0)});
+  const auto& partial = failure(prefix_outcome, ErrorKind::Truncated).partial;
+  CHECK(!partial.messages[0].native->complete());
+  next = request(); next.messages.push_back(partial.messages[0]);
+  const auto refused = interactions::encode(desc(), next, false);
+  CHECK(std::holds_alternative<Error>(refused) && std::get<Error>(refused).kind == ErrorKind::ReplayIneligible);
+  const auto abnormal = stream(f, {false, ErrorKind::Truncated});
+  CHECK(!failure(abnormal, ErrorKind::Truncated).partial.messages[0].native->complete());
+
+  // Only an omitted creation status is optional; supplied and terminal values remain strict.
+  for (const auto* status : {"null", "0", "\"\"", "\"completed\"", "\"queued\""}) {
+    const auto invalid = frame("interaction.created", std::string(",\"interaction\":{\"model\":\"fixture-model\",\"status\":") + status + "}");
+    failure(stream({invalid}), ErrorKind::ProtocolCorrupt);
+  }
+  failure(stream({initial, initial}), ErrorKind::ProtocolCorrupt);
+  auto missing = f;
+  missing[6] = frame("interaction.completed", R"(,"interaction":{"usage":{}})");
+  failure(stream(missing), ErrorKind::ProtocolCorrupt);
+  failure(buffered(R"({"model":"fixture-model","steps":[]})"), ErrorKind::ProtocolCorrupt);
+  auto foreign = f;
+  foreign[0] = frame("interaction.created", R"(,"interaction":{"model":"foreign-model"})");
+  failure(stream(foreign), ErrorKind::ProtocolCorrupt);
+}
 void raw_observation_ownership() {
   auto wire = resource("[" + output + "]");
   wire.pop_back(); wire += R"(,"future":{"z":[null,{"b":2,"a":1}],"a":false}})";
@@ -237,7 +285,7 @@ void named_error_raw_ownership() {
 }
 }
 int main() {
-  try { raw_observation_ownership(); named_error_raw_ownership(); stateless_missing_resource_id(); missing_terminal_usage(); exact_steps_and_replay(); input_boundaries(); lifecycle_and_errors(); unknown_usage_and_signature();
+  try { creation_without_status_transcription(); raw_observation_ownership(); named_error_raw_ownership(); stateless_missing_resource_id(); missing_terminal_usage(); exact_steps_and_replay(); input_boundaries(); lifecycle_and_errors(); unknown_usage_and_signature();
     std::cout << "Interactions semantic contracts passed\n"; return 0;
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }
