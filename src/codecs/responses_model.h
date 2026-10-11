@@ -14,8 +14,12 @@ inline bool snapshot_date(std::string_view date) {
   const bool leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
   return day <= days[month - 1] + (month == 2 && leap ? 1U : 0U);
 }
-inline bool requested_model_matches(std::string_view requested, std::string_view served, std::string_view origin) {
+// `routed` is true for a declared routing gateway origin (descriptor::routed_gateway). A gateway
+// resolves routing aliases and fallbacks itself, so any nonempty served model is admitted there;
+// the codec still requires that served identity to stay stable for the whole response.
+inline bool requested_model_matches(std::string_view requested, std::string_view served, std::string_view origin, bool routed) {
   if (requested == served) return true;
+  if (routed) return !served.empty();
   // Snapshot alias admission is restricted to the direct documented OpenAI
   // origin. Gateway namespaces and explicit snapshots retain exact equality.
   if (origin != "https://api.openai.com" || requested.empty()) return false;

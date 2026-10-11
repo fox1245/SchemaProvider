@@ -3,6 +3,7 @@
 #include "codecs/responses_model.h"
 #include "core/native.h"
 #include "descriptor/descriptor.h"
+#include "descriptor/policy.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -286,7 +287,8 @@ bool Codec::identity(json::Value v) {
   auto id = v.get("id"), object = v.get("object"), model = v.get("model"), created = v.get("created_at");
   if (!nonempty(id) || !object.is_string() || object.as_string() != "response" || !nonempty(model) || !created.is_number() || !std::isfinite(created.as_double()) || created.as_double() < 0)
     return fail(ErrorKind::ProtocolCorrupt, "invalid response identity metadata");
-  if (!requested_model_matches(context_->model(), model.as_string(), descriptor_.base_url()))
+  if (model.as_string() != context_->model() &&
+      !requested_model_matches(context_->model(), model.as_string(), descriptor_.base_url(), descriptor::routed_gateway(descriptor_)))
     return fail(ErrorKind::ProtocolCorrupt, "response model differs from request");
   if (begun_ && (id.as_string() != generation_ || model.as_string() != model_ || created.as_double() != created_at_)) return fail(ErrorKind::ProtocolCorrupt, "response identity changed");
   return true;
