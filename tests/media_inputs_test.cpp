@@ -1031,6 +1031,24 @@ void messages_decoded_document_cache_budget() {
   expect_error(tool_history(Fam::Messages,d,sealed),ErrorKind::ReplayIneligible);
 }
 } // namespace
+// Admission boundaries confirmed against the live vendor APIs: Gemini answers image/tiff with
+// "Unsupported MIME type" on both endpoints, while OpenRouter Chat file data and Responses
+// input_file accept plain text (and CSV for Responses) that direct OpenAI Chat rejects.
+void live_verified_admission() {
+  const std::string tiff_bytes = std::string("II*\0", 4) + std::string(60, '\0');
+  for (const auto family : {Fam::Gemini, Fam::Interactions})
+    for (const bool streaming : {false, true})
+      expect_error(run1(family, Origin::Direct, inline_media(MediaKind::Image, "image/tiff", tiff_bytes), streaming),
+                   ErrorKind::InvalidRequest);
+  for (const bool streaming : {false, true}) {
+    CHECK(is_wire(run1(Fam::Chat, Origin::OpenRouter, inline_media("text/plain"), streaming)));
+    CHECK(is_wire(run1(Fam::Responses, Origin::OpenRouter, inline_media("text/plain"), streaming)));
+    CHECK(is_wire(run1(Fam::Responses, Origin::OpenRouter, inline_media("text/csv"), streaming)));
+  }
+  expect_error(run1(Fam::Chat, Origin::Direct, inline_media("text/plain"), false), ErrorKind::InvalidRequest);
+  expect_error(run1(Fam::Chat, Origin::OpenRouter, inline_media("text/csv"), false), ErrorKind::InvalidRequest);
+}
+
 int main() {
   try {
     heif_admission_and_brand_boundaries();
@@ -1044,6 +1062,7 @@ int main() {
     generate_alias_policy_is_closed();
     generate_alias_output_semantics();
     google_named_reference_wire();
+    live_verified_admission();
     nested_tool_media_wire_and_binding();
     nested_tool_family_sources_and_limits();
     messages_decoded_document_cache_budget();
