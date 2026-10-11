@@ -217,8 +217,10 @@ Gemini endpoints reject `image/tiff` ("Unsupported MIME type"), so it is not adm
 | Chat | Nonempty `content_parts` returns `Unsupported`; use legacy text `content`. |
 | Responses | Text plus admitted image/document forms in `function_call_output.output`; audio/video are `Unsupported`. |
 | Messages | Text plus admitted image/PDF/text-document forms in user-role `tool_result.content`. |
-| Generate | Text plus admitted inline image/audio/video/PDF bytes; no URL/file references, names, non-default image detail or generated identity/transcript metadata. |
+| Generate | Text plus admitted inline image/audio/video, PDF and `text/plain` bytes; other document types, URL/file references, names, non-default image detail and generated identity/transcript metadata are `Unsupported`. |
 | Interactions | Text plus admitted images in `function_result.result`; other media kinds, names, non-default image detail and generated identity/transcript metadata are `Unsupported`. |
+
+Generate's function-response media forms were verified live on Gemini 3 (`gemini-3.1-flash-lite`, 2026-10-11): inline `image/png`, `image/jpeg`, `image/webp`, `image/gif`, `image/heic`, `application/pdf`, `text/plain`, `audio/wav` and `video/mp4` parts were accepted and read correctly. Multimodal function responses are a Gemini 3 feature; earlier models may reject them, and that remains the vendor's decision rather than an SDK admission rule. Interactions `function_result` was not part of that check and still rejects non-image media.
 
 Generate's legacy `ToolResult::content` must parse as one JSON object, not arbitrary text or a JSON array. Typed text strings go to `functionResponse.response.output` (or `response.error` when `is_error`); inline media goes to the separate `functionResponse.parts` lane. Generate accepts alternating typed text/media and groups them into these separate ordered lanes. Each lane retains its order, but cross-lane positions are not represented; callers must not rely on cross-lane interleaving. Named blobs return `Unsupported`; no synthetic references are invented. Responses and Messages also reject tool-media controls/metadata their output wire cannot represent rather than silently dropping them.
 

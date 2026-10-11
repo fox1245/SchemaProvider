@@ -183,10 +183,13 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         tool_error = Error{ErrorKind::InvalidRequest, "tool result part count limit exceeded"};
       else for (const auto& nested : tool->content_parts) if (const auto* media = std::get_if<Media>(&nested)) {
         has_media = true;
+        // Inline only. Documents are limited to the PDF and plain-text forms Gemini 3 accepted
+        // and read inside functionResponse.parts when verified live; other documents stay out.
         if (static_cast<unsigned>(media->kind) < media_kind_count && static_cast<unsigned>(media->source) <= 2 &&
             (media->source != MediaSource::Inline ||
-             (media->kind == MediaKind::Document && !mime_equal(media->mime, "application/pdf"))))
-          tool_error = Error{ErrorKind::Unsupported, "function response media requires inline nontext bytes"};
+             (media->kind == MediaKind::Document && !mime_equal(media->mime, "application/pdf") &&
+              !mime_equal(media->mime, "text/plain"))))
+          tool_error = Error{ErrorKind::Unsupported, "function response media requires inline image, audio, video, PDF or plain-text bytes"};
         else tool_error = media_input::admit(descriptor, *media);
         if (!tool_error && (media->detail != ImageDetail::Auto || !media->name.empty() ||
                             !media->id.empty() || !media->transcript.empty()))
