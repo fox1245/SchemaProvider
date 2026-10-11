@@ -16,7 +16,7 @@
         "image": {"mime": ["image/png", "image/jpeg", "image/webp", "image/gif"], "sources": ["inline", "url"]},
         "audio": {"mime": ["audio/wav", "audio/mp3", "audio/mpeg", "audio/aiff", "audio/aac", "audio/ogg", "audio/flac", "audio/m4a", "audio/l16", "audio/l24"], "sources": ["inline"]},
         "video": {"mime": ["video/mp4", "video/mpeg", "video/mov", "video/webm"], "sources": ["inline", "url"]},
-        "document": {"mime": ["application/pdf"], "sources": ["inline", "url", "file"]}
+        "document": {"mime": ["application/pdf", "text/plain"], "sources": ["inline", "url", "file"]}
       },
       "bindings": {
         "model": "model",
@@ -225,7 +225,7 @@
         "image": {"mime": ["image/png", "image/jpeg", "image/webp", "image/gif"], "sources": ["inline", "url", "file"]},
         "audio": {"mime": ["audio/mp3", "audio/mpeg", "audio/wav"], "sources": ["inline"]},
         "video": {"mime": ["video/mp4", "video/mpeg", "video/mov", "video/webm"], "sources": ["inline", "url"]},
-        "document": {"mime": ["application/pdf"], "sources": ["inline", "url", "file"]}
+        "document": {"mime": ["application/pdf", "text/plain", "text/csv"], "sources": ["inline", "url", "file"]}
       },
       "bindings": {
         "model": "model",
@@ -301,7 +301,7 @@
       "openrouter_origins": [],
       "temperature_forbidden_model_prefixes": [],
       "media": {
-        "image": {"mime": ["image/png", "image/jpeg", "image/jpg", "image/webp", "image/heic", "image/heif", "image/gif", "image/avif", "image/bmp", "image/tiff"], "sources": ["inline", "url", "file"]},
+        "image": {"mime": ["image/png", "image/jpeg", "image/jpg", "image/webp", "image/heic", "image/heif", "image/gif", "image/avif", "image/bmp"], "sources": ["inline", "url", "file"]},
         "audio": {"mime": ["audio/wav", "audio/mp3", "audio/aiff", "audio/aac", "audio/ogg", "audio/flac", "audio/mpeg", "audio/m4a", "audio/l16", "audio/opus", "audio/alaw", "audio/mulaw", "audio/webm", "video/audio/s16le", "video/audio/wav"], "sources": ["inline", "url", "file"]},
         "video": {"mime": ["video/mp4", "video/mpeg", "video/mpg", "video/avi", "video/x-flv", "video/webm", "video/wmv", "video/3gpp", "video/mov", "video/quicktime"], "sources": ["inline", "url", "file"]},
         "document": {"mime": ["application/pdf", "text/plain", "text/html", "text/css", "text/javascript", "text/x-typescript", "text/csv", "text/markdown", "text/x-python", "text/xml", "text/rtf", "application/x-javascript", "application/x-typescript", "application/x-python-code", "application/json", "application/x-ipynb+json", "application/rtf", "video/text/timestamp"], "sources": ["inline", "url", "file"]}
@@ -360,7 +360,7 @@
       "openrouter_origins": [],
       "temperature_forbidden_model_prefixes": [],
       "media": {
-        "image": {"mime": ["image/png", "image/jpeg", "image/webp", "image/heic", "image/heif", "image/gif", "image/bmp", "image/tiff"], "sources": ["inline", "url", "file"]},
+        "image": {"mime": ["image/png", "image/jpeg", "image/webp", "image/heic", "image/heif", "image/gif", "image/bmp"], "sources": ["inline", "url", "file"]},
         "audio": {"mime": ["audio/wav", "audio/mp3", "audio/aiff", "audio/aac", "audio/ogg", "audio/flac", "audio/mpeg", "audio/m4a", "audio/l16", "audio/opus", "audio/alaw", "audio/mulaw", "audio/webm"], "sources": ["inline", "url", "file"]},
         "video": {"mime": ["video/mp4", "video/mpeg", "video/mpg", "video/mov", "video/avi", "video/x-flv", "video/webm", "video/wmv", "video/3gpp"], "sources": ["inline", "url", "file"]},
         "document": {"mime": ["application/pdf", "text/csv"], "sources": ["inline", "url", "file"]}
