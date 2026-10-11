@@ -169,6 +169,9 @@ void modality_keyed_usage() {
 }
 // Captured gemini-2.5-flash-lite usage with thoughts and a cached prefix. Interactions has no
 // cache-write counter, so input_uncached = total_input_tokens - total_cached_tokens (Derived).
+// total_output_tokens is the response-only count (output_total also adds total_thought_tokens) and
+// total_tool_use_tokens has no typed slot: both stay in extra as unmapped vendor counters, which
+// are never summed with the typed slots.
 void uncached_input_and_unmapped_counters() {
   const std::string captured = R"({"total_tokens":6703,"total_input_tokens":6616,"input_tokens_by_modality":[{"modality":"text","tokens":6616}],"total_cached_tokens":6119,"cached_tokens_by_modality":[{"modality":"text","tokens":6119}],"total_output_tokens":3,"total_tool_use_tokens":0,"total_thought_tokens":84})";
   for (const auto& o : {buffered(resource("[" + output + "]", "completed", captured)),
@@ -179,6 +182,11 @@ void uncached_input_and_unmapped_counters() {
     CHECK(u.input_uncached->value == 497 && u.input_uncached->evidence == Evidence::Derived);
     CHECK(u.output_total->value == 87 && u.output_total->evidence == Evidence::Derived && u.reasoning->value == 84);
     CHECK(u.input_total->value + u.output_total->value == u.provider_reported_total->value);
+    // Distinct counters, not copies of a typed slot.
+    CHECK(u.extra.at("total_output_tokens").value == 3 && u.extra.at("total_output_tokens").value != u.output_total->value);
+    CHECK(u.extra.at("total_output_tokens").value + u.reasoning->value == u.output_total->value);
+    CHECK(u.extra.at("total_tool_use_tokens").value == 0);
+    for (const auto* typed : {"total_input_tokens", "total_cached_tokens", "total_thought_tokens", "total_tokens"}) CHECK(!u.extra.contains(typed));
   }
 }
 void missing_terminal_usage() {
