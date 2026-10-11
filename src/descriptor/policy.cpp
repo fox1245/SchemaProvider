@@ -122,7 +122,13 @@ bool safe_stop(std::string_view family, std::string_view raw, StopKind kind) {
     {"openai.chat","stop",StopKind::EndTurn},{"openai.chat","length",StopKind::MaxTokens},{"openai.chat","tool_calls",StopKind::ToolUse},{"openai.chat","content_filter",StopKind::ContentFilter},
     {"anthropic.messages","end_turn",StopKind::EndTurn},{"anthropic.messages","max_tokens",StopKind::MaxTokens},{"anthropic.messages","tool_use",StopKind::ToolUse},{"anthropic.messages","pause_turn",StopKind::PauseTurn},{"anthropic.messages","refusal",StopKind::Refusal},{"anthropic.messages","stop_sequence",StopKind::StopSequence},{"anthropic.messages","model_context_window_exceeded",StopKind::ContextLimit},
     {"openai.responses","completed",StopKind::EndTurn},{"openai.responses","max_output_tokens",StopKind::MaxTokens},{"openai.responses","content_filter",StopKind::ContentFilter},
-    {"google.generate","STOP",StopKind::EndTurn},{"google.generate","MAX_TOKENS",StopKind::MaxTokens},{"google.generate","SAFETY",StopKind::ContentFilter},{"google.generate","MALFORMED_FUNCTION_CALL",StopKind::MalformedCall},
+    // google.generate mirrors the Gemini codec's compiled finishReason mapping (codecs/gemini.cpp).
+    {"google.generate","STOP",StopKind::EndTurn},{"google.generate","MAX_TOKENS",StopKind::MaxTokens},
+    {"google.generate","SAFETY",StopKind::ContentFilter},{"google.generate","RECITATION",StopKind::ContentFilter},{"google.generate","BLOCKLIST",StopKind::ContentFilter},
+    {"google.generate","PROHIBITED_CONTENT",StopKind::ContentFilter},{"google.generate","SPII",StopKind::ContentFilter},{"google.generate","IMAGE_SAFETY",StopKind::ContentFilter},
+    {"google.generate","IMAGE_PROHIBITED_CONTENT",StopKind::ContentFilter},{"google.generate","IMAGE_RECITATION",StopKind::ContentFilter},
+    {"google.generate","ESCALATION",StopKind::ContentFilter},{"google.generate","PUP_LIMITED_DISABLED",StopKind::ContentFilter},
+    {"google.generate","MALFORMED_FUNCTION_CALL",StopKind::MalformedCall},{"google.generate","UNEXPECTED_TOOL_CALL",StopKind::MalformedCall},{"google.generate","TOO_MANY_TOOL_CALLS",StopKind::MalformedCall},
     {"google.interactions","completed",StopKind::EndTurn},{"google.interactions","requires_action",StopKind::ToolUse},{"google.interactions","max_output_tokens",StopKind::MaxTokens}};
   for (const auto& r:rules) if(r.family==family && r.raw==raw) return r.kind==kind;
   return true;

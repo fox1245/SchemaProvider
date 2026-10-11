@@ -1,7 +1,10 @@
 #include "codecs/gemini.h"
 #include "codecs/gemini_request.h"
 #include "core/native.h"
+#include "descriptor/descriptor.h"
+#include "descriptor/policy.h"
 #include "json/json.h"
+#include <algorithm>
 #include <iostream>
 #include <stdexcept>
 
@@ -116,6 +119,52 @@ void uncached_input_rule() {
   // Live gemini-2.5-flash-lite shape without cachedContentTokenCount.
   auto o = buffered(body(R"([{"text":"hello"}])", "STOP", R"({"promptTokenCount":21,"candidatesTokenCount":1,"totalTokenCount":22,"promptTokensDetails":[{"modality":"TEXT","tokenCount":21}],"serviceTier":"standard"})"));
   CHECK(complete(o).usage.input_total->value == 21 && !complete(o).usage.cache_read && !complete(o).usage.input_uncached);
+}
+StopKind policy_kind(descriptor::StopKind kind) {
+  switch (kind) {
+    case descriptor::StopKind::EndTurn: return StopKind::EndTurn;
+    case descriptor::StopKind::MaxTokens: return StopKind::MaxTokens;
+    case descriptor::StopKind::ToolUse: return StopKind::ToolUse;
+    case descriptor::StopKind::ContentFilter: return StopKind::ContentFilter;
+    case descriptor::StopKind::Refusal: return StopKind::Refusal;
+    case descriptor::StopKind::PauseTurn: return StopKind::PauseTurn;
+    case descriptor::StopKind::ContextLimit: return StopKind::ContextLimit;
+    case descriptor::StopKind::StopSequence: return StopKind::StopSequence;
+    case descriptor::StopKind::MalformedCall: return StopKind::MalformedCall;
+    case descriptor::StopKind::Unknown: return StopKind::Unknown;
+  }
+  return StopKind::Unknown;
+}
+// The codec maps finishReason with a compiled table; the google.generate policy stop_reasons table
+// restates it (STOP is listed with its call-free meaning) and must not drift from it.
+void stop_kinds_match_policy_table() {
+  const auto stop_of = [](std::string_view reason, std::string_view parts = R"([{"text":"hello"}])") {
+    const auto o = buffered(body(parts, reason));
+    if (const auto* c = std::get_if<Completion>(&o)) return c->stop.kind;
+    const auto& f = std::get<Failure>(o);
+    CHECK(f.error.kind == ErrorKind::RemoteFailure && f.partial.stop);
+    return f.partial.stop->kind;
+  };
+  const std::pair<std::string_view, StopKind> expected[]{
+      {"STOP", StopKind::EndTurn}, {"MAX_TOKENS", StopKind::MaxTokens}, {"SAFETY", StopKind::ContentFilter},
+      {"IMAGE_SAFETY", StopKind::ContentFilter}, {"MALFORMED_FUNCTION_CALL", StopKind::MalformedCall}, {"OTHER", StopKind::Unknown}};
+  for (const auto& [reason, kind] : expected) CHECK(stop_of(reason) == kind);
+  CHECK(stop_of("STOP", R"([{"functionCall":{"id":"owned","name":"lookup","args":{"x":1}}}])") == StopKind::ToolUse);
+  const std::string_view reasons[]{"STOP", "MAX_TOKENS", "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII",
+      "IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT", "IMAGE_RECITATION", "ESCALATION", "PUP_LIMITED_DISABLED",
+      "MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL", "TOO_MANY_TOOL_CALLS", "OTHER", "LANGUAGE", "NO_IMAGE", "IMAGE_OTHER"};
+  for (const auto reason : reasons) CHECK(policy_kind(desc().stop_kind(reason)) == stop_of(reason));
+  for (const auto& [raw, kind] : desc().stop_mappings()) {
+    CHECK(std::find(std::begin(reasons), std::end(reasons), raw) != std::end(reasons));
+    CHECK(policy_kind(kind) == stop_of(raw));
+  }
+  // A policy snapshot may restate the compiled mapping but cannot rewrite it.
+  std::string policy(config_defaults::descriptor_policy_json);
+  const std::string fact = "\"IMAGE_SAFETY\":\"ContentFilter\"";
+  const auto at = policy.find(fact); CHECK(at != std::string::npos);
+  policy.replace(at, fact.size(), "\"IMAGE_SAFETY\":\"EndTurn\"");
+  const auto rewritten = descriptor::load_policy(policy, config_defaults::codec_defaults_json);
+  CHECK(std::holds_alternative<descriptor::ConfigError>(rewritten) && std::get<descriptor::ConfigError>(rewritten).pointer == "/stop_reasons");
 }
 void invalid_model_calls() {
   for (auto args : {"[]", "null", "1", R"({"x":1,"x":2})"}) {
@@ -458,6 +507,6 @@ void total_proves_zero_thoughts() {
 }
 }
 int main() {
-  try { http_error_envelope_in_an_array_is_retained(); output_total_without_thoughts(); total_proves_zero_thoughts(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); successive_unidentified_calls(); native_group_and_replay(); nullable_usage(); uncached_input_rule(); invalid_model_calls(); errors_and_terminals(); std::cout << "Gemini semantic invariants passed\n"; }
+  try { http_error_envelope_in_an_array_is_retained(); output_total_without_thoughts(); total_proves_zero_thoughts(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); successive_unidentified_calls(); native_group_and_replay(); nullable_usage(); uncached_input_rule(); stop_kinds_match_policy_table(); invalid_model_calls(); errors_and_terminals(); std::cout << "Gemini semantic invariants passed\n"; }
   catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }
