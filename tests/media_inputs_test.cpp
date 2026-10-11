@@ -996,7 +996,8 @@ void nested_tool_family_sources_and_limits() {
   const auto object=tool_history(Fam::Gemini,d,with_tool_results(Fam::Gemini,prefix,ToolResult{"call1",R"({"result":7})"}));
   CHECK(is_wire(object));
   CHECK(json_matches(first_tool_result(Fam::Gemini,wire_of(object).root()).get("response"),R"({"result":7})"));
-  ToolResult text_document{"call1",""};text_document.content_parts={inline_media("text/plain")};
+  // Plain text is the one text document admitted in a function response; other documents stay out.
+  ToolResult text_document{"call1",""};text_document.content_parts={inline_media("text/csv")};
   expect_error(tool_history(Fam::Gemini,d,with_tool_results(Fam::Gemini,prefix,text_document)),ErrorKind::Unsupported);
 }
 void messages_decoded_document_cache_budget() {
@@ -1049,6 +1050,65 @@ void live_verified_admission() {
   expect_error(run1(Fam::Chat, Origin::OpenRouter, inline_media("text/csv"), false), ErrorKind::InvalidRequest);
 }
 
+// Gemini 3 (gemini-3.1-flash-lite, 2026-10-11) accepted each of these MIME types as inline
+// functionResponse.parts and read them correctly. Earlier models may reject multimodal function
+// responses; that is the vendor's decision, not an SDK admission rule.
+void gemini_function_response_live_verified_media() {
+  const auto& d = desc(Fam::Gemini);
+  const auto prefix = tool_prefix(Fam::Gemini, d);
+  const std::vector<std::pair<std::string, std::string>> verified{
+      {"image/png", sample_bytes("image/png")},
+      {"image/jpeg", bytes_of({0xFF, 0xD8, 0xFF, 0xE0}) + "JFIF"},
+      {"image/webp", "RIFF" + be32(12) + "WEBPVP8 "},
+      {"image/gif", "GIF89a" + std::string(6, '\0')},
+      {"image/heic", sample_bytes("image/heic")},
+      {"application/pdf", sample_bytes("application/pdf")},
+      {"text/plain", "tool output\n"},
+      {"text/plain;charset=utf-8", "tool output\n"},
+      {"audio/wav", sample_bytes("audio/wav")},
+      {"video/mp4", sample_bytes("video/mp4")}};
+  for (const auto& [mime, raw] : verified)
+    for (const bool streaming : {false, true}) {
+      ToolResult result{"call1", ""};
+      const auto media = inline_media(kind_for(mime), mime, raw);
+      result.content_parts = {Text{"caption"}, media};
+      const auto encoded = tool_history(Fam::Gemini, d,
+          with_tool_results(Fam::Gemini, streaming ? tool_prefix(Fam::Gemini, d, true) : prefix, result), streaming);
+      if (!is_wire(encoded))
+        throw std::runtime_error("function response " + mime + " rejected: " + std::get<Error>(encoded).safe_message);
+      const auto wire = first_tool_result(Fam::Gemini, wire_of(encoded).root());
+      CHECK(json_matches(wire.get("response"), R"({"output":["caption"]})"));
+      CHECK(wire.get("parts").size() == 1);
+      CHECK(wire.get("parts").at(0).get("inlineData").get("mimeType").as_string() == mime);
+      CHECK(wire.get("parts").at(0).get("inlineData").get("data").as_string() == *media.data);
+    }
+  // Unverified documents, non-inline text and text metadata remain outside the function response.
+  for (const auto mime : {"text/csv", "text/markdown", "text/html", "application/json"}) {
+    ToolResult result{"call1", ""};
+    result.content_parts = {inline_media(MediaKind::Document, mime, "{}")};
+    expect_error(tool_history(Fam::Gemini, d, with_tool_results(Fam::Gemini, prefix, result)), ErrorKind::Unsupported);
+  }
+  for (const auto source : {MediaSource::Url, MediaSource::File}) {
+    ToolResult result{"call1", ""};
+    result.content_parts = {source == MediaSource::Url
+        ? Media::url(MediaKind::Document, "https://example.test/notes.txt", "text/plain")
+        : Media::file(MediaKind::Document, "https://generativelanguage.googleapis.com/v1beta/files/notes", "text/plain")};
+    expect_error(tool_history(Fam::Gemini, d, with_tool_results(Fam::Gemini, prefix, result)), ErrorKind::Unsupported);
+  }
+  ToolResult named{"call1", ""};
+  auto text = inline_media(MediaKind::Document, "text/plain", "tool output\n");
+  text.name = "notes.txt";
+  named.content_parts = {text};
+  expect_error(tool_history(Fam::Gemini, d, with_tool_results(Fam::Gemini, prefix, named)), ErrorKind::Unsupported);
+  // Interactions function_result is unchanged (not live-verified): text/plain stays Unsupported.
+  const auto& interactions = desc(Fam::Interactions);
+  ToolResult interactions_text{"call1", ""};
+  interactions_text.content_parts = {inline_media(MediaKind::Document, "text/plain", "tool output\n")};
+  expect_error(tool_history(Fam::Interactions, interactions,
+                            with_tool_results(Fam::Interactions, tool_prefix(Fam::Interactions, interactions), interactions_text)),
+               ErrorKind::Unsupported);
+}
+
 int main() {
   try {
     heif_admission_and_brand_boundaries();
@@ -1063,6 +1123,7 @@ int main() {
     generate_alias_output_semantics();
     google_named_reference_wire();
     live_verified_admission();
+    gemini_function_response_live_verified_media();
     nested_tool_media_wire_and_binding();
     nested_tool_family_sources_and_limits();
     messages_decoded_document_cache_budget();
