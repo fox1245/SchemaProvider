@@ -1,6 +1,7 @@
 // Real runtime/owned-outcome benchmark. The independent TLS oracle is a child process.
 #include "runtime/client.h"
 #include "runtime/testing.h"
+#include "codecs/gemini.h"
 #include "core/native.h"
 #include "json/json.h"
 #include "posix_owner.h"
@@ -185,17 +186,25 @@ void validate(const Config& c,const sp::runtime::Result& result,bool tool) {
         !usage.cache_read && !usage.cache_write && !usage.input_total && !usage.total,
         "missing cache bands became fabricated totals");
   } else if (c.family == "google.generate" || c.family == "google.interactions") {
+    const bool generate = c.family == "google.generate";
     require(usage.input_total && usage.input_total->value == 10 &&
-        usage.provider_reported_total && usage.provider_reported_total->value == 17 &&
-        !usage.reasoning && !usage.output_total, "missing thought usage became fabricated output");
-    const std::string_view response_counter = c.family == "google.generate" ?
-        "candidatesTokenCount" : "total_output_tokens";
+        usage.provider_reported_total && usage.provider_reported_total->value == 17,
+        "reported prompt or provider total lost");
+    // The generate peer omits thoughtsTokenCount but reports totalTokenCount == prompt +
+    // candidates, which proves zero thoughts; only that proof may derive them. The converse
+    // (a total that does not prove zero) is checked by gemini_unproven_thoughts_stay_unknown.
+    require(generate ?
+        usage.reasoning && usage.reasoning->value == 0 && usage.reasoning->evidence == sp::Evidence::Derived &&
+            usage.output_total && usage.output_total->value == 7 && usage.output_total->evidence == sp::Evidence::Derived :
+        !usage.reasoning && !usage.output_total,
+        generate ? "total-proven zero thoughts not derived" : "missing thought usage became fabricated output");
+    const std::string_view response_counter = generate ? "candidatesTokenCount" : "total_output_tokens";
     const auto reported = std::find_if(usage.extra.begin(), usage.extra.end(),
         [&](const auto& counter) { return counter.first == response_counter; });
     require(reported != usage.extra.end() && reported->second.value == 7,
         "reported response-token counter lost");
-    require(c.family == "google.generate" ? !usage.total :
-        usage.total && usage.total->value == 17 && usage.total->evidence == sp::Evidence::Reported,
+    require(usage.total && usage.total->value == 17 &&
+        usage.total->evidence == (generate ? sp::Evidence::Derived : sp::Evidence::Reported),
         "reported versus derived total authority lost");
   } else {
     require(usage.input_total && usage.input_total->value == 10 &&
@@ -225,6 +234,26 @@ void validate(const Config& c,const sp::runtime::Result& result,bool tool) {
   }
   require(tool?calls==1:(calls==0 && text==c.expected()),"wrong semantic payload");
   if(tool && c.scenario=="native")require(natives>0 && private_part,"native replay authority or rich part lost");
+}
+// Untimed, once per repetition: the peer's generate response with a total that leaves room for
+// omitted thoughts must keep reasoning, output and total unknown under the benchmark descriptor.
+void gemini_unproven_thoughts_stay_unknown(const Config& c, const sp::descriptor::ValidatedDescriptor& d) {
+  const auto encoded = sp::gemini::encode(d, std::get<sp::gemini::Request>(request(c)), c.streaming);
+  require(std::holds_alternative<sp::gemini::EncodedRequest>(encoded), "benchmark Gemini request rejected");
+  const auto body = R"({"responseId":"bench-generation","modelVersion":"bench-model","candidates":[{"index":0,"content":{"role":"model","parts":[{"text":)" +
+      sp::json::quote(c.expected()) + R"(}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":7,"totalTokenCount":20}})";
+  sp::Accumulator accumulator;
+  sp::gemini::Codec codec(d, c.streaming ? sp::gemini::Mode::Sse : sp::gemini::Mode::Buffered, accumulator,
+      std::get<sp::gemini::EncodedRequest>(encoded).context);
+  if (c.streaming) { codec.frame({}, body); codec.finish(); } else codec.buffered(body, {});
+  require(accumulator.outcome() && std::holds_alternative<sp::Completion>(*accumulator.outcome()),
+      "unproven thought usage probe failed");
+  const auto& usage = std::get<sp::Completion>(*accumulator.outcome()).usage;
+  require(usage.stage == sp::UsageStage::Final && usage.quality == sp::UsageQuality::Consistent &&
+      usage.input_total && usage.input_total->value == 10 &&
+      usage.provider_reported_total && usage.provider_reported_total->value == 20 &&
+      !usage.reasoning && !usage.output_total && !usage.total,
+      "unproven missing thought usage became fabricated output");
 }
 sp::runtime::Request continuation(const Config& c,const sp::runtime::Result& result) {
   auto r=request(c); const auto& done=completion(result);
@@ -313,6 +342,7 @@ std::pair<std::size_t,bool> encode(const sp::descriptor::ValidatedDescriptor& d,
 }
 int repetition(const Config& c,const std::string& path,std::size_t repetition_index) {
   Peer peer(c,path); auto d=descriptor(c,peer);
+  if(c.family=="google.generate")gemini_unproven_thoughts_stay_unknown(c,d);
   sp::runtime::Options options;options.workers=c.workers;options.transport.io_threads=static_cast<unsigned>(c.io);options.transport.resolver_threads=static_cast<unsigned>(c.resolver);options.transport.max_host_connections=c.max_connections;options.http_version=c.preference=="h1"?sp::transport::HttpVersion::Http1_1:sp::transport::HttpVersion::Auto;options.ca_file=peer.ca;options.api_key="BENCHMARK_SYNTHETIC_KEY";options.default_timeout=std::chrono::milliseconds(c.timeout);options.limits.max_operations=c.max_operations;
   Sampler sampler(c.sample_interval);
   auto observed=std::make_shared<ObservedTransport>(options.transport);auto backend=observed->transport->runtime_info();
