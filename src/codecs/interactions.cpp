@@ -382,9 +382,26 @@ bool Codec::count(json::Value value, std::optional<Count>& target, std::string_v
 }
 bool Codec::leaves(json::Value value, std::string path) {
   if (value.is_object()) {
-    for (auto member : value.members()) if (!leaves(member.value, path.empty() ? std::string(member.key) : path + "." + std::string(member.key))) return false;
+    for (auto member : value.members()) {
+      // Aggregates with a typed Usage slot are not repeated; the response-only output and
+      // tool-use prompt counts have none and stay, like Generate's candidates count.
+      if (path.empty() && (member.key == "total_input_tokens" || member.key == "total_thought_tokens" ||
+                           member.key == "total_cached_tokens" || member.key == "total_tokens")) continue;
+      if (!leaves(member.value, path.empty() ? std::string(member.key) : path + "." + std::string(member.key))) return false;
+    }
   } else if (value.is_array()) {
-    for (size_t i = 0; i < value.size(); ++i) if (!leaves(value.at(i), path + "." + std::to_string(i))) return false;
+    for (size_t i = 0; i < value.size(); ++i) {
+      // A modality breakdown entry is keyed by its modality, e.g. input_tokens_by_modality.text.
+      const auto item = value.at(i), modality = item.get("modality");
+      if (!item.is_object() || !modality.is_string() || modality.as_string().empty()) {
+        if (!leaves(item, path + "." + std::to_string(i))) return false;
+        continue;
+      }
+      const auto keyed = path + "." + std::string(modality.as_string());
+      if (usage_.extra.contains(keyed)) return fail(ErrorKind::ProtocolCorrupt, "duplicate interaction modality usage");
+      for (auto member : item.members())
+        if (member.key != "modality" && !leaves(member.value, member.key == "tokens" ? keyed : keyed + "." + std::string(member.key))) return false;
+    }
   } else if (value.is_number()) {
     if (!unsigned_count(value)) return fail(ErrorKind::ProtocolCorrupt, "invalid numeric usage leaf");
     usage_.extra.emplace(std::move(path), Count{number(value), Evidence::Reported});

@@ -489,10 +489,155 @@ void routed_gateway_model() {
   // A non-gateway origin keeps exact request/response model equality.
   failed(buffered(served(body(), concrete)), ErrorKind::ProtocolCorrupt);
 }
+// Observed direct Anthropic behavior: the documented alias claude-haiku-4-5 is answered with
+// "model":"claude-haiku-4-5-20251001". Only that origin admits an undated alias's dated snapshot.
+void direct_dated_snapshot_alias() {
+  static auto loaded = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"direct-messages","family":"anthropic.messages","connection":{"base_url":"https://api.anthropic.com","paths":{"buffered":"/v1/messages","streaming":"/v1/messages"}}})");
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
+  const auto& direct = std::get<descriptor::ValidatedDescriptor>(loaded);
+  const auto request_for = [](std::string model) {
+    messages::Request request; request.model = std::move(model); request.account_scope = "fixture-account";
+    request.messages.push_back(Message{"", Role::User, {Text{"Hello"}}}); return request;
+  };
+  const auto served = [](std::string wire, std::string_view model) {
+    for (auto at = wire.find("fixture-model"); at != std::string::npos; at = wire.find("fixture-model")) wire.replace(at, 13, model);
+    return wire;
+  };
+  const auto run = [&](const descriptor::ValidatedDescriptor& d, const messages::Request& request, const std::vector<Frame>& frames, bool sse) {
+    auto encoded = messages::encode(d, request, sse); CHECK(std::holds_alternative<messages::EncodedRequest>(encoded));
+    Accumulator acc; messages::Codec codec(d, sse ? messages::Mode::Sse : messages::Mode::Buffered, acc, std::get<messages::EncodedRequest>(encoded).context);
+    if (sse) { for (const auto& [event, data] : frames) if (!codec.frame(event, data)) break; codec.finish({}); }
+    else codec.buffered(frames.front().second, {});
+    CHECK(acc.outcome()); return *acc.outcome();
+  };
+  const auto wires = [&](std::string_view model, bool sse) {
+    return sse ? std::vector<Frame>{{"message_start", served(start().second, model)}, block(0, R"({"type":"text","text":"hi"})"), end(0), stop(), done}
+               : std::vector<Frame>{{"", served(body(R"([{"type":"text","text":"hi"}])"), model)}};
+  };
+  const auto alias = request_for("claude-haiku-4-5");
+  const std::string snapshot = "claude-haiku-4-5-20251001";
+  for (bool sse : {false, true}) {
+    const auto first = run(direct, alias, wires(snapshot, sse), sse);
+    const auto& c = completed(first);
+    CHECK(text(c.messages) == "hi" && c.messages[0].native && c.messages[0].native->complete());
+    // Replay stays bound to the requested alias, not the served snapshot.
+    auto replay = alias; replay.messages.push_back(c.messages[0]); replay.messages.push_back(Message{"", Role::User, {Text{"again"}}});
+    auto encoded = messages::encode(direct, replay, false); CHECK(std::holds_alternative<messages::EncodedRequest>(encoded));
+    auto wire = json::parse(std::get<messages::EncodedRequest>(encoded).body); CHECK(std::holds_alternative<json::Document>(wire));
+    CHECK(std::get<json::Document>(wire).root().get("model").as_string() == alias.model);
+    auto changed = replay; changed.model = snapshot;
+    CHECK(std::holds_alternative<Error>(messages::encode(direct, changed, false)) && std::get<Error>(messages::encode(direct, changed, false)).kind == ErrorKind::ReplayIneligible);
+    // An explicit snapshot request is exact: the same snapshot passes, another date does not.
+    completed(run(direct, request_for(snapshot), wires(snapshot, sse), sse));
+    failed(run(direct, request_for(snapshot), wires("claude-haiku-4-5-20251002", sse), sse), ErrorKind::ProtocolCorrupt);
+    // Other undeclared origins keep exact equality.
+    failed(run(descriptor_value(), alias, wires(snapshot, sse), sse), ErrorKind::ProtocolCorrupt);
+  }
+  // The served identity must remain stable for the whole response.
+  for (const auto& later : {std::string("claude-haiku-4-5-20251002"), alias.model}) {
+    auto frames = wires(snapshot, true);
+    frames[3] = {"message_delta", R"({"type":"message_delta","model":")" + later + R"(","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}})"};
+    failed(run(direct, alias, frames, true), ErrorKind::ProtocolCorrupt);
+  }
+  for (const auto& wrong : {"claude-haiku-4-5-20250229", "claude-haiku-4-5-20251301", "claude-haiku-4-5-20251032", "claude-haiku-4-5-00001001",
+                            "claude-haiku-4-5-2025-10-01", "claude-haiku-4-5-2025100", "claude-haiku-4-5-202510011", "claude-haiku-4-5-20251001-extra",
+                            "claude-haiku-4-6-20251001", "claude-haiku-4-520251001", "claude-haiku-4-5-2025100a"})
+    failed(run(direct, alias, wires(wrong, false), false), ErrorKind::ProtocolCorrupt);
+  completed(run(direct, alias, wires("claude-haiku-4-5-20240229", false), false));
+  // A dated request never gains a second date, and namespaced or uppercase names stay exact.
+  failed(run(direct, request_for(snapshot), wires(snapshot + "-20251002", false), false), ErrorKind::ProtocolCorrupt);
+  failed(run(direct, request_for("anthropic/claude-haiku-4-5"), wires("anthropic/claude-haiku-4-5-20251001", false), false), ErrorKind::ProtocolCorrupt);
+  failed(run(direct, request_for("Claude-Haiku-4-5"), wires("Claude-Haiku-4-5-20251001", false), false), ErrorKind::ProtocolCorrupt);
+}
+// Captured OpenRouter Messages wire (anthropic/claude-haiku-4.5, ids scrubbed). OpenRouter ends the
+// stream with an extra `[DONE]` frame after message_stop and reports USD cost inside usage.
+void openrouter_sentinel_and_cost() {
+  static auto loaded = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"captured-openrouter-messages","family":"anthropic.messages","connection":{"base_url":"https://openrouter.ai","paths":{"buffered":"/api/v1/messages","streaming":"/api/v1/messages"}}})");
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
+  const auto& gateway = std::get<descriptor::ValidatedDescriptor>(loaded);
+  const auto context_for = [](const descriptor::ValidatedDescriptor& d) {
+    messages::Request request; request.model = "anthropic/claude-haiku-4.5"; request.account_scope = "fixture-account";
+    request.messages.push_back(Message{"", Role::User, {Text{"Reply with one word: sky color?"}}});
+    auto encoded = messages::encode(d, request, true); CHECK(std::holds_alternative<messages::EncodedRequest>(encoded));
+    return std::get<messages::EncodedRequest>(encoded).context;
+  };
+  size_t unknown_properties = 0;
+  const auto run = [&](const descriptor::ValidatedDescriptor& d, const std::vector<Frame>& frames, bool sse) {
+    Accumulator acc; messages::Codec codec(d, sse ? messages::Mode::Sse : messages::Mode::Buffered, acc, context_for(d));
+    if (sse) { for (const auto& [event, data] : frames) if (!codec.frame(event, data)) break; codec.finish({}); }
+    else codec.buffered(frames.front().second, {});
+    unknown_properties = codec.diagnostics().unknown_properties;
+    CHECK(acc.outcome()); return *acc.outcome();
+  };
+  const std::string start_usage = R"({"input_tokens":3,"output_tokens":1,"output_tokens_details":null,"cache_creation_input_tokens":0,"cache_read_input_tokens":6219,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0},"inference_geo":null,"server_tool_use":null,"service_tier":"standard","speed":"standard"})";
+  const std::string money = R"(,"cost":0.0006649,"is_byok":false,"cost_details":{"upstream_inference_cost":0.0006649,"upstream_inference_prompt_cost":0.0006249,"upstream_inference_completions_cost":0.00004})";
+  const std::string final_counters = R"({"input_tokens":3,"output_tokens":8,"output_tokens_details":{"thinking_tokens":0},"cache_creation_input_tokens":0,"cache_read_input_tokens":6219,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0},"server_tool_use":null,"service_tier":"standard","speed":"standard")";
+  const std::vector<Frame> captured{
+      {"message_start", R"({"type":"message_start","message":{"id":"msg_fixture","type":"message","role":"assistant","container":null,"content":[],"model":"anthropic/claude-haiku-4.5","stop_reason":null,"stop_details":null,"stop_sequence":null,"usage":)" + start_usage + R"(,"provider":"Amazon Bedrock"}})"},
+      {"content_block_start", R"({"type":"content_block_start","index":0,"content_block":{"type":"text","text":"","citations":[]}})"},
+      {"content_block_delta", R"({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"t"}})"},
+      {"content_block_delta", R"({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"undra-ember"}})"},
+      {"content_block_stop", R"({"type":"content_block_stop","index":0})"},
+      {"message_delta", R"({"type":"message_delta","delta":{"container":null,"stop_details":null,"stop_reason":"end_turn","stop_sequence":null},"usage":)" + final_counters + money + R"(},"context_management":null})"},
+      {"message_stop", R"({"type":"message_stop"})"}};
+  const auto with = [&](std::vector<Frame> frames, std::initializer_list<Frame> tail) { frames.insert(frames.end(), tail); return frames; };
+  const auto check_stream = [&](const Outcome& outcome) {
+    const auto& c = completed(outcome);
+    CHECK(text(c.messages) == "tundra-ember" && c.stop.kind == StopKind::EndTurn);
+    CHECK(c.usage.stage == UsageStage::Final && c.usage.output_total->value == 8 && c.usage.cache_read->value == 6219 && c.usage.reasoning->value == 0);
+    const auto& cost = c.usage.provider_cost;
+    CHECK(cost.source == CostSource::OpenRouterUsd && cost.quality == UsageQuality::Consistent && cost.is_byok && !*cost.is_byok);
+    CHECK(cost.total->nano_usd == 664900 && cost.upstream_total->nano_usd == 664900);
+    CHECK(cost.upstream_input->nano_usd == 624900 && cost.upstream_output->nano_usd == 40000);
+    for (const auto status : cost.status) CHECK(status == CostStatus::Available);
+    for (const auto& [key, value] : c.usage.extra) CHECK(key.starts_with("cache_creation."));
+  };
+  // The observed `event: data` sentinel, the default SSE event name, and no sentinel all complete.
+  check_stream(run(gateway, with(captured, {{"data", "[DONE]"}}), true));
+  check_stream(run(gateway, with(captured, {{"message", "[DONE]"}}), true));
+  check_stream(run(gateway, captured, true));
+  // Anything else after termination is still corrupt, as is a sentinel anywhere else.
+  for (const auto& tail : std::vector<std::vector<Frame>>{
+           {{"data", "[DONE]"}, {"data", "[DONE]"}}, {{"data", "not json"}}, {{"data", "[DONE] "}}, {{"error_like", "[DONE]"}},
+           {{"data", "[DONE]"}, {"message_stop", R"({"type":"message_stop"})"}}, {{"message_stop", R"({"type":"message_stop"})"}}}) {
+    auto frames = captured; frames.insert(frames.end(), tail.begin(), tail.end());
+    failed(run(gateway, frames, true), ErrorKind::ProtocolCorrupt);
+  }
+  auto early = captured; early.insert(early.end() - 1, Frame{"data", "[DONE]"});
+  failed(run(gateway, early, true), ErrorKind::ProtocolCorrupt);
+  // A direct Anthropic origin never sends the sentinel, so it stays corrupt there.
+  auto direct_frames = with(captured, {{"data", "[DONE]"}});
+  for (auto& [event, data] : direct_frames) for (auto at = data.find("anthropic/claude-haiku-4.5"); at != std::string::npos; at = data.find("anthropic/claude-haiku-4.5"))
+    data.replace(at, 26, "fixture-model");
+  CHECK(text(completed(stream({direct_frames.begin(), direct_frames.end() - 1})).messages) == "tundra-ember");
+  failed(stream(direct_frames), ErrorKind::ProtocolCorrupt);
+  // Buffered: the captured envelope keeps its cost; a trailing sentinel is never part of a body.
+  const std::string buffered_usage = R"({"input_tokens":29,"output_tokens":4,"output_tokens_details":{"thinking_tokens":0},"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0},"inference_geo":null,"server_tool_use":null,"service_tier":"standard","speed":"standard")";
+  const auto envelope = [&](std::string_view usage) {
+    return R"({"id":"msg_fixture","type":"message","role":"assistant","container":null,"content":[{"type":"text","text":"Blue"}],"model":"anthropic/claude-haiku-4.5","stop_reason":"end_turn","stop_details":null,"stop_sequence":null,"usage":)" + std::string(usage) + R"(,"provider":"Amazon Bedrock"})";
+  };
+  const auto buffered_money = R"(,"cost":4.9e-05,"is_byok":false,"cost_details":{"upstream_inference_cost":4.9e-05,"upstream_inference_prompt_cost":2.9e-05,"upstream_inference_completions_cost":2e-05}})";
+  const auto bought = run(gateway, {{"", envelope(buffered_usage + buffered_money)}}, false);
+  const auto with_money_unknowns = unknown_properties;
+  const auto& c = completed(bought);
+  CHECK(text(c.messages) == "Blue" && c.usage.total->value == 33 && c.usage.extra.size() == 2);
+  CHECK(c.usage.provider_cost.source == CostSource::OpenRouterUsd && c.usage.provider_cost.total->nano_usd == 49000);
+  CHECK(c.usage.provider_cost.upstream_input->nano_usd == 29000 && c.usage.provider_cost.upstream_output->nano_usd == 20000);
+  CHECK(c.usage.provider_cost.upstream_total->nano_usd == 49000);
+  // Monetary members are typed cost, not unknown usage properties.
+  CHECK(completed(run(gateway, {{"", envelope(buffered_usage + "}")}}, false)).usage.provider_cost.source == CostSource::None);
+  CHECK(unknown_properties == with_money_unknowns);
+  failed(run(gateway, {{"", envelope(buffered_usage + buffered_money) + "\n[DONE]"}}, false), ErrorKind::ProtocolCorrupt);
+  // An origin without declared USD semantics keeps an explicit unknown currency.
+  auto direct_body = envelope(buffered_usage + buffered_money);
+  direct_body.replace(direct_body.find("anthropic/claude-haiku-4.5"), 26, "fixture-model");
+  const auto unknown_currency = completed(buffered(direct_body)).usage.provider_cost;
+  CHECK(unknown_currency.source == CostSource::UnknownCurrency && !unknown_currency.total && unknown_currency.status[0] == CostStatus::UnknownCurrency);
+}
 } // namespace
 int main() {
   try {
-    routed_gateway_model();
+    routed_gateway_model(); openrouter_sentinel_and_cost(); direct_dated_snapshot_alias();
     owned_raw_observations(); raw_failure_evidence(); typeless_buffered_error();
     usage_binding_precedence();
     usage_detail_forward_compatibility(); toolset_metadata_shapes();

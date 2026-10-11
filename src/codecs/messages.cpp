@@ -1,4 +1,6 @@
 #include "codecs/messages.h"
+#include "codecs/provider_cost.h"
+#include "codecs/responses_model.h"
 #include "core/native.h"
 #include "descriptor/descriptor.h"
 #include "descriptor/policy.h"
@@ -13,6 +15,23 @@ bool count_value(json::Value v) { return v.is_uint() || (v.is_int() && v.as_int(
 uint64_t number(json::Value v) { return v.is_uint() ? v.as_uint() : static_cast<uint64_t>(v.as_int()); }
 bool nonempty(json::Value v) { return v.is_string() && !v.as_string().empty(); }
 bool nullable_string(json::Value v) { return !v.valid() || v.is_null() || v.is_string(); }
+bool compact_snapshot_date(std::string_view date) {
+  if (date.size() != 8) return false;
+  const std::string dashed = std::string(date.substr(0, 4)) + '-' + std::string(date.substr(4, 2)) + '-' + std::string(date.substr(6, 2));
+  return responses::snapshot_date(dashed);
+}
+// Snapshot alias admission is restricted to the direct documented Anthropic origin, which
+// serves an undated alias (claude-haiku-4-5) as its dated snapshot (claude-haiku-4-5-20251001).
+// Explicitly dated requests and every other undeclared origin keep exact equality.
+bool requested_model_matches(std::string_view requested, std::string_view served, std::string_view origin) {
+  if (requested == served) return true;
+  if (origin != "https://api.anthropic.com" || requested.empty()) return false;
+  for (const char c : requested)
+    if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.')) return false;
+  if (requested.size() >= 9 && requested[requested.size() - 9] == '-' && compact_snapshot_date(requested.substr(requested.size() - 8))) return false;
+  return served.size() == requested.size() + 9 && served.starts_with(requested) &&
+      served[requested.size()] == '-' && compact_snapshot_date(served.substr(requested.size() + 1));
+}
 StopKind mapped(descriptor::StopKind k) {
   switch (k) {
     case descriptor::StopKind::EndTurn: return StopKind::EndTurn;
@@ -87,6 +106,11 @@ bool Codec::buffered(std::string_view body, Close close) {
 bool Codec::frame(std::string_view event, std::string_view data) {
   if (closed_ || accumulator_.terminal()) return false;
   if (mode_ != Mode::Sse) return fail(ErrorKind::Misuse, "unexpected stream frame");
+  // A declared routing gateway appends one `[DONE]` sentinel after message_stop. Anything
+  // else after message_stop, a repeated sentinel, or a sentinel elsewhere stays corrupt.
+  if (done_ && !sentinel_ && data == "[DONE]" && (event.empty() || event == "message" || event == "data") && descriptor::routed_gateway(descriptor_)) {
+    sentinel_ = true; return true;
+  }
   return document(data, event, true);
 }
 bool Codec::document(std::string_view bytes, std::string_view event, bool streaming) {
@@ -164,8 +188,10 @@ bool Codec::identity(json::Value v, bool required) {
   if ((required && (!id.valid() || !model.valid() || !role.valid())) ||
       (id.valid() && !nonempty(id)) || (model.valid() && !nonempty(model)) ||
       (role.valid() && (!role.is_string() || role.as_string() != "assistant"))) return fail(ErrorKind::ProtocolCorrupt, "invalid message identity");
-  // A declared routing gateway may serve another concrete model; stability is still enforced below.
-  if (model.valid() && model.as_string() != context_->model() && !descriptor::routed_gateway(descriptor_))
+  // A declared routing gateway may serve another concrete model, and the direct origin may serve
+  // an undated alias as its dated snapshot; stability is still enforced below.
+  if (model.valid() && !requested_model_matches(context_->model(), model.as_string(), descriptor_.base_url()) &&
+      !descriptor::routed_gateway(descriptor_))
     return fail(ErrorKind::ProtocolCorrupt, "response model differs from request");
   if (begun_ && ((id.valid() && id.as_string() != generation_) || (model.valid() && model.as_string() != model_))) return fail(ErrorKind::ProtocolCorrupt, "inconsistent message identity");
   return true;
@@ -508,7 +534,9 @@ bool Codec::usage(json::Value v, bool initial) {
     if (!usage_leaves(iterations, "iterations")) return false;
   }
   for (auto key : {"service_tier", "inference_geo"}) if (!nullable_string(v.get(key))) return fail(ErrorKind::ProtocolCorrupt, "invalid usage metadata");
-  unknown(v, {"input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "cache_creation", "server_tool_use", "output_tokens_details", "iterations", "service_tier", "inference_geo"});
+  // Monetary members are typed provider cost, never token leaves or unknown counters.
+  usage_.provider_cost = codecs::provider_cost(v, descriptor_);
+  unknown(v, {"input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "cache_creation", "server_tool_use", "output_tokens_details", "iterations", "service_tier", "inference_geo", "cost", "cost_details", "is_byok"});
   auto sum = [&](uint64_t a, uint64_t b, uint64_t& out) {
     if (b > std::numeric_limits<uint64_t>::max() - a) return fail(ErrorKind::ProtocolCorrupt, "usage sum overflow");
     out = a + b; return true;

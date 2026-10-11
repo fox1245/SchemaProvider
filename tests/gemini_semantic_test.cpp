@@ -397,11 +397,17 @@ void output_total_without_thoughts() {
   };
   auto off = run(thinking_off(0), usage);
   CHECK(off.output_total && off.output_total->value == 3 && off.output_total->evidence == Evidence::Derived);
-  CHECK(off.total && off.total->value == 11 && !off.reasoning);
-  // thinking enabled (explicit budget, or none at all) and no thoughts count: still unknown
+  CHECK(off.total && off.total->value == 11 && off.reasoning && off.reasoning->value == 0 && off.reasoning->evidence == Evidence::Derived);
+  // without a reported total only the budget proves the output; reasoning stays unknown
+  auto unproven = run(thinking_off(0), R"({"promptTokenCount":8,"candidatesTokenCount":3})");
+  CHECK(unproven.output_total && unproven.output_total->value == 3 && !unproven.reasoning && unproven.total->value == 11);
+  // thinking enabled (explicit budget, or none at all), no thoughts count and no total proving
+  // zero thoughts: still unknown
   for (auto budget : {std::optional<uint64_t>(1024), std::optional<uint64_t>()}) {
-    auto on = run(thinking_off(budget), usage);
-    CHECK(!on.output_total && !on.total && on.provider_reported_total && on.provider_reported_total->value == 11);
+    auto on = run(thinking_off(budget), R"({"promptTokenCount":8,"candidatesTokenCount":3,"totalTokenCount":12})");
+    CHECK(!on.output_total && !on.total && !on.reasoning && on.provider_reported_total && on.provider_reported_total->value == 12);
+    on = run(thinking_off(budget), R"({"promptTokenCount":8,"candidatesTokenCount":3})");
+    CHECK(!on.output_total && !on.total && !on.reasoning);
   }
   // a reported thoughts count always wins, even with the budget at zero
   auto reported = run(thinking_off(0), R"({"promptTokenCount":8,"candidatesTokenCount":3,"thoughtsTokenCount":2})");
@@ -409,8 +415,37 @@ void output_total_without_thoughts() {
   // the flag survives dropping issuing authority, which is what the runtime keeps while decoding
   CHECK(run(thinking_off(0)->decoding_only(), usage).output_total);
 }
+// Captured gemini-2.5-flash-lite usage with thinking left on: thoughtsTokenCount is omitted, but
+// totalTokenCount == prompt + candidates proves the thoughts were zero.
+void total_proves_zero_thoughts() {
+  const auto captured = R"({"promptTokenCount":21,"candidatesTokenCount":1,"totalTokenCount":22,"promptTokensDetails":[{"modality":"TEXT","tokenCount":21}],"serviceTier":"standard"})";
+  for (const auto& o : {buffered(body(R"([{"text":"Blue"}])", "STOP", captured)), stream({body(R"([{"text":"Blue"}])", "STOP", captured)})}) {
+    const auto& u = complete(o).usage;
+    CHECK(u.input_total->value == 21 && u.provider_reported_total->value == 22 && u.quality == UsageQuality::Consistent);
+    CHECK(u.reasoning && u.reasoning->value == 0 && u.reasoning->evidence == Evidence::Derived);
+    CHECK(u.output_total && u.output_total->value == 1 && u.output_total->evidence == Evidence::Derived);
+    CHECK(u.total && u.total->value == 22 && u.total->evidence == Evidence::Derived);
+    CHECK(u.extra.at("candidatesTokenCount").value == 1 && u.extra.at("promptTokensDetails.TEXT").value == 21);
+  }
+  const auto usage_of = [&](std::string_view counters) { return complete(buffered(body(R"([{"text":"Blue"}])", "STOP", counters))).usage; };
+  // a zero tool-use prompt count does not disturb the proof
+  auto u = usage_of(R"({"promptTokenCount":21,"candidatesTokenCount":1,"toolUsePromptTokenCount":0,"totalTokenCount":22})");
+  CHECK(u.reasoning->value == 0 && u.output_total->value == 1 && u.total->value == 22);
+  // a larger total leaves room for unreported thoughts; a nonzero tool-use prompt is ambiguous
+  for (auto counters : {R"({"promptTokenCount":21,"candidatesTokenCount":1,"totalTokenCount":30})",
+                        R"({"promptTokenCount":21,"candidatesTokenCount":1,"toolUsePromptTokenCount":2,"totalTokenCount":24})",
+                        R"({"promptTokenCount":21,"candidatesTokenCount":1,"toolUsePromptTokenCount":2,"totalTokenCount":22})",
+                        R"({"promptTokenCount":21,"candidatesTokenCount":1,"totalTokenCount":null})",
+                        R"({"candidatesTokenCount":1,"totalTokenCount":1})"}) {
+    u = usage_of(counters);
+    CHECK(!u.reasoning && !u.output_total && !u.total && u.quality == UsageQuality::Consistent);
+  }
+  // a reported thoughts count always wins
+  u = usage_of(R"({"promptTokenCount":21,"candidatesTokenCount":1,"thoughtsTokenCount":5,"totalTokenCount":27})");
+  CHECK(u.reasoning->value == 5 && u.reasoning->evidence == Evidence::Reported && u.output_total->value == 6 && u.total->value == 27);
+}
 }
 int main() {
-  try { http_error_envelope_in_an_array_is_retained(); output_total_without_thoughts(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); successive_unidentified_calls(); native_group_and_replay(); nullable_usage(); invalid_model_calls(); errors_and_terminals(); std::cout << "Gemini semantic invariants passed\n"; }
+  try { http_error_envelope_in_an_array_is_retained(); output_total_without_thoughts(); total_proves_zero_thoughts(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); successive_unidentified_calls(); native_group_and_replay(); nullable_usage(); invalid_model_calls(); errors_and_terminals(); std::cout << "Gemini semantic invariants passed\n"; }
   catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }
