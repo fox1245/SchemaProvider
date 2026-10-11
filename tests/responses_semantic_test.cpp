@@ -509,14 +509,26 @@ void provider_money_and_snapshot_aliases() {
     CHECK(c.usage.stage == UsageStage::Final && cost.source == CostSource::OpenRouterUsd && cost.quality == UsageQuality::Consistent);
     CHECK(cost.total->nano_usd == 4000 && cost.upstream_total->nano_usd == 4000);
     CHECK(cost.upstream_input->nano_usd == 1600 && cost.upstream_output->nano_usd == 2400);
-    CHECK(cost.total->evidence == Evidence::Reported && cost.total->rounding == CostRounding::CeilingParsedBinary64);
+    CHECK(cost.total->evidence == Evidence::Reported && cost.total->rounding == CostRounding::CeilingShortestDecimal);
     CHECK(cost.is_byok && !*cost.is_byok && cost.byok_status == CostStatus::Available);
     CHECK(c.wire_envelope->root().get("usage").get("cost_details").is_object());
   }
   for (const auto& [amount, status, nanos] : std::vector<std::tuple<std::string, CostStatus, uint64_t>>{
       {"0", CostStatus::Available, 0}, {"0.125", CostStatus::Available, 125000000},
-      {"0.1", CostStatus::Available, 100000001}, {"1e-10", CostStatus::Available, 1},
+      {"0.1", CostStatus::Available, 100000000}, {"1e-10", CostStatus::Available, 1},
       {"5e-324", CostStatus::Available, 1}, {"null", CostStatus::Missing, 0},
+      // Captured OpenRouter decimals convert exactly; binary64 ceiling used to add one nanoUSD.
+      {"1.5e-06", CostStatus::Available, 1500}, {"0.0000015", CostStatus::Available, 1500},
+      {"0.00029", CostStatus::Available, 290000}, {"0.0002724", CostStatus::Available, 272400},
+      {"0.0000176", CostStatus::Available, 17600}, {"0.0000371", CostStatus::Available, 37100},
+      {"0.00004928", CostStatus::Available, 49280}, {"0.0006649", CostStatus::Available, 664900},
+      {"123.456789012", CostStatus::Available, 123456789012}, {"9007199.25474099", CostStatus::Available, 9007199254740990},
+      {"9007199.254740992", CostStatus::PrecisionExceeded, 0},  // shortest form is ...993, above 2^53
+      // Only a nonzero digit beyond the ninth fractional place rounds up.
+      {"1.0000000001", CostStatus::Available, 1000000001}, {"1.0000000009", CostStatus::Available, 1000000001},
+      {"0.0000000015", CostStatus::Available, 2}, {"1.0000000001e-9", CostStatus::Available, 2},
+      {"0.000012345678901", CostStatus::Available, 12346}, {"1.000000000000001e-12", CostStatus::Available, 1},
+      {"1e-9", CostStatus::Available, 1}, {"2.5e-9", CostStatus::Available, 3},
       {"-1", CostStatus::Malformed, 0}, {"\"0.5\"", CostStatus::Malformed, 0},
       {"true", CostStatus::Malformed, 0}, {"{}", CostStatus::Malformed, 0},
       {"\"NaN\"", CostStatus::Malformed, 0}, {"\"Infinity\"", CostStatus::Malformed, 0},
@@ -531,6 +543,10 @@ void provider_money_and_snapshot_aliases() {
     CHECK(cost.quality == (status == CostStatus::Available || status == CostStatus::Missing ? UsageQuality::Consistent : UsageQuality::Inconsistent));
     CHECK(c.usage.extra.empty());
   }
+  const auto captured = decode(gateway, request(), {{"", body("[]", "completed",
+      R"({"cost":0.00029,"is_byok":false,"cost_details":{"upstream_inference_cost":0.00029,"upstream_inference_input_cost":0.0002724,"upstream_inference_output_cost":0.0000176}})")}}, false);
+  const auto& sum = completed(captured).usage.provider_cost;
+  CHECK(sum.total->nano_usd == 290000 && sum.upstream_input->nano_usd + sum.upstream_output->nano_usd == sum.upstream_total->nano_usd);
   const auto partial_fields = decode(gateway, request(), {{"", body("[]", "completed",
       R"({"cost_details":{"upstream_inference_input_cost":0,"upstream_inference_output_cost":-1,"future_price":0.25},"is_byok":true})")}}, false);
   const auto& fields = completed(partial_fields).usage.provider_cost;

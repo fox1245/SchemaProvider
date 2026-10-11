@@ -4,6 +4,7 @@
 #include "transport/sse_framer.h"
 #include <iostream>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -792,10 +793,52 @@ void idempotent_terminal_money_tail() {
   const auto missing = frames({chunk("{}", "\"stop\""), usage_frame(full_usage), "[DONE]"});
   CHECK(!completed(missing).usage.provider_cost.total && completed(missing).usage.provider_cost.source == CostSource::None);
 }
+// Captured OpenRouter Chat usage (openai/gpt-5-nano): unlisted detail counters must survive in
+// extra and decimal costs must not gain a nanoUSD (1.5e-06 was 1501).
+void unlisted_usage_leaves_and_decimal_cost() {
+  auto loaded = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"captured-openrouter-chat","family":"openai.chat","connection":{"base_url":"https://openrouter.ai","paths":{"buffered":"/api/v1/chat/completions","streaming":"/api/v1/chat/completions"}}})");
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
+  const auto& gateway = std::get<descriptor::ValidatedDescriptor>(loaded);
+  const auto decode = [&](std::string_view counters, bool sse) {
+    Accumulator acc; chat::Codec codec(gateway, sse ? chat::Mode::Sse : chat::Mode::Buffered, acc);
+    if (sse) {
+      for (const auto& wire : {chunk(R"({"role":"assistant","content":"blue"})", "\"stop\""), usage_frame(counters), std::string("[DONE]")})
+        if (!codec.frame("message", wire)) break;
+      codec.finish();
+    } else codec.buffered(body(R"({"role":"assistant","content":"blue"})", "\"stop\"", counters), {});
+    CHECK(acc.outcome()); return *acc.outcome();
+  };
+  const std::string captured = R"({"prompt_tokens":30,"completion_tokens":144,"total_tokens":174,"cost":0.0000591,"is_byok":false,"prompt_tokens_details":{"cached_tokens":0,"cache_write_tokens":0,"audio_tokens":0,"video_tokens":0},"cost_details":{"upstream_inference_cost":0.0000591,"upstream_inference_prompt_cost":0.0000015,"upstream_inference_completions_cost":0.0000576},"completion_tokens_details":{"reasoning_tokens":128,"image_tokens":0,"audio_tokens":0}})";
+  for (bool sse : {false, true}) {
+    const auto outcome = decode(captured, sse);
+    const auto& usage = completed(outcome).usage;
+    CHECK(text_of(completed(outcome).messages) == "blue" && usage.quality == UsageQuality::Consistent);
+    CHECK(usage.input_total->value == 30 && usage.output_total->value == 144 && usage.reasoning->value == 128 && usage.total->value == 174);
+    // Typed and already-named counters are not repeated; monetary members never become leaves.
+    const std::map<std::string, uint64_t> expected{{"input_audio", 0}, {"audio_tokens", 0},
+        {"prompt_tokens_details.video_tokens", 0}, {"completion_tokens_details.image_tokens", 0}};
+    CHECK(usage.extra.size() == expected.size());
+    for (const auto& [key, value] : expected) CHECK(usage.extra.contains(key) && usage.extra.at(key).value == value && usage.extra.at(key).evidence == Evidence::Reported);
+    const auto& cost = usage.provider_cost;
+    CHECK(cost.source == CostSource::OpenRouterUsd && cost.quality == UsageQuality::Consistent);
+    CHECK(cost.total->nano_usd == 59100 && cost.upstream_total->nano_usd == 59100);
+    CHECK(cost.upstream_input->nano_usd == 1500 && cost.upstream_output->nano_usd == 57600);
+    CHECK(cost.upstream_input->nano_usd + cost.upstream_output->nano_usd == cost.total->nano_usd);
+    CHECK(cost.total->rounding == CostRounding::CeilingShortestDecimal);
+  }
+  // Nonzero unlisted counters at every depth; noninteger or negative leaves stay diagnostics only.
+  const auto nonzero = decode(R"({"prompt_tokens":100,"completion_tokens":20,"total_tokens":120,"prompt_cache_hit_tokens":10,"queue_time":0.25,"future":-1,"server":{"web_search_requests":2,"label":"x"},"prompt_tokens_details":{"cached_tokens":10,"cache_write_tokens":5,"audio_tokens":0,"video_tokens":40},"completion_tokens_details":{"reasoning_tokens":4,"image_tokens":7,"audio_tokens":0,"accepted_prediction_tokens":1}})", true);
+  const auto& usage = completed(nonzero).usage;
+  CHECK(usage.extra.at("prompt_tokens_details.video_tokens").value == 40 && usage.extra.at("completion_tokens_details.image_tokens").value == 7);
+  CHECK(usage.extra.at("prompt_cache_hit_tokens").value == 10 && usage.extra.at("server.web_search_requests").value == 2);
+  CHECK(usage.extra.at("accepted_prediction_tokens").value == 1 && !usage.extra.contains("completion_tokens_details.accepted_prediction_tokens"));
+  CHECK(!usage.extra.contains("queue_time") && !usage.extra.contains("future") && !usage.extra.contains("prompt_tokens_details.cached_tokens"));
+  CHECK(usage.extra.size() == 7 && usage.cache_read->value == 10 && usage.cache_write->value == 5 && usage.input_uncached->value == 85);
+}
 } // namespace
 int main() {
   try {
-    idempotent_terminal_money_tail();
+    idempotent_terminal_money_tail(); unlisted_usage_leaves_and_decimal_cost();
     owned_raw_observations(); raw_failure_evidence();
     chunk_partition_invariant(); no_terminal_no_success(); transport_projection_parity(); known_corrupt_never_ignored();
     invalid_tools_and_compatibility(); usage_knowledge(); accumulator_transitions_and_seals(); typed_request_encoding();

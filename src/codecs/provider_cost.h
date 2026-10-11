@@ -2,9 +2,10 @@
 #include "core/value.h"
 #include "descriptor/policy.h"
 #include "json/json.h"
-#include <bit>
+#include <charconv>
 #include <cmath>
 #include <limits>
+#include <system_error>
 
 namespace sp::codecs {
 // These are monetary/boolean metadata, never integer token-counter extras.
@@ -22,29 +23,30 @@ inline CostStatus usd_amount(json::Value value, bool usd, std::optional<UsdAmoun
   // Above 2^53 nanoUSD binary64 cannot consistently resolve one nanoUSD.
   if (amount > 9007199.254740992) return CostStatus::PrecisionExceeded;
   if (amount == 0) { target = UsdAmount{}; return CostStatus::Available; }
-  static_assert(sizeof(double) == sizeof(uint64_t) && std::numeric_limits<double>::is_iec559);
-  const uint64_t bits = std::bit_cast<uint64_t>(amount);
-  const unsigned exponent = static_cast<unsigned>((bits >> 52) & 0x7ffU);
-  const uint64_t mantissa = (bits & ((uint64_t{1} << 52) - 1)) | (exponent ? uint64_t{1} << 52 : 0);
-  // Exact binary64 * 1e9 = mantissa * 1953125 / 2^shift. Two stack
-  // limbs avoid nonportable __int128 and floating multiplication rounding.
-  const uint64_t lower = (mantissa & 0xffffffffU) * 1953125U;
-  const uint64_t upper = (mantissa >> 32) * 1953125U;
-  const uint64_t low = lower + (upper << 32);
-  const uint64_t high = (upper >> 32) + (low < lower ? 1U : 0U);
-  const unsigned shift = 1066U - (exponent ? exponent : 1U);
-  uint64_t integral = 0;
-  bool remainder = true;
-  if (shift < 64) {
-    integral = (high << (64 - shift)) | (low >> shift);
-    remainder = (low & ((uint64_t{1} << shift) - 1)) != 0;
-  } else if (shift == 64) {
-    integral = high; remainder = low != 0;
-  } else if (shift < 128) {
-    integral = high >> (shift - 64);
-    remainder = low != 0 || (high & ((uint64_t{1} << (shift - 64)) - 1)) != 0;
+  // The parser keeps no lexeme, so recover the shortest decimal that round-trips to the
+  // parsed binary64 (the provider's own decimal whenever it had at most 17 significant
+  // digits) and convert that decimal exactly. Only a nonzero digit beyond the ninth
+  // fractional place rounds up: 1.5e-06 is 1500 nanoUSD, 1e-10 is 1.
+  char text[32];
+  const auto written = std::to_chars(text, text + sizeof text, amount, std::chars_format::scientific);
+  if (written.ec != std::errc{}) return CostStatus::Malformed;
+  uint64_t significand = 0;
+  int digits = 0, exponent = 0;
+  const char* cursor = text;
+  for (; cursor != written.ptr && *cursor != 'e'; ++cursor)
+    if (*cursor != '.') { significand = significand * 10 + static_cast<uint64_t>(*cursor - '0'); ++digits; }
+  if (cursor == written.ptr || std::from_chars(cursor + (cursor[1] == '+' ? 2 : 1), written.ptr, exponent).ec != std::errc{})
+    return CostStatus::Malformed;
+  // amount == significand * 10^(exponent - digits + 1), so nanoUSD == significand * 10^scale.
+  const int scale = exponent - digits + 1 + 9;
+  uint64_t nanos = significand;
+  if (scale >= 0) {
+    for (int i = 0; i < scale; ++i) nanos *= 10;  // bounded by the 2^53 nanoUSD precheck above
+  } else {
+    uint64_t divisor = 1;
+    for (int i = 0; i < -scale && divisor <= significand; ++i) divisor *= 10;
+    nanos = divisor > significand ? 1 : significand / divisor + (significand % divisor ? 1U : 0U);
   }
-  const uint64_t nanos = integral + (remainder ? 1U : 0U);
   if (nanos > (uint64_t{1} << 53)) return CostStatus::PrecisionExceeded;
   target = UsdAmount{nanos};
   return CostStatus::Available;

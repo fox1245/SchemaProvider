@@ -4,6 +4,7 @@
 #include "json/json.h"
 #include "support/vision_fixture.h"
 #include <iostream>
+#include <map>
 #include <stdexcept>
 
 namespace {
@@ -140,6 +141,31 @@ void unknown_usage_and_signature() {
   CHECK(complete(o).usage.total->value == 17 && complete(o).usage.provider_reported_total->value == 15 && complete(o).usage.quality == UsageQuality::Inconsistent);
   failure(buffered(resource("[" + output + "]", "completed", R"({"total_input_tokens":-1})")), ErrorKind::ProtocolCorrupt);
   auto no_usage = buffered(resource("[" + output + "]", "completed", "null")); CHECK(complete(no_usage).usage.stage == UsageStage::Missing);
+}
+// Captured gemini-2.5-flash-lite interaction usage: typed aggregates are not repeated in extra and a
+// modality breakdown is keyed by modality name rather than array position.
+void modality_keyed_usage() {
+  const std::string captured = R"({"total_tokens":23,"total_input_tokens":22,"input_tokens_by_modality":[{"modality":"text","tokens":22}],"total_cached_tokens":0,"total_output_tokens":1,"total_tool_use_tokens":0,"total_thought_tokens":0})";
+  for (const auto& o : {buffered(resource("[" + output + "]", "completed", captured)),
+                        stream({created(), start(0, R"({"type":"model_output","content":[],"extra":17})"), delta(0, R"({"type":"text","text":"answer"})"),
+                                stop(0), end("[" + output + "]", "completed", captured), {"done", "[DONE]"}})}) {
+    const auto& u = complete(o).usage;
+    CHECK(u.input_total->value == 22 && u.output_total->value == 1 && u.reasoning->value == 0 && u.cache_read->value == 0);
+    CHECK(u.total->value == 23 && u.provider_reported_total->value == 23 && u.quality == UsageQuality::Consistent);
+    const std::map<std::string, uint64_t> expected{{"input_tokens_by_modality.text", 22}, {"total_output_tokens", 1}, {"total_tool_use_tokens", 0}};
+    CHECK(u.extra.size() == expected.size());
+    for (const auto& [key, value] : expected) CHECK(u.extra.contains(key) && u.extra.at(key).value == value);
+  }
+  auto u = complete(buffered(resource("[" + output + "]", "completed",
+      R"({"total_input_tokens":300,"total_output_tokens":5,"total_tokens":305,"input_tokens_by_modality":[{"modality":"text","tokens":42},{"modality":"image","tokens":258,"future_tokens":3}],"cached_tokens_by_modality":[{"modality":"text","tokens":4}],"output_tokens_by_modality":[{"tokens":5}]})"))).usage;
+  CHECK(u.extra.at("input_tokens_by_modality.text").value == 42 && u.extra.at("input_tokens_by_modality.image").value == 258);
+  CHECK(u.extra.at("input_tokens_by_modality.image.future_tokens").value == 3 && u.extra.at("cached_tokens_by_modality.text").value == 4);
+  // an entry without a modality name keeps its position
+  CHECK(u.extra.at("output_tokens_by_modality.0.tokens").value == 5 && !u.extra.contains("total_input_tokens") && !u.extra.contains("total_tokens"));
+  failure(buffered(resource("[" + output + "]", "completed",
+      R"({"total_input_tokens":2,"input_tokens_by_modality":[{"modality":"text","tokens":1},{"modality":"text","tokens":1}]})")), ErrorKind::ProtocolCorrupt);
+  failure(buffered(resource("[" + output + "]", "completed",
+      R"({"total_input_tokens":2,"input_tokens_by_modality":[{"modality":"text","tokens":-1}]})")), ErrorKind::ProtocolCorrupt);
 }
 void missing_terminal_usage() {
   for (const bool null_usage : {false, true}) {
@@ -285,7 +311,7 @@ void named_error_raw_ownership() {
 }
 }
 int main() {
-  try { creation_without_status_transcription(); raw_observation_ownership(); named_error_raw_ownership(); stateless_missing_resource_id(); missing_terminal_usage(); exact_steps_and_replay(); input_boundaries(); lifecycle_and_errors(); unknown_usage_and_signature();
+  try { creation_without_status_transcription(); raw_observation_ownership(); named_error_raw_ownership(); stateless_missing_resource_id(); missing_terminal_usage(); exact_steps_and_replay(); input_boundaries(); lifecycle_and_errors(); unknown_usage_and_signature(); modality_keyed_usage();
     std::cout << "Interactions semantic contracts passed\n"; return 0;
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }
