@@ -75,4 +75,7 @@ std::optional<std::string_view> borrowed(const std::optional<std::string>&);
 bool contains(const std::vector<std::string>&, std::string_view);
 bool temperature_forbidden(const ValidatedDescriptor&, std::string_view model);
 std::optional<std::string> validate_choices(const ValidatedDescriptor&, std::string_view model, const EffectiveChoices&);
+// True when this descriptor targets an origin its family policy declares as a routing gateway
+// (openrouter_origins). Such a gateway may serve a different concrete model than the one requested.
+bool routed_gateway(const ValidatedDescriptor&) noexcept;
 } // namespace sp::descriptor

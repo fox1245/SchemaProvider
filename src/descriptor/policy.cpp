@@ -225,6 +225,7 @@ PolicySnapshot builtin_policy(){static const auto value=[] {auto r=load_policy(c
 std::optional<std::string_view> borrowed(const std::optional<std::string>& value){if(value)return *value;return {};}
 bool contains(const std::vector<std::string>& values,std::string_view value){return std::find(values.begin(),values.end(),value)!=values.end();}
 EffectiveChoices effective_defaults(const ValidatedDescriptor& d,std::string_view model){return choices(d.policy()->defaults(d.family(),model));}
+bool routed_gateway(const ValidatedDescriptor& d) noexcept { return contains(d.family_policy().openrouter_origins, d.base_url()); }
 bool temperature_forbidden(const ValidatedDescriptor& d, std::string_view model) {
   const auto slash = model.rfind('/');
   const auto suffix = slash == std::string_view::npos ? model : model.substr(slash + 1);
