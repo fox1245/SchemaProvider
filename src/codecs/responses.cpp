@@ -677,9 +677,14 @@ bool Codec::usage(json::Value v) {
       !counter(v.get("total_tokens"), usage_.provider_reported_total, "total_tokens") || !counter(input.get("cached_tokens"), usage_.cache_read, "cached_tokens") ||
       !counter(input.get("cache_write_tokens"), usage_.cache_write, "cache_write_tokens") || !counter(output.get("reasoning_tokens"), usage_.reasoning, "reasoning_tokens") || !usage_leaves(v, "")) return false;
   usage_.input_uncached.reset(); usage_.total.reset();
-  if (usage_.input_total && usage_.cache_read) {
-    if (usage_.cache_read->value > usage_.input_total->value) conflict("cache_read", "cache read subset exceeds input total");
-    else usage_.input_uncached = Count{usage_.input_total->value - usage_.cache_read->value, Evidence::Derived};
+  if (usage_.input_total) {
+    // Both cache bands are subsets of input_tokens. Direct OpenAI reports cache_write_tokens and
+    // OpenRouter omits it; neither origin always carries it, so an absent count is zero.
+    const uint64_t read = usage_.cache_read ? usage_.cache_read->value : 0;
+    const uint64_t written = usage_.cache_write ? usage_.cache_write->value : 0;
+    if (read > usage_.input_total->value) conflict("cache_read", "cache read subset exceeds input total");
+    else if (written > usage_.input_total->value - read) conflict("cache_write", "cache read and write subsets exceed input total");
+    else if (usage_.cache_read) usage_.input_uncached = Count{usage_.input_total->value - read - written, Evidence::Derived};
   }
   if (usage_.input_total && usage_.output_total) {
     if (usage_.output_total->value > std::numeric_limits<uint64_t>::max() - usage_.input_total->value) return fail(ErrorKind::ProtocolCorrupt, "usage total overflow");

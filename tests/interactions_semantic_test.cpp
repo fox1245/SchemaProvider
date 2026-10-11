@@ -167,6 +167,20 @@ void modality_keyed_usage() {
   failure(buffered(resource("[" + output + "]", "completed",
       R"({"total_input_tokens":2,"input_tokens_by_modality":[{"modality":"text","tokens":-1}]})")), ErrorKind::ProtocolCorrupt);
 }
+// Captured gemini-2.5-flash-lite usage with thoughts and a cached prefix. Interactions has no
+// cache-write counter, so input_uncached = total_input_tokens - total_cached_tokens (Derived).
+void uncached_input_and_unmapped_counters() {
+  const std::string captured = R"({"total_tokens":6703,"total_input_tokens":6616,"input_tokens_by_modality":[{"modality":"text","tokens":6616}],"total_cached_tokens":6119,"cached_tokens_by_modality":[{"modality":"text","tokens":6119}],"total_output_tokens":3,"total_tool_use_tokens":0,"total_thought_tokens":84})";
+  for (const auto& o : {buffered(resource("[" + output + "]", "completed", captured)),
+                        stream({created(), start(0, R"({"type":"model_output","content":[],"extra":17})"), delta(0, R"({"type":"text","text":"answer"})"),
+                                stop(0), end("[" + output + "]", "completed", captured), {"done", "[DONE]"}})}) {
+    const auto& u = complete(o).usage;
+    CHECK(u.quality == UsageQuality::Consistent && !u.cache_write);
+    CHECK(u.input_uncached->value == 497 && u.input_uncached->evidence == Evidence::Derived);
+    CHECK(u.output_total->value == 87 && u.output_total->evidence == Evidence::Derived && u.reasoning->value == 84);
+    CHECK(u.input_total->value + u.output_total->value == u.provider_reported_total->value);
+  }
+}
 void missing_terminal_usage() {
   for (const bool null_usage : {false, true}) {
     auto change = delta(0, R"({"type":"text","text":"answer"})");
@@ -263,7 +277,7 @@ void named_error_raw_ownership() {
 }
 }
 int main() {
-  try { raw_observation_ownership(); named_error_raw_ownership(); stateless_missing_resource_id(); missing_terminal_usage(); exact_steps_and_replay(); input_boundaries(); lifecycle_and_errors(); unknown_usage_and_signature(); modality_keyed_usage();
+  try { raw_observation_ownership(); named_error_raw_ownership(); stateless_missing_resource_id(); missing_terminal_usage(); exact_steps_and_replay(); input_boundaries(); lifecycle_and_errors(); unknown_usage_and_signature(); modality_keyed_usage(); uncached_input_and_unmapped_counters();
     std::cout << "Interactions semantic contracts passed\n"; return 0;
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

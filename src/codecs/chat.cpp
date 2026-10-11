@@ -478,8 +478,12 @@ bool Codec::usage(json::Value value) {
     const uint64_t written = result.cache_write ? result.cache_write->value : 0;
     if (written > std::numeric_limits<uint64_t>::max() - read) return fail(ErrorKind::ProtocolCorrupt, "cache sum overflow");
     const uint64_t known_cached = read + written;
+    // A declared OpenRouter origin always reports prompt_tokens_details.cache_write_tokens, so
+    // its absence there leaves the cache-write share unknown. OpenAI-shaped Chat origins have no
+    // cache-write counter at all; an absent one is zero and a reported one is still subtracted.
+    const bool write_known = result.cache_write || !descriptor::routed_gateway(descriptor_);
     if (known_cached > result.input_total->value) conflict("input_uncached", "known cache subset exceeds input total");
-    else if (result.cache_read && result.cache_write)
+    else if (result.cache_read && write_known)
       result.input_uncached = Count{result.input_total->value - known_cached, Evidence::Derived};
   }
   if (result.output_total && result.reasoning && result.reasoning->value > result.output_total->value) conflict("reasoning", "reasoning subset exceeds output total");

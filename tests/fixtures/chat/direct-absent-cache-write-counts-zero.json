@@ -1,6 +1,6 @@
 {
   "fixture_version": 2,
-  "case_id": "absent-cache-write-stays-unknown",
+  "case_id": "direct-absent-cache-write-counts-zero",
   "origin": {
     "family": "openai.chat",
     "vendor": "synthetic",
@@ -94,7 +94,7 @@
         "output_total": 4,
         "total": 14,
         "provider_reported_total": 14,
-        "input_uncached": null,
+        "input_uncached": 6,
         "cache_read": 4,
         "cache_write": null,
         "reasoning": null,

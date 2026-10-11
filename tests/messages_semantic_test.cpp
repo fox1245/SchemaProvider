@@ -349,6 +349,18 @@ void usage_knowledge() {
   CHECK(failed(overflow, ErrorKind::ProtocolCorrupt).partial.usage.input_uncached->value == 2);
   auto missing_delta = stream({start(), stop("\"end_turn\"", "{}")}); failed(missing_delta, ErrorKind::ProtocolCorrupt);
 }
+// Messages reports the exclusive uncached input itself; input_total is derived from it, so the
+// cross-family identity input_uncached = input_total - cache_read - cache_write holds by construction.
+void uncached_input_rule() {
+  auto full = buffered(body("[]", "\"end_turn\"", R"({"input_tokens":10,"cache_read_input_tokens":20,"cache_creation_input_tokens":30,"output_tokens":3})"));
+  const auto& u = completed(full).usage;
+  CHECK(u.input_uncached->value == 10 && u.input_uncached->evidence == Evidence::Reported);
+  CHECK(u.input_total->value == 60 && u.input_total->evidence == Evidence::Derived);
+  CHECK(u.input_total->value - u.cache_read->value - u.cache_write->value == u.input_uncached->value);
+  auto no_write = buffered(body("[]", "\"end_turn\"", R"({"input_tokens":10,"cache_read_input_tokens":20,"output_tokens":3})"));
+  const auto& n = completed(no_write).usage;
+  CHECK(n.input_uncached->value == 10 && n.input_uncached->evidence == Evidence::Reported && !n.input_total && !n.cache_write);
+}
 void usage_binding_precedence() {
   auto loaded = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"bound-messages","family":"anthropic.messages","connection":{"base_url":"http://127.0.0.1","paths":{"buffered":"/messages","streaming":"/messages"}},"bindings":{"usage":["metrics","tokens"]}})");
   CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
@@ -642,7 +654,7 @@ int main() {
     usage_binding_precedence();
     usage_detail_forward_compatibility(); toolset_metadata_shapes();
     terminal_matrix(); text_thinking_and_order(); tool_fragments(); server_semantics(); server_result_shapes();
-    stop_classes(); corruption_matrix(); usage_knowledge(); limits_and_close_priority();
+    stop_classes(); corruption_matrix(); usage_knowledge(); uncached_input_rule(); limits_and_close_priority();
     std::cout << "messages semantic tests passed\n";
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

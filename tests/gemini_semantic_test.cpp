@@ -105,6 +105,18 @@ void nullable_usage() {
   CHECK(complete(o).usage.quality == UsageQuality::Inconsistent && !complete(o).usage.input_uncached && complete(o).usage.total->value == 17 && complete(o).usage.provider_reported_total->value == 99);
   o = buffered(body("[]", "STOP", R"({"candidatesTokenCount":18446744073709551615,"thoughtsTokenCount":1})")); failure(o, ErrorKind::ProtocolCorrupt);
 }
+// Generate has no cache-write counter: input_uncached = promptTokenCount - cachedContentTokenCount
+// (Evidence::Derived) when the cached count is reported, and unknown when it is omitted.
+void uncached_input_rule() {
+  for (const auto& o : {buffered(body(R"([{"text":"hello"}])", "STOP", counters)), stream({body(R"([{"text":"hello"}])", "STOP", counters)})}) {
+    const auto& u = complete(o).usage;
+    CHECK(u.input_total->value == 10 && u.cache_read->value == 4 && !u.cache_write);
+    CHECK(u.input_uncached->value == 6 && u.input_uncached->evidence == Evidence::Derived);
+  }
+  // Live gemini-2.5-flash-lite shape without cachedContentTokenCount.
+  auto o = buffered(body(R"([{"text":"hello"}])", "STOP", R"({"promptTokenCount":21,"candidatesTokenCount":1,"totalTokenCount":22,"promptTokensDetails":[{"modality":"TEXT","tokenCount":21}],"serviceTier":"standard"})"));
+  CHECK(complete(o).usage.input_total->value == 21 && !complete(o).usage.cache_read && !complete(o).usage.input_uncached);
+}
 void invalid_model_calls() {
   for (auto args : {"[]", "null", "1", R"({"x":1,"x":2})"}) {
     auto o = buffered(body("[{\"functionCall\":{\"id\":\"owned\",\"name\":\"lookup\",\"args\":" + std::string(args) + "}}]"));
@@ -446,6 +458,6 @@ void total_proves_zero_thoughts() {
 }
 }
 int main() {
-  try { http_error_envelope_in_an_array_is_retained(); output_total_without_thoughts(); total_proves_zero_thoughts(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); successive_unidentified_calls(); native_group_and_replay(); nullable_usage(); invalid_model_calls(); errors_and_terminals(); std::cout << "Gemini semantic invariants passed\n"; }
+  try { http_error_envelope_in_an_array_is_retained(); output_total_without_thoughts(); total_proves_zero_thoughts(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); successive_unidentified_calls(); native_group_and_replay(); nullable_usage(); uncached_input_rule(); invalid_model_calls(); errors_and_terminals(); std::cout << "Gemini semantic invariants passed\n"; }
   catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }
