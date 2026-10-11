@@ -90,7 +90,7 @@ class Codec {
   bool begun_ = false, stopped_ = false, done_ = false, closed_ = false, body_seen_ = false;
   std::optional<Error> buffered_failure_;
   std::string generation_, model_, finish_reason_;
-  uint64_t created_ = 0;
+  uint64_t created_ = 0;  // Latest chunk created value; nondecreasing within a stream.
   std::optional<bool> indexed_tools_;
   uint32_t next_part_ = 1;
   std::optional<LocalId> text_, refusal_, thinking_;

@@ -101,8 +101,12 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
   if (root.get("object").as_string() != (streaming ? "chat.completion.chunk" : "chat.completion")) return fail(ErrorKind::Unsupported, "unknown response object tag");
   auto created = root.get("created");
   if (!unsigned_count(created)) return fail(ErrorKind::ProtocolCorrupt, "creation counter required");
-  if (begun_ && (generation_ != root.get("id").as_string() || model_ != root.get("model").as_string() || created_ != uint_value(created)))
+  // Stream identity is id + model. Some OpenAI-compatible servers stamp each chunk with
+  // the current time, so created may repeat or advance between chunks but never go back.
+  if (begun_ && (generation_ != root.get("id").as_string() || model_ != root.get("model").as_string()))
     return fail(ErrorKind::ProtocolCorrupt, "inconsistent response identity");
+  if (begun_ && uint_value(created) < created_) return fail(ErrorKind::ProtocolCorrupt, "creation counter decreased");
+  created_ = uint_value(created);
   unknown(root, {"id", "model", "object", "created", "choices", "usage", "error"});
   auto choices = root.get("choices");
   if (!choices.is_array()) return fail(ErrorKind::ProtocolCorrupt, "choices must be array");
@@ -110,7 +114,6 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
   if (!begun_) {
     generation_ = root.get("id").as_string();
     model_ = root.get("model").as_string();
-    created_ = uint_value(created);
     if (!emit(Begin{generation_}) || !emit(MessageBegin{{0}, generation_, Role::Assistant, context_})) return false;
     begun_ = true;
   }

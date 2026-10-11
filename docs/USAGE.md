@@ -369,6 +369,8 @@ auto result = operation.join();  // Use a caller thread, never a library callbac
 
 An absolute `steady_clock` deadline includes preparation time, retained-handle waiting, DNS/connect/TLS, request/response I/O and any retry delay. Omitting it computes `now + Options::default_timeout` before encoding in `prepare`; moving the handle does not renew it. A stop requested before preparation or an already expired deadline is inspectable as an initial error; expiry during preparation is still checked before sending. Later cancellation cancels local work without waiting for peer progress. It cannot promise the remote service stops generating or billing. If the outcome was decided before cancellation was observed, that terminal outcome remains.
 
+A Chat stream is bound to one `id` and `model`. Some OpenAI-compatible local servers stamp each chunk with the current time, so `created` may repeat or advance between chunks; it must still be an unsigned count on every chunk, and a decrease, like a changed `id` or `model`, fails with `ProtocolCorrupt`.
+
 ### Stall bounds for long generations
 
 The deadline is the only time bound by default, so a stream that keeps its connection open and trickles bytes, or goes silent after its headers, runs until the whole deadline expires. That is acceptable at the 30 s default and costly once you raise the deadline for a long generation. Three optional bounds detect a stalled peer without touching the deadline. All are `std::chrono::milliseconds`, **off by default** (zero), and each is measured from the start of every attempt:

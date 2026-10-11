@@ -332,10 +332,25 @@ void required_metadata_and_identity() {
       failed(streaming ? frames({wire, "[DONE]"}) : buffered(wire), ErrorKind::ProtocolCorrupt);
     }
     if (streaming) {
+      // Stream identity is id + model; created may repeat or advance but never go back.
       for (size_t i : {0U, 1U, 3U}) {
-        auto outcome = frames({chunk(R"({"content":"prefix"})"), response(i, i == 3 ? "8" : "\"changed\"")});
+        auto outcome = frames({chunk(R"({"content":"prefix"})"), response(i, i == 3 ? "6" : "\"changed\"")});
         CHECK(text_of(failed(outcome, ErrorKind::ProtocolCorrupt).partial.messages) == "prefix");
       }
+      CHECK(text_of(completed(frames({chunk(R"({"content":"prefix"})"), response(3, "8"), "[DONE]"})).messages) == "prefixkept");
+      auto stamped = [](std::string_view created, std::string_view content, std::string_view finish = "null") {
+        return "{\"id\":\"generation-1\",\"model\":\"fixture-model\",\"created\":" + std::string(created) +
+          ",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":" + json::quote(content) +
+          "},\"finish_reason\":" + std::string(finish) + "}]}";
+      };
+      CHECK(text_of(completed(frames({stamped("7", "a"), stamped("9", "b"), stamped("9", "c"), stamped("12", "d", "\"stop\""), "[DONE]"})).messages) == "abcd");
+      auto back = frames({stamped("7", "a"), stamped("9", "b"), stamped("8", "c", "\"stop\""), "[DONE]"});
+      CHECK(text_of(failed(back, ErrorKind::ProtocolCorrupt).partial.messages) == "ab");
+      CHECK(failed(back, ErrorKind::ProtocolCorrupt).error.safe_message == "creation counter decreased");
+      auto other = frames({stamped("7", "a"), stamped("9", "b"),
+          R"({"id":"generation-2","model":"fixture-model","created":9,"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"c"},"finish_reason":"stop"}]})", "[DONE]"});
+      CHECK(text_of(failed(other, ErrorKind::ProtocolCorrupt).partial.messages) == "ab");
+      CHECK(failed(other, ErrorKind::ProtocolCorrupt).error.safe_message == "inconsistent response identity");
     }
   }
   std::string generation;
@@ -349,6 +364,34 @@ void required_metadata_and_identity() {
   CHECK(codec.frame("message", "[DONE]")); codec.finish();
   CHECK(generation == "generation-1" && begins == 1);
   CHECK(text_of(completed(*accumulator.outcome()).messages) == "hello");
+}
+void per_chunk_creation_clock() {
+  // Shape of an OpenAI-compatible local server that stamps each chunk with the current time.
+  // The last two chunks are a captured stream tail; the final chunk carries finish_reason,
+  // usage and an extra timings object before [DONE].
+  const auto tail = [](std::string_view created, std::string_view choice) {
+    return "data: {\"choices\":[" + std::string(choice) + "],\"created\":" + std::string(created) +
+      R"(,"id":"chatcmpl-X","model":"local-llm","system_fingerprint":"b4889-9f2250ba","object":"chat.completion.chunk"})" "\n\n";
+  };
+  const std::string wire =
+    tail("1791711213", R"({"finish_reason":null,"index":0,"delta":{"role":"assistant","content":null}})") +
+    tail("1791711213", R"({"finish_reason":null,"index":0,"delta":{"content":"Hello"}})") +
+    tail("1791711214", R"({"finish_reason":null,"index":0,"delta":{"content":", local"}})") +
+    tail("1791711221", R"({"finish_reason":null,"index":0,"delta":{"content":" model."}})") +
+    "data: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"content\":\"\"}}],\"created\":1791711222,\"id\":\"chatcmpl-X\",\"model\":\"local-llm\",\"system_fingerprint\":\"b4889-9f2250ba\",\"object\":\"chat.completion.chunk\"}\n\n"
+    "data: {\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"delta\":{}}],\"created\":1791711222,\"id\":\"chatcmpl-X\",\"model\":\"local-llm\",\"system_fingerprint\":\"b4889-9f2250ba\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":45,\"prompt_tokens\":36,\"total_tokens\":81},\"timings\":{\"prompt_n\":26,\"predicted_n\":45}}\n\n"
+    "data: [DONE]\n\n";
+  Accumulator accumulator;
+  chat::Codec codec(descriptor_value(), chat::Mode::Sse, accumulator);
+  transport::SseFramer framer;
+  CHECK(framer.feed(wire, [&](const transport::SseFrame& frame) { return codec.frame(frame.event, frame.data); }));
+  framer.finish(); CHECK(framer.error() == transport::SseError::None); codec.finish();
+  CHECK(accumulator.outcome());
+  const auto& completion = completed(*accumulator.outcome());
+  CHECK(text_of(completion.messages) == "Hello, local model." && completion.stop.kind == StopKind::EndTurn);
+  CHECK(completion.usage.input_total && completion.usage.input_total->value == 36);
+  CHECK(completion.usage.output_total && completion.usage.output_total->value == 45);
+  CHECK(completion.usage.total && completion.usage.total->value == 81);
 }
 void required_usage_and_unknown_cache() {
   const std::vector<std::string> names{"prompt_tokens", "completion_tokens", "total_tokens"};
@@ -884,7 +927,7 @@ int main() {
     owned_raw_observations(); raw_failure_evidence();
     chunk_partition_invariant(); no_terminal_no_success(); transport_projection_parity(); known_corrupt_never_ignored();
     invalid_tools_and_compatibility(); usage_knowledge(); accumulator_transitions_and_seals(); typed_request_encoding();
-    required_metadata_and_identity(); required_usage_and_unknown_cache(); unindexed_tool_order_and_optional_function(); buffered_close_precedence();
+    required_metadata_and_identity(); per_chunk_creation_clock(); required_usage_and_unknown_cache(); unindexed_tool_order_and_optional_function(); buffered_close_precedence();
     accumulator_interleaved_ordering(); accumulator_order_uniqueness_and_limits();
     tool_history_and_escaped_arguments(); quoted_json_and_request_bounds();
     gateway_request_controls();
