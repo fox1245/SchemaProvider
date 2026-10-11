@@ -45,6 +45,8 @@ Responses function tools apply the policy `strict_tools` default only to strict-
 
 The Chat codec binds stream identity to `id` and `model`. Some OpenAI-compatible local servers stamp each chunk with the current time, so `created` may now repeat or increase between chunks instead of failing every stream as `ProtocolCorrupt`; it must still be an unsigned count on every chunk, and a decrease or a changed `id` or `model` remains `ProtocolCorrupt`.
 
+An in-band failure larger than `max_error_bytes` (64 KiB by default) that the codec had already admitted under the response bounds was reported as `ResourceLimit` with `RetryClass::Never`. A Responses `response.failed` after a hosted image, which repeats the multi-megabyte image, hit this. It is now classified from the admitted document like a small one: `RemoteFailure`, or the kind, retry class and `vendor_code` of an admitted error code. `max_error_bytes` still bounds non-2xx bodies and in-band error bytes the runtime parses itself; runtime and error policies are unchanged. See [outcomes](USAGE.md#outcomes-raw-data-and-nullable-usage).
+
 ## From interface 5 to 6
 
 Package 0.3.0 alpha adds `Usage::provider_cost` and the fixed-size `ProviderReportedCost`, `UsdAmount`, `CostSource`, `CostStatus` and `CostRounding` types. Existing field access remains source-compatible, but `Usage`, `UsageUpdate`, `Completion`, `PartialCompletion` and the containing `Event` layouts grow. Rebuild every consumer against the same headers and generation 6 libraries (`libsp_*.so.6`); interface 5 binaries must not load interface 6 libraries. CMake consumers select `SchemaProvider 0.3.0 EXACT`.

@@ -648,19 +648,22 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
     if (attempt) attempt->cancel();
   }
   void inspect(std::string_view body, bool retain_body = false) {
-    if (body.size() > client->options.limits.max_error_bytes) {
-      response_info = {};
-      response_info.kind = ErrorKind::ResourceLimit;
-      response_info.retry_class = RetryClass::Never;
-      return;
-    }
     static const std::vector<transport::Header> no_headers;
     auto classify = [&](json::Value document) {
       response_info = inspect_document_response(*client->options.policy, client->descriptor.family(),
           response ? response->value.status : 0, response ? response->value.headers : no_headers, document,
           response ? response->received : executor->now(), response ? response->wall_received : executor->wall_now());
     };
+    // The codec already admitted this document under the response bounds, so
+    // max_error_bytes, which bounds only bytes parsed here, does not apply. A
+    // hosted image makes response.failed megabytes long; that is no local limit.
     if (observed_document) { classify(observed_document->root()); return; }
+    if (body.size() > client->options.limits.max_error_bytes) {
+      response_info = {};
+      response_info.kind = ErrorKind::ResourceLimit;
+      response_info.retry_class = RetryClass::Never;
+      return;
+    }
     auto parsed = json::parse(body, {client->options.limits.max_error_bytes,
         static_cast<std::size_t>(client->options.policy->admission().error_json_depth)});
     if (auto* document = std::get_if<json::Document>(&parsed)) {

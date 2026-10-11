@@ -386,6 +386,49 @@ void incomplete_and_opaque(Peer& peer) {
     peer.count(opaque, 1);
   }
 }
+// A hosted image arrives whole in its output_item.done and again in the terminal
+// envelope, so a response.failed after it is far larger than max_error_bytes. The
+// codec already admitted that document under the response bounds; its failure stays
+// the vendor's, classified from the admitted document like any other remote error.
+void hosted_image_terminal(Peer& peer) {
+  constexpr std::size_t MiB = 1024 * 1024;
+  auto large = options();
+  large.limits.sse.max_line_bytes = large.limits.sse.max_event_bytes = 8 * MiB;
+  large.limits.sse.max_total_bytes = large.limits.max_response_bytes = 32 * MiB;
+  large.limits.semantic.max_content_bytes = 32 * MiB;
+  const std::vector<std::pair<std::size_t, sp::runtime::Options>> cases{{512 * 1024, options()}, {3 * MiB, large}};
+  for (const auto& [bytes, limits] : cases) {
+    require(bytes > limits.limits.max_error_bytes, "hosted image fixture fits the error-body bound");
+    Client client(descriptor(peer), limits);
+    const auto size = std::to_string(bytes);
+    const auto image = [&](const std::vector<sp::Message>& messages) {
+      for (const auto& m : messages) for (const auto& p : m.parts)
+        if (const auto* item = std::get_if<sp::Media>(&p); item && item->kind == sp::MediaKind::Image && item->id == "ig_native")
+          return item->data && item->data->size() == bytes;
+      return false;
+    };
+    for (bool streaming : {false, true}) {
+      const auto failed = peer.arm("failed-image", size); const auto failed_result = client.complete(request(failed), run(streaming));
+      const auto& f = failure(failed_result, sp::ErrorKind::RemoteFailure);
+      require(f.error.http_status == 200 && f.error.vendor_code.empty() && f.error.retry_class == sp::RetryClass::Unknown,
+          "admitted response.failed became a local resource limit");
+      require(text(f.partial.messages) == "hello" && image(f.partial.messages), "failed response lost the generated image item");
+      require(f.partial.wire_envelope && f.partial.wire_envelope->root().get("status").as_string() == "failed" &&
+          f.partial.wire_envelope->root().get("error").get("code").as_string() == "server_error", "failed envelope not retained");
+      require(!streaming || f.partial.raw_events.back().type == "response.failed", "terminal failure event not retained");
+      incomplete_native(f.partial.messages); peer.count(failed, 1);
+      const auto quota = peer.arm("failed-image-quota", size); const auto quota_result = client.complete(request(quota), run(streaming));
+      const auto& q = failure(quota_result, sp::ErrorKind::QuotaExhausted);
+      require(q.error.vendor_code == "insufficient_quota" && q.error.retry_class == sp::RetryClass::Never,
+          "admitted vendor code lost in a large terminal failure");
+      peer.count(quota, 1);
+      const auto done = peer.arm("image", size); const auto done_result = client.complete(request(done), run(streaming));
+      const auto& c = completion(done_result);
+      require(c.stop.kind == sp::StopKind::EndTurn && text(c.messages) == "hello" && image(c.messages), "completed image response lost its item");
+      peer.count(done, 1);
+    }
+  }
+}
 } // namespace
 int main(int argc, char** argv) {
 #ifdef _WIN32
@@ -398,7 +441,7 @@ int main(int argc, char** argv) {
     {
       Peer peer(argv[1], argv[2]); provider_held_continuation(peer); provider_held_client_tool_ownership(peer);
       two_turn_and_refusal(peer); negative_replay_is_only_model_free(peer);
-      failed_terminal_matrix(peer); named_error_outcomes_and_retry(peer); close_cancel_deadline_and_retention(peer); incomplete_and_opaque(peer);
+      failed_terminal_matrix(peer); hosted_image_terminal(peer); named_error_outcomes_and_retry(peer); close_cancel_deadline_and_retention(peer); incomplete_and_opaque(peer);
     }
     const auto captured = logs.finish(); require(captured.find(key) == std::string::npos && captured.find(cipher) == std::string::npos, "credential/cipher leaked in diagnostics");
     std::cout << "Responses model-free HTTP contracts passed (not vendor replay validation)\n"; return 0;

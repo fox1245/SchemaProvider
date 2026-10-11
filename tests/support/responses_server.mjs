@@ -21,20 +21,23 @@ const call = () => ({ id: 'fc_item', type: 'function_call', status: 'completed',
 const message = text => ({ id: 'msg_native', type: 'message', status: 'completed', role: 'assistant',
   phase: 'final_answer', content: [{ type: 'output_text', text, annotations: [] }] });
 const grouped = () => [reasoning(), call(), message('need lookup')];
+// A hosted image arrives whole in its output_item.done and again in the terminal envelope.
+const image = bytes => ({ id: 'ig_native', type: 'image_generation_call', status: 'completed', result: 'A'.repeat(bytes) });
 const usage = { input_tokens: 10, output_tokens: 7, total_tokens: 17,
   input_tokens_details: { cached_tokens: 4 }, output_tokens_details: { reasoning_tokens: 3 } };
-function response(model, output, status = 'completed', counters = usage, id = 'resp_native') {
+function response(model, output, status = 'completed', counters = usage, id = 'resp_native', error = null) {
   return { id, object: 'response', created_at: 1, model, status, output, usage: counters,
-    incomplete_details: status === 'incomplete' ? { reason: 'max_output_tokens' } : null, error: null };
+    incomplete_details: status === 'incomplete' ? { reason: 'max_output_tokens' } : null, error };
 }
-function frames(model, output, status = 'completed', counters = usage, id = 'resp_native') {
+function frames(model, output, status = 'completed', counters = usage, id = 'resp_native', error = null) {
   let sequence = 0;
   const frame = (type, fields) => `event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: sequence++, ...fields })}\n\n`;
   let wire = frame('response.created', { response: response(model, [], 'in_progress', null, id) });
   for (const [output_index, item] of output.entries()) {
     const initial = item.type === 'message' ? { ...item, status: 'in_progress', content: [] }
       : item.type === 'reasoning' ? { id: item.id, type: item.type, summary: [] }
-      : item.type === 'function_call' ? { ...item, status: 'in_progress', arguments: '' } : item;
+      : item.type === 'function_call' ? { ...item, status: 'in_progress', arguments: '' }
+      : item.type === 'image_generation_call' ? { id: item.id, type: item.type, status: 'in_progress' } : item;
     wire += frame('response.output_item.added', { output_index, item: initial });
     if (item.type === 'message' || item.type === 'reasoning') {
       const summary = item.type === 'reasoning';
@@ -59,8 +62,8 @@ function frames(model, output, status = 'completed', counters = usage, id = 'res
   // Replay must use the completed output_item.done bytes, not this envelope.
   const aggregate = structuredClone(output);
   for (const item of aggregate) if (item.type === 'reasoning') item.encrypted_content = 'TERMINAL_ONLY_REPRESENTATION';
-  wire += frame(status === 'incomplete' ? 'response.incomplete' : 'response.completed',
-    { response: response(model, aggregate, status, counters, id) });
+  wire += frame(status === 'incomplete' ? 'response.incomplete' : status === 'failed' ? 'response.failed' : 'response.completed',
+    { response: response(model, aggregate, status, counters, id, error) });
   return wire;
 }
 function prefix(model) {
@@ -157,13 +160,17 @@ const server = http.createServer(async (req, res) => {
       fault(); res.writeHead(400, { 'Content-Type': 'application/json', Connection: 'close' });
       res.end(JSON.stringify({ error: { type: 'invalid_request_error', code: 'invalid_encrypted_content', message: key + cipher } })); return;
     }
-    const status = c.scenario === 'incomplete' ? 'incomplete' : 'completed';
+    const failed = c.scenario.startsWith('failed-image');
+    const status = c.scenario === 'incomplete' ? 'incomplete' : failed ? 'failed' : 'completed';
+    const error = failed ? { code: c.scenario.endsWith('-quota') ? 'insufficient_quota' : 'server_error', message: key + cipher } : null;
     const output = c.scenario === 'grouped' || c.scenario === 'replay-rejected' || c.scenario === 'forced'
       ? (c.count === 1 ? grouped() : [reasoning(), message('answer one')])
       : c.scenario === 'incomplete' ? [reasoning(), { ...call(), status: 'incomplete', arguments: '{"x":' }]
       : c.scenario === 'opaque' ? [{ id: 'ws_1', type: 'web_search_call', status: 'completed', action: { type: 'search', query: 'x' } }, message('hello')]
+      : c.scenario.endsWith('image') || failed ? [reasoning(), message('hello'), image(Number(c.text))]
       : [reasoning(), message(c.text ?? 'hello')];
-    const data = body.stream ? frames(body.model, output, status) : JSON.stringify(response(body.model, output, status));
+    const data = body.stream ? frames(body.model, output, status, usage, 'resp_native', error)
+      : JSON.stringify(response(body.model, output, status, usage, 'resp_native', error));
     const headers = { 'Content-Type': body.stream ? 'text/event-stream' : 'application/json', Connection: 'close' };
     if (c.scenario === 'short-close') headers['Content-Length'] = Buffer.byteLength(data) + 19;
     res.writeHead(200, headers); res.flushHeaders();
