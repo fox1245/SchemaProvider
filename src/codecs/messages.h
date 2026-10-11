@@ -53,7 +53,7 @@ class Codec {
   const bool context_valid_;
   SemanticLimits limits_;
   Diagnostics diagnostics_;
-  bool begun_ = false, stopped_ = false, done_ = false, closed_ = false, body_seen_ = false, message_delta_ = false;
+  bool begun_ = false, stopped_ = false, done_ = false, closed_ = false, body_seen_ = false, message_delta_ = false, sentinel_ = false;
   std::optional<Error> buffered_failure_;
   std::optional<StopReason> stop_;
   std::string generation_, model_;

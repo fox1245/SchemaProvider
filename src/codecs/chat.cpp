@@ -446,6 +446,27 @@ bool Codec::usage(json::Value value) {
       if (c) result.extra[key] = *c;
     }
   }
+  // Like Responses, every other nonnegative integer leaf (for example a gateway's
+  // prompt_tokens_details.video_tokens) stays addressable by its dotted path. Typed or
+  // already-named counters are not repeated, and monetary members are never token leaves.
+  static constexpr std::string_view mapped[] = {"prompt_tokens", "completion_tokens", "total_tokens",
+      "prompt_tokens_details.cached_tokens", "prompt_tokens_details.cache_write_tokens", "prompt_tokens_details.audio_tokens",
+      "completion_tokens_details.reasoning_tokens", "completion_tokens_details.audio_tokens",
+      "completion_tokens_details.accepted_prediction_tokens", "completion_tokens_details.rejected_prediction_tokens"};
+  const auto leaves = [&](const auto& self, json::Value node, const std::string& path) -> void {
+    if (node.is_object()) {
+      for (auto member : node.members()) {
+        if (path.empty() && codecs::monetary_member(member.key)) continue;
+        self(self, member.value, path.empty() ? std::string(member.key) : path + "." + std::string(member.key));
+      }
+    } else if (node.is_array()) {
+      size_t n = 0;
+      for (auto item : node.elements()) self(self, item, path + "." + std::to_string(n++));
+    } else if (unsigned_count(node) && std::find(std::begin(mapped), std::end(mapped), path) == std::end(mapped)) {
+      result.extra.emplace(path, Count{uint_value(node), Evidence::Reported});
+    }
+  };
+  leaves(leaves, value, {});
   auto conflict = [&](std::string counter_name, std::string detail) { result.quality = UsageQuality::Inconsistent; result.conflicts.push_back({std::move(counter_name), std::move(detail)}); };
   if (result.input_total && result.output_total) {
     if (result.output_total->value > std::numeric_limits<uint64_t>::max() - result.input_total->value) return fail(ErrorKind::ProtocolCorrupt, "usage sum overflow");

@@ -83,15 +83,17 @@ enum class UsageQuality { Consistent, Inconsistent };
 struct UsageConflict { std::string counter, detail; };
 enum class CostSource { None, OpenRouterUsd, UnknownCurrency };
 enum class CostStatus { Missing, Available, Malformed, PrecisionExceeded, Overflow, UnknownCurrency, Conflict };
-enum class CostRounding { CeilingParsedBinary64 };
+// CeilingParsedBinary64 is retained for source compatibility; amounts are no longer produced with it.
+enum class CostRounding { CeilingParsedBinary64, CeilingShortestDecimal };
 struct UsdAmount {
   uint64_t nano_usd = 0;
   Evidence evidence = Evidence::Reported;
-  CostRounding rounding = CostRounding::CeilingParsedBinary64;
+  CostRounding rounding = CostRounding::CeilingShortestDecimal;
 };
 // Provider-reported usage metadata, not an invoice, estimate, or budget authority.
-// One nanoUSD is 1e-9 USD. Amounts round upward from the parsed binary64 value,
-// not the unavailable original decimal lexeme; stage is the enclosing Usage.stage.
+// One nanoUSD is 1e-9 USD. Amounts convert exactly from the shortest decimal that
+// round-trips to the parsed binary64 value (the original lexeme is unavailable); only a
+// remainder below one nanoUSD rounds upward. Stage is the enclosing Usage.stage.
 struct ProviderReportedCost {
   std::optional<UsdAmount> total, upstream_total, upstream_input, upstream_output;
   // Status order: total, upstream_total, upstream_input, upstream_output.

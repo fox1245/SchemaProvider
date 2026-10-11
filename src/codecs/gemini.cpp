@@ -239,8 +239,16 @@ bool Codec::usage(json::Value v) {
   // thoughts treated as an inclusive subset. Missing thoughts remain unknown.
   // When the request set the thinking budget to zero the vendor cannot have
   // generated thoughts, and it then omits thoughtsTokenCount: the candidates are
-  // the whole output. Without that request evidence a missing count stays unknown.
+  // the whole output. Without that request evidence, or a total proving zero thoughts
+  // (below), a missing count stays unknown.
   const bool no_thoughts = !next.reasoning && context_ && context_->thinking_disabled();
+  // A reported total that already equals prompt + candidates leaves no room for thoughts,
+  // so the omitted count is a derived zero. A nonzero tool-use prompt count makes that
+  // equation ambiguous (it is not part of the derived total), so it stays unknown.
+  if (!next.reasoning && candidates && next.input_total && next.provider_reported_total && (!tool || tool->value == 0) &&
+      candidates->value <= std::numeric_limits<uint64_t>::max() - next.input_total->value &&
+      next.input_total->value + candidates->value == next.provider_reported_total->value)
+    next.reasoning = Count{0, Evidence::Derived};
   if (candidates && (next.reasoning || no_thoughts)) {
     const uint64_t thoughts = next.reasoning ? next.reasoning->value : 0;
     if (thoughts > std::numeric_limits<uint64_t>::max() - candidates->value)
