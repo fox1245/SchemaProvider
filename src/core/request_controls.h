@@ -148,6 +148,85 @@ inline bool schema_node(json::Value node) {
   }
   return true;
 }
+// Structural part of OpenAI's strict function-schema rules. The root must be an
+// object schema, and every object schema reached through properties, items,
+// prefixItems, anyOf, $defs or definitions must set "additionalProperties":
+// false and list each of its properties in "required". Keywords are deliberately
+// not whitelisted: the supported set varies by model and the service still
+// judges them. The result is the first violation in document order, as an
+// RFC 6901 pointer into the schema plus a reason; none means compatible.
+struct StrictSchemaViolation { std::string pointer; std::string_view reason; };
+inline void append_pointer_token(std::string& pointer, std::string_view token) {
+  pointer += '/';
+  for (const char c : token) {
+    if (c == '~') pointer += "~0";
+    else if (c == '/') pointer += "~1";
+    else pointer += c;
+  }
+}
+inline bool strict_object_schema(json::Value node) {
+  const auto type = node.get("type");
+  if (type.is_string()) return type.as_string() == "object";
+  if (type.is_array()) {
+    for (auto name : type.elements()) if (name.is_string() && name.as_string() == "object") return true;
+    return false;
+  }
+  return node.get("properties").valid();
+}
+inline std::optional<StrictSchemaViolation> strict_schema_node(json::Value node, std::string& pointer) {
+  if (!node.is_object()) return {};
+  if (strict_object_schema(node)) {
+    const auto additional = node.get("additionalProperties");
+    if (!additional.is_bool() || additional.as_bool())
+      return StrictSchemaViolation{pointer, "object schema needs \"additionalProperties\": false"};
+    if (const auto properties = node.get("properties"); properties.is_object()) {
+      std::set<std::string_view> required;
+      if (const auto names = node.get("required"); names.is_array())
+        for (auto name : names.elements()) if (name.is_string()) required.insert(name.as_string());
+      for (auto property : properties.members())
+        if (!required.count(property.key)) {
+          append_pointer_token(pointer, "properties");
+          append_pointer_token(pointer, property.key);
+          return StrictSchemaViolation{pointer, "property is not listed in \"required\""};
+        }
+    }
+  }
+  for (auto member : node.members()) {
+    const auto key = member.key;
+    const auto child = member.value;
+    const auto size = pointer.size();
+    if (key == "properties" || key == "$defs" || key == "definitions") {
+      if (!child.is_object()) continue;
+      for (auto entry : child.members()) {
+        append_pointer_token(pointer, key);
+        append_pointer_token(pointer, entry.key);
+        if (auto violation = strict_schema_node(entry.value, pointer)) return violation;
+        pointer.resize(size);
+      }
+    } else if (key == "items" || key == "prefixItems" || key == "anyOf") {
+      if (child.is_array()) {
+        std::size_t index = 0;
+        for (auto element : child.elements()) {
+          append_pointer_token(pointer, key);
+          append_pointer_token(pointer, std::to_string(index++));
+          if (auto violation = strict_schema_node(element, pointer)) return violation;
+          pointer.resize(size);
+        }
+      } else if (key == "items") {
+        append_pointer_token(pointer, key);
+        if (auto violation = strict_schema_node(child, pointer)) return violation;
+        pointer.resize(size);
+      }
+    }
+  }
+  return {};
+}
+inline std::optional<StrictSchemaViolation> strict_schema_violation(json::Value schema) {
+  if (!schema.is_object() || !schema.get("type").is_string() || schema.get("type").as_string() != "object")
+    return StrictSchemaViolation{"", "root must be an object schema"};
+  std::string pointer;
+  return strict_schema_node(schema, pointer);
+}
 inline std::optional<std::string> validate_response_format(
     const ResponseFormat& format, const descriptor::CodecResources& resources) {
   if (format.kind == ResponseFormat::Kind::JsonObject) {
