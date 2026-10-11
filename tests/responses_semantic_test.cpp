@@ -626,10 +626,18 @@ void provider_money_and_snapshot_aliases() {
     CHECK(std::get<Error>(responses::encode(direct, changed, false)).kind == ErrorKind::ReplayIneligible);
     auto explicit_request = alias; explicit_request.model = snapshot;
     completed(decode(direct, explicit_request, wires, sse));
-    failed(decode(gateway, alias, wires, sse), ErrorKind::ProtocolCorrupt);
+    // A declared routing gateway may serve another concrete model; replay stays bound to the request.
+    const auto routed = decode(gateway, alias, wires, sse);
+    CHECK(completed(routed).wire_envelope->root().get("model").as_string() == snapshot);
+    auto routed_replay = alias; routed_replay.messages.push_back(completed(routed).messages[0]);
+    routed_replay.messages.push_back(Message{"", Role::Tool, {ToolResult{"call_1", "one"}}});
+    auto routed_encoded = responses::encode(gateway, routed_replay, false);
+    CHECK(std::holds_alternative<responses::EncodedRequest>(routed_encoded));
+    CHECK(parse(std::get<responses::EncodedRequest>(routed_encoded).body).root().get("model").as_string() == alias.model);
     if (sse) {
       wires.back().second = replace_model(terminal(output).second, "gpt-4.1-nano-2025-04-15");
       failed(decode(direct, alias, wires, true), ErrorKind::ProtocolCorrupt);
+      failed(decode(gateway, alias, wires, true), ErrorKind::ProtocolCorrupt);
       wires.back().second = replace_model(terminal(output).second, alias.model);
       failed(decode(direct, alias, wires, true), ErrorKind::ProtocolCorrupt);
     }
@@ -643,6 +651,11 @@ void provider_money_and_snapshot_aliases() {
   failed(decode(direct, namespaced, {{"", replace_model(body("[]"), "openai/gpt-4.1-nano-2025-04-14")}}, false), ErrorKind::ProtocolCorrupt);
   const auto leap = replace_model(body("[]"), "gpt-4.1-nano-2024-02-29");
   completed(decode(direct, alias, {{"", leap}}, false));
+  // Observed OpenRouter routing alias: the gateway answers with the concrete model it served.
+  auto routing = request(); routing.model = "~deepseek/deepseek-v4-flash-latest";
+  const auto served = replace_model(body("[" + message + "]"), "deepseek/deepseek-v4-flash-0731");
+  CHECK(completed(decode(gateway, routing, {{"", served}}, false)).wire_envelope->root().get("model").as_string() == "deepseek/deepseek-v4-flash-0731");
+  failed(decode(direct, routing, {{"", served}}, false), ErrorKind::ProtocolCorrupt);
 }
 void corruption_and_bounds() {
   auto frames = text_frames(); frames[3] = text_delta("foreign", 0, "hel"); failed(stream(frames), ErrorKind::ProtocolCorrupt);

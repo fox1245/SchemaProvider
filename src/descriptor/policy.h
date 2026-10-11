@@ -94,4 +94,7 @@ bool temperature_forbidden(const ValidatedDescriptor&, std::string_view model);
 std::optional<std::string> validate_choices(const ValidatedDescriptor&, std::string_view model, const EffectiveChoices&);
 // The media admission in force for this descriptor's origin.
 const MediaPolicy& media_policy(const ValidatedDescriptor&) noexcept;
+// True when this descriptor targets an origin its family policy declares as a routing gateway
+// (openrouter_origins). Such a gateway may serve a different concrete model than the one requested.
+bool routed_gateway(const ValidatedDescriptor&) noexcept;
 } // namespace sp::descriptor

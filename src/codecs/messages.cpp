@@ -1,6 +1,7 @@
 #include "codecs/messages.h"
 #include "core/native.h"
 #include "descriptor/descriptor.h"
+#include "descriptor/policy.h"
 #include "json/json.h"
 #include <algorithm>
 #include <limits>
@@ -163,7 +164,9 @@ bool Codec::identity(json::Value v, bool required) {
   if ((required && (!id.valid() || !model.valid() || !role.valid())) ||
       (id.valid() && !nonempty(id)) || (model.valid() && !nonempty(model)) ||
       (role.valid() && (!role.is_string() || role.as_string() != "assistant"))) return fail(ErrorKind::ProtocolCorrupt, "invalid message identity");
-  if (model.valid() && model.as_string() != context_->model()) return fail(ErrorKind::ProtocolCorrupt, "response model differs from request");
+  // A declared routing gateway may serve another concrete model; stability is still enforced below.
+  if (model.valid() && model.as_string() != context_->model() && !descriptor::routed_gateway(descriptor_))
+    return fail(ErrorKind::ProtocolCorrupt, "response model differs from request");
   if (begun_ && ((id.valid() && id.as_string() != generation_) || (model.valid() && model.as_string() != model_))) return fail(ErrorKind::ProtocolCorrupt, "inconsistent message identity");
   return true;
 }
