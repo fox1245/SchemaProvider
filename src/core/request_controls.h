@@ -4,6 +4,7 @@
 #include "json/json.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <set>
@@ -13,10 +14,21 @@
 #include <vector>
 
 namespace sp {
+// OpenRouter `provider.max_price`: the highest endpoint price the router may choose for this
+// request. When no endpoint is priced at or below it, the request fails rather than routing to a
+// dearer one. Amounts are integer nanoUSD (1e-9 USD), the unit of UsdAmount, so a ceiling is
+// exact: prompt and completion per million tokens, image per image, audio per audio unit,
+// request per request. Each is sent as the exact decimal USD JSON number, with no exponent or
+// binary rounding (75'000'000 is 0.075). At least one amount is required; none may exceed
+// 2^53 nanoUSD.
+struct OpenRouterMaxPrice {
+  std::optional<std::uint64_t> prompt_nano_usd, completion_nano_usd, image_nano_usd, audio_nano_usd, request_nano_usd;
+};
 struct OpenRouterRouting {
   std::optional<bool> zdr, allow_fallbacks, require_parameters;
   std::vector<std::string> only, order, ignore;
   std::optional<std::string> data_collection;
+  std::optional<OpenRouterMaxPrice> max_price;
 };
 struct ResponseFormat {
   enum class Kind { JsonObject, JsonSchema };
@@ -60,6 +72,17 @@ inline std::optional<std::string> validate_routing(
       return "ignored providers cannot be selected or ordered";
   if (!routing.only.empty()) for (const auto& name : routing.order)
     if (!descriptor::contains(routing.only, name)) return "ordered providers must belong to only";
+  if (routing.max_price) {
+    const auto& price = *routing.max_price;
+    bool any = false;
+    for (const auto* amount : {&price.prompt_nano_usd, &price.completion_nano_usd, &price.image_nano_usd,
+                               &price.audio_nano_usd, &price.request_nano_usd}) {
+      if (!*amount) continue;
+      any = true;
+      if (**amount > (std::uint64_t{1} << 53)) return "max_price amounts cannot exceed 2^53 nanoUSD";
+    }
+    if (!any) return "max_price requires at least one amount";
+  }
   return {};
 }
 
@@ -274,7 +297,34 @@ inline void write_routing(json::BoundedWriter& body, const OpenRouterRouting& ro
   list("ignore", routing.ignore);
   if (routing.data_collection) {
     if (comma) body.raw(",");
+    comma = true;
     body.raw("\"data_collection\":").quoted(*routing.data_collection);
+  }
+  if (routing.max_price) {
+    if (comma) body.raw(",");
+    body.raw("\"max_price\":{");
+    bool price_comma = false;
+    // Exact decimal USD: whole dollars, then at most nine fractional digits without trailing
+    // zeros. No exponent and no binary64 rounding reach the wire.
+    auto price = [&](std::string_view key, const std::optional<std::uint64_t>& nano_usd) {
+      if (!nano_usd) return;
+      if (price_comma) body.raw(",");
+      price_comma = true;
+      body.quoted(key).raw(":").raw(std::to_string(*nano_usd / 1000000000U));
+      if (auto fraction = *nano_usd % 1000000000U) {
+        char digits[10] = {'.'};
+        for (std::size_t i = 9; i > 0; --i, fraction /= 10) digits[i] = static_cast<char>('0' + fraction % 10);
+        std::size_t end = sizeof digits;
+        while (digits[end - 1] == '0') --end;
+        body.raw(std::string_view(digits, end));
+      }
+    };
+    price("prompt", routing.max_price->prompt_nano_usd);
+    price("completion", routing.max_price->completion_nano_usd);
+    price("image", routing.max_price->image_nano_usd);
+    price("audio", routing.max_price->audio_nano_usd);
+    price("request", routing.max_price->request_nano_usd);
+    body.raw("}");
   }
   body.raw("}");
 }

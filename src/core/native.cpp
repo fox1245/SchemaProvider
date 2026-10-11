@@ -228,6 +228,17 @@ void routing_digest(Hash& hash, const std::optional<OpenRouterRouting>& routing)
   list(routing->only); list(routing->order); list(routing->ignore);
   hash.number(routing->data_collection.has_value());
   if (routing->data_collection) hash.text(*routing->data_collection);
+  // A price ceiling narrows the endpoints the gateway may choose, so it joins the routing
+  // binding behind its own marker. Routing without one keeps its earlier digest, and
+  // histories sealed before max_price existed still verify.
+  if (const auto& price = routing->max_price) {
+    hash.text("sp.openrouter.max_price.v1");
+    for (const auto* amount : {&price->prompt_nano_usd, &price->completion_nano_usd, &price->image_nano_usd,
+                               &price->audio_nano_usd, &price->request_nano_usd}) {
+      hash.number(amount->has_value());
+      if (*amount) hash.number(**amount);
+    }
+  }
 }
 void response_format_digest(Hash& hash, const std::optional<ResponseFormat>& format) {
   hash.number(format.has_value());

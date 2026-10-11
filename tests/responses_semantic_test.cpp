@@ -140,6 +140,41 @@ void controls_and_cursor_boundaries() {
   rejected(r); // A caller-provided cursor alone does not authorize client results.
   r = request(); r.previous_response_history = r.messages; rejected(r);
 }
+// OpenRouter provider.max_price (https://openrouter.ai/docs/guides/routing/provider-selection#max-price)
+// on the Responses route; the request schema shares the Chat provider object.
+void openrouter_max_price() {
+  static const auto loaded = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"gateway-responses","family":"openai.responses","connection":{"base_url":"https://openrouter.ai","paths":{"buffered":"/api/v1/responses","streaming":"/api/v1/responses"}}})");
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
+  const auto& gateway = std::get<descriptor::ValidatedDescriptor>(loaded);
+  const auto outcome = [&](const descriptor::ValidatedDescriptor& d, const responses::Request& r) {
+    auto encoded = responses::encode(d, r, false);
+    return std::holds_alternative<Error>(encoded) ? std::optional<ErrorKind>(std::get<Error>(encoded).kind) : std::nullopt;
+  };
+  auto r = request(); r.provider = OpenRouterRouting{}; r.provider->order = {"openai"};
+  OpenRouterMaxPrice price; price.prompt_nano_usd = 75'000'000; price.completion_nano_usd = 15'000'000'000; price.image_nano_usd = 100'000;
+  r.provider->max_price = price;
+  auto encoded = responses::encode(gateway, r, false);
+  CHECK(std::holds_alternative<responses::EncodedRequest>(encoded));
+  const auto& wire = std::get<responses::EncodedRequest>(encoded).body;
+  CHECK(wire.find(R"("provider":{"order":["openai"],"max_price":{"prompt":0.075,"completion":15,"image":0.0001}})") != std::string::npos);
+  auto changed = r; changed.provider->max_price = OpenRouterMaxPrice{};
+  CHECK(outcome(gateway, changed) == ErrorKind::InvalidRequest);
+  changed.provider->max_price->request_nano_usd = (std::uint64_t{1} << 53) + 1;
+  CHECK(outcome(gateway, changed) == ErrorKind::InvalidRequest);
+  CHECK(outcome(desc(), r) == ErrorKind::InvalidRequest);
+  // Captured native output stays bound to the ceiling it was requested under.
+  Accumulator acc;
+  responses::Codec codec(gateway, responses::Mode::Buffered, acc, std::get<responses::EncodedRequest>(encoded).context);
+  codec.buffered(body("[" + reasoning + "," + message + "]"), {});
+  CHECK(acc.outcome());
+  auto follow = r; follow.messages.push_back(completed(*acc.outcome()).messages.at(0));
+  follow.messages.push_back(Message{"", Role::User, {Text{"next"}}});
+  CHECK(!outcome(gateway, follow));
+  changed = follow; changed.provider->max_price->completion_nano_usd = 14'999'999'999;
+  CHECK(outcome(gateway, changed) == ErrorKind::ReplayIneligible);
+  changed = follow; changed.provider->max_price.reset();
+  CHECK(outcome(gateway, changed) == ErrorKind::ReplayIneligible);
+}
 void strict_tool_schemas() {
   // The embedded policy defaults Responses function tools to strict.
   CHECK(desc().policy()->defaults("openai.responses", "fixture-model").strict_tools == std::optional<bool>(true));
@@ -848,7 +883,7 @@ void reviewed_wire_boundaries() {
 }
 } // namespace
 int main() {
-  try { provider_money_and_snapshot_aliases(); named_error_precedence(); named_error_raw_capacity(); completed_reasoning_ciphertext_authority(); reviewed_wire_boundaries(); typed_encode(); controls_and_cursor_boundaries(); strict_tool_schemas(); previous_response_ownership(); grouped_native_and_owned_outcomes(); normal_close_required(); cancellation_observation_boundary(); reasoning_stream_snapshots(); tools_interleaving_and_ownership(); incomplete_and_server_items(); unknown_hosted_item_ownership(); unknown_wire_observation_boundary(); usage_boundaries(); uncached_input_rule(); corruption_and_bounds();
+  try { provider_money_and_snapshot_aliases(); named_error_precedence(); named_error_raw_capacity(); completed_reasoning_ciphertext_authority(); reviewed_wire_boundaries(); typed_encode(); controls_and_cursor_boundaries(); openrouter_max_price(); strict_tool_schemas(); previous_response_ownership(); grouped_native_and_owned_outcomes(); normal_close_required(); cancellation_observation_boundary(); reasoning_stream_snapshots(); tools_interleaving_and_ownership(); incomplete_and_server_items(); unknown_hosted_item_ownership(); unknown_wire_observation_boundary(); usage_boundaries(); uncached_input_rule(); corruption_and_bounds();
     std::cout << "Responses semantic contracts passed\n"; return 0;
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }
