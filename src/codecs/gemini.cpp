@@ -31,6 +31,8 @@ bool envelope_unique(json::Value v, bool function_call = false) {
   } else if (v.is_array()) for (auto p : v.elements()) if (!envelope_unique(p)) return false;
   return true;
 }
+// The google.generate stop_reasons policy table restates this mapping (STOP as its call-free
+// EndTurn); the codec does not consult it. gemini_semantic_test checks that the two agree.
 StopKind stop_kind(std::string_view reason, bool call) {
   if (reason == "STOP") return call ? StopKind::ToolUse : StopKind::EndTurn;
   if (reason == "MAX_TOKENS") return StopKind::MaxTokens;

@@ -320,7 +320,18 @@
         "STOP": "EndTurn",
         "MAX_TOKENS": "MaxTokens",
         "SAFETY": "ContentFilter",
-        "MALFORMED_FUNCTION_CALL": "MalformedCall"
+        "RECITATION": "ContentFilter",
+        "BLOCKLIST": "ContentFilter",
+        "PROHIBITED_CONTENT": "ContentFilter",
+        "SPII": "ContentFilter",
+        "IMAGE_SAFETY": "ContentFilter",
+        "IMAGE_PROHIBITED_CONTENT": "ContentFilter",
+        "IMAGE_RECITATION": "ContentFilter",
+        "ESCALATION": "ContentFilter",
+        "PUP_LIMITED_DISABLED": "ContentFilter",
+        "MALFORMED_FUNCTION_CALL": "MalformedCall",
+        "UNEXPECTED_TOOL_CALL": "MalformedCall",
+        "TOO_MANY_TOOL_CALLS": "MalformedCall"
       },
       "defaults": {
         "max_output_tokens": 4096,
