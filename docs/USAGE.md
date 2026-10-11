@@ -101,7 +101,7 @@ The closed descriptor-version-1 root accepts only these keys:
 | `family` | `openai.chat`, `openai.responses`, `anthropic.messages`, `google.generate` or `google.interactions`. |
 | `connection` | Origin-only `base_url`, literal `paths.buffered`/`paths.streaming`, optional non-reserved literal `headers`. |
 | `bindings` | Optional admitted model/message/stream/output-cap member names and usage path segments. Defaults come from the family's policy. |
-| `stop_reasons` | Optional mappings to declared stop kinds; compiled failure/standard-stop safety cannot be overridden. |
+| `stop_reasons` | Optional mappings to declared stop kinds; compiled failure/standard-stop safety cannot be overridden. Chat and Messages decode stops through this table. Responses, Generate and Interactions decode with compiled mappings and do not consult it; entries added for them change the native binding identity, not decoded stops (Generate's built-in table lists four entries that agree with its compiled mapping; the others are compiled-only). |
 | `evidence` | Optional HTTPS documentation URLs and verification date; metadata is not runtime qualification. |
 
 The loader rejects duplicate/unknown keys, wrong types, size/depth overflow, path traversal, URL userinfo and invalid bindings. Non-loopback origins require HTTPS. HTTP is allowed only for canonical loopback hosts. Google generate paths are literal model routes: the codec checks their model against `Request::model` and permits the fixed streaming `?alt=sse` suffix. Descriptors cannot script authentication, expand environment variables, interpolate prompts or merge arbitrary JSON bodies. Host endpoint allow-lists are a host responsibility; descriptor validation alone does not decide who should receive a credential.

@@ -1,6 +1,7 @@
 #include "codecs/gemini.h"
 #include "codecs/gemini_request.h"
 #include "core/native.h"
+#include "descriptor/descriptor.h"
 #include "json/json.h"
 #include <iostream>
 #include <stdexcept>
@@ -116,6 +117,40 @@ void uncached_input_rule() {
   // Live gemini-2.5-flash-lite shape without cachedContentTokenCount.
   auto o = buffered(body(R"([{"text":"hello"}])", "STOP", R"({"promptTokenCount":21,"candidatesTokenCount":1,"totalTokenCount":22,"promptTokensDetails":[{"modality":"TEXT","tokenCount":21}],"serviceTier":"standard"})"));
   CHECK(complete(o).usage.input_total->value == 21 && !complete(o).usage.cache_read && !complete(o).usage.input_uncached);
+}
+StopKind policy_kind(descriptor::StopKind kind) {
+  switch (kind) {
+    case descriptor::StopKind::EndTurn: return StopKind::EndTurn;
+    case descriptor::StopKind::MaxTokens: return StopKind::MaxTokens;
+    case descriptor::StopKind::ToolUse: return StopKind::ToolUse;
+    case descriptor::StopKind::ContentFilter: return StopKind::ContentFilter;
+    case descriptor::StopKind::Refusal: return StopKind::Refusal;
+    case descriptor::StopKind::PauseTurn: return StopKind::PauseTurn;
+    case descriptor::StopKind::ContextLimit: return StopKind::ContextLimit;
+    case descriptor::StopKind::StopSequence: return StopKind::StopSequence;
+    case descriptor::StopKind::MalformedCall: return StopKind::MalformedCall;
+    case descriptor::StopKind::Unknown: return StopKind::Unknown;
+  }
+  return StopKind::Unknown;
+}
+// The codec maps finishReason with a compiled table and does not consult the google.generate policy
+// stop_reasons. Interface 6 keeps that table's four entries (its policy identity is a persisted
+// golden), so every listed entry must agree with the codec; the rest are compiled-only.
+void stop_kinds_match_policy_table() {
+  const auto stop_of = [](std::string_view reason, std::string_view parts = R"([{"text":"hello"}])") {
+    const auto o = buffered(body(parts, reason));
+    if (const auto* c = std::get_if<Completion>(&o)) return c->stop.kind;
+    const auto& f = std::get<Failure>(o);
+    CHECK(f.error.kind == ErrorKind::RemoteFailure && f.partial.stop);
+    return f.partial.stop->kind;
+  };
+  const std::pair<std::string_view, StopKind> expected[]{
+      {"STOP", StopKind::EndTurn}, {"MAX_TOKENS", StopKind::MaxTokens}, {"SAFETY", StopKind::ContentFilter},
+      {"IMAGE_SAFETY", StopKind::ContentFilter}, {"MALFORMED_FUNCTION_CALL", StopKind::MalformedCall}, {"OTHER", StopKind::Unknown}};
+  for (const auto& [reason, kind] : expected) CHECK(stop_of(reason) == kind);
+  CHECK(stop_of("STOP", R"([{"functionCall":{"id":"owned","name":"lookup","args":{"x":1}}}])") == StopKind::ToolUse);
+  CHECK(desc().stop_mappings().size() == 4);
+  for (const auto& [raw, kind] : desc().stop_mappings()) CHECK(policy_kind(kind) == stop_of(raw));
 }
 void invalid_model_calls() {
   for (auto args : {"[]", "null", "1", R"({"x":1,"x":2})"}) {
@@ -458,6 +493,6 @@ void total_proves_zero_thoughts() {
 }
 }
 int main() {
-  try { http_error_envelope_in_an_array_is_retained(); output_total_without_thoughts(); total_proves_zero_thoughts(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); successive_unidentified_calls(); native_group_and_replay(); nullable_usage(); uncached_input_rule(); invalid_model_calls(); errors_and_terminals(); std::cout << "Gemini semantic invariants passed\n"; }
+  try { http_error_envelope_in_an_array_is_retained(); output_total_without_thoughts(); total_proves_zero_thoughts(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); successive_unidentified_calls(); native_group_and_replay(); nullable_usage(); uncached_input_rule(); stop_kinds_match_policy_table(); invalid_model_calls(); errors_and_terminals(); std::cout << "Gemini semantic invariants passed\n"; }
   catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

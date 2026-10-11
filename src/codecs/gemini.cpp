@@ -30,6 +30,9 @@ bool envelope_unique(json::Value v, bool function_call = false) {
   } else if (v.is_array()) for (auto p : v.elements()) if (!envelope_unique(p)) return false;
   return true;
 }
+// The codec does not consult the google.generate stop_reasons policy table. On interface 6 that
+// table keeps its four entries (changing it would change the pinned policy identity); each agrees
+// with this mapping, which gemini_semantic_test checks.
 StopKind stop_kind(std::string_view reason, bool call) {
   if (reason == "STOP") return call ? StopKind::ToolUse : StopKind::EndTurn;
   if (reason == "MAX_TOKENS") return StopKind::MaxTokens;
