@@ -140,6 +140,88 @@ void controls_and_cursor_boundaries() {
   rejected(r); // A caller-provided cursor alone does not authorize client results.
   r = request(); r.previous_response_history = r.messages; rejected(r);
 }
+void strict_tool_schemas() {
+  // The embedded policy defaults Responses function tools to strict.
+  CHECK(desc().policy()->defaults("openai.responses", "fixture-model").strict_tools == std::optional<bool>(true));
+  const std::string plain = R"({"type":"object","properties":{"x":{"type":"integer"}},"required":["x"]})";
+  const std::string closed = R"({"type":"object","properties":{"x":{"type":"integer"}},"required":["x"],"additionalProperties":false})";
+  const auto with = [](std::string_view schema, std::optional<bool> strict) {
+    auto r = request(); r.tools = {{"lookup", "Find a value", owned(schema), strict, {}}}; return r;
+  };
+  const auto sent = [](const responses::Request& r) {
+    auto encoded = responses::encode(desc(), r, false);
+    CHECK(std::holds_alternative<responses::EncodedRequest>(encoded));
+    auto wire = parse(std::get<responses::EncodedRequest>(encoded).body);
+    std::vector<bool> flags;
+    for (auto tool : wire.root().get("tools").elements()) { CHECK(tool.get("strict").is_bool()); flags.push_back(tool.get("strict").as_bool()); }
+    return flags;
+  };
+  const auto refused = [](const responses::Request& r, std::string_view pointer, std::string_view reason) {
+    auto encoded = responses::encode(desc(), r, false);
+    CHECK(std::holds_alternative<Error>(encoded));
+    const auto& error = std::get<Error>(encoded);
+    CHECK(error.kind == ErrorKind::InvalidRequest && error.http_status == 0 && error.vendor_code.empty());
+    CHECK(error.safe_message == "strict function \"lookup\" parameters are not strict-compatible at " +
+          json::quote(pointer) + ": " + std::string(reason));
+  };
+  const std::string open_object = "object schema needs \"additionalProperties\": false";
+  const std::string unlisted = "property is not listed in \"required\"";
+  // Policy default: kept for a compatible schema, sent as false otherwise.
+  CHECK(sent(with(plain, {})) == std::vector<bool>{false});
+  CHECK(sent(with(closed, {})) == std::vector<bool>{true});
+  // Explicit false is honored; explicit true on an incompatible schema fails before dispatch.
+  CHECK(sent(with(plain, false)) == std::vector<bool>{false});
+  CHECK(sent(with(closed, false)) == std::vector<bool>{false});
+  CHECK(sent(with(closed, true)) == std::vector<bool>{true});
+  refused(with(plain, true), "", open_object);
+  // Each tool is judged on its own schema.
+  auto mixed = with(closed, {}); mixed.tools.push_back({"other", "", owned(plain), {}, {}});
+  CHECK((sent(mixed) == std::vector<bool>{true, false}));
+  // Nested objects reached through properties, items, prefixItems, anyOf and $defs.
+  const std::vector<std::tuple<std::string, std::string, std::string>> nested{
+    {R"({"type":"object","properties":{"x":{"type":"integer"}},"additionalProperties":false})", "/properties/x", unlisted},
+    {R"({"properties":{},"additionalProperties":false})", "", "root must be an object schema"},
+    {R"({"type":"object","properties":{"point":{"type":"object","properties":{"x":{"type":"number"}},"required":["x"]}},"required":["point"],"additionalProperties":false})",
+     "/properties/point", open_object},
+    {R"({"type":"object","properties":{"rows":{"type":"array","items":{"type":"object","properties":{"a":{"type":"string"},"b":{"type":"string"}},"required":["a"],"additionalProperties":false}}},"required":["rows"],"additionalProperties":false})",
+     "/properties/rows/items/properties/b", unlisted},
+    {R"({"type":"object","properties":{"pair":{"type":"array","prefixItems":[{"type":"string"},{"type":"object"}]}},"required":["pair"],"additionalProperties":false})",
+     "/properties/pair/prefixItems/1", open_object},
+    {R"({"type":"object","properties":{"v":{"anyOf":[{"type":"string"},{"type":["object","null"],"properties":{}}]}},"required":["v"],"additionalProperties":false})",
+     "/properties/v/anyOf/1", open_object},
+    {R"({"type":"object","properties":{"n":{"$ref":"#/$defs/node"}},"required":["n"],"additionalProperties":false,"$defs":{"node":{"type":"object","properties":{"next":{"type":"object","properties":{"id":{"type":"string"}},"additionalProperties":false}},"required":["next"],"additionalProperties":false}}})",
+     "/$defs/node/properties/next/properties/id", unlisted},
+    {R"({"type":"object","properties":{"a/b~c":{"type":"object","additionalProperties":true}},"required":["a/b~c"],"additionalProperties":false})",
+     "/properties/a~1b~0c", open_object},
+  };
+  for (const auto& [schema, pointer, reason] : nested) {
+    CHECK(sent(with(schema, {})) == std::vector<bool>{false});
+    CHECK(sent(with(schema, false)) == std::vector<bool>{false});
+    refused(with(schema, true), pointer, reason);
+  }
+  // The same shapes made strict-compatible keep the default; other keywords are not judged locally.
+  const std::string compatible = R"({"type":"object","properties":{"rows":{"type":"array","items":{"type":"object","properties":{"a":{"type":"string","pattern":"^a"},"b":{"anyOf":[{"type":"null"},{"type":"object","properties":{},"additionalProperties":false}]}},"required":["a","b"],"additionalProperties":false}},"pair":{"type":"array","prefixItems":[{"type":"string","format":"email"},{"$ref":"#/$defs/leaf"}]}},"required":["rows","pair"],"additionalProperties":false,"$defs":{"leaf":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":false}}})";
+  CHECK(sent(with(compatible, {})) == std::vector<bool>{true});
+  CHECK(sent(with(compatible, true)) == std::vector<bool>{true});
+  // Native continuation: the configuration digest binds the requested strictness, so a turn
+  // captured with a downgraded default continues and still sends false.
+  const auto first = with(plain, {});
+  auto encoded = responses::encode(desc(), first, false);
+  CHECK(std::holds_alternative<responses::EncodedRequest>(encoded));
+  Accumulator acc{SemanticLimits{}};
+  responses::Codec codec(desc(), responses::Mode::Buffered, acc, std::get<responses::EncodedRequest>(encoded).context, SemanticLimits{});
+  codec.buffered(body("[" + call + "]"), {});
+  CHECK(acc.outcome());
+  const auto& turn = completed(*acc.outcome()).messages.front();
+  CHECK(turn.native && turn.native->complete());
+  auto next = first; next.messages.push_back(turn); next.messages.push_back(Message{"", Role::Tool, {ToolResult{"call_1", "one"}}});
+  CHECK(sent(next) == std::vector<bool>{false});
+  auto changed = next; changed.tools[0].strict = true;
+  refused(changed, "", open_object);
+  changed = next; changed.tools[0].strict = false;
+  auto mismatch = responses::encode(desc(), changed, false);
+  CHECK(std::holds_alternative<Error>(mismatch) && std::get<Error>(mismatch).kind == ErrorKind::ReplayIneligible);
+}
 void grouped_native_and_owned_outcomes() {
   const auto output = "[" + reasoning + "," + call + "," + message + "]";
   auto b = buffered(body(output)); auto s = stream({created(), added(0, reasoning), item_done(0, reasoning), added(1, call), item_done(1, call),
@@ -766,7 +848,7 @@ void reviewed_wire_boundaries() {
 }
 } // namespace
 int main() {
-  try { provider_money_and_snapshot_aliases(); named_error_precedence(); named_error_raw_capacity(); completed_reasoning_ciphertext_authority(); reviewed_wire_boundaries(); typed_encode(); controls_and_cursor_boundaries(); previous_response_ownership(); grouped_native_and_owned_outcomes(); normal_close_required(); cancellation_observation_boundary(); reasoning_stream_snapshots(); tools_interleaving_and_ownership(); incomplete_and_server_items(); unknown_hosted_item_ownership(); unknown_wire_observation_boundary(); usage_boundaries(); uncached_input_rule(); corruption_and_bounds();
+  try { provider_money_and_snapshot_aliases(); named_error_precedence(); named_error_raw_capacity(); completed_reasoning_ciphertext_authority(); reviewed_wire_boundaries(); typed_encode(); controls_and_cursor_boundaries(); strict_tool_schemas(); previous_response_ownership(); grouped_native_and_owned_outcomes(); normal_close_required(); cancellation_observation_boundary(); reasoning_stream_snapshots(); tools_interleaving_and_ownership(); incomplete_and_server_items(); unknown_hosted_item_ownership(); unknown_wire_observation_boundary(); usage_boundaries(); uncached_input_rule(); corruption_and_bounds();
     std::cout << "Responses semantic contracts passed\n"; return 0;
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

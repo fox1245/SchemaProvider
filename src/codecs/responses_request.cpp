@@ -303,11 +303,21 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       for (const auto& tool : request.tools) {
         if (!function_name(tool.name) || !tool_names.insert(tool.name).second) return invalid("tools require unique valid function names");
         if (!tool.parameters || !tool.parameters->root().is_object()) return invalid("function parameters must be an object schema");
+        // A policy strict default applies only to strict-compatible schemas and is
+        // otherwise sent as false. An explicit strict request on an incompatible
+        // schema fails here, naming the schema location, instead of as a vendor 400.
+        auto strict = tool.strict ? tool.strict : defaults.strict_tools;
+        if (strict && *strict) {
+          if (const auto violation = request_controls::strict_schema_violation(tool.parameters->root())) {
+            if (tool.strict) return invalid("strict function " + json::quote(tool.name) + " parameters are not strict-compatible at " +
+                                            json::quote(violation->pointer) + ": " + std::string(violation->reason));
+            strict = false;
+          }
+        }
         if (comma) body.raw(",");
         comma = true;
         body.raw("{\"type\":\"function\",\"name\":").quoted(tool.name).raw(",\"description\":").quoted(tool.description)
             .raw(",\"parameters\":").value(tool.parameters->root(), 3);
-        const auto strict = tool.strict ? tool.strict : defaults.strict_tools;
         if (strict) body.raw(",\"strict\":").raw(*strict ? "true" : "false");
         if (tool.defer_loading) body.raw(",\"defer_loading\":").raw(*tool.defer_loading ? "true" : "false");
         body.raw("}");

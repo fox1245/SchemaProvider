@@ -332,6 +332,9 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
   for (const auto& tool : request.tools) {
     const auto& defaults = descriptor.policy()->defaults(descriptor.family(), request.model);
     hash.text(tool.name); hash.text(tool.description); hash.document(tool.parameters);
+    // Binds the requested strictness, not the sent flag. The encoder derives the
+    // sent flag from it and the schema hashed above (a policy default on an
+    // incompatible schema is sent as false), so existing digests stay unchanged.
     const auto strict = tool.strict ? tool.strict : defaults.strict_tools;
     hash.number(strict.has_value()); if (strict) hash.number(*strict);
     hash.number(tool.defer_loading.value_or(false));
