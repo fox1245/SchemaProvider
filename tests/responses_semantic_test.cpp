@@ -475,6 +475,34 @@ void usage_boundaries() {
   const auto& x = completed(conflict).usage; CHECK(x.quality == UsageQuality::Inconsistent && !x.conflicts.empty()); CHECK(x.provider_reported_total->value == 99 && !x.input_uncached);
   failed(buffered(body("[]", "completed", R"({"input_tokens":-1})")), ErrorKind::ProtocolCorrupt);
 }
+// input_uncached = input_tokens - cached_tokens - cache_write_tokens (Evidence::Derived) once the
+// cache read is reported. Direct OpenAI reports cache_write_tokens and OpenRouter omits it, so no
+// Responses origin always carries it: a reported write is subtracted and an absent one is zero.
+void uncached_input_rule() {
+  const auto usage_of = [](std::string_view counters, bool sse) {
+    auto frames = text_frames(); frames.back() = terminal("[" + message + "]", "completed", counters);
+    const auto outcome = sse ? stream(frames) : buffered(body("[" + message + "]", "completed", counters));
+    return completed(outcome).usage;
+  };
+  const auto counters = [](std::string_view details) {
+    return std::string(R"({"input_tokens":100,"output_tokens":7,"total_tokens":107,"input_tokens_details":)") + std::string(details) + "}";
+  };
+  for (bool sse : {false, true}) {
+    auto u = usage_of(counters(R"({"cached_tokens":30,"cache_write_tokens":20})"), sse);
+    CHECK(u.quality == UsageQuality::Consistent && u.cache_read->value == 30 && u.cache_write->value == 20);
+    CHECK(u.input_uncached->value == 50 && u.input_uncached->evidence == Evidence::Derived);
+    u = usage_of(counters(R"({"cached_tokens":30})"), sse);
+    CHECK(u.quality == UsageQuality::Consistent && !u.cache_write && u.input_uncached->value == 70);
+    u = usage_of(counters(R"({"cache_write_tokens":20})"), sse);
+    CHECK(u.quality == UsageQuality::Consistent && !u.cache_read && !u.input_uncached);
+    u = usage_of(counters(R"({"cached_tokens":60,"cache_write_tokens":50})"), sse);
+    CHECK(u.quality == UsageQuality::Inconsistent && !u.input_uncached);
+    CHECK(u.conflicts.size() == 1 && u.conflicts[0].counter == "cache_write");
+    // Live direct OpenAI shape (gpt-5-nano, cached prefix).
+    u = usage_of(R"({"input_tokens":5547,"input_tokens_details":{"cache_write_tokens":0,"cached_tokens":5376},"output_tokens":97,"output_tokens_details":{"reasoning_tokens":64},"total_tokens":5644})", sse);
+    CHECK(u.quality == UsageQuality::Consistent && u.input_uncached->value == 171 && u.cache_write->value == 0);
+  }
+}
 void provider_money_and_snapshot_aliases() {
   const auto descriptor_for = [](std::string_view origin) {
     auto loaded = descriptor::load("{\"descriptor_version\":1,\"revision\":1,\"id\":\"cost-alias\",\"family\":\"openai.responses\",\"connection\":{\"base_url\":" +
@@ -738,7 +766,7 @@ void reviewed_wire_boundaries() {
 }
 } // namespace
 int main() {
-  try { provider_money_and_snapshot_aliases(); named_error_precedence(); named_error_raw_capacity(); completed_reasoning_ciphertext_authority(); reviewed_wire_boundaries(); typed_encode(); controls_and_cursor_boundaries(); previous_response_ownership(); grouped_native_and_owned_outcomes(); normal_close_required(); cancellation_observation_boundary(); reasoning_stream_snapshots(); tools_interleaving_and_ownership(); incomplete_and_server_items(); unknown_hosted_item_ownership(); unknown_wire_observation_boundary(); usage_boundaries(); corruption_and_bounds();
+  try { provider_money_and_snapshot_aliases(); named_error_precedence(); named_error_raw_capacity(); completed_reasoning_ciphertext_authority(); reviewed_wire_boundaries(); typed_encode(); controls_and_cursor_boundaries(); previous_response_ownership(); grouped_native_and_owned_outcomes(); normal_close_required(); cancellation_observation_boundary(); reasoning_stream_snapshots(); tools_interleaving_and_ownership(); incomplete_and_server_items(); unknown_hosted_item_ownership(); unknown_wire_observation_boundary(); usage_boundaries(); uncached_input_rule(); corruption_and_bounds();
     std::cout << "Responses semantic contracts passed\n"; return 0;
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

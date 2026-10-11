@@ -5,6 +5,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -361,7 +362,8 @@ void required_usage_and_unknown_cache() {
     failed(buffered(body(R"({"role":"assistant","content":"kept"})", "\"stop\"", usage)), ErrorKind::ProtocolCorrupt);
     failed(frames({chunk("{}", "\"stop\""), usage_frame(usage), "[DONE]"}), ErrorKind::ProtocolCorrupt);
   }
-  for (auto details : {R"({})", R"({"cached_tokens":4})", R"({"cache_write_tokens":3})", R"({"cached_tokens":0})", R"({"cache_write_tokens":0})"}) {
+  // Without a reported cache read the uncached share stays unknown (see uncached_input_rule).
+  for (auto details : {R"({})", R"({"cache_write_tokens":3})", R"({"cache_write_tokens":0})"}) {
     const auto usage = std::string(R"({"prompt_tokens":10,"completion_tokens":4,"total_tokens":14,"prompt_tokens_details":)") + details + "}";
     const auto outcome = buffered(body(R"({"role":"assistant","content":null})", "\"stop\"", usage));
     CHECK(!completed(outcome).usage.input_uncached);
@@ -835,10 +837,49 @@ void unlisted_usage_leaves_and_decimal_cost() {
   CHECK(!usage.extra.contains("queue_time") && !usage.extra.contains("future") && !usage.extra.contains("prompt_tokens_details.cached_tokens"));
   CHECK(usage.extra.size() == 7 && usage.cache_read->value == 10 && usage.cache_write->value == 5 && usage.input_uncached->value == 85);
 }
+// input_uncached = prompt_tokens - cached_tokens - cache_write_tokens (Evidence::Derived) once the
+// cache read is reported. OpenAI-shaped origins have no cache-write counter, so its absence is zero;
+// a declared OpenRouter origin always reports cache_write_tokens, so its absence there stays unknown.
+void uncached_input_rule() {
+  auto loaded = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"uncached-openrouter-chat","family":"openai.chat","connection":{"base_url":"https://openrouter.ai","paths":{"buffered":"/api/v1/chat/completions","streaming":"/api/v1/chat/completions"}}})");
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
+  const auto& gateway = std::get<descriptor::ValidatedDescriptor>(loaded);
+  const auto decode = [&](const descriptor::ValidatedDescriptor& d, std::string_view counters, bool sse) {
+    Accumulator acc; chat::Codec codec(d, sse ? chat::Mode::Sse : chat::Mode::Buffered, acc);
+    if (sse) {
+      for (const auto& wire : {chunk(R"({"role":"assistant","content":"ok"})", "\"stop\""), usage_frame(counters), std::string("[DONE]")})
+        if (!codec.frame("message", wire)) break;
+      codec.finish();
+    } else codec.buffered(body(R"({"role":"assistant","content":"ok"})", "\"stop\"", counters), {});
+    CHECK(acc.outcome()); return completed(*acc.outcome()).usage;
+  };
+  const auto counters = [](std::string_view details) {
+    return std::string(R"({"prompt_tokens":10,"completion_tokens":4,"total_tokens":14,"prompt_tokens_details":)") + std::string(details) + "}";
+  };
+  struct Case { const descriptor::ValidatedDescriptor* origin; const char* details; std::optional<uint64_t> uncached; };
+  const Case cases[]{
+      {&descriptor_value(), R"({"cached_tokens":4})", 6},
+      {&descriptor_value(), R"({"cached_tokens":0})", 10},
+      {&descriptor_value(), R"({"cached_tokens":4,"cache_write_tokens":3})", 3},
+      {&descriptor_value(), R"({"cache_write_tokens":3})", std::nullopt},
+      {&gateway, R"({"cached_tokens":4,"cache_write_tokens":3})", 3},
+      {&gateway, R"({"cached_tokens":0,"cache_write_tokens":0})", 10},
+      {&gateway, R"({"cached_tokens":4})", std::nullopt},
+      {&gateway, R"({"cache_write_tokens":3})", std::nullopt}};
+  for (const auto& c : cases) for (bool sse : {false, true}) {
+    const auto usage = decode(*c.origin, counters(c.details), sse);
+    CHECK(usage.quality == UsageQuality::Consistent && usage.input_total->value == 10);
+    CHECK(usage.input_uncached.has_value() == c.uncached.has_value());
+    if (c.uncached) CHECK(usage.input_uncached->value == *c.uncached && usage.input_uncached->evidence == Evidence::Derived);
+  }
+  // Live direct OpenAI shape (gpt-5-nano): no cache_write_tokens member at all.
+  const auto live = decode(descriptor_value(), R"({"prompt_tokens":30,"completion_tokens":74,"total_tokens":104,"prompt_tokens_details":{"cached_tokens":0,"audio_tokens":0},"completion_tokens_details":{"reasoning_tokens":64,"audio_tokens":0,"accepted_prediction_tokens":0,"rejected_prediction_tokens":0}})", false);
+  CHECK(live.input_uncached->value == 30 && live.input_uncached->evidence == Evidence::Derived && !live.cache_write);
+}
 } // namespace
 int main() {
   try {
-    idempotent_terminal_money_tail(); unlisted_usage_leaves_and_decimal_cost();
+    idempotent_terminal_money_tail(); unlisted_usage_leaves_and_decimal_cost(); uncached_input_rule();
     owned_raw_observations(); raw_failure_evidence();
     chunk_partition_invariant(); no_terminal_no_success(); transport_projection_parity(); known_corrupt_never_ignored();
     invalid_tools_and_compatibility(); usage_knowledge(); accumulator_transitions_and_seals(); typed_request_encoding();
