@@ -450,9 +450,49 @@ void limits_and_close_priority() {
   // An already observed in-band failure is not rewritten by a subsequent close.
   failed(stream({start(), {"error", "{}"}}, {false, ErrorKind::Cancelled}), ErrorKind::RemoteFailure);
 }
+void routed_gateway_model() {
+  static auto loaded = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"gateway-messages","family":"anthropic.messages","connection":{"base_url":"https://openrouter.ai","paths":{"buffered":"/api/v1/messages","streaming":"/api/v1/messages"}}})");
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
+  const auto& gateway = std::get<descriptor::ValidatedDescriptor>(loaded);
+  CHECK(descriptor::routed_gateway(gateway) && !descriptor::routed_gateway(descriptor_value()));
+  messages::Request request; request.model = "~anthropic/claude-haiku-latest"; request.account_scope = "fixture-account";
+  request.messages.push_back(Message{"", Role::User, {Text{"Hello"}}});
+  auto encoded = messages::encode(gateway, request, true); CHECK(std::holds_alternative<messages::EncodedRequest>(encoded));
+  const auto routed_context = std::get<messages::EncodedRequest>(encoded).context;
+  const auto served = [](std::string wire, std::string_view model) {
+    const auto at = wire.find("fixture-model"); CHECK(at != std::string::npos); wire.replace(at, 13, model); return wire;
+  };
+  const auto run = [&](const descriptor::ValidatedDescriptor& d, std::shared_ptr<const NativeContext> ctx, const std::vector<Frame>& frames, bool sse) {
+    Accumulator acc; messages::Codec codec(d, sse ? messages::Mode::Sse : messages::Mode::Buffered, acc, std::move(ctx));
+    if (sse) { for (const auto& [event, data] : frames) if (!codec.frame(event, data)) break; codec.finish({}); }
+    else codec.buffered(frames.front().second, {});
+    CHECK(acc.outcome()); return *acc.outcome();
+  };
+  const std::string concrete = "anthropic/claude-haiku-4.5-20261001";
+  const auto routed = run(gateway, routed_context, {{"", served(body(R"([{"type":"text","text":"hi"}])"), concrete)}}, false);
+  CHECK(text(completed(routed).messages) == "hi");
+  auto replay = request; replay.messages.push_back(completed(routed).messages[0]);
+  replay.messages.push_back(Message{"", Role::User, {Text{"again"}}});
+  auto replay_encoded = messages::encode(gateway, replay, false);
+  CHECK(std::holds_alternative<messages::EncodedRequest>(replay_encoded));
+  auto replay_wire = json::parse(std::get<messages::EncodedRequest>(replay_encoded).body);
+  CHECK(std::holds_alternative<json::Document>(replay_wire));
+  CHECK(std::get<json::Document>(replay_wire).root().get("model").as_string() == request.model);
+  const std::vector<Frame> frames{{"message_start", served(start().second, concrete)}, block(0, R"({"type":"text","text":"hi"})"), end(0), stop(), done};
+  CHECK(text(completed(run(gateway, routed_context, frames, true)).messages) == "hi");
+  // The served identity must remain stable for the whole response, even through a gateway.
+  auto changed = frames;
+  changed[3] = {"message_delta", R"({"type":"message_delta","model":"other","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}})"};
+  failed(run(gateway, routed_context, changed, true), ErrorKind::ProtocolCorrupt);
+  changed[3] = {"message_delta", R"({"type":"message_delta","delta":{"stop_reason":"end_turn","model":"other"},"usage":{"output_tokens":3}})"};
+  failed(run(gateway, routed_context, changed, true), ErrorKind::ProtocolCorrupt);
+  // A non-gateway origin keeps exact request/response model equality.
+  failed(buffered(served(body(), concrete)), ErrorKind::ProtocolCorrupt);
+}
 } // namespace
 int main() {
   try {
+    routed_gateway_model();
     owned_raw_observations(); raw_failure_evidence(); typeless_buffered_error();
     usage_binding_precedence();
     usage_detail_forward_compatibility(); toolset_metadata_shapes();

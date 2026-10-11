@@ -275,6 +275,8 @@ request.models = {"your-alternative-model"};
 
 These fields choose wire controls; they do not authorize a hidden client retry or guarantee a gateway's backend selection. Retained OpenRouter reasoning fragments and cache/reasoning counts stay in the owned outcome. Counts still obey reported/derived and unknown-versus-zero rules.
 
+A declared OpenRouter origin may answer Responses and Messages requests with a different concrete `model` (a routing alias such as `~vendor/model-latest` resolves to a dated or provider-specific slug). The codec accepts any nonempty served model there, rejects a served model that changes within one response, and records it only in the raw wire envelope; replay keeps the requested model. Other origins require the response to echo the requested model.
+
 Messages has three `ThinkingMode` values. `Manual` needs a positive effective budget at least the admitted minimum and below `max_tokens`; an effective budget without a mode selects manual thinking. `Adaptive` and `Disabled` forbid an explicit budget and clear an inherited budget. The SDK's Messages encoding rule omits temperature when manual/adaptive thinking is enabled, after rejecting explicit prohibited-model temperature or an invalid range. Thinking `top_p` bounds still apply. Vendor model-specific rules can differ; this names the current SDK contract rather than a universal guarantee about every model.
 
 ```cpp
