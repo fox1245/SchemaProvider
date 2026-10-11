@@ -43,6 +43,8 @@ Usage fidelity repairs keep layouts and the interface revision. `CostRounding` g
 
 Responses function tools apply the policy `strict_tools` default only to strict-compatible parameter schemas and send `"strict": false` for other schemas, which OpenAI rejected with HTTP 400 under the default. An explicit `strict = true` on an incompatible schema now returns `InvalidRequest` before dispatch, naming the tool and the first failing JSON pointer; an explicit `false` is unchanged. The descriptor policy, its identity and native configuration digests are unchanged. See [request controls](USAGE.md#request-families-and-controls).
 
+The Chat codec binds stream identity to `id` and `model`. Some OpenAI-compatible local servers stamp each chunk with the current time, so `created` may now repeat or increase between chunks instead of failing every stream as `ProtocolCorrupt`; it must still be an unsigned count on every chunk, and a decrease or a changed `id` or `model` remains `ProtocolCorrupt`.
+
 ## From interface 5 to 6
 
 Package 0.3.0 alpha adds `Usage::provider_cost` and the fixed-size `ProviderReportedCost`, `UsdAmount`, `CostSource`, `CostStatus` and `CostRounding` types. Existing field access remains source-compatible, but `Usage`, `UsageUpdate`, `Completion`, `PartialCompletion` and the containing `Event` layouts grow. Rebuild every consumer against the same headers and generation 6 libraries (`libsp_*.so.6`); interface 5 binaries must not load interface 6 libraries. CMake consumers select `SchemaProvider 0.3.0 EXACT`.
