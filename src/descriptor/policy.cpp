@@ -226,6 +226,67 @@ std::optional<std::string_view> borrowed(const std::optional<std::string>& value
 bool contains(const std::vector<std::string>& values,std::string_view value){return std::find(values.begin(),values.end(),value)!=values.end();}
 EffectiveChoices effective_defaults(const ValidatedDescriptor& d,std::string_view model){return choices(d.policy()->defaults(d.family(),model));}
 bool routed_gateway(const ValidatedDescriptor& d) noexcept { return contains(d.family_policy().openrouter_origins, d.base_url()); }
+namespace {
+char ascii_lower(char c) noexcept { return c >= 'A' && c <= 'Z' ? static_cast<char>(c + ('a' - 'A')) : c; }
+bool starts_with_ignore_case(std::string_view value, std::string_view prefix) noexcept {
+  if (value.size() < prefix.size()) return false;
+  for (std::size_t i = 0; i < prefix.size(); ++i) if (ascii_lower(value[i]) != prefix[i]) return false;
+  return true;
+}
+// The generation after a series prefix: "opus-4-8-20260101" is 4.8, "3-5-sonnet-20241022" is 3.5,
+// "sonnet-5" is 5.0 and gateway spellings with dots ("opus-4.7") read the same. The first component
+// is the first token of one or two digits and the second is the token right after it when it is
+// also one or two digits; a longer run of digits is a date and ends the version. No such token
+// (or a date before any version) leaves the generation unknown.
+std::optional<std::pair<std::uint32_t, std::uint32_t>> model_generation(std::string_view rest) noexcept {
+  auto number = [](std::string_view token) -> std::optional<std::uint32_t> {
+    if (token.empty() || token.size() > 2) return std::nullopt;
+    std::uint32_t value = 0;
+    for (const char c : token) {
+      if (c < '0' || c > '9') return std::nullopt;
+      value = value * 10 + static_cast<std::uint32_t>(c - '0');
+    }
+    return value;
+  };
+  auto next = [&](std::string_view& view) {
+    const auto end = view.find_first_of("-.");
+    const auto token = view.substr(0, end);
+    view = end == std::string_view::npos ? std::string_view{} : view.substr(end + 1);
+    return token;
+  };
+  while (!rest.empty()) {
+    const auto token = next(rest);
+    if (const auto major = number(token)) {
+      std::uint32_t minor = 0;
+      if (!rest.empty()) {
+        auto look = rest;
+        if (const auto second = number(next(look))) minor = *second;
+      }
+      return std::pair{*major, minor};
+    }
+    if (!token.empty() && std::all_of(token.begin(), token.end(), [](char c) { return c >= '0' && c <= '9'; })) return std::nullopt;
+  }
+  return std::nullopt;
+}
+// Models of a series, from a generation on, that refuse `temperature`. These facts are compiled, not
+// policy data: the embedded policy identity is a persisted golden on this interface and must not
+// change, so a fact that arrives after it is kept in code like the codecs' compiled stop tables.
+struct GenerationRule { std::string_view family, series; std::uint32_t major, minor; };
+constexpr GenerationRule compiled_temperature_generations[] = {{"anthropic.messages", "claude-", 4, 7}};
+bool temperature_forbidden_by_generation(std::string_view family, std::string_view model) noexcept {
+  const auto slash = model.rfind('/');
+  const auto suffix = slash == std::string_view::npos ? model : model.substr(slash + 1);
+  for (const auto& rule : compiled_temperature_generations) {
+    if (rule.family != family) continue;
+    for (const auto candidate : {model, suffix}) {
+      if (!starts_with_ignore_case(candidate, rule.series)) continue;
+      const auto generation = model_generation(candidate.substr(rule.series.size()));
+      if (!generation || *generation >= std::pair{rule.major, rule.minor}) return true;
+    }
+  }
+  return false;
+}
+} // namespace
 bool temperature_forbidden(const ValidatedDescriptor& d, std::string_view model) {
   const auto slash = model.rfind('/');
   const auto suffix = slash == std::string_view::npos ? model : model.substr(slash + 1);
@@ -240,7 +301,7 @@ bool temperature_forbidden(const ValidatedDescriptor& d, std::string_view model)
   };
   for (const auto& prefix : d.family_policy().temperature_forbidden_model_prefixes)
     if (starts(model, prefix) || starts(suffix, prefix)) return true;
-  return false;
+  return temperature_forbidden_by_generation(d.family(), model);
 }
 std::optional<std::string> validate_choices(const ValidatedDescriptor& d,std::string_view model,const EffectiveChoices& c) {
   if (c.temperature && temperature_forbidden(d, model)) return "temperature is prohibited for the admitted model";

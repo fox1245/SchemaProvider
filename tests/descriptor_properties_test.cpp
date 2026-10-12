@@ -326,6 +326,57 @@ void model_sampling_admission() {
         }
     }
 }
+
+// The Claude models that refuse `temperature` are a generation, not a list: Opus 4.7 and every
+// later model, whatever the family name. These are the ids the provider's model listing reported
+// when the bug was found plus the dated and older 4.x and 3.x ids; each one is classified through the
+// admitted policy rather than restated. The rule is compiled because the embedded policy identity is
+// pinned on this interface (crypto_golden). A new id belongs in this list.
+void claude_temperature_by_generation() {
+    using namespace sp::descriptor;
+    auto source = std::string(descriptor({}, "https://api.example.test", "/v1/messages"));
+    source.replace(source.find("openai.chat"), std::string_view("openai.chat").size(), "anthropic.messages");
+    auto loaded = load(source);
+    CHECK(std::holds_alternative<ValidatedDescriptor>(loaded));
+    if (!std::holds_alternative<ValidatedDescriptor>(loaded)) return;
+    const auto& admitted = std::get<ValidatedDescriptor>(loaded);
+    struct Listed { std::string_view model; bool forbidden; };
+    const Listed listed[] = {
+        // Refused by the API with "`temperature` is deprecated for this model".
+        {"claude-haiku-5-5", true}, {"claude-opus-5", true}, {"claude-opus-5-5", true}, {"claude-sonnet-5", true},
+        {"claude-sonnet-5-5", true}, {"claude-fable-5", true}, {"claude-fable-5-1", true},
+        {"claude-opus-4-7", true}, {"claude-opus-4-8", true},
+        // Accepted: everything before Opus 4.7, with and without the date suffix.
+        {"claude-opus-4-6", false}, {"claude-sonnet-4-6", false},
+        {"claude-opus-4-5", false}, {"claude-opus-4-5-20251101", false},
+        {"claude-sonnet-4-5", false}, {"claude-sonnet-4-5-20250929", false},
+        {"claude-haiku-4-5", false}, {"claude-haiku-4-5-20251001", false},
+        {"claude-opus-4-1", false}, {"claude-opus-4-1-20250805", false},
+        {"claude-opus-4-0", false}, {"claude-opus-4-20250514", false},
+        {"claude-sonnet-4-0", false}, {"claude-sonnet-4-20250514", false},
+        {"claude-3-7-sonnet-20250219", false}, {"claude-3-5-sonnet-20241022", false},
+        {"claude-3-5-haiku-20241022", false}, {"claude-3-haiku-20240307", false}, {"claude-3-opus-20240229", false},
+        // Gateway spellings: namespace, dots for the version, any case.
+        {"anthropic/claude-haiku-5.5", true}, {"anthropic/claude-opus-4.7", true}, {"Anthropic/CLAUDE-HAIKU-5-5", true},
+        {"anthropic/claude-opus-4.6", false}, {"anthropic/claude-sonnet-4.5", false}, {"anthropic/claude-3.5-sonnet", false},
+        {"anthropic/claude-3.7-sonnet:thinking", false},
+        // The next releases need no new entry: a later generation of any family, dated or not.
+        {"claude-haiku-6", true}, {"claude-sonnet-6-2", true}, {"claude-opus-4-9", true}, {"claude-opus-4-10", true},
+        {"claude-opus-4-7-20271001", true}, {"claude-newfamily-5-1", true}, {"claude-future-7-20300101", true},
+        // A Claude id whose generation cannot be read is treated like the newest one.
+        {"claude-experimental", true}, {"claude-opus-latest", true},
+        // Other ids are not Claude and are not guessed at.
+        {"gpt-4o", false}, {"vendor/some-model-5", false},
+    };
+    for (const auto& entry : listed) {
+        auto choices = effective_defaults(admitted, entry.model);
+        choices.temperature = 0.7;
+        const bool refused = validate_choices(admitted, entry.model, choices).has_value();
+        if (refused != entry.forbidden) std::fprintf(stderr, "temperature classification differs for %.*s\n", static_cast<int>(entry.model.size()), entry.model.data());
+        CHECK(refused == entry.forbidden);
+        CHECK(temperature_forbidden(admitted, entry.model) == entry.forbidden);
+    }
+}
 }
 int main() {
     json_validation_and_ownership();
@@ -338,6 +389,7 @@ int main() {
     duplicate_errors_retain_only_unambiguous_revision();
     deployment_header_admission();
     model_sampling_admission();
+    claude_temperature_by_generation();
     if (failures) std::fprintf(stderr, "%d descriptor/JSON checks failed\n", failures);
     else std::puts("descriptor/JSON properties passed");
     return failures ? 1 : 0;
