@@ -221,7 +221,7 @@ bool Codec::message(json::Value v, bool streaming) {
   begun_ = true;
   uint64_t index = 0;
   for (auto item : content.elements()) if (!block(item, index++, false)) return false;
-  if (!usage(usage_at(v), true)) return false;
+  if (!usage(usage_at(v), true, streaming)) return false;
   return terminal(v, streaming);
 }
 bool Codec::all_blocks_closed() {
@@ -492,13 +492,23 @@ json::Value Codec::usage_at(json::Value root) const {
   }
   return root;
 }
-bool Codec::usage(json::Value v, bool initial) {
+bool Codec::usage(json::Value v, bool initial, bool placeholder_output) {
   if (!v.is_object() || !v.get("output_tokens").valid() || (initial && !v.get("input_tokens").valid())) return fail(ErrorKind::ProtocolCorrupt, "required usage counters missing");
   usage_.stage = UsageStage::Partial;
+  // The streaming message_start reports a placeholder output count (the first token, often none), not the count so
+  // far. It is validated and remembered, so a later cumulative count below it is still a conflict, but
+  // it is no evidence of the output until message_delta reports the cumulative count: a stream cut
+  // before that has input evidence and no output evidence, which is not the same as zero output.
+  std::optional<Count> started;
   if (!counter(v.get("input_tokens"), usage_.input_uncached, "input_tokens", !initial) ||
-      !counter(v.get("output_tokens"), usage_.output_total, "output_tokens") ||
+      !counter(v.get("output_tokens"), placeholder_output ? started : usage_.output_total, "output_tokens") ||
       !counter(v.get("cache_read_input_tokens"), usage_.cache_read, "cache_read_input_tokens", true) ||
       !counter(v.get("cache_creation_input_tokens"), usage_.cache_write, "cache_creation_input_tokens", true)) return false;
+  if (placeholder_output && started) started_output_ = started->value;
+  else if (started_output_ && usage_.output_total && usage_.output_total->value < *started_output_) {
+    conflict("output_tokens", "cumulative counter regressed");
+    usage_.output_total = Count{*started_output_, Evidence::Reported};
+  }
   for (auto key : {"cache_creation", "server_tool_use", "output_tokens_details"}) {
     auto detail = v.get(key);
     if (!detail.valid() || detail.is_null()) continue;
