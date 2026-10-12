@@ -259,6 +259,17 @@ bool Codec::usage(json::Value v) {
     const auto sum = candidates->value + thoughts;
     next.output_total = Count{sum, Evidence::Derived};
   }
+  // The output budget can be spent while thinking: usageMetadata then carries the prompt, thoughts and
+  // total counts but no candidatesTokenCount. The total still bounds the output, since everything
+  // beyond the prompt was generated, so output_total (and the total below) derive from it. A nonzero
+  // tool-use prompt count is part of the total but not of the output, which makes that arithmetic
+  // ambiguous, and with a candidates count the rules above apply.
+  if (!candidates && !next.output_total && next.input_total && next.provider_reported_total && (!tool || tool->value == 0)) {
+    const auto reported = next.provider_reported_total->value, prompt = next.input_total->value;
+    if (reported < prompt) conflict("total", "provider total is below the prompt count");
+    else if (next.reasoning && next.reasoning->value > reported - prompt) conflict("reasoning", "thoughts exceed what the provider total leaves after the prompt");
+    else next.output_total = Count{reported - prompt, Evidence::Derived};
+  }
   if (next.input_total && next.cache_read) {
     if (next.cache_read->value > next.input_total->value) conflict("cache_read", "cached prompt exceeds prompt total");
     else next.input_uncached = Count{next.input_total->value - next.cache_read->value, Evidence::Derived};

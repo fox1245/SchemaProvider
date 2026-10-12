@@ -491,8 +491,54 @@ void total_proves_zero_thoughts() {
   u = usage_of(R"({"promptTokenCount":21,"candidatesTokenCount":1,"thoughtsTokenCount":5,"totalTokenCount":27})");
   CHECK(u.reasoning->value == 5 && u.reasoning->evidence == Evidence::Reported && u.output_total->value == 6 && u.total->value == 27);
 }
+// When the output budget is spent while thinking, usageMetadata has promptTokenCount,
+// thoughtsTokenCount and totalTokenCount but no candidatesTokenCount. The total still bounds the
+// output, so the output and the total are derived from it instead of being left unknown.
+void total_without_candidates_bounds_the_output() {
+  const auto spent = R"({"promptTokenCount":13,"totalTokenCount":25,"thoughtsTokenCount":12,"promptTokensDetails":[{"modality":"TEXT","tokenCount":13}]})";
+  // Recorded shape: the candidate ends MAX_TOKENS with a content object that has a role and no parts.
+  auto wire = [](std::string_view usage) {
+    return std::string(R"({"modelVersion":"fixture-model","responseId":"generation","candidates":[{"content":{"role":"model"},"finishReason":"MAX_TOKENS","index":0}],"usageMetadata":)") + std::string(usage) + "}";
+  };
+  for (const auto& o : {buffered(wire(spent)), stream({wire(spent)}), buffered(body("[]", "MAX_TOKENS", spent))}) {
+    const auto& c = complete(o);
+    CHECK(c.stop.kind == StopKind::MaxTokens && c.usage.stage == UsageStage::Final && c.usage.quality == UsageQuality::Consistent);
+    const auto& u = c.usage;
+    CHECK(u.input_total->value == 13 && u.reasoning->value == 12 && u.reasoning->evidence == Evidence::Reported);
+    CHECK(u.provider_reported_total->value == 25 && u.provider_reported_total->evidence == Evidence::Reported);
+    CHECK(u.output_total && u.output_total->value == 12 && u.output_total->evidence == Evidence::Derived);
+    CHECK(u.total && u.total->value == 25 && u.total->evidence == Evidence::Derived);
+    CHECK(!u.extra.contains("candidatesTokenCount"));
+  }
+  const auto usage_of = [&](std::string_view counters) { return complete(buffered(wire(counters))).usage; };
+  // Without thoughts either: everything beyond the prompt is output, and an empty output derives zero.
+  auto u = usage_of(R"({"promptTokenCount":13,"totalTokenCount":20})");
+  CHECK(u.output_total && u.output_total->value == 7 && u.output_total->evidence == Evidence::Derived && u.total->value == 20 && !u.reasoning);
+  u = usage_of(R"({"promptTokenCount":13,"totalTokenCount":13})");
+  CHECK(u.output_total && u.output_total->value == 0 && u.total->value == 13);
+  // A reported candidates count keeps the earlier rules: a larger total is no proof of the output.
+  u = usage_of(R"({"promptTokenCount":13,"candidatesTokenCount":3,"totalTokenCount":25})");
+  CHECK(!u.output_total && !u.total);
+  // A nonzero tool-use prompt count is part of the total but not of the output: ambiguous, so unknown.
+  u = usage_of(R"({"promptTokenCount":13,"toolUsePromptTokenCount":2,"thoughtsTokenCount":12,"totalTokenCount":27})");
+  CHECK(!u.output_total && !u.total && u.quality == UsageQuality::Consistent);
+  u = usage_of(R"({"promptTokenCount":13,"toolUsePromptTokenCount":0,"thoughtsTokenCount":12,"totalTokenCount":25})");
+  CHECK(u.output_total && u.output_total->value == 12);
+  // Missing prompt or total leaves the output unknown.
+  for (auto counters : {R"({"thoughtsTokenCount":12,"totalTokenCount":25})", R"({"promptTokenCount":13,"thoughtsTokenCount":12})",
+                        R"({"promptTokenCount":13,"thoughtsTokenCount":12,"totalTokenCount":null})"}) {
+    u = usage_of(counters);
+    CHECK(!u.output_total && !u.total && u.quality == UsageQuality::Consistent);
+  }
+  // Counters that cannot be true are a conflict, not a derivation.
+  for (auto counters : {R"({"promptTokenCount":13,"thoughtsTokenCount":12,"totalTokenCount":10})",
+                        R"({"promptTokenCount":13,"thoughtsTokenCount":12,"totalTokenCount":20})"}) {
+    u = usage_of(counters);
+    CHECK(!u.output_total && !u.total && u.quality == UsageQuality::Inconsistent && !u.conflicts.empty());
+  }
+}
 }
 int main() {
-  try { http_error_envelope_in_an_array_is_retained(); output_total_without_thoughts(); total_proves_zero_thoughts(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); successive_unidentified_calls(); native_group_and_replay(); nullable_usage(); uncached_input_rule(); stop_kinds_match_policy_table(); invalid_model_calls(); errors_and_terminals(); std::cout << "Gemini semantic invariants passed\n"; }
+  try { http_error_envelope_in_an_array_is_retained(); output_total_without_thoughts(); total_proves_zero_thoughts(); total_without_candidates_bounds_the_output(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); successive_unidentified_calls(); native_group_and_replay(); nullable_usage(); uncached_input_rule(); stop_kinds_match_policy_table(); invalid_model_calls(); errors_and_terminals(); std::cout << "Gemini semantic invariants passed\n"; }
   catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }
