@@ -31,6 +31,10 @@ struct ResponseInfo {
   ErrorKind kind = ErrorKind::RemoteFailure;
   RetryClass retry_class = RetryClass::Unknown;
   std::string vendor_code;
+  // OpenAI's error.param, kept only for the codes that name an unsupported parameter or value and
+  // only when it is a plain request member name (lowercase letters, digits and '_').
+  std::string parameter;
+  bool unsupported_value = false;
   std::optional<SteadyTime> retry_not_before;
 };
 

@@ -287,6 +287,10 @@ bool temperature_forbidden_by_generation(std::string_view family, std::string_vi
   return false;
 }
 } // namespace
+std::string_view output_cap_member_for_origin(std::string_view family, std::string_view origin) noexcept {
+  if (family == "openai.chat" && origin == "https://api.openai.com") return "max_completion_tokens";
+  return {};
+}
 bool temperature_forbidden(const ValidatedDescriptor& d, std::string_view model) {
   const auto slash = model.rfind('/');
   const auto suffix = slash == std::string_view::npos ? model : model.substr(slash + 1);

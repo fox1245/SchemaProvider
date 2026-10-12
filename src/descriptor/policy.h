@@ -74,6 +74,10 @@ EffectiveChoices effective_defaults(const ValidatedDescriptor&, std::string_view
 std::optional<std::string_view> borrowed(const std::optional<std::string>&);
 bool contains(const std::vector<std::string>&, std::string_view);
 bool temperature_forbidden(const ValidatedDescriptor&, std::string_view model);
+// The request member the output cap defaults to on `origin` for `family`, or empty when the family's own
+// member applies. Direct OpenAI Chat (`https://api.openai.com`) rejects max_tokens on its current models
+// and takes max_completion_tokens. Compiled, not policy data: the embedded policy identity is pinned.
+std::string_view output_cap_member_for_origin(std::string_view family, std::string_view origin) noexcept;
 std::optional<std::string> validate_choices(const ValidatedDescriptor&, std::string_view model, const EffectiveChoices&);
 // True when this descriptor targets an origin its family policy declares as a routing gateway
 // (openrouter_origins). Such a gateway may serve a different concrete model than the one requested.

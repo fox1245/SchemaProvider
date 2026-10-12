@@ -160,6 +160,22 @@ ResponseInfo inspect_document_response(const configuration::RuntimePolicy& polic
           break;
         }
       };
+      // OpenAI names the request member it refused: {"param":"max_tokens","code":"unsupported_parameter"}.
+      // Only that pair is read, and only a plain member name survives, never the vendor's message.
+      if (family == "openai.chat" || family == "openai.responses") {
+        const auto code = error.get("code");
+        const auto param = error.get("param");
+        if (code.is_string() && param.is_string() &&
+            (code.as_string() == "unsupported_parameter" || code.as_string() == "unsupported_value")) {
+          const auto name = param.as_string();
+          if (!name.empty() && name.size() <= 64 && std::all_of(name.begin(), name.end(), [](unsigned char c) {
+                return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_';
+              })) {
+            info.parameter = std::string(name);
+            info.unsupported_value = code.as_string() == "unsupported_value";
+          }
+        }
+      }
       for (const auto& field : family_rules->code_fields) {
         // `details.reason` selects `reason` of every object in the `details` array
         // (Google's google.rpc.ErrorInfo); every other field is read from the error itself.
@@ -271,6 +287,9 @@ Error classify_failure(const transport::Result& result, const ResponseInfo& info
   // close error has higher diagnostic precedence (for example quota + short EOF).
   if (info.retry_class == RetryClass::Never) error.retry_class = RetryClass::Never;
   error.safe_message = safe_message(error.kind);
+  // A vendor 400 that names the member it refused says which one; the vendor's own text stays out.
+  if (error.kind == ErrorKind::InvalidRequest && !info.parameter.empty())
+    error.safe_message += std::string(info.unsupported_value ? ": unsupported value for parameter '" : ": unsupported parameter '") + info.parameter + "'";
   error.http_status = result.http_status;
   error.vendor_code = info.vendor_code;
   const auto& a = result.attempt;

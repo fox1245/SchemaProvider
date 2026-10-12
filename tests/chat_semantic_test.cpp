@@ -710,6 +710,40 @@ void one_tool_message_with_several_results() {
   rejects(request({Message{"", Role::Tool, {}}}), ErrorKind::InvalidRequest, "Tool message holds only tool results");
 }
 
+// Current OpenAI chat models (gpt-5.x and gpt-6.x, the reasoning models) answer HTTP 400
+// "Use 'max_completion_tokens'" to max_tokens. Direct OpenAI therefore defaults to the new member;
+// OpenRouter and other compatible endpoints keep max_tokens, which they all understand. An explicit
+// binding always wins, whatever the origin. The default is compiled, not policy data, because the
+// embedded policy identity is pinned on this interface.
+void output_cap_member_by_origin() {
+  auto cap_member = [](std::string_view origin, std::string_view bindings = {}) {
+    const std::string source = R"({"descriptor_version":1,"revision":1,"id":"cap","family":"openai.chat","connection":{"base_url":")" +
+        std::string(origin) + R"(","paths":{"buffered":"/v1/chat/completions","streaming":"/v1/chat/completions"}})" +
+        (bindings.empty() ? std::string() : ",\"bindings\":" + std::string(bindings)) + "}";
+    auto loaded = descriptor::load(source);
+    CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
+    const auto& value = std::get<descriptor::ValidatedDescriptor>(loaded);
+    chat::Request request; request.model = "gpt-6-luna"; request.max_output_tokens = 7;
+    request.messages.push_back({Role::User, "Say hello."});
+    auto encoded = chat::encode(value, request, false);
+    CHECK(std::holds_alternative<chat::EncodedRequest>(encoded));
+    auto body = json::parse(std::get<chat::EncodedRequest>(encoded).body);
+    const auto root = std::get<json::Document>(body).root();
+    CHECK(root.get("max_completion_tokens").valid() != root.get("max_tokens").valid());
+    const std::string member(value.max_output_tokens_member());
+    CHECK(root.get(member).valid() && root.get(member).as_uint() == 7);
+    return member;
+  };
+  CHECK(cap_member("https://api.openai.com") == "max_completion_tokens");
+  CHECK(cap_member("https://openrouter.ai") == "max_tokens");
+  CHECK(cap_member("https://api.groq.com") == "max_tokens");
+  CHECK(cap_member("http://127.0.0.1:18080") == "max_tokens");
+  // The other output slots keep their defaults, and an explicit binding wins either way.
+  CHECK(cap_member("https://api.openai.com", R"({"max_output_tokens":"max_tokens"})") == "max_tokens");
+  CHECK(cap_member("https://openrouter.ai", R"({"max_output_tokens":"max_completion_tokens"})") == "max_completion_tokens");
+  CHECK(cap_member("https://api.openai.com", R"({"model":"deployment"})") == "max_completion_tokens");
+}
+
 void quoted_json_and_request_bounds() {
   const auto parsed = json::parse(R"({"quote\"key":"\u0000\b\f\n\r\t\"\\雪","array":[1,-2,1.25,true,null,{}]})");
   CHECK(std::holds_alternative<json::Document>(parsed));
@@ -1065,7 +1099,7 @@ int main() {
     invalid_tools_and_compatibility(); usage_knowledge(); accumulator_transitions_and_seals(); typed_request_encoding();
     required_metadata_and_identity(); per_chunk_creation_clock(); required_usage_and_unknown_cache(); unindexed_tool_order_and_optional_function(); buffered_close_precedence();
     accumulator_interleaved_ordering(); accumulator_order_uniqueness_and_limits();
-    tool_history_and_escaped_arguments(); one_tool_message_with_several_results(); quoted_json_and_request_bounds();
+    tool_history_and_escaped_arguments(); one_tool_message_with_several_results(); output_cap_member_by_origin(); quoted_json_and_request_bounds();
     gateway_request_controls(); gateway_max_price();
     std::cout << "chat semantic properties passed\n";
     return 0;
