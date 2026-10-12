@@ -541,6 +541,20 @@ void minima_budget_deadline(Peer& peer) {
     failure(finish(pending, c), sp::ErrorKind::Cancelled); peer.count(model, 1, 1);
   }
 }
+// A vendor 400 that names the member it refused says which one in the safe message, without the vendor's text.
+void unsupported_parameter_named(Peer& peer) {
+  Client client(descriptor(peer, false), options());
+  for (const bool streaming : {false, true}) {
+    const auto model = peer.arm("unsupported-param");
+    auto submitted = request(model);
+    std::get<sp::chat::Request>(submitted).max_output_tokens = 16;
+    const auto result = client.complete(std::move(submitted), run(streaming));
+    const auto& rejected = failure(result, sp::ErrorKind::InvalidRequest);
+    require(rejected.error.safe_message == "invalid request: unsupported parameter 'max_tokens'", "vendor parameter name is not in the safe message");
+    require(rejected.error.http_status == 400 && rejected.error.retry_class == sp::RetryClass::Never, "vendor 400 lost its classification");
+    peer.count(model, 1, 1);
+  }
+}
 void ownership(Peer& peer) {
   Client client(descriptor(peer, false), options());
   for (const auto how : {0, 1, 2, 3}) {
@@ -899,6 +913,7 @@ int main(int argc, char** argv) {
     check("partial, ping and close", [&] { partial_ping_and_close(peer); });
     check("typeless Messages buffered error", [&] { typeless_messages_runtime_error(peer); });
     check("minima, bucket and deadline", [&] { minima_budget_deadline(peer); });
+    check("unsupported parameter named", [&] { unsupported_parameter_named(peer); });
     check("ownership", [&] { ownership(peer); });
     check("callback ownership and misuse", [&] { callback_ownership_and_misuse(peer); });
     check("raw I/O blocking misuse", [&] { raw_io_misuse(peer); });

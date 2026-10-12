@@ -200,7 +200,7 @@ class PolicyLoader {
         fail("", "configured policy depth limit");
       auto families=root.get("families"); if(!families.is_array() || families.size()!=5)fail("/families","all five typed families");
       for(auto v:families.elements()) {
-        closed(v,{"family","bindings","stop_reasons","defaults","required_output_cap","temperature_range","top_p_range","thinking_minimum","thinking_top_p_minimum","reasoning_efforts","reasoning_summaries","thinking_levels","service_tiers","header_versions","header_version","server_tools","openrouter_origins","temperature_forbidden_model_prefixes","media","openrouter_media"},"/families",{"temperature_forbidden_generations"});
+        closed(v,{"family","bindings","stop_reasons","defaults","required_output_cap","temperature_range","top_p_range","thinking_minimum","thinking_top_p_minimum","reasoning_efforts","reasoning_summaries","thinking_levels","service_tiers","header_versions","header_version","server_tools","openrouter_origins","temperature_forbidden_model_prefixes","media","openrouter_media"},"/families",{"temperature_forbidden_generations","max_completion_tokens_origins"});
         FamilyPolicy f; f.family=text(v.get("family"),"/families");
         if(f.family!="openai.chat" && f.family!="anthropic.messages" && f.family!="openai.responses" && f.family!="google.generate" && f.family!="google.interactions")fail("/families","typed family");
         if(policy->family(f.family))fail("/families","unique families");
@@ -250,6 +250,16 @@ class PolicyLoader {
         for (const auto& route : f.openrouter_origins)
           if (!valid_origin(route) || route.ends_with('/'))
             fail("/openrouter_origins", "canonical admitted origin without path");
+        // Optional: origins whose API rejects max_tokens, so the output cap defaults to max_completion_tokens there.
+        if (auto origins = v.get("max_completion_tokens_origins"); origins.valid()) {
+          const auto listed = strings(origins, "/max_completion_tokens_origins");
+          if (!listed.empty() && f.family != "openai.chat") fail("/max_completion_tokens_origins", "Chat output-cap origins only");
+          for (const auto& origin : listed) {
+            if (!valid_origin(origin) || origin.ends_with('/') || contains(f.openrouter_origins, origin))
+              fail("/max_completion_tokens_origins", "canonical admitted origin without path, apart from the OpenRouter origins");
+            policy->completion_cap_origins_.emplace_back(f.family, origin);
+          }
+        }
         f.media = media_admission(v.get("media"), "/media", f.family);
         if (!v.get("openrouter_media").is_null()) {
           if (f.openrouter_origins.empty()) fail("/openrouter_media", "gateway media requires declared OpenRouter origins");
@@ -388,6 +398,12 @@ bool DescriptorPolicy::temperature_forbidden_by_generation(std::string_view fami
     }
   }
   return false;
+}
+std::string_view DescriptorPolicy::default_output_cap_member(std::string_view family, std::string_view origin) const noexcept {
+  for (const auto& [listed_family, listed_origin] : completion_cap_origins_)
+    if (listed_family == family && listed_origin == origin) return "max_completion_tokens";
+  const auto* declared = this->family(family);
+  return declared ? std::string_view(declared->cap_member) : std::string_view{};
 }
 bool temperature_forbidden(const ValidatedDescriptor& d, std::string_view model) {
   const auto slash = model.rfind('/');

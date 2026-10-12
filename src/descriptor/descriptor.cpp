@@ -236,6 +236,9 @@ public:
             auto defaults = json::parse(default_bindings);
             bindings(std::get<json::Document>(defaults).root());
             connection(root.get("connection"));
+            // The origin can change the default output-cap member (direct OpenAI rejects max_tokens);
+            // an explicit binding below still wins.
+            value_.max_output_tokens_member_ = std::string(value_.policy_->default_output_cap_member(value_.family_, value_.base_url_));
             if (auto item = root.get("evidence"); item.valid()) evidence(item);
             if (auto item = root.get("bindings"); item.valid()) bindings(item);
             if (auto item = root.get("stop_reasons"); item.valid()) stops(item);

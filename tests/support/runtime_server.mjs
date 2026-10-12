@@ -119,6 +119,14 @@ const server = http.createServer(async (req, res) => {
         vendor: { b: true, a: null } }));
       ++c.faults; notify(); return;
     }
+    if (scenario === 'unsupported-param') {
+      // OpenAI's answer to a member the model does not take; the loopback origin is a compatible endpoint, so max_tokens is sent.
+      if (body.max_tokens !== 16) ++c.invalid;
+      res.writeHead(400, { 'Content-Type': 'application/json', Connection: 'close' });
+      res.end(JSON.stringify({ error: { message: `${marker} Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.`,
+        type: 'invalid_request_error', param: 'max_tokens', code: 'unsupported_parameter' } }));
+      ++c.faults; notify(); return;
+    }
     const fail = scenario === 'always-error' || scenario === 'quota' || scenario === 'vendor-secret' || scenario === 'error-cap'
       || scenario === 'rate' || scenario === 'long-rate' || scenario === 'malformed-rate'
       || ((scenario === 'recover' || scenario === 'retry-held') && c.count === 1);

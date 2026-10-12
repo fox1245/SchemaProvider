@@ -5,6 +5,7 @@
     {
       "family": "openai.chat",
       "openrouter_origins": ["https://openrouter.ai"],
+      "max_completion_tokens_origins": ["https://api.openai.com"],
       "temperature_forbidden_model_prefixes": ["gpt-5", "gpt-6", "o1", "o3", "o4"],
       "media": {
         "image": {"mime": ["image/png", "image/jpeg", "image/webp", "image/gif"], "sources": ["inline", "url"]},

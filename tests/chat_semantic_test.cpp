@@ -1,6 +1,8 @@
 #include "codecs/chat.h"
 #include "descriptor/descriptor.h"
+#include "descriptor/policy.h"
 #include "json/json.h"
+#include "sp/config_defaults.h"
 #include "transport/sse_framer.h"
 #include <iostream>
 #include <limits>
@@ -711,6 +713,76 @@ void one_tool_message_with_several_results() {
   rejects(request({tool({typed, ToolResult{"b", "second"}})}), ErrorKind::Unsupported, "typed media");
 }
 
+// Current OpenAI chat models (gpt-5.x and gpt-6.x, the reasoning models) answer HTTP 400
+// "Use 'max_completion_tokens'" to max_tokens. Direct OpenAI therefore defaults to the new member;
+// OpenRouter and other compatible endpoints keep max_tokens, which they all understand. An explicit
+// binding always wins, whatever the origin.
+void output_cap_member_by_origin() {
+  auto cap_member = [](std::string_view origin, std::string_view bindings = {}, descriptor::PolicySnapshot policy = {}) {
+    const std::string source = R"({"descriptor_version":1,"revision":1,"id":"cap","family":"openai.chat","connection":{"base_url":")" +
+        std::string(origin) + R"(","paths":{"buffered":"/v1/chat/completions","streaming":"/v1/chat/completions"}})" +
+        (bindings.empty() ? std::string() : ",\"bindings\":" + std::string(bindings)) + "}";
+    auto loaded = policy ? descriptor::load(source, std::move(policy)) : descriptor::load(source);
+    CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
+    const auto& value = std::get<descriptor::ValidatedDescriptor>(loaded);
+    chat::Request request; request.model = "gpt-6-luna"; request.max_output_tokens = 7;
+    request.messages.push_back({Role::User, "Say hello."});
+    auto encoded = chat::encode(value, request, false);
+    CHECK(std::holds_alternative<chat::EncodedRequest>(encoded));
+    auto body = json::parse(std::get<chat::EncodedRequest>(encoded).body);
+    const auto root = std::get<json::Document>(body).root();
+    CHECK(root.get("max_completion_tokens").valid() != root.get("max_tokens").valid());
+    const std::string member(value.max_output_tokens_member());
+    CHECK(root.get(member).valid() && root.get(member).as_uint() == 7);
+    return member;
+  };
+  CHECK(cap_member("https://api.openai.com") == "max_completion_tokens");
+  CHECK(cap_member("https://openrouter.ai") == "max_tokens");
+  CHECK(cap_member("https://api.groq.com") == "max_tokens");
+  CHECK(cap_member("http://127.0.0.1:18080") == "max_tokens");
+  // The other output slots keep their defaults, and an explicit binding wins either way.
+  CHECK(cap_member("https://api.openai.com", R"({"max_output_tokens":"max_tokens"})") == "max_tokens");
+  CHECK(cap_member("https://openrouter.ai", R"({"max_output_tokens":"max_completion_tokens"})") == "max_completion_tokens");
+  CHECK(cap_member("https://api.openai.com", R"({"model":"deployment"})") == "max_completion_tokens");
+
+  // The origin list is policy data: a snapshot that predates it keeps max_tokens everywhere, and a
+  // list is admitted only for Chat, as canonical origins, apart from the OpenRouter ones.
+  auto document = json::parse(config_defaults::descriptor_policy_json);
+  CHECK(std::holds_alternative<json::Document>(document));
+  const auto root = std::get<json::Document>(document).root();
+  auto snapshot = [&](std::string_view family, std::string_view origins) {
+    std::string families = "[";
+    for (auto entry : root.get("families").elements()) {
+      if (families.size() > 1) families += ',';
+      std::string member = "{";
+      for (auto field : entry.members()) {
+        if (field.key == "max_completion_tokens_origins") continue;
+        if (member.size() > 1) member += ',';
+        member += json::quote(field.key) + ':' + field.value.dump();
+      }
+      if (!origins.empty() && entry.get("family").as_string() == family) member += ",\"max_completion_tokens_origins\":" + std::string(origins);
+      families += member + '}';
+    }
+    families += ']';
+    return descriptor::load_policy("{\"version\":1,\"revision\":" + std::to_string(root.get("revision").as_uint()) + ",\"families\":" + families +
+                                   ",\"models\":" + root.get("models").dump() + '}', config_defaults::codec_defaults_json);
+  };
+  auto admitted = snapshot("openai.chat", {});
+  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(admitted));
+  if (auto* old = std::get_if<descriptor::PolicySnapshot>(&admitted)) CHECK(cap_member("https://api.openai.com", {}, *old) == "max_tokens");
+  auto custom = snapshot("openai.chat", R"(["https://gateway.example.test"])");
+  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(custom));
+  if (auto* policy = std::get_if<descriptor::PolicySnapshot>(&custom)) {
+    CHECK(cap_member("https://gateway.example.test", {}, *policy) == "max_completion_tokens");
+    CHECK(cap_member("https://api.openai.com", {}, *policy) == "max_tokens");
+  }
+  for (std::string_view bad : {R"(["https://api.openai.com/"])", R"(["api.openai.com"])", R"(["https://openrouter.ai"])", R"("https://api.openai.com")",
+                               R"(["https://api.openai.com","https://api.openai.com"])", R"([""])"})
+    CHECK(std::holds_alternative<descriptor::ConfigError>(snapshot("openai.chat", bad)));
+  CHECK(std::holds_alternative<descriptor::ConfigError>(snapshot("openai.responses", R"(["https://api.openai.com"])")));
+  CHECK(std::holds_alternative<descriptor::ConfigError>(snapshot("anthropic.messages", R"(["https://api.anthropic.com"])")));
+}
+
 void quoted_json_and_request_bounds() {
   const auto parsed = json::parse(R"({"quote\"key":"\u0000\b\f\n\r\t\"\\雪","array":[1,-2,1.25,true,null,{}]})");
   CHECK(std::holds_alternative<json::Document>(parsed));
@@ -1066,7 +1138,7 @@ int main() {
     invalid_tools_and_compatibility(); usage_knowledge(); accumulator_transitions_and_seals(); typed_request_encoding();
     required_metadata_and_identity(); per_chunk_creation_clock(); required_usage_and_unknown_cache(); unindexed_tool_order_and_optional_function(); buffered_close_precedence();
     accumulator_interleaved_ordering(); accumulator_order_uniqueness_and_limits();
-    tool_history_and_escaped_arguments(); one_tool_message_with_several_results(); quoted_json_and_request_bounds();
+    tool_history_and_escaped_arguments(); one_tool_message_with_several_results(); output_cap_member_by_origin(); quoted_json_and_request_bounds();
     gateway_request_controls(); gateway_max_price();
     std::cout << "chat semantic properties passed\n";
     return 0;

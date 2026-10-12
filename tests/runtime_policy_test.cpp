@@ -224,9 +224,49 @@ void google_api_key_errors() {
   // A one-element array unwraps for every family; a vendor code in it is read the same way.
   CHECK(inspect(429, R"([{"error":{"code":"insufficient_quota"}}])").kind == ErrorKind::QuotaExhausted);
 }
+
+// OpenAI names the rejected request member in error.param. The safe message carries that name when
+// the vendor code says the parameter or its value is unsupported, and never the vendor's own text.
+void unsupported_parameter_is_named() {
+  transport::Result rejected;
+  rejected.status = transport::Status::Completed;
+  rejected.http_status = 400;
+  auto classify = [&](std::string_view body, std::string_view family = "openai.chat") {
+    return classify_failure(rejected, inspect(400, body, {}, family), {}, false, 1, receipt);
+  };
+  const std::string unsupported =
+      R"({"error":{"message":"SECRET Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.",)"
+      R"("type":"invalid_request_error","param":"max_tokens","code":"unsupported_parameter"}})";
+  auto error = classify(unsupported);
+  CHECK(error.kind == ErrorKind::InvalidRequest && error.retry_class == RetryClass::Never);
+  CHECK(error.safe_message == "invalid request: unsupported parameter 'max_tokens'");
+  CHECK(error.safe_message.find("SECRET") == std::string::npos && error.http_status == 400);
+  error = classify(R"({"error":{"message":"SECRET","type":"invalid_request_error","param":"temperature","code":"unsupported_value"}})");
+  CHECK(error.safe_message == "invalid request: unsupported value for parameter 'temperature'");
+  CHECK(classify(unsupported, "openai.responses").safe_message == "invalid request: unsupported parameter 'max_tokens'");
+  CHECK(classify("[" + unsupported + "]").safe_message == "invalid request: unsupported parameter 'max_tokens'");
+  // Only a plain request member name is repeated; anything else, or another code, keeps the generic text.
+  const std::string generic(safe_message(ErrorKind::InvalidRequest));
+  for (const auto* param : {R"("messages[0].content")", R"("tools.0.function")", R"("SECRET value")", R"("")", R"(7)", R"(null)", R"(["max_tokens"])",
+                            R"("Max_Tokens")", R"("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")"})
+    CHECK(classify(std::string(R"({"error":{"type":"invalid_request_error","param":)") + param + R"(,"code":"unsupported_parameter"}})").safe_message == generic);
+  for (const auto* code : {R"("invalid_value")", R"("unsupported")", R"(400)", R"(null)"})
+    CHECK(classify(std::string(R"({"error":{"param":"max_tokens","code":)") + code + "}}").safe_message == generic);
+  CHECK(classify(R"({"error":{"param":"max_tokens"}})").safe_message == generic);
+  CHECK(classify(R"({"error":{"code":"unsupported_parameter"}})").safe_message == generic);
+  CHECK(classify(R"({"error":{"param":"max_tokens","param":"stop","code":"unsupported_parameter"}})").safe_message == generic);
+  // Other kinds and families are untouched.
+  rejected.http_status = 401;
+  CHECK(classify_failure(rejected, inspect(401, unsupported), {}, false, 1, receipt).safe_message == "authentication failed");
+  rejected.http_status = 400;
+  // The member name is an OpenAI error field (Chat and Responses); other families do not define it.
+  CHECK(classify(unsupported, "anthropic.messages").safe_message == generic);
+  CHECK(classify(unsupported, "google.generate").safe_message == generic);
+  CHECK(classify(R"({"type":"error","error":{"type":"invalid_request_error","message":"SECRET temperature is deprecated for this model"}})", "anthropic.messages").safe_message == generic);
+}
 }  // namespace
 int main() {
-  classification(); google_api_key_errors(); safety_and_budget(); hints(); arithmetic_and_bucket(); shipped_ceilings_fit_the_narrowest_long();
+  classification(); google_api_key_errors(); unsupported_parameter_is_named(); safety_and_budget(); hints(); arithmetic_and_bucket(); shipped_ceilings_fit_the_narrowest_long();
   if (failures) return 1;
   std::puts("runtime policy: classification, safety, hints, arithmetic and bucket passed");
 }

@@ -4,6 +4,7 @@
 #include <array>
 #include <memory>
 #include <optional>
+#include <utility>
 
 namespace sp::descriptor {
 // Decoded-byte ceilings per media kind are the *_decoded_bytes members, in sp::MediaKind order
@@ -73,6 +74,10 @@ class DescriptorPolicy final {
   // full model or the part after its last `/`. A model of the series whose generation cannot be
   // read counts as the newest one. This complements the exact `temperature_forbidden_model_prefixes`.
   bool temperature_forbidden_by_generation(std::string_view family, std::string_view model) const noexcept;
+  // The request member the output cap is written to when a descriptor does not bind one. It is the
+  // family's own member, except on the origins a family lists in `max_completion_tokens_origins`
+  // (direct OpenAI Chat, whose current models reject `max_tokens`).
+  std::string_view default_output_cap_member(std::string_view family, std::string_view origin) const noexcept;
  private:
   DescriptorPolicy() = default;
   // New facts are kept here, after the members above, so the installed FamilyPolicy layout stays as it was.
@@ -82,6 +87,7 @@ class DescriptorPolicy final {
   std::vector<ModelDefaults> models_;
   std::string identity_;
   std::vector<GenerationRule> generation_rules_;
+  std::vector<std::pair<std::string, std::string>> completion_cap_origins_;  // family, origin
   friend class PolicyLoader;
 };
 PolicyResult load_policy(std::string_view family_json, std::string_view resource_json);
