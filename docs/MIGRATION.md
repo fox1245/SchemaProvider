@@ -21,6 +21,12 @@ Family C++ code now owns request structure, tool/native checks, stream correlati
 
 `sp::runtime::Request` is the five-family typed variant. `Result` is `std::shared_ptr<const sp::Outcome>`, not a flat successful completion object. This lets callers retain ordered parts, native sidecars, raw observations and failure partials without borrowing a client or callback.
 
+## Package 0.3.1 (interface 6)
+
+Package 0.3.1 is a maintenance release of this line. The interface revision and shared-library generation stay 6, and no installed struct or enum changes layout or gains an enumerator, so a consumer rebuilds against the 0.3.1 headers only to select `SchemaProvider 0.3.1 EXACT`. The fixes below change behaviour.
+
+Chat Completions now accepts one `Role::Tool` message that carries several `ToolResult` parts, like the other families, and writes one wire `tool` message for each in order. A Tool message that is empty or holds anything else is still refused, and the refusal names the rule. See [request families](USAGE.md#request-families-and-controls).
+
 ## From interface 5 to 6
 
 Package 0.3.0 alpha adds `Usage::provider_cost` and the fixed-size `ProviderReportedCost`, `UsdAmount`, `CostSource`, `CostStatus` and `CostRounding` types. Existing field access remains source-compatible, but `Usage`, `UsageUpdate`, `Completion`, `PartialCompletion` and the containing `Event` layouts grow. Rebuild every consumer against the same headers and generation 6 libraries (`libsp_*.so.6`); interface 5 binaries must not load interface 6 libraries. CMake consumers select `SchemaProvider 0.3.0 EXACT`.

@@ -3,6 +3,7 @@
 #include "descriptor/descriptor.h"
 #include "descriptor/policy.h"
 #include "json/json.h"
+#include <algorithm>
 #include <charconv>
 #include <cmath>
 #include <set>
@@ -142,17 +143,29 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       }
       if (validate && message.role != Role::Tool && !pending.empty())
         return bad("tool results must precede the next message");
+      if (message.role == Role::Tool) {
+        // The other families take every result of a tool turn in one Tool message. This API
+        // wants one wire message per result, so a message of several results is split here,
+        // in the caller's order. Nothing else may share the message.
+        if (message.parts.empty() || !std::all_of(message.parts.begin(), message.parts.end(),
+            [](const Part& part) { return std::holds_alternative<ToolResult>(part); }))
+          return bad("a Tool message holds only tool results, one or more");
+        for (const auto& part : message.parts) {
+          const auto& result = std::get<ToolResult>(part);
+          if (validate && (result.tool_use_id.empty() || pending.erase(result.tool_use_id) != 1))
+            return bad("tool result must resolve one pending call");
+          if (comma) body.raw(",");
+          comma = true;
+          body.raw("{\"role\":\"tool\",\"content\":").quoted(result.content)
+              .raw(",\"tool_call_id\":").quoted(result.tool_use_id).raw("}");
+          if (!body.ok()) return bad("request exceeds JSON limits or encoding");
+        }
+        continue;
+      }
       if (comma) body.raw(",");
       comma = true;
       body.raw("{\"role\":").quoted(role).raw(",\"content\":");
-      if (message.role == Role::Tool) {
-        if (message.parts.size() != 1 || !std::holds_alternative<ToolResult>(message.parts.front()))
-          return bad("tool message requires exactly one typed result");
-        const auto& result = std::get<ToolResult>(message.parts.front());
-        if (validate && (result.tool_use_id.empty() || pending.erase(result.tool_use_id) != 1))
-          return bad("tool result must resolve one pending call");
-        body.quoted(result.content).raw(",\"tool_call_id\":").quoted(result.tool_use_id);
-      } else {
+      {  // Every non-Tool role: ordered content, reasoning, refusal and tool calls.
         body.raw("[");
         bool part_comma = false;
         for (const auto& part : message.parts) {
