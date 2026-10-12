@@ -119,6 +119,15 @@ const server = http.createServer(async (req, res) => {
         vendor: { b: true, a: null } }));
       ++c.faults; notify(); return;
     }
+    if (scenario.startsWith('status-')) {
+      // A plain 4xx answer in the vendor's shape: nothing ran. The message carries the marker, which must not leak.
+      const status = Number(scenario.slice('status-'.length));
+      const type = status === 401 ? (messages ? 'authentication_error' : 'invalid_api_key')
+        : status === 404 ? (messages ? 'not_found_error' : 'not_found') : (messages ? 'invalid_request_error' : 'invalid_request_error');
+      res.writeHead(status, { 'Content-Type': 'application/json', Connection: 'close' });
+      res.end(JSON.stringify(messages ? { type: 'error', error: { type, message: marker } } : { error: { message: marker, type, code: status } }));
+      ++c.faults; notify(); return;
+    }
     if (scenario === 'unsupported-param') {
       // OpenAI's answer to a member the model does not take; the loopback origin is a compatible endpoint, so max_tokens is sent.
       if (body.max_tokens !== 16) ++c.invalid;

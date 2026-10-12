@@ -296,8 +296,15 @@ Error classify_failure(const transport::Result& result, const ResponseInfo& info
   const bool sent = a.reached >= transport::Stage::RequestStarted || a.request_body_bytes > 0 ||
                     a.response_head_seen || a.transport_internal_resends > 0 || result.http_status != 0;
   error.attempt = {sent, a.request_body_bytes, a.response_head_seen, a.transport_internal_resends, attempts};
+  // An HTTP 4xx answer is the server declining the request: nothing ran and nothing is billed
+  // (RFC 9110, section 15.5). 408 and 425 ask the client to try again, and 429 and 5xx may follow
+  // started work, so those stay possibly accepted, as does any transport failure after the request
+  // left and any answer that was cut off or never completed.
+  const bool declined = result.status == transport::Status::Completed && result.http_status >= 400 &&
+      result.http_status < 500 && result.http_status != 408 && result.http_status != 425 && result.http_status != 429;
   error.retry_safety = (output || (semantic && semantic->retry_safety == RetrySafety::OutputObserved)) ?
-      RetrySafety::OutputObserved : sent ? RetrySafety::PossiblyAccepted : RetrySafety::NotSent;
+      RetrySafety::OutputObserved : !sent ? RetrySafety::NotSent :
+      declined ? RetrySafety::RejectedBeforeOutput : RetrySafety::PossiblyAccepted;
   if (info.retry_not_before) {
     if (*info.retry_not_before == SteadyTime::max()) error.retry_after = Ms::max();
     else if (*info.retry_not_before <= now) error.retry_after = Ms::zero();

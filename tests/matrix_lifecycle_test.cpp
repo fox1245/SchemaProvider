@@ -452,7 +452,9 @@ void http_status(Matrix& m, Wire w, bool streaming, int status, Body body, const
   c.start();
   const auto result = c.finish();
   const auto s = shape(m.fam, status, body == Body::Family || body == Body::Array);
-  Want want(s.kind, s.retry, RetrySafety::PossiblyAccepted);
+  // A completed 4xx answer declines the request before any work; 408, 425, 429 and 5xx may follow started work.
+  const bool declined = status >= 400 && status < 500 && status != 408 && status != 425 && status != 429;
+  Want want(s.kind, s.retry, declined ? RetrySafety::RejectedBeforeOutput : RetrySafety::PossiblyAccepted);
   want.http(status).code(s.vendor).head_seen(true);
   if (retry_after) want.after(*retry_after);
   expect_failure(result, want);
