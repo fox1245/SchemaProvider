@@ -13,9 +13,15 @@ using json::Value;
 [[noreturn]] void fail(std::string_view path, std::string_view expected) {
   throw ConfigError{std::string(path), std::string(expected), 0, "descriptor policy value rejected"};
 }
-void closed(Value value, std::initializer_list<std::string_view> keys, std::string_view path) {
-  if (!value.is_object() || value.size() != keys.size()) fail(path, "complete closed object");
-  for (auto member : value.members()) if (std::find(keys.begin(), keys.end(), member.key) == keys.end()) fail(path, "declared fields only");
+// Every key must be present and no other may appear, except the listed optional ones: a snapshot
+// written before an optional fact existed stays admissible.
+void closed(Value value, std::initializer_list<std::string_view> keys, std::string_view path,
+            std::initializer_list<std::string_view> optional = {}) {
+  if (!value.is_object() || value.size() < keys.size() || value.size() > keys.size() + optional.size()) fail(path, "complete closed object");
+  for (auto member : value.members())
+    if (std::find(keys.begin(), keys.end(), member.key) == keys.end() &&
+        std::find(optional.begin(), optional.end(), member.key) == optional.end()) fail(path, "declared fields only");
+  for (auto key : keys) if (!value.get(key).valid()) fail(path, "complete closed object");
 }
 std::string text(Value v, std::string_view path) {
   if (!v.is_string() || v.as_string().empty() || v.as_string().size() > 128) fail(path, "bounded nonempty string");
@@ -194,7 +200,7 @@ class PolicyLoader {
         fail("", "configured policy depth limit");
       auto families=root.get("families"); if(!families.is_array() || families.size()!=5)fail("/families","all five typed families");
       for(auto v:families.elements()) {
-        closed(v,{"family","bindings","stop_reasons","defaults","required_output_cap","temperature_range","top_p_range","thinking_minimum","thinking_top_p_minimum","reasoning_efforts","reasoning_summaries","thinking_levels","service_tiers","header_versions","header_version","server_tools","openrouter_origins","temperature_forbidden_model_prefixes","media","openrouter_media"},"/families");
+        closed(v,{"family","bindings","stop_reasons","defaults","required_output_cap","temperature_range","top_p_range","thinking_minimum","thinking_top_p_minimum","reasoning_efforts","reasoning_summaries","thinking_levels","service_tiers","header_versions","header_version","server_tools","openrouter_origins","temperature_forbidden_model_prefixes","media","openrouter_media"},"/families",{"temperature_forbidden_generations"});
         FamilyPolicy f; f.family=text(v.get("family"),"/families");
         if(f.family!="openai.chat" && f.family!="anthropic.messages" && f.family!="openai.responses" && f.family!="google.generate" && f.family!="google.interactions")fail("/families","typed family");
         if(policy->family(f.family))fail("/families","unique families");
@@ -213,6 +219,32 @@ class PolicyLoader {
               std::any_of(prefix.begin(), prefix.end(), [](unsigned char c) {
                 return !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.');
               })) fail("/temperature_forbidden_model_prefixes", "lowercase model prefixes without gateway namespace");
+        // Optional: models of a series from a generation on. "from" is "major.minor".
+        if (auto rules = v.get("temperature_forbidden_generations"); rules.valid()) {
+          if (!rules.is_array() || rules.size() > 8) fail("/temperature_forbidden_generations", "bounded array of generation rules");
+          for (auto rule : rules.elements()) {
+            closed(rule, {"series", "from"}, "/temperature_forbidden_generations");
+            auto series = text(rule.get("series"), "/temperature_forbidden_generations");
+            if (series.back() != '-' || std::any_of(series.begin(), series.end(), [](unsigned char c) {
+                  return !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.');
+                })) fail("/temperature_forbidden_generations", "lowercase series prefix ending in '-' without gateway namespace");
+            if (std::any_of(policy->generation_rules_.begin(), policy->generation_rules_.end(),
+                            [&](const auto& old) { return old.family == f.family && old.series == series; }))
+              fail("/temperature_forbidden_generations", "one generation rule per series");
+            const auto from = text(rule.get("from"), "/temperature_forbidden_generations");
+            const auto dot = from.find('.');
+            auto component = [&](std::string_view digits) -> std::optional<std::uint32_t> {
+              if (digits.empty() || digits.size() > 3 || !std::all_of(digits.begin(), digits.end(), [](unsigned char c) { return c >= '0' && c <= '9'; })) return std::nullopt;
+              std::uint32_t value = 0;
+              for (const char c : digits) value = value * 10 + static_cast<std::uint32_t>(c - '0');
+              return value;
+            };
+            const auto major = dot == std::string::npos ? std::nullopt : component(std::string_view(from).substr(0, dot));
+            const auto minor = dot == std::string::npos ? std::nullopt : component(std::string_view(from).substr(dot + 1));
+            if (!major || !minor) fail("/temperature_forbidden_generations", "generation as major.minor digits");
+            policy->generation_rules_.push_back({f.family, std::move(series), *major, *minor});
+          }
+        }
         if (!f.openrouter_origins.empty() && f.family != "openai.chat" && f.family != "openai.responses" && f.family != "anthropic.messages")
           fail("/openrouter_origins", "routing only for declared OpenRouter API families");
         for (const auto& route : f.openrouter_origins)
@@ -301,6 +333,62 @@ const MediaPolicy& media_policy(const ValidatedDescriptor& d) noexcept {
   return family.openrouter_media && routed_gateway(d) ? *family.openrouter_media : family.media;
 }
 bool routed_gateway(const ValidatedDescriptor& d) noexcept { return contains(d.family_policy().openrouter_origins, d.base_url()); }
+namespace {
+char ascii_lower(char c) noexcept { return c >= 'A' && c <= 'Z' ? static_cast<char>(c + ('a' - 'A')) : c; }
+bool starts_with_ignore_case(std::string_view value, std::string_view prefix) noexcept {
+  if (value.size() < prefix.size()) return false;
+  for (std::size_t i = 0; i < prefix.size(); ++i) if (ascii_lower(value[i]) != prefix[i]) return false;
+  return true;
+}
+// The generation after a series prefix: "opus-4-8-20260101" is 4.8, "3-5-sonnet-20241022" is 3.5,
+// "sonnet-5" is 5.0 and gateway spellings with dots ("opus-4.7") read the same. The first component
+// is the first token of one or two digits and the second is the token right after it when it is
+// also one or two digits; a longer run of digits is a date and ends the version. No such token
+// (or a date before any version) leaves the generation unknown.
+std::optional<std::pair<std::uint32_t, std::uint32_t>> model_generation(std::string_view rest) noexcept {
+  auto number = [](std::string_view token) -> std::optional<std::uint32_t> {
+    if (token.empty() || token.size() > 2) return std::nullopt;
+    std::uint32_t value = 0;
+    for (const char c : token) {
+      if (c < '0' || c > '9') return std::nullopt;
+      value = value * 10 + static_cast<std::uint32_t>(c - '0');
+    }
+    return value;
+  };
+  auto next = [&](std::string_view& view) {
+    const auto end = view.find_first_of("-.");
+    const auto token = view.substr(0, end);
+    view = end == std::string_view::npos ? std::string_view{} : view.substr(end + 1);
+    return token;
+  };
+  while (!rest.empty()) {
+    const auto token = next(rest);
+    if (const auto major = number(token)) {
+      std::uint32_t minor = 0;
+      if (!rest.empty()) {
+        auto look = rest;
+        if (const auto second = number(next(look))) minor = *second;
+      }
+      return std::pair{*major, minor};
+    }
+    if (!token.empty() && std::all_of(token.begin(), token.end(), [](char c) { return c >= '0' && c <= '9'; })) return std::nullopt;
+  }
+  return std::nullopt;
+}
+} // namespace
+bool DescriptorPolicy::temperature_forbidden_by_generation(std::string_view family, std::string_view model) const noexcept {
+  const auto slash = model.rfind('/');
+  const auto suffix = slash == std::string_view::npos ? model : model.substr(slash + 1);
+  for (const auto& rule : generation_rules_) {
+    if (rule.family != family) continue;
+    for (const auto candidate : {model, suffix}) {
+      if (!starts_with_ignore_case(candidate, rule.series)) continue;
+      const auto generation = model_generation(candidate.substr(rule.series.size()));
+      if (!generation || *generation >= std::pair{rule.major, rule.minor}) return true;
+    }
+  }
+  return false;
+}
 bool temperature_forbidden(const ValidatedDescriptor& d, std::string_view model) {
   const auto slash = model.rfind('/');
   const auto suffix = slash == std::string_view::npos ? model : model.substr(slash + 1);
@@ -315,7 +403,7 @@ bool temperature_forbidden(const ValidatedDescriptor& d, std::string_view model)
   };
   for (const auto& prefix : d.family_policy().temperature_forbidden_model_prefixes)
     if (starts(model, prefix) || starts(suffix, prefix)) return true;
-  return false;
+  return d.policy()->temperature_forbidden_by_generation(d.family(), model);
 }
 std::optional<std::string> validate_choices(const ValidatedDescriptor& d,std::string_view model,const EffectiveChoices& c) {
   if (c.temperature && temperature_forbidden(d, model)) return "temperature is prohibited for the admitted model";

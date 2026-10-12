@@ -68,12 +68,20 @@ class DescriptorPolicy final {
   std::optional<std::uint64_t> output_limit(std::string_view family, std::string_view model) const noexcept;
   std::optional<std::uint64_t> input_limit(std::string_view family, std::string_view model) const noexcept;
   std::string_view identity() const noexcept { return identity_; }
+  // True when `model` belongs to a series that the family's `temperature_forbidden_generations`
+  // names, at or after the generation given there. Matching is ASCII case-insensitive against the
+  // full model or the part after its last `/`. A model of the series whose generation cannot be
+  // read counts as the newest one. This complements the exact `temperature_forbidden_model_prefixes`.
+  bool temperature_forbidden_by_generation(std::string_view family, std::string_view model) const noexcept;
  private:
   DescriptorPolicy() = default;
+  // New facts are kept here, after the members above, so the installed FamilyPolicy layout stays as it was.
+  struct GenerationRule { std::string family, series; std::uint32_t major = 0, minor = 0; };
   CodecResources resources_{};
   std::vector<FamilyPolicy> families_;
   std::vector<ModelDefaults> models_;
   std::string identity_;
+  std::vector<GenerationRule> generation_rules_;
   friend class PolicyLoader;
 };
 PolicyResult load_policy(std::string_view family_json, std::string_view resource_json);

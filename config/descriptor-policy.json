@@ -84,7 +84,8 @@
     {
       "family": "anthropic.messages",
       "openrouter_origins": ["https://openrouter.ai"],
-      "temperature_forbidden_model_prefixes": ["claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-sonnet-5", "claude-fable-"],
+      "temperature_forbidden_model_prefixes": ["claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-sonnet-5", "claude-haiku-5", "claude-fable-"],
+      "temperature_forbidden_generations": [{"series": "claude-", "from": "4.7"}],
       "media": {
         "image": {"mime": ["image/jpeg", "image/png", "image/gif", "image/webp"], "sources": ["inline", "url", "file"]},
         "audio": {"mime": [], "sources": []},
