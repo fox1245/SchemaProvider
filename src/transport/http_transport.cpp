@@ -577,6 +577,9 @@ void OperationState::setup() {
     else needs_resolve = !is_ip_literal(host);
   }
   set(CURLOPT_PROTOCOLS_STR, "http,https");
+  // Never negotiate anything older than TLS 1.2, whatever the libcurl build or TLS backend
+  // (OpenSSL, Schannel, Secure Transport) would allow by default.
+  set(CURLOPT_SSLVERSION, static_cast<long>(CURL_SSLVERSION_TLSv1_2));
   set(CURLOPT_FOLLOWLOCATION, 0L);
   set(CURLOPT_NOSIGNAL, 1L);
   set(CURLOPT_NOPROGRESS, idle_bound.count() > 0 ? 0L : 1L);
