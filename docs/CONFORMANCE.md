@@ -8,6 +8,10 @@ Scope (decision D2): chat completion APIs and the artifacts that arrive inside c
 
 Current source scope is five typed buffered/SSE families, bounded prepare/start/complete lifecycle, owned nullable/raw outcomes, exact native binding and archive v3 custody, plus interface 4 controls, Responses cursor ownership and explicit Generate portable history. General sidecar fixture schema, constraints engine, generated support tables, SDK journal projection/kit, cross-origin equivalence and general Drop/Demote remain historical proposals. Generate's explicit imported-call sentinel is a narrow current path, not those historical treatments. WebSocket has no current cell; NeoGraph owns its outcome/checkpoint serializers.
 
+## Package 0.3.1 maintenance record
+
+SDK 0.3.1 alpha keeps interface revision 6 and shared-library generation 6 and changes no installed layout. Its fixes are Chat Tool messages of several results, temperature facts by Claude generation, the Chat output-cap member on direct OpenAI and the named refused parameter, HTTP 4xx answers as `RejectedBeforeOutput`, usage of calls that end early and Gemini output and total derivation when the candidates count is omitted ([migration](MIGRATION.md#package-031-interface-6)). Each fix has a failing-first case in the SDK's own suites, on recorded bodies or the loopback peers; the lifecycle matrix cells for 4xx statuses now expect `RejectedBeforeOutput`. The Linux x86_64 GCC 13.3 Release tree passed all 49 registered ctest entries. No hosted endpoint, credential or paid call was used, sanitizer builds and Windows/macOS were not run for this record, and the embedded policy identity golden is unchanged.
+
 ## Interface 6 cost, compatibility and async-overhead record
 
 SDK 0.3.0 alpha appends fixed-size provider-reported monetary metadata to `Usage`, advances interface/shared-library generation to 6, and requires matching rebuilt consumers. Tokens remain integer counters; reported nanoUSD, unknown status, catalogue estimates, budget holds and invoices are distinct. Original qualification grants/ledgers, archive v3 and portable history v2 remain unchanged.

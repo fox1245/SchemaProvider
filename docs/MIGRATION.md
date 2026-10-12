@@ -23,7 +23,7 @@ Family C++ code now owns request structure, tool/native checks, stream correlati
 
 ## Package 0.3.1 (interface 6)
 
-Package 0.3.1 is a maintenance release of this line. The interface revision and shared-library generation stay 6, and no installed struct or enum changes layout or gains an enumerator, so a consumer rebuilds against the 0.3.1 headers only to select `SchemaProvider 0.3.1 EXACT`. The fixes below change behaviour.
+Package 0.3.1 is a maintenance release of this line. The interface revision and shared-library generation stay 6, and no struct or enum of the public API ([runtime/client.h](../src/runtime/client.h), [core/value.h](../src/core/value.h)) changes layout or gains an enumerator, so a consumer rebuilds against the 0.3.1 headers only to select `SchemaProvider 0.3.1 EXACT`. The embedded descriptor policy and its identity, a persisted value on this interface, are unchanged. Two installed helper types that only the SDK's own libraries construct grow (`messages::Codec` and `runtime::detail::ResponseInfo`). The fixes below change behaviour.
 
 Chat Completions now accepts one `Role::Tool` message that carries several `ToolResult` parts, like the other families, and writes one wire `tool` message for each in order. A Tool message that is empty or holds anything else is still refused, and the refusal names the rule. See [request families](USAGE.md#request-families-and-controls).
 
