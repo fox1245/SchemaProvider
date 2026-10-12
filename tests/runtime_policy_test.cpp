@@ -105,6 +105,54 @@ void safety_and_budget() {
   }
 }
 
+// An HTTP 4xx answer is the server declining the request: nothing ran and nothing is billed, so
+// the failure is RejectedBeforeOutput and a host may release what it held for the call. 5xx, 429
+// and the 4xx that say "not yet" (408, 425) may follow started work, and a transport failure after
+// the request left proves nothing either way: those stay PossiblyAccepted.
+void http_4xx_is_a_definitive_rejection() {
+  auto answered = [](int status) {
+    transport::Result result;
+    result.status = transport::Status::Completed;
+    result.http_status = status;
+    result.attempt = {transport::Stage::ResponseStarted, 271, false, true, 0};
+    return result;
+  };
+  for (const int status : {400, 401, 402, 403, 404, 405, 409, 410, 413, 415, 422, 451}) {
+    const auto result = answered(status);
+    const auto e = classify_failure(result, inspect(status, R"({"error":{"message":"SECRET"}})"), {}, false, 1, receipt);
+    CHECK(e.retry_safety == RetrySafety::RejectedBeforeOutput);
+    CHECK(e.http_status == status && e.attempt.request_may_have_left && e.attempt.response_head_seen);
+    CHECK(e.safe_message.find("SECRET") == std::string::npos);
+    // The runtime classifies once with no decision and once more with its own first answer.
+    CHECK(classify_failure(result, inspect(status), e, false, 1, receipt).retry_safety == RetrySafety::RejectedBeforeOutput);
+  }
+  for (const int status : {408, 425, 429, 500, 502, 503, 504, 529}) {
+    const auto e = classify_failure(answered(status), inspect(status), {}, false, 1, receipt);
+    CHECK(e.retry_safety == RetrySafety::PossiblyAccepted);
+  }
+  // Specific kinds keep their classification; only the safety changes.
+  CHECK(classify_failure(answered(401), inspect(401), {}, false, 1, receipt).kind == ErrorKind::Authentication);
+  CHECK(classify_failure(answered(404), inspect(404, R"({"error":{"message":"SECRET","code":404}})"), {}, false, 1, receipt).kind == ErrorKind::NotFound);
+  CHECK(classify_failure(answered(400), inspect(400), {}, false, 1, receipt).kind == ErrorKind::InvalidRequest);
+  // Output already delivered, an answer that did not complete, a cut-off or a failure after the request
+  // left without an answer: never a rejection.
+  CHECK(classify_failure(answered(400), inspect(400), {}, true, 1, receipt).retry_safety == RetrySafety::OutputObserved);
+  auto cut = answered(400);
+  cut.status = transport::Status::Cancelled;
+  CHECK(classify_failure(cut, inspect(400), Error{ErrorKind::Cancelled, "SECRET"}, false, 1, receipt).retry_safety == RetrySafety::PossiblyAccepted);
+  cut.status = transport::Status::Failed;
+  cut.failure = transport::FailureKind::Receive;
+  CHECK(classify_failure(cut, inspect(400), {}, false, 1, receipt).retry_safety == RetrySafety::PossiblyAccepted);
+  CHECK(classify_failure(answered(200), inspect(200, R"({"error":{"type":"overloaded_error"}})", {}, "anthropic.messages"),
+                         Error{ErrorKind::RemoteFailure, "SECRET"}, false, 1, receipt).retry_safety == RetrySafety::PossiblyAccepted);
+  CHECK(transport_error(transport::Stage::ResponseStarted).retry_safety == RetrySafety::PossiblyAccepted);
+  CHECK(transport_error(transport::Stage::Connected).retry_safety == RetrySafety::NotSent);
+  // A declined request is not resent unless its class says it could clear up.
+  auto p = enabled();
+  const auto declined = classify_failure(answered(401), inspect(401), {}, false, 1, receipt);
+  CHECK(declined.retry_class == RetryClass::Never && !retry_at(declined, p, 1, receipt, receipt + 10s, 0));
+}
+
 void hints() {
   auto p = enabled(); p.allow_duplicate_billing_risk = true;
   auto hinted = [&](std::vector<transport::Header> headers, SteadyTime now = receipt) {
@@ -266,7 +314,7 @@ void unsupported_parameter_is_named() {
 }
 }  // namespace
 int main() {
-  classification(); google_api_key_errors(); unsupported_parameter_is_named(); safety_and_budget(); hints(); arithmetic_and_bucket(); shipped_ceilings_fit_the_narrowest_long();
+  classification(); google_api_key_errors(); unsupported_parameter_is_named(); safety_and_budget(); http_4xx_is_a_definitive_rejection(); hints(); arithmetic_and_bucket(); shipped_ceilings_fit_the_narrowest_long();
   if (failures) return 1;
   std::puts("runtime policy: classification, safety, hints, arithmetic and bucket passed");
 }

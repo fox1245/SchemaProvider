@@ -555,6 +555,31 @@ void unsupported_parameter_named(Peer& peer) {
     peer.count(model, 1, 1);
   }
 }
+// A 4xx answer from the vendor (a bad key, a bad request, a pinned price nobody meets) is a definitive
+// rejection; 429 and 5xx may follow started work and stay possibly accepted.
+void http_rejections_are_definitive(Peer& peer) {
+  for (const bool messages : {false, true}) {
+    Client client(descriptor(peer, messages), options());
+    for (const bool streaming : {false, true}) {
+      for (const auto& [scenario, kind] : std::vector<std::pair<std::string, sp::ErrorKind>>{
+               {"status-400", sp::ErrorKind::InvalidRequest}, {"status-401", sp::ErrorKind::Authentication}, {"status-404", sp::ErrorKind::NotFound}}) {
+        const auto model = peer.arm(scenario);
+        const auto result = client.complete(request(model, messages), run(streaming));
+        const auto& rejected = failure(result, kind);
+        require(rejected.error.retry_safety == sp::RetrySafety::RejectedBeforeOutput, "4xx answer kept the call possibly accepted");
+        require(rejected.error.attempt.request_may_have_left && rejected.error.attempt.response_head_seen, "rejection lost its attempt evidence");
+        require(rejected.partial.messages.empty() && rejected.partial.usage.stage == sp::UsageStage::Missing, "rejection invented output or usage");
+        peer.count(model, 1, 1);
+      }
+      for (const auto* scenario : {"always-error", "rate"}) {
+        const auto model = peer.arm(scenario);
+        const auto result = client.complete(request(model, messages), run(streaming));
+        require(failure(result).error.retry_safety == sp::RetrySafety::PossiblyAccepted, "5xx or 429 answer was treated as a rejection");
+        peer.count(model, 1, 1);
+      }
+    }
+  }
+}
 void ownership(Peer& peer) {
   Client client(descriptor(peer, false), options());
   for (const auto how : {0, 1, 2, 3}) {
@@ -914,6 +939,7 @@ int main(int argc, char** argv) {
     check("typeless Messages buffered error", [&] { typeless_messages_runtime_error(peer); });
     check("minima, bucket and deadline", [&] { minima_budget_deadline(peer); });
     check("unsupported parameter named", [&] { unsupported_parameter_named(peer); });
+    check("HTTP rejections", [&] { http_rejections_are_definitive(peer); });
     check("ownership", [&] { ownership(peer); });
     check("callback ownership and misuse", [&] { callback_ownership_and_misuse(peer); });
     check("raw I/O blocking misuse", [&] { raw_io_misuse(peer); });
