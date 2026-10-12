@@ -733,6 +733,84 @@ void gateway_request_controls() {
     CHECK(std::get<Error>(chat::encode(gateway, changed, false)).kind == ErrorKind::ReplayIneligible);
   }
 }
+// OpenRouter provider.max_price (https://openrouter.ai/docs/guides/routing/provider-selection#max-price).
+void gateway_max_price() {
+  auto loaded = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"gateway","family":"openai.chat","connection":{"base_url":"https://openrouter.ai","paths":{"buffered":"/api/v1/chat/completions","streaming":"/api/v1/chat/completions"}}})");
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
+  const auto& gateway = std::get<descriptor::ValidatedDescriptor>(loaded);
+  const auto wire = [&](const chat::Request& request) {
+    auto result = chat::encode(gateway, request, false);
+    CHECK(std::holds_alternative<chat::EncodedRequest>(result));
+    return std::get<chat::EncodedRequest>(result).body;
+  };
+  const auto rejected = [&](const chat::Request& request, ErrorKind kind, const descriptor::ValidatedDescriptor& d) {
+    auto result = chat::encode(d, request, false);
+    CHECK(std::holds_alternative<Error>(result) && std::get<Error>(result).kind == kind);
+  };
+  const auto capture = [&](const chat::Request& request) {
+    auto result = chat::encode(gateway, request, false);
+    CHECK(std::holds_alternative<chat::EncodedRequest>(result));
+    Accumulator accumulator;
+    chat::Codec codec(gateway, chat::Mode::Buffered, accumulator, {}, std::get<chat::EncodedRequest>(result).context);
+    codec.buffered(body(R"({"role":"assistant","content":"answer"})"), {});
+    CHECK(accumulator.outcome() && std::holds_alternative<Completion>(*accumulator.outcome()));
+    return std::get<Completion>(*accumulator.outcome()).messages.at(0);
+  };
+  chat::Request request; request.model = "fixture-model"; request.messages.push_back({Role::User, "hello"});
+  OpenRouterRouting routing; routing.zdr = true;
+  OpenRouterMaxPrice price;
+  price.prompt_nano_usd = 75'000'000;          // $0.075 per million prompt tokens
+  price.completion_nano_usd = 15'000'000'000;  // $15 per million completion tokens
+  price.image_nano_usd = 100'000;              // $0.0001 per image
+  price.audio_nano_usd = 1;                    // one nanoUSD per audio unit
+  price.request_nano_usd = 0;                  // free endpoints only
+  routing.max_price = price; request.provider = routing;
+  // Exact decimal JSON numbers: no exponent (0.0001, not 1e-04), no trailing zeros, no binary rounding.
+  const auto text = wire(request);
+  CHECK(text.find(R"("provider":{"zdr":true,"max_price":{"prompt":0.075,"completion":15,"image":0.0001,"audio":0.000000001,"request":0}})") != std::string::npos);
+  auto parsed = json::parse(text); CHECK(std::holds_alternative<json::Document>(parsed));
+  const auto sent = std::get<json::Document>(parsed).root().get("provider").get("max_price");
+  CHECK(sent.size() == 5 && sent.get("prompt").as_double() == 0.075 && sent.get("completion").as_double() == 15.0);
+  CHECK(sent.get("image").as_double() == 0.0001 && sent.get("audio").as_double() == 1e-9 && sent.get("request").as_double() == 0.0);
+  // Only amounts that are set are sent, after the other routing members.
+  routing.data_collection = "deny"; routing.max_price = OpenRouterMaxPrice{}; routing.max_price->completion_nano_usd = 1'500'000'000;
+  request.provider = routing;
+  CHECK(wire(request).find(R"("provider":{"zdr":true,"data_collection":"deny","max_price":{"completion":1.5}})") != std::string::npos);
+  routing.max_price->completion_nano_usd = std::uint64_t{1} << 53; request.provider = routing;
+  CHECK(wire(request).find(R"("max_price":{"completion":9007199.254740992})") != std::string::npos);
+  routing.max_price.reset(); request.provider = routing;
+  CHECK(wire(request).find("max_price") == std::string::npos);
+  // An empty ceiling, an amount above 2^53 nanoUSD and an undeclared origin reject before I/O.
+  auto changed = request; changed.provider->max_price = OpenRouterMaxPrice{};
+  rejected(changed, ErrorKind::InvalidRequest, gateway);
+  for (const auto amount : {(std::uint64_t{1} << 53) + 1, std::numeric_limits<std::uint64_t>::max()}) {
+    changed.provider->max_price->image_nano_usd = amount;
+    rejected(changed, ErrorKind::InvalidRequest, gateway);
+  }
+  changed.provider->max_price->image_nano_usd = 1;
+  CHECK(wire(changed).find(R"("max_price":{"image":0.000000001})") != std::string::npos);
+  rejected(changed, ErrorKind::InvalidRequest, descriptor_value());
+  // The ceiling joins the routing binding of native history.
+  request.provider->max_price = price;
+  const auto answer = capture(request);
+  request.messages.clear();
+  request.canonical_messages = {Message{{}, Role::User, {Text{"hello"}}}, answer, Message{{}, Role::User, {Text{"next"}}}};
+  CHECK(wire(request).find(R"("max_price":{"prompt":0.075,)") != std::string::npos);
+  for (int field = 0; field != 3; ++field) {
+    changed = request;
+    if (field == 0) changed.provider->max_price->prompt_nano_usd = 75'000'001;
+    if (field == 1) changed.provider->max_price->request_nano_usd.reset();
+    if (field == 2) changed.provider->max_price.reset();
+    rejected(changed, ErrorKind::ReplayIneligible, gateway);
+  }
+  // History sealed without a ceiling keeps its binding and cannot gain one.
+  changed = request; changed.provider->max_price.reset(); changed.canonical_messages.resize(1);
+  const auto unpriced = capture(changed);
+  changed.canonical_messages = {Message{{}, Role::User, {Text{"hello"}}}, unpriced, Message{{}, Role::User, {Text{"next"}}}};
+  CHECK(wire(changed).find("max_price") == std::string::npos);
+  changed.provider->max_price = price;
+  rejected(changed, ErrorKind::ReplayIneligible, gateway);
+}
 void idempotent_terminal_money_tail() {
   auto loaded = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"tail-money","family":"openai.chat","connection":{"base_url":"https://openrouter.ai","paths":{"buffered":"/api/v1/chat/completions","streaming":"/api/v1/chat/completions"}}})");
   CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
@@ -930,7 +1008,7 @@ int main() {
     required_metadata_and_identity(); per_chunk_creation_clock(); required_usage_and_unknown_cache(); unindexed_tool_order_and_optional_function(); buffered_close_precedence();
     accumulator_interleaved_ordering(); accumulator_order_uniqueness_and_limits();
     tool_history_and_escaped_arguments(); quoted_json_and_request_bounds();
-    gateway_request_controls();
+    gateway_request_controls(); gateway_max_price();
     std::cout << "chat semantic properties passed\n";
     return 0;
   } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

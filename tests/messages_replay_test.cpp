@@ -557,6 +557,27 @@ void thinking_cache_tool_controls() {
   routing.provider->order = {"other"};
   rejected(gateway, routing);
 }
+// OpenRouter provider.max_price (https://openrouter.ai/docs/guides/routing/provider-selection#max-price)
+// on the Messages route.
+void openrouter_max_price() {
+  const auto gateway = descriptor_value("https://openrouter.ai", "/api/v1/messages");
+  auto request = base_request(); request.provider = OpenRouterRouting{};
+  OpenRouterMaxPrice price; price.prompt_nano_usd = 3'000'000'000; price.completion_nano_usd = 15'000'000'000; price.request_nano_usd = 100'000;
+  request.provider->max_price = price;
+  CHECK(encoded(gateway, request).body.find(R"("provider":{"max_price":{"prompt":3,"completion":15,"request":0.0001}})") != std::string::npos);
+  rejected(descriptor_value(), request, ErrorKind::InvalidRequest);
+  auto changed = request; changed.provider->max_price = OpenRouterMaxPrice{};
+  rejected(gateway, changed, ErrorKind::InvalidRequest);
+  changed.provider->max_price->audio_nano_usd = (std::uint64_t{1} << 53) + 1;
+  rejected(gateway, changed, ErrorKind::InvalidRequest);
+  request.messages.push_back(capture(gateway, request, R"([{"type":"text","text":"answer"}])"));
+  request.messages.push_back(user("continue"));
+  CHECK(std::holds_alternative<messages::EncodedRequest>(messages::encode(gateway, request, false)));
+  changed = request; changed.provider->max_price->prompt_nano_usd = 3'000'000'001;
+  rejected(gateway, changed);
+  changed = request; changed.provider->max_price.reset();
+  rejected(gateway, changed);
+}
 } // namespace
 int main() {
   try {
@@ -565,7 +586,7 @@ int main() {
     invalid_calls_are_not_repaired();
     bounded_json_serialization(); request_encoded_byte_boundaries(); request_json_encoding_and_depth();
     effective_policy_lineage();
-    thinking_cache_tool_controls();
+    thinking_cache_tool_controls(); openrouter_max_price();
     std::cout << "Messages replay properties passed\n"; return 0;
   } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }
