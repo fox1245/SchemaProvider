@@ -23,9 +23,14 @@ inline constexpr std::uint64_t OrderedWireEvents = 1ULL << 5;
 inline constexpr std::uint64_t NativeSocketRuntime = 1ULL << 6;
 inline constexpr std::uint64_t RetainedJsonSize = 1ULL << 7;
 inline constexpr std::uint64_t CompleteAttemptEvidence = 1ULL << 8;
+// The library sends OpenRouterRouting::max_price and binds it into native replay. A library
+// built before the field has smaller request layouts and would not send the cap. It lacks this
+// bit, so a consumer's require_interface_contract call with RequiredProvider refuses it; its own
+// Client construction checks only the constants it was built with.
+inline constexpr std::uint64_t OpenRouterRoutingMaxPrice = 1ULL << 9;
 inline constexpr std::uint64_t RequiredProvider = TypedRuntime | PreparedAdmission |
     NullableUsage | All5Native | TrustedArchive | OrderedWireEvents | NativeSocketRuntime |
-    RetainedJsonSize | CompleteAttemptEvidence;
+    RetainedJsonSize | CompleteAttemptEvidence | OpenRouterRoutingMaxPrice;
 }
 InterfaceContract core_interface_contract() noexcept;
 std::uint32_t codec_interface_revision() noexcept;
