@@ -61,6 +61,29 @@ std::string descriptor_source(std::uint64_t port, bool messages, std::string_vie
       "\"bindings\":{\"model\":\"model\",\"messages\":\"messages\",\"stream\":\"stream\",\"max_output_tokens\":\"max_tokens\",\"usage\":[\"usage\"]},"
       "\"stop_reasons\":{\"stop\":\"EndTurn\",\"end_turn\":\"EndTurn\",\"tool_use\":\"ToolUse\"}}";
 }
+// The linked library advertises OpenRouter max_price support and RequiredProvider demands it.
+// The suite links only the current library, so an ungranted bit stands in for a library built
+// without a required capability: the handshake must refuse it rather than admit a partial match.
+void interface_contract_capabilities() {
+  using namespace sp::capability;
+  static_assert((RequiredProvider & OpenRouterRoutingMaxPrice) == OpenRouterRoutingMaxPrice);
+  const auto linked = sp::runtime::interface_contract();
+  require(linked.revision == sp::EXPECTED_INTERFACE_REVISION, "linked interface revision differs");
+  require((linked.capabilities & RequiredProvider) == RequiredProvider, "required capabilities are not advertised");
+  require((sp::core_interface_contract().capabilities & OpenRouterRoutingMaxPrice) != 0, "core omits max_price support");
+  sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, OpenRouterRoutingMaxPrice);
+  sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, RequiredProvider);
+  constexpr std::uint64_t ungranted = 1ULL << 63;
+  require((linked.capabilities & ungranted) == 0, "test capability bit is granted");
+  const auto refused = [](std::uint32_t revision, std::uint64_t capabilities) {
+    try { sp::runtime::require_interface_contract(revision, capabilities); }
+    catch (const sp::runtime::InterfaceContractError&) { return true; }
+    return false;
+  };
+  require(refused(sp::EXPECTED_INTERFACE_REVISION, OpenRouterRoutingMaxPrice | ungranted), "missing capability admitted");
+  require(refused(sp::EXPECTED_INTERFACE_REVISION, RequiredProvider | ungranted), "missing capability admitted");
+  require(refused(sp::EXPECTED_INTERFACE_REVISION + 1, OpenRouterRoutingMaxPrice), "other interface revision admitted");
+}
 sp::descriptor::ValidatedDescriptor descriptor(const Peer& peer, bool messages) {
   auto loaded = sp::descriptor::load(descriptor_source(peer.port, messages));
   require(std::holds_alternative<sp::descriptor::ValidatedDescriptor>(loaded), "runtime descriptor rejected");
@@ -864,6 +887,7 @@ int main(int argc, char** argv) {
   auto check = [&](std::string_view name, auto&& body) { section = name; body(); };
   try {
     guarded_cycle(argv[0], argv[1], argv[2]);
+    check("interface contract capabilities", [&] { interface_contract_capabilities(); });
     check("RAII exception ownership", [&] { owner_exception_paths(argv[1], argv[2]); });
     Peer peer(argv[1], argv[2]);
     check("quota abnormal close", [&] { quota_abnormal_close(peer); });

@@ -678,7 +678,8 @@ NativeReplay::NativeReplay(std::shared_ptr<const NativeContext> context, const M
 }
 InterfaceContract core_interface_contract() noexcept {
   std::uint64_t capabilities = capability::NullableUsage |
-      capability::All5Native | capability::TrustedArchive | capability::OrderedWireEvents;
+      capability::All5Native | capability::TrustedArchive | capability::OrderedWireEvents |
+      capability::OpenRouterRoutingMaxPrice;
   if (json::retained_size_contract() == 1) capabilities |= capability::RetainedJsonSize;
 #if defined(__unix__) || defined(__APPLE__) || defined(_WIN32)
   return {7, capabilities | capability::NativeSocketRuntime};
