@@ -179,6 +179,8 @@ request.max_tokens = 128;  // This family uses max_tokens in C++.
 
 `sp::chat::InputMessage` is the shorter text/tool/media path. Its `media` vector is emitted in vector order before nonempty text. Use `canonical_messages` for caller-controlled Text/Media part order or retained native history.
 
+A `Role::Tool` message may carry the results of several parallel tool calls in every family, and holds nothing else. Chat Completions takes one wire message per result, so the Chat encoder writes one `tool` message for each `ToolResult`, in the order given; one message of two results and two messages of one result each encode to the same bytes. Each result must still resolve exactly one pending call of the preceding assistant message. A Tool message that is empty or mixes in other parts is refused before dispatch as `InvalidRequest`, naming this rule.
+
 Structured output uses `sp::ResponseFormat`, not a descriptor program. Tool schemas are owned immutable `sp::json::Document` values. This fragment creates a Responses request with a JSON-object response format:
 
 ```cpp

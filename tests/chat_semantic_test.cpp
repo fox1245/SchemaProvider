@@ -651,6 +651,66 @@ void tool_history_and_escaped_arguments() {
   CHECK(std::get<Error>(chat::encode(descriptor_value(), changed, false)).kind == ErrorKind::Unsupported);
 }
 
+// A parallel tool turn may answer every call in one Tool message, as the Responses, Messages and
+// Generate codecs accept. Chat Completions takes one wire message per result, so the encoder
+// splits the message instead of refusing it.
+void one_tool_message_with_several_results() {
+  const auto outcome = buffered(body(R"({"role":"assistant","content":"checking","tool_calls":[{"id":"a","type":"function","function":{"name":"f","arguments":"{\"x\":1}"}},{"id":"b","type":"function","function":{"name":"g","arguments":"{}"}}]})", "\"tool_calls\""));
+  auto request = [&](std::vector<Message> results) {
+    chat::Request value; value.model = "fixture-model";
+    value.canonical_messages.push_back(Message{"", Role::User, {Text{"Use the two tools."}}});
+    Message assistant{"", Role::Assistant, {}};
+    for (const auto& part : completed(outcome).messages.front().parts)
+      if (std::holds_alternative<Text>(part) || std::holds_alternative<ToolCall>(part)) assistant.parts.push_back(part);
+    value.canonical_messages.push_back(std::move(assistant));
+    for (auto& result : results) value.canonical_messages.push_back(std::move(result));
+    return value;
+  };
+  auto tool = [](std::initializer_list<ToolResult> results) {
+    Message message{"", Role::Tool, {}};
+    for (const auto& result : results) message.parts.push_back(result);
+    return message;
+  };
+  auto wire = [&](const chat::Request& value, bool streaming) {
+    auto encoded = chat::encode(descriptor_value(), value, streaming);
+    CHECK(std::holds_alternative<chat::EncodedRequest>(encoded));
+    return std::get<chat::EncodedRequest>(std::move(encoded)).body;
+  };
+  for (bool streaming : {false, true}) {
+    const auto split = wire(request({tool({ToolResult{"b", "second"}, ToolResult{"a", "first", true}})}), streaming);
+    // One Tool message per result on the wire, in the order the caller gave.
+    auto document = json::parse(split);
+    CHECK(std::holds_alternative<json::Document>(document));
+    const auto messages = std::get<json::Document>(document).root().get("messages");
+    CHECK(messages.size() == 4);
+    CHECK(messages.at(2).get("role").as_string() == "tool" && messages.at(3).get("role").as_string() == "tool");
+    CHECK(messages.at(2).get("tool_call_id").as_string() == "b" && messages.at(2).get("content").as_string() == "second");
+    CHECK(messages.at(3).get("tool_call_id").as_string() == "a" && messages.at(3).get("content").as_string() == "first");
+    // The same conversation as two Tool messages encodes to the same bytes.
+    CHECK(wire(request({tool({ToolResult{"b", "second"}}), tool({ToolResult{"a", "first", true}})}), streaming) == split);
+    // A single result and a result split across messages keep working.
+    CHECK(wire(request({tool({ToolResult{"a", "first"}, ToolResult{"b", "second"}})}), streaming) ==
+          wire(request({tool({ToolResult{"a", "first"}}), tool({ToolResult{"b", "second"}})}), streaming));
+  }
+  auto rejects = [&](chat::Request value, ErrorKind kind, std::string_view fragment) {
+    auto result = chat::encode(descriptor_value(), value, false);
+    CHECK(std::holds_alternative<Error>(result));
+    const auto& error = std::get<Error>(result);
+    CHECK(error.kind == kind && error.safe_message.find(fragment) != std::string::npos);
+  };
+  // Results still have to resolve the calls of the preceding assistant message, each exactly once.
+  rejects(request({tool({ToolResult{"a", "first"}, ToolResult{"a", "again"}})}), ErrorKind::InvalidRequest, "pending call");
+  rejects(request({tool({ToolResult{"a", "first"}, ToolResult{"missing", "x"}})}), ErrorKind::InvalidRequest, "pending call");
+  rejects(request({tool({ToolResult{"a", "first"}})}), ErrorKind::InvalidRequest, "missing tool results");
+  // What the Tool message may hold is stated by the refusal: tool results only, at least one.
+  auto mixed = tool({ToolResult{"a", "first"}});
+  mixed.parts.push_back(Text{"note"});
+  rejects(request({std::move(mixed), tool({ToolResult{"b", "second"}})}), ErrorKind::InvalidRequest, "Tool message holds only tool results");
+  rejects(request({Message{"", Role::Tool, {}}}), ErrorKind::InvalidRequest, "Tool message holds only tool results");
+  ToolResult typed{"a", ""}; typed.content_parts = {Text{"typed"}};
+  rejects(request({tool({typed, ToolResult{"b", "second"}})}), ErrorKind::Unsupported, "typed media");
+}
+
 void quoted_json_and_request_bounds() {
   const auto parsed = json::parse(R"({"quote\"key":"\u0000\b\f\n\r\t\"\\雪","array":[1,-2,1.25,true,null,{}]})");
   CHECK(std::holds_alternative<json::Document>(parsed));
@@ -1006,7 +1066,7 @@ int main() {
     invalid_tools_and_compatibility(); usage_knowledge(); accumulator_transitions_and_seals(); typed_request_encoding();
     required_metadata_and_identity(); per_chunk_creation_clock(); required_usage_and_unknown_cache(); unindexed_tool_order_and_optional_function(); buffered_close_precedence();
     accumulator_interleaved_ordering(); accumulator_order_uniqueness_and_limits();
-    tool_history_and_escaped_arguments(); quoted_json_and_request_bounds();
+    tool_history_and_escaped_arguments(); one_tool_message_with_several_results(); quoted_json_and_request_bounds();
     gateway_request_controls(); gateway_max_price();
     std::cout << "chat semantic properties passed\n";
     return 0;
