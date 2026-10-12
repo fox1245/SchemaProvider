@@ -580,6 +580,30 @@ void http_rejections_are_definitive(Peer& peer) {
     }
   }
 }
+// A cancelled call has the usage reported before the cut and nothing more: no stage and no counter when the
+// provider had said nothing (not zero), a partial snapshot when it had. The output count of a streamed
+// Messages call is not known until message_delta, so a cut stream never reports a placeholder one.
+void cancelled_call_usage_is_not_evidence_of_zero(Peer& peer) {
+  for (const bool messages : {false, true}) {
+    Client client(descriptor(peer, messages), options());
+    const auto model = peer.arm("partial"); Capture capture;
+    auto op = client.start(request(model, messages), run(), capture.callbacks());
+    capture.delta();
+    op.cancel();
+    const auto result = finish(op, capture);
+    const auto& cancelled = failure(result, sp::ErrorKind::Cancelled);
+    const auto& usage = cancelled.partial.usage;
+    require(text(cancelled.partial.messages) == "partial" && cancelled.error.retry_safety == sp::RetrySafety::OutputObserved, "cancelled call lost its partial output");
+    require(!usage.output_total && !usage.total && !usage.provider_reported_total && !usage.reasoning, "cancelled call reported an output count it did not have");
+    if (messages) {
+      require(usage.stage == sp::UsageStage::Partial && usage.quality == sp::UsageQuality::Consistent, "partial snapshot is not labelled partial");
+      require(usage.input_uncached && usage.input_uncached->value == 2 && usage.input_uncached->evidence == sp::Evidence::Reported, "partial snapshot lost its input count");
+    } else {
+      require(usage.stage == sp::UsageStage::Missing && !usage.input_total && !usage.input_uncached && usage.extra.empty(), "cancelled call with no report has usage");
+    }
+    peer.count(model, 1);
+  }
+}
 void ownership(Peer& peer) {
   Client client(descriptor(peer, false), options());
   for (const auto how : {0, 1, 2, 3}) {
@@ -940,6 +964,7 @@ int main(int argc, char** argv) {
     check("minima, bucket and deadline", [&] { minima_budget_deadline(peer); });
     check("unsupported parameter named", [&] { unsupported_parameter_named(peer); });
     check("HTTP rejections", [&] { http_rejections_are_definitive(peer); });
+    check("cancelled call usage", [&] { cancelled_call_usage_is_not_evidence_of_zero(peer); });
     check("ownership", [&] { ownership(peer); });
     check("callback ownership and misuse", [&] { callback_ownership_and_misuse(peer); });
     check("raw I/O blocking misuse", [&] { raw_io_misuse(peer); });

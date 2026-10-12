@@ -34,7 +34,8 @@ class Codec {
   bool delta(json::Value, uint64_t);
   bool end_block(uint64_t);
   bool terminal(json::Value, bool initial = false);
-  bool usage(json::Value, bool initial);
+  // `initial` is a message object (message_start or a buffered body); `placeholder_output` marks the streaming message_start.
+  bool usage(json::Value, bool initial, bool placeholder_output = false);
   bool usage_leaves(json::Value, const std::string& prefix);
   json::Value usage_at(json::Value) const;
   bool counter(json::Value, std::optional<Count>&, std::string_view, bool nullable = false);
@@ -61,6 +62,8 @@ class Codec {
   std::map<std::string, Call, std::less<>> calls_;
   std::set<std::string, std::less<>> results_;
   Usage usage_;
+  // The output count of message_start: a placeholder, kept only to detect a later cumulative count below it.
+  std::optional<uint64_t> started_output_;
   size_t input_bytes_ = 0;
 };
 } // namespace sp::messages

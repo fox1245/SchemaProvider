@@ -646,6 +646,47 @@ void openrouter_sentinel_and_cost() {
   const auto unknown_currency = completed(buffered(direct_body)).usage.provider_cost;
   CHECK(unknown_currency.source == CostSource::UnknownCurrency && !unknown_currency.total && unknown_currency.status[0] == CostStatus::UnknownCurrency);
 }
+
+// A call that is cut off (cancelled, deadline, reset) has the usage the provider had reported so far,
+// labelled partial, and nothing more. message_start carries a placeholder output count (the first token
+// or none), not the count so far: a stream cut before message_delta has input evidence and no output
+// evidence, which is not the same as zero output. The cumulative count of message_delta is evidence.
+void cut_stream_usage_has_no_placeholder_output() {
+  const std::string first_token = R"({"input_tokens":2,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":1})";
+  const std::vector<Frame> prefix_frames{block(0, R"({"type":"text","text":""})"), delta(0, R"({"type":"text_delta","text":"partial"})")};
+  for (const auto& usage : {initial_usage, first_token}) {
+    for (const auto kind : {ErrorKind::Cancelled, ErrorKind::DeadlineExceeded, ErrorKind::Truncated, ErrorKind::Transport}) {
+      std::vector<Frame> frames{start(usage)};
+      frames.insert(frames.end(), prefix_frames.begin(), prefix_frames.end());
+      const auto outcome = stream(frames, {false, kind});
+      const auto& f = failed(outcome, kind);
+      CHECK(text(f.partial.messages) == "partial");
+      const auto& u = f.partial.usage;
+      CHECK(u.stage == UsageStage::Partial && u.quality == UsageQuality::Consistent && u.conflicts.empty());
+      CHECK(u.input_uncached && u.input_uncached->value == 2 && u.input_uncached->evidence == Evidence::Reported);
+      CHECK(!u.output_total && !u.total && !u.provider_reported_total);
+    }
+  }
+  // Before message_start there is nothing at all: no stage, no counter.
+  for (const auto kind : {ErrorKind::Cancelled, ErrorKind::Transport}) {
+    const auto& u = failed(stream({}, {false, kind}), kind).partial.usage;
+    CHECK(u.stage == UsageStage::Missing && !u.input_total && !u.input_uncached && !u.output_total && !u.total && u.extra.empty());
+  }
+  // The cumulative count in message_delta is evidence, kept when the stream is cut after it.
+  std::vector<Frame> frames{start(first_token)};
+  frames.insert(frames.end(), prefix_frames.begin(), prefix_frames.end());
+  frames.push_back(end(0)); frames.push_back(stop("\"end_turn\"", R"({"output_tokens":5})"));
+  const auto& cut = failed(stream(frames, {false, ErrorKind::Cancelled}), ErrorKind::Cancelled).partial.usage;
+  CHECK(cut.stage == UsageStage::Partial && cut.output_total && cut.output_total->value == 5 && cut.output_total->evidence == Evidence::Reported);
+  frames.push_back(done);
+  const auto& whole = completed(stream(frames)).usage;
+  CHECK(whole.stage == UsageStage::Final && whole.output_total->value == 5 && whole.input_total->value == 2 && whole.total->value == 7);
+  CHECK(whole.quality == UsageQuality::Consistent);
+  // A final count below the one in message_start is still a conflict.
+  const std::string large = R"({"input_tokens":2,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":5})";
+  std::vector<Frame> regress{start(large), block(0, R"({"type":"text","text":""})"), end(0), stop("\"end_turn\"", R"({"output_tokens":3})"), done};
+  CHECK(completed(stream(regress)).usage.quality == UsageQuality::Inconsistent);
+}
 } // namespace
 int main() {
   try {
@@ -654,7 +695,7 @@ int main() {
     usage_binding_precedence();
     usage_detail_forward_compatibility(); toolset_metadata_shapes();
     terminal_matrix(); text_thinking_and_order(); tool_fragments(); server_semantics(); server_result_shapes();
-    stop_classes(); corruption_matrix(); usage_knowledge(); uncached_input_rule(); limits_and_close_priority();
+    stop_classes(); corruption_matrix(); usage_knowledge(); cut_stream_usage_has_no_placeholder_output(); uncached_input_rule(); limits_and_close_priority();
     std::cout << "messages semantic tests passed\n";
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }
