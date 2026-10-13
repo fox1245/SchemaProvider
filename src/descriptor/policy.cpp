@@ -3,6 +3,7 @@
 #include "sp/config_defaults.h"
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 #include <limits>
 #include <stdexcept>
 #include <unordered_set>
@@ -333,7 +334,115 @@ const FamilyPolicy* DescriptorPolicy::family(std::string_view name) const noexce
 const RequestDefaults& DescriptorPolicy::defaults(std::string_view name,std::string_view model) const noexcept { for(const auto& m:models_)if(m.family==name && m.model==model)return m.defaults; return family(name)->defaults; }
 std::optional<std::uint64_t> DescriptorPolicy::output_limit(std::string_view name,std::string_view model) const noexcept {for(const auto& m:models_)if(m.family==name && m.model==model)return m.output_limit;return {};}
 std::optional<std::uint64_t> DescriptorPolicy::input_limit(std::string_view name,std::string_view model) const noexcept {for(const auto& m:models_)if(m.family==name && m.model==model)return m.input_limit;return {};}
+std::string DescriptorPolicy::identity_hex() const {
+  static constexpr char hex[] = "0123456789abcdef";
+  std::string out;
+  out.reserve(identity_.size() * 2);
+  for (const unsigned char byte : identity_) {
+    out.push_back(hex[(byte >> 4) & 0x0fU]);
+    out.push_back(hex[byte & 0x0fU]);
+  }
+  return out;
+}
 PolicyResult load_policy(std::string_view f,std::string_view r){return PolicyLoader{}.run(f,r);}
+namespace {
+bool matches_sha256_hex(std::string_view actual_lower_hex, std::string_view expected_hex) noexcept {
+  if (expected_hex.size() != 64 || actual_lower_hex.size() != 64) return false;
+  for (std::size_t i = 0; i < 64; ++i) {
+    char c = expected_hex[i];
+    if (c >= 'A' && c <= 'F') c = static_cast<char>(c + ('a' - 'A'));
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+    if (c != actual_lower_hex[i]) return false;
+  }
+  return true;
+}
+std::variant<std::string, ConfigError> read_bounded_policy_file(
+    std::string_view path, std::size_t max_bytes, std::string_view pointer) {
+  if (path.empty() || path.find('\0') != std::string_view::npos) {
+    return ConfigError{std::string(pointer), "readable bounded policy file", 0,
+                       "policy file path is invalid"};
+  }
+  std::ifstream stream{std::string(path), std::ios::binary};
+  if (!stream.is_open()) {
+    return ConfigError{std::string(pointer), "readable bounded policy file", 0,
+                       "policy file could not be opened"};
+  }
+  std::string contents;
+  char buffer[4096];
+  while (stream.read(buffer, sizeof(buffer)) || stream.gcount() > 0) {
+    const auto count = static_cast<std::size_t>(stream.gcount());
+    if (contents.size() + count > max_bytes) {
+      return ConfigError{std::string(pointer), "policy file within admission byte limit", 0,
+                         "policy file exceeds admission byte limit"};
+    }
+    contents.append(buffer, count);
+  }
+  if (stream.bad()) {
+    return ConfigError{std::string(pointer), "readable bounded policy file", 0,
+                       "policy file read failed"};
+  }
+  return contents;
+}
+} // namespace
+PolicyResult load_verified_policy(std::string_view family_json, std::string_view resource_json,
+                                  std::string_view expected_sha256_hex) {
+  auto loaded = load_policy(family_json, resource_json);
+  auto* snapshot = std::get_if<PolicySnapshot>(&loaded);
+  if (!snapshot || expected_sha256_hex.empty()) return loaded;
+  if (!matches_sha256_hex((*snapshot)->identity_hex(), expected_sha256_hex)) {
+    return ConfigError{"/identity", "matching 64-character SHA-256 policy identity digest", 0,
+                       "policy identity SHA-256 digest mismatch"};
+  }
+  return loaded;
+}
+PolicyResult load_policy_files(std::string_view family_json_path, std::string_view resource_json_path,
+                               std::string_view expected_sha256_hex) {
+  auto family_file = read_bounded_policy_file(
+      family_json_path, config_defaults::codec_admission_policy_bytes, "/descriptor_policy");
+  if (auto* error = std::get_if<ConfigError>(&family_file)) return std::move(*error);
+  auto resource_file = read_bounded_policy_file(
+      resource_json_path, config_defaults::codec_admission_policy_bytes, "/codec_defaults");
+  if (auto* error = std::get_if<ConfigError>(&resource_file)) return std::move(*error);
+  return load_verified_policy(std::get<std::string>(family_file),
+                              std::get<std::string>(resource_file),
+                              expected_sha256_hex);
+}
+PolicyResult load_policy_bundle(std::string_view bundle_json,
+                                std::string_view expected_sha256_hex) {
+  const json::Limits limits{config_defaults::codec_admission_policy_bytes * 2,
+                            config_defaults::codec_admission_policy_depth + 2};
+  auto parsed = json::parse(bundle_json, limits);
+  if (auto* error = std::get_if<json::ParseError>(&parsed)) {
+    return ConfigError{error->pointer, "valid JSON policy bundle", 0,
+                       "policy bundle JSON rejected"};
+  }
+  try {
+    const auto root = std::get<json::Document>(parsed).root();
+    closed(root, {"version", "descriptor_policy", "codec_defaults"}, "");
+    if (!root.get("version").is_uint() || root.get("version").as_uint() != 1)
+      fail("/version", "integer version 1");
+    const auto family_node = root.get("descriptor_policy");
+    const auto resource_node = root.get("codec_defaults");
+    if (!family_node.is_object()) fail("/descriptor_policy", "descriptor policy object");
+    if (!resource_node.is_object()) fail("/codec_defaults", "codec defaults object");
+    return load_verified_policy(family_node.dump(), resource_node.dump(), expected_sha256_hex);
+  } catch (ConfigError& error) {
+    return std::move(error);
+  }
+}
+PolicyResult load_policy_bundle_file(std::string_view bundle_path,
+                                     std::string_view expected_sha256_hex) {
+  auto bundle_file = read_bounded_policy_file(
+      bundle_path, config_defaults::codec_admission_policy_bytes * 2, "");
+  if (auto* error = std::get_if<ConfigError>(&bundle_file)) return std::move(*error);
+  return load_policy_bundle(std::get<std::string>(bundle_file), expected_sha256_hex);
+}
+std::string builtin_policy_bundle_json() {
+  return std::string("{\"version\":1,\"descriptor_policy\":") +
+         std::string(config_defaults::descriptor_policy_json) +
+         ",\"codec_defaults\":" +
+         std::string(config_defaults::codec_defaults_json) + "}";
+}
 PolicySnapshot builtin_policy(){static const auto value=[] {auto r=load_policy(config_defaults::descriptor_policy_json,config_defaults::codec_defaults_json); if(auto* e=std::get_if<ConfigError>(&r))throw std::logic_error(e->message);return std::get<PolicySnapshot>(std::move(r));}();return value;}
 std::optional<std::string_view> borrowed(const std::optional<std::string>& value){if(value)return *value;return {};}
 bool contains(const std::vector<std::string>& values,std::string_view value){return std::find(values.begin(),values.end(),value)!=values.end();}

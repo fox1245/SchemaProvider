@@ -4,6 +4,18 @@ SchemaProvider is a C++20 client for five LLM API families: Chat Completions, Re
 
 The current source package is **0.3.0 alpha**, with interface revision **7** and shared-library generation **7**. Rebuild and reinstall consumers with matching headers and libraries: typed `Media` replaces `Image`, request controls grow, and generated media joins owned outcomes/events. See [media inputs and outputs](docs/USAGE.md#media-inputs-and-generated-outputs) and the [interface 6-to-7 migration](docs/MIGRATION.md#from-interface-6-to-7). Provider-reported monetary metadata remains separate from token counts, estimates and invoices. Native archive storage remains v3 and portable history remains v2; policy/native binding compatibility is checked independently. Neither the linked-interface check nor shared-library version promises source or cross-toolchain ABI compatibility. Earlier interface 3–6 execution records retain their original scope.
 
+## Why SchemaProvider exists
+
+Most C++ LLM wrappers treat vendor APIs as interchangeable JSON-over-HTTP endpoints. In multi-turn tool and reasoning loops, that assumption breaks silently:
+
+| Failure Mode | Typical Thin Wrapper / Naive Client | SchemaProvider |
+| :--- | :--- | :--- |
+| **SSE stream drops after `HTTP 200` before terminal frame** | Returns truncated text as a normal completion | Fails closed with `ErrorKind::Truncated` and preserves partial output in `Failure::partial` |
+| **Multi-turn reasoning & thought signatures** (Claude `signature`, OpenAI `encrypted_content`, Gemini `thoughtSignature`) | Drops or flattens reasoning blocks, breaking subsequent tool-result turns or corrupting state | Seals provider-authentic `NativeReplay` with HMAC-SHA256 lineage and verifies descriptor/model/config digests before replay |
+| **Server-executed vs. client-executed tools** (`web_search`, `code_execution`, MCP approval vs. local function calls) | Mixes all tool calls into one list, tricking the host into executing server-side tools locally | Explicitly classifies `ToolCallKind::{ClientExecuted, ServerExecuted, ApprovalRequest}`; `executable_tool_calls()` returns only `ClientExecuted` |
+| **Token usage & gateway cost reporting** | Conflates missing counters with `0` and loses floating-point USD precision | Distinguishes `std::nullopt` (**unknown**) from `0` (**known zero**) with `Evidence`, and converts OpenRouter USD to integer `nano_usd` |
+| **Vendor parameter drift & unmodeled fields** | Either hardcodes model names in C++ or passes unchecked JSON maps | Decouples policy via runtime-loadable `load_policy_bundle_file()` with SHA-256 pinning and collision-gated `Request::extension_fields` |
+
 ## Install and use the unstable C++ SDK
 
 Build prerequisites are CMake 3.20+, a C++20 compiler and standard library implementing `std::stop_token`, Python 3 for configuration generation, standalone Asio headers, libcurl 7.88+ and yyjson. Supply an installed yyjson library or its source tree; configuration does not download dependencies. The SDK libraries have no OpenSSL dependency: SHA-256, HMAC-SHA256, constant-time comparison and operating-system entropy are implemented in-tree (`src/crypto`). TLS comes from your libcurl's backend, and the test suite uses the `openssl` command-line tool only to generate throwaway certificates (its optional `crypto_openssl_differential` check also links OpenSSL's libcrypto into that one test when the development files are installed).
@@ -37,52 +49,28 @@ This complete program talks to a local Chat Completions peer and prints its text
 #include <runtime/client.h>
 #include <chrono>
 #include <iostream>
-#include <utility>
-#include <variant>
 
 int main() {
-    auto loaded = sp::descriptor::load(R"json({
-      "descriptor_version": 1, "revision": 1,
-      "id": "local-chat", "family": "openai.chat",
-      "connection": {
-        "base_url": "http://127.0.0.1:8765",
-        "paths": {"buffered": "/v1/chat/completions",
-                  "streaming": "/v1/chat/completions"}
-      }
-    })json");
-    if (const auto* error = std::get_if<sp::descriptor::ConfigError>(&loaded)) {
-        std::cerr << error->pointer << ": " << error->expected << '\n';
-        return 1;
-    }
-
     try {
         sp::runtime::require_interface_contract(
             sp::EXPECTED_INTERFACE_REVISION, sp::capability::RequiredProvider);
         sp::runtime::Client client(
-            std::get<sp::descriptor::ValidatedDescriptor>(std::move(loaded)));
+            sp::descriptor::presets::loopback_chat("http://127.0.0.1:8765"));
 
-        sp::chat::Request request;
-        request.model = "example-model";
-        request.messages.push_back({sp::Role::User, "Say hello."});
-        request.max_output_tokens = 64;
         sp::runtime::RunOptions run;
         run.streaming = false;
         run.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        auto result = client.complete(std::move(request), run);
+        auto result = client.complete(
+            sp::chat::Request::simple("example-model", "Say hello.", 64), run);
 
-        if (const auto* failure = std::get_if<sp::Failure>(result.get())) {
-            std::cerr << failure->error.safe_message << '\n';
+        if (const auto* error = sp::as_error(result)) {
+            std::cerr << error->safe_message << '\n';
             return 2;
         }
-        const auto& completion = std::get<sp::Completion>(*result);
-        for (const auto& message : completion.messages) {
-            for (const auto& part : message.parts) {
-                if (const auto* text = std::get_if<sp::Text>(&part))
-                    std::cout << text->value << '\n';
-            }
-        }
-        if (completion.usage.output_total)
-            std::cout << "output tokens: " << completion.usage.output_total->value << '\n';
+        const auto& completion = *sp::as_completion(result);
+        std::cout << completion.joined_text() << '\n';
+        if (const auto out_tokens = completion.usage.output_total_value())
+            std::cout << "output tokens: " << *out_tokens << '\n';
         else
             std::cout << "output tokens: unknown\n";
     } catch (const sp::descriptor::ConfigError& error) {
@@ -91,6 +79,9 @@ int main() {
     } catch (const sp::runtime::InterfaceContractError& error) {
         std::cerr << error.what() << '\n';
         return 4;
+    } catch (const std::exception& error) {
+        std::cerr << error.what() << '\n';
+        return 1;
     }
 }
 ```
@@ -102,13 +93,15 @@ Hello.
 output tokens: 0
 ```
 
-The descriptor selects an admitted family, origin and literal routes. The typed request supplies model, conversation and controls. `complete()` returns `std::shared_ptr<const sp::Outcome>`, containing either `Completion` or `Failure`; it does not turn an HTTP error or a truncated stream into successful text. Retain that pointer when results must outlive the client. A missing usage count means **unknown**, while a present count whose value is zero means **known zero**.
+Built-in presets in `sp::descriptor::presets` (`openai_chat`, `openai_responses`, `anthropic_messages`, `google_generate(model)`, `google_interactions`, `openrouter_chat`, `openrouter_responses`, `openrouter_messages`, and `loopback_chat`) construct validated descriptors through `sp::descriptor::load`. Each protocol family also provides `Request::simple(model, prompt_or_history, max_tokens, system_prompt)`, while `Completion` and `Message` expose read-only projections (`joined_text()`, `joined_thinking()`, `first_refusal()`, `executable_tool_calls()`, `invalid_tool_calls()`) alongside the full `std::variant` AST.
 
-For a hosted endpoint, load your own HTTPS descriptor and pass credentials through `sp::runtime::Options::api_key`. Do not put credentials in descriptor JSON or print encoded request bodies. [Configuration and credential rules](docs/USAGE.md#descriptors-credentials-and-defaults) explain validation and defaults.
+For a hosted endpoint, pass credentials through `sp::runtime::Client(descriptor, std::move(api_key))` or `sp::runtime::Options::with_api_key(...)` (or load a custom HTTPS descriptor via `sp::descriptor::load`). Do not put credentials in descriptor JSON or print encoded request bodies. [Configuration and credential rules](docs/USAGE.md#descriptors-credentials-and-defaults) explain validation and defaults.
 
 ## Owned requests, results and configuration
 
 The typed SDK replaces descriptor interpretation with family code and closed immutable configuration. Encoders own message ordering, tool validation and native replay checks; codecs own stream causality, usage meaning and terminal evidence. Interface 4 adds declared reasoning/tool/sampling controls, Responses provider-held cursors and an explicit Gemini portable-history path without restoring the interpreter. JSON supplies admitted routes, bindings, stop mappings, defaults and model/error facts; it cannot add loops, callbacks, templates or event actions.
+
+When a vendor introduces a new model rule or header version between C++ releases, hosts can load an external policy bundle at startup with `sp::descriptor::load_policy_bundle_file(path, expected_sha256_hex)` (or `load_policy_files`) without recompiling the SDK, and pass newly introduced top-level request parameters through collision-gated `request.extension_fields = sp::make_extension_fields(R"({"custom_param":true})")` (which rejects collisions with codec-owned or descriptor-bound members and binds into `NativeContext` replay lineage).
 
 Use `Client::prepare()` when your host must validate and inspect a request before persisting a dispatch receipt or claiming a budget. Preparation encodes once, reserves a bounded slot and keeps the original deadline, but sends nothing. Move the resulting `PreparedRequest` into `start()` or `complete()` once. Dropping it releases the slot. The direct `complete(Request, RunOptions)` and `start(Request, RunOptions, Callbacks)` paths prepare internally.
 

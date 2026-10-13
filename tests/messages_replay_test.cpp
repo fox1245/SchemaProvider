@@ -578,6 +578,18 @@ void openrouter_max_price() {
   changed = request; changed.provider->max_price.reset();
   rejected(gateway, changed);
 }
+void tool_role_helper_admission() {
+  const auto descriptor = descriptor_value();
+  auto request = base_request();
+  request.messages.push_back(capture(descriptor, request, R"([{"type":"tool_use","id":"call_a","name":"f","input":{"x":1}}])", "tool_use"));
+  request.messages.push_back(Message::tool_result("call_a", "42"));
+  const auto wire = encoded(descriptor, request);
+  CHECK(wire.body.find(R"({"role":"user","content":[{"type":"tool_result","tool_use_id":"call_a","content":"42","is_error":false}]})") != std::string::npos);
+
+  auto mixed = request;
+  mixed.messages.back().parts.push_back(Text{"extra"});
+  rejected(descriptor, mixed, ErrorKind::InvalidRequest);
+}
 } // namespace
 int main() {
   try {
@@ -586,7 +598,7 @@ int main() {
     invalid_calls_are_not_repaired();
     bounded_json_serialization(); request_encoded_byte_boundaries(); request_json_encoding_and_depth();
     effective_policy_lineage();
-    thinking_cache_tool_controls(); openrouter_max_price();
+    thinking_cache_tool_controls(); openrouter_max_price(); tool_role_helper_admission();
     std::cout << "Messages replay properties passed\n"; return 0;
   } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

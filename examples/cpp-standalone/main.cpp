@@ -29,13 +29,10 @@ sp::json::Document parse_json(std::string_view text) {
 }
 
 sp::descriptor::ValidatedDescriptor chat_descriptor(std::string_view base_url) {
-  const auto quoted_url = sp::json::quote(base_url);
-  if (quoted_url.empty()) throw ExampleError("base URL is not valid UTF-8");
-  auto loaded = sp::descriptor::load(
-      "{\"descriptor_version\":1,\"revision\":1,\"id\":\"standalone-chat\","
-      "\"family\":\"openai.chat\",\"connection\":{\"base_url\":" + quoted_url +
-      ",\"paths\":{\"buffered\":\"/v1/chat/completions\","
-      "\"streaming\":\"/v1/chat/completions\"}}}");
+  sp::descriptor::presets::PresetOptions options;
+  options.id = "standalone-chat";
+  options.base_url = std::string(base_url);
+  auto loaded = sp::descriptor::presets::try_openai_chat(std::move(options));
   if (std::holds_alternative<sp::descriptor::ConfigError>(loaded))
     throw ExampleError("chat descriptor rejected; check the base URL");
   return std::get<sp::descriptor::ValidatedDescriptor>(std::move(loaded));
@@ -67,7 +64,7 @@ int chat(std::string_view base_url, const char* model, const char* dotenv_path,
          const char* key_name, const char* question) {
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION,
                                          sp::capability::RequiredProvider);
-  sp::runtime::Options options;
+  std::string api_key;
   {
     // Read only this file, without interpolation or mutation of the process environment.
     // The temporary map dies here; the credential moves into the SDK-owned Client.
@@ -75,22 +72,19 @@ int chat(std::string_view base_url, const char* model, const char* dotenv_path,
     const auto found = values.find(key_name);
     if (found == values.end() || found->second.empty())
       throw ExampleError("named key is missing or empty in the dotenv file (or file is unreadable)");
-    options.api_key = std::move(found->second);
+    api_key = std::move(found->second);
   }
-  sp::runtime::Client client(chat_descriptor(base_url), std::move(options));
+  sp::runtime::Client client(chat_descriptor(base_url), std::move(api_key));
   const std::vector<sp::chat::ToolDefinition> tools{{
       "add", "Add two signed 64-bit integers.",
       std::make_shared<const sp::json::Document>(parse_json(
           R"({"type":"object","properties":{"a":{"type":"integer"},"b":{"type":"integer"}},"required":["a","b"],"additionalProperties":false})"))}};
-  std::vector<sp::Message> history{{"", sp::Role::User, {sp::Text{question}}}};
+  std::vector<sp::Message> history{sp::Message::user_text(question)};
   constexpr unsigned max_tool_turns = 4;
 
   for (unsigned tool_turns = 0; tool_turns <= max_tool_turns; ++tool_turns) {
-    sp::chat::Request request;
-    request.model = model;
-    request.max_output_tokens = 64;
+    sp::chat::Request request = sp::chat::Request::simple(model, history, 64);
     request.tools = tools;
-    request.canonical_messages = history;
     sp::runtime::RunOptions run;
     run.streaming = false;
     run.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
@@ -99,23 +93,23 @@ int chat(std::string_view base_url, const char* model, const char* dotenv_path,
     retry.max_attempts = 1;
     run.retry = retry;
     const auto outcome = client.complete(std::move(request), run);
-    if (const auto* failure = std::get_if<sp::Failure>(outcome.get())) {
+    if (const auto* failure = sp::as_failure(outcome)) {
       // Do not print provider bodies, URLs, credentials, or arbitrary exception messages.
       std::cerr << "request failed: SDK error kind=" << static_cast<int>(failure->error.kind)
                 << ", HTTP status=" << failure->error.http_status << " (no retry)\n";
       return 1;
     }
-    const auto& completion = std::get<sp::Completion>(*outcome);
+    const auto& completion = *sp::as_completion(outcome);
     std::vector<sp::Message> results;
     std::string answer;
     for (const auto& message : completion.messages) {
+      answer += message.joined_text();
       for (const auto& part : message.parts) {
-        if (const auto* text = std::get_if<sp::Text>(&part)) answer += text->value;
         if (const auto* refusal = std::get_if<sp::Refusal>(&part)) answer += refusal->text;
-        if (const auto* call = std::get_if<sp::ToolCall>(&part)) {
-          if (tool_turns == max_tool_turns) throw ExampleError("tool turn limit reached");
-          results.push_back({"", sp::Role::Tool, {sp::ToolResult{call->id, execute_add(*call)}}});
-        }
+      }
+      for (const sp::ToolCall& call : message.executable_tool_calls()) {
+        if (tool_turns == max_tool_turns) throw ExampleError("tool turn limit reached");
+        results.push_back(sp::Message::tool_result(call.id, execute_add(call)));
       }
       // Copy the sealed SDK message intact, including authenticated native replay state.
       // Reconstructing assistant messages from text/tool JSON would lose that state.

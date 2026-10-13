@@ -18,6 +18,18 @@ PEER_EXPECTED_API_KEY=LOCAL_EXAMPLE_SYNTHETIC_KEY \
 
 Leave that terminal running. If the port is occupied, choose another and change the consumers' base URL. The peer validates the synthetic Authorization header when `PEER_EXPECTED_API_KEY` is set. Its default 300 ms response delay makes overlapping requests observable; `GET /stats` reports the request count and maximum requests in flight.
 
+## Multi-family C++ quickstart (`examples/quickstart`)
+
+```sh
+cmake -S examples/quickstart -B examples/quickstart/build \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$SDK_PREFIX"
+cmake --build examples/quickstart/build
+examples/quickstart/build/sp_quickstart \
+  http://127.0.0.1:8765 example-model examples/local.env EXAMPLE_API_KEY "Say hello."
+```
+
+`sp_quickstart` demonstrates the lightweight ergonomic layer (`sp::descriptor::presets`, `Request::simple`, `Client(descriptor, api_key)`, `sp::as_completion`, `joined_text()`, `output_total_value()`, and `cost_nano_usd_value()`) across all five protocol families. Pass a built-in preset name (`openai-chat`, `openai-responses`, `anthropic`, `gemini`, `interactions`, `openrouter-chat`, `openrouter-responses`, `openrouter-messages`) or an `http(s)://` base URL.
+
 ## C++ standalone tool loop
 
 ```sh
@@ -30,7 +42,7 @@ examples/cpp-standalone/build/sp_chat_standalone \
 
 On a multi-configuration generator, build with `--config Release` and use the executable under `build/Release`.
 
-The program creates `sp::runtime::Client`, declares `add(a,b)`, executes the requested tool locally, and sends its result back. Assistant history remains in the SDK's typed representation, including sealed native state. The expected final answer is `The sum is 5.`
+The program creates `sp::runtime::Client`, declares `add(a,b)`, executes the requested tool locally via `message.executable_tool_calls()` (which strictly filters `ToolCallKind::ClientExecuted`), and sends its result back via `sp::Message::tool_result(...)`. Assistant history remains in the SDK's typed representation, including sealed native state. The expected final answer is `The sum is 5.`
 
 CLI: `sp_chat_standalone <base-url> <model> <dotenv-path> <key-name> [question]`. It uses `/v1/chat/completions`, a 64-token output cap, a 10-second deadline per request, no automatic retries, and at most four tool turns. Missing credentials, failed requests, invalid tool arguments and incomplete final answers return a nonzero exit status.
 

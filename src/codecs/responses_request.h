@@ -54,6 +54,29 @@ struct Request {
   std::optional<Truncation> truncation;
   // Absent keeps reasoning.encrypted_content; an explicit empty vector sends [].
   std::optional<std::vector<Include>> include;
+  // Optional collision-gated top-level JSON object for vendor/model-specific request fields.
+  std::shared_ptr<const json::Document> extension_fields{};
+
+  static Request simple(std::string model_name, std::string user_prompt,
+                        std::optional<uint64_t> max_tokens = std::nullopt,
+                        std::string system_instructions = {}) {
+    Request request;
+    request.model = std::move(model_name);
+    request.instructions = std::move(system_instructions);
+    request.messages.push_back(sp::Message::user_text(std::move(user_prompt)));
+    request.max_output_tokens = max_tokens;
+    return request;
+  }
+  static Request simple(std::string model_name, std::vector<sp::Message> history,
+                        std::optional<uint64_t> max_tokens = std::nullopt,
+                        std::string system_instructions = {}) {
+    Request request;
+    request.model = std::move(model_name);
+    request.instructions = std::move(system_instructions);
+    request.messages = std::move(history);
+    request.max_output_tokens = max_tokens;
+    return request;
+  }
 };
 struct EncodedRequest {
   std::string method, path;

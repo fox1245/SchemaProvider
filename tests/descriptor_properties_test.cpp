@@ -1,9 +1,12 @@
 #include "descriptor/descriptor.h"
 #include "descriptor/policy.h"
+#include "descriptor/presets.h"
 #include "json/json.h"
 #include "sp/config_defaults.h"
 
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -424,6 +427,92 @@ void claude_temperature_by_generation() {
                                  R"([{"series":"","from":"4.7"}])", R"([{"series":"a/b-","from":"4.7"}])"})
         CHECK(!admit(bad).has_value());
 }
+void preset_builders_and_validation() {
+    using namespace sp::descriptor;
+    const auto d_openai_chat = presets::openai_chat();
+    CHECK(d_openai_chat.family() == "openai.chat" && d_openai_chat.base_url() == "https://api.openai.com" && d_openai_chat.path(false) == "/v1/chat/completions");
+    const auto d_openai_resp = presets::openai_responses();
+    CHECK(d_openai_resp.family() == "openai.responses" && d_openai_resp.path(false) == "/v1/responses");
+    const auto d_anthropic = presets::anthropic_messages();
+    CHECK(d_anthropic.family() == "anthropic.messages" && d_anthropic.base_url() == "https://api.anthropic.com" && d_anthropic.path(false) == "/v1/messages");
+    const auto d_google_gen = presets::google_generate("gemini-2.5-flash");
+    CHECK(d_google_gen.family() == "google.generate" && d_google_gen.path(false) == "/v1beta/models/gemini-2.5-flash:generateContent" && d_google_gen.path(true) == "/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse");
+    const auto d_google_int = presets::google_interactions();
+    CHECK(d_google_int.family() == "google.interactions" && d_google_int.path(false) == "/v1beta/interactions");
+    const auto d_or_chat = presets::openrouter_chat();
+    CHECK(d_or_chat.family() == "openai.chat" && d_or_chat.base_url() == "https://openrouter.ai" && d_or_chat.path(false) == "/api/v1/chat/completions");
+    const auto d_or_resp = presets::openrouter_responses();
+    CHECK(d_or_resp.family() == "openai.responses" && d_or_resp.path(false) == "/api/v1/responses");
+    const auto d_or_msg = presets::openrouter_messages();
+    CHECK(d_or_msg.family() == "anthropic.messages" && d_or_msg.path(false) == "/api/v1/messages");
+    const auto d_loopback = presets::loopback_chat("http://127.0.0.1:8080");
+    CHECK(d_loopback.family() == "openai.chat" && d_loopback.base_url() == "http://127.0.0.1:8080" && d_loopback.path(false) == "/v1/chat/completions");
+
+    presets::PresetOptions opts;
+    opts.id = "custom-preset-id";
+    opts.revision = 42;
+    opts.headers = {{"X-Title", "SchemaProvider"}};
+    const auto d_custom = presets::openrouter_chat(opts);
+    CHECK(d_custom.id() == "custom-preset-id" && d_custom.revision() == 42 && d_custom.headers().size() == 1);
+
+    for (std::string_view bad_model : {"", "models/gemini-2.5-flash", "gemini-2.5-flash:generateContent", "gemini?key=x", "gemini#frag"}) {
+        const auto res = presets::try_google_generate(bad_model);
+        CHECK(std::holds_alternative<ConfigError>(res));
+        bool threw = false;
+        try { (void)presets::google_generate(bad_model); } catch (const std::invalid_argument&) { threw = true; }
+        CHECK(threw);
+    }
+    CHECK(std::holds_alternative<ConfigError>(presets::try_loopback_chat("http://api.openai.com")));
+    CHECK(std::holds_alternative<ConfigError>(presets::try_loopback_chat("http://127.0.0.1:8080", "relative/path")));
+}
+void policy_bundle_and_identity_pinning() {
+    using namespace sp::descriptor;
+    const auto def = builtin_policy();
+    CHECK(def != nullptr);
+    const auto hex = def->identity_hex();
+    CHECK(hex.size() == 64);
+    for (char c : hex) CHECK((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'));
+
+    const auto verified = load_verified_policy(sp::config_defaults::descriptor_policy_json, sp::config_defaults::codec_defaults_json, hex);
+    CHECK(std::holds_alternative<PolicySnapshot>(verified) && std::get<PolicySnapshot>(verified)->identity_hex() == hex);
+
+    std::string wrong_hex = hex;
+    wrong_hex[0] = (wrong_hex[0] == '0') ? '1' : '0';
+    const auto mismatch = load_verified_policy(sp::config_defaults::descriptor_policy_json, sp::config_defaults::codec_defaults_json, wrong_hex);
+    CHECK(std::holds_alternative<ConfigError>(mismatch) && std::get<ConfigError>(mismatch).pointer == "/identity");
+    const auto malformed_hex = load_verified_policy(sp::config_defaults::descriptor_policy_json, sp::config_defaults::codec_defaults_json, "not-a-sha256");
+    CHECK(std::holds_alternative<ConfigError>(malformed_hex) && std::get<ConfigError>(malformed_hex).pointer == "/identity");
+
+    const auto bundle_json = builtin_policy_bundle_json();
+    const auto bundle_loaded = load_policy_bundle(bundle_json, hex);
+    CHECK(std::holds_alternative<PolicySnapshot>(bundle_loaded) && std::get<PolicySnapshot>(bundle_loaded)->identity_hex() == hex);
+    CHECK(std::holds_alternative<ConfigError>(load_policy_bundle(bundle_json, wrong_hex)));
+    CHECK(std::holds_alternative<ConfigError>(load_policy_bundle(R"({"version":2,"descriptor_policy":{},"codec_defaults":{}})")));
+    CHECK(std::holds_alternative<ConfigError>(load_policy_bundle(R"({"version":1,"descriptor_policy":{},"codec_defaults":{},"extra":1})")));
+
+    const auto tmp_dir = std::filesystem::temp_directory_path();
+    const auto bundle_path = tmp_dir / "sp_test_policy_bundle.json";
+    const auto desc_path = tmp_dir / "sp_test_descriptor_policy.json";
+    const auto codec_path = tmp_dir / "sp_test_codec_defaults.json";
+    const auto huge_path = tmp_dir / "sp_test_huge_policy.json";
+    {
+        std::ofstream(bundle_path, std::ios::binary) << bundle_json;
+        std::ofstream(desc_path, std::ios::binary) << sp::config_defaults::descriptor_policy_json;
+        std::ofstream(codec_path, std::ios::binary) << sp::config_defaults::codec_defaults_json;
+        std::ofstream(huge_path, std::ios::binary) << std::string(140000, ' ');
+    }
+    const auto from_files = load_policy_files(desc_path.string(), codec_path.string(), hex);
+    CHECK(std::holds_alternative<PolicySnapshot>(from_files) && std::get<PolicySnapshot>(from_files)->identity_hex() == hex);
+    const auto from_bundle_file = load_policy_bundle_file(bundle_path.string(), hex);
+    CHECK(std::holds_alternative<PolicySnapshot>(from_bundle_file) && std::get<PolicySnapshot>(from_bundle_file)->identity_hex() == hex);
+    CHECK(std::holds_alternative<ConfigError>(load_policy_bundle_file((tmp_dir / "nonexistent_sp_bundle.json").string())));
+    CHECK(std::holds_alternative<ConfigError>(load_policy_bundle_file(huge_path.string())));
+    std::error_code ec;
+    std::filesystem::remove(bundle_path, ec);
+    std::filesystem::remove(desc_path, ec);
+    std::filesystem::remove(codec_path, ec);
+    std::filesystem::remove(huge_path, ec);
+}
 }
 int main() {
     json_validation_and_ownership();
@@ -437,6 +526,8 @@ int main() {
     deployment_header_admission();
     model_sampling_admission();
     claude_temperature_by_generation();
+    preset_builders_and_validation();
+    policy_bundle_and_identity_pinning();
     if (failures) std::fprintf(stderr, "%d descriptor/JSON checks failed\n", failures);
     else std::puts("descriptor/JSON properties passed");
     return failures ? 1 : 0;
