@@ -75,6 +75,13 @@ struct Options {
 
 struct Callbacks {
   // Nonterminal semantic events only. Views are borrowed; callbacks must not block.
+  // Ordering: a PartDelta is in the retained partial output before on_event receives it, so every delta a
+  // callback was shown is in Failure::partial of a call that then fails, is cancelled or times out. A cancel,
+  // stop request or deadline is acted on when the running callback returns (also a cancel made from inside
+  // it), and no later event is delivered; a cancel made from another thread between two events lets at most
+  // one more event through, and that event is retained too. Wire content received but not yet delivered when
+  // the call is cut is not reported. A text part can open with an empty PartDelta, so a caller that needs
+  // some text in the failure waits for that text, not for the first delta, before it cancels.
   std::function<void(const Event&)> on_event;
   // Exactly once, after all events. Result may be retained beyond callback/join.
   std::function<void(Result)> on_outcome;
