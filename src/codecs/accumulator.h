@@ -14,6 +14,8 @@ class Accumulator {
   // A known transport failure takes precedence over errors in deferred decoding.
   // The sink observes normalized semantic Stops, including invalid client-call
   // intent; specific vendor terminal reasons and server-executed calls survive.
+  // An event is applied before the sink sees it, so whatever the sink was shown is
+  // already in the outcome a later Fail takes, even if the sink throws on that event.
   bool accept(const Event& event, const Error* failure_override = nullptr);
   const std::optional<Outcome>& outcome() const { return outcome_; }
   // Terminal ownership transfer; discard the accumulator after taking its outcome.

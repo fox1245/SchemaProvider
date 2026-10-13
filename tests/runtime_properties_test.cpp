@@ -128,13 +128,23 @@ struct Capture {
   std::condition_variable cv;
   Result result;
   std::size_t outcomes = 0, deltas = 0, terminals = 0;
+  // Every byte of text the callback was shown, in order. A PartDelta can be empty (the Messages wire opens a
+  // text block with an empty one), so "a delta arrived" does not mean "the text arrived".
+  std::string shown;
   sp::runtime::Callbacks callbacks() {
     return {[this](const sp::Event& event) {
       std::lock_guard lock(mutex);
-      if (std::holds_alternative<sp::PartDelta>(event)) ++deltas;
+      if (const auto* delta = std::get_if<sp::PartDelta>(&event)) {
+        ++deltas;
+        if (delta->payload.kind == sp::PartKind::Text && delta->payload.channel == sp::DeltaChannel::Content) shown.append(delta->payload.bytes);
+      }
       if (std::holds_alternative<sp::Commit>(event) || std::holds_alternative<sp::Fail>(event)) ++terminals;
       cv.notify_all();
     }, [this](Result value) { std::lock_guard lock(mutex); result = std::move(value); ++outcomes; cv.notify_all(); }};
+  }
+  std::string shown_text() { std::lock_guard lock(mutex); return shown; }
+  void await_shown(std::string_view expected) {
+    std::unique_lock lock(mutex); require(cv.wait_for(lock, 15s, [&] { return shown == expected; }), "semantic text timed out");
   }
   Result await() {
     std::unique_lock lock(mutex);
@@ -588,12 +598,15 @@ void cancelled_call_usage_is_not_evidence_of_zero(Peer& peer) {
     Client client(descriptor(peer, messages), options());
     const auto model = peer.arm("partial"); Capture capture;
     auto op = client.start(request(model, messages), run(), capture.callbacks());
-    capture.delta();
+    // Wait for the text itself, not for the first delta: the Messages stream delivers an empty delta when the
+    // text block opens, ahead of the one that carries "partial", and the peer sends both in one write.
+    capture.await_shown("partial");
     op.cancel();
     const auto result = finish(op, capture);
     const auto& cancelled = failure(result, sp::ErrorKind::Cancelled);
     const auto& usage = cancelled.partial.usage;
-    require(text(cancelled.partial.messages) == "partial" && cancelled.error.retry_safety == sp::RetrySafety::OutputObserved, "cancelled call lost its partial output");
+    require(text(cancelled.partial.messages) == "partial" && text(cancelled.partial.messages) == capture.shown_text() &&
+            cancelled.error.retry_safety == sp::RetrySafety::OutputObserved, "cancelled call lost its partial output");
     require(!usage.output_total && !usage.total && !usage.provider_reported_total && !usage.reasoning, "cancelled call reported an output count it did not have");
     if (messages) {
       require(usage.stage == sp::UsageStage::Partial && usage.quality == sp::UsageQuality::Consistent, "partial snapshot is not labelled partial");
@@ -602,6 +615,40 @@ void cancelled_call_usage_is_not_evidence_of_zero(Peer& peer) {
       require(usage.stage == sp::UsageStage::Missing && !usage.input_total && !usage.input_uncached && usage.extra.empty(), "cancelled call with no report has usage");
     }
     peer.count(model, 1);
+  }
+}
+// What a callback was shown is what a cancelled call reports, however early the cancel comes. The cancel here is
+// requested from inside the callback, the earliest instant there is, so no scheduling decides the outcome: a
+// PartDelta is appended to the retained partial output before the callback sees it, and the cancel is acted on
+// when that callback returns, so no later event is delivered. The failure holds exactly the text that was shown:
+// nothing shown is missing, and nothing the stream carried beyond the cut is added.
+void cancel_inside_delta_callback_keeps_what_was_shown(Peer& peer) {
+  for (const bool messages : {false, true}) {
+    Client client(descriptor(peer, messages), options());
+    // First delta: for Messages that is the empty one that opens the text block, with "partial" still undelivered
+    // on the wire. First delta with text: "partial" itself, which must already be in the retained output.
+    for (const bool wait_for_text : {false, true}) {
+      const auto model = peer.arm("partial"); Capture capture;
+      std::mutex gate; Operation op; bool fired = false; std::size_t after_cancel = 0;
+      auto callbacks = capture.callbacks(); auto record = callbacks.on_event;
+      callbacks.on_event = [&](const sp::Event& event) {
+        record(event);
+        std::lock_guard lock(gate);
+        if (fired) { ++after_cancel; return; }
+        if (!std::holds_alternative<sp::PartDelta>(event) || (wait_for_text && capture.shown_text().empty())) return;
+        fired = true; op.cancel();
+      };
+      { std::lock_guard lock(gate); op = client.start(request(model, messages), run(), std::move(callbacks)); }
+      const auto result = finish(op, capture);
+      const auto& cancelled = failure(result, sp::ErrorKind::Cancelled);
+      const auto shown = capture.shown_text();
+      require(fired, "no delta reached the callback");
+      require(after_cancel == 0, "event delivered after the cancelling callback returned");
+      require(text(cancelled.partial.messages) == shown, "cancelled call reported other output than the callback was shown");
+      require(std::string_view("partial").starts_with(shown) && (!wait_for_text || shown == "partial"), "callback was shown unexpected text");
+      require(cancelled.error.retry_safety == sp::RetrySafety::OutputObserved, "delivered delta not recorded as observed output");
+      peer.count(model, 1);
+    }
   }
 }
 void ownership(Peer& peer) {
@@ -965,6 +1012,7 @@ int main(int argc, char** argv) {
     check("unsupported parameter named", [&] { unsupported_parameter_named(peer); });
     check("HTTP rejections", [&] { http_rejections_are_definitive(peer); });
     check("cancelled call usage", [&] { cancelled_call_usage_is_not_evidence_of_zero(peer); });
+    check("cancel inside delta callback", [&] { cancel_inside_delta_callback_keeps_what_was_shown(peer); });
     check("ownership", [&] { ownership(peer); });
     check("callback ownership and misuse", [&] { callback_ownership_and_misuse(peer); });
     check("raw I/O blocking misuse", [&] { raw_io_misuse(peer); });
