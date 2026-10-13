@@ -152,6 +152,12 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   }
   if (request.provider)
     if (auto error = request_controls::validate_routing(descriptor, *request.provider)) return bad(std::move(*error));
+  if (auto error = request_controls::validate_extension_fields(
+          descriptor, request.extension_fields,
+          {"model", "messages", "stream", "max_tokens", "system", "tools", "tool_choice",
+           "thinking", "temperature", "top_p", "metadata", "stop_sequences", "output_config",
+           "container", "cache_control", "provider"}))
+    return bad(std::move(*error));
   if (request.messages.size() > resources.request_messages || request.tools.size() > resources.request_tools)
     return bad("request count limit exceeded");
   // Check seals before encoding or interpreting the edited contents. Removing a seal
@@ -186,8 +192,8 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
           media_error = Error{ErrorKind::InvalidRequest, "tool result content and content_parts are mutually exclusive"};
         else if (tool->content_parts.size() > resources.request_parts)
           media_error = Error{ErrorKind::InvalidRequest, "tool result part count limit exceeded"};
-        else if (!tool->content_parts.empty() && message.role != Role::User)
-          media_error = Error{ErrorKind::InvalidRequest, "tool results require user role"};
+        else if (!tool->content_parts.empty() && message.role != Role::User && message.role != Role::Tool)
+          media_error = Error{ErrorKind::InvalidRequest, "tool results require user or tool role"};
         else for (const auto& nested : tool->content_parts) if (const auto* media = std::get_if<Media>(&nested)) {
           retain_media(*media);
           if (!media_error && (!media->id.empty() || !media->transcript.empty() ||
@@ -283,7 +289,12 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   std::map<std::string_view, std::string_view> server_pending;
   bool message_comma = false;
   for (const auto& message : request.messages) {
-    if (message.role != Role::User && message.role != Role::Assistant) return Error{ErrorKind::Unsupported, "Messages history supports only user and assistant roles"};
+    const bool tool_role = message.role == Role::Tool;
+    if (message.role != Role::User && message.role != Role::Assistant && !tool_role)
+      return Error{ErrorKind::Unsupported, "Messages history supports only user and assistant roles"};
+    if (tool_role && (message.parts.empty() || std::any_of(message.parts.begin(), message.parts.end(),
+        [](const Part& part) { return !std::holds_alternative<ToolResult>(part); })))
+      return bad("tool role messages require tool results only");
     const bool assistant = message.role == Role::Assistant;
     if (assistant && !client_pending.empty()) return bad("client tool results must immediately follow their assistant message");
     if (!assistant && client_pending.empty() && !server_pending.empty()) return bad("server continuation requires the captured assistant content");
@@ -372,7 +383,9 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     if (assistant && message.native && message.native->stop_ == StopKind::PauseTurn && !client_pending.empty()) return bad("pause continuation cannot await client tools");
   }
   if (!client_pending.empty()) return bad("client tool results are required before dispatch");
-  body.raw("]}");
+  body.raw("]");
+  request_controls::write_extension_fields(body, request.extension_fields);
+  body.raw("}");
   if (!body.ok()) return Error{has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest,
                               "request exceeds JSON limits or encoding"};
   return std::nullopt;

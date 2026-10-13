@@ -55,6 +55,29 @@ struct Request {
   std::optional<SpeechConfig> speech_config;
   std::optional<ImageConfig> image_config;
   std::optional<AudioTranscriptionConfig> audio_transcription_config;
+  // Optional collision-gated top-level JSON object for vendor/model-specific request fields.
+  std::shared_ptr<const json::Document> extension_fields{};
+
+  static Request simple(std::string model_name, std::string user_prompt,
+                        std::optional<uint64_t> max_tokens = std::nullopt,
+                        std::string system_prompt = {}) {
+    Request request;
+    request.model = std::move(model_name);
+    request.system = std::move(system_prompt);
+    request.messages.push_back(sp::Message::user_text(std::move(user_prompt)));
+    request.max_output_tokens = max_tokens;
+    return request;
+  }
+  static Request simple(std::string model_name, std::vector<sp::Message> history,
+                        std::optional<uint64_t> max_tokens = std::nullopt,
+                        std::string system_prompt = {}) {
+    Request request;
+    request.model = std::move(model_name);
+    request.system = std::move(system_prompt);
+    request.messages = std::move(history);
+    request.max_output_tokens = max_tokens;
+    return request;
+  }
 };
 struct EncodedRequest {
   std::string method, path;

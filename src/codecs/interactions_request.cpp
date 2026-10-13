@@ -1,6 +1,7 @@
 #include "codecs/interactions_request.h"
 #include "codecs/media_input.h"
 #include "core/native.h"
+#include "core/request_controls.h"
 #include "json/json.h"
 #include "descriptor/policy.h"
 #include <limits>
@@ -156,6 +157,13 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         (transcription.mode == TranscriptionMode::Smart || !transcription.custom_vocabulary.empty()))
       return bad("timestamps and diarization cannot combine with smart mode or custom vocabulary");
   }
+  if (auto error = request_controls::validate_extension_fields(
+          descriptor, request.extension_fields,
+          {"model", "input", "stream", "system_instruction", "tools", "tool_choice",
+           "generation_config", "response_format", "response_modalities", "response_mime_type",
+           "response_schema", "previous_interaction_id", "store", "background", "agent",
+           "agent_config", "service_tier", "speech_config", "transcription_config"}))
+    return Error{ErrorKind::InvalidRequest, std::move(*error)};
   bool captured_history = false;
   std::optional<Error> tool_error;
   for (const auto& message : request.messages) {
@@ -356,7 +364,9 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       if (!body.ok()) return Error{ErrorKind::ResourceLimit, "request exceeds JSON limits"};
     }
     if (!pending.empty()) return invalid("all pending functions require host results");
-    body.raw("]}");
+    body.raw("]");
+    request_controls::write_extension_fields(body, request.extension_fields);
+    body.raw("}");
     if (!body.ok()) return Error{ErrorKind::ResourceLimit, "request exceeds JSON limits"};
     return std::nullopt;
   };

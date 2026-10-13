@@ -33,6 +33,29 @@ struct Request {
   std::optional<CacheControl> cache_control{};
   std::optional<ToolChoice> tool_choice{};
   std::optional<sp::OpenRouterRouting> provider{};
+  // Optional collision-gated top-level JSON object for vendor/model-specific request fields.
+  std::shared_ptr<const json::Document> extension_fields{};
+
+  static Request simple(std::string model_name, std::string user_prompt,
+                        std::optional<uint64_t> output_cap = std::nullopt,
+                        std::string system_prompt = {}) {
+    Request request;
+    request.model = std::move(model_name);
+    request.system = std::move(system_prompt);
+    request.messages.push_back(sp::Message::user_text(std::move(user_prompt)));
+    request.max_tokens = output_cap;
+    return request;
+  }
+  static Request simple(std::string model_name, std::vector<sp::Message> history,
+                        std::optional<uint64_t> output_cap = std::nullopt,
+                        std::string system_prompt = {}) {
+    Request request;
+    request.model = std::move(model_name);
+    request.system = std::move(system_prompt);
+    request.messages = std::move(history);
+    request.max_tokens = output_cap;
+    return request;
+  }
 };
 struct EncodedRequest {
   std::string method, path;

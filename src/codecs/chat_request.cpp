@@ -144,6 +144,13 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (request.response_format)
     if (auto error = request_controls::validate_response_format(*request.response_format, resources))
       return bad(std::move(*error));
+  if (auto error = request_controls::validate_extension_fields(
+          descriptor, request.extension_fields,
+          {"model", "messages", "stream", "max_tokens", "max_completion_tokens", "tools",
+           "tool_choice", "temperature", "top_p", "reasoning_effort", "service_tier",
+           "stream_options", "provider", "response_format", "reasoning", "include_reasoning",
+           "usage", "models", "modalities", "audio", "image_config"}))
+    return bad(std::move(*error));
   if (auto error = validate_output(descriptor, request)) return bad(std::move(*error));
   if (std::max(request.messages.size(), request.canonical_messages.size()) > resources.request_messages || request.tools.size() > resources.request_tools)
     return bad("request count limit exceeded");
@@ -504,6 +511,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       text_field("moderation", config.moderation);
       body.raw("}");
     }
+    request_controls::write_extension_fields(body, request.extension_fields);
     body.raw("}");
     if (!body.ok()) return limit_error();
     return {};

@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -78,6 +79,99 @@ struct Message {
   std::shared_ptr<const NativeReplay> native{};
   // Atomic ordered native replay group, never imported JSON authority.
   std::shared_ptr<const json::Document> wire_output{};
+
+  static Message user_text(std::string text, std::string message_id = {}) {
+    Message message;
+    message.id = std::move(message_id);
+    message.role = Role::User;
+    message.parts.push_back(Text{std::move(text)});
+    return message;
+  }
+  static Message system_text(std::string text, std::string message_id = {}) {
+    Message message;
+    message.id = std::move(message_id);
+    message.role = Role::System;
+    message.parts.push_back(Text{std::move(text)});
+    return message;
+  }
+  static Message developer_text(std::string text, std::string message_id = {}) {
+    Message message;
+    message.id = std::move(message_id);
+    message.role = Role::Developer;
+    message.parts.push_back(Text{std::move(text)});
+    return message;
+  }
+  static Message assistant_text(std::string text, std::string message_id = {}) {
+    Message message;
+    message.id = std::move(message_id);
+    message.role = Role::Assistant;
+    message.parts.push_back(Text{std::move(text)});
+    return message;
+  }
+  static Message tool_result(std::string tool_use_id, std::string content,
+                             bool is_error = false, std::string message_id = {}) {
+    Message message;
+    message.id = std::move(message_id);
+    message.role = Role::Tool;
+    ToolResult result;
+    result.tool_use_id = std::move(tool_use_id);
+    result.content = std::move(content);
+    result.is_error = is_error;
+    message.parts.push_back(std::move(result));
+    return message;
+  }
+
+  std::string joined_text() const {
+    std::string out;
+    for (const auto& part : parts)
+      if (const auto* text = std::get_if<Text>(&part)) out += text->value;
+    return out;
+  }
+  std::string joined_thinking() const {
+    std::string out;
+    for (const auto& part : parts) {
+      if (const auto* thinking = std::get_if<Thinking>(&part)) {
+        out += thinking->text;
+      } else if (const auto* reasoning = std::get_if<Reasoning>(&part)) {
+        const auto& items = !reasoning->content.empty() ? reasoning->content : reasoning->summary;
+        for (const auto& item : items) out += item;
+      } else if (const auto* thought = std::get_if<Thought>(&part)) {
+        for (const auto& item : thought->summary) out += item;
+      }
+    }
+    return out;
+  }
+  std::optional<std::string_view> first_refusal() const noexcept {
+    for (const auto& part : parts)
+      if (const auto* refusal = std::get_if<Refusal>(&part)) return refusal->text;
+    return std::nullopt;
+  }
+  // Host-executable tool calls only (ToolCallKind::ClientExecuted).
+  // ServerExecuted and ApprovalRequest calls are never returned here.
+  std::vector<std::reference_wrapper<const ToolCall>> executable_tool_calls() const {
+    std::vector<std::reference_wrapper<const ToolCall>> out;
+    for (const auto& part : parts) {
+      if (const auto* call = std::get_if<ToolCall>(&part);
+          call && call->kind == ToolCallKind::ClientExecuted) {
+        out.emplace_back(*call);
+      }
+    }
+    return out;
+  }
+  std::vector<std::reference_wrapper<const InvalidToolCall>> invalid_tool_calls() const {
+    std::vector<std::reference_wrapper<const InvalidToolCall>> out;
+    for (const auto& part : parts) {
+      if (const auto* call = std::get_if<InvalidToolCall>(&part)) {
+        out.emplace_back(*call);
+      }
+    }
+    return out;
+  }
+  bool has_invalid_tool_calls() const noexcept {
+    for (const auto& part : parts)
+      if (std::holds_alternative<InvalidToolCall>(part)) return true;
+    return false;
+  }
 };
 enum class Evidence { Reported, Derived };
 struct Count { uint64_t value = 0; Evidence evidence = Evidence::Reported; };
@@ -114,6 +208,24 @@ struct Usage {
   UsageQuality quality = UsageQuality::Consistent;
   std::vector<UsageConflict> conflicts;
   ProviderReportedCost provider_cost;
+
+  std::optional<uint64_t> input_total_value() const noexcept {
+    return input_total ? std::optional<uint64_t>(input_total->value) : std::nullopt;
+  }
+  std::optional<uint64_t> output_total_value() const noexcept {
+    return output_total ? std::optional<uint64_t>(output_total->value) : std::nullopt;
+  }
+  std::optional<uint64_t> reasoning_value() const noexcept {
+    return reasoning ? std::optional<uint64_t>(reasoning->value) : std::nullopt;
+  }
+  std::optional<uint64_t> total_tokens_value() const noexcept {
+    if (total) return total->value;
+    if (provider_reported_total) return provider_reported_total->value;
+    return std::nullopt;
+  }
+  std::optional<uint64_t> cost_nano_usd_value() const noexcept {
+    return provider_cost.total ? std::optional<uint64_t>(provider_cost.total->nano_usd) : std::nullopt;
+  }
 };
 enum class StopKind { EndTurn, ToolUse, MaxTokens, StopSequence, ContentFilter, Refusal, PauseTurn, ContextLimit, MalformedCall, Unknown };
 struct StopReason {
@@ -154,6 +266,43 @@ struct Completion {
   std::shared_ptr<const json::Document> wire_envelope{};
   AttemptEvidence attempt{};
   std::vector<RawWire> raw_events{};
+
+  std::string joined_text() const {
+    std::string out;
+    for (const auto& message : messages) out += message.joined_text();
+    return out;
+  }
+  std::string joined_thinking() const {
+    std::string out;
+    for (const auto& message : messages) out += message.joined_thinking();
+    return out;
+  }
+  std::optional<std::string_view> first_refusal() const noexcept {
+    for (const auto& message : messages)
+      if (auto refusal = message.first_refusal()) return refusal;
+    return std::nullopt;
+  }
+  std::vector<std::reference_wrapper<const ToolCall>> executable_tool_calls() const {
+    std::vector<std::reference_wrapper<const ToolCall>> out;
+    for (const auto& message : messages) {
+      auto calls = message.executable_tool_calls();
+      out.insert(out.end(), calls.begin(), calls.end());
+    }
+    return out;
+  }
+  std::vector<std::reference_wrapper<const InvalidToolCall>> invalid_tool_calls() const {
+    std::vector<std::reference_wrapper<const InvalidToolCall>> out;
+    for (const auto& message : messages) {
+      auto calls = message.invalid_tool_calls();
+      out.insert(out.end(), calls.begin(), calls.end());
+    }
+    return out;
+  }
+  bool has_invalid_tool_calls() const noexcept {
+    for (const auto& message : messages)
+      if (message.has_invalid_tool_calls()) return true;
+    return false;
+  }
 };
 struct PartialCompletion {
   std::vector<Message> messages;
@@ -161,9 +310,85 @@ struct PartialCompletion {
   std::optional<StopReason> stop;
   std::shared_ptr<const json::Document> wire_envelope{};
   std::vector<RawWire> raw_events{};
+
+  std::string joined_text() const {
+    std::string out;
+    for (const auto& message : messages) out += message.joined_text();
+    return out;
+  }
+  std::string joined_thinking() const {
+    std::string out;
+    for (const auto& message : messages) out += message.joined_thinking();
+    return out;
+  }
+  std::optional<std::string_view> first_refusal() const noexcept {
+    for (const auto& message : messages)
+      if (auto refusal = message.first_refusal()) return refusal;
+    return std::nullopt;
+  }
+  std::vector<std::reference_wrapper<const ToolCall>> executable_tool_calls() const {
+    std::vector<std::reference_wrapper<const ToolCall>> out;
+    for (const auto& message : messages) {
+      auto calls = message.executable_tool_calls();
+      out.insert(out.end(), calls.begin(), calls.end());
+    }
+    return out;
+  }
+  std::vector<std::reference_wrapper<const InvalidToolCall>> invalid_tool_calls() const {
+    std::vector<std::reference_wrapper<const InvalidToolCall>> out;
+    for (const auto& message : messages) {
+      auto calls = message.invalid_tool_calls();
+      out.insert(out.end(), calls.begin(), calls.end());
+    }
+    return out;
+  }
+  bool has_invalid_tool_calls() const noexcept {
+    for (const auto& message : messages)
+      if (message.has_invalid_tool_calls()) return true;
+    return false;
+  }
 };
 struct Failure { Error error; PartialCompletion partial; };
 using Outcome = std::variant<Completion, Failure>;
+
+inline bool is_completion(const Outcome& outcome) noexcept {
+  return std::holds_alternative<Completion>(outcome);
+}
+inline bool is_failure(const Outcome& outcome) noexcept {
+  return std::holds_alternative<Failure>(outcome);
+}
+inline const Completion* as_completion(const Outcome& outcome) noexcept {
+  return std::get_if<Completion>(&outcome);
+}
+inline const Failure* as_failure(const Outcome& outcome) noexcept {
+  return std::get_if<Failure>(&outcome);
+}
+inline const Error* as_error(const Outcome& outcome) noexcept {
+  if (const auto* failure = std::get_if<Failure>(&outcome)) return &failure->error;
+  return nullptr;
+}
+inline std::string joined_text(const Outcome& outcome) {
+  if (const auto* completion = std::get_if<Completion>(&outcome)) return completion->joined_text();
+  return {};
+}
+inline bool is_completion(const std::shared_ptr<const Outcome>& result) noexcept {
+  return result && is_completion(*result);
+}
+inline bool is_failure(const std::shared_ptr<const Outcome>& result) noexcept {
+  return result && is_failure(*result);
+}
+inline const Completion* as_completion(const std::shared_ptr<const Outcome>& result) noexcept {
+  return result ? as_completion(*result) : nullptr;
+}
+inline const Failure* as_failure(const std::shared_ptr<const Outcome>& result) noexcept {
+  return result ? as_failure(*result) : nullptr;
+}
+inline const Error* as_error(const std::shared_ptr<const Outcome>& result) noexcept {
+  return result ? as_error(*result) : nullptr;
+}
+inline std::string joined_text(const std::shared_ptr<const Outcome>& result) {
+  return result ? joined_text(*result) : std::string{};
+}
 struct LocalId { uint32_t value = 0; friend bool operator==(LocalId, LocalId) = default; };
 enum class PartKind { Text, Refusal, ToolCall, Thinking, RedactedThinking, ServerToolResult, Reasoning, Opaque, Thought, Media };
 struct PartHeader {

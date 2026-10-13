@@ -6,6 +6,7 @@
 #include "codecs/responses_request.h"
 #include "codecs/gemini_request.h"
 #include "codecs/interactions_request.h"
+#include "descriptor/presets.h"
 #include "runtime/policy.h"
 #include "transport/sse_framer.h"
 
@@ -28,6 +29,12 @@ void require_interface_contract(std::uint32_t expected_revision, std::uint64_t r
 using Request = std::variant<chat::Request, messages::Request, responses::Request, gemini::Request, interactions::Request>;
 // Immutable outcome owner; messages/raw JSON/native carry can outlive Client.
 using Result = std::shared_ptr<const Outcome>;
+using sp::as_completion;
+using sp::as_error;
+using sp::as_failure;
+using sp::is_completion;
+using sp::is_failure;
+using sp::joined_text;
 
 struct RunOptions {
   bool streaming = true;
@@ -59,6 +66,13 @@ struct Limits {
 
 struct Options {
   Options(configuration::PolicySnapshot = configuration::builtin_runtime_policy());
+  static Options with_api_key(
+      std::string key,
+      configuration::PolicySnapshot runtime_policy = configuration::builtin_runtime_policy()) {
+    Options options(std::move(runtime_policy));
+    options.api_key = std::move(key);
+    return options;
+  }
   configuration::PolicySnapshot policy;
   std::size_t workers = config_defaults::defaults_workers;
   transport::TransportOptions transport;
@@ -168,6 +182,8 @@ class Client {
   // One immutable descriptor/credential-origin and one shared retry budget.
   // Invalid options throw ConfigError with fixed, non-sensitive diagnostics.
   explicit Client(descriptor::ValidatedDescriptor, Options = {});
+  Client(descriptor::ValidatedDescriptor descriptor, std::string api_key)
+      : Client(std::move(descriptor), Options::with_api_key(std::move(api_key))) {}
   ~Client();
   Client(const Client&) = delete;
   Client& operator=(const Client&) = delete;
