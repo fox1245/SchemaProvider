@@ -187,6 +187,28 @@ void invalid_model_calls() {
   CHECK(!wire->root().get("contents").at(1).get("parts").at(0).get("functionCall").get("id").valid());
   CHECK(!wire->root().get("contents").at(2).get("parts").at(0).get("functionResponse").get("id").valid());
 }
+void tool_result_helper_needs_a_json_object() {
+  auto first = buffered(body(R"([{"functionCall":{"name":"lookup","args":{"x":1}}}])"));
+  const auto& call_message = complete(first).messages[0];
+  const auto id = std::get<ToolCall>(call_message.parts[0]).id;
+  auto with = [&](Message result) {
+    auto r = request();
+    r.messages.push_back(call_message);
+    r.messages.push_back(std::move(result));
+    return gemini::encode(desc(), r, true);
+  };
+  // Message::tool_result passes its text through: Generate takes only one JSON object.
+  auto object = with(Message::tool_result(id, R"({"result":5})"));
+  CHECK(std::holds_alternative<gemini::EncodedRequest>(object));
+  CHECK(std::get<gemini::EncodedRequest>(object).body.find(R"("response":{"result":5})") != std::string::npos);
+  auto failed = with(Message::tool_result(id, R"({"reason":"x"})", true));
+  CHECK(std::holds_alternative<gemini::EncodedRequest>(failed));
+  CHECK(std::get<gemini::EncodedRequest>(failed).body.find(R"("response":{"error":{"reason":"x"}})") != std::string::npos);
+  for (const char* text : {"5", "[5]", "not json", ""}) {
+    auto refused = with(Message::tool_result(id, text));
+    CHECK(std::holds_alternative<Error>(refused) && std::get<Error>(refused).kind == ErrorKind::InvalidRequest);
+  }
+}
 void successive_unidentified_calls() {
   const auto call = R"([{"functionCall":{"name":"lookup","args":{"x":1}}}])";
   auto first = buffered(body(call));
@@ -553,6 +575,6 @@ void total_without_candidates_bounds_the_output() {
 }
 }
 int main() {
-  try { http_error_envelope_in_an_array_is_retained(); output_total_without_thoughts(); total_proves_zero_thoughts(); total_without_candidates_bounds_the_output(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); successive_unidentified_calls(); native_group_and_replay(); nullable_usage(); uncached_input_rule(); stop_kinds_match_policy_table(); invalid_model_calls(); errors_and_terminals(); std::cout << "Gemini semantic invariants passed\n"; }
+  try { http_error_envelope_in_an_array_is_retained(); output_total_without_thoughts(); total_proves_zero_thoughts(); total_without_candidates_bounds_the_output(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); tool_result_helper_needs_a_json_object(); successive_unidentified_calls(); native_group_and_replay(); nullable_usage(); uncached_input_rule(); stop_kinds_match_policy_table(); invalid_model_calls(); errors_and_terminals(); std::cout << "Gemini semantic invariants passed\n"; }
   catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }
