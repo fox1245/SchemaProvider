@@ -25,8 +25,10 @@ cmake -S examples/quickstart -B examples/quickstart/build \
   -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$SDK_PREFIX"
 cmake --build examples/quickstart/build
 examples/quickstart/build/sp_quickstart \
-  http://127.0.0.1:8765 example-model examples/local.env EXAMPLE_API_KEY "Say hello."
+  http://127.0.0.1:8765 example-model examples/local.env EXAMPLE_API_KEY "Add 2 and 3."
 ```
+
+The credential-free peer above is a tool-loop fixture, not a chat model: it answers a request that has no tool result with a call to `add(a, b)` built from the first two integers in the user text, and it fails on a prompt without two integers. So the command above prints an empty text line, `tool calls requested: 1` and `output tokens: 7`; it proves the connection, the key header and the typed outcome, not a conversation. `sp_quickstart` declares no tools and does not run the loop; use `sp_chat_standalone` below for that. Against a hosted model, give it any prompt.
 
 `sp_quickstart` demonstrates the lightweight ergonomic layer (`sp::descriptor::presets`, `Request::simple`, `Client(descriptor, api_key)`, `sp::as_completion`, `joined_text()`, `output_total_value()`, and `cost_nano_usd_value()`) across all five protocol families. Pass a built-in preset name (`openai-chat`, `openai-responses`, `anthropic`, `gemini`, `interactions`, `openrouter-chat`, `openrouter-responses`, `openrouter-messages`) or an `http(s)://` base URL.
 
