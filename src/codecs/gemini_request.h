@@ -55,8 +55,6 @@ struct Request {
   std::optional<SpeechConfig> speech_config;
   std::optional<ImageConfig> image_config;
   std::optional<AudioTranscriptionConfig> audio_transcription_config;
-  // Optional collision-gated top-level JSON object for vendor/model-specific request fields.
-  std::shared_ptr<const json::Document> extension_fields{};
 
   static Request simple(std::string model_name, std::string user_prompt,
                         std::optional<uint64_t> max_tokens = std::nullopt,

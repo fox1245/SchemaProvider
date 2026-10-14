@@ -1,7 +1,6 @@
 #include "codecs/gemini_request.h"
 #include "codecs/media_input.h"
 #include "core/native.h"
-#include "core/request_controls.h"
 #include "json/json.h"
 #include "descriptor/policy.h"
 #include <map>
@@ -170,12 +169,6 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   }
   if (request.messages.empty() || request.messages.size() > resources.request_messages || request.tools.size() > resources.request_tools)
     return bad("request count limit exceeded");
-  if (auto error = request_controls::validate_extension_fields(
-          descriptor, request.extension_fields,
-          {"model", "contents", "systemInstruction", "system_instruction", "tools", "toolConfig",
-           "tool_config", "generationConfig", "generation_config", "safetySettings",
-           "safety_settings", "cachedContent", "cached_content"}))
-    return Error{ErrorKind::InvalidRequest, std::move(*error)};
   bool has_media = false;
   bool captured_history = false;
   std::optional<Error> tool_error;
@@ -461,9 +454,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
                                "request exceeds JSON limits or encoding"};
     }
     if (!pending.empty()) return invalid("function results required before dispatch");
-    w.raw("]");
-    request_controls::write_extension_fields(w, request.extension_fields);
-    w.raw("}");
+    w.raw("]}");
     if (!w.ok()) return Error{has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest,
                              "request exceeds JSON limits or encoding"};
     return {};

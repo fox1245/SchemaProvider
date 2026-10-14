@@ -3,7 +3,6 @@
 #include "codecs/interactions_request.h"
 #include "codecs/messages_request.h"
 #include "codecs/responses_request.h"
-#include "core/request_controls.h"
 #include "descriptor/descriptor.h"
 #include "descriptor/policy.h"
 #include "descriptor/presets.h"
@@ -1199,81 +1198,54 @@ void value_builders_and_projections() {
   std::shared_ptr<const Outcome> null_res;
   CHECK(!is_completion(null_res) && !is_failure(null_res) && as_completion(null_res) == nullptr && as_failure(null_res) == nullptr && as_error(null_res) == nullptr && joined_text(null_res).empty());
 }
-void simple_requests_and_extension_fields_all_families() {
+void simple_requests_all_families() {
   using namespace descriptor;
-  const auto ext = make_extension_fields(R"({"vendor_beta_flag":true,"vendor_seed":42})");
-  CHECK(ext && ext->root().is_object());
+  const auto contains = [](const std::string& body, std::string_view needle) { return body.find(needle) != std::string::npos; };
+  const auto history = [] { return std::vector<Message>{Message::user_text("hi")}; };
+  // The text and history forms write the same request; the system text and the output cap reach
+  // each family's own member.
+  const auto chat_text = chat::encode(presets::openai_chat(), chat::Request::simple("gpt-4o-mini", "hi", 128, "be brief"), false);
+  const auto chat_hist = chat::encode(presets::openai_chat(), chat::Request::simple("gpt-4o-mini", history(), 128, "be brief"), false);
+  CHECK(std::holds_alternative<chat::EncodedRequest>(chat_text) && std::holds_alternative<chat::EncodedRequest>(chat_hist));
+  const auto& chat_body = std::get<chat::EncodedRequest>(chat_text).body;
+  CHECK(chat_body == std::get<chat::EncodedRequest>(chat_hist).body);
+  CHECK(contains(chat_body, R"("role":"system","content":"be brief")") && contains(chat_body, R"("role":"user","content":"hi")") && contains(chat_body, R"("max_completion_tokens":128)"));
 
-  // 1. openai.chat (both string prompt and vector<Message> overloads)
-  auto r_chat = chat::Request::simple("gpt-4o-mini", "hi", 128, "be brief");
-  r_chat.extension_fields = ext;
-  const auto w_chat = chat::encode(presets::openai_chat(), r_chat, false);
-  CHECK(std::holds_alternative<chat::EncodedRequest>(w_chat));
-  CHECK(std::get<chat::EncodedRequest>(w_chat).body.find(R"("vendor_beta_flag":true,"vendor_seed":42)") != std::string::npos);
+  const auto msg_text = messages::encode(presets::anthropic_messages(), messages::Request::simple("claude-sonnet-4-5", "hi", 256, "be brief"), false);
+  const auto msg_hist = messages::encode(presets::anthropic_messages(), messages::Request::simple("claude-sonnet-4-5", history(), 256, "be brief"), false);
+  CHECK(std::holds_alternative<messages::EncodedRequest>(msg_text) && std::holds_alternative<messages::EncodedRequest>(msg_hist));
+  const auto& msg_body = std::get<messages::EncodedRequest>(msg_text).body;
+  CHECK(msg_body == std::get<messages::EncodedRequest>(msg_hist).body);
+  CHECK(contains(msg_body, R"("system")") && contains(msg_body, "be brief") && contains(msg_body, R"("max_tokens":256)"));
 
-  // 2. anthropic.messages
-  auto r_msg = messages::Request::simple("claude-sonnet-4-5", "hi", 256, "be brief");
-  r_msg.extension_fields = ext;
-  const auto w_msg = messages::encode(presets::anthropic_messages(), r_msg, false);
-  CHECK(std::holds_alternative<messages::EncodedRequest>(w_msg));
-  CHECK(std::get<messages::EncodedRequest>(w_msg).body.find(R"("vendor_beta_flag":true,"vendor_seed":42)") != std::string::npos);
+  const auto resp_text = responses::encode(presets::openai_responses(), responses::Request::simple("gpt-4.1-mini", "hi", 256, "be brief"), false);
+  const auto resp_hist = responses::encode(presets::openai_responses(), responses::Request::simple("gpt-4.1-mini", history(), 256, "be brief"), false);
+  CHECK(std::holds_alternative<responses::EncodedRequest>(resp_text) && std::holds_alternative<responses::EncodedRequest>(resp_hist));
+  const auto& resp_body = std::get<responses::EncodedRequest>(resp_text).body;
+  CHECK(resp_body == std::get<responses::EncodedRequest>(resp_hist).body);
+  CHECK(contains(resp_body, R"("instructions":"be brief")") && contains(resp_body, R"("max_output_tokens":256)"));
 
-  // 3. openai.responses
-  auto r_resp = responses::Request::simple("gpt-4.1-mini", "hi", 256, "be brief");
-  r_resp.extension_fields = ext;
-  const auto w_resp = responses::encode(presets::openai_responses(), r_resp, false);
-  CHECK(std::holds_alternative<responses::EncodedRequest>(w_resp));
-  CHECK(std::get<responses::EncodedRequest>(w_resp).body.find(R"("vendor_beta_flag":true,"vendor_seed":42)") != std::string::npos);
+  const auto gem_text = gemini::encode(presets::google_generate("gemini-2.5-flash"), gemini::Request::simple("gemini-2.5-flash", "hi", 256, "be brief"), false);
+  const auto gem_hist = gemini::encode(presets::google_generate("gemini-2.5-flash"), gemini::Request::simple("gemini-2.5-flash", history(), 256, "be brief"), false);
+  CHECK(std::holds_alternative<gemini::EncodedRequest>(gem_text) && std::holds_alternative<gemini::EncodedRequest>(gem_hist));
+  const auto& gem_body = std::get<gemini::EncodedRequest>(gem_text).body;
+  CHECK(gem_body == std::get<gemini::EncodedRequest>(gem_hist).body);
+  CHECK(contains(gem_body, "be brief") && contains(gem_body, R"("maxOutputTokens":256)"));
 
-  // 4. google.generate
-  auto r_gem = gemini::Request::simple("gemini-2.5-flash", "hi", 256, "be brief");
-  r_gem.extension_fields = ext;
-  const auto w_gem = gemini::encode(presets::google_generate("gemini-2.5-flash"), r_gem, false);
-  CHECK(std::holds_alternative<gemini::EncodedRequest>(w_gem));
-  CHECK(std::get<gemini::EncodedRequest>(w_gem).body.find(R"("vendor_beta_flag":true,"vendor_seed":42)") != std::string::npos);
+  const auto int_text = interactions::encode(presets::google_interactions(), interactions::Request::simple("gemini-2.5-flash", "hi", 256, "be brief"), false);
+  const auto int_hist = interactions::encode(presets::google_interactions(), interactions::Request::simple("gemini-2.5-flash", history(), 256, "be brief"), false);
+  CHECK(std::holds_alternative<interactions::EncodedRequest>(int_text) && std::holds_alternative<interactions::EncodedRequest>(int_hist));
+  const auto& int_body = std::get<interactions::EncodedRequest>(int_text).body;
+  CHECK(int_body == std::get<interactions::EncodedRequest>(int_hist).body);
+  CHECK(contains(int_body, R"("system_instruction":"be brief")") && contains(int_body, R"("max_output_tokens":256)"));
 
-  // 5. google.interactions
-  auto r_int = interactions::Request::simple("gemini-2.5-flash", "hi", 256, "be brief");
-  r_int.extension_fields = ext;
-  const auto w_int = interactions::encode(presets::google_interactions(), r_int, false);
-  CHECK(std::holds_alternative<interactions::EncodedRequest>(w_int));
-  CHECK(std::get<interactions::EncodedRequest>(w_int).body.find(R"("vendor_beta_flag":true,"vendor_seed":42)") != std::string::npos);
+  // Without a system text or cap, neither member is written.
+  const auto bare = chat::encode(presets::openai_chat(), chat::Request::simple("gpt-4o-mini", "hi"), false);
+  CHECK(std::holds_alternative<chat::EncodedRequest>(bare));
+  CHECK(!contains(std::get<chat::EncodedRequest>(bare).body, "system") && !contains(std::get<chat::EncodedRequest>(bare).body, "max_"));
 
-  // Malformed or non-object extension_fields fail closed across all families.
-  for (const auto& bad_ext : {make_extension_fields("{broken"), make_extension_fields("[1,2]"), make_extension_fields("42")}) {
-    r_chat.extension_fields = bad_ext;
-    CHECK(std::holds_alternative<Error>(chat::encode(presets::openai_chat(), r_chat, false)));
-    r_msg.extension_fields = bad_ext;
-    CHECK(std::holds_alternative<Error>(messages::encode(presets::anthropic_messages(), r_msg, false)));
-    r_resp.extension_fields = bad_ext;
-    CHECK(std::holds_alternative<Error>(responses::encode(presets::openai_responses(), r_resp, false)));
-    r_gem.extension_fields = bad_ext;
-    CHECK(std::holds_alternative<Error>(gemini::encode(presets::google_generate("gemini-2.5-flash"), r_gem, false)));
-    r_int.extension_fields = bad_ext;
-    CHECK(std::holds_alternative<Error>(interactions::encode(presets::google_interactions(), r_int, false)));
-  }
-
-  // Collisions with codec-owned keys fail closed before wire emission.
-  r_chat.extension_fields = make_extension_fields(R"({"model":"override"})");
-  CHECK(std::holds_alternative<Error>(chat::encode(presets::openai_chat(), r_chat, false)));
-  r_msg.extension_fields = make_extension_fields(R"({"max_tokens":999})");
-  CHECK(std::holds_alternative<Error>(messages::encode(presets::anthropic_messages(), r_msg, false)));
-  r_resp.extension_fields = make_extension_fields(R"({"input":[]})");
-  CHECK(std::holds_alternative<Error>(responses::encode(presets::openai_responses(), r_resp, false)));
-  r_gem.extension_fields = make_extension_fields(R"({"contents":[]})");
-  CHECK(std::holds_alternative<Error>(gemini::encode(presets::google_generate("gemini-2.5-flash"), r_gem, false)));
-  r_int.extension_fields = make_extension_fields(R"({"stream":true})");
-  CHECK(std::holds_alternative<Error>(interactions::encode(presets::google_interactions(), r_int, false)));
-
-  // Collisions with descriptor-bound request members fail closed.
-  const auto custom_desc = std::get<ValidatedDescriptor>(descriptor::load(
-      R"({"descriptor_version":1,"revision":1,"id":"ext-collision","family":"openai.chat","connection":{"base_url":"https://api.openai.com","paths":{"buffered":"/v1/chat/completions","streaming":"/v1/chat/completions"}},"bindings":{"max_output_tokens":"custom_cap"}})"));
-  r_chat.extension_fields = make_extension_fields(R"({"custom_cap":512})");
-  CHECK(std::holds_alternative<Error>(chat::encode(custom_desc, r_chat, false)));
-
-  // Replay lineage binds extension_fields into NativeContext configuration_digest.
+  // The history form keeps sealed native history continuable and refuses an edited prefix.
   chat::Request turn1 = chat::Request::simple("fixture-model", std::vector<Message>{Message::user_text("hello")});
-  turn1.extension_fields = ext;
   const auto enc1 = chat::encode(descriptor_value(), turn1, false);
   CHECK(std::holds_alternative<chat::EncodedRequest>(enc1));
   Accumulator acc;
@@ -1281,14 +1253,10 @@ void simple_requests_and_extension_fields_all_families() {
   codec.buffered(body(R"({"role":"assistant","content":"answer"})"), {});
   CHECK(acc.outcome() && is_completion(*acc.outcome()));
   const auto sealed_msg = as_completion(*acc.outcome())->messages.at(0);
-
   chat::Request turn2 = chat::Request::simple("fixture-model", std::vector<Message>{Message::user_text("hello"), sealed_msg, Message::user_text("next")});
-  turn2.extension_fields = ext;
   CHECK(std::holds_alternative<chat::EncodedRequest>(chat::encode(descriptor_value(), turn2, false)));
-  turn2.extension_fields = make_extension_fields(R"({"vendor_beta_flag":false,"vendor_seed":42})");
-  CHECK(std::get<Error>(chat::encode(descriptor_value(), turn2, false)).kind == ErrorKind::ReplayIneligible);
-  turn2.extension_fields.reset();
-  CHECK(std::get<Error>(chat::encode(descriptor_value(), turn2, false)).kind == ErrorKind::ReplayIneligible);
+  chat::Request edited = chat::Request::simple("fixture-model", std::vector<Message>{Message::user_text("HELLO"), sealed_msg, Message::user_text("next")});
+  CHECK(std::get<Error>(chat::encode(descriptor_value(), edited, false)).kind == ErrorKind::ReplayIneligible);
 }
 } // namespace
 int main() {
@@ -1301,7 +1269,7 @@ int main() {
     accumulator_interleaved_ordering(); accumulator_order_uniqueness_and_limits();
     tool_history_and_escaped_arguments(); one_tool_message_with_several_results(); output_cap_member_by_origin(); quoted_json_and_request_bounds();
     gateway_request_controls(); gateway_max_price();
-    value_builders_and_projections(); simple_requests_and_extension_fields_all_families();
+    value_builders_and_projections(); simple_requests_all_families();
     std::cout << "chat semantic properties passed\n";
     return 0;
   } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
