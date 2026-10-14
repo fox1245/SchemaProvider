@@ -4,9 +4,11 @@
 #include "json/json.h"
 #include "sp/config_defaults.h"
 
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <random>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -490,11 +492,27 @@ void policy_bundle_and_identity_pinning() {
     CHECK(std::holds_alternative<ConfigError>(load_policy_bundle(R"({"version":2,"descriptor_policy":{},"codec_defaults":{}})")));
     CHECK(std::holds_alternative<ConfigError>(load_policy_bundle(R"({"version":1,"descriptor_policy":{},"codec_defaults":{},"extra":1})")));
 
-    const auto tmp_dir = std::filesystem::temp_directory_path();
-    const auto bundle_path = tmp_dir / "sp_test_policy_bundle.json";
-    const auto desc_path = tmp_dir / "sp_test_descriptor_policy.json";
-    const auto codec_path = tmp_dir / "sp_test_codec_defaults.json";
-    const auto huge_path = tmp_dir / "sp_test_huge_policy.json";
+    // A directory only this run created: parallel runs (plain and sanitizer builds) and stale
+    // files from an earlier run can neither collide with nor feed these files.
+    std::filesystem::path tmp_dir;
+    {
+        std::random_device entropy;
+        std::error_code create_error;
+        for (int attempt = 0; attempt < 16 && tmp_dir.empty(); ++attempt) {
+            char suffix[40];
+            std::snprintf(suffix, sizeof suffix, "sp_policy_test_%08x%08x",
+                          static_cast<unsigned>(entropy()),
+                          static_cast<unsigned>(std::chrono::steady_clock::now().time_since_epoch().count()));
+            const auto candidate = std::filesystem::temp_directory_path() / suffix;
+            if (std::filesystem::create_directory(candidate, create_error) && !create_error) tmp_dir = candidate;
+        }
+    }
+    CHECK(!tmp_dir.empty());
+    if (tmp_dir.empty()) return;
+    const auto bundle_path = tmp_dir / "policy_bundle.json";
+    const auto desc_path = tmp_dir / "descriptor_policy.json";
+    const auto codec_path = tmp_dir / "codec_defaults.json";
+    const auto huge_path = tmp_dir / "huge_policy.json";
     {
         std::ofstream(bundle_path, std::ios::binary) << bundle_json;
         std::ofstream(desc_path, std::ios::binary) << sp::config_defaults::descriptor_policy_json;
@@ -508,10 +526,7 @@ void policy_bundle_and_identity_pinning() {
     CHECK(std::holds_alternative<ConfigError>(load_policy_bundle_file((tmp_dir / "nonexistent_sp_bundle.json").string())));
     CHECK(std::holds_alternative<ConfigError>(load_policy_bundle_file(huge_path.string())));
     std::error_code ec;
-    std::filesystem::remove(bundle_path, ec);
-    std::filesystem::remove(desc_path, ec);
-    std::filesystem::remove(codec_path, ec);
-    std::filesystem::remove(huge_path, ec);
+    std::filesystem::remove_all(tmp_dir, ec);
 }
 }
 int main() {
