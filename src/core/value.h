@@ -108,6 +108,12 @@ struct Message {
     message.parts.push_back(Text{std::move(text)});
     return message;
   }
+  // One tool result in a Role::Tool message. `content` is the legacy text form and is passed
+  // through unchanged. Generate requires it to be one JSON object (a plain string such as "5"
+  // is refused before dispatch there); the other families accept any text. `is_error` follows
+  // each family's wire: Messages and Interactions send the flag, Generate wraps the object as
+  // `error`, Responses refuses `true` as Unsupported and Chat has no field for it. Use
+  // ToolResult::content_parts directly for typed text/media results.
   static Message tool_result(std::string tool_use_id, std::string content,
                              bool is_error = false, std::string message_id = {}) {
     Message message;
@@ -141,14 +147,18 @@ struct Message {
     }
     return out;
   }
-  std::optional<std::string_view> first_refusal() const noexcept {
+  // The next three projections borrow from this Message (a view or references into `parts`).
+  // They are deleted on a temporary so a borrow cannot outlive its owner; bind the Message,
+  // or the owning Outcome, to a name first.
+  std::optional<std::string_view> first_refusal() const& noexcept {
     for (const auto& part : parts)
       if (const auto* refusal = std::get_if<Refusal>(&part)) return refusal->text;
     return std::nullopt;
   }
+  std::optional<std::string_view> first_refusal() const&& noexcept = delete;
   // Host-executable tool calls only (ToolCallKind::ClientExecuted).
   // ServerExecuted and ApprovalRequest calls are never returned here.
-  std::vector<std::reference_wrapper<const ToolCall>> executable_tool_calls() const {
+  std::vector<std::reference_wrapper<const ToolCall>> executable_tool_calls() const& {
     std::vector<std::reference_wrapper<const ToolCall>> out;
     for (const auto& part : parts) {
       if (const auto* call = std::get_if<ToolCall>(&part);
@@ -158,7 +168,8 @@ struct Message {
     }
     return out;
   }
-  std::vector<std::reference_wrapper<const InvalidToolCall>> invalid_tool_calls() const {
+  std::vector<std::reference_wrapper<const ToolCall>> executable_tool_calls() const&& = delete;
+  std::vector<std::reference_wrapper<const InvalidToolCall>> invalid_tool_calls() const& {
     std::vector<std::reference_wrapper<const InvalidToolCall>> out;
     for (const auto& part : parts) {
       if (const auto* call = std::get_if<InvalidToolCall>(&part)) {
@@ -167,6 +178,7 @@ struct Message {
     }
     return out;
   }
+  std::vector<std::reference_wrapper<const InvalidToolCall>> invalid_tool_calls() const&& = delete;
   bool has_invalid_tool_calls() const noexcept {
     for (const auto& part : parts)
       if (std::holds_alternative<InvalidToolCall>(part)) return true;
@@ -209,6 +221,13 @@ struct Usage {
   std::vector<UsageConflict> conflicts;
   ProviderReportedCost provider_cost;
 
+  // Convenience reads of one counter. An absent counter stays nullopt (unknown), never zero.
+  // They return the bare number: they drop Count::evidence (Reported or Derived) and say
+  // nothing about `stage` (a partial or failed call), `quality` or `conflicts`. Read those
+  // fields, or the Count itself, before settling or billing on a value. total_tokens_value()
+  // prefers `total` and falls back to `provider_reported_total`, so it can mix the two;
+  // cost_nano_usd_value() is the provider-reported USD total only when its status is
+  // Available (see provider_cost), not an invoice.
   std::optional<uint64_t> input_total_value() const noexcept {
     return input_total ? std::optional<uint64_t>(input_total->value) : std::nullopt;
   }
@@ -277,12 +296,14 @@ struct Completion {
     for (const auto& message : messages) out += message.joined_thinking();
     return out;
   }
-  std::optional<std::string_view> first_refusal() const noexcept {
+  // Borrowing projections: deleted on a temporary, as on Message.
+  std::optional<std::string_view> first_refusal() const& noexcept {
     for (const auto& message : messages)
       if (auto refusal = message.first_refusal()) return refusal;
     return std::nullopt;
   }
-  std::vector<std::reference_wrapper<const ToolCall>> executable_tool_calls() const {
+  std::optional<std::string_view> first_refusal() const&& noexcept = delete;
+  std::vector<std::reference_wrapper<const ToolCall>> executable_tool_calls() const& {
     std::vector<std::reference_wrapper<const ToolCall>> out;
     for (const auto& message : messages) {
       auto calls = message.executable_tool_calls();
@@ -290,7 +311,8 @@ struct Completion {
     }
     return out;
   }
-  std::vector<std::reference_wrapper<const InvalidToolCall>> invalid_tool_calls() const {
+  std::vector<std::reference_wrapper<const ToolCall>> executable_tool_calls() const&& = delete;
+  std::vector<std::reference_wrapper<const InvalidToolCall>> invalid_tool_calls() const& {
     std::vector<std::reference_wrapper<const InvalidToolCall>> out;
     for (const auto& message : messages) {
       auto calls = message.invalid_tool_calls();
@@ -298,6 +320,7 @@ struct Completion {
     }
     return out;
   }
+  std::vector<std::reference_wrapper<const InvalidToolCall>> invalid_tool_calls() const&& = delete;
   bool has_invalid_tool_calls() const noexcept {
     for (const auto& message : messages)
       if (message.has_invalid_tool_calls()) return true;
@@ -321,12 +344,14 @@ struct PartialCompletion {
     for (const auto& message : messages) out += message.joined_thinking();
     return out;
   }
-  std::optional<std::string_view> first_refusal() const noexcept {
+  // Borrowing projections: deleted on a temporary, as on Message.
+  std::optional<std::string_view> first_refusal() const& noexcept {
     for (const auto& message : messages)
       if (auto refusal = message.first_refusal()) return refusal;
     return std::nullopt;
   }
-  std::vector<std::reference_wrapper<const ToolCall>> executable_tool_calls() const {
+  std::optional<std::string_view> first_refusal() const&& noexcept = delete;
+  std::vector<std::reference_wrapper<const ToolCall>> executable_tool_calls() const& {
     std::vector<std::reference_wrapper<const ToolCall>> out;
     for (const auto& message : messages) {
       auto calls = message.executable_tool_calls();
@@ -334,7 +359,8 @@ struct PartialCompletion {
     }
     return out;
   }
-  std::vector<std::reference_wrapper<const InvalidToolCall>> invalid_tool_calls() const {
+  std::vector<std::reference_wrapper<const ToolCall>> executable_tool_calls() const&& = delete;
+  std::vector<std::reference_wrapper<const InvalidToolCall>> invalid_tool_calls() const& {
     std::vector<std::reference_wrapper<const InvalidToolCall>> out;
     for (const auto& message : messages) {
       auto calls = message.invalid_tool_calls();
@@ -342,6 +368,7 @@ struct PartialCompletion {
     }
     return out;
   }
+  std::vector<std::reference_wrapper<const InvalidToolCall>> invalid_tool_calls() const&& = delete;
   bool has_invalid_tool_calls() const noexcept {
     for (const auto& message : messages)
       if (message.has_invalid_tool_calls()) return true;
@@ -389,6 +416,15 @@ inline const Error* as_error(const std::shared_ptr<const Outcome>& result) noexc
 inline std::string joined_text(const std::shared_ptr<const Outcome>& result) {
   return result ? joined_text(*result) : std::string{};
 }
+// as_completion/as_failure/as_error return a pointer into the outcome. On a temporary owner
+// (for example directly on the result of Client::complete) it would dangle at the end of the
+// expression, so those calls are deleted: keep the Result in a variable first.
+const Completion* as_completion(const Outcome&&) = delete;
+const Failure* as_failure(const Outcome&&) = delete;
+const Error* as_error(const Outcome&&) = delete;
+const Completion* as_completion(std::shared_ptr<const Outcome>&&) = delete;
+const Failure* as_failure(std::shared_ptr<const Outcome>&&) = delete;
+const Error* as_error(std::shared_ptr<const Outcome>&&) = delete;
 struct LocalId { uint32_t value = 0; friend bool operator==(LocalId, LocalId) = default; };
 enum class PartKind { Text, Refusal, ToolCall, Thinking, RedactedThinking, ServerToolResult, Reasoning, Opaque, Thought, Media };
 struct PartHeader {

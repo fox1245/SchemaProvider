@@ -1134,6 +1134,22 @@ void uncached_input_rule() {
   const auto live = decode(descriptor_value(), R"({"prompt_tokens":30,"completion_tokens":74,"total_tokens":104,"prompt_tokens_details":{"cached_tokens":0,"audio_tokens":0},"completion_tokens_details":{"reasoning_tokens":64,"audio_tokens":0,"accepted_prediction_tokens":0,"rejected_prediction_tokens":0}})", false);
   CHECK(live.input_uncached->value == 30 && live.input_uncached->evidence == Evidence::Derived && !live.cache_write);
 }
+// Projections that borrow from their owner, and pointer accessors into an Outcome, must refuse
+// a temporary owner at compile time; the named-owner forms must stay callable.
+template <class T> concept BorrowsRefusal = requires(T&& value) { std::forward<T>(value).first_refusal(); };
+template <class T> concept BorrowsExecutable = requires(T&& value) { std::forward<T>(value).executable_tool_calls(); };
+template <class T> concept BorrowsInvalid = requires(T&& value) { std::forward<T>(value).invalid_tool_calls(); };
+template <class T> concept PointsIntoOutcome = requires(T&& value) {
+  as_completion(std::forward<T>(value)); as_failure(std::forward<T>(value)); as_error(std::forward<T>(value));
+};
+static_assert(BorrowsRefusal<const Message&> && BorrowsExecutable<const Message&> && BorrowsInvalid<const Message&>);
+static_assert(!BorrowsRefusal<Message> && !BorrowsExecutable<Message> && !BorrowsInvalid<Message>);
+static_assert(BorrowsRefusal<const Completion&> && BorrowsExecutable<const Completion&> && BorrowsInvalid<const Completion&>);
+static_assert(!BorrowsRefusal<Completion> && !BorrowsExecutable<Completion> && !BorrowsInvalid<Completion>);
+static_assert(BorrowsRefusal<const PartialCompletion&> && BorrowsExecutable<const PartialCompletion&> && BorrowsInvalid<const PartialCompletion&>);
+static_assert(!BorrowsRefusal<PartialCompletion> && !BorrowsExecutable<PartialCompletion> && !BorrowsInvalid<PartialCompletion>);
+static_assert(PointsIntoOutcome<const Outcome&> && PointsIntoOutcome<const std::shared_ptr<const Outcome>&>);
+static_assert(!PointsIntoOutcome<Outcome> && !PointsIntoOutcome<std::shared_ptr<const Outcome>>);
 void value_builders_and_projections() {
   const auto m_user = Message::user_text("hello", "u1");
   CHECK(m_user.role == Role::User && m_user.id == "u1" && m_user.joined_text() == "hello");
@@ -1202,13 +1218,17 @@ void simple_requests_all_families() {
   using namespace descriptor;
   const auto contains = [](const std::string& body, std::string_view needle) { return body.find(needle) != std::string::npos; };
   const auto history = [] { return std::vector<Message>{Message::user_text("hi")}; };
-  // The text and history forms write the same request; the system text and the output cap reach
-  // each family's own member.
+  // The system text and the output cap reach each family's own member. Outside Chat the prompt
+  // and history forms write the same bytes.
   const auto chat_text = chat::encode(presets::openai_chat(), chat::Request::simple("gpt-4o-mini", "hi", 128, "be brief"), false);
   const auto chat_hist = chat::encode(presets::openai_chat(), chat::Request::simple("gpt-4o-mini", history(), 128, "be brief"), false);
   CHECK(std::holds_alternative<chat::EncodedRequest>(chat_text) && std::holds_alternative<chat::EncodedRequest>(chat_hist));
   const auto& chat_body = std::get<chat::EncodedRequest>(chat_text).body;
-  CHECK(chat_body == std::get<chat::EncodedRequest>(chat_hist).body);
+  // Chat's history form is the canonical path, which writes content as typed parts, not strings.
+  const auto& chat_hist_body = std::get<chat::EncodedRequest>(chat_hist).body;
+  CHECK(contains(chat_hist_body, R"("role":"system","content":[{"type":"text","text":"be brief"}])") &&
+        contains(chat_hist_body, R"("role":"user","content":[{"type":"text","text":"hi"}])") &&
+        contains(chat_hist_body, R"("max_completion_tokens":128)"));
   CHECK(contains(chat_body, R"("role":"system","content":"be brief")") && contains(chat_body, R"("role":"user","content":"hi")") && contains(chat_body, R"("max_completion_tokens":128)"));
 
   const auto msg_text = messages::encode(presets::anthropic_messages(), messages::Request::simple("claude-sonnet-4-5", "hi", 256, "be brief"), false);

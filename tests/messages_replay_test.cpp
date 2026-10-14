@@ -589,6 +589,22 @@ void tool_role_helper_admission() {
   auto mixed = request;
   mixed.messages.back().parts.push_back(Text{"extra"});
   rejected(descriptor, mixed, ErrorKind::InvalidRequest);
+  auto empty = request;
+  empty.messages.back().parts.clear();
+  rejected(descriptor, empty, ErrorKind::InvalidRequest);
+
+  // Messages has no tool role on the wire: a User-role result encodes to the same bytes.
+  auto user_form = request;
+  user_form.messages.back() = Message{"", Role::User, {ToolResult{"call_a", "42"}}};
+  CHECK(encoded(descriptor, user_form).body == wire.body);
+  // The role still joins the sealed prefix, so a later turn must resend the same role.
+  auto next = request;
+  next.messages.push_back(capture(descriptor, request, R"([{"type":"text","text":"done"}])"));
+  next.messages.push_back(Message::user_text("thanks"));
+  CHECK(!encoded(descriptor, next).body.empty());
+  auto swapped = next;
+  swapped.messages.at(2).role = Role::User;
+  rejected(descriptor, swapped);
 }
 } // namespace
 int main() {
