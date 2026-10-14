@@ -44,6 +44,10 @@ int print_outcome(const sp::runtime::Result& result) {
   const auto* completion = sp::as_completion(result);
   if (!completion) throw QuickstartError("missing completion outcome");
   std::cout << completion->joined_text() << '\n';
+  // This program declares no tools, so a tool call is only reported, never executed. The
+  // cpp-standalone example shows the full tool loop.
+  if (const auto calls = completion->executable_tool_calls(); !calls.empty())
+    std::cout << "tool calls requested: " << calls.size() << '\n';
   if (const auto out_tokens = completion->usage.output_total_value())
     std::cout << "output tokens: " << *out_tokens << '\n';
   else
