@@ -339,53 +339,5 @@ inline void write_response_format(json::BoundedWriter& body, const ResponseForma
   if (!responses) body.raw("}");
   body.raw("}");
 }
-inline std::optional<std::string> validate_extension_fields(
-    const descriptor::ValidatedDescriptor& descriptor,
-    const std::shared_ptr<const json::Document>& extension_fields,
-    std::initializer_list<std::string_view> reserved_keys) {
-  if (!extension_fields) return {};
-  const auto root = extension_fields->root();
-  if (!root.valid() || !root.is_object())
-    return "extension_fields must be a JSON object";
-  const auto& resources = descriptor.policy()->resources();
-  auto members = resources.native_members;
-  const auto max_depth = std::min(resources.json_depth, resources.native_depth);
-  if (!bounded_schema_value(root, 1, max_depth, members))
-    return "extension_fields exceeds codec resource limits";
-  const auto default_cap = descriptor.policy()->default_output_cap_member(
-      descriptor.family(), descriptor.base_url());
-  for (auto member : root.members()) {
-    if (!bounded_text(member.key, 128))
-      return "extension_fields keys must be bounded printable ASCII";
-    if (member.key == descriptor.request_model_member() ||
-        member.key == descriptor.request_messages_member() ||
-        member.key == descriptor.request_stream_member() ||
-        (!descriptor.max_output_tokens_member().empty() &&
-         member.key == descriptor.max_output_tokens_member()) ||
-        (!default_cap.empty() && member.key == default_cap))
-      return "extension_fields key collides with a descriptor-bound request member";
-    for (const auto reserved : reserved_keys)
-      if (member.key == reserved)
-        return "extension_fields key collides with a codec-owned request member";
-  }
-  return {};
-}
-inline void write_extension_fields(
-    json::BoundedWriter& body,
-    const std::shared_ptr<const json::Document>& extension_fields) {
-  if (!extension_fields) return;
-  for (auto member : extension_fields->root().members()) {
-    body.raw(",").quoted(member.key).raw(":").value(member.value, 1);
-  }
-}
 } // namespace request_controls
-inline std::shared_ptr<const json::Document> make_extension_fields(
-    std::string_view json_object,
-    json::Limits limits = {}) {
-  auto parsed = json::parse(json_object, limits);
-  if (auto* doc = std::get_if<json::Document>(&parsed)) {
-    return std::make_shared<const json::Document>(std::move(*doc));
-  }
-  return std::make_shared<const json::Document>();
-}
 } // namespace sp

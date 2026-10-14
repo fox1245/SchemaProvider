@@ -152,12 +152,6 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   }
   if (request.provider)
     if (auto error = request_controls::validate_routing(descriptor, *request.provider)) return bad(std::move(*error));
-  if (auto error = request_controls::validate_extension_fields(
-          descriptor, request.extension_fields,
-          {"model", "messages", "stream", "max_tokens", "system", "tools", "tool_choice",
-           "thinking", "temperature", "top_p", "metadata", "stop_sequences", "output_config",
-           "container", "cache_control", "provider"}))
-    return bad(std::move(*error));
   if (request.messages.size() > resources.request_messages || request.tools.size() > resources.request_tools)
     return bad("request count limit exceeded");
   // Check seals before encoding or interpreting the edited contents. Removing a seal
@@ -383,9 +377,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     if (assistant && message.native && message.native->stop_ == StopKind::PauseTurn && !client_pending.empty()) return bad("pause continuation cannot await client tools");
   }
   if (!client_pending.empty()) return bad("client tool results are required before dispatch");
-  body.raw("]");
-  request_controls::write_extension_fields(body, request.extension_fields);
-  body.raw("}");
+  body.raw("]}");
   if (!body.ok()) return Error{has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest,
                               "request exceeds JSON limits or encoding"};
   return std::nullopt;

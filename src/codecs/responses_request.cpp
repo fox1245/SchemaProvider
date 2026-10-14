@@ -152,13 +152,6 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     if (auto error = request_controls::validate_routing(descriptor, *request.provider)) return bad(std::move(*error));
   if (request.response_format)
     if (auto error = request_controls::validate_response_format(*request.response_format, resources)) return bad(std::move(*error));
-  if (auto error = request_controls::validate_extension_fields(
-          descriptor, request.extension_fields,
-          {"model", "input", "stream", "max_output_tokens", "instructions", "tools", "tool_choice",
-           "parallel_tool_calls", "reasoning", "text", "truncation", "store", "metadata", "include",
-           "previous_response_id", "service_tier", "temperature", "top_p", "provider",
-           "max_tool_calls"}))
-    return bad(std::move(*error));
   std::set<std::string_view> hosted_types;
   for (const auto& tool : request.hosted_tools) {
     const auto type = hosted_type(tool);
@@ -458,9 +451,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       if (!body.ok()) return Error{ErrorKind::ResourceLimit, "request exceeds JSON byte, depth or encoding limits"};
     }
     if (!pending.empty()) return invalid("all client function calls require results before dispatch");
-    body.raw("]");
-    request_controls::write_extension_fields(body, request.extension_fields);
-    body.raw("}");
+    body.raw("]}");
     if (!body.ok()) return Error{ErrorKind::ResourceLimit, "request exceeds JSON byte, depth or encoding limits"};
     return std::nullopt;
   };

@@ -33,8 +33,6 @@ struct Request {
   std::optional<CacheControl> cache_control{};
   std::optional<ToolChoice> tool_choice{};
   std::optional<sp::OpenRouterRouting> provider{};
-  // Optional collision-gated top-level JSON object for vendor/model-specific request fields.
-  std::shared_ptr<const json::Document> extension_fields{};
 
   static Request simple(std::string model_name, std::string user_prompt,
                         std::optional<uint64_t> output_cap = std::nullopt,

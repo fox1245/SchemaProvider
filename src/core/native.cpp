@@ -283,10 +283,6 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
   for (const auto& tool : request.tools) {
     hash.text(tool.name); hash.text(tool.description); hash.document(tool.parameters);
   }
-  if (request.extension_fields) {
-    hash.text("sp.request.extension_fields.v1");
-    hash.document(request.extension_fields);
-  }
   return hash.finish(digest);
 }
 bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, const messages::Request& request, const descriptor::EffectiveChoices& choices, Digest& digest) {
@@ -305,10 +301,6 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
   for (const auto& tool : request.tools) {
     hash.text(tool.name); hash.text(tool.description); hash.document(tool.input_schema); hash.text(tool.type);
     hash.number(tool.max_uses.has_value()); if (tool.max_uses) hash.number(*tool.max_uses);
-  }
-  if (request.extension_fields) {
-    hash.text("sp.request.extension_fields.v1");
-    hash.document(request.extension_fields);
   }
   return hash.finish(digest);
 }
@@ -358,10 +350,6 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
     hash.number(strict.has_value()); if (strict) hash.number(*strict);
     hash.number(tool.defer_loading.value_or(false));
   }
-  if (request.extension_fields) {
-    hash.text("sp.request.extension_fields.v1");
-    hash.document(request.extension_fields);
-  }
   return hash.finish(digest);
 }
 bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, const gemini::Request& request, const descriptor::EffectiveChoices& choices, Digest& digest) {
@@ -410,10 +398,6 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
       hash.number(transcription.diarization.has_value()); if (transcription.diarization) hash.number(*transcription.diarization);
       hash.number(transcription.mode.has_value()); if (transcription.mode) hash.number(static_cast<unsigned>(*transcription.mode));
     }
-  }
-  if (request.extension_fields) {
-    hash.text("sp.request.extension_fields.v1");
-    hash.document(request.extension_fields);
   }
   return hash.finish(digest);
 }
@@ -469,10 +453,6 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
       hash.number(transcription.mode.has_value()); if (transcription.mode) hash.number(static_cast<unsigned>(*transcription.mode));
       hash.number(transcription.speaker_diarization); hash.number(transcription.word_timestamps);
     }
-  }
-  if (request.extension_fields) {
-    hash.text("sp.request.extension_fields.v1");
-    hash.document(request.extension_fields);
   }
   return hash.finish(digest);
 }

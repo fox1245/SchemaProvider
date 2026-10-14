@@ -54,8 +54,6 @@ struct Request {
   std::optional<Truncation> truncation;
   // Absent keeps reasoning.encrypted_content; an explicit empty vector sends [].
   std::optional<std::vector<Include>> include;
-  // Optional collision-gated top-level JSON object for vendor/model-specific request fields.
-  std::shared_ptr<const json::Document> extension_fields{};
 
   static Request simple(std::string model_name, std::string user_prompt,
                         std::optional<uint64_t> max_tokens = std::nullopt,
