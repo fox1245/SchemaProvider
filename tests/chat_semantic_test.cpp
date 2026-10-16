@@ -230,7 +230,6 @@ void known_corrupt_never_ignored() {
     R"({})", R"({"choices":null})", R"({"choices":[null]})",
     R"({"choices":[{"delta":{},"finish_reason":null}]})",
     R"({"choices":[{"index":0,"delta":{},"finish_reason":7}]})",
-    R"({"choices":[{"index":0,"delta":{}}]})",
     R"({"choices":[{"index":0,"delta":null,"finish_reason":null}]})",
     chunk(R"({"role":null})"), chunk(R"({"role":"user"})"), chunk(R"({"content":9})"), chunk(R"({"refusal":false})"),
     chunk(R"({"tool_calls":{}})"), chunk(R"({"tool_calls":[{"index":0,"id":"a","type":"function","function":{"name":"f","arguments":{}}}]})"),
@@ -392,6 +391,54 @@ void per_chunk_creation_clock() {
   CHECK(completion.usage.input_total && completion.usage.input_total->value == 36);
   CHECK(completion.usage.output_total && completion.usage.output_total->value == 45);
   CHECK(completion.usage.total && completion.usage.total->value == 81);
+}
+void omitted_open_finish_reason() {
+  // Shape of Google's OpenAI-compatible endpoint: every chunk before the last leaves
+  // finish_reason out (instead of sending null), repeats the role and carries cumulative usage.
+  const auto google = [](std::string_view delta, std::string_view finish, std::string_view completion_tokens) {
+    return "data: {\"choices\":[{\"delta\":" + std::string(delta) + (finish.empty() ? "" : ",\"finish_reason\":" + std::string(finish)) +
+      ",\"index\":0}],\"created\":1792130675,\"id\":\"g-1\",\"model\":\"gemini-2.5-flash-lite\",\"object\":\"chat.completion.chunk\","
+      "\"usage\":{\"completion_tokens\":" + std::string(completion_tokens) + ",\"prompt_tokens\":57,\"total_tokens\":" +
+      std::to_string(57 + std::stoi(std::string(completion_tokens))) + "}}\n\n";
+  };
+  const std::string wire =
+    google(R"({"content":"One,","role":"assistant"})", "", "6") +
+    google(R"({"content":" two,","role":"assistant"})", "", "24") +
+    google(R"({"content":" three.","role":"assistant"})", "\"stop\"", "36") +
+    "data: [DONE]\n\n";
+  Accumulator accumulator;
+  chat::Codec codec(descriptor_value(), chat::Mode::Sse, accumulator);
+  transport::SseFramer framer;
+  CHECK(framer.feed(wire, [&](const transport::SseFrame& frame) { return codec.frame(frame.event, frame.data); }));
+  framer.finish(); CHECK(framer.error() == transport::SseError::None); codec.finish();
+  CHECK(accumulator.outcome());
+  const auto& completion = completed(*accumulator.outcome());
+  CHECK(text_of(completion.messages) == "One, two, three." && completion.stop.kind == StopKind::EndTurn && completion.stop.raw == "stop");
+  CHECK(completion.usage.input_total && completion.usage.input_total->value == 57);
+  CHECK(completion.usage.output_total && completion.usage.output_total->value == 36);
+  CHECK(completion.usage.total && completion.usage.total->value == 93);
+
+  // An absent member on an open stream is the same as null, also for tool calls (an open
+  // chunk {"index":0,"delta":{}} used to be ProtocolCorrupt).
+  const auto open = [](std::string_view delta) { return envelope("{\"choices\":[{\"index\":0,\"delta\":" + std::string(delta) + "}]}"); };
+  const auto tools = frames({
+    open(R"({"role":"assistant","tool_calls":[{"index":0,"id":"call-a","type":"function","function":{"name":"weather","arguments":"{\"city\":\"Seoul\"}"}}]})"),
+    chunk(R"({"tool_calls":[{"index":1,"id":"call-b","type":"function","function":{"name":"clock","arguments":"{}"}}]})", "\"tool_calls\""),
+    "[DONE]"});
+  const auto& called = completed(tools);
+  CHECK(called.stop.kind == StopKind::ToolUse && called.messages.size() == 1 && called.messages[0].parts.size() == 2);
+  CHECK(projection(frames({open(R"({"role":"assistant","content":"a"})"), chunk(R"({"content":"b"})", "\"stop\""), "[DONE]"})) ==
+        projection(frames({chunk(R"({"role":"assistant","content":"a"})"), chunk(R"({"content":"b"})", "\"stop\""), "[DONE]"})));
+
+  // Nothing else relaxes: a stream still needs a string finish_reason before [DONE], a chunk
+  // after the stop reason still needs the member, and so does a buffered choice.
+  const auto unfinished = frames({open(R"({"role":"assistant","content":"prefix"})"), open(R"({"content":" more"})"), "[DONE]"});
+  CHECK(text_of(failed(unfinished, ErrorKind::ProtocolCorrupt).partial.messages) == "prefix more");
+  const auto after_stop = frames({open(R"({"role":"assistant","content":"prefix"})"), chunk("{}", "\"stop\""),
+                                  envelope(R"({"choices":[{"index":0,"delta":{}}],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}})"),
+                                  "[DONE]"});
+  CHECK(failed(after_stop, ErrorKind::ProtocolCorrupt).partial.stop && failed(after_stop, ErrorKind::ProtocolCorrupt).partial.stop->kind == StopKind::EndTurn);
+  failed(buffered(envelope(R"({"choices":[{"index":0,"message":{"role":"assistant","content":"ok"}}]})", false)), ErrorKind::ProtocolCorrupt);
 }
 void required_usage_and_unknown_cache() {
   const std::vector<std::string> names{"prompt_tokens", "completion_tokens", "total_tokens"};
@@ -1097,7 +1144,7 @@ int main() {
     owned_raw_observations(); raw_failure_evidence();
     chunk_partition_invariant(); no_terminal_no_success(); transport_projection_parity(); known_corrupt_never_ignored();
     invalid_tools_and_compatibility(); usage_knowledge(); accumulator_transitions_and_seals(); typed_request_encoding();
-    required_metadata_and_identity(); per_chunk_creation_clock(); required_usage_and_unknown_cache(); unindexed_tool_order_and_optional_function(); buffered_close_precedence();
+    required_metadata_and_identity(); per_chunk_creation_clock(); omitted_open_finish_reason(); required_usage_and_unknown_cache(); unindexed_tool_order_and_optional_function(); buffered_close_precedence();
     accumulator_interleaved_ordering(); accumulator_order_uniqueness_and_limits();
     tool_history_and_escaped_arguments(); one_tool_message_with_several_results(); output_cap_member_by_origin(); quoted_json_and_request_bounds();
     gateway_request_controls(); gateway_max_price();

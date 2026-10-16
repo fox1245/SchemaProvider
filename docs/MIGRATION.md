@@ -21,6 +21,12 @@ Family C++ code now owns request structure, tool/native checks, stream correlati
 
 `sp::runtime::Request` is the five-family typed variant. `Result` is `std::shared_ptr<const sp::Outcome>`, not a flat successful completion object. This lets callers retain ordered parts, native sidecars, raw observations and failure partials without borrowing a client or callback.
 
+## Package 0.3.2 (interface 6)
+
+Package 0.3.2 is a maintenance release of this line. The interface revision and shared-library generation stay 6, no installed struct or enum changes layout or gains an enumerator, and the embedded descriptor policy and its identity are unchanged. The fix below changes behaviour.
+
+A streamed Chat Completions choice without `finish_reason` now reads as `"finish_reason": null` while the stream is open. Google's OpenAI-compatible endpoint (`https://generativelanguage.googleapis.com/v1beta/openai/chat/completions`) leaves the member out of every chunk before the last, so every stream from it longer than one chunk failed with `ProtocolCorrupt`; OpenRouter, which sends `null`, was not affected. The stream must still carry a string `finish_reason` before `[DONE]`, a buffered choice without the member and a chunk after the stop reason without it are still `ProtocolCorrupt`, and no other member is read this way. See [frame classes](DESIGN.md#41-frame-classes).
+
 ## Package 0.3.1 (interface 6)
 
 Package 0.3.1 is a maintenance release of this line. The interface revision and shared-library generation stay 6, and no struct or enum of the public API ([runtime/client.h](../src/runtime/client.h), [core/value.h](../src/core/value.h)) changes layout or gains an enumerator, so a consumer rebuilds against the 0.3.1 headers only to select `SchemaProvider 0.3.1 EXACT`. The embedded descriptor policy and its identity, a persisted value on this interface, are unchanged. Two installed helper types that only the SDK's own libraries construct grow (`messages::Codec` and `runtime::detail::ResponseInfo`). The fixes below change behaviour.
