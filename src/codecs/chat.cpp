@@ -183,7 +183,12 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
         audio_.seen && !audio_.payload.empty() && audio_.pending.empty() && tools_.empty() &&
         delta.is_object() && delta.size() == 1 && expiry_audio.is_object() && expiry_audio.size() == 1 &&
         unsigned_count(expiry_audio.get("expires_at"));
-    if ((!reason.valid() && !omitted_expiry_reason) ||
+    // Google's OpenAI-compatible endpoint leaves finish_reason out of every chunk before
+    // the last. On an open stream an absent reason reads as null; a buffered choice and a
+    // terminal tail still need the member (apart from the expiry case above), and the
+    // stream still needs a string reason before [DONE].
+    const bool omitted_open_reason = !reason.valid() && streaming && !terminal_tail;
+    if ((!reason.valid() && !omitted_expiry_reason && !omitted_open_reason) ||
         (reason.valid() && !reason.is_null() && !reason.is_string()))
       return fail(ErrorKind::ProtocolCorrupt, "invalid finish reason");
     if (terminal_tail) {
