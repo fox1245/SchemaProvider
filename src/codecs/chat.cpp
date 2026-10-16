@@ -140,7 +140,13 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
       return fail(ErrorKind::Unsupported, "logprobs outside first Chat cell");
     }
     auto reason = choice.get("finish_reason");
-    if (!reason.valid() || (!reason.is_null() && !reason.is_string())) return fail(ErrorKind::ProtocolCorrupt, "invalid finish reason");
+    // Google's OpenAI-compatible endpoint leaves finish_reason out of every chunk before
+    // the last. On an open stream an absent reason reads as null; a buffered choice and a
+    // terminal usage tail still need the member, and the stream still needs a string
+    // reason before [DONE].
+    const bool omitted_open_reason = !reason.valid() && streaming && !terminal_tail;
+    if ((!reason.valid() && !omitted_open_reason) || (reason.valid() && !reason.is_null() && !reason.is_string()))
+      return fail(ErrorKind::ProtocolCorrupt, "invalid finish reason");
     const auto delta = choice.get(streaming ? "delta" : "message");
     if (terminal_tail) {
       if (reason.is_string() && reason.as_string() == "error")
