@@ -1,6 +1,6 @@
 # Roadmap and release gates
 
-Current source package 0.3.1 alpha uses typed interface/shared-library generation 6 with five HTTP/SSE families. [Usage](USAGE.md) defines separate provider-reported costs, nullable token evidence, preserved controls, Responses provider-held cursors and explicit Generate portable imports. [Recorded provenance](POC_PLAN.md#current-typed-c-cutover-provenance) keeps earlier interface 3–5 runs unchanged; implementation, fresh wire proof and release/support admission are separate claims.
+Current source package 0.3.2 alpha uses typed interface/shared-library generation 6 with five HTTP/SSE families. [Usage](USAGE.md) defines separate provider-reported costs, nullable token evidence, preserved controls, Responses provider-held cursors and explicit Generate portable imports. [Recorded provenance](POC_PLAN.md#current-typed-c-cutover-provenance) keeps earlier interface 3–5 runs unchanged; implementation, fresh wire proof and release/support admission are separate claims.
 
 ## Owner-requested next work
 
