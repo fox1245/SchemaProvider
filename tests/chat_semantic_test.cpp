@@ -440,6 +440,51 @@ void omitted_open_finish_reason() {
   CHECK(failed(after_stop, ErrorKind::ProtocolCorrupt).partial.stop && failed(after_stop, ErrorKind::ProtocolCorrupt).partial.stop->kind == StopKind::EndTurn);
   failed(buffered(envelope(R"({"choices":[{"index":0,"message":{"role":"assistant","content":"ok"}}]})", false)), ErrorKind::ProtocolCorrupt);
 }
+// What a stream's sink is shown for the parts of a message: [begin], a text delta with its bytes, [seal]. An empty
+// text delta would show as [delta:], and none may.
+struct Traced { std::string trace; Outcome outcome; };
+Traced traced(const std::vector<std::string>& wire, bool normal = true) {
+  Traced result;
+  Accumulator accumulator({}, [&](const Event& event) {
+    if (std::holds_alternative<PartBegin>(event)) result.trace += "[begin]";
+    else if (const auto* delta = std::get_if<PartDelta>(&event)) result.trace += "[" + std::string(delta->payload.kind == PartKind::Text ? "delta:" : "other:") + std::string(delta->payload.bytes) + "]";
+    else if (std::holds_alternative<PartSeal>(event)) result.trace += "[seal]";
+  });
+  chat::Codec codec(descriptor_value(), chat::Mode::Sse, accumulator);
+  for (const auto& frame : wire) if (!codec.frame("message", frame)) break;
+  codec.finish({normal, ErrorKind::Truncated});
+  CHECK(accumulator.outcome()); result.outcome = *accumulator.outcome();
+  return result;
+}
+void empty_text_delta_is_withheld() {
+  // OpenAI opens a stream with {"role":"assistant","content":""}: the Text part opens with that empty string. The part
+  // is still opened and sealed, in the same place as before, but the sink is shown only deltas that carry text.
+  const auto opening = chunk(R"({"role":"assistant","content":"","refusal":null})");
+  const auto streamed = traced({opening, chunk(R"({"content":"Hi"})"), chunk(R"({"content":""})"), chunk(R"({"content":" there"})"), chunk("{}", "\"stop\""), "[DONE]"});
+  CHECK(streamed.trace == "[begin][delta:Hi][delta: there][seal]");
+  CHECK(text_of(completed(streamed.outcome).messages) == "Hi there" && completed(streamed.outcome).messages[0].parts.size() == 1);
+  CHECK(projection(streamed.outcome) == projection(buffered(body(R"({"role":"assistant","content":"Hi there"})"))));
+
+  // A text part that only ever received empty text is still there, and is the empty Text a buffered response returns.
+  const auto only_empty = traced({opening, chunk("{}", "\"stop\""), "[DONE]"});
+  CHECK(only_empty.trace == "[begin][seal]");
+  CHECK(completed(only_empty.outcome).messages.size() == 1 && completed(only_empty.outcome).messages[0].parts.size() == 1);
+  CHECK(std::holds_alternative<Text>(completed(only_empty.outcome).messages[0].parts[0]) && text_of(completed(only_empty.outcome).messages).empty());
+  CHECK(projection(only_empty.outcome) == projection(buffered(body(R"({"role":"assistant","content":""})"))));
+  // A null or absent content opens no part, in either mode.
+  CHECK(traced({chunk(R"({"role":"assistant","content":null})"), chunk("{}", "\"stop\""), "[DONE]"}).trace.empty());
+
+  // A call cut after the empty opening keeps the empty part in its partial output, as it did.
+  const auto cut = traced({opening}, false);
+  CHECK(cut.trace == "[begin]");
+  const auto& partial = failed(cut.outcome, ErrorKind::Truncated).partial;
+  CHECK(partial.messages.size() == 1 && partial.messages[0].parts.size() == 1 && std::holds_alternative<Text>(partial.messages[0].parts[0]));
+  CHECK(text_of(partial.messages).empty());
+
+  // Only text deltas are withheld: an empty reasoning delta is delivered as it was.
+  const auto reasoning = traced({chunk(R"({"role":"assistant","reasoning_content":""})"), chunk(R"({"content":"ok"})"), chunk("{}", "\"stop\""), "[DONE]"});
+  CHECK(reasoning.trace == "[begin][other:][begin][delta:ok][seal][seal]");
+}
 void required_usage_and_unknown_cache() {
   const std::vector<std::string> names{"prompt_tokens", "completion_tokens", "total_tokens"};
   for (size_t field = 0; field < names.size(); ++field) for (auto invalid : {"", "null", "true", "\"0\"", "-1", "0.5", "18446744073709551616"}) {
@@ -1144,7 +1189,7 @@ int main() {
     owned_raw_observations(); raw_failure_evidence();
     chunk_partition_invariant(); no_terminal_no_success(); transport_projection_parity(); known_corrupt_never_ignored();
     invalid_tools_and_compatibility(); usage_knowledge(); accumulator_transitions_and_seals(); typed_request_encoding();
-    required_metadata_and_identity(); per_chunk_creation_clock(); omitted_open_finish_reason(); required_usage_and_unknown_cache(); unindexed_tool_order_and_optional_function(); buffered_close_precedence();
+    required_metadata_and_identity(); per_chunk_creation_clock(); omitted_open_finish_reason(); empty_text_delta_is_withheld(); required_usage_and_unknown_cache(); unindexed_tool_order_and_optional_function(); buffered_close_precedence();
     accumulator_interleaved_ordering(); accumulator_order_uniqueness_and_limits();
     tool_history_and_escaped_arguments(); one_tool_message_with_several_results(); output_cap_member_by_origin(); quoted_json_and_request_bounds();
     gateway_request_controls(); gateway_max_price();
