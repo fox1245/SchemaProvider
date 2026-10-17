@@ -687,6 +687,53 @@ void cut_stream_usage_has_no_placeholder_output() {
   std::vector<Frame> regress{start(large), block(0, R"({"type":"text","text":""})"), end(0), stop("\"end_turn\"", R"({"output_tokens":3})"), done};
   CHECK(completed(stream(regress)).usage.quality == UsageQuality::Inconsistent);
 }
+// What a stream's sink is shown for the parts of a message: [begin], a text delta with its bytes, [seal]. An empty
+// text delta would show as [delta:], and none may.
+struct Traced { std::string trace; Outcome outcome; };
+Traced traced(const std::vector<Frame>& frames, messages::Close close = {}) {
+  Traced result;
+  Accumulator acc({}, [&](const Event& event) {
+    if (std::holds_alternative<PartBegin>(event)) result.trace += "[begin]";
+    else if (const auto* d = std::get_if<PartDelta>(&event)) result.trace += "[" + std::string(d->payload.kind == PartKind::Text ? "delta:" : "other:") + std::string(d->payload.bytes) + "]";
+    else if (std::holds_alternative<PartSeal>(event)) result.trace += "[seal]";
+  });
+  messages::Codec codec(descriptor_value(), messages::Mode::Sse, acc, context());
+  for (const auto& [event, data] : frames) if (!codec.frame(event, data)) break;
+  codec.finish(close); CHECK(acc.outcome()); result.outcome = *acc.outcome();
+  return result;
+}
+void empty_text_delta_is_withheld() {
+  // content_block_start carries the block's text, which is "" on every real stream: the Text part opens with an empty
+  // delta. The part is still opened and sealed, in the same place as before, but the sink is shown only text.
+  const auto opening = block(0, R"({"type":"text","text":""})");
+  const auto streamed = traced({start(), opening, delta(0, R"({"type":"text_delta","text":"Hi"})"), delta(0, R"({"type":"text_delta","text":""})"),
+                                delta(0, R"({"type":"text_delta","text":" there"})"), end(0), stop(), done});
+  CHECK(streamed.trace == "[begin][delta:Hi][delta: there][seal]");
+  const auto whole = buffered(body(R"([{"type":"text","text":"Hi there"}])"));
+  CHECK(text(completed(streamed.outcome).messages) == "Hi there" && completed(streamed.outcome).messages[0].parts.size() == 1);
+  CHECK(completed(streamed.outcome).messages[0].parts.size() == completed(whole).messages[0].parts.size() && completed(streamed.outcome).stop.kind == completed(whole).stop.kind);
+
+  // A block that only ever received empty text is still there, and is the empty Text a buffered response returns.
+  const auto only_empty = traced({start(), opening, end(0), stop(), done});
+  CHECK(only_empty.trace == "[begin][seal]");
+  CHECK(completed(only_empty.outcome).messages.size() == 1 && completed(only_empty.outcome).messages[0].parts.size() == 1);
+  CHECK(std::holds_alternative<Text>(completed(only_empty.outcome).messages[0].parts[0]) && text(completed(only_empty.outcome).messages).empty());
+  const auto empty_whole = buffered(body(R"([{"type":"text","text":""}])"));
+  CHECK(completed(empty_whole).messages[0].parts.size() == 1 && std::holds_alternative<Text>(completed(empty_whole).messages[0].parts[0]));
+  // Two text blocks keep their order and their separate parts, the first of them empty.
+  const auto two = traced({start(), opening, end(0), block(1, R"({"type":"text","text":""})"), delta(1, R"({"type":"text_delta","text":"x"})"), end(1), stop(), done});
+  CHECK(two.trace == "[begin][seal][begin][delta:x][seal]" && completed(two.outcome).messages[0].parts.size() == 2);
+
+  // A call cut after the empty opening keeps the empty part in its partial output, as it did.
+  const auto cut = traced({start(), opening}, {false, ErrorKind::Truncated});
+  CHECK(cut.trace == "[begin]");
+  const auto& partial = failed(cut.outcome, ErrorKind::Truncated).partial;
+  CHECK(partial.messages.size() == 1 && partial.messages[0].parts.size() == 1 && std::holds_alternative<Text>(partial.messages[0].parts[0]));
+
+  // Only text deltas are withheld: a thinking block's empty opening delta is delivered as it was.
+  const auto thinking = traced({start(), block(0, R"({"type":"thinking","thinking":""})"), delta(0, R"({"type":"thinking_delta","thinking":"hm"})"), end(0), stop(), done});
+  CHECK(thinking.trace == "[begin][other:][other:hm][seal]");
+}
 } // namespace
 int main() {
   try {
@@ -695,7 +742,7 @@ int main() {
     usage_binding_precedence();
     usage_detail_forward_compatibility(); toolset_metadata_shapes();
     terminal_matrix(); text_thinking_and_order(); tool_fragments(); server_semantics(); server_result_shapes();
-    stop_classes(); corruption_matrix(); usage_knowledge(); cut_stream_usage_has_no_placeholder_output(); uncached_input_rule(); limits_and_close_priority();
+    stop_classes(); corruption_matrix(); usage_knowledge(); cut_stream_usage_has_no_placeholder_output(); uncached_input_rule(); limits_and_close_priority(); empty_text_delta_is_withheld();
     std::cout << "messages semantic tests passed\n";
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

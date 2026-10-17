@@ -21,6 +21,12 @@ Family C++ code now owns request structure, tool/native checks, stream correlati
 
 `sp::runtime::Request` is the five-family typed variant. `Result` is `std::shared_ptr<const sp::Outcome>`, not a flat successful completion object. This lets callers retain ordered parts, native sidecars, raw observations and failure partials without borrowing a client or callback.
 
+## Package 0.3.3 (interface 6)
+
+Package 0.3.3 is a maintenance release of this line. The interface revision and shared-library generation stay 6, no installed struct or enum changes layout or gains an enumerator, and the embedded descriptor policy and its identity are unchanged. The fixes below change behaviour.
+
+`on_event` no longer receives a text `PartDelta` with empty text. OpenAI Chat opens a stream with `"content":""`, a Messages text block starts with `"text":""`, a Gemini answer usually ends with a part whose text is `""` and Responses repeats the whole text at `output_text.done`; each of those used to arrive as a delta without text, so a caller that counted chunks, or took the first text delta for the first token, was off by one. The accumulator still applies the event: the part exists, keeps its index and order and seals as before, a text part that only ever received empty text is the empty `Text` a buffered response returns, and `PartBegin` and `PartSeal` are delivered either way. Code that waited for text rather than for the first delta (the advice that came with the old behaviour) keeps working. Thinking, refusal, tool-call and signature deltas are delivered as the wire gives them. See [streaming](USAGE.md#streaming-deadlines-cancellation-and-backpressure).
+
 ## Package 0.3.2 (interface 6)
 
 Package 0.3.2 is a maintenance release of this line. The interface revision and shared-library generation stay 6, no installed struct or enum changes layout or gains an enumerator, and the embedded descriptor policy and its identity are unchanged. The fix below changes behaviour.

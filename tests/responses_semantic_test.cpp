@@ -881,9 +881,24 @@ void reviewed_wire_boundaries() {
   });
   CHECK(failures == 0);
 }
+// A text part opens with the "" of content_part.added, and output_text.done repeats the whole text, which leaves an
+// empty remainder after a stream that delivered every delta. Neither empty delta reaches the sink; the part does.
+void empty_text_delta_is_withheld() {
+  std::string trace;
+  Accumulator acc({}, [&](const Event& event) {
+    if (std::holds_alternative<PartBegin>(event)) trace += "[begin]";
+    else if (const auto* d = std::get_if<PartDelta>(&event)) trace += "[delta:" + std::string(d->payload.bytes) + "]";
+    else if (std::holds_alternative<PartSeal>(event)) trace += "[seal]";
+  });
+  responses::Codec codec(desc(), responses::Mode::Sse, acc, context());
+  for (const auto& [name, data] : text_frames()) CHECK(codec.frame(name, data));
+  codec.finish(); CHECK(acc.outcome());
+  CHECK(trace == "[begin][delta:hel][delta:lo][seal]");
+  CHECK(text(completed(*acc.outcome()).messages) == "hello" && completed(*acc.outcome()).messages[0].parts.size() == 1);
+}
 } // namespace
 int main() {
-  try { provider_money_and_snapshot_aliases(); named_error_precedence(); named_error_raw_capacity(); completed_reasoning_ciphertext_authority(); reviewed_wire_boundaries(); typed_encode(); controls_and_cursor_boundaries(); openrouter_max_price(); strict_tool_schemas(); previous_response_ownership(); grouped_native_and_owned_outcomes(); normal_close_required(); cancellation_observation_boundary(); reasoning_stream_snapshots(); tools_interleaving_and_ownership(); incomplete_and_server_items(); unknown_hosted_item_ownership(); unknown_wire_observation_boundary(); usage_boundaries(); uncached_input_rule(); corruption_and_bounds();
+  try { empty_text_delta_is_withheld(); provider_money_and_snapshot_aliases(); named_error_precedence(); named_error_raw_capacity(); completed_reasoning_ciphertext_authority(); reviewed_wire_boundaries(); typed_encode(); controls_and_cursor_boundaries(); openrouter_max_price(); strict_tool_schemas(); previous_response_ownership(); grouped_native_and_owned_outcomes(); normal_close_required(); cancellation_observation_boundary(); reasoning_stream_snapshots(); tools_interleaving_and_ownership(); incomplete_and_server_items(); unknown_hosted_item_ownership(); unknown_wire_observation_boundary(); usage_boundaries(); uncached_input_rule(); corruption_and_bounds();
     std::cout << "Responses semantic contracts passed\n"; return 0;
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }
