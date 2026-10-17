@@ -16,6 +16,7 @@ class Accumulator {
   // intent; specific vendor terminal reasons and server-executed calls survive.
   // An event is applied before the sink sees it, so whatever the sink was shown is
   // already in the outcome a later Fail takes, even if the sink throws on that event.
+  // A text PartDelta with empty bytes is applied but never shown to the sink.
   bool accept(const Event& event, const Error* failure_override = nullptr);
   const std::optional<Outcome>& outcome() const { return outcome_; }
   // Terminal ownership transfer; discard the accumulator after taking its outcome.

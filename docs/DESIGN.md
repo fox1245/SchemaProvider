@@ -315,7 +315,7 @@ using Event = std::variant<Begin, MessageBegin, PartBegin, PartDelta, PartSeal,
 }
 ```
 
-Delta payload views are valid only for the callback duration. Retaining requires an explicit copy. Opaque reasoning bytes are never placed in delta events or logs. Every vendor delta kind that the codec knows but cannot map (annotations, citations, refusal deltas, stop details, server-side fallback blocks) is either mapped to a part or recorded as a `ConversionLoss`; none vanishes silently. The codec defines, per kind, the replay projection including what is dropped.
+Delta payload views are valid only for the callback duration. Retaining requires an explicit copy. A text delta with empty bytes is applied by the accumulator but never delivered to the sink: the part, its order and its sealed (possibly empty) text are the same as in a buffered response; only the empty event is withheld. Opaque reasoning bytes are never placed in delta events or logs. Every vendor delta kind that the codec knows but cannot map (annotations, citations, refusal deltas, stop details, server-side fallback blocks) is either mapped to a part or recorded as a `ConversionLoss`; none vanishes silently. The codec defines, per kind, the replay projection including what is dropped.
 
 ### 3.5 Usage: unknown is not zero
 

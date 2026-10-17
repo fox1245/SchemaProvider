@@ -573,8 +573,54 @@ void total_without_candidates_bounds_the_output() {
     CHECK(!u.output_total && !u.total && u.quality == UsageQuality::Inconsistent && !u.conflicts.empty());
   }
 }
+// What a stream's sink is shown for the parts of a message: [begin], a text delta with its bytes, [seal]. An empty
+// text delta would show as [delta:], and none may.
+struct Traced { std::string trace; Outcome outcome; };
+Traced traced(std::initializer_list<std::string> chunks, gemini::Close close = {}) {
+  Traced result;
+  Accumulator a({}, [&](const Event& event) {
+    if (std::holds_alternative<PartBegin>(event)) result.trace += "[begin]";
+    else if (const auto* d = std::get_if<PartDelta>(&event)) result.trace += "[" + std::string(d->payload.kind == PartKind::Text ? "delta:" : "other:") + std::string(d->payload.bytes) + "]";
+    else if (std::holds_alternative<PartSeal>(event)) result.trace += "[seal]";
+  });
+  gemini::Codec c(desc(), gemini::Mode::Sse, a, context());
+  for (const auto& b : chunks) if (!c.frame({}, b)) break;
+  c.finish(close); CHECK(a.outcome()); result.outcome = *a.outcome();
+  return result;
+}
+void empty_text_delta_is_withheld() {
+  // Every wire part with a text member is a part of its own, and Gemini ends most answers with a part whose text is
+  // "" next to the finish reason. The part is still opened and sealed, in the same place as before, but the sink is
+  // shown only deltas that carry text.
+  const auto streamed = traced({body(R"([{"text":"Hel"}])", "", "null"), body(R"([{"text":"lo"}])", "", "null"), body(R"([{"text":""}])")});
+  CHECK(streamed.trace == "[begin][delta:Hel][seal][begin][delta:lo][seal][begin][seal]");
+  const auto& completion = complete(streamed.outcome);
+  CHECK(completion.joined_text() == "Hello" && completion.messages.size() == 1 && completion.messages[0].parts.size() == 3);
+  // The same three parts in one buffered body.
+  const auto whole = complete(buffered(body(R"([{"text":"Hel"},{"text":"lo"},{"text":""}])")));
+  CHECK(whole.joined_text() == "Hello" && whole.messages[0].parts.size() == 3 && whole.stop.kind == completion.stop.kind);
+  for (size_t i = 0; i < 3; ++i) CHECK(std::holds_alternative<Text>(completion.messages[0].parts[i]) && std::holds_alternative<Text>(whole.messages[0].parts[i]));
+
+  // An empty text part that carries a signature is the same part with the same signature in both modes.
+  const auto signed_empty = R"([{"text":"","thoughtSignature":"EMPTY_TEXT_SIG"}])";
+  const auto signed_stream = traced({body(R"([{"text":"a"}])", "", "null"), body(signed_empty)});
+  CHECK(signed_stream.trace == "[begin][delta:a][seal][begin][seal]");
+  const auto& signed_parts = complete(signed_stream.outcome).messages[0].parts;
+  CHECK(signed_parts.size() == 2 && std::get<Text>(signed_parts[1]).value.empty());
+  CHECK(complete(signed_stream.outcome).messages[0].wire_output && complete(signed_stream.outcome).messages[0].wire_output->root().at(1).get("thoughtSignature").as_string() == "EMPTY_TEXT_SIG");
+
+  // A call cut after an empty part keeps it in its partial output, as it did.
+  const auto cut = traced({body(R"([{"text":""}])", "", "null")}, {false, ErrorKind::Truncated});
+  CHECK(cut.trace == "[begin][seal]");
+  const auto& partial = failure(cut.outcome, ErrorKind::Truncated).partial;
+  CHECK(partial.messages.size() == 1 && partial.messages[0].parts.size() == 1 && std::holds_alternative<Text>(partial.messages[0].parts[0]));
+
+  // Only text deltas are withheld: an empty thought part is delivered as it was.
+  const auto thought = traced({body(R"([{"text":"","thought":true}])", "", "null"), body(R"([{"text":"ok"}])")});
+  CHECK(thought.trace == "[begin][other:][seal][begin][delta:ok][seal]");
+}
 }
 int main() {
-  try { http_error_envelope_in_an_array_is_retained(); output_total_without_thoughts(); total_proves_zero_thoughts(); total_without_candidates_bounds_the_output(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); tool_result_helper_needs_a_json_object(); successive_unidentified_calls(); native_group_and_replay(); nullable_usage(); uncached_input_rule(); stop_kinds_match_policy_table(); invalid_model_calls(); errors_and_terminals(); std::cout << "Gemini semantic invariants passed\n"; }
+  try { http_error_envelope_in_an_array_is_retained(); output_total_without_thoughts(); total_proves_zero_thoughts(); total_without_candidates_bounds_the_output(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); tool_result_helper_needs_a_json_object(); successive_unidentified_calls(); native_group_and_replay(); nullable_usage(); uncached_input_rule(); stop_kinds_match_policy_table(); invalid_model_calls(); errors_and_terminals(); empty_text_delta_is_withheld(); std::cout << "Gemini semantic invariants passed\n"; }
   catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

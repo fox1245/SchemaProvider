@@ -94,8 +94,8 @@ struct Callbacks {
   // stop request or deadline is acted on when the running callback returns (also a cancel made from inside
   // it), and no later event is delivered; a cancel made from another thread between two events lets at most
   // one more event through, and that event is retained too. Wire content received but not yet delivered when
-  // the call is cut is not reported. A text part can open with an empty PartDelta, so a caller that needs
-  // some text in the failure waits for that text, not for the first delta, before it cancels.
+  // the call is cut is not reported. A text PartDelta with empty text is applied but never delivered, so the
+  // first text delta of a part carries text; the part's PartBegin and PartSeal are delivered either way.
   std::function<void(const Event&)> on_event;
   // Exactly once, after all events. Result may be retained beyond callback/join.
   std::function<void(Result)> on_outcome;

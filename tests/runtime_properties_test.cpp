@@ -127,22 +127,28 @@ struct Capture {
   std::mutex mutex;
   std::condition_variable cv;
   Result result;
-  std::size_t outcomes = 0, deltas = 0, terminals = 0;
-  // Every byte of text the callback was shown, in order. A PartDelta can be empty (the Messages wire opens a
-  // text block with an empty one), so "a delta arrived" does not mean "the text arrived".
+  std::size_t outcomes = 0, deltas = 0, terminals = 0, empty_text = 0;
+  // Every byte of text the callback was shown, in order, and how many text deltas it was shown without any.
+  // The runtime withholds an empty text delta (the Messages wire opens a text block with one), so the
+  // count stays zero and "a delta arrived" means "text arrived".
   std::string shown;
   sp::runtime::Callbacks callbacks() {
     return {[this](const sp::Event& event) {
       std::lock_guard lock(mutex);
       if (const auto* delta = std::get_if<sp::PartDelta>(&event)) {
         ++deltas;
-        if (delta->payload.kind == sp::PartKind::Text && delta->payload.channel == sp::DeltaChannel::Content) shown.append(delta->payload.bytes);
+        if (delta->payload.kind == sp::PartKind::Text && delta->payload.channel == sp::DeltaChannel::Content) {
+          shown.append(delta->payload.bytes);
+          if (delta->payload.bytes.empty()) ++empty_text;
+        }
       }
       if (std::holds_alternative<sp::Commit>(event) || std::holds_alternative<sp::Fail>(event)) ++terminals;
       cv.notify_all();
     }, [this](Result value) { std::lock_guard lock(mutex); result = std::move(value); ++outcomes; cv.notify_all(); }};
   }
   std::string shown_text() { std::lock_guard lock(mutex); return shown; }
+  std::size_t empty_text_deltas() { std::lock_guard lock(mutex); return empty_text; }
+  std::size_t delta_count() { std::lock_guard lock(mutex); return deltas; }
   void await_shown(std::string_view expected) {
     std::unique_lock lock(mutex); require(cv.wait_for(lock, 15s, [&] { return shown == expected; }), "semantic text timed out");
   }
@@ -271,6 +277,12 @@ void family_modes(Peer& peer) {
     const auto model = peer.arm("normal"); Capture capture;
     auto op = client.start(request(model, messages), run(streaming), capture.callbacks());
     auto result = finish(op, capture); success(result);
+    // The Messages stream opens its text block with an empty delta; Chat has none. Neither reaches the callback,
+    // so one delta, the one with the text, is the whole stream, and the part is the one a buffered call returns.
+    if (streaming) require(capture.delta_count() == 1 && capture.empty_text_deltas() == 0 && capture.shown_text() == "hello",
+      "an empty text delta reached the callback");
+    require(std::get<sp::Completion>(*result).messages.size() == 1 && std::get<sp::Completion>(*result).messages[0].parts.size() == 1,
+      "streamed and buffered calls returned different parts");
     const auto& usage = std::get<sp::Completion>(*result).usage;
     require(usage.output_total && usage.output_total->value == 3 && usage.stage == sp::UsageStage::Final,
       "final output usage was not retained");
@@ -598,8 +610,8 @@ void cancelled_call_usage_is_not_evidence_of_zero(Peer& peer) {
     Client client(descriptor(peer, messages), options());
     const auto model = peer.arm("partial"); Capture capture;
     auto op = client.start(request(model, messages), run(), capture.callbacks());
-    // Wait for the text itself, not for the first delta: the Messages stream delivers an empty delta when the
-    // text block opens, ahead of the one that carries "partial", and the peer sends both in one write.
+    // Wait for the text. The Messages stream opens its text block with an empty delta that is not delivered,
+    // so the first delta the callback sees is the one that carries "partial".
     capture.await_shown("partial");
     op.cancel();
     const auto result = finish(op, capture);
@@ -625,9 +637,10 @@ void cancelled_call_usage_is_not_evidence_of_zero(Peer& peer) {
 void cancel_inside_delta_callback_keeps_what_was_shown(Peer& peer) {
   for (const bool messages : {false, true}) {
     Client client(descriptor(peer, messages), options());
-    // First delta: for Messages that is the empty one that opens the text block, with "partial" still undelivered
-    // on the wire. First delta with text: "partial" itself, which must already be in the retained output.
-    for (const bool wait_for_text : {false, true}) {
+    // Cancelled at the text part's PartBegin, nothing of "partial" has been decoded: the failure holds the part as an
+    // empty Text and the callback was shown no text. Cancelled at the first delta, which is "partial" itself for both
+    // families (the empty delta that opens a Messages text block is not delivered), it is already in the retained output.
+    for (const bool at_delta : {false, true}) {
       const auto model = peer.arm("partial"); Capture capture;
       std::mutex gate; Operation op; bool fired = false; std::size_t after_cancel = 0;
       auto callbacks = capture.callbacks(); auto record = callbacks.on_event;
@@ -635,18 +648,20 @@ void cancel_inside_delta_callback_keeps_what_was_shown(Peer& peer) {
         record(event);
         std::lock_guard lock(gate);
         if (fired) { ++after_cancel; return; }
-        if (!std::holds_alternative<sp::PartDelta>(event) || (wait_for_text && capture.shown_text().empty())) return;
+        if (at_delta ? !std::holds_alternative<sp::PartDelta>(event) : !std::holds_alternative<sp::PartBegin>(event)) return;
         fired = true; op.cancel();
       };
       { std::lock_guard lock(gate); op = client.start(request(model, messages), run(), std::move(callbacks)); }
       const auto result = finish(op, capture);
       const auto& cancelled = failure(result, sp::ErrorKind::Cancelled);
       const auto shown = capture.shown_text();
-      require(fired, "no delta reached the callback");
+      require(fired, "no event reached the callback");
       require(after_cancel == 0, "event delivered after the cancelling callback returned");
       require(text(cancelled.partial.messages) == shown, "cancelled call reported other output than the callback was shown");
-      require(std::string_view("partial").starts_with(shown) && (!wait_for_text || shown == "partial"), "callback was shown unexpected text");
-      require(cancelled.error.retry_safety == sp::RetrySafety::OutputObserved, "delivered delta not recorded as observed output");
+      require(shown == (at_delta ? "partial" : "") && capture.empty_text_deltas() == 0, "callback was shown unexpected text");
+      require(cancelled.partial.messages.size() == 1 && cancelled.partial.messages[0].parts.size() == 1 &&
+              std::holds_alternative<sp::Text>(cancelled.partial.messages[0].parts[0]), "the text part is not in the failure");
+      require(cancelled.error.retry_safety == sp::RetrySafety::OutputObserved, "delivered event not recorded as observed output");
       peer.count(model, 1);
     }
   }
