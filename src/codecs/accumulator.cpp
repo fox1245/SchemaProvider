@@ -47,6 +47,14 @@ bool reasoning_metadata(json::Value value, std::string_view id) {
       (!encrypted.valid() || encrypted.is_null() || encrypted.is_string()) &&
       (!status.valid() || status.is_null() || status.is_string());
 }
+// A text part opens with whatever string the wire carries, and every family has wires that open it with
+// an empty one. The part is applied as usual, so it exists and seals as an empty Text exactly as in a
+// buffered response, but an empty delta says nothing and is not shown to the sink.
+bool empty_text_delta(const Event& event) {
+  const auto* delta = std::get_if<PartDelta>(&event);
+  return delta && delta->payload.kind == PartKind::Text && delta->payload.channel == DeltaChannel::Content &&
+         delta->payload.bytes.empty();
+}
 std::size_t add_size(std::size_t a, std::size_t b) {
   return b > std::numeric_limits<std::size_t>::max() - a ? std::numeric_limits<std::size_t>::max() : a + b;
 }
@@ -72,7 +80,7 @@ bool Accumulator::accept(const Event& event, const Error* failure_override) {
   if (ok && sink_) {
     if (const auto* stop = std::get_if<Stop>(&event); stop && stop->reason.kind != stop_->kind)
       sink_(Event{Stop{*stop_}});
-    else sink_(event);
+    else if (!empty_text_delta(event)) sink_(event);
   }
   return ok;
 }
