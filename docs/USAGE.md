@@ -162,6 +162,44 @@ A descriptor/codec snapshot can also be loaded from files, from one bundle, and 
 
 Family/model defaults are resolved before encoding. An unset request optional uses its admitted default, which may also be unset. An explicit value replaces that default; false and allowed zero values remain distinct from absence. Output caps must be positive, so explicit zero is rejected there. Caller caps are not silently clamped: an admitted model limit or representation/resource bound rejects an incompatible value. No policy snapshot or canary profile grants financial authority.
 
+### Served model identity and routing gateways
+
+A response must report the model that was requested. Native history is sealed against the requested model, and the exact echo is what keeps another model's output from entering that lineage unnoticed, so a mismatch fails the call with `ProtocolCorrupt` (`invalid response protocol`) and is not relaxed by default. The rule is per family:
+
+| Family | The reported model must | Admitted besides |
+|---|---|---|
+| Responses (`model`) | equal the request | at `https://api.openai.com`, an undated request served as `<model>-YYYY-MM-DD`; at a declared routing gateway, any nonempty model |
+| Messages (`model`) | equal the request | at `https://api.anthropic.com`, an undated request served as `<model>-YYYYMMDD`; at a declared routing gateway, any nonempty model |
+| Generate (`modelVersion`, when present) | equal the request | at every origin, the request followed by `-` and digits or dashes (`gemini-2.5-flash-001`); no gateway can be declared |
+| Interactions (`model`, when present) | equal the request | nothing |
+| Chat | stay the same across the chunks of a stream; it is not compared with the request | - |
+
+In every family the reported identity must also stay the same for the whole response. An explicitly dated request (`gpt-5-nano-2025-08-07`) is exact; the snapshot rule is for an undated request only. A proxy or gateway that reports another name than the one requested, such as `gpt-5-nano-2025-08-07` for `gpt-5-nano` from any origin but the vendor's own, or its own alias for a model it resolved, therefore fails every call that reports it. In order of how little they change:
+
+- Request the name the service reports, or have the proxy echo the requested name. Nothing in the SDK changes.
+- For Responses and Messages, declare the origin as a routing gateway, below.
+- Generate and Interactions cannot declare a gateway: the policy loader refuses a nonempty `openrouter_origins` for them at `/openrouter_origins`. A proxy in front of them has to report the requested model (Generate also accepts a response without `modelVersion`).
+
+A gateway is declared by listing its origin in `openrouter_origins` of the family's entry (`openai.responses`, `anthropic.messages` or `openai.chat`) in the descriptor policy, and building the descriptor against that policy. The listed string is compared byte for byte with the descriptor's `base_url` as stored: scheme and host, plus the port if there is one, with no path and no trailing slash. `https://GW.example.com` does not declare `https://gw.example.com`, and a second origin needs its own entry. HTTP is admitted for loopback hosts only.
+
+```cpp
+#include <descriptor/descriptor.h>
+#include <descriptor/policy.h>
+
+// bundle is sp::descriptor::builtin_policy_bundle_json() with "https://llm.example.com" added to the
+// "openrouter_origins" array of the "openai.responses" entry of descriptor_policy.families.
+auto policy = sp::descriptor::load_policy_bundle(bundle, expected_identity_hex);
+if (auto* error = std::get_if<sp::descriptor::ConfigError>(&policy)) { /* error->pointer names the entry */ }
+// descriptor_json has "base_url": "https://llm.example.com" and the Responses paths of the gateway.
+auto loaded = sp::descriptor::load(descriptor_json, std::get<sp::descriptor::PolicySnapshot>(policy));
+```
+
+A preset takes the same snapshot in `PresetOptions::policy`, together with the replaced `base_url`.
+
+The declaration is not a model-only switch. It makes the origin an OpenRouter-profile origin for that family, so besides the served-model rule it admits the `provider` routing object (`OpenRouterRouting`), Chat's gateway controls (`reasoning`, `include_reasoning`, `usage_include`, `models`) and image output, the policy's declared-origin media admission (`openrouter_media`) in place of `media`, assistant content arrays, `reasoning_details` and file annotations in Chat responses, one `[DONE]` after a Messages `message_stop`, an absent Chat cache-write counter as unknown instead of zero, and `usage.cost` read as USD (`CostSource::OpenRouterUsd`). Declare only an origin that behaves like OpenRouter in those respects; otherwise the SDK sends controls the service ignores or reads its cost in the wrong unit.
+
+What the declaration keeps: the served identity must still stay the same for the whole response, the reported model is retained only in the raw wire envelope, and native history stays bound to the requested model. What it costs: a policy with different content has a different `DescriptorPolicy::identity_hex()`, which is part of the native origin, so history sealed under the embedded policy is `ReplayIneligible` under the edited one. Use the same snapshot for every client of the deployment, and pin it with `expected_identity_hex`.
+
 ## Request families and controls
 
 `sp::runtime::Request` is a variant of the five structs below. A request must match the client's descriptor family; a mismatch fails before network dispatch. Assign declared fields rather than using a generic `extra_fields` map.
@@ -315,7 +353,7 @@ request.provider = routing;  // "provider":{"max_price":{"prompt":0.075,"complet
 
 Routing joins the native configuration binding, `max_price` included: changing or removing the cap between turns makes captured native history `ReplayIneligible`. Routing without a cap keeps the binding it had before `max_price` existed. The cap filters endpoints by OpenRouter's listed prices; it bounds neither tokens nor total spending and grants no budget. Reported spending stays in `usage.provider_cost`. The linked library advertises this support as `sp::capability::OpenRouterRoutingMaxPrice`, which `RequiredProvider` includes. A consumer's own `require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, sp::capability::RequiredProvider)` call, as in the README program, therefore throws `InterfaceContractError` against a library built without it instead of letting the cap be dropped. `Client` construction checks a library against its own constants and cannot detect this, so make that call at startup.
 
-A declared OpenRouter origin may answer Responses and Messages requests with a different concrete `model` (a routing alias such as `~vendor/model-latest` resolves to a dated or provider-specific slug). The codec accepts any nonempty served model there, rejects a served model that changes within one response, and records it only in the raw wire envelope; replay keeps the requested model. Its Messages streams end with one extra `[DONE]` frame after `message_stop`, which is accepted only there and only once. Other origins require the response to echo the requested model, except that direct OpenAI Responses and direct Anthropic Messages admit an undated alias served as its dated snapshot (`gpt-4.1-nano` as `gpt-4.1-nano-2025-04-14`, `claude-haiku-4-5` as `claude-haiku-4-5-20251001`). The served snapshot must stay stable within the response, replay keeps the requested alias, and an explicitly dated request stays exact.
+A declared OpenRouter origin may answer Responses and Messages requests with a different concrete `model` (a routing alias such as `~vendor/model-latest` resolves to a dated or provider-specific slug). The codec accepts any nonempty served model there, rejects a served model that changes within one response, and records it only in the raw wire envelope; replay keeps the requested model. Its Messages streams end with one extra `[DONE]` frame after `message_stop`, which is accepted only there and only once. Other origins require the response to echo the requested model, except that direct OpenAI Responses and direct Anthropic Messages admit an undated alias served as its dated snapshot (`gpt-4.1-nano` as `gpt-4.1-nano-2025-04-14`, `claude-haiku-4-5` as `claude-haiku-4-5-20251001`). The served snapshot must stay stable within the response, replay keeps the requested alias, and an explicitly dated request stays exact. [Served model identity and routing gateways](#served-model-identity-and-routing-gateways) says how to declare an origin of your own and what the declaration turns on besides the model.
 
 Messages has three `ThinkingMode` values. `Manual` needs a positive effective budget at least the admitted minimum and below `max_tokens`; an effective budget without a mode selects manual thinking. `Adaptive` and `Disabled` forbid an explicit budget and clear an inherited budget. The SDK's Messages encoding rule omits temperature when manual/adaptive thinking is enabled, after rejecting explicit prohibited-model temperature or an invalid range. Thinking `top_p` bounds still apply. Vendor model-specific rules can differ; this names the current SDK contract rather than a universal guarantee about every model.
 
