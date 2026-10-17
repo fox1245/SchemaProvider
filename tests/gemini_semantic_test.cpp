@@ -537,6 +537,24 @@ void total_without_candidates_bounds_the_output() {
     CHECK(!u.output_total && !u.total && u.quality == UsageQuality::Inconsistent && !u.conflicts.empty());
   }
 }
+// descriptor::load holds a google.generate descriptor to the route shape the encoder accepts, so a descriptor that
+// loads encodes for the model its paths name (buffered and streamed) and only for that model, and nothing the encoder
+// accepts is refused at load.
+void loaded_routes_encode_for_their_model() {
+  for (const std::string model : {"gemini-2.5-flash", "fixture-model", "Model_1.0-a", "x"}) {
+    auto loaded = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"route","family":"google.generate","connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":"/v1beta/models/)" + model +
+        R"(:generateContent","streaming":"/v1beta/models/)" + model + R"(:streamGenerateContent?alt=sse"}}})");
+    CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
+    const auto& d = std::get<descriptor::ValidatedDescriptor>(loaded);
+    auto r = request(); r.model = model;
+    for (const bool sse : {false, true}) CHECK(std::holds_alternative<gemini::EncodedRequest>(gemini::encode(d, r, sse)));
+    r.model = model + "-other";
+    for (const bool sse : {false, true}) {
+      const auto refused = gemini::encode(d, r, sse);
+      CHECK(std::holds_alternative<Error>(refused) && std::get<Error>(refused).kind == ErrorKind::InvalidConfig);
+    }
+  }
+}
 // What a stream's sink is shown for the parts of a message: [begin], a text delta with its bytes, [seal]. An empty
 // text delta would show as [delta:], and none may.
 struct Traced { std::string trace; Outcome outcome; };
@@ -590,6 +608,6 @@ void empty_text_delta_is_withheld() {
 }
 }
 int main() {
-  try { http_error_envelope_in_an_array_is_retained(); output_total_without_thoughts(); total_proves_zero_thoughts(); total_without_candidates_bounds_the_output(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); successive_unidentified_calls(); native_group_and_replay(); nullable_usage(); uncached_input_rule(); stop_kinds_match_policy_table(); invalid_model_calls(); errors_and_terminals(); empty_text_delta_is_withheld(); std::cout << "Gemini semantic invariants passed\n"; }
+  try { http_error_envelope_in_an_array_is_retained(); output_total_without_thoughts(); total_proves_zero_thoughts(); total_without_candidates_bounds_the_output(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); successive_unidentified_calls(); native_group_and_replay(); nullable_usage(); uncached_input_rule(); stop_kinds_match_policy_table(); invalid_model_calls(); errors_and_terminals(); loaded_routes_encode_for_their_model(); empty_text_delta_is_withheld(); std::cout << "Gemini semantic invariants passed\n"; }
   catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }
