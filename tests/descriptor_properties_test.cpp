@@ -209,6 +209,45 @@ void endpoint_security_and_paths() {
     rejected(descriptor({}, "https://example.test", "/chat", R"(,"headers":{"X-Trace":"SECRET\r\nInjected: x"})"), "/connection/headers");
     rejected(descriptor({}, "https://example.test", "/chat", R"(,"headers":{"X-Trace":"a","x-trace":"b"})"), "/connection/headers");
 }
+std::string generate_descriptor(std::string_view buffered, std::string_view streaming) {
+    return "{\"descriptor_version\":1,\"revision\":7,\"id\":\"synthetic-generate\",\"family\":\"google.generate\",\"connection\":{\"base_url\":\"https://api.example.test\",\"paths\":{\"buffered\":"
+        + sp::json::quote(buffered) + ",\"streaming\":" + sp::json::quote(streaming) + "}}}";
+}
+// A google.generate route is a literal model route: the encoder accepts one buffered and one streaming path for the
+// request's model, so the loader holds the pair to that shape instead of leaving every request to fail at dispatch.
+void generate_route_shape() {
+    using namespace sp::descriptor;
+    const auto root = std::string("/v1beta/models/");
+    const auto buffered = [&](const std::string& model) { return root + model + ":generateContent"; };
+    const auto streaming = [&](const std::string& model) { return root + model + ":streamGenerateContent?alt=sse"; };
+    for (const std::string& model : std::vector<std::string>{"gemini-2.5-flash", "fixture-model", "Model_1.0-a", "a", std::string(128, 'm')}) {
+        auto loaded = load(generate_descriptor(buffered(model), streaming(model)));
+        CHECK(std::holds_alternative<ValidatedDescriptor>(loaded));
+        if (auto* value = std::get_if<ValidatedDescriptor>(&loaded)) CHECK(value->path(false) == buffered(model) && value->path(true) == streaming(model));
+    }
+    // The streaming path equal to the buffered one is the mistake this guards against; each of these is refused where it is written.
+    for (const auto& pair : std::vector<std::pair<std::string, std::string>>{
+             {buffered("m"), buffered("m")},
+             {buffered("m"), root + "m:streamGenerateContent"},
+             {buffered("m"), root + "m:streamGenerateContent?alt=json"},
+             {buffered("m"), streaming("other")},
+             {buffered("m"), root + "other:streamGenerateContent?alt=sse"},
+             {buffered("m"), "/v1beta/models/m:streamGenerateContent?alt=sse&x=1"},
+             {buffered("m"), "/v1/models/m:streamGenerateContent?alt=sse"},
+             {buffered("m"), streaming("m") + "/"},
+             {buffered("m"), streaming("M")},
+             {buffered("m"), "/chat"},
+         })
+        rejected(generate_descriptor(pair.first, pair.second), "/connection/paths/streaming");
+    // A buffered path the encoder never accepts is refused too, whatever the streaming path says.
+    for (const std::string& path : std::vector<std::string>{"/chat", root + "m", root + "m:generate", root + "m:streamGenerateContent", root + "m:generateContent?alt=sse",
+                                                              "/v1/models/m:generateContent", root + ":generateContent", root + "a:b:generateContent", root + "a~b:generateContent",
+                                                              root + "a/b:generateContent", "/v1beta/models:generateContent"})
+        rejected(generate_descriptor(path, streaming("m")), "/connection/paths/buffered");
+    // Other families keep their paths: Chat and Responses may route both modes through one path.
+    CHECK(std::holds_alternative<ValidatedDescriptor>(load(descriptor({}, "https://example.test", "/chat"))));
+    CHECK(std::holds_alternative<ValidatedDescriptor>(load(R"({"descriptor_version":1,"revision":1,"id":"interactions","family":"google.interactions","connection":{"base_url":"https://example.test","paths":{"buffered":"/v1beta/interactions","streaming":"/v1beta/interactions"}}})")));
+}
 void collisions_and_selector_rejection() {
     rejected(descriptor(R"(,"bindings":{"model":"messages"})"), "/bindings/messages");
     rejected(descriptor(R"(,"bindings":{"model":"tools"})"), "/bindings/model");
@@ -384,6 +423,7 @@ int main() {
     messages_family_boundaries();
     closed_inventory_and_nested_types();
     endpoint_security_and_paths();
+    generate_route_shape();
     collisions_and_selector_rejection();
     diagnostics_exclude_untrusted_keys_and_controls();
     duplicate_errors_retain_only_unambiguous_revision();

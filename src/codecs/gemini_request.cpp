@@ -58,6 +58,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (descriptor.family() != "google.generate") return Error{ErrorKind::InvalidConfig, "Gemini encoder requires generate descriptor"};
   if (request.model.empty() || request.model.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._") != std::string::npos) return bad("literal model name required");
   const auto base = "/v1beta/models/" + request.model;
+  // descriptor::load already holds a google.generate descriptor to one model in both paths; this ties that model to the request.
   if (descriptor.path(false) != base + ":generateContent" || descriptor.path(true) != base + ":streamGenerateContent?alt=sse") return Error{ErrorKind::InvalidConfig, "Gemini descriptor paths must target the same literal model"};
   const auto& resources = descriptor.policy()->resources();
   auto effective = descriptor::effective_defaults(descriptor, request.model);
