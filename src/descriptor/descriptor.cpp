@@ -181,6 +181,13 @@ bool relative_path(std::string_view path, bool google_generate = false) {
     }
     return true;
 }
+// A google.generate route is a literal model route. For the request's model the encoder (codecs/gemini_request.cpp)
+// accepts exactly one buffered and one streaming path and refuses every other pair with InvalidConfig on each request,
+// so the loader holds a descriptor to the same shape: both paths name one model of characters the encoder accepts.
+constexpr std::string_view generate_root = "/v1beta/models/", generate_buffered = ":generateContent", generate_streaming = ":streamGenerateContent?alt=sse";
+bool generate_model(std::string_view model) {
+    return !model.empty() && model.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._") == std::string_view::npos;
+}
 bool date(std::string_view s) {
     if (s.size() != 10 || s[4] != '-' || s[7] != '-') return false;
     for (std::size_t i = 0; i < s.size(); ++i) if (i != 4 && i != 7 && !digit(s[i])) return false;
@@ -275,6 +282,15 @@ private:
         const bool generate = value_.family_ == "google.generate";
         if (!relative_path(value_.buffered_path_, generate)) fail("/connection/paths/buffered", "origin-relative literal path without traversal or URL escapes");
         if (!relative_path(value_.streaming_path_, generate)) fail("/connection/paths/streaming", "origin-relative literal path without traversal or URL escapes");
+        if (generate) {
+            const std::string_view buffered = value_.buffered_path_;
+            const auto model = buffered.starts_with(generate_root) && buffered.ends_with(generate_buffered) &&
+                buffered.size() >= generate_root.size() + generate_buffered.size()
+                ? buffered.substr(generate_root.size(), buffered.size() - generate_root.size() - generate_buffered.size()) : std::string_view{};
+            if (!generate_model(model)) fail("/connection/paths/buffered", "/v1beta/models/<model>:generateContent with a literal model name");
+            if (value_.streaming_path_ != std::string(generate_root) + std::string(model) + std::string(generate_streaming))
+                fail("/connection/paths/streaming", "/v1beta/models/<model>:streamGenerateContent?alt=sse for the model of the buffered path");
+        }
         auto headers = item.get("headers");
         if (!headers.valid()) return;
         if (!headers.is_object() || headers.size() > 32) fail("/connection/headers", "object with at most 32 literal headers");

@@ -319,10 +319,14 @@ class PolicyLoader {
       // Reuse descriptor admission for slot collisions, escaped usage segments,
       // and reserved wire fields instead of introducing a second convention.
       for (const auto& family : policy->families_) {
+        // A google.generate route has to name its model in both paths (descriptor.cpp).
+        const bool generate = family.family == "google.generate";
         const auto descriptor_source =
             std::string("{\"descriptor_version\":1,\"revision\":1,\"id\":\"policy-admission\",\"family\":") +
             json::quote(family.family) +
-            ",\"connection\":{\"base_url\":\"https://policy.invalid\",\"paths\":{\"buffered\":\"/policy\",\"streaming\":\"/policy\"}}}";
+            ",\"connection\":{\"base_url\":\"https://policy.invalid\",\"paths\":{\"buffered\":" +
+            (generate ? "\"/v1beta/models/policy-admission:generateContent\",\"streaming\":\"/v1beta/models/policy-admission:streamGenerateContent?alt=sse\"}}}"
+                      : "\"/policy\",\"streaming\":\"/policy\"}}}");
         auto admitted = load(descriptor_source, PolicySnapshot(policy));
         if (auto* error = std::get_if<ConfigError>(&admitted)) throw std::move(*error);
       }
