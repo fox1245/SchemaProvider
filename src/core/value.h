@@ -274,6 +274,12 @@ struct Error {
   std::string vendor_code{};
   std::optional<std::chrono::milliseconds> retry_after{};
   AttemptEvidence attempt{};
+  // Which check of the SDK failed, as a stable machine-readable code ("responses.model.mismatch",
+  // "chat.finish_reason.invalid"): lower-case dotted segments from a fixed table, never built from the response,
+  // so it holds no vendor text, payload bytes or model output. Empty when no specific check applies, as for
+  // transport, HTTP and vendor-reported errors, which keep using kind, http_status and vendor_code.
+  // safe_message does not change and does not include it.
+  std::string reason{};
 };
 // Owned wire observations, in arrival order before their semantic projections.
 // Neither field grants native replay authority.

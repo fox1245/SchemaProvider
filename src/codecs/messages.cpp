@@ -1,5 +1,6 @@
 #include "codecs/messages.h"
 #include "codecs/provider_cost.h"
+#include "codecs/reason.h"
 #include "codecs/responses_model.h"
 #include "core/native.h"
 #include "descriptor/descriptor.h"
@@ -84,7 +85,9 @@ Codec::Codec(const descriptor::ValidatedDescriptor& descriptor, Mode mode, Accum
 bool Codec::emit(const Event& e) { return accumulator_.accept(e, buffered_failure_ ? &*buffered_failure_ : nullptr); }
 bool Codec::fail(ErrorKind kind, std::string text) {
   if (buffered_failure_ && !closed_) return false;
-  emit(Fail{{kind, std::move(text)}}); return false;
+  Error error{kind, std::move(text)};
+  error.reason = reason::code(reason::Source::Messages, error.safe_message);
+  emit(Fail{std::move(error)}); return false;
 }
 void Codec::unknown(json::Value v, std::initializer_list<std::string_view> known) {
   for (auto m : v.members()) if (std::find(known.begin(), known.end(), m.key) == known.end()) ++diagnostics_.unknown_properties;

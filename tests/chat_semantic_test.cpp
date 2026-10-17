@@ -491,6 +491,28 @@ void empty_text_delta_is_withheld() {
   const auto reasoning = traced({chunk(R"({"role":"assistant","reasoning_content":""})"), chunk(R"({"content":"ok"})"), chunk("{}", "\"stop\""), "[DONE]"});
   CHECK(reasoning.trace == "[begin][other:][begin][delta:ok][seal][seal]");
 }
+// A failure names the check that failed with a code of the fixed table, whatever the response says; the codec's own text
+// stays as it was and nothing the vendor sent reaches either.
+void failure_reasons() {
+  const std::string secret = "VENDOR_SECRET_MARKER_5d2";
+  const auto check = [&](const Outcome& outcome, ErrorKind kind, std::string_view message, std::string_view code) {
+    const auto& error = failed(outcome, kind).error;
+    CHECK(error.safe_message == message && error.reason == code);
+    CHECK(error.reason.find(secret) == std::string::npos && error.safe_message.find(secret) == std::string::npos);
+  };
+  check(frames({chunk(R"({"role":"assistant","content":"x"})", "7")}), ErrorKind::ProtocolCorrupt, "invalid finish reason", "chat.finish_reason.invalid");
+  check(buffered(body(R"({"role":"assistant","content":"x"})", "[1]")), ErrorKind::ProtocolCorrupt, "invalid finish reason", "chat.finish_reason.invalid");
+  check(frames({"{\"id\":\"g\",\"model\":\"" + secret + "\",\"created\":\"" + secret + "\",\"object\":\"chat.completion.chunk\",\"choices\":[]}"}),
+        ErrorKind::ProtocolCorrupt, "creation counter required", "chat.created.required");
+  check(frames({"{\"id\":\"g\",\"model\":\"m\",\"created\":1,\"object\":" + json::quote(secret) + ",\"choices\":[]}"}),
+        ErrorKind::Unsupported, "unknown response object tag", "chat.object.tag_unknown");
+  check(frames({chunk(R"({"role":"assistant","content":"x"})", "\"stop\""), "[DONE]", chunk(R"({"content":"y"})")}),
+        ErrorKind::ProtocolCorrupt, "frame after DONE", "chat.done.frame_after");
+  check(frames({chunk(R"({"role":"assistant","content":"x"})")}), ErrorKind::Truncated, "missing family terminal evidence", "chat.terminal.missing");
+  // A close the transport reports is the transport's: its kind stays, and no codec check is named.
+  const auto cut = frames({chunk(R"({"role":"assistant","content":"x"})")}, false);
+  CHECK(failed(cut, ErrorKind::Truncated).error.reason.empty() && failed(cut, ErrorKind::Truncated).error.safe_message == "abnormal response close");
+}
 void required_usage_and_unknown_cache() {
   const std::vector<std::string> names{"prompt_tokens", "completion_tokens", "total_tokens"};
   for (size_t field = 0; field < names.size(); ++field) for (auto invalid : {"", "null", "true", "\"0\"", "-1", "0.5", "18446744073709551616"}) {
@@ -1377,7 +1399,7 @@ int main() {
     owned_raw_observations(); raw_failure_evidence();
     chunk_partition_invariant(); no_terminal_no_success(); transport_projection_parity(); known_corrupt_never_ignored();
     invalid_tools_and_compatibility(); usage_knowledge(); accumulator_transitions_and_seals(); typed_request_encoding();
-    required_metadata_and_identity(); per_chunk_creation_clock(); omitted_open_finish_reason(); empty_text_delta_is_withheld(); required_usage_and_unknown_cache(); unindexed_tool_order_and_optional_function(); buffered_close_precedence();
+    required_metadata_and_identity(); per_chunk_creation_clock(); omitted_open_finish_reason(); empty_text_delta_is_withheld(); failure_reasons(); required_usage_and_unknown_cache(); unindexed_tool_order_and_optional_function(); buffered_close_precedence();
     accumulator_interleaved_ordering(); accumulator_order_uniqueness_and_limits();
     tool_history_and_escaped_arguments(); one_tool_message_with_several_results(); output_cap_member_by_origin(); quoted_json_and_request_bounds();
     gateway_request_controls(); gateway_max_price();

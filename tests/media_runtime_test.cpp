@@ -293,10 +293,13 @@ void transcription_annotations(Peer& peer) {
     require(observed == 3, "raw transcription annotations missing");
   }
 }
-void no_partial_inline(const Result& result, sp::ErrorKind expected, bool prefix_received) {
+void no_partial_inline(const Result& result, sp::ErrorKind expected, bool prefix_received, std::string_view reason) {
   require(result && std::holds_alternative<sp::Failure>(*result), "corrupt or truncated generated media committed");
   const auto& failed = std::get<sp::Failure>(*result);
   require(failed.error.kind == expected, "media fault has wrong consumer-visible error kind");
+  // The check that failed is named by a code of the fixed table; the faulty bytes and the credential are in neither it nor the text.
+  require(failed.error.reason == reason, "media fault names another check: " + failed.error.reason);
+  if (expected == sp::ErrorKind::ProtocolCorrupt) require(failed.error.safe_message == "invalid response protocol", "media fault changed the protocol failure text");
   require(failed.error.attempt.request_may_have_left && failed.error.attempt.response_head_seen, "media failure lacks HTTP attempt evidence");
   std::string text;
   for (const auto& message : failed.partial.messages) for (const auto& part : message.parts) {
@@ -304,7 +307,7 @@ void no_partial_inline(const Result& result, sp::ErrorKind expected, bool prefix
     if (const auto* value = std::get_if<sp::Text>(&part)) text += value->value;
   }
   if (prefix_received) require(text == "safe prefix", "failure lost or altered the independently received safe text prefix");
-  require(failed.error.safe_message.find(secret) == std::string::npos, "credential exposed by media failure");
+  require(failed.error.safe_message.find(secret) == std::string::npos && failed.error.reason.find(secret) == std::string::npos, "credential exposed by media failure");
 }
 void malformed_and_truncated(Peer& peer) {
   for (const auto family : {Family::Chat, Family::Responses, Family::Gemini, Family::Interactions}) {
@@ -316,13 +319,20 @@ void malformed_and_truncated(Peer& peer) {
       auto typed = request(family, model, input, false);
       if (family == Family::Chat) { auto& chat = std::get<sp::chat::Request>(typed); chat.modalities = {sp::chat::OutputModality::Text, sp::chat::OutputModality::Audio}; chat.audio = sp::chat::AudioOutput{"alloy", "pcm16"}; }
       sp::runtime::Client client(descriptor(peer, family, model), options());
-      no_partial_inline(client.complete(std::move(typed), run(streaming)), sp::ErrorKind::ProtocolCorrupt, streaming); checked_request(peer, model, 0);
+      // Chat names its audio decoder, Responses and Gemini the accumulator's check of the sealed payload, Interactions the
+      // decoder of the form it received (a whole item buffered, a delta streamed).
+      const std::string_view corrupt = family == Family::Chat ? "chat.audio.data_invalid"
+          : family == Family::Interactions ? (streaming ? "interactions.output.audio_invalid" : "interactions.output.media_data_invalid")
+          : "accumulator.media.payload_invalid";
+      no_partial_inline(client.complete(std::move(typed), run(streaming)), sp::ErrorKind::ProtocolCorrupt, streaming, corrupt); checked_request(peer, model, 0);
     }
     const auto model = arm(peer, family, input, {text_plan("safe prefix"), output.plan(identity)}, "{}", "{\"transport\":\"clean\",\"at\":\"mid-payload\"}");
     auto typed = request(family, model, input, false);
     if (family == Family::Chat) { auto& chat = std::get<sp::chat::Request>(typed); chat.modalities = {sp::chat::OutputModality::Text, sp::chat::OutputModality::Audio}; chat.audio = sp::chat::AudioOutput{"alloy", "pcm16"}; }
     sp::runtime::Client client(descriptor(peer, family, model), options());
-    no_partial_inline(client.complete(std::move(typed), run(true)), sp::ErrorKind::Truncated, true); checked_request(peer, model, 0, 1);
+    const std::string_view cut = family == Family::Chat ? "chat.terminal.missing" : family == Family::Responses ? "responses.terminal.missing"
+        : family == Family::Gemini ? "gemini.terminal.missing" : "interactions.terminal.missing";
+    no_partial_inline(client.complete(std::move(typed), run(true)), sp::ErrorKind::Truncated, true, cut); checked_request(peer, model, 0, 1);
   }
 }
 void native_media_replay_budget(Peer& peer) {

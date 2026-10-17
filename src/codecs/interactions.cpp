@@ -1,5 +1,6 @@
 #include "codecs/interactions.h"
 #include "codecs/media_output.h"
+#include "codecs/reason.h"
 #include "core/native.h"
 #include "descriptor/descriptor.h"
 #include "json/json.h"
@@ -35,7 +36,9 @@ Codec::Codec(const descriptor::ValidatedDescriptor& descriptor, Mode mode, Accum
 bool Codec::emit(const Event& event) { return accumulator_.accept(event, buffered_failure_ ? &*buffered_failure_ : nullptr); }
 bool Codec::fail(ErrorKind kind, std::string label) {
   if (buffered_failure_ && !closed_) return false;
-  emit(Fail{{kind, std::move(label)}}); return false;
+  Error error{kind, std::move(label)};
+  error.reason = reason::code(reason::Source::Interactions, error.safe_message);
+  emit(Fail{std::move(error)}); return false;
 }
 void Codec::unknown(json::Value v, std::initializer_list<std::string_view> keys) {
   for (auto m : v.members()) if (std::find(keys.begin(), keys.end(), m.key) == keys.end()) ++diagnostics_.unknown_properties;

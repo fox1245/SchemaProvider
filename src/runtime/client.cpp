@@ -50,7 +50,21 @@ struct RuntimeScope {
   ~RuntimeScope() { --runtime_depth; }
 };
 
-Error error_for(ErrorKind kind) { return Error{kind, std::string(safe_message(kind))}; }
+Error error_for(ErrorKind kind, std::string_view reason = {}) {
+  Error error{kind, std::string(safe_message(kind))};
+  error.reason = reason;
+  return error;
+}
+// The SSE framer's failure, as the reason the call reports.
+std::string_view framer_reason(transport::SseError error) noexcept {
+  switch (error) {
+    case transport::SseError::ResourceLimit: return "sse.limit.exceeded";
+    case transport::SseError::InvalidUtf8: return "sse.utf8.invalid";
+    case transport::SseError::Misuse: return "sse.framer.misuse";
+    case transport::SseError::None: break;
+  }
+  return {};
+}
 Result misuse_result() {
   static const Result result = std::make_shared<const Outcome>(Failure{error_for(ErrorKind::Misuse), {}});
   return result;
@@ -636,8 +650,8 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
     }
     if (attempt) attempt->cancel();
   }
-  void fail_semantic(ErrorKind kind) {
-    if (!accumulator->terminal()) accumulator->accept(Fail{error_for(kind)});
+  void fail_semantic(ErrorKind kind, std::string_view reason = {}) {
+    if (!accumulator->terminal()) accumulator->accept(Fail{error_for(kind, reason)});
     {
       std::lock_guard lock(mutex);
       accepting = false;
@@ -681,7 +695,7 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
   }
   void body(std::string_view bytes) {
     const auto& limits = client->options.limits;
-    if (!response) { fail_semantic(ErrorKind::ProtocolCorrupt); return; }
+    if (!response) { fail_semantic(ErrorKind::ProtocolCorrupt, "transport.body.before_head"); return; }
     if (bytes.size() > limits.max_response_bytes - response_bytes) { fail_semantic(ErrorKind::ResourceLimit); return; }
     response_bytes += bytes.size();
     const bool http_error = response->value.status < 200 || response->value.status >= 300;
@@ -709,7 +723,8 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
       return accepted;
     });
     if (framer->error() != transport::SseError::None) {
-      fail_semantic(framer->error() == transport::SseError::ResourceLimit ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt);
+      fail_semantic(framer->error() == transport::SseError::ResourceLimit ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt,
+                    framer_reason(framer->error()));
     } else if (accumulator->terminal()) {
       // Semantic failure is already decided; cancellation only harvests wire evidence.
       if (attempt) attempt->cancel();
@@ -748,7 +763,8 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
         // truncation cuts it wherever it was, and that is the transport's error, not malformed server output.
         if (normal) framer->finish();
         if (framer->error() != transport::SseError::None)
-          fail_semantic(framer->error() == transport::SseError::ResourceLimit ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt);
+          fail_semantic(framer->error() == transport::SseError::ResourceLimit ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt,
+                        framer_reason(framer->error()));
         else if (chat_codec) chat_codec->finish({normal, close_error.kind});
         else if (messages_codec) messages_codec->finish({normal, close_error.kind});
         else if (responses_codec) responses_codec->finish({normal, close_error.kind});
@@ -769,7 +785,7 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
         }
       }
     }
-    if (!accumulator->terminal()) accumulator->accept(Fail{error_for(ErrorKind::ProtocolCorrupt)});
+    if (!accumulator->terminal()) accumulator->accept(Fail{error_for(ErrorKind::ProtocolCorrupt, "runtime.outcome.undecided")});
     auto outcome = accumulator->take_outcome();
     if (auto* failure = std::get_if<Failure>(&*outcome)) {
       if (!semantic_failure_decided && !normal && failure->error.kind == close_error.kind)
@@ -932,7 +948,8 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
       head = std::move(head_input); head_input.reset();
     }
     if (head) { response = std::move(head); inspect({}); }
-    if (failure && accumulator) fail_semantic(*failure);
+    if (failure && accumulator)
+      fail_semantic(*failure, *failure == ErrorKind::ProtocolCorrupt ? "transport.head.duplicate" : std::string_view{});
     if (cancelled || expired) {
       stop(cancelled ? ErrorKind::Cancelled : ErrorKind::DeadlineExceeded);
       if (stage == Stage::Terminal) return;

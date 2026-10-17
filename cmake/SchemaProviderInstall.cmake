@@ -19,7 +19,8 @@ install(DIRECTORY
   DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/SchemaProvider"
   FILES_MATCHING PATTERN "*.h"
   PATTERN "native_archive_fs.h" EXCLUDE
-  PATTERN "io_thread.h" EXCLUDE)
+  PATTERN "io_thread.h" EXCLUDE
+  PATTERN "reason.h" EXCLUDE)
 install(FILES
   "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/client.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/policy.h"
