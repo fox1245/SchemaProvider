@@ -157,9 +157,15 @@ const server = http.createServer(async (req, res) => {
       ++c.faults; res.socket.resetAndDestroy(); notify(); return;
     }
     const streaming = body.stream;
+    if (scenario === 'invalid-utf8') {
+      // Bytes no reader may accept: invalid UTF-8 in a stream, a cut-off object in a buffered body.
+      res.writeHead(200, { 'Content-Type': streaming ? 'text/event-stream' : 'application/json', Connection: 'close' });
+      res.end(streaming ? Buffer.concat([Buffer.from('data: '), Buffer.from([0xff, 0xfe]), Buffer.from(`${marker}\n\n`)]) : `{"vendor":"${marker}"`);
+      ++c.faults; notify(); return;
+    }
     const data = scenario === 'quota-short-close'
       ? JSON.stringify({ error: { code: 'insufficient_quota', message: marker } })
-      : wire(c, body.model, streaming, messages);
+      : wire(c, scenario === 'wrong-model' ? `${marker}-elsewhere` : body.model, streaming, messages);
     const headers = { 'Content-Type': streaming ? 'text/event-stream' : 'application/json', Connection: 'close' };
     if (scenario === 'header-cap') headers['x-padding'] = 'x'.repeat(8192);
     if (scenario === 'short-close' || scenario === 'quota-short-close') headers['Content-Length'] = Buffer.byteLength(data) + 17;

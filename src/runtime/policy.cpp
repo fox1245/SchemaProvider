@@ -251,10 +251,11 @@ Error classify_failure(const transport::Result& result, const ResponseInfo& info
   if (semantic) {
     error.kind = semantic->kind;
     error.retry_class = semantic->retry_class;
+    error.reason = semantic->reason;
     if (error.kind == ErrorKind::RemoteFailure) { error.kind = info.kind; error.retry_class = info.retry_class; }
   } else if (result.status == transport::Status::Cancelled) error.kind = ErrorKind::Cancelled;
   else if (result.status == transport::Status::DeadlineExceeded) error.kind = ErrorKind::DeadlineExceeded;
-  else if (result.failure == transport::FailureKind::Protocol) error.kind = ErrorKind::ProtocolCorrupt;
+  else if (result.failure == transport::FailureKind::Protocol) { error.kind = ErrorKind::ProtocolCorrupt; error.reason = "transport.protocol"; }
   else if (result.failure == transport::FailureKind::ResponseTooLarge) error.kind = ErrorKind::ResourceLimit;
   else if (result.failure == transport::FailureKind::CallbackError || result.failure == transport::FailureKind::Misuse) error.kind = ErrorKind::Misuse;
   else if (result.http_status >= 400 || result.status == transport::Status::Completed) {

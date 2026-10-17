@@ -28,9 +28,13 @@ inline constexpr std::uint64_t CompleteAttemptEvidence = 1ULL << 8;
 // bit, so a consumer's require_interface_contract call with RequiredProvider refuses it; its own
 // Client construction checks only the constants it was built with.
 inline constexpr std::uint64_t OpenRouterRoutingMaxPrice = 1ULL << 9;
+// sp::Error carries `reason`. A library built before the member has a smaller Error, which a consumer
+// built with this header would read past, so it lacks this bit and a require_interface_contract call
+// with RequiredProvider refuses it.
+inline constexpr std::uint64_t ErrorReason = 1ULL << 10;
 inline constexpr std::uint64_t RequiredProvider = TypedRuntime | PreparedAdmission |
     NullableUsage | All5Native | TrustedArchive | OrderedWireEvents | NativeSocketRuntime |
-    RetainedJsonSize | CompleteAttemptEvidence | OpenRouterRoutingMaxPrice;
+    RetainedJsonSize | CompleteAttemptEvidence | OpenRouterRoutingMaxPrice | ErrorReason;
 }
 InterfaceContract core_interface_contract() noexcept;
 std::uint32_t codec_interface_revision() noexcept;

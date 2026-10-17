@@ -332,8 +332,26 @@ void named_error_raw_ownership() {
   CHECK(failure(bounded, ErrorKind::RemoteFailure).partial.raw_events.empty());
 }
 }
+// A failure names the check that failed with a code of the fixed table, whatever the response says; the codec's own text
+// stays as it was and nothing the vendor sent reaches either.
+void failure_reasons() {
+  const std::string secret = "VENDOR_SECRET_MARKER_5d2";
+  const auto check = [&](const Outcome& outcome, ErrorKind kind, std::string_view message, std::string_view code) {
+    const auto& error = failure(outcome, kind).error;
+    CHECK(error.safe_message == message && error.reason == code);
+    CHECK(error.reason.find(secret) == std::string::npos && error.safe_message.find(secret) == std::string::npos);
+  };
+  auto foreign = resource("[" + output + "]");
+  foreign.replace(foreign.find("fixture-model"), 13, secret);
+  check(buffered(foreign), ErrorKind::ProtocolCorrupt, "interaction identity changed", "interactions.identity.changed");
+  check(buffered(resource("[" + output + "]", secret)), ErrorKind::Unsupported, "unsupported terminal interaction status", "interactions.terminal.status_unsupported");
+  auto truncated = frames(); truncated.resize(4);
+  check(stream(truncated), ErrorKind::Truncated, "interaction lacks terminal resource", "interactions.terminal.missing");
+  const auto cut = stream(truncated, {false, ErrorKind::Transport});
+  CHECK(failure(cut, ErrorKind::Transport).error.reason.empty());
+}
 int main() {
-  try { creation_without_status_transcription(); raw_observation_ownership(); named_error_raw_ownership(); stateless_missing_resource_id(); missing_terminal_usage(); exact_steps_and_replay(); input_boundaries(); lifecycle_and_errors(); unknown_usage_and_signature(); modality_keyed_usage(); uncached_input_and_unmapped_counters();
+  try { failure_reasons(); creation_without_status_transcription(); raw_observation_ownership(); named_error_raw_ownership(); stateless_missing_resource_id(); missing_terminal_usage(); exact_steps_and_replay(); input_boundaries(); lifecycle_and_errors(); unknown_usage_and_signature(); modality_keyed_usage(); uncached_input_and_unmapped_counters();
     std::cout << "Interactions semantic contracts passed\n"; return 0;
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

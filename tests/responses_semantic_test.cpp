@@ -881,6 +881,27 @@ void reviewed_wire_boundaries() {
   });
   CHECK(failures == 0);
 }
+// A failure names the check that failed with a code of the fixed table, whatever the response says; the codec's own text
+// stays as it was and nothing the vendor sent reaches either.
+void failure_reasons() {
+  const std::string secret = "VENDOR_SECRET_MARKER_5d2";
+  const auto check = [&](const Outcome& outcome, ErrorKind kind, std::string_view message, std::string_view code) {
+    const auto& error = failed(outcome, kind).error;
+    CHECK(error.safe_message == message && error.reason == code);
+    CHECK(error.reason.find(secret) == std::string::npos && error.safe_message.find(secret) == std::string::npos);
+  };
+  const auto served = [&](std::string wire) { wire.replace(wire.find("fixture-model"), 13, secret); return wire; };
+  check(buffered(served(body("[" + message + "]"))), ErrorKind::ProtocolCorrupt, "response model differs from request", "responses.model.mismatch");
+  auto frames = text_frames();
+  const std::vector<Frame> opening(frames.begin(), frames.begin() + 3);
+  frames[0].second = served(frames[0].second);
+  check(stream(frames), ErrorKind::ProtocolCorrupt, "response model differs from request", "responses.model.mismatch");
+  check(stream({event("response." + secret)}), ErrorKind::Unsupported, "unsupported semantic Responses event", "responses.event.unsupported");
+  check(stream({opening[1]}), ErrorKind::ProtocolCorrupt, "event before response.created", "responses.stream.event_before_created");
+  check(stream(opening), ErrorKind::Truncated, "missing Responses terminal evidence", "responses.terminal.missing");
+  const auto cut = stream(opening, {false, ErrorKind::Cancelled});
+  CHECK(failed(cut, ErrorKind::Cancelled).error.reason.empty() && failed(cut, ErrorKind::Cancelled).error.safe_message == "abnormal response close");
+}
 // A text part opens with the "" of content_part.added, and output_text.done repeats the whole text, which leaves an
 // empty remainder after a stream that delivered every delta. Neither empty delta reaches the sink; the part does.
 void empty_text_delta_is_withheld() {
@@ -898,7 +919,7 @@ void empty_text_delta_is_withheld() {
 }
 } // namespace
 int main() {
-  try { empty_text_delta_is_withheld(); provider_money_and_snapshot_aliases(); named_error_precedence(); named_error_raw_capacity(); completed_reasoning_ciphertext_authority(); reviewed_wire_boundaries(); typed_encode(); controls_and_cursor_boundaries(); openrouter_max_price(); strict_tool_schemas(); previous_response_ownership(); grouped_native_and_owned_outcomes(); normal_close_required(); cancellation_observation_boundary(); reasoning_stream_snapshots(); tools_interleaving_and_ownership(); incomplete_and_server_items(); unknown_hosted_item_ownership(); unknown_wire_observation_boundary(); usage_boundaries(); uncached_input_rule(); corruption_and_bounds();
+  try { empty_text_delta_is_withheld(); failure_reasons(); provider_money_and_snapshot_aliases(); named_error_precedence(); named_error_raw_capacity(); completed_reasoning_ciphertext_authority(); reviewed_wire_boundaries(); typed_encode(); controls_and_cursor_boundaries(); openrouter_max_price(); strict_tool_schemas(); previous_response_ownership(); grouped_native_and_owned_outcomes(); normal_close_required(); cancellation_observation_boundary(); reasoning_stream_snapshots(); tools_interleaving_and_ownership(); incomplete_and_server_items(); unknown_hosted_item_ownership(); unknown_wire_observation_boundary(); usage_boundaries(); uncached_input_rule(); corruption_and_bounds();
     std::cout << "Responses semantic contracts passed\n"; return 0;
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

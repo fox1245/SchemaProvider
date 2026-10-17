@@ -137,7 +137,7 @@ add_library(sp_descriptor src/descriptor/descriptor.cpp src/descriptor/policy.cp
 target_compile_options(sp_descriptor PRIVATE ${SP_WARNING_OPTIONS})
 target_link_libraries(sp_descriptor PUBLIC sp_json)
 
-add_library(sp_codecs src/codecs/accumulator.cpp src/codecs/media_input.cpp src/codecs/media_output.cpp
+add_library(sp_codecs src/codecs/accumulator.cpp src/codecs/reason.cpp src/codecs/media_input.cpp src/codecs/media_output.cpp
             src/codecs/chat.cpp src/codecs/chat_request.cpp
             src/codecs/messages.cpp src/codecs/messages_request.cpp
             src/codecs/responses.cpp src/codecs/responses_request.cpp
@@ -336,6 +336,8 @@ if(SP_BUILD_TESTS)
   target_link_libraries(sp_descriptor_tests PRIVATE sp_descriptor sp_json)
   add_executable(sp_chat_tests tests/chat_semantic_test.cpp)
   target_link_libraries(sp_chat_tests PRIVATE sp_codecs sp_descriptor sp_json sp_transport)
+  add_executable(sp_error_reason_tests tests/error_reason_test.cpp)
+  target_link_libraries(sp_error_reason_tests PRIVATE sp_codecs sp_descriptor sp_json)
   add_executable(sp_stop_reasoning_preservation_tests tests/stop_reasoning_preservation_test.cpp)
   target_link_libraries(sp_stop_reasoning_preservation_tests PRIVATE sp_codecs sp_descriptor sp_json sp_transport)
   target_compile_options(sp_stop_reasoning_preservation_tests PRIVATE ${SP_WARNING_OPTIONS})
@@ -418,7 +420,7 @@ if(SP_BUILD_TESTS)
   foreach(target sp_runtime_policy_tests sp_runtime_scheduler_tests)
     target_compile_options(${target} PRIVATE ${SP_WARNING_OPTIONS})
   endforeach()
-  foreach(target sp_sse_tests sp_descriptor_tests sp_chat_tests sp_messages_tests sp_messages_replay_tests sp_native_continuation_tests)
+  foreach(target sp_sse_tests sp_descriptor_tests sp_chat_tests sp_error_reason_tests sp_messages_tests sp_messages_replay_tests sp_native_continuation_tests)
     target_compile_options(${target} PRIVATE ${SP_WARNING_OPTIONS})
   endforeach()
 
@@ -430,6 +432,7 @@ if(SP_BUILD_TESTS)
   add_test(NAME sse_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_sse_tests>)
   add_test(NAME descriptor_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_descriptor_tests>)
   add_test(NAME chat_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_chat_tests>)
+  add_test(NAME error_reason COMMAND ${sp_test_runner} $<TARGET_FILE:sp_error_reason_tests> ${CMAKE_CURRENT_SOURCE_DIR}/src)
   add_test(NAME stop_reasoning_preservation COMMAND ${sp_test_runner} $<TARGET_FILE:sp_stop_reasoning_preservation_tests>)
   add_test(NAME messages_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_messages_tests>)
   add_test(NAME messages_replay COMMAND ${sp_test_runner} $<TARGET_FILE:sp_messages_replay_tests>)

@@ -67,11 +67,14 @@ std::string descriptor_source(std::uint64_t port, bool messages, std::string_vie
 void interface_contract_capabilities() {
   using namespace sp::capability;
   static_assert((RequiredProvider & OpenRouterRoutingMaxPrice) == OpenRouterRoutingMaxPrice);
+  static_assert((RequiredProvider & ErrorReason) == ErrorReason);
   const auto linked = sp::runtime::interface_contract();
   require(linked.revision == sp::EXPECTED_INTERFACE_REVISION, "linked interface revision differs");
   require((linked.capabilities & RequiredProvider) == RequiredProvider, "required capabilities are not advertised");
   require((sp::core_interface_contract().capabilities & OpenRouterRoutingMaxPrice) != 0, "core omits max_price support");
+  require((sp::core_interface_contract().capabilities & ErrorReason) != 0, "core omits Error::reason");
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, OpenRouterRoutingMaxPrice);
+  sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, ErrorReason);
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, RequiredProvider);
   constexpr std::uint64_t ungranted = 1ULL << 63;
   require((linked.capabilities & ungranted) == 0, "test capability bit is granted");
@@ -81,6 +84,7 @@ void interface_contract_capabilities() {
     return false;
   };
   require(refused(sp::EXPECTED_INTERFACE_REVISION, OpenRouterRoutingMaxPrice | ungranted), "missing capability admitted");
+  require(refused(sp::EXPECTED_INTERFACE_REVISION, ErrorReason | ungranted), "missing capability admitted");
   require(refused(sp::EXPECTED_INTERFACE_REVISION, RequiredProvider | ungranted), "missing capability admitted");
   require(refused(sp::EXPECTED_INTERFACE_REVISION + 1, OpenRouterRoutingMaxPrice), "other interface revision admitted");
 }
@@ -666,6 +670,42 @@ void cancel_inside_delta_callback_keeps_what_was_shown(Peer& peer) {
     }
   }
 }
+// A protocol failure reaches the caller with the generic text and a code for the check that failed. The peer's bytes and
+// its model name carry the marker; neither is in the text or the code, which come from a fixed table.
+void protocol_failures_carry_a_reason(Peer& peer) {
+  for (const bool messages : {false, true}) for (const bool streaming : {false, true}) {
+    Client client(descriptor(peer, messages), options());
+    const auto model = peer.arm("invalid-utf8"); Capture capture;
+    auto op = client.start(request(model, messages), run(streaming), capture.callbacks());
+    const auto result = finish(op, capture);
+    const auto& error = failure(result, sp::ErrorKind::ProtocolCorrupt).error;
+    require(error.safe_message == "invalid response protocol", "the protocol failure text changed");
+    require(error.reason == (streaming ? "sse.utf8.invalid" : messages ? "messages.response.json_invalid" : "chat.response.json_invalid"),
+            "protocol failure named another check: " + error.reason);
+    require(error.reason.find(marker) == std::string::npos && error.vendor_code.empty(), "peer bytes reached the failure");
+    peer.count(model, 1, 1);
+  }
+  for (const bool streaming : {false, true}) {
+    Client client(descriptor(peer, true), options());
+    const auto model = peer.arm("wrong-model"); Capture capture;
+    auto op = client.start(request(model, true), run(streaming), capture.callbacks());
+    const auto result = finish(op, capture);
+    const auto& error = failure(result, sp::ErrorKind::ProtocolCorrupt).error;
+    require(error.safe_message == "invalid response protocol" && error.reason == "messages.model.mismatch",
+            "a served model that differs from the request was not named: " + error.reason);
+    require(error.reason.find(marker) == std::string::npos, "the served model reached the failure");
+    peer.count(model, 1);
+  }
+  // Chat compares nothing with the request, so the same peer answer succeeds there. A body the connection cut short
+  // is the transport's failure and names no check.
+  Client client(descriptor(peer, false), options());
+  const auto model = peer.arm("wrong-model");
+  success(client.complete(request(model, false), run(true))); peer.count(model, 1);
+  const auto cut = peer.arm("short-close");
+  const auto short_result = client.complete(request(cut, false), run(false));
+  require(failure(short_result, sp::ErrorKind::Truncated).error.reason.empty(), "a transport failure named a decoder check");
+  peer.count(cut, 1, 1);
+}
 void ownership(Peer& peer) {
   Client client(descriptor(peer, false), options());
   for (const auto how : {0, 1, 2, 3}) {
@@ -1028,6 +1068,7 @@ int main(int argc, char** argv) {
     check("HTTP rejections", [&] { http_rejections_are_definitive(peer); });
     check("cancelled call usage", [&] { cancelled_call_usage_is_not_evidence_of_zero(peer); });
     check("cancel inside delta callback", [&] { cancel_inside_delta_callback_keeps_what_was_shown(peer); });
+    check("protocol failure reasons", [&] { protocol_failures_carry_a_reason(peer); });
     check("ownership", [&] { ownership(peer); });
     check("callback ownership and misuse", [&] { callback_ownership_and_misuse(peer); });
     check("raw I/O blocking misuse", [&] { raw_io_misuse(peer); });

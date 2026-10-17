@@ -514,6 +514,14 @@ Requirement on the private core: runtime-visible I/O notifications, timer action
 M4 implementation: `src/runtime/testing.h` is a private, non-installed executor/clock/attempt seam. The bounded race model starts four simultaneously ready stimuli (cancel, stop token, deadline advance, response) and explores every ready-task choice, including resulting actor turns and promoted timers: **298 schedules**, with **6 completion / 260 cancellation / 32 deadline** outcomes. It observes **216 wire completions, 82 wire cancellations and 256 timer callbacks**, rather than counting attempted no-op injections as fired faults. The independent decision model samples control state at actor entry and checks exactly one terminal and no later events. Separately, 64 seeded schedules of eight concurrent operations with three retry tokens produce 704 total dispatches and 512 outcomes, with three recoveries per seed. These finite cases do not enumerate all OS/libcurl interleavings or every ownership scenario; the actual transport and sanitizer suites complement them.
 
 
+### 5.25 FailureReasonCode
+
+- Statement: a failure that a decoder, the accumulator, the SSE framer or the transport layer of the SDK decides carries `Error::reason`, a code of lower-case dotted segments (`<source>.<subject>.<problem>`) from a fixed table keyed by the failure string in the source. The table has one code for each failure string of each decoder and of the accumulator, with no code twice, and no string without a code except the strings for an abnormal close, which are the transport's. The code never depends on the response: no vendor text, payload byte, field name or model output reaches it or `safe_message`, which stays the fixed text of its `ErrorKind`. A failure the transport decided first (abnormal close, cancellation, deadline) has none.
+- Exercised by: `error_reason` (table shape, uniqueness, and a scan of the decoder sources that requires a code for every failure string and no entry without one), the per-family `failure_reasons` cases, the runtime peer cases for invalid UTF-8, a served model that differs and a short close, and the corrupt and truncated generated-media cases of all four families.
+- Fault injected: remove an entry; add a failure string without one; fail each family with the marker in the served model, the object tag, the delta type and an unknown part member; cut a stream; close it abnormally.
+- Mutants: a code built from the response; a code that replaces or is appended to `safe_message`; a decoder `fail()` that skips the lookup; a transport close that keeps a decoder's code; the accumulator losing its code.
+- Prevents: field reports that read `invalid response protocol` for every different protocol check.
+
 ## 6. Reference state machine
 
 A small test-only implementation, separate from production tables and helpers.

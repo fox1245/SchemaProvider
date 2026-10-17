@@ -1,4 +1,5 @@
 #include "codecs/accumulator.h"
+#include "codecs/reason.h"
 #include "core/interface_contract.h"
 #include "core/native.h"
 #include "json/json.h"
@@ -85,7 +86,9 @@ bool Accumulator::accept(const Event& event, const Error* failure_override) {
   return ok;
 }
 bool Accumulator::reject(ErrorKind kind, std::string message) {
-  Fail e{failure_override_ ? *failure_override_ : Error{kind, std::move(message)}};
+  Error error{kind, std::move(message)};
+  error.reason = reason::code(reason::Source::Accumulator, error.safe_message);
+  Fail e{failure_override_ ? *failure_override_ : std::move(error)};
   apply(e);
   if (sink_) sink_(Event{e});
   return false;

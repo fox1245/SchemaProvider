@@ -1,6 +1,7 @@
 #include "codecs/chat.h"
 #include "codecs/media_output.h"
 #include "codecs/provider_cost.h"
+#include "codecs/reason.h"
 #include "core/native.h"
 #include "descriptor/descriptor.h"
 #include "json/json.h"
@@ -57,7 +58,9 @@ bool Codec::emit(const Event& e) {
 }
 bool Codec::fail(ErrorKind kind, std::string message) {
   if (buffered_failure_ && !closed_) return false;
-  emit(Fail{{kind, std::move(message)}}); return false;
+  Error error{kind, std::move(message)};
+  error.reason = reason::code(reason::Source::Chat, error.safe_message);
+  emit(Fail{std::move(error)}); return false;
 }
 void Codec::unknown(json::Value v, std::initializer_list<std::string_view> known) {
   for (auto member : v.members()) if (std::find(known.begin(), known.end(), member.key) == known.end()) ++diagnostics_.unknown_properties;

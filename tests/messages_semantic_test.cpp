@@ -734,6 +734,29 @@ void empty_text_delta_is_withheld() {
   const auto thinking = traced({start(), block(0, R"({"type":"thinking","thinking":""})"), delta(0, R"({"type":"thinking_delta","thinking":"hm"})"), end(0), stop(), done});
   CHECK(thinking.trace == "[begin][other:][other:hm][seal]");
 }
+// A failure names the check that failed with a code of the fixed table, whatever the response says; the codec's own text
+// stays as it was and nothing the vendor sent reaches either.
+void failure_reasons() {
+  const std::string secret = "VENDOR_SECRET_MARKER_5d2";
+  const auto check = [&](const Outcome& outcome, ErrorKind kind, std::string_view message, std::string_view code) {
+    const auto& error = failed(outcome, kind).error;
+    CHECK(error.safe_message == message && error.reason == code);
+    CHECK(error.reason.find(secret) == std::string::npos && error.safe_message.find(secret) == std::string::npos);
+  };
+  const auto text_block = block(0, R"({"type":"text","text":""})");
+  check(stream({start(), text_block, delta(0, R"({"text":"x"})")}), ErrorKind::ProtocolCorrupt, "delta type required", "messages.delta.type_required");
+  check(stream({start(), text_block, delta(0, "{\"type\":" + json::quote(secret) + "}")}), ErrorKind::Unsupported, "unknown content delta", "messages.delta.unknown");
+  check(stream({start(), text_block, delta(0, R"({"type":"thinking_delta","thinking":"x"})")}), ErrorKind::ProtocolCorrupt, "delta kind differs from block", "messages.delta.kind_mismatch");
+  auto foreign = start();
+  foreign.second.replace(foreign.second.find("fixture-model"), 13, secret);
+  check(stream({foreign}), ErrorKind::ProtocolCorrupt, "response model differs from request", "messages.model.mismatch");
+  auto served = body();
+  served.replace(served.find("fixture-model"), 13, secret);
+  check(buffered(served), ErrorKind::ProtocolCorrupt, "response model differs from request", "messages.model.mismatch");
+  check(stream({start(), text_block}), ErrorKind::Truncated, "missing Messages terminal evidence", "messages.terminal.missing");
+  const auto cut = stream({start(), text_block}, {false, ErrorKind::Transport});
+  CHECK(failed(cut, ErrorKind::Transport).error.reason.empty() && failed(cut, ErrorKind::Transport).error.safe_message == "abnormal response close");
+}
 } // namespace
 int main() {
   try {
@@ -742,7 +765,7 @@ int main() {
     usage_binding_precedence();
     usage_detail_forward_compatibility(); toolset_metadata_shapes();
     terminal_matrix(); text_thinking_and_order(); tool_fragments(); server_semantics(); server_result_shapes();
-    stop_classes(); corruption_matrix(); usage_knowledge(); cut_stream_usage_has_no_placeholder_output(); uncached_input_rule(); limits_and_close_priority(); empty_text_delta_is_withheld();
+    stop_classes(); corruption_matrix(); usage_knowledge(); cut_stream_usage_has_no_placeholder_output(); uncached_input_rule(); limits_and_close_priority(); empty_text_delta_is_withheld(); failure_reasons();
     std::cout << "messages semantic tests passed\n";
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }
