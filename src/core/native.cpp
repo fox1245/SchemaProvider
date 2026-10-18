@@ -551,7 +551,7 @@ NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, 
   bind_history(request.messages);
 }
 NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, const gemini::Request& request, const descriptor::EffectiveChoices& choices, bool)
-    : family_(Family::Gemini), model_(request.model), route_(descriptor.path(false)), prefix_count_(request.messages.size()), policy_(descriptor.policy()) {
+    : family_(Family::Gemini), model_(request.model), route_(descriptor.resolved_path(false, request.model)), prefix_count_(request.messages.size()), policy_(descriptor.policy()) {
   valid_ = descriptor.family() == family_name(family_) && origin_digest(descriptor, origin_) && configuration_digest(descriptor, request, choices, prefix_);
   thinking_disabled_ = choices.thinking_budget && *choices.thinking_budget == 0 && !choices.thinking_level;
   if (valid_) {
@@ -647,7 +647,9 @@ void NativeContext::bind_history(const std::vector<Message>& messages, bool port
 }
 bool NativeContext::matches_descriptor(const descriptor::ValidatedDescriptor& descriptor) const {
   Digest digest{};
-  return valid_ && (route_ == descriptor.path(false) || route_ == descriptor.path(true)) && origin_digest(descriptor, digest) && digest == origin_;
+  // The route binds the model on a model-routed Generate descriptor, so a seal never replays to another model.
+  return valid_ && (route_ == descriptor.resolved_path(false, model_) || route_ == descriptor.resolved_path(true, model_)) &&
+         origin_digest(descriptor, digest) && digest == origin_;
 }
 std::optional<std::string_view> NativeContext::server_tool_name(std::string_view id) const {
   const auto found = std::lower_bound(pending_server_tools_.begin(), pending_server_tools_.end(), id,

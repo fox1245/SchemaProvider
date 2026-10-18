@@ -101,8 +101,11 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (descriptor.family() != "google.generate") return Error{ErrorKind::InvalidConfig, "Gemini encoder requires generate descriptor"};
   if (request.model.empty() || request.model.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._") != std::string::npos) return bad("literal model name required");
   const auto base = "/v1beta/models/" + request.model;
-  // descriptor::load already holds a google.generate descriptor to one model in both paths; this ties that model to the request.
-  if (descriptor.path(false) != base + ":generateContent" || descriptor.path(true) != base + ":streamGenerateContent?alt=sse") return Error{ErrorKind::InvalidConfig, "Gemini descriptor paths must target the same literal model"};
+  // descriptor::load holds a google.generate descriptor to one model in both paths, or to {model}; a literal route
+  // serves only the request for its own model.
+  if (!descriptor.model_routed() &&
+      (descriptor.path(false) != base + ":generateContent" || descriptor.path(true) != base + ":streamGenerateContent?alt=sse"))
+    return Error{ErrorKind::InvalidConfig, "Gemini descriptor paths must target the same literal model"};
   const auto& resources = descriptor.policy()->resources();
   auto effective = descriptor::effective_defaults(descriptor, request.model);
   if (request.max_output_tokens) effective.max_output_tokens = request.max_output_tokens;
@@ -222,7 +225,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (!context->history_valid_) return replay_bad();
   if (!context->valid_) return Error{ErrorKind::ResourceLimit, "native binding could not be captured"};
   if (tool_error) return *tool_error;
-  EncodedRequest result{"POST", std::string(descriptor.path(streaming)), {}, {}, {}};
+  EncodedRequest result{"POST", descriptor.resolved_path(streaming, request.model), {}, {}, {}};
   for (const auto& header : descriptor.headers()) {
     std::string key = header.first;
     for (auto& c : key) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + ('a' - 'A'));
