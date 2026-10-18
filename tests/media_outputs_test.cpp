@@ -423,6 +423,37 @@ void audio_usage_expiry_terminal() {
                                       context(desc(), "pcm16", true));
   CHECK(completed(null_reason_tail).stop.kind == StopKind::EndTurn && parts_of(completed(null_reason_tail)).size() == 1);
 }
+// The OpenRouter order, captured live on 2026-10-19 (openai/gpt-audio-mini, pcm16): audio data, an expiry-only delta,
+// an empty delta, then the final usage on a choice whose delta is empty and whose finish_reason is null, and [DONE].
+void openrouter_audio_tail() {
+  const auto payload = b64(bytes_of(12, 5));
+  const std::vector<std::string> wires{
+      chunk(R"({"content":"","role":"assistant","audio":{"id":"audio_r","transcript":"hi","data":")" + payload + R"("}})"),
+      chunk(R"({"content":"","role":"assistant","audio":{"expires_at":1792370558}})"),
+      chunk(R"({"content":"","role":"assistant"})"),
+      wrap(R"("choices":[{"index":0,"delta":{"content":"","role":"assistant"},"finish_reason":null,"native_finish_reason":null}],)"
+           R"("usage":{"prompt_tokens":11,"completion_tokens":100,"total_tokens":111,"cost":0.0002466,"is_byok":false})", true)};
+  const auto at_gateway = stream(wires, context(router(), "pcm16", true), {}, {}, router());
+  const auto& c = completed(at_gateway);
+  CHECK(c.stop.kind == StopKind::EndTurn && c.stop.raw == "derived:audio_usage+audio.expires_at+DONE");
+  const auto& parts = parts_of(c);
+  CHECK(std::any_of(parts.begin(), parts.end(), [&](const Part& p) {
+    const auto* m = std::get_if<Media>(&p);
+    return m && m->kind == MediaKind::Audio && m->data && *m->data == payload && m->transcript == std::optional<std::string>("hi");
+  }));
+  CHECK(c.usage.output_total && c.usage.output_total->value == 100);
+  // The same order at an origin that is not a declared gateway still lacks its terminal evidence.
+  const auto elsewhere = stream(wires, context(desc(), "pcm16", true));
+  CHECK(std::holds_alternative<Failure>(elsewhere) && std::get<Failure>(elsewhere).error.reason == "chat.done.without_terminal");
+  // Without the expiry update first, or with text after the usage, the gateway stream is refused too.
+  auto no_expiry = wires; no_expiry.erase(no_expiry.begin() + 1);
+  CHECK(std::holds_alternative<Failure>(stream(no_expiry, context(router(), "pcm16", true), {}, {}, router())));
+  auto late = wires; late.push_back(chunk(R"({"content":"more"})"));
+  CHECK(std::holds_alternative<Failure>(stream(late, context(router(), "pcm16", true), {}, {}, router())));
+  auto spoken = wires; spoken.back() = wrap(R"("choices":[{"index":0,"delta":{"content":"x"},"finish_reason":null}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2})", true);
+  const auto spoken_outcome = stream(spoken, context(router(), "pcm16", true), {}, {}, router());
+  CHECK(std::holds_alternative<Failure>(spoken_outcome) && std::get<Failure>(spoken_outcome).error.reason == "chat.done.without_terminal");
+}
 void audio_usage_terminal_failures() {
   const auto initial = chunk(audio_delta(R"("id":"audio_fixture","data":"QUJD","transcript":"words")", true));
   const auto usage = wrap(R"("choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3})", true);
@@ -1150,6 +1181,7 @@ int main() {
     chat_fixture::metadata_heartbeats();
     chat_fixture::audio_usage_expiry_terminal();
     chat_fixture::audio_usage_terminal_failures();
+    chat_fixture::openrouter_audio_tail();
     chat_fixture::audio_malformed();
     chat_fixture::images_buffered_and_streamed();
     chat_fixture::images_malformed();

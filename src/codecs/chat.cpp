@@ -12,6 +12,19 @@
 
 namespace sp::chat {
 namespace {
+// A streamed choice without a finish reason whose delta holds nothing but the assistant role and empty text.
+bool empty_choice(json::Value choice) {
+  const auto reason = choice.get("finish_reason");
+  if (reason.valid() && !reason.is_null()) return false;
+  const auto delta = choice.get("delta");
+  if (!delta.is_object()) return false;
+  for (auto member : delta.members()) {
+    if (member.key == "role" && member.value.is_string() && member.value.as_string() == "assistant") continue;
+    if (member.key == "content" && (member.value.is_null() || (member.value.is_string() && member.value.as_string().empty()))) continue;
+    return false;
+  }
+  return true;
+}
 bool unsigned_count(json::Value v) { return v.is_uint() || (v.is_int() && v.as_int() >= 0); }
 uint64_t uint_value(json::Value v) { return v.is_uint() ? v.as_uint() : static_cast<uint64_t>(v.as_int()); }
 StopKind stop_kind(descriptor::StopKind kind) {
@@ -245,6 +258,11 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
   // An audio usage-only frame closes the semantic channel; only its expiry metadata may follow.
   // The audio is not sealed or given replay authority until the remaining terminal evidence arrives.
   if (streaming && choice_count == 0 && usage_value.is_object() && audio_.seen && !stopped_)
+    audio_usage_tail_ = true;
+  // A declared OpenRouter origin sends the expiry first and then the final usage on a choice whose delta is empty and
+  // whose finish_reason is null, with no usage-only frame. That chunk ends the semantic channel the same way.
+  else if (streaming && choice_count == 1 && usage_value.is_object() && audio_.seen && audio_.expires_at && !stopped_ &&
+           tools_.empty() && descriptor::routed_gateway(descriptor_) && empty_choice(choices.at(0)))
     audio_usage_tail_ = true;
   return true;
 }
