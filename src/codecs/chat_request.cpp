@@ -96,6 +96,13 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
           return Error{ErrorKind::ReplayIneligible, "Chat requires one plain unsigned assistant thinking part"};
         has_thinking = true;
       } else if (const auto* opaque = std::get_if<Opaque>(&part)) {
+        if (opaque->wire_type == "images") {
+          // A generated image kept by the response codec. Interface 6 does not send it
+          // back: the provider receives the assistant turn as it did before 0.3.4.
+          if (message.role != Role::Assistant || !opaque->wire_metadata)
+            return bad("generated image parts belong to assistant messages");
+          continue;
+        }
         if (opaque->wire_type == "reasoning_details.frame") {
           if (!message.native || !opaque->wire_metadata)
             return Error{ErrorKind::ReplayIneligible, "reasoning frame lacks native authority"};

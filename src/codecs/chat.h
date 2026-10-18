@@ -80,6 +80,7 @@ class Codec {
   void unknown(json::Value, std::initializer_list<std::string_view>);
   bool text(json::Value, PartKind, bool streaming);
   bool reasoning_details(json::Value, bool streaming);
+  bool images(json::Value);
   bool finish_reasoning_details();
   const descriptor::ValidatedDescriptor& descriptor_;
   Mode mode_;

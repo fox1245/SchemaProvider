@@ -1183,6 +1183,39 @@ void uncached_input_rule() {
   CHECK(live.input_uncached->value == 30 && live.input_uncached->evidence == Evidence::Derived && !live.cache_write);
 }
 } // namespace
+// Image models (OpenRouter) answer with `images` even without `modalities`; the image used to be
+// dropped while its tokens were billed (#44). Interface 6 keeps each one as an Opaque part.
+void generated_images_are_kept() {
+  const std::string url = "data:image/png;base64,iVBORw0KGgo=";
+  const std::string image = R"({"type":"image_url","image_url":{"url":")" + url + R"("}})";
+  const auto b = buffered(body(R"({"role":"assistant","content":"","images":[)" + image + "]}"));
+  const auto s = frames({chunk(R"({"role":"assistant","content":""})"), chunk(R"({"content":"","images":[)" + image + "]}", "\"stop\""), "[DONE]"});
+  for (const auto* outcome : {&b, &s}) {
+    const auto& c = completed(*outcome);
+    const Opaque* kept = nullptr;
+    for (const auto& part : c.messages.front().parts)
+      if (const auto* opaque = std::get_if<Opaque>(&part); opaque && opaque->wire_type == "images") kept = opaque;
+    CHECK(kept && kept->wire_metadata);
+    CHECK(kept->wire_metadata->root().get("image").get("image_url").get("url").as_string() == url);
+  }
+  // After the text: the image does not disturb text or tool order.
+  const auto& parts = completed(b).messages.front().parts;
+  CHECK(std::holds_alternative<Opaque>(parts.back()));
+  failed(buffered(body(R"({"role":"assistant","content":"","images":{}})")), ErrorKind::ProtocolCorrupt);
+  failed(buffered(body(R"({"role":"assistant","content":"","images":[{"type":"image_url","image_url":{}}]})")), ErrorKind::ProtocolCorrupt);
+  // The kept image may stay in the history. It is not sent back, so the provider receives the turn as before.
+  chat::Request request; request.model = "fixture-model";
+  request.canonical_messages.push_back(Message{"", Role::User, {Text{"Draw a circle."}}});
+  Message assistant{"", Role::Assistant, completed(b).messages.front().parts};
+  request.canonical_messages.push_back(assistant);
+  request.canonical_messages.push_back(Message{"", Role::User, {Text{"Thanks."}}});
+  auto encoded = chat::encode(descriptor_value(), request, false);
+  CHECK(std::holds_alternative<chat::EncodedRequest>(encoded));
+  CHECK(std::get<chat::EncodedRequest>(encoded).body.find("iVBORw0KGgo") == std::string::npos);
+  // It belongs to the assistant that produced it.
+  request.canonical_messages.front().parts.push_back(assistant.parts.back());
+  CHECK(std::get<Error>(chat::encode(descriptor_value(), request, false)).kind == ErrorKind::InvalidRequest);
+}
 int main() {
   try {
     idempotent_terminal_money_tail(); unlisted_usage_leaves_and_decimal_cost(); uncached_input_rule();
@@ -1192,7 +1225,7 @@ int main() {
     required_metadata_and_identity(); per_chunk_creation_clock(); omitted_open_finish_reason(); empty_text_delta_is_withheld(); required_usage_and_unknown_cache(); unindexed_tool_order_and_optional_function(); buffered_close_precedence();
     accumulator_interleaved_ordering(); accumulator_order_uniqueness_and_limits();
     tool_history_and_escaped_arguments(); one_tool_message_with_several_results(); output_cap_member_by_origin(); quoted_json_and_request_bounds();
-    gateway_request_controls(); gateway_max_price();
+    gateway_request_controls(); gateway_max_price(); generated_images_are_kept();
     std::cout << "chat semantic properties passed\n";
     return 0;
   } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
