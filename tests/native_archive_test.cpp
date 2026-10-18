@@ -167,10 +167,16 @@ void chat_encrypted_legacy_to_canonical_restart() {
   for(auto& part:follow.canonical_messages[1].parts)if(auto* opaque=std::get_if<Opaque>(&part))opaque->wire_metadata=document(R"({"type":"reasoning_details","details":[]})");
   CHECK(std::holds_alternative<Error>(chat::encode(d,follow,false)));CHECK(std::holds_alternative<Error>(a->save(follow.canonical_messages,"chat-call")));
 }
+// A model-routed Generate descriptor ({model} in both paths) restores its sealed history like a literal one.
+std::string routed_paths(std::string json, bool routed) {
+  if (!routed) return json;
+  for (auto at = json.find("/fixture-model:"); at != std::string::npos; at = json.find("/fixture-model:")) json.replace(at + 1, 13, "{model}");
+  return json;
+}
 void google_tool_loop_restart() {
-  {
+  for (const bool routed : {false, true}) {
     Fixture f;
-    auto admitted_descriptor=descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"archive-gemini","family":"google.generate","connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":"/v1beta/models/fixture-model:generateContent","streaming":"/v1beta/models/fixture-model:streamGenerateContent?alt=sse"}}})");
+    auto admitted_descriptor=descriptor::load(routed_paths(R"({"descriptor_version":1,"revision":1,"id":"archive-gemini","family":"google.generate","connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":"/v1beta/models/fixture-model:generateContent","streaming":"/v1beta/models/fixture-model:streamGenerateContent?alt=sse"}}})", routed));
     CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(admitted_descriptor));auto d=std::get<descriptor::ValidatedDescriptor>(std::move(admitted_descriptor));
     gemini::Request r;r.model="fixture-model";r.account_scope="fixture-account";r.max_output_tokens=2048;r.thinking_budget=1024;r.messages.push_back(user("question"));r.tools.push_back({"lookup","Find value",document(R"({"type":"object","properties":{"x":{"type":"integer"}}})")});
     auto e=gemini::encode(d,r,false);CHECK(std::holds_alternative<gemini::EncodedRequest>(e));Accumulator acc;gemini::Codec codec(d,gemini::Mode::Buffered,acc,std::get<gemini::EncodedRequest>(e).context);

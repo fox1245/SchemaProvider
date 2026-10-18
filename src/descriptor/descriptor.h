@@ -36,6 +36,12 @@ public:
     std::string_view family() const { return family_; }
     std::string_view base_url() const { return base_url_; }
     std::string_view path(bool streaming) const { return streaming ? streaming_path_ : buffered_path_; }
+    // True for a google.generate descriptor whose paths name `{model}`: one descriptor serves every
+    // model of its origin, and each request's model takes the place of the placeholder.
+    bool model_routed() const noexcept { return model_routed_; }
+    // The path a request for `model` is sent to: path(streaming) with `{model}` replaced on a
+    // model-routed descriptor, and path(streaming) itself otherwise.
+    std::string resolved_path(bool streaming, std::string_view model) const;
     std::string_view request_model_member() const { return model_member_; }
     std::string_view request_messages_member() const { return messages_member_; }
     std::string_view request_stream_member() const { return stream_member_; }
@@ -50,6 +56,7 @@ public:
 private:
     ValidatedDescriptor() = default;
     std::uint64_t revision_ = 0;
+    bool model_routed_ = false;
     std::string id_, family_, base_url_, buffered_path_, streaming_path_;
     std::string model_member_, messages_member_, stream_member_, max_output_tokens_member_;
     std::vector<std::string> usage_path_;

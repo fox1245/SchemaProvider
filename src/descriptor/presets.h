@@ -108,6 +108,17 @@ inline LoadResult try_google_generate(std::string_view model, PresetOptions opti
 inline ValidatedDescriptor google_generate(std::string_view model, PresetOptions options = {}) {
   return unwrap(try_google_generate(model, std::move(options)));
 }
+// One Generate descriptor for every model of the origin: the request's model fills `{model}`.
+inline LoadResult try_google_generate(PresetOptions options = {}) {
+  return detail::build_preset("google-generate", "google.generate",
+                              "https://generativelanguage.googleapis.com",
+                              "/v1beta/models/{model}:generateContent",
+                              "/v1beta/models/{model}:streamGenerateContent?alt=sse",
+                              std::move(options));
+}
+inline ValidatedDescriptor google_generate(PresetOptions options = {}) {
+  return unwrap(try_google_generate(std::move(options)));
+}
 
 inline LoadResult try_google_interactions(PresetOptions options = {}) {
   return detail::build_preset("google-interactions", "google.interactions",

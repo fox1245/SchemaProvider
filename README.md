@@ -93,7 +93,7 @@ Hello.
 output tokens: 0
 ```
 
-Built-in presets in `sp::descriptor::presets` (`openai_chat`, `openai_responses`, `anthropic_messages`, `google_generate(model)`, `google_interactions`, `openrouter_chat`, `openrouter_responses`, `openrouter_messages`, and `loopback_chat`) construct validated descriptors through `sp::descriptor::load`. Each protocol family also provides `Request::simple(model, prompt_or_history, max_tokens, system_prompt)`, while `Completion` and `Message` expose read-only projections (`joined_text()`, `joined_thinking()`, `first_refusal()`, `executable_tool_calls()`, `invalid_tool_calls()`) alongside the full `std::variant` AST.
+Built-in presets in `sp::descriptor::presets` (`openai_chat`, `openai_responses`, `anthropic_messages`, `google_generate()` (every model) or `google_generate(model)`, `google_interactions`, `openrouter_chat`, `openrouter_responses`, `openrouter_messages`, and `loopback_chat`) construct validated descriptors through `sp::descriptor::load`. Each protocol family also provides `Request::simple(model, prompt_or_history, max_tokens, system_prompt)`, while `Completion` and `Message` expose read-only projections (`joined_text()`, `joined_thinking()`, `first_refusal()`, `executable_tool_calls()`, `invalid_tool_calls()`) alongside the full `std::variant` AST.
 
 For a hosted endpoint, pass credentials through `sp::runtime::Client(descriptor, std::move(api_key))` or `sp::runtime::Options::with_api_key(...)` (or load a custom HTTPS descriptor via `sp::descriptor::load`). Do not put credentials in descriptor JSON or print encoded request bodies. [Configuration and credential rules](docs/USAGE.md#descriptors-credentials-and-defaults) explain validation and defaults.
 

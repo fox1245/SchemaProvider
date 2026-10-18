@@ -250,6 +250,27 @@ void generate_route_shape() {
                                                               "/v1/models/m:generateContent", root + ":generateContent", root + "a:b:generateContent", root + "a~b:generateContent",
                                                               root + "a/b:generateContent", "/v1beta/models:generateContent"})
         rejected(generate_descriptor(path, streaming("m")), "/connection/paths/buffered");
+    // `{model}` in both paths makes one descriptor serve every model of the origin.
+    {
+        auto routed = load(generate_descriptor(buffered("{model}"), streaming("{model}")));
+        CHECK(std::holds_alternative<ValidatedDescriptor>(routed));
+        if (auto* value = std::get_if<ValidatedDescriptor>(&routed)) {
+            CHECK(value->model_routed() && value->path(false) == buffered("{model}"));
+            CHECK(value->resolved_path(false, "gemini-3.5-flash") == buffered("gemini-3.5-flash"));
+            CHECK(value->resolved_path(true, "gemini-3.5-flash") == streaming("gemini-3.5-flash"));
+        }
+        auto literal = load(generate_descriptor(buffered("m"), streaming("m")));
+        if (auto* value = std::get_if<ValidatedDescriptor>(&literal))
+            CHECK(!value->model_routed() && value->resolved_path(false, "other") == buffered("m"));
+        rejected(generate_descriptor(buffered("{model}"), streaming("m")), "/connection/paths/streaming");
+        rejected(generate_descriptor(buffered("m"), streaming("{model}")), "/connection/paths/streaming");
+        for (const std::string& path : {buffered("{models}"), buffered("{model}{model}"), buffered("x{model}"), root + "{model}/{model}:generateContent"})
+            rejected(generate_descriptor(path, streaming("{model}")), "/connection/paths/buffered");
+        // Only Generate routes take a placeholder.
+        rejected(descriptor({}, "https://example.test", "/v1/{model}/chat"), "/connection/paths/buffered");
+        const auto preset = presets::try_google_generate();
+        CHECK(std::holds_alternative<ValidatedDescriptor>(preset) && std::get<ValidatedDescriptor>(preset).model_routed());
+    }
     // Other families keep their paths: Chat and Responses may route both modes through one path.
     CHECK(std::holds_alternative<ValidatedDescriptor>(load(descriptor({}, "https://example.test", "/chat"))));
     CHECK(std::holds_alternative<ValidatedDescriptor>(load(R"({"descriptor_version":1,"revision":1,"id":"interactions","family":"google.interactions","connection":{"base_url":"https://example.test","paths":{"buffered":"/v1beta/interactions","streaming":"/v1beta/interactions"}}})")));

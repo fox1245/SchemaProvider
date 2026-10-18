@@ -591,8 +591,34 @@ void loaded_routes_encode_for_their_model() {
     }
   }
 }
-// A failure names the check that failed with a code of the fixed table, whatever the response says; the codec's own text
-// stays as it was and nothing the vendor sent reaches either.
+// One descriptor whose paths name {model} serves every model of the origin. Each request goes to its own model's
+// route, and a seal stays bound to its model: the same descriptor refuses to replay it to another one.
+void one_descriptor_serves_every_model() {
+  auto loaded = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"routed","family":"google.generate","connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":"/v1beta/models/{model}:generateContent","streaming":"/v1beta/models/{model}:streamGenerateContent?alt=sse"}}})");
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
+  const auto& d = std::get<descriptor::ValidatedDescriptor>(loaded);
+  for (const std::string model : {"gemini-a", "gemini-b"})
+    for (const bool sse : {false, true}) {
+      auto r = request(); r.model = model;
+      const auto encoded = gemini::encode(d, r, sse);
+      CHECK(std::holds_alternative<gemini::EncodedRequest>(encoded));
+      CHECK(std::get<gemini::EncodedRequest>(encoded).path == "/v1beta/models/" + model + (sse ? ":streamGenerateContent?alt=sse" : ":generateContent"));
+    }
+  auto first = request(); first.model = "gemini-a";
+  const auto encoded = std::get<gemini::EncodedRequest>(gemini::encode(d, first, false));
+  Accumulator a; gemini::Codec c(d, gemini::Mode::Buffered, a, encoded.context);
+  c.buffered(body(R"([{"text":"answer","thoughtSignature":"SIG"}])", "STOP", counters, "gemini-a"), {});
+  CHECK(a.outcome());
+  const auto& sealed = complete(*a.outcome()).messages.at(0);
+  CHECK(sealed.native && sealed.native->complete());
+  auto next = first;
+  next.messages.push_back(sealed);
+  next.messages.push_back(Message{"", Role::User, {Text{"next"}}});
+  CHECK(std::holds_alternative<gemini::EncodedRequest>(gemini::encode(d, next, false)));
+  next.model = "gemini-b";
+  const auto other = gemini::encode(d, next, false);
+  CHECK(std::holds_alternative<Error>(other) && std::get<Error>(other).kind == ErrorKind::ReplayIneligible);
+}
 // Google answers aliases and auto-routed models under other names (lyria-3-pro-preview as lyria-3.5,
 // gemini-3.5-flash as gemini-3.6-flash). The name is recorded; an unexplained one is delivered
 // without a native seal. The embedded catalogue relates the observed pairs.
@@ -628,6 +654,8 @@ void served_model_is_recorded() {
     CHECK(a.outcome() && complete(*a.outcome()).model.relation == ServedRelation::Listed);
   }
 }
+// A failure names the check that failed with a code of the fixed table, whatever the response says; the codec's own text
+// stays as it was and nothing the vendor sent reaches either.
 void failure_reasons() {
   const std::string secret = "VENDOR_SECRET_MARKER_5d2";
   const auto check = [&](const Outcome& outcome, ErrorKind kind, std::string_view message, std::string_view code) {
@@ -691,6 +719,6 @@ void empty_text_delta_is_withheld() {
 }
 }
 int main() {
-  try { http_error_envelope_in_an_array_is_retained(); output_total_without_thoughts(); total_proves_zero_thoughts(); total_without_candidates_bounds_the_output(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); tool_result_helper_needs_a_json_object(); successive_unidentified_calls(); native_group_and_replay(); nullable_usage(); uncached_input_rule(); stop_kinds_match_policy_table(); invalid_model_calls(); errors_and_terminals(); loaded_routes_encode_for_their_model(); empty_text_delta_is_withheld(); served_model_is_recorded(); failure_reasons(); std::cout << "Gemini semantic invariants passed\n"; }
+  try { http_error_envelope_in_an_array_is_retained(); output_total_without_thoughts(); total_proves_zero_thoughts(); total_without_candidates_bounds_the_output(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); tool_result_helper_needs_a_json_object(); successive_unidentified_calls(); native_group_and_replay(); nullable_usage(); uncached_input_rule(); stop_kinds_match_policy_table(); invalid_model_calls(); errors_and_terminals(); loaded_routes_encode_for_their_model(); empty_text_delta_is_withheld(); one_descriptor_serves_every_model(); served_model_is_recorded(); failure_reasons(); std::cout << "Gemini semantic invariants passed\n"; }
   catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

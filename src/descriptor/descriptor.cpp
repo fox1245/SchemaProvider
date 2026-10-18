@@ -168,6 +168,15 @@ bool origin(std::string_view url, bool https_only = false) {
 bool relative_path(std::string_view path, bool google_generate = false) {
     if (path.empty() || path.front() != '/' || path.starts_with("//") || path.size() > 2048) return false;
     if (google_generate && path.ends_with("?alt=sse")) path.remove_suffix(8);
+    // A google.generate route may name the request's model with one `{model}` segment (checked below).
+    std::string checked;
+    if (google_generate) {
+        if (const auto at = path.find("{model}"); at != std::string_view::npos) {
+            checked = std::string(path);
+            checked.replace(at, 7, "m");
+            path = checked;
+        }
+    }
     for (unsigned char c : path) {
         if (!(ascii_alpha(static_cast<char>(c)) || digit(static_cast<char>(c)) || c == '/' || c == '-' || c == '_' || c == '.' || c == '~' || (google_generate && c == ':'))) return false;
     }
@@ -181,9 +190,9 @@ bool relative_path(std::string_view path, bool google_generate = false) {
     }
     return true;
 }
-// A google.generate route is a literal model route. For the request's model the encoder (codecs/gemini_request.cpp)
-// accepts exactly one buffered and one streaming path and refuses every other pair with InvalidConfig on each request,
-// so the loader holds a descriptor to the same shape: both paths name one model of characters the encoder accepts.
+// A google.generate route names its model. Both paths name the same model of characters the encoder accepts, or both
+// name `{model}`, and then one descriptor serves every model of the origin. The encoder (codecs/gemini_request.cpp)
+// sends a literal route only for its own model and refuses every other request with InvalidConfig.
 constexpr std::string_view generate_root = "/v1beta/models/", generate_buffered = ":generateContent", generate_streaming = ":streamGenerateContent?alt=sse";
 bool generate_model(std::string_view model) {
     return !model.empty() && model.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._") == std::string_view::npos;
@@ -287,7 +296,9 @@ private:
             const auto model = buffered.starts_with(generate_root) && buffered.ends_with(generate_buffered) &&
                 buffered.size() >= generate_root.size() + generate_buffered.size()
                 ? buffered.substr(generate_root.size(), buffered.size() - generate_root.size() - generate_buffered.size()) : std::string_view{};
-            if (!generate_model(model)) fail("/connection/paths/buffered", "/v1beta/models/<model>:generateContent with a literal model name");
+            value_.model_routed_ = model == "{model}";
+            if (!value_.model_routed_ && !generate_model(model))
+                fail("/connection/paths/buffered", "/v1beta/models/<model>:generateContent with a literal model name or {model}");
             if (value_.streaming_path_ != std::string(generate_root) + std::string(model) + std::string(generate_streaming))
                 fail("/connection/paths/streaming", "/v1beta/models/<model>:streamGenerateContent?alt=sse for the model of the buffered path");
         }
@@ -528,4 +539,10 @@ LoadResult load_with_environment_headers(
 
 namespace sp::descriptor {
 bool valid_origin(std::string_view url) { return origin(url); }
+std::string ValidatedDescriptor::resolved_path(bool streaming, std::string_view model) const {
+    std::string resolved(path(streaming));
+    if (!model_routed_) return resolved;
+    if (const auto at = resolved.find("{model}"); at != std::string::npos) resolved.replace(at, 7, model);
+    return resolved;
+}
 }
