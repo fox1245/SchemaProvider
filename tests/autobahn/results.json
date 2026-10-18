@@ -1,0 +1,26 @@
+{
+ "agent": "schemaprovider",
+ "cases": 301,
+ "behavior": {
+  "OK": 298,
+  "INFORMATIONAL": 3
+ },
+ "behavior_close": {
+  "OK": 298,
+  "INFORMATIONAL": 3
+ },
+ "not_ok": {
+  "7.1.6": [
+   "INFORMATIONAL",
+   "INFORMATIONAL"
+  ],
+  "7.13.1": [
+   "INFORMATIONAL",
+   "INFORMATIONAL"
+  ],
+  "7.13.2": [
+   "INFORMATIONAL",
+   "INFORMATIONAL"
+  ]
+ }
+}

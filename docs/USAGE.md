@@ -553,6 +553,43 @@ A throwing nonterminal callback cancels with `Failure(Misuse)`. A throwing termi
 
 Retries are off by default. `RunOptions::retry` can replace the client's admitted default policy. If enabled, the runtime is the single retry owner with an attempt cap, shared token bucket and unchanged deadline. Retry class and safety are separate; no observed semantic output is retried, and possible acceptance requires explicit duplicate-billing-risk approval in the current policy. Retry-After cannot shorten a server wait to fit the deadline. `AttemptEvidence::prior_usage_unknown` keeps unknown earlier cost visible. If NeoGraph or another host owns retry, leave SDK retry off.
 
+## WebSocket sessions
+
+Realtime APIs (Gemini Live, Lyria RealTime, OpenAI Realtime and the like) speak WebSocket. `transport/ws_transport.h` opens an RFC 6455 client session on a `sp::transport::Transport`. The session shares that transport's I/O threads, resolver and TLS settings and costs no thread of its own. The provider protocols themselves (setup messages, audio chunks, turn events) are not decoded here yet: a session moves whole text and binary messages.
+
+```cpp
+#include <chrono>
+#include <transport/ws_transport.h>
+
+sp::transport::Transport transport;
+sp::transport::WsRequest request;
+request.url = "wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1-mini";
+request.headers.push_back({"Authorization", "Bearer " + api_key});
+request.deadline = std::chrono::steady_clock::now() + std::chrono::minutes(30);
+request.idle_timeout = std::chrono::seconds(60);
+sp::transport::WsCallbacks callbacks;
+callbacks.on_message = [](sp::transport::WsMessageKind kind, std::string_view message) {
+    // Copy what you need; the view ends with the call. Runs on an I/O thread: never block.
+};
+callbacks.on_done = [](const sp::transport::WsResult& result) { /* exactly once */ };
+auto session = sp::transport::open_websocket(transport, std::move(request), std::move(callbacks));
+session.send_text(R"({"type":"session.update","session":{"type":"realtime","output_modalities":["text"]}})");
+// ... later, from any thread:
+session.close();
+auto result = session.join();  // result.clean: both Close frames were exchanged
+```
+
+- **Connection.** libcurl opens the connection (TCP, TLS with ALPN `http/1.1`, the private CA in `ca_file`), and the session writes the opening handshake and every frame itself. A server that does not answer `101` with the right `Sec-WebSocket-Accept`, or that selects an extension or subprotocol, fails the session with `FailureKind::Protocol`. `WsResult::http_status` keeps its status (for example 401).
+- **Sending.** `send_text` and `send_binary` are thread-safe and queue the message. Messages sent before the handshake completes are written, in order, once it has. Text must be valid UTF-8. After `close()` or the end of the session, a send returns false.
+- **Receiving.** Fragmented messages arrive whole. A Ping is answered with a Pong of the same payload. A server message larger than `limits.max_message_bytes` (64 MiB by default), a masked server frame, a reserved bit or opcode, or invalid UTF-8 fails the session after a Close frame with 1009, 1002 or 1007.
+- **Closing.**
+  - `close()` starts the closing handshake. `close_timeout` (5 s) bounds the wait for the server's Close.
+  - A server's Close is answered with its code and reported through `on_close`.
+  - The session is `Completed` only after a closing handshake. A connection lost without a Close frame is `Failed` with `close_code` 1006.
+- **Bounds.** The absolute `deadline` covers the whole session. The optional `connect_timeout`, `handshake_timeout` (until the `101` head) and `idle_timeout` (no byte in either direction) behave as the HTTP stall bounds do. `cancel()`, destroying the handle and destroying the transport end the session at once, without a closing handshake.
+
+The [Autobahn|Testsuite](../tests/autobahn/README.md) fuzzing server checks the framing and closing behaviour: every case 1 to 10 ends `OK` or `INFORMATIONAL`.
+
 ## Outcomes, raw data and nullable usage
 
 Retain the result owner, then inspect its variant. A `Failure` retains `PartialCompletion`: already observed messages, nullable usage, optional stop, wire envelope and raw observations. Partial text is not a successful completion and partial tool fragments are not executable calls.

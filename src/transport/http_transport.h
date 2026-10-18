@@ -214,6 +214,10 @@ struct RuntimeInfo {
 class Transport;
 struct OperationState;
 struct TransportCore;
+struct WsRequest;
+struct WsCallbacks;
+class WsSession;
+WsSession open_websocket(Transport&, WsRequest, WsCallbacks);  // ws_transport.h
 
 // Move-only handle over shared operation state (DESIGN.md section 7).
 //  * Destroying a non-terminal handle performs a non-blocking cancel; the state still delivers
@@ -259,6 +263,7 @@ class Transport {
   unsigned io_threads() const noexcept;
 
  private:
+  friend WsSession open_websocket(Transport&, WsRequest, WsCallbacks);
   std::shared_ptr<TransportCore> core_;
 };
 
