@@ -168,6 +168,35 @@ std::optional<std::string> validate(const FamilyPolicy& f, const EffectiveChoice
   if(c.service_tier && f.family!="openai.chat" && f.family!="openai.responses" && f.family!="google.interactions") return "service tier unsupported for family";
   return {};
 }
+// The replay identity covers only the facts that decide how sealed history is written to and read
+// from the wire. Families are hashed in name order and stop facts in key order, every text with its
+// length, so the identity does not depend on the order of the file.
+std::string replay_identity(const std::vector<FamilyPolicy>& families) {
+  crypto::Sha256 hash;
+  auto put = [&](std::string_view value) {
+    const auto size = std::to_string(value.size());
+    hash.update(size);
+    hash.update(":");
+    hash.update(value);
+  };
+  put("sp.descriptor-policy.replay.v1");
+  std::vector<const FamilyPolicy*> ordered;
+  for (const auto& family : families) ordered.push_back(&family);
+  std::sort(ordered.begin(), ordered.end(), [](const auto* a, const auto* b) { return a->family < b->family; });
+  for (const auto* family : ordered) {
+    put(family->family);
+    put(family->model_member); put(family->messages_member); put(family->stream_member); put(family->cap_member);
+    put(std::to_string(family->usage_path.size()));
+    for (const auto& segment : family->usage_path) put(segment);
+    auto stops = family->stops;
+    std::sort(stops.begin(), stops.end());
+    put(std::to_string(stops.size()));
+    for (const auto& [raw, kind] : stops) { put(raw); put(std::to_string(static_cast<unsigned>(kind))); }
+    put(family->header_version ? *family->header_version : std::string_view{});
+  }
+  const auto digest = hash.finish();
+  return std::string(reinterpret_cast<const char*>(digest.data()), digest.size());
+}
 bool within_depth(Value v, std::size_t remaining) {
   if (!v.is_array() && !v.is_object()) return true;
   if (!remaining) return false;
@@ -308,14 +337,15 @@ class PolicyLoader {
           fail("/models/defaults/strict_tools", "Responses strict tools only");
         policy->models_.push_back(std::move(m));
       }
-      const auto family_identity = pd->root().dump();
-      const auto resource_identity = rd->root().dump();
-      crypto::Sha256 hash;
-      hash.update(family_identity);
-      hash.update("\n");
-      hash.update(resource_identity);
-      const auto digest = hash.finish();
-      policy->identity_.assign(reinterpret_cast<const char*>(digest.data()), digest.size());
+      {
+        crypto::Sha256 hash;
+        hash.update(pd->root().dump());
+        hash.update("\n");
+        hash.update(rd->root().dump());
+        const auto digest = hash.finish();
+        policy->content_digest_.assign(reinterpret_cast<const char*>(digest.data()), digest.size());
+      }
+      policy->identity_ = replay_identity(policy->families_);
       // Reuse descriptor admission for slot collisions, escaped usage segments,
       // and reserved wire fields instead of introducing a second convention.
       for (const auto& family : policy->families_) {
@@ -338,16 +368,20 @@ const FamilyPolicy* DescriptorPolicy::family(std::string_view name) const noexce
 const RequestDefaults& DescriptorPolicy::defaults(std::string_view name,std::string_view model) const noexcept { for(const auto& m:models_)if(m.family==name && m.model==model)return m.defaults; return family(name)->defaults; }
 std::optional<std::uint64_t> DescriptorPolicy::output_limit(std::string_view name,std::string_view model) const noexcept {for(const auto& m:models_)if(m.family==name && m.model==model)return m.output_limit;return {};}
 std::optional<std::uint64_t> DescriptorPolicy::input_limit(std::string_view name,std::string_view model) const noexcept {for(const auto& m:models_)if(m.family==name && m.model==model)return m.input_limit;return {};}
-std::string DescriptorPolicy::identity_hex() const {
+namespace {
+std::string lower_hex(std::string_view bytes) {
   static constexpr char hex[] = "0123456789abcdef";
   std::string out;
-  out.reserve(identity_.size() * 2);
-  for (const unsigned char byte : identity_) {
+  out.reserve(bytes.size() * 2);
+  for (const unsigned char byte : bytes) {
     out.push_back(hex[(byte >> 4) & 0x0fU]);
     out.push_back(hex[byte & 0x0fU]);
   }
   return out;
 }
+} // namespace
+std::string DescriptorPolicy::identity_hex() const { return lower_hex(identity_); }
+std::string DescriptorPolicy::content_digest_hex() const { return lower_hex(content_digest_); }
 PolicyResult load_policy(std::string_view f,std::string_view r){return PolicyLoader{}.run(f,r);}
 namespace {
 bool matches_sha256_hex(std::string_view actual_lower_hex, std::string_view expected_hex) noexcept {
@@ -393,9 +427,9 @@ PolicyResult load_verified_policy(std::string_view family_json, std::string_view
   auto loaded = load_policy(family_json, resource_json);
   auto* snapshot = std::get_if<PolicySnapshot>(&loaded);
   if (!snapshot || expected_sha256_hex.empty()) return loaded;
-  if (!matches_sha256_hex((*snapshot)->identity_hex(), expected_sha256_hex)) {
-    return ConfigError{"/identity", "matching 64-character SHA-256 policy identity digest", 0,
-                       "policy identity SHA-256 digest mismatch"};
+  if (!matches_sha256_hex((*snapshot)->content_digest_hex(), expected_sha256_hex)) {
+    return ConfigError{"/content_digest", "matching 64-character SHA-256 policy content digest", 0,
+                       "policy content SHA-256 digest mismatch"};
   }
   return loaded;
 }

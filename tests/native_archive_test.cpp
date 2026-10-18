@@ -10,6 +10,8 @@
 #include "codecs/interactions_request.h"
 #include "codecs/responses_request.h"
 #include "crypto/crypto.h"
+#include "descriptor/policy.h"
+#include "sp/config_defaults.h"
 #include "json/json.h"
 #include <array>
 #include <filesystem>
@@ -223,6 +225,20 @@ void diagnostic_documents_roundtrip_without_executable_upgrade() {
   CHECK(std::holds_alternative<Error>(archive->load(invalid_reference,"invalid-executable")));
   CHECK(std::holds_alternative<Error>(archive->load("spna2:"+reference.substr(6),"diagnostic-call")));
 }
+std::string with_member(json::Value object,std::string_view key,std::string_view raw) {
+  std::string out="{";for(auto member:object.members()){if(out.size()>1)out+=',';out+=json::quote(member.key)+':'+(member.key==key?std::string(raw):member.value.dump());}return out+'}';
+}
+// The embedded policy with an extra model entry (admission data) or with another Messages header
+// version (a wire fact).
+descriptor::PolicySnapshot edited_policy(bool wire_fact) {
+  auto source=document(config_defaults::descriptor_policy_json);const auto root=source->root();std::string edited;
+  if(!wire_fact){std::string models=root.get("models").dump();models.insert(models.size()-1,","+with_member(root.get("models").at(0),"model","\"archive-added-model\""));edited=with_member(root,"models",models);}
+  else{std::string families="[";for(auto family:root.get("families").elements()){if(families.size()>1)families+=',';
+    if(family.get("family").as_string()=="anthropic.messages"){auto versions=document(with_member(family,"header_versions",R"(["2023-06-01","2026-01-01"])"));families+=with_member(versions->root(),"header_version","\"2026-01-01\"");}
+    else families+=family.dump();}
+    edited=with_member(root,"families",families+"]");}
+  auto loaded=descriptor::load_policy(edited,config_defaults::codec_defaults_json);CHECK(std::holds_alternative<descriptor::PolicySnapshot>(loaded));return std::get<descriptor::PolicySnapshot>(std::move(loaded));
+}
 void descriptor_semantics_are_archive_authority() {
   Fixture fixture;auto original=desc();auto archive=admitted(NativeArchive::provision(fixture.directory(),fixture.key(),"semantic-owner",original));
   const std::string prefix=R"({"descriptor_version":1,"revision":1,"id":"archive-fixture","family":"anthropic.messages","connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":"/v1/messages","streaming":"/v1/messages"}})";
@@ -236,6 +252,24 @@ void descriptor_semantics_are_archive_authority() {
     CHECK(std::holds_alternative<Error>(NativeArchive::open(fixture.directory(),fixture.key(),"semantic-owner",changed)));
   }
   CHECK(archive->matches_descriptor(original));
+}
+// Editing admission data keeps the replay identity: the archive opens under the edited policy and
+// its history encodes exactly as before. A changed wire fact is a different native origin.
+void admission_policy_edit_keeps_archive_replayable() {
+  Fixture fixture;auto original=desc();auto archive=admitted(NativeArchive::provision(fixture.directory(),fixture.key(),"policy-owner",original));
+  auto r=request();r.messages.push_back(genuine(original,r));r.messages.push_back(user("continue"));
+  const auto reference=saved(archive->save(r.messages,"policy-call"));const auto expected=encoded(original,r).body;archive.reset();
+  const std::string source=R"({"descriptor_version":1,"revision":1,"id":"archive-fixture","family":"anthropic.messages","connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":"/v1/messages","streaming":"/v1/messages"}}})";
+  auto admission=descriptor::load(source,edited_policy(false));CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(admission));
+  const auto& edited=std::get<descriptor::ValidatedDescriptor>(admission);
+  CHECK(edited.policy()->identity()==original.policy()->identity() && edited.policy()->content_digest()!=original.policy()->content_digest());
+  archive=admitted(NativeArchive::open(fixture.directory(),fixture.key(),"policy-owner",edited));
+  auto replay=r;replay.messages=loaded(archive->load(reference,"policy-call"));CHECK(encoded(edited,replay).body==expected);archive.reset();
+  auto wire=descriptor::load(source,edited_policy(true));CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(wire));
+  const auto& changed=std::get<descriptor::ValidatedDescriptor>(wire);
+  CHECK(changed.policy()->identity()!=original.policy()->identity());
+  CHECK(std::holds_alternative<Error>(NativeArchive::open(fixture.directory(),fixture.key(),"policy-owner",changed)));
+  auto stale=r;CHECK(std::holds_alternative<Error>(messages::encode(changed,stale,false)));
 }
 void extended_tool_result_archive_bounds() {
   Fixture fixture;auto d=desc();NativeArchiveLimits limits;limits.max_parts=3;
@@ -294,6 +328,6 @@ int main(int argc,char** argv) {
   try {
     if(argc==5 && std::string_view(argv[1])=="--restart") {const std::string root=argv[2];auto d=desc();auto a=admitted(NativeArchive::open(root+"/records",root+"/activation","restart-owner",d));auto r=request();r.messages=loaded(a->load(argv[3],"restart-call"));CHECK(digest(encoded(d,r).body)==argv[4]);return 0;}
     extended_tool_result_archive_bounds();
-    full_portable_and_native_roundtrip();responses_ordered_restart();chat_encrypted_legacy_to_canonical_restart();google_tool_loop_restart();deprivileged_decode_preserves_result_without_issuing_seals();diagnostic_documents_roundtrip_without_executable_upgrade();descriptor_semantics_are_archive_authority();process_restart(argv[0]);identity_tamper_permissions_and_bounds();std::cout<<"native archive behavioral tests passed\n";return 0;
+    full_portable_and_native_roundtrip();responses_ordered_restart();chat_encrypted_legacy_to_canonical_restart();google_tool_loop_restart();deprivileged_decode_preserves_result_without_issuing_seals();diagnostic_documents_roundtrip_without_executable_upgrade();descriptor_semantics_are_archive_authority();admission_policy_edit_keeps_archive_replayable();process_restart(argv[0]);identity_tamper_permissions_and_bounds();std::cout<<"native archive behavioral tests passed\n";return 0;
   }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

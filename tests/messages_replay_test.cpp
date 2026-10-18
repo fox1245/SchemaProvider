@@ -461,8 +461,12 @@ void effective_policy_lineage() {
   CHECK(request.messages[1].native == sealed.native);
   CHECK(json::equal(document(encoded(original, request).body)->root().get("messages").at(1).get("content"), document(thinking_content)->root()));
   request.max_tokens = 257;
+  // A changed default is admission data, not part of the replay identity: the request sends the
+  // same explicit cap, so the seal stays usable under the reloaded policy.
   auto reloaded = policy_descriptor(messages_policy("258"));
-  rejected(reloaded, request); // A changed semantic policy is not old authority.
+  CHECK(reloaded.policy()->identity() == original.policy()->identity());
+  CHECK(reloaded.policy()->content_digest() != original.policy()->content_digest());
+  CHECK(json::equal(document(encoded(reloaded, request).body)->root(), document(encoded(original, request).body)->root()));
   encoded(original, request); // Existing snapshot and seal remain usable.
   auto version_changed = policy_descriptor(messages_policy("257", "\"2026-01-01\""));
   rejected(version_changed, request);

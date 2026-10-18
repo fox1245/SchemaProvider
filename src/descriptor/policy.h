@@ -68,8 +68,18 @@ class DescriptorPolicy final {
   const RequestDefaults& defaults(std::string_view family, std::string_view model) const noexcept;
   std::optional<std::uint64_t> output_limit(std::string_view family, std::string_view model) const noexcept;
   std::optional<std::uint64_t> input_limit(std::string_view family, std::string_view model) const noexcept;
+  // The replay identity: SHA-256 over the facts that decide how sealed history is written to and
+  // read from the wire (each family's bindings, stop reasons and Messages header version). It is
+  // part of every native origin and archive, so a policy that changes one of them makes earlier
+  // sealed history ReplayIneligible. Admission data (model defaults and limits, media allowlists,
+  // sampling rules, server-tool facts, gateway origins, codec resources) is not part of it: editing
+  // that data keeps sealed history replayable.
   std::string_view identity() const noexcept { return identity_; }
   std::string identity_hex() const;
+  // SHA-256 over the whole policy pair, admission data included. This is what a pin
+  // (`expected_sha256_hex`) checks. It is computed from the parsed documents, not the file bytes.
+  std::string_view content_digest() const noexcept { return content_digest_; }
+  std::string content_digest_hex() const;
   // True when `model` belongs to a series that the family's `temperature_forbidden_generations`
   // names, at or after the generation given there. Matching is ASCII case-insensitive against the
   // full model or the part after its last `/`. A model of the series whose generation cannot be
@@ -86,7 +96,7 @@ class DescriptorPolicy final {
   CodecResources resources_{};
   std::vector<FamilyPolicy> families_;
   std::vector<ModelDefaults> models_;
-  std::string identity_;
+  std::string identity_, content_digest_;
   std::vector<GenerationRule> generation_rules_;
   std::vector<std::pair<std::string, std::string>> completion_cap_origins_;  // family, origin
   friend class PolicyLoader;

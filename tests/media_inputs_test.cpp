@@ -146,9 +146,10 @@ std::string_view default_origin(Fam f, Origin o) {
   return {};
 }
 const descriptor::ValidatedDescriptor& load_descriptor(Fam f, std::string_view base_url, const descriptor::PolicySnapshot& policy) {
-  // Cached for the process: a descriptor owns its policy snapshot.
+  // Cached for the process: a descriptor owns its policy snapshot. Policies that differ only in
+  // admission data share a replay identity, so the key is the content digest.
   static std::map<std::string, std::unique_ptr<descriptor::ValidatedDescriptor>> cache;
-  const std::string key = std::string(fam_name(f)) + "|" + std::string(base_url) + "|" + (policy ? std::string(policy->identity()) : std::string());
+  const std::string key = std::string(fam_name(f)) + "|" + std::string(base_url) + "|" + (policy ? std::string(policy->content_digest()) : std::string());
   auto found = cache.find(key);
   if (found != cache.end()) return *found->second;
   auto loaded = policy ? descriptor::load(descriptor_text(f, base_url), policy) : descriptor::load(descriptor_text(f, base_url));
