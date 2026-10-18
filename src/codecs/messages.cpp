@@ -203,6 +203,11 @@ bool Codec::metadata(json::Value v) {
     const bool array = std::string_view(key) == "input_transformations";
     if (array ? !item.is_array() : !item.is_object()) return fail(ErrorKind::ProtocolCorrupt, "invalid known message metadata");
     if (array && item.size() == 0) continue;
+    // The code-execution container (also opened by dynamic filtering in the web tools) and
+    // cache diagnostics describe the response; they do not change its content. They stay in
+    // the retained raw wire observations. Server-side context edits still change what was answered.
+    const std::string_view name(key);
+    if (name == "container" || name == "diagnostics") continue;
     return fail(ErrorKind::Unsupported, "unsupported semantic message metadata");
   }
   return true;
