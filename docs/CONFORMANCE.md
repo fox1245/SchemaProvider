@@ -8,6 +8,20 @@ Scope (decision D2): chat completion APIs and the artifacts that arrive inside c
 
 Current source scope is five typed buffered/SSE families, bounded prepare/start/complete lifecycle, owned nullable/raw outcomes, exact native binding and archive v3 custody, plus interface 4 controls, Responses cursor ownership and explicit Generate portable history. General sidecar fixture schema, constraints engine, generated support tables, SDK journal projection/kit, cross-origin equivalence and general Drop/Demote remain historical proposals. Generate's explicit imported-call sentinel is a narrow current path, not those historical treatments. WebSocket has no current cell; NeoGraph owns its outcome/checkpoint serializers.
 
+## Package 0.3.4 maintenance record
+
+SDK 0.3.4 alpha keeps interface revision 6 and shared-library generation 6, and changes no installed layout. Its fixes change behaviour ([migration](MIGRATION.md#package-034-interface-6)):
+- **#44.** Chat Completions keeps each generated image from `message.images` as an `Opaque` part of wire type `images`. It used to drop the image although its tokens were billed. A history may keep the part on its assistant message, and the encoder does not send it back.
+- **#46.** A Messages response with a code-execution `container` or the cache `diagnostics` object is accepted. Both stay in `raw_events`. Non-empty `context_management` and `input_transformations` are still `Unsupported`.
+
+Each fix has a case in the SDK's own suites that fails first: `generated_images_are_kept` in the Chat semantic test and `response_metadata_is_kept` in the Messages semantic test. The embedded descriptor policy and its identity are unchanged: no file under `config/` or `src/descriptor/` changed since 0.3.3.
+
+The Linux x86_64 GCC 13.3 Release tree with `SP_BUILD_TESTS`, `SP_BUILD_CANARY` and `SP_BUILD_RUNTIME_TESTS` passed all 49 registered ctest entries, using loopback peers and recorded bodies only, with no network.
+
+Separately, live calls on 2026-10-18 against the fix branch, both buffered and streamed:
+- OpenRouter `google/gemini-3.1-flash-lite-image` returned the `images` part.
+- `claude-haiku-5-5` with `web_fetch_20260318` completed.
+
 ## Package 0.3.3 maintenance record
 
 SDK 0.3.3 alpha keeps interface revision 6 and shared-library generation 6 and changes no installed layout. Its fixes change behaviour ([migration](MIGRATION.md#package-033-interface-6)): a text `PartDelta` with empty text is applied but no longer delivered to `on_event` (#37), and `descriptor::load` holds a `google.generate` descriptor to one literal model in its buffered and streaming paths, the shape the encoder already required at dispatch (#40). The documentation also says how a deployment declares a routing gateway and what that relaxes (#38). Each fix has failing-first cases in the SDK's own suites (the Chat, Messages, Gemini and Responses semantic tests and `runtime_properties` for #37, `descriptor_properties` for #40), and the embedded descriptor policy and its identity are unchanged. The Linux x86_64 GCC 13.3 Release tree with `SP_BUILD_TESTS`, `SP_BUILD_CANARY` and `SP_BUILD_RUNTIME_TESTS` passed all 49 registered ctest entries; loopback peers and recorded bodies only, no network.
