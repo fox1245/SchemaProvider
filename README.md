@@ -2,7 +2,7 @@
 
 SchemaProvider is a C++20 client for five LLM API families: Chat Completions, Responses, Messages, Gemini generate and Interactions. A **family** is a wire protocol, not a model or endpoint operator. Each family has a typed request encoder and response codec; the runtime supplies HTTP/SSE transport, deadlines, cancellation and owned results.
 
-The current source package is **0.3.4 alpha**, with interface revision **6** and shared-library generation **6**. Package 0.3.4 is a maintenance release of this interface: it changes behavior ([migration](docs/MIGRATION.md#package-034-interface-6)) but no installed layout. The 0.3.0 rebuild boundary: `Usage::provider_cost` adds typed provider-reported monetary metadata and changes public outcome/event layouts, so rebuild and reinstall SDK consumers with matching headers and libraries. [Reported costs](docs/USAGE.md#provider-reported-costs) are separate from integer token counts, catalogue estimates, budget holds and invoices. Native archives remain v3 and portable history remains v2. Neither the linked-interface check nor shared-library version promises source or cross-toolchain ABI compatibility. Earlier interface 3–5 execution records retain their original scope and do not retroactively qualify this build or every endpoint/model.
+The current source package is **0.3.5 alpha**, with interface revision **6** and shared-library generation **6**. Package 0.3.5 is a maintenance release of this interface: it changes behavior ([migration](docs/MIGRATION.md#package-035-interface-6)) but no installed layout. The 0.3.0 rebuild boundary: `Usage::provider_cost` adds typed provider-reported monetary metadata and changes public outcome/event layouts, so rebuild and reinstall SDK consumers with matching headers and libraries. [Reported costs](docs/USAGE.md#provider-reported-costs) are separate from integer token counts, catalogue estimates, budget holds and invoices. Native archives remain v3 and portable history remains v2. Neither the linked-interface check nor shared-library version promises source or cross-toolchain ABI compatibility. Earlier interface 3–5 execution records retain their original scope and do not retroactively qualify this build or every endpoint/model.
 
 ## Install and use the unstable C++ SDK
 
@@ -21,7 +21,7 @@ Use a separate build directory and `-DBUILD_SHARED_LIBS=ON` for shared libraries
 ```cmake
 cmake_minimum_required(VERSION 3.20)
 project(first_request LANGUAGES CXX)
-find_package(SchemaProvider 0.3.4 EXACT CONFIG REQUIRED)
+find_package(SchemaProvider 0.3.5 EXACT CONFIG REQUIRED)
 add_executable(first_request main.cpp)
 target_link_libraries(first_request PRIVATE SchemaProvider::transport)
 target_compile_features(first_request PRIVATE cxx_std_20)

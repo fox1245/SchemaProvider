@@ -8,6 +8,22 @@ Scope (decision D2): chat completion APIs and the artifacts that arrive inside c
 
 Current source scope is five typed buffered/SSE families, bounded prepare/start/complete lifecycle, owned nullable/raw outcomes, exact native binding and archive v3 custody, plus interface 4 controls, Responses cursor ownership and explicit Generate portable history. General sidecar fixture schema, constraints engine, generated support tables, SDK journal projection/kit, cross-origin equivalence and general Drop/Demote remain historical proposals. Generate's explicit imported-call sentinel is a narrow current path, not those historical treatments. WebSocket has no current cell; NeoGraph owns its outcome/checkpoint serializers.
 
+## Package 0.3.5 maintenance record
+
+SDK 0.3.5 alpha keeps interface revision 6 and shared-library generation 6, and changes no installed layout. Its fixes change behaviour ([migration](MIGRATION.md#package-035-interface-6)):
+- **#65.** A streamed Interactions call may open with an `interaction.created` resource that has no `status`, as the live API now sends. Every streamed Interactions call used to fail.
+- **#66.** The default SSE line and event bounds are 16 MiB, so a streamed generated image whose base64 exceeds 1 MiB is no longer `ResourceLimit`.
+
+Each fix has a case in the SDK's own suites that fails first: `created_without_status` in the Interactions semantic test, and `SSE defaults hold a generated image` in `runtime_properties`. The embedded descriptor policy and its identity are unchanged: no file under `src/descriptor/` and no policy document changed. The runtime defaults are not part of the identity.
+
+The Linux x86_64 GCC 13.3 Release tree with `SP_BUILD_TESTS`, `SP_BUILD_CANARY` and `SP_BUILD_RUNTIME_TESTS` passed all 49 registered ctest entries, using loopback peers and recorded bodies only, with no network.
+
+Separately, a NeoGraph build of the fix branch passed a live matrix on 2026-10-19:
+- OpenAI Chat and Responses, Anthropic Messages, Gemini Generate and Interactions, and OpenRouter Chat, Responses and Messages, each buffered and streamed.
+- Image input.
+- OpenRouter and Gemini image output, including streamed Gemini images with base64 of 1.5 MB.
+- Claude 5.5 with `web_fetch_20260318`.
+
 ## Package 0.3.4 maintenance record
 
 SDK 0.3.4 alpha keeps interface revision 6 and shared-library generation 6, and changes no installed layout. Its fixes change behaviour ([migration](MIGRATION.md#package-034-interface-6)):
