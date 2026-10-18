@@ -21,6 +21,24 @@ Family C++ code now owns request structure, tool/native checks, stream correlati
 
 `sp::runtime::Request` is the five-family typed variant. `Result` is `std::shared_ptr<const sp::Outcome>`, not a flat successful completion object. This lets callers retain ordered parts, native sidecars, raw observations and failure partials without borrowing a client or callback.
 
+## Package 0.3.5 (interface 6)
+
+Package 0.3.5 is a maintenance release of this line:
+- The interface revision and the shared-library generation stay 6.
+- No installed struct or enum changes layout or gains an enumerator.
+- The embedded descriptor policy and its identity are unchanged. The runtime defaults below are not part of that identity.
+
+Both fixes were found by live streamed calls.
+
+**A streamed Interactions call completes.**
+- The live API now opens a stream with an `interaction.created` resource that has no `status`. This line required one, so every streamed Interactions call failed with `ProtocolCorrupt`, plain text included.
+- The initial resource of a stream may now omit `status`. A present status must still be `in_progress`, and every later resource and every buffered response must still carry one.
+
+**The default SSE line and event bounds are 16 MiB.**
+- A provider sends a whole generated image in one SSE event. With the 1 MiB defaults, a streamed image whose base64 exceeded 1 MiB failed with `ResourceLimit`; buffered calls were bounded by `max_response_bytes` and were not affected.
+- `sse_max_line_bytes` and `sse_max_event_bytes` now default to 16 MiB, the same as `sse_max_total_bytes` and `max_response_bytes`.
+- A caller that sets its own `limits.sse` keeps its values.
+
 ## Package 0.3.4 (interface 6)
 
 Package 0.3.4 is a maintenance release of this line:
