@@ -289,7 +289,8 @@ void named_error_raw_ownership() {
 void created_without_status() {
   auto f = frames();
   f.front() = frame("interaction.created", R"(,"interaction":{"id":"i1","object":"interaction","model":"fixture-model"})");
-  const auto& done = complete(stream(f));
+  const auto outcome = stream(f);  // keep the owner: complete() returns a reference into it
+  const auto& done = complete(outcome);
   CHECK(done.messages[0].native && done.messages[0].native->complete());
   f.front() = frame("interaction.created", R"(,"interaction":{"id":"i1","status":"completed","model":"fixture-model"})");
   failure(stream(f), ErrorKind::ProtocolCorrupt);
