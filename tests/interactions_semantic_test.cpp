@@ -271,7 +271,7 @@ void creation_without_status_transcription() {
   failure(buffered(R"({"model":"fixture-model","steps":[]})"), ErrorKind::ProtocolCorrupt);
   auto foreign = f;
   foreign[0] = frame("interaction.created", R"(,"interaction":{"model":"foreign-model"})");
-  failure(stream(foreign), ErrorKind::ProtocolCorrupt);
+  CHECK(complete(stream(foreign)).model.relation == ServedRelation::Unexplained);
 }
 void raw_observation_ownership() {
   auto wire = resource("[" + output + "]");
@@ -332,6 +332,22 @@ void named_error_raw_ownership() {
   CHECK(failure(bounded, ErrorKind::RemoteFailure).partial.raw_events.empty());
 }
 }
+// The served name is recorded and classified, never refused; an unexplained one is delivered
+// without a native seal. It must stay the same for the whole interaction.
+void served_model_is_recorded() {
+  const auto exact = buffered(resource("[" + output + "]"));
+  CHECK(complete(exact).model.relation == ServedRelation::Exact && complete(exact).model.served == "fixture-model");
+  auto foreign = resource("[" + output + "]");
+  foreign.replace(foreign.find("fixture-model"), 13, "other-model");
+  const auto& c = complete(buffered(foreign));
+  CHECK(c.model.requested == "fixture-model" && c.model.served == "other-model" && c.model.relation == ServedRelation::Unexplained);
+  CHECK(!c.messages.empty() && !c.messages[0].native);
+  auto all_foreign = frames();
+  for (auto& [event, data] : all_foreign)
+    for (auto at = data.find("fixture-model"); at != std::string::npos; at = data.find("fixture-model")) data.replace(at, 13, "other-model");
+  const auto& streamed = complete(stream(all_foreign));
+  CHECK(streamed.model.relation == ServedRelation::Unexplained && !streamed.messages.at(0).native);
+}
 // A failure names the check that failed with a code of the fixed table, whatever the response says; the codec's own text
 // stays as it was and nothing the vendor sent reaches either.
 void failure_reasons() {
@@ -341,9 +357,12 @@ void failure_reasons() {
     CHECK(error.safe_message == message && error.reason == code);
     CHECK(error.reason.find(secret) == std::string::npos && error.safe_message.find(secret) == std::string::npos);
   };
-  auto foreign = resource("[" + output + "]");
-  foreign.replace(foreign.find("fixture-model"), 13, secret);
-  check(buffered(foreign), ErrorKind::ProtocolCorrupt, "interaction identity changed", "interactions.identity.changed");
+  auto changed = frames();
+  changed[0] = frame("interaction.created", R"(,"interaction":{"id":"i1","status":"in_progress","model":")" + secret + R"("})");
+  check(stream(changed), ErrorKind::ProtocolCorrupt, "interaction model changed", "interactions.model.changed");
+  auto unnamed = frames();
+  unnamed[0] = frame("interaction.created", R"(,"interaction":{"id":"i1","status":"in_progress","model":""})");
+  check(stream(unnamed), ErrorKind::ProtocolCorrupt, "invalid interaction model", "interactions.model.invalid");
   check(buffered(resource("[" + output + "]", secret)), ErrorKind::Unsupported, "unsupported terminal interaction status", "interactions.terminal.status_unsupported");
   auto truncated = frames(); truncated.resize(4);
   check(stream(truncated), ErrorKind::Truncated, "interaction lacks terminal resource", "interactions.terminal.missing");
@@ -351,7 +370,7 @@ void failure_reasons() {
   CHECK(failure(cut, ErrorKind::Transport).error.reason.empty());
 }
 int main() {
-  try { failure_reasons(); creation_without_status_transcription(); raw_observation_ownership(); named_error_raw_ownership(); stateless_missing_resource_id(); missing_terminal_usage(); exact_steps_and_replay(); input_boundaries(); lifecycle_and_errors(); unknown_usage_and_signature(); modality_keyed_usage(); uncached_input_and_unmapped_counters();
+  try { served_model_is_recorded(); failure_reasons(); creation_without_status_transcription(); raw_observation_ownership(); named_error_raw_ownership(); stateless_missing_resource_id(); missing_terminal_usage(); exact_steps_and_replay(); input_boundaries(); lifecycle_and_errors(); unknown_usage_and_signature(); modality_keyed_usage(); uncached_input_and_unmapped_counters();
     std::cout << "Interactions semantic contracts passed\n"; return 0;
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

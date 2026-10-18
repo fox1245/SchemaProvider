@@ -72,7 +72,7 @@ class Codec {
   Diagnostics diagnostics_;
   std::map<uint64_t, Step> steps_;
   std::set<std::string, std::less<>> calls_;
-  std::string generation_;
+  std::string generation_, model_;
   Usage usage_;
   std::optional<Error> buffered_failure_;
   bool begun_ = false, terminal_ = false, closed_ = false, body_seen_ = false, done_ = false;

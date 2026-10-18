@@ -593,6 +593,41 @@ void loaded_routes_encode_for_their_model() {
 }
 // A failure names the check that failed with a code of the fixed table, whatever the response says; the codec's own text
 // stays as it was and nothing the vendor sent reaches either.
+// Google answers aliases and auto-routed models under other names (lyria-3-pro-preview as lyria-3.5,
+// gemini-3.5-flash as gemini-3.6-flash). The name is recorded; an unexplained one is delivered
+// without a native seal. The embedded catalogue relates the observed pairs.
+void served_model_is_recorded() {
+  const auto exact = buffered(body(parts, "STOP"));
+  CHECK(complete(exact).model.relation == ServedRelation::Exact && complete(exact).messages.at(0).native);
+  const auto version = buffered(body(parts, "STOP", counters, "fixture-model-001"));
+  CHECK(complete(version).model.relation == ServedRelation::Snapshot && complete(version).messages.at(0).native);
+  for (const bool sse : {false, true}) {
+    const auto wire = body(parts, "STOP", counters, "other-model");
+    const auto outcome = sse ? stream({wire}) : buffered(wire);
+    const auto& c = complete(outcome);
+    CHECK(c.model.requested == "fixture-model" && c.model.served == "other-model" && c.model.relation == ServedRelation::Unexplained);
+    CHECK(c.messages.size() == 1 && c.messages[0].parts.size() == 4 && !c.messages[0].native);
+  }
+  // A name first reported in a later chunk still withholds the seal of the message begun before it.
+  const auto late = stream({R"({"responseId":"generation","candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"a"}]}}]})",
+                            body(R"([{"text":"b"}])", "STOP", counters, "other-model")});
+  CHECK(complete(late).model.relation == ServedRelation::Unexplained && !complete(late).messages.at(0).native);
+  // Observed pairs live in the embedded catalogue: requests of those models.
+  struct Pair { std::string_view requested, served; };
+  for (const auto& [requested, served] : {Pair{"lyria-3-pro-preview", "lyria-3.5"}, Pair{"gemini-3.5-flash", "gemini-3.6-flash"}}) {
+    auto loaded = descriptor::load(std::string(R"({"descriptor_version":1,"revision":1,"id":"gemini-served","family":"google.generate","connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":"/v1beta/models/)") +
+                                   std::string(requested) + R"(:generateContent","streaming":"/v1beta/models/)" + std::string(requested) +
+                                   R"(:streamGenerateContent?alt=sse"}}})");
+    CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
+    const auto& d = std::get<descriptor::ValidatedDescriptor>(loaded);
+    auto r = request(); r.model = std::string(requested);
+    auto encoded = gemini::encode(d, r, false);
+    CHECK(std::holds_alternative<gemini::EncodedRequest>(encoded));
+    Accumulator a; gemini::Codec c(d, gemini::Mode::Buffered, a, std::get<gemini::EncodedRequest>(encoded).context);
+    c.buffered(body(R"([{"text":"x"}])", "STOP", counters, served), {});
+    CHECK(a.outcome() && complete(*a.outcome()).model.relation == ServedRelation::Listed);
+  }
+}
 void failure_reasons() {
   const std::string secret = "VENDOR_SECRET_MARKER_5d2";
   const auto check = [&](const Outcome& outcome, ErrorKind kind, std::string_view message, std::string_view code) {
@@ -600,8 +635,8 @@ void failure_reasons() {
     CHECK(error.safe_message == message && error.reason == code);
     CHECK(error.reason.find(secret) == std::string::npos && error.safe_message.find(secret) == std::string::npos);
   };
-  check(buffered(body(R"([{"text":"x"}])", "STOP", counters, secret)), ErrorKind::ProtocolCorrupt, "Gemini response model mismatch", "gemini.model.mismatch");
-  check(stream({body(R"([{"text":"x"}])", "STOP", counters, secret)}), ErrorKind::ProtocolCorrupt, "Gemini response model mismatch", "gemini.model.mismatch");
+  check(stream({body(R"([{"text":"x"}])"), body(R"([{"text":"y"}])", "STOP", counters, secret)}), ErrorKind::ProtocolCorrupt,
+        "Gemini model identity changed", "gemini.model.identity_changed");
   check(stream({body(R"([{"text":1}])")}), ErrorKind::ProtocolCorrupt, "Gemini text must be string", "gemini.part.text_invalid");
   check(stream({body(R"([{"text":"x","unknown_part_key":")" + secret + R"("}])")}), ErrorKind::Unsupported, "unknown Gemini part semantic", "gemini.part.semantic_unknown");
   check(stream({body(R"([{"text":"x"}])", "", "null")}), ErrorKind::Truncated, "missing Gemini finish reason", "gemini.terminal.missing");
@@ -656,6 +691,6 @@ void empty_text_delta_is_withheld() {
 }
 }
 int main() {
-  try { http_error_envelope_in_an_array_is_retained(); output_total_without_thoughts(); total_proves_zero_thoughts(); total_without_candidates_bounds_the_output(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); tool_result_helper_needs_a_json_object(); successive_unidentified_calls(); native_group_and_replay(); nullable_usage(); uncached_input_rule(); stop_kinds_match_policy_table(); invalid_model_calls(); errors_and_terminals(); loaded_routes_encode_for_their_model(); empty_text_delta_is_withheld(); failure_reasons(); std::cout << "Gemini semantic invariants passed\n"; }
+  try { http_error_envelope_in_an_array_is_retained(); output_total_without_thoughts(); total_proves_zero_thoughts(); total_without_candidates_bounds_the_output(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); tool_result_helper_needs_a_json_object(); successive_unidentified_calls(); native_group_and_replay(); nullable_usage(); uncached_input_rule(); stop_kinds_match_policy_table(); invalid_model_calls(); errors_and_terminals(); loaded_routes_encode_for_their_model(); empty_text_delta_is_withheld(); served_model_is_recorded(); failure_reasons(); std::cout << "Gemini semantic invariants passed\n"; }
   catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

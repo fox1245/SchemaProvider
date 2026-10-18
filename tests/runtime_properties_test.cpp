@@ -690,10 +690,11 @@ void protocol_failures_carry_a_reason(Peer& peer) {
     const auto model = peer.arm("wrong-model"); Capture capture;
     auto op = client.start(request(model, true), run(streaming), capture.callbacks());
     const auto result = finish(op, capture);
-    const auto& error = failure(result, sp::ErrorKind::ProtocolCorrupt).error;
-    require(error.safe_message == "invalid response protocol" && error.reason == "messages.model.mismatch",
-            "a served model that differs from the request was not named: " + error.reason);
-    require(error.reason.find(marker) == std::string::npos, "the served model reached the failure");
+    // A served model that differs from the request is delivered, recorded and classified.
+    require(result && std::holds_alternative<sp::Completion>(*result), "a billed answer under another model name was refused");
+    const auto& served = std::get<sp::Completion>(*result).model;
+    require(served.requested == model && served.served.ends_with("-elsewhere") && served.relation == sp::ServedRelation::Unexplained,
+            "the served model was not recorded as unexplained");
     peer.count(model, 1);
   }
   // Chat compares nothing with the request, so the same peer answer succeeds there. A body the connection cut short

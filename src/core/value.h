@@ -274,7 +274,7 @@ struct Error {
   std::string vendor_code{};
   std::optional<std::chrono::milliseconds> retry_after{};
   AttemptEvidence attempt{};
-  // Which check of the SDK failed, as a stable machine-readable code ("responses.model.mismatch",
+  // Which check of the SDK failed, as a stable machine-readable code ("responses.event.unsupported",
   // "chat.finish_reason.invalid"): lower-case dotted segments from a fixed table, never built from the response,
   // so it holds no vendor text, payload bytes or model output. Empty when no specific check applies, as for
   // transport, HTTP and vendor-reported errors, which keep using kind, http_status and vendor_code.
@@ -284,6 +284,20 @@ struct Error {
 // Owned wire observations, in arrival order before their semantic projections.
 // Neither field grants native replay authority.
 struct RawWire { std::string type; std::shared_ptr<const json::Document> payload; };
+// How the model a response reported relates to the requested one. A name never makes a completed,
+// billed response fail; only `Unexplained` withholds replay authority from the native state.
+enum class ServedRelation : std::uint8_t {
+  NotReported,  // the response named no model
+  Exact,        // the requested name
+  Snapshot,     // the requested name with a version or date suffix ("-20251001", "-2025-08-07", "-001")
+  Listed,       // a name the model catalogue relates to the request (aliases, served_as, alias_of)
+  Routed,       // another name at a declared routing gateway
+  Unexplained,  // any other name: delivered, but its native state is not replayable
+};
+struct ServedModel {
+  std::string requested, served;
+  ServedRelation relation = ServedRelation::NotReported;
+};
 struct Completion {
   std::vector<Message> messages;
   StopReason stop;
@@ -291,6 +305,8 @@ struct Completion {
   std::shared_ptr<const json::Document> wire_envelope{};
   AttemptEvidence attempt{};
   std::vector<RawWire> raw_events{};
+  // The requested and the reported model, and how they relate.
+  ServedModel model{};
 
   std::string joined_text() const {
     std::string out;
@@ -339,6 +355,7 @@ struct PartialCompletion {
   std::optional<StopReason> stop;
   std::shared_ptr<const json::Document> wire_envelope{};
   std::vector<RawWire> raw_events{};
+  ServedModel model{};
 
   std::string joined_text() const {
     std::string out;

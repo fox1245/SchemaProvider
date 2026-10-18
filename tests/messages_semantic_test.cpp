@@ -324,7 +324,7 @@ void corruption_matrix() {
   failed(buffered(body(R"([{"type":"text","text":"x","citations":[{}]}])")), ErrorKind::Unsupported);
   failed(buffered(body(R"([{"type":"container_upload","file_id":"x"}])")), ErrorKind::Unsupported);
   std::string wrong_model = body(); wrong_model.replace(wrong_model.find("fixture-model"), 13, "other-model");
-  failed(buffered(wrong_model), ErrorKind::ProtocolCorrupt);
+  CHECK(completed(buffered(wrong_model)).model.relation == ServedRelation::Unexplained);
   Accumulator acc; messages::Codec no_context(descriptor_value(), messages::Mode::Buffered, acc, nullptr);
   CHECK(!no_context.buffered(body(), {})); failed(*acc.outcome(), ErrorKind::InvalidConfig);
 }
@@ -498,11 +498,12 @@ void routed_gateway_model() {
   failed(run(gateway, routed_context, changed, true), ErrorKind::ProtocolCorrupt);
   changed[3] = {"message_delta", R"({"type":"message_delta","delta":{"stop_reason":"end_turn","model":"other"},"usage":{"output_tokens":3}})"};
   failed(run(gateway, routed_context, changed, true), ErrorKind::ProtocolCorrupt);
-  // A non-gateway origin keeps exact request/response model equality.
-  failed(buffered(served(body(), concrete)), ErrorKind::ProtocolCorrupt);
+  CHECK(completed(routed).model.relation == ServedRelation::Routed && completed(routed).model.served == concrete);
+  // Another origin delivers the same answer, with the name unexplained.
+  CHECK(completed(buffered(served(body(), concrete))).model.relation == ServedRelation::Unexplained);
 }
 // Observed direct Anthropic behavior: the documented alias claude-haiku-4-5 is answered with
-// "model":"claude-haiku-4-5-20251001". Only that origin admits an undated alias's dated snapshot.
+// "model":"claude-haiku-4-5-20251001". Any origin reads a dated suffix as a snapshot.
 void direct_dated_snapshot_alias() {
   static auto loaded = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"direct-messages","family":"anthropic.messages","connection":{"base_url":"https://api.anthropic.com","paths":{"buffered":"/v1/messages","streaming":"/v1/messages"}}})");
   CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
@@ -532,6 +533,7 @@ void direct_dated_snapshot_alias() {
     const auto first = run(direct, alias, wires(snapshot, sse), sse);
     const auto& c = completed(first);
     CHECK(text(c.messages) == "hi" && c.messages[0].native && c.messages[0].native->complete());
+    CHECK(c.model.requested == alias.model && c.model.served == snapshot && c.model.relation == ServedRelation::Snapshot);
     // Replay stays bound to the requested alias, not the served snapshot.
     auto replay = alias; replay.messages.push_back(c.messages[0]); replay.messages.push_back(Message{"", Role::User, {Text{"again"}}});
     auto encoded = messages::encode(direct, replay, false); CHECK(std::holds_alternative<messages::EncodedRequest>(encoded));
@@ -539,11 +541,10 @@ void direct_dated_snapshot_alias() {
     CHECK(std::get<json::Document>(wire).root().get("model").as_string() == alias.model);
     auto changed = replay; changed.model = snapshot;
     CHECK(std::holds_alternative<Error>(messages::encode(direct, changed, false)) && std::get<Error>(messages::encode(direct, changed, false)).kind == ErrorKind::ReplayIneligible);
-    // An explicit snapshot request is exact: the same snapshot passes, another date does not.
-    completed(run(direct, request_for(snapshot), wires(snapshot, sse), sse));
-    failed(run(direct, request_for(snapshot), wires("claude-haiku-4-5-20251002", sse), sse), ErrorKind::ProtocolCorrupt);
-    // Other undeclared origins keep exact equality.
-    failed(run(descriptor_value(), alias, wires(snapshot, sse), sse), ErrorKind::ProtocolCorrupt);
+    // An explicit snapshot request is exact; another date is unexplained, still delivered.
+    CHECK(completed(run(direct, request_for(snapshot), wires(snapshot, sse), sse)).model.relation == ServedRelation::Exact);
+    CHECK(completed(run(direct, request_for(snapshot), wires("claude-haiku-4-5-20251002", sse), sse)).model.relation == ServedRelation::Unexplained);
+    CHECK(completed(run(descriptor_value(), alias, wires(snapshot, sse), sse)).model.relation == ServedRelation::Snapshot);
   }
   // The served identity must remain stable for the whole response.
   for (const auto& later : {std::string("claude-haiku-4-5-20251002"), alias.model}) {
@@ -551,15 +552,16 @@ void direct_dated_snapshot_alias() {
     frames[3] = {"message_delta", R"({"type":"message_delta","model":")" + later + R"(","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}})"};
     failed(run(direct, alias, frames, true), ErrorKind::ProtocolCorrupt);
   }
-  for (const auto& wrong : {"claude-haiku-4-5-20250229", "claude-haiku-4-5-20251301", "claude-haiku-4-5-20251032", "claude-haiku-4-5-00001001",
-                            "claude-haiku-4-5-2025-10-01", "claude-haiku-4-5-2025100", "claude-haiku-4-5-202510011", "claude-haiku-4-5-20251001-extra",
-                            "claude-haiku-4-6-20251001", "claude-haiku-4-520251001", "claude-haiku-4-5-2025100a"})
-    failed(run(direct, alias, wires(wrong, false), false), ErrorKind::ProtocolCorrupt);
-  completed(run(direct, alias, wires("claude-haiku-4-5-20240229", false), false));
-  // A dated request never gains a second date, and namespaced or uppercase names stay exact.
-  failed(run(direct, request_for(snapshot), wires(snapshot + "-20251002", false), false), ErrorKind::ProtocolCorrupt);
-  failed(run(direct, request_for("anthropic/claude-haiku-4-5"), wires("anthropic/claude-haiku-4-5-20251001", false), false), ErrorKind::ProtocolCorrupt);
-  failed(run(direct, request_for("Claude-Haiku-4-5"), wires("Claude-Haiku-4-5-20251001", false), false), ErrorKind::ProtocolCorrupt);
+  // A suffix of digits and dashes is a snapshot by its shape; anything else is unexplained. No name fails.
+  for (const auto& suffixed : {"claude-haiku-4-5-20250229", "claude-haiku-4-5-00001001", "claude-haiku-4-5-2025-10-01",
+                               "claude-haiku-4-5-2025100", "claude-haiku-4-5-202510011", "claude-haiku-4-5-20240229"})
+    CHECK(completed(run(direct, alias, wires(suffixed, false), false)).model.relation == ServedRelation::Snapshot);
+  for (const auto& other : {"claude-haiku-4-5-20251001-extra", "claude-haiku-4-6-20251001", "claude-haiku-4-520251001", "claude-haiku-4-5-2025100a"})
+    CHECK(completed(run(direct, alias, wires(other, false), false)).model.relation == ServedRelation::Unexplained);
+  CHECK(completed(run(direct, request_for("anthropic/claude-haiku-4-5"), wires("anthropic/claude-haiku-4-5-20251001", false), false)).model.relation ==
+        ServedRelation::Snapshot);
+  CHECK(completed(run(direct, request_for("Claude-Haiku-4-5"), wires("claude-haiku-4-5-20251001", false), false)).model.relation ==
+        ServedRelation::Unexplained);
 }
 // Captured OpenRouter Messages wire (anthropic/claude-haiku-4.5, ids scrubbed). OpenRouter ends the
 // stream with an extra `[DONE]` frame after message_stop and reports USD cost inside usage.
@@ -734,6 +736,39 @@ void empty_text_delta_is_withheld() {
   const auto thinking = traced({start(), block(0, R"({"type":"thinking","thinking":""})"), delta(0, R"({"type":"thinking_delta","thinking":"hm"})"), end(0), stop(), done});
   CHECK(thinking.trace == "[begin][other:][other:hm][seal]");
 }
+// The reported model is recorded and classified; no name fails a completed response. Only an
+// unexplained name withholds replay authority from the native state.
+void served_model_is_recorded() {
+  const std::string content = R"([{"type":"thinking","thinking":"t","signature":"SIG"},{"type":"text","text":"answer"}])";
+  auto with_model = [](std::string wire, std::string_view model) { wire.replace(wire.find("fixture-model"), 13, model); return wire; };
+  auto replays = [](const Message& sealed) {
+    messages::Request request; request.model = "fixture-model"; request.account_scope = "fixture-account";
+    request.messages = {Message{"", Role::User, {Text{"Hello"}}}, sealed, Message{"", Role::User, {Text{"next"}}}};
+    const auto encoded = messages::encode(descriptor_value(), request, true);
+    if (const auto* error = std::get_if<Error>(&encoded)) { CHECK(error->kind == ErrorKind::ReplayIneligible); return false; }
+    return true;
+  };
+  const auto exact = buffered(body(content));
+  CHECK(completed(exact).model.requested == "fixture-model" && completed(exact).model.served == "fixture-model");
+  CHECK(completed(exact).model.relation == ServedRelation::Exact && completed(exact).messages.at(0).native &&
+        replays(completed(exact).messages.at(0)));
+  const auto dated = buffered(with_model(body(content), "fixture-model-20261001"));
+  CHECK(completed(dated).model.relation == ServedRelation::Snapshot && replays(completed(dated).messages.at(0)));
+  for (const bool streaming : {false, true}) {
+    auto foreign = start();
+    foreign.second = with_model(foreign.second, "other-model");
+    const auto outcome = streaming
+        ? stream({foreign, block(0, R"({"type":"thinking","thinking":""})"), delta(0, R"({"type":"thinking_delta","thinking":"t"})"),
+                  delta(0, R"({"type":"signature_delta","signature":"SIG"})"), end(0), block(1, R"({"type":"text","text":""})"),
+                  delta(1, R"({"type":"text_delta","text":"answer"})"), end(1), stop(), done})
+        : buffered(with_model(body(content), "other-model"));
+    const auto& completion = completed(outcome);
+    CHECK(completion.model.served == "other-model" && completion.model.relation == ServedRelation::Unexplained);
+    CHECK(completion.joined_text() == "answer");
+    // Delivered without a native seal, so a continuation that replays its thinking is refused.
+    CHECK(!completion.messages.at(0).native && !replays(completion.messages.at(0)));
+  }
+}
 // A failure names the check that failed with a code of the fixed table, whatever the response says; the codec's own text
 // stays as it was and nothing the vendor sent reaches either.
 void failure_reasons() {
@@ -747,12 +782,6 @@ void failure_reasons() {
   check(stream({start(), text_block, delta(0, R"({"text":"x"})")}), ErrorKind::ProtocolCorrupt, "delta type required", "messages.delta.type_required");
   check(stream({start(), text_block, delta(0, "{\"type\":" + json::quote(secret) + "}")}), ErrorKind::Unsupported, "unknown content delta", "messages.delta.unknown");
   check(stream({start(), text_block, delta(0, R"({"type":"thinking_delta","thinking":"x"})")}), ErrorKind::ProtocolCorrupt, "delta kind differs from block", "messages.delta.kind_mismatch");
-  auto foreign = start();
-  foreign.second.replace(foreign.second.find("fixture-model"), 13, secret);
-  check(stream({foreign}), ErrorKind::ProtocolCorrupt, "response model differs from request", "messages.model.mismatch");
-  auto served = body();
-  served.replace(served.find("fixture-model"), 13, secret);
-  check(buffered(served), ErrorKind::ProtocolCorrupt, "response model differs from request", "messages.model.mismatch");
   check(stream({start(), text_block}), ErrorKind::Truncated, "missing Messages terminal evidence", "messages.terminal.missing");
   const auto cut = stream({start(), text_block}, {false, ErrorKind::Transport});
   CHECK(failed(cut, ErrorKind::Transport).error.reason.empty() && failed(cut, ErrorKind::Transport).error.safe_message == "abnormal response close");
@@ -779,7 +808,7 @@ void response_metadata_is_kept() {
 }
 int main() {
   try {
-    routed_gateway_model(); openrouter_sentinel_and_cost(); direct_dated_snapshot_alias();
+    routed_gateway_model(); openrouter_sentinel_and_cost(); direct_dated_snapshot_alias(); served_model_is_recorded();
     owned_raw_observations(); raw_failure_evidence(); typeless_buffered_error();
     usage_binding_precedence();
     usage_detail_forward_compatibility(); toolset_metadata_shapes();

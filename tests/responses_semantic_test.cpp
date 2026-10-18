@@ -803,20 +803,27 @@ void provider_money_and_snapshot_aliases() {
       failed(decode(direct, alias, wires, true), ErrorKind::ProtocolCorrupt);
     }
   }
-  for (const auto& served : {"gpt-4.1-mini-2025-04-14", "gpt-4.1-nano-2025-02-29", "gpt-4.1-nano-2025-04-31", "gpt-4.1-nano-2025-04-14-extra"}) {
-    failed(decode(direct, alias, {{"", replace_model(body("[]"), served)}}, false), ErrorKind::ProtocolCorrupt);
-  }
+  // No name fails a completed response: a suffix of digits and dashes is a snapshot by its shape,
+  // and any other name is unexplained.
+  for (const auto& served : {"gpt-4.1-nano-2025-02-29", "gpt-4.1-nano-2025-04-31"})
+    CHECK(completed(decode(direct, alias, {{"", replace_model(body("[]"), served)}}, false)).model.relation == ServedRelation::Snapshot);
+  for (const auto& served : {"gpt-4.1-mini-2025-04-14", "gpt-4.1-nano-2025-04-14-extra"})
+    CHECK(completed(decode(direct, alias, {{"", replace_model(body("[]"), served)}}, false)).model.relation == ServedRelation::Unexplained);
   auto explicit_request = alias; explicit_request.model = snapshot;
-  failed(decode(direct, explicit_request, {{"", replace_model(body("[]"), "gpt-4.1-nano-2025-04-15")}}, false), ErrorKind::ProtocolCorrupt);
+  CHECK(completed(decode(direct, explicit_request, {{"", replace_model(body("[]"), "gpt-4.1-nano-2025-04-15")}}, false)).model.relation ==
+        ServedRelation::Unexplained);
   auto namespaced = alias; namespaced.model = "openai/gpt-4.1-nano";
-  failed(decode(direct, namespaced, {{"", replace_model(body("[]"), "openai/gpt-4.1-nano-2025-04-14")}}, false), ErrorKind::ProtocolCorrupt);
+  CHECK(completed(decode(direct, namespaced, {{"", replace_model(body("[]"), "openai/gpt-4.1-nano-2025-04-14")}}, false)).model.relation ==
+        ServedRelation::Snapshot);
   const auto leap = replace_model(body("[]"), "gpt-4.1-nano-2024-02-29");
   completed(decode(direct, alias, {{"", leap}}, false));
   // Observed OpenRouter routing alias: the gateway answers with the concrete model it served.
   auto routing = request(); routing.model = "~deepseek/deepseek-v4-flash-latest";
   const auto served = replace_model(body("[" + message + "]"), "deepseek/deepseek-v4-flash-0731");
-  CHECK(completed(decode(gateway, routing, {{"", served}}, false)).wire_envelope->root().get("model").as_string() == "deepseek/deepseek-v4-flash-0731");
-  failed(decode(direct, routing, {{"", served}}, false), ErrorKind::ProtocolCorrupt);
+  const auto at_gateway = decode(gateway, routing, {{"", served}}, false);
+  CHECK(completed(at_gateway).wire_envelope->root().get("model").as_string() == "deepseek/deepseek-v4-flash-0731");
+  CHECK(completed(at_gateway).model.relation == ServedRelation::Routed && completed(at_gateway).model.served == "deepseek/deepseek-v4-flash-0731");
+  CHECK(completed(decode(direct, routing, {{"", served}}, false)).model.relation == ServedRelation::Unexplained);
 }
 void corruption_and_bounds() {
   auto frames = text_frames(); frames[3] = text_delta("foreign", 0, "hel"); failed(stream(frames), ErrorKind::ProtocolCorrupt);
@@ -828,7 +835,7 @@ void corruption_and_bounds() {
   failed(stream(sequenced), ErrorKind::ProtocolCorrupt);
   for (const auto& [from, to] : std::vector<std::pair<std::string, std::string>>{
       {"\"id\":\"resp_1\"", "\"id\":null"}, {"\"object\":\"response\"", "\"object\":\"message\""},
-      {"\"created_at\":1", "\"created_at\":-1"}, {"\"model\":\"fixture-model\"", "\"model\":\"foreign\""}}) {
+      {"\"created_at\":1", "\"created_at\":-1"}, {"\"model\":\"fixture-model\"", "\"model\":\"\""}}) {
     auto invalid = body("[]"); const auto position = invalid.find(from); CHECK(position != std::string::npos);
     invalid.replace(position, from.size(), to); failed(buffered(invalid), ErrorKind::ProtocolCorrupt);
   }
@@ -891,11 +898,10 @@ void failure_reasons() {
     CHECK(error.reason.find(secret) == std::string::npos && error.safe_message.find(secret) == std::string::npos);
   };
   const auto served = [&](std::string wire) { wire.replace(wire.find("fixture-model"), 13, secret); return wire; };
-  check(buffered(served(body("[" + message + "]"))), ErrorKind::ProtocolCorrupt, "response model differs from request", "responses.model.mismatch");
+  // Another served name is recorded, not refused (served_model_is_recorded).
+  CHECK(completed(buffered(served(body("[" + message + "]")))).model.relation == ServedRelation::Unexplained);
   auto frames = text_frames();
   const std::vector<Frame> opening(frames.begin(), frames.begin() + 3);
-  frames[0].second = served(frames[0].second);
-  check(stream(frames), ErrorKind::ProtocolCorrupt, "response model differs from request", "responses.model.mismatch");
   check(stream({event("response." + secret)}), ErrorKind::Unsupported, "unsupported semantic Responses event", "responses.event.unsupported");
   check(stream({opening[1]}), ErrorKind::ProtocolCorrupt, "event before response.created", "responses.stream.event_before_created");
   check(stream(opening), ErrorKind::Truncated, "missing Responses terminal evidence", "responses.terminal.missing");

@@ -1,4 +1,5 @@
 #include "codecs/chat.h"
+#include "codecs/served_model.h"
 #include "codecs/media_output.h"
 #include "codecs/provider_cost.h"
 #include "codecs/reason.h"
@@ -52,6 +53,7 @@ Codec::Codec(const descriptor::ValidatedDescriptor& descriptor, Mode mode, Accum
   if (descriptor_.family() != "openai.chat") fail(ErrorKind::InvalidConfig, "descriptor family does not match Chat codec");
   if (context_ && !context_->matches_descriptor(descriptor_))
     fail(ErrorKind::InvalidConfig, "Chat request context does not match descriptor");
+  served::observe(descriptor_, accumulator_, context_, {}, false);
 }
 bool Codec::emit(const Event& e) {
   return accumulator_.accept(e, buffered_failure_ ? &*buffered_failure_ : nullptr);
@@ -150,6 +152,9 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
   if (!begun_) {
     generation_ = root.get("id").as_string();
     model_ = root.get("model").as_string();
+    // Chat has never bound replay to the served name (compatible servers report their own), so the
+    // name is only recorded.
+    served::observe(descriptor_, accumulator_, context_, model_, false);
     if (!emit(Begin{generation_}) || !emit(MessageBegin{{0}, generation_, Role::Assistant, context_})) return false;
     begun_ = true;
   }

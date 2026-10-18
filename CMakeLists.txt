@@ -139,7 +139,7 @@ add_library(sp_descriptor src/descriptor/descriptor.cpp src/descriptor/policy.cp
 target_compile_options(sp_descriptor PRIVATE ${SP_WARNING_OPTIONS})
 target_link_libraries(sp_descriptor PUBLIC sp_json)
 
-add_library(sp_codecs src/codecs/accumulator.cpp src/codecs/reason.cpp src/codecs/media_input.cpp src/codecs/media_output.cpp
+add_library(sp_codecs src/codecs/accumulator.cpp src/codecs/reason.cpp src/codecs/served_model.cpp src/codecs/media_input.cpp src/codecs/media_output.cpp
             src/codecs/chat.cpp src/codecs/chat_request.cpp
             src/codecs/messages.cpp src/codecs/messages_request.cpp
             src/codecs/responses.cpp src/codecs/responses_request.cpp

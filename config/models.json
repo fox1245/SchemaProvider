@@ -20,6 +20,18 @@
       "source": "verified"
     },
     {
+      "id": "gemini-3.5-flash",
+      "families": ["google.generate", "google.interactions"],
+      "served_as": ["gemini-3.6-flash"],
+      "source": "verified"
+    },
+    {
+      "id": "gemini-3.7-flash",
+      "families": ["google.generate", "google.interactions"],
+      "served_as": ["gemini-3.8-flash"],
+      "source": "verified"
+    },
+    {
       "id": "gemini-omni-1.1-flash",
       "families": ["google.interactions"],
       "source": "verified"
@@ -29,6 +41,12 @@
       "families": ["openai.chat", "openai.responses"],
       "input_limit": 922000,
       "output_limit": 128000,
+      "source": "verified"
+    },
+    {
+      "id": "lyria-3-pro-preview",
+      "families": ["google.generate", "google.interactions"],
+      "served_as": ["lyria-3.5"],
       "source": "verified"
     }
   ]
