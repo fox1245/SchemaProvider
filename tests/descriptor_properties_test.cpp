@@ -508,27 +508,121 @@ void preset_builders_and_validation() {
     CHECK(std::holds_alternative<ConfigError>(presets::try_loopback_chat("http://api.openai.com")));
     CHECK(std::holds_alternative<ConfigError>(presets::try_loopback_chat("http://127.0.0.1:8080", "relative/path")));
 }
+// Replaces (or appends) one member of a JSON object, keeping the others in order.
+std::string with_member(sp::json::Value object, std::string_view key, std::string_view raw) {
+    std::string result = "{";
+    bool present = false;
+    for (auto member : object.members()) {
+        if (result.size() > 1) result += ',';
+        result += sp::json::quote(member.key) + ':';
+        if (member.key == key) { result += raw; present = true; }
+        else result += member.value.dump();
+    }
+    if (!present) result += std::string(result.size() > 1 ? "," : "") + sp::json::quote(key) + ':' + std::string(raw);
+    return result + '}';
+}
+// The embedded descriptor policy with one member of one family replaced.
+std::string with_family_member(std::string_view family, std::string_view key, std::string_view raw) {
+    auto parsed = sp::json::parse(sp::config_defaults::descriptor_policy_json);
+    const auto root = std::get<sp::json::Document>(parsed).root();
+    std::string families = "[";
+    for (auto entry : root.get("families").elements()) {
+        if (families.size() > 1) families += ',';
+        families += entry.get("family").as_string() == family ? with_member(entry, key, raw) : entry.dump();
+    }
+    return with_member(root, "families", families + ']');
+}
+void replay_identity_covers_wire_facts_only() {
+    using namespace sp::descriptor;
+    const auto builtin = builtin_policy();
+    CHECK(builtin->identity().size() == 32 && builtin->content_digest().size() == 32);
+    CHECK(builtin->identity_hex() != builtin->content_digest_hex());
+    auto load_pair = [](std::string_view family_json, std::string_view resource_json = sp::config_defaults::codec_defaults_json) {
+        auto loaded = load_policy(family_json, resource_json);
+        CHECK(std::holds_alternative<PolicySnapshot>(loaded));
+        return std::holds_alternative<PolicySnapshot>(loaded) ? std::get<PolicySnapshot>(std::move(loaded)) : PolicySnapshot{};
+    };
+    auto parsed = sp::json::parse(sp::config_defaults::descriptor_policy_json);
+    const auto root = std::get<sp::json::Document>(parsed).root();
+    auto codec = sp::json::parse(sp::config_defaults::codec_defaults_json);
+    const auto codec_root = std::get<sp::json::Document>(codec).root();
+
+    // Admission data: the replay identity stays, the content digest changes.
+    std::string added_model = root.get("models").dump();
+    added_model.insert(added_model.size() - 1, "," + with_member(root.get("models").at(0), "model", "\"policy-test-added-model\""));
+    std::string reversed = "[";
+    for (std::size_t i = root.get("families").size(); i-- > 0;) {
+        if (reversed.size() > 1) reversed += ',';
+        reversed += root.get("families").at(i).dump();
+    }
+    reversed += ']';
+    auto chat = std::get<sp::json::Document>(parsed).root().get("families").at(0);
+    CHECK(chat.get("family").as_string() == "openai.chat");
+    std::string prefixes = chat.get("temperature_forbidden_model_prefixes").dump();
+    prefixes.insert(prefixes.size() - 1, std::string(prefixes.size() > 2 ? "," : "") + "\"policy-test-\"");
+    std::string origins = chat.get("openrouter_origins").dump();
+    origins.insert(origins.size() - 1, std::string(origins.size() > 2 ? "," : "") + "\"https://gateway.example.test\"");
+    const auto anthropic_defaults = with_member(root.get("families").at(1).get("defaults"), "max_output_tokens", "321");
+    CHECK(root.get("families").at(1).get("family").as_string() == "anthropic.messages");
+    const std::string admission_edits[] = {
+        with_member(root, "models", added_model),
+        with_member(root, "families", reversed),
+        with_member(root, "revision", std::to_string(root.get("revision").as_uint() + 1)),
+        with_family_member("openai.chat", "temperature_forbidden_model_prefixes", prefixes),
+        with_family_member("openai.chat", "openrouter_origins", origins),
+        with_family_member("anthropic.messages", "defaults", anthropic_defaults),
+        with_family_member("anthropic.messages", "header_versions", R"(["2023-06-01","2026-01-01"])"),
+    };
+    for (const auto& edited : admission_edits) {
+        const auto policy = load_pair(edited);
+        if (!policy) continue;
+        CHECK(policy->identity() == builtin->identity());
+        CHECK(policy->content_digest() != builtin->content_digest());
+    }
+    const auto resources = with_member(codec_root.get("resources"), "request_bytes", "4096");
+    if (const auto policy = load_pair(sp::config_defaults::descriptor_policy_json, with_member(codec_root, "resources", resources))) {
+        CHECK(policy->identity() == builtin->identity());
+        CHECK(policy->content_digest() != builtin->content_digest());
+    }
+
+    // Wire facts: the replay identity changes.
+    std::string stops = chat.get("stop_reasons").dump();
+    stops.insert(stops.size() - 1, ",\"policy_test_stop\":\"Unknown\"");
+    if (const auto policy = load_pair(with_family_member("openai.chat", "stop_reasons", stops)))
+        CHECK(policy->identity() != builtin->identity());
+    {
+        auto versions = sp::json::parse(with_family_member("anthropic.messages", "header_versions", R"(["2023-06-01","2026-01-01"])"));
+        const auto edited_root = std::get<sp::json::Document>(versions).root();
+        std::string families = "[";
+        for (auto entry : edited_root.get("families").elements()) {
+            if (families.size() > 1) families += ',';
+            families += entry.get("family").as_string() == "anthropic.messages" ? with_member(entry, "header_version", "\"2026-01-01\"") : entry.dump();
+        }
+        const auto policy = load_pair(with_member(edited_root, "families", families + ']'));
+        if (policy) CHECK(policy->identity() != builtin->identity());
+    }
+}
 void policy_bundle_and_identity_pinning() {
     using namespace sp::descriptor;
     const auto def = builtin_policy();
     CHECK(def != nullptr);
-    const auto hex = def->identity_hex();
+    const auto hex = def->content_digest_hex();
     CHECK(hex.size() == 64);
     for (char c : hex) CHECK((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'));
 
     const auto verified = load_verified_policy(sp::config_defaults::descriptor_policy_json, sp::config_defaults::codec_defaults_json, hex);
-    CHECK(std::holds_alternative<PolicySnapshot>(verified) && std::get<PolicySnapshot>(verified)->identity_hex() == hex);
+    CHECK(std::holds_alternative<PolicySnapshot>(verified) && std::get<PolicySnapshot>(verified)->content_digest_hex() == hex);
 
     std::string wrong_hex = hex;
     wrong_hex[0] = (wrong_hex[0] == '0') ? '1' : '0';
     const auto mismatch = load_verified_policy(sp::config_defaults::descriptor_policy_json, sp::config_defaults::codec_defaults_json, wrong_hex);
-    CHECK(std::holds_alternative<ConfigError>(mismatch) && std::get<ConfigError>(mismatch).pointer == "/identity");
+    CHECK(std::holds_alternative<ConfigError>(mismatch) && std::get<ConfigError>(mismatch).pointer == "/content_digest");
     const auto malformed_hex = load_verified_policy(sp::config_defaults::descriptor_policy_json, sp::config_defaults::codec_defaults_json, "not-a-sha256");
-    CHECK(std::holds_alternative<ConfigError>(malformed_hex) && std::get<ConfigError>(malformed_hex).pointer == "/identity");
+    CHECK(std::holds_alternative<ConfigError>(malformed_hex) && std::get<ConfigError>(malformed_hex).pointer == "/content_digest");
 
     const auto bundle_json = builtin_policy_bundle_json();
     const auto bundle_loaded = load_policy_bundle(bundle_json, hex);
-    CHECK(std::holds_alternative<PolicySnapshot>(bundle_loaded) && std::get<PolicySnapshot>(bundle_loaded)->identity_hex() == hex);
+    CHECK(std::holds_alternative<PolicySnapshot>(bundle_loaded) && std::get<PolicySnapshot>(bundle_loaded)->content_digest_hex() == hex);
     CHECK(std::holds_alternative<ConfigError>(load_policy_bundle(bundle_json, wrong_hex)));
     CHECK(std::holds_alternative<ConfigError>(load_policy_bundle(R"({"version":2,"descriptor_policy":{},"codec_defaults":{}})")));
     CHECK(std::holds_alternative<ConfigError>(load_policy_bundle(R"({"version":1,"descriptor_policy":{},"codec_defaults":{},"extra":1})")));
@@ -561,9 +655,9 @@ void policy_bundle_and_identity_pinning() {
         std::ofstream(huge_path, std::ios::binary) << std::string(140000, ' ');
     }
     const auto from_files = load_policy_files(desc_path.string(), codec_path.string(), hex);
-    CHECK(std::holds_alternative<PolicySnapshot>(from_files) && std::get<PolicySnapshot>(from_files)->identity_hex() == hex);
+    CHECK(std::holds_alternative<PolicySnapshot>(from_files) && std::get<PolicySnapshot>(from_files)->content_digest_hex() == hex);
     const auto from_bundle_file = load_policy_bundle_file(bundle_path.string(), hex);
-    CHECK(std::holds_alternative<PolicySnapshot>(from_bundle_file) && std::get<PolicySnapshot>(from_bundle_file)->identity_hex() == hex);
+    CHECK(std::holds_alternative<PolicySnapshot>(from_bundle_file) && std::get<PolicySnapshot>(from_bundle_file)->content_digest_hex() == hex);
     CHECK(std::holds_alternative<ConfigError>(load_policy_bundle_file((tmp_dir / "nonexistent_sp_bundle.json").string())));
     CHECK(std::holds_alternative<ConfigError>(load_policy_bundle_file(huge_path.string())));
     std::error_code ec;
@@ -585,6 +679,7 @@ int main() {
     claude_temperature_by_generation();
     preset_builders_and_validation();
     policy_bundle_and_identity_pinning();
+    replay_identity_covers_wire_facts_only();
     if (failures) std::fprintf(stderr, "%d descriptor/JSON checks failed\n", failures);
     else std::puts("descriptor/JSON properties passed");
     return failures ? 1 : 0;

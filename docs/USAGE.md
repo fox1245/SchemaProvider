@@ -149,7 +149,7 @@ There are two independent immutable policy snapshots:
 
 Both loaders return a variant of snapshot or `descriptor::ConfigError`. Embedded snapshots are the default; they are generated during SDK configuration. External loads are explicit and bounded. Files are source inputs, not files that every installed process must discover. Existing clients/descriptors retain their admitted policy; loading a replacement affects only newly constructed values.
 
-A descriptor/codec snapshot can also be loaded from files, from one bundle, and against an expected identity, so a vendor fact (a model rule, a header version) can be updated without rebuilding the SDK:
+A descriptor/codec snapshot can also be loaded from files, from one bundle, and against an expected content digest, so a vendor fact (a model rule, a header version) can be updated without rebuilding the SDK:
 
 | Function | Reads |
 |---|---|
@@ -158,7 +158,11 @@ A descriptor/codec snapshot can also be loaded from files, from one bundle, and 
 | `descriptor::load_verified_policy(family_json, resource_json, expected_sha256_hex = {})` | The two documents as text; the common core of the loaders above. |
 | `descriptor::builtin_policy_bundle_json()` | The embedded pair in the bundle shape, a starting point for an edited bundle. |
 
-`DescriptorPolicy::identity_hex()` is the lowercase 64-digit SHA-256 identity of the canonical policy pair, the same identity the native origin binds; it is computed from the parsed documents, not the raw file bytes. A nonempty `expected_sha256_hex` must be 64 hexadecimal digits (either case) equal to that identity, otherwise the load returns a `ConfigError` at `/identity`, so a malformed or wrong pin is never ignored. An empty pin means no check. The pin compares against a value you obtained out of band; it is an integrity check, not proof of who produced the file. The bundle covers the descriptor/codec pair only: runtime and error policy still load with `configuration::load_runtime_policy`. A policy with a different identity is a different native origin, so history sealed under the previous snapshot is `ReplayIneligible` under the new one.
+A policy has two digests. Both are lowercase 64-digit SHA-256 values computed from the parsed documents, not the raw file bytes:
+- `DescriptorPolicy::identity_hex()` is the replay identity. It covers the facts that decide how sealed history is written to and read from the wire: each family's bindings, stop reasons and Messages header version. Every native origin and archive binds it, so a policy that changes one of these facts makes history sealed under the previous snapshot `ReplayIneligible`.
+- `DescriptorPolicy::content_digest_hex()` covers the whole pair, including the admission data: model defaults and limits, media allowlists, sampling rules, server-tool facts, gateway origins and codec resources. Editing that data changes the content digest only, so sealed history stays replayable.
+
+A nonempty `expected_sha256_hex` must be 64 hexadecimal digits (either case) equal to the content digest, otherwise the load returns a `ConfigError` at `/content_digest`, so a malformed or wrong pin is never ignored. An empty pin means no check. The pin compares against a value you obtained out of band; it is an integrity check, not proof of who produced the file. The bundle covers the descriptor/codec pair only: runtime and error policy still load with `configuration::load_runtime_policy`.
 
 Family/model defaults are resolved before encoding. An unset request optional uses its admitted default, which may also be unset. An explicit value replaces that default; false and allowed zero values remain distinct from absence. Output caps must be positive, so explicit zero is rejected there. Caller caps are not silently clamped: an admitted model limit or representation/resource bound rejects an incompatible value. No policy snapshot or canary profile grants financial authority.
 
@@ -188,7 +192,7 @@ A gateway is declared by listing its origin in `openrouter_origins` of the famil
 
 // bundle is sp::descriptor::builtin_policy_bundle_json() with "https://llm.example.com" added to the
 // "openrouter_origins" array of the "openai.responses" entry of descriptor_policy.families.
-auto policy = sp::descriptor::load_policy_bundle(bundle, expected_identity_hex);
+auto policy = sp::descriptor::load_policy_bundle(bundle, expected_content_digest_hex);
 if (auto* error = std::get_if<sp::descriptor::ConfigError>(&policy)) { /* error->pointer names the entry */ }
 // descriptor_json has "base_url": "https://llm.example.com" and the Responses paths of the gateway.
 auto loaded = sp::descriptor::load(descriptor_json, std::get<sp::descriptor::PolicySnapshot>(policy));
@@ -198,7 +202,7 @@ A preset takes the same snapshot in `PresetOptions::policy`, together with the r
 
 The declaration is not a model-only switch. It makes the origin an OpenRouter-profile origin for that family, so besides the served-model rule it admits the `provider` routing object (`OpenRouterRouting`), Chat's gateway controls (`reasoning`, `include_reasoning`, `usage_include`, `models`) and image output, the policy's declared-origin media admission (`openrouter_media`) in place of `media`, assistant content arrays, `reasoning_details` and file annotations in Chat responses, one `[DONE]` after a Messages `message_stop`, an absent Chat cache-write counter as unknown instead of zero, and `usage.cost` read as USD (`CostSource::OpenRouterUsd`). Declare only an origin that behaves like OpenRouter in those respects; otherwise the SDK sends controls the service ignores or reads its cost in the wrong unit.
 
-What the declaration keeps: the served identity must still stay the same for the whole response, the reported model is retained only in the raw wire envelope, and native history stays bound to the requested model. What it costs: a policy with different content has a different `DescriptorPolicy::identity_hex()`, which is part of the native origin, so history sealed under the embedded policy is `ReplayIneligible` under the edited one. Use the same snapshot for every client of the deployment, and pin it with `expected_identity_hex`.
+What the declaration keeps: the served identity must still stay the same for the whole response, the reported model is retained only in the raw wire envelope, and native history stays bound to the requested model. What it does not cost: the origin list is admission data, so it changes `DescriptorPolicy::content_digest_hex()` and leaves the replay identity as it was, and history sealed under the embedded policy stays replayable. Use the same snapshot for every client of the deployment, and pin it with `expected_content_digest_hex`.
 
 ## Request families and controls
 
