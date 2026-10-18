@@ -537,4 +537,150 @@ CatalogueDiff diff_catalogues(const ModelCatalogue& before, const ModelCatalogue
   return diff;
 }
 
+std::string_view listing_name(Listing listing) noexcept {
+  switch (listing) {
+    case Listing::OpenRouter: return "openrouter";
+    case Listing::Gemini: return "gemini";
+    case Listing::Anthropic: return "anthropic";
+    case Listing::OpenAI: return "openai";
+  }
+  return {};
+}
+
+namespace {
+// Listing readers keep what the catalogue can hold and drop the rest member by member.
+std::optional<std::string> listed_text(Value value, bool (*check)(std::string_view) noexcept) {
+  if (value.is_string() && check(value.as_string())) return std::string(value.as_string());
+  return std::nullopt;
+}
+std::optional<std::uint64_t> listed_count(Value value) {
+  if (value.is_uint() && value.as_uint() > 0) return value.as_uint();
+  return std::nullopt;
+}
+std::vector<std::string> listed_tokens(Value value) {
+  std::vector<std::string> out;
+  if (!value.is_array()) return out;
+  for (auto element : value.elements()) {
+    if (out.size() == max_list) break;
+    if (!element.is_string() || !token(element.as_string())) continue;
+    std::string item(element.as_string());
+    if (!contains(out, item)) out.push_back(std::move(item));
+  }
+  return out;
+}
+bool page_token(std::string_view value) noexcept {
+  return !value.empty() && value.size() <= 1024 &&
+         std::all_of(value.begin(), value.end(), [](unsigned char c) { return c > 0x20 && c < 0x7f; });
+}
+bool supported(Value capabilities, std::string_view name) {
+  const auto capability = capabilities.get(name);
+  return capability.is_object() && capability.get("supported").is_bool() && capability.get("supported").as_bool();
+}
+} // namespace
+
+ListingResult parse_listing(Listing listing, std::string_view body, std::string_view origin) {
+  try {
+    if (!descriptor::valid_origin(origin) || origin.ends_with('/')) fail("", "canonical origin for the listed entries");
+    auto parsed = json::parse(body, {32u * 1024u * 1024u, 64});
+    if (std::holds_alternative<json::ParseError>(parsed)) fail("", "a JSON listing");
+    const auto root = std::get<json::Document>(parsed).root();
+    if (!root.is_object()) fail("", "a listing object");
+    ListingPage page;
+    auto entry_for = [&](Value id) -> CatalogueEntry* {
+      std::string_view name = id.is_string() ? id.as_string() : std::string_view{};
+      if (listing == Listing::Gemini) {
+        if (!name.starts_with("models/")) name = {};
+        else name.remove_prefix(7);
+      }
+      if (!model_name(name)) { ++page.skipped; return nullptr; }
+      auto& entry = page.entries.emplace_back();
+      entry.id = std::string(name);
+      entry.source = std::string(listing_name(listing));
+      entry.origins = {std::string(origin)};
+      return &entry;
+    };
+    if (listing == Listing::Gemini) {
+      const auto models = root.get("models");
+      if (models.valid() && !models.is_array()) fail("/models", "a model array");
+      if (models.is_array())
+        for (auto model : models.elements()) {
+          auto* e = entry_for(model.get("name"));
+          if (!e) continue;
+          e->name = listed_text(model.get("displayName"), display);
+          e->input_limit = listed_count(model.get("inputTokenLimit"));
+          e->output_limit = listed_count(model.get("outputTokenLimit"));
+          e->methods = listed_tokens(model.get("supportedGenerationMethods"));
+          if (contains(e->methods, "generateContent")) e->families = {"google.generate", "google.interactions"};
+        }
+      if (const auto next = root.get("nextPageToken"); next.is_string() && page_token(next.as_string()))
+        page.next = std::string(next.as_string());
+    } else {
+    const auto data = root.get("data");
+    if (!data.is_array()) fail("/data", "a model array");
+    for (auto model : data.elements()) {
+      auto* e = entry_for(model.get("id"));
+      if (!e) continue;
+      switch (listing) {
+        case Listing::OpenRouter: {
+          e->name = listed_text(model.get("name"), display);
+          if (const auto slug = model.get("canonical_slug"); slug.is_string() && slug.as_string() != e->id && model_name(slug.as_string()))
+            e->served_as = {std::string(slug.as_string())};
+          e->alias_of = listed_text(model.get("alias_target").get("slug"), model_name);
+          e->context_window = listed_count(model.get("context_length"));
+          e->output_limit = listed_count(model.get("top_provider").get("max_completion_tokens"));
+          e->input_modalities = listed_tokens(model.get("architecture").get("input_modalities"));
+          e->output_modalities = listed_tokens(model.get("architecture").get("output_modalities"));
+          e->parameters = listed_tokens(model.get("supported_parameters"));
+          e->retires_at = listed_text(model.get("expiration_date"), date);
+          if (const auto pricing = model.get("pricing"); pricing.is_object())
+            for (auto member : pricing.members()) {
+              if (e->pricing.size() == 64) break;
+              if (token(member.key) && member.value.is_string() && decimal(member.value.as_string()))
+                e->pricing.emplace_back(std::string(member.key), std::string(member.value.as_string()));
+            }
+          std::sort(e->pricing.begin(), e->pricing.end());
+          // OpenRouter serves its text models on all three of its API families.
+          if (contains(e->output_modalities, "text")) e->families = {"anthropic.messages", "openai.chat", "openai.responses"};
+          break;
+        }
+        case Listing::Anthropic: {
+          e->name = listed_text(model.get("display_name"), display);
+          e->input_limit = listed_count(model.get("max_input_tokens"));
+          e->output_limit = listed_count(model.get("max_tokens"));
+          e->lifecycle = listed_text(model.get("lifecycle"), token);
+          e->retires_at = listed_text(model.get("retires_at"), date);
+          e->families = {"anthropic.messages"};
+          const auto capabilities = model.get("capabilities");
+          e->input_modalities = {"text"};
+          if (supported(capabilities, "image_input")) e->input_modalities.push_back("image");
+          if (supported(capabilities, "pdf_input")) e->input_modalities.push_back("document");
+          e->output_modalities = {"text"};
+          break;
+        }
+        case Listing::OpenAI:
+          // The listing has ids and shutdown dates only.
+          e->retires_at = listed_text(model.get("shutdown_date"), date);
+          break;
+        case Listing::Gemini: break;
+      }
+    }
+    }
+    // A listing that names one id twice gives one entry, merged in listing order.
+    std::vector<CatalogueEntry> unique;
+    std::map<std::string, std::size_t> seen;
+    for (auto& entry : page.entries) {
+      const auto [found, inserted] = seen.try_emplace(entry.id, unique.size());
+      if (inserted) unique.push_back(std::move(entry));
+      else merge_entry(unique[found->second], entry);
+    }
+    page.entries = std::move(unique);
+    if (listing == Listing::Anthropic && root.get("has_more").is_bool() && root.get("has_more").as_bool()) {
+      const auto last = root.get("last_id");
+      if (!last.is_string() || !page_token(last.as_string())) fail("/last_id", "the id that continues the listing");
+      page.next = std::string(last.as_string());
+    }
+    return page;
+  } catch (ConfigError& error) { return std::move(error); }
+}
+
 } // namespace sp::descriptor
