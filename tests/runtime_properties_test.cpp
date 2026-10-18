@@ -994,6 +994,14 @@ struct AlarmGuard {
 #endif
 } // namespace
 
+// A generated image arrives in one SSE event; the 1 MiB line and event defaults cut base64 images
+// over 1 MiB (#66). The defaults now equal the 16 MiB response and stream totals.
+void sse_defaults_hold_a_generated_image() {
+  const sp::runtime::Options options;
+  require(options.limits.sse.max_line_bytes == 16u * 1024 * 1024, "default SSE line bound is not 16 MiB");
+  require(options.limits.sse.max_event_bytes == 16u * 1024 * 1024, "default SSE event bound is not 16 MiB");
+  require(options.limits.sse.max_event_bytes <= options.limits.sse.max_total_bytes, "an SSE event bound exceeds the stream bound");
+}
 int main(int argc, char** argv) {
 #ifdef _WIN32
   runtime_test::Arguments arguments(argc, argv);
@@ -1013,6 +1021,7 @@ int main(int argc, char** argv) {
   try {
     guarded_cycle(argv[0], argv[1], argv[2]);
     check("interface contract capabilities", [&] { interface_contract_capabilities(); });
+    check("SSE defaults hold a generated image", [&] { sse_defaults_hold_a_generated_image(); });
     check("RAII exception ownership", [&] { owner_exception_paths(argv[1], argv[2]); });
     Peer peer(argv[1], argv[2]);
     check("quota abnormal close", [&] { quota_abnormal_close(peer); });
