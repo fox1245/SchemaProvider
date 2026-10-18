@@ -284,8 +284,19 @@ void named_error_raw_ownership() {
   CHECK(failure(bounded, ErrorKind::RemoteFailure).partial.raw_events.empty());
 }
 }
+// The stream's interaction.created resource may omit its status (#65); this is what the live API
+// sends since 2026-10. Every other resource still needs one, and a present status must be in_progress.
+void created_without_status() {
+  auto f = frames();
+  f.front() = frame("interaction.created", R"(,"interaction":{"id":"i1","object":"interaction","model":"fixture-model"})");
+  const auto& done = complete(stream(f));
+  CHECK(done.messages[0].native && done.messages[0].native->complete());
+  f.front() = frame("interaction.created", R"(,"interaction":{"id":"i1","status":"completed","model":"fixture-model"})");
+  failure(stream(f), ErrorKind::ProtocolCorrupt);
+  failure(buffered(R"({"id":"i1","model":"fixture-model","steps":[]})"), ErrorKind::ProtocolCorrupt);
+}
 int main() {
-  try { raw_observation_ownership(); named_error_raw_ownership(); stateless_missing_resource_id(); missing_terminal_usage(); exact_steps_and_replay(); input_boundaries(); lifecycle_and_errors(); unknown_usage_and_signature(); modality_keyed_usage(); uncached_input_and_unmapped_counters();
+  try { created_without_status(); raw_observation_ownership(); named_error_raw_ownership(); stateless_missing_resource_id(); missing_terminal_usage(); exact_steps_and_replay(); input_boundaries(); lifecycle_and_errors(); unknown_usage_and_signature(); modality_keyed_usage(); uncached_input_and_unmapped_counters();
     std::cout << "Interactions semantic contracts passed\n"; return 0;
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

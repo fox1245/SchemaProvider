@@ -50,7 +50,11 @@ bool Codec::frame(std::string_view event, std::string_view data) {
 }
 bool Codec::identity(json::Value resource, bool initial) {
   auto id = resource.get("id");
-  if (!resource.is_object() || !nonempty(resource.get("status")) ||
+  const auto status = resource.get("status");
+  // The stream's interaction.created resource may omit its status (live since 2026-10);
+  // every later resource and every buffered one still carries one.
+  if (!resource.is_object() ||
+      (!nonempty(status) && !(initial && mode_ == Mode::Sse && !status.valid())) ||
       (id.valid() && !id.is_null() && !id.is_string()))
     return fail(ErrorKind::ProtocolCorrupt, "invalid interaction identity or status");
   if (resource.get("agent").valid() || resource.get("environment").valid() || resource.get("environment_id").valid())
@@ -110,7 +114,8 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
     unknown(root, {"event_type", "event_id", "interaction"});
     if (begun_ || !identity(root.get("interaction"), true)) return begun_ ? fail(ErrorKind::ProtocolCorrupt, "duplicate interaction creation") : false;
     auto resource = root.get("interaction");
-    if (resource.get("status").as_string() != "in_progress") return fail(ErrorKind::ProtocolCorrupt, "new interaction must be in progress");
+    if (resource.get("status").valid() && resource.get("status").as_string() != "in_progress")
+      return fail(ErrorKind::ProtocolCorrupt, "new interaction must be in progress");
     if (resource.get("steps").valid() && (!resource.get("steps").is_array() || resource.get("steps").size()))
       return fail(ErrorKind::ProtocolCorrupt, "creation contains unexpected steps");
     generation_ = resource.get("id").as_string(); begun_ = true;
