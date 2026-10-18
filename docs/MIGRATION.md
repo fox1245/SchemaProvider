@@ -103,6 +103,8 @@ A response that reports another model name than the one requested is no longer r
 - **Stability.** A name that changes within one response is still `ProtocolCorrupt`. Interactions now tells a changed model (`interactions.model.changed`) and an empty one (`interactions.model.invalid`) apart from a changed id (`interactions.identity.changed`).
 - **Reason codes.** `messages.model.mismatch`, `responses.model.mismatch` and `gemini.model.mismatch` are removed.
 
+A request the SDK refuses before dispatch now names the check that refused it. `Client::prepare` replaced the encoder's text with the generic text of its kind, so "temperature is prohibited for this model", "unsupported audio output MIME type" and "output cap exceeds admitted model limit" all reached the caller as `invalid request` or `unsupported operation`, with an empty `Error::reason`. The reason is now the code of the check, `request.<area>.<check>`: the family encoder's (`request.chat`, `request.messages`, `request.responses`, `request.generate`, `request.interactions`) or one the encoders share (`request.choice`, `request.controls`, `request.media`, `request.native`). `safe_message` does not change. No struct changes.
+
 ## From interface 5 to 6
 
 Package 0.3.0 alpha adds `Usage::provider_cost` and the fixed-size `ProviderReportedCost`, `UsdAmount`, `CostSource`, `CostStatus` and `CostRounding` types. Existing field access remains source-compatible, but `Usage`, `UsageUpdate`, `Completion`, `PartialCompletion` and the containing `Event` layouts grow. Rebuild every consumer against the same headers and generation 6 libraries (`libsp_*.so.6`); interface 5 binaries must not load interface 6 libraries. CMake consumers select `SchemaProvider 0.3.0 EXACT`.

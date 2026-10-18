@@ -2,12 +2,15 @@
 // and a transport failure that takes precedence carries none. Usage: sp_error_reason_tests <src dir>
 #include "codecs/accumulator.h"
 #include "codecs/reason.h"
+#include "descriptor/presets.h"
+#include "runtime/client.h"
 #include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
 #include <map>
+#include <regex>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -21,7 +24,17 @@ using namespace sp;
 struct Source { reason::Source source; const char* prefix; };
 const Source sources[]{{reason::Source::Chat, "chat"}, {reason::Source::Messages, "messages"}, {reason::Source::Responses, "responses"},
                        {reason::Source::Gemini, "gemini"}, {reason::Source::Interactions, "interactions"},
-                       {reason::Source::Accumulator, "accumulator"}};
+                       {reason::Source::Accumulator, "accumulator"},
+                       {reason::Source::ChatRequest, "request.chat"}, {reason::Source::MessagesRequest, "request.messages"},
+                       {reason::Source::ResponsesRequest, "request.responses"}, {reason::Source::GeminiRequest, "request.generate"},
+                       {reason::Source::InteractionsRequest, "request.interactions"}, {reason::Source::SharedRequest, "request"}};
+// The sources each encoder table covers, relative to src/.
+struct EncoderSource { reason::Source source; std::vector<const char*> files; };
+const EncoderSource encoder_sources[]{
+    {reason::Source::ChatRequest, {"codecs/chat_request.cpp"}}, {reason::Source::MessagesRequest, {"codecs/messages_request.cpp"}},
+    {reason::Source::ResponsesRequest, {"codecs/responses_request.cpp"}}, {reason::Source::GeminiRequest, {"codecs/gemini_request.cpp"}},
+    {reason::Source::InteractionsRequest, {"codecs/interactions_request.cpp"}},
+    {reason::Source::SharedRequest, {"descriptor/policy.cpp", "core/request_controls.h", "codecs/media_input.cpp", "core/media.cpp", "core/native.cpp"}}};
 // The strings for an abnormal close belong to the transport: the close error's kind is the transport's, and so is its lack of a reason.
 const std::set<std::string> transport_strings{"abnormal response close", "abnormal Gemini response close", "abnormal interaction close"};
 
@@ -55,7 +68,7 @@ void table_is_well_formed() {
     const auto& first = entries.front();
     CHECK(reason::code(source, std::string(first.message) + " ").empty() && reason::code(source, first.message.substr(1)).empty() && reason::code(source, {}).empty());
   }
-  CHECK(codes.size() > 400);
+  CHECK(codes.size() > 700);
 }
 
 // Literals of every failure a decoder source can raise: the arguments after the kind of fail() and reject(), and the
@@ -116,6 +129,7 @@ std::vector<std::string> failure_strings(const std::string& s) {
 void every_failure_string_has_a_code(const std::filesystem::path& root) {
   size_t checked = 0;
   for (const auto& [source, prefix] : sources) {
+    if (std::string_view(prefix).starts_with("request")) continue;  // encoders: every_refusal_has_a_code
     std::ifstream file(root / "codecs" / (std::string(prefix) + ".cpp"), std::ios::binary);
     CHECK(file.good());
     const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
@@ -133,6 +147,71 @@ void every_failure_string_has_a_code(const std::filesystem::path& root) {
       if (!used.contains(std::string(entry.message))) throw std::runtime_error(std::string(prefix) + ": unused entry \"" + std::string(entry.message) + "\"");
   }
   CHECK(checked > 400);
+}
+
+// Literals an encoder can refuse with: the text passed to bad(), invalid(), unsupported() or refuse(), the text of an
+// `Error{kind, "text"}`, a validator's `return "text";` and an `error = "text"`. A literal without a space is a token
+// (a modality, a family name), not a refusal.
+std::vector<std::string> refusal_strings(const std::string& source) {
+  std::string code;
+  for (size_t i = 0; i < source.size();) {
+    if (const auto next = skip_trivia(source, i); next != i) { i = next; continue; }
+    if (source[i] == '"') { const auto end = skip_literal(source, i, nullptr); code.append(source, i, end - i); i = end; continue; }
+    if (source[i] == '\'') { const auto end = skip_literal(source, i, nullptr); code.append(source, i, end - i); i = end; continue; }
+    code.push_back(source[i++]);
+  }
+  static const std::regex patterns[]{
+      std::regex(R"re(\b(?:bad|invalid|unsupported|refuse)\(\s*"((?:[^"\\]|\\.)*)")re"),
+      std::regex(R"re(\bError(?:\s+\w+)?\s*\{\s*(?:ErrorKind::\w+|[^,{}]+?)\s*,\s*"((?:[^"\\]|\\.)*)")re"),
+      std::regex(R"re(\breturn\s+"((?:[^"\\]|\\.)*)"\s*;)re"),
+      std::regex(R"re(\berror\s*=\s*"((?:[^"\\]|\\.)*)")re")};
+  std::vector<std::string> out;
+  for (const auto& pattern : patterns)
+    for (auto it = std::sregex_iterator(code.begin(), code.end(), pattern); it != std::sregex_iterator(); ++it) {
+      const auto text = (*it)[1].str();
+      if (text.find(' ') != std::string::npos && std::find(out.begin(), out.end(), text) == out.end()) out.push_back(text);
+    }
+  return out;
+}
+void every_refusal_has_a_code(const std::filesystem::path& root) {
+  size_t checked = 0;
+  for (const auto& [source, files] : encoder_sources) {
+    std::set<std::string> used;
+    for (const auto* name : files) {
+      std::ifstream file(root / name, std::ios::binary);
+      CHECK(file.good());
+      const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+      for (const auto& message : refusal_strings(text)) {
+        if (reason::request_code(source, message).empty()) throw std::runtime_error(std::string(name) + ": no reason code for \"" + message + "\"");
+        if (!reason::code(source, message).empty()) used.insert(message);
+        ++checked;
+      }
+    }
+    for (const auto& entry : reason::entries(source))
+      if (!used.contains(std::string(entry.message))) throw std::runtime_error(std::string(files.front()) + ": unused entry \"" + std::string(entry.message) + "\"");
+  }
+  CHECK(checked > 250);
+}
+// The runtime replaces an encoder's text with the generic text of the error kind and keeps the code of the check.
+void prepare_keeps_the_refusing_check() {
+  sp::runtime::Client client(sp::descriptor::presets::anthropic_messages(), std::string("unused-key"));
+  sp::runtime::RunOptions run;
+  run.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+  auto request = sp::messages::Request::simple("claude-haiku-4-5", "hi", 64);
+  request.temperature = 0.5;
+  request.model = "claude-opus-4-8";
+  const auto refused = [&](sp::runtime::Request value) {
+    auto prepared = client.prepare(std::move(value), run);
+    const auto result = client.complete(std::move(prepared));
+    CHECK(result && std::holds_alternative<Failure>(*result));
+    return std::get<Failure>(*result).error;
+  };
+  const auto temperature = refused(request);
+  CHECK(temperature.kind == ErrorKind::InvalidRequest && temperature.safe_message == "invalid request");
+  CHECK(temperature.reason == "request.messages.temperature_is_prohibited_for_this_model");
+  auto cap = sp::messages::Request::simple("claude-haiku-4-5-20251001", "hi", 64001);
+  const auto limit = refused(cap);
+  CHECK(limit.kind == ErrorKind::InvalidRequest && limit.reason == "request.choice.output_cap_exceeds_admitted_model_limit");
 }
 
 // The accumulator names the check that failed; a transport failure that takes precedence is the transport's, without a reason.
@@ -181,6 +260,8 @@ int main(int argc, char** argv) {
     if (argc != 2) throw std::runtime_error("usage: sp_error_reason_tests <src dir>");
     table_is_well_formed();
     every_failure_string_has_a_code(argv[1]);
+    every_refusal_has_a_code(argv[1]);
+    prepare_keeps_the_refusing_check();
     accumulator_failures();
     std::cout << "error reason tests passed\n";
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
