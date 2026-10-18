@@ -334,6 +334,7 @@ constexpr Entry gemini_table[] = {
   {"Gemini part contains conflicting data fields", "gemini.part.fields_conflict"},
   {"unknown Gemini part semantic", "gemini.part.semantic_unknown"},
   {"Gemini text must be string", "gemini.part.text_invalid"},
+  {"invalid Gemini audio transcription", "gemini.part.transcription_invalid"},
   {"invalid Gemini function identity", "gemini.function_call.identity_invalid"},
   {"invalid Gemini function call id", "gemini.function_call.id_invalid"},
   {"undeclared Gemini client function", "gemini.function_call.undeclared"},

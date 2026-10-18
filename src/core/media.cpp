@@ -153,7 +153,22 @@ std::string_view media_source_name(MediaSource source) noexcept {
   return {};
 }
 
-std::string_view mime_essence(std::string_view mime) noexcept { return mime.substr(0, mime.find(';')); }
+// RFC 9110 media type: type "/" subtype *( OWS ";" OWS parameter ). Optional whitespace (space or tab) may surround
+// the ";" that separates parameters, and nowhere else: not inside the type, the subtype, a name or a value, and not
+// around "=". Gemini labels streamed TTS audio "audio/l16; rate=24000; channels=1".
+namespace {
+bool ows(char c) noexcept { return c == ' ' || c == '\t'; }
+std::string_view trim_ows(std::string_view value) noexcept {
+  while (!value.empty() && ows(value.front())) value.remove_prefix(1);
+  while (!value.empty() && ows(value.back())) value.remove_suffix(1);
+  return value;
+}
+}  // namespace
+std::string_view mime_essence(std::string_view mime) noexcept {
+  auto essence = mime.substr(0, mime.find(';'));
+  while (!essence.empty() && ows(essence.back())) essence.remove_suffix(1);
+  return essence;
+}
 bool mime_is_generate_alias(std::string_view mime) noexcept {
   const auto essence = mime_essence(mime);
   return lower_equal(essence, "video/audio/s16le") || lower_equal(essence, "video/audio/wav") ||
@@ -162,7 +177,7 @@ bool mime_is_generate_alias(std::string_view mime) noexcept {
 bool mime_syntax(std::string_view mime) noexcept {
   if (mime.empty() || mime.size() > 255) return false;
   const auto semicolon = mime.find(';');
-  const auto essence = mime.substr(0, semicolon);
+  const auto essence = mime_essence(mime);
   const auto slash = essence.find('/');
   if (!mime_is_generate_alias(essence) &&
       (slash == std::string_view::npos || !token(essence.substr(0, slash)) || !token(essence.substr(slash + 1))))
@@ -172,7 +187,7 @@ bool mime_syntax(std::string_view mime) noexcept {
   while (!rest.empty()) {
     rest.remove_prefix(1);  // the leading semicolon
     const auto next = rest.find(';');
-    const auto parameter = rest.substr(0, next);
+    const auto parameter = trim_ows(rest.substr(0, next));
     const auto equals = parameter.find('=');
     if (equals == std::string_view::npos || !token(parameter.substr(0, equals)) || !token(parameter.substr(equals + 1)))
       return false;

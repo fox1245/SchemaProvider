@@ -890,6 +890,33 @@ Outcome interactions_decode(std::string_view steps, const std::vector<Frame>& de
   }
   CHECK(a.outcome()); return *a.outcome();
 }
+// Streamed Gemini TTS labels its audio "audio/l16; rate=24000; channels=1": optional whitespace around the ";" that
+// separates parameters is RFC 9110 syntax and the spelling is kept as reported. A transcription model answers with a
+// part whose only data is the transcript, which is the answer's text.
+void gemini_tts_and_transcripts() {
+  for (const auto* mime : {"audio/l16; rate=24000; channels=1", "audio/l16 ;rate=24000", "audio/l16;\trate=24000"})
+    CHECK(mime_syntax(mime) && mime_kind(mime) == MediaKind::Audio && mime_essence(mime) == "audio/l16" && mime_equal(mime, "audio/L16"));
+  for (const auto* mime : {"audio/l16; rate = 24000", "audio/l16; rate= 24000", "audio/ l16", " audio/l16", "audio/l16;", "audio/l16; ;rate=1", "audio /l16;rate=1"})
+    CHECK(!mime_syntax(mime));
+  const std::string tts = R"([{"inlineData":{"mimeType":"audio/l16; rate=24000; channels=1","data":"AAAAAA=="}}])";
+  for (const bool streamed : {false, true}) {
+    const auto outcome = gemini_decode(gemini_body(tts), streamed);
+    const auto& parts = parts_of(completed(outcome));
+    CHECK(parts.size() == 1 && std::holds_alternative<Media>(parts[0]));
+    const auto& media = std::get<Media>(parts[0]);
+    CHECK(media.kind == MediaKind::Audio && media.mime == "audio/l16; rate=24000; channels=1" && media.data && *media.data == "AAAAAA==");
+  }
+  for (const bool streamed : {false, true}) {
+    const auto outcome = gemini_decode(gemini_body(R"([{"audioTranscription":{"text":"hello world"}}])"), streamed);
+    const auto& completion = completed(outcome);
+    CHECK(completion.joined_text() == "hello world" && parts_of(completion).size() == 1 && std::holds_alternative<Text>(parts_of(completion)[0]));
+  }
+  // Next to inline audio the transcript stays the media part's metadata, and a malformed one is refused.
+  const auto spoken = gemini_decode(gemini_body(R"([{"inlineData":{"mimeType":"audio/wav","data":"AAAAAA=="},"audioTranscription":{"text":"hi"}}])"), false);
+  CHECK(parts_of(completed(spoken)).size() == 1 && std::holds_alternative<Media>(parts_of(completed(spoken))[0]));
+  const auto malformed = gemini_decode(gemini_body(R"([{"audioTranscription":{"text":1}}])"), false);
+  CHECK(std::holds_alternative<Failure>(malformed) && std::get<Failure>(malformed).error.reason == "gemini.part.transcription_invalid");
+}
 void gemini_generated() {
   const auto payload = b64(bytes_of(43));
   const auto native = R"([{"text":"before"},{"inlineData":{"mimeType":"image/png","data":)" + json::quote(payload) +
@@ -1132,6 +1159,7 @@ int main() {
     chat_fixture::chat_limits();
     responses_fixture::generated_images();
     google_fixture::gemini_generated();
+    google_fixture::gemini_tts_and_transcripts();
     google_fixture::interactions_generated();
     google_fixture::interactions_transcription_annotations();
     google_fixture::media_kinds_and_unknown_formats();
