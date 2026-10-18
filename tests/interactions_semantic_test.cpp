@@ -339,13 +339,15 @@ void served_model_is_recorded() {
   CHECK(complete(exact).model.relation == ServedRelation::Exact && complete(exact).model.served == "fixture-model");
   auto foreign = resource("[" + output + "]");
   foreign.replace(foreign.find("fixture-model"), 13, "other-model");
-  const auto& c = complete(buffered(foreign));
+  const auto outcome = buffered(foreign);
+  const auto& c = complete(outcome);
   CHECK(c.model.requested == "fixture-model" && c.model.served == "other-model" && c.model.relation == ServedRelation::Unexplained);
   CHECK(!c.messages.empty() && !c.messages[0].native);
   auto all_foreign = frames();
   for (auto& [event, data] : all_foreign)
     for (auto at = data.find("fixture-model"); at != std::string::npos; at = data.find("fixture-model")) data.replace(at, 13, "other-model");
-  const auto& streamed = complete(stream(all_foreign));
+  const auto streamed_outcome = stream(all_foreign);
+  const auto& streamed = complete(streamed_outcome);
   CHECK(streamed.model.relation == ServedRelation::Unexplained && !streamed.messages.at(0).native);
 }
 // A failure names the check that failed with a code of the fixed table, whatever the response says; the codec's own text

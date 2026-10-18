@@ -671,17 +671,20 @@ void cut_stream_usage_has_no_placeholder_output() {
   }
   // Before message_start there is nothing at all: no stage, no counter.
   for (const auto kind : {ErrorKind::Cancelled, ErrorKind::Transport}) {
-    const auto& u = failed(stream({}, {false, kind}), kind).partial.usage;
+    const auto outcome = stream({}, {false, kind});
+    const auto& u = failed(outcome, kind).partial.usage;
     CHECK(u.stage == UsageStage::Missing && !u.input_total && !u.input_uncached && !u.output_total && !u.total && u.extra.empty());
   }
   // The cumulative count in message_delta is evidence, kept when the stream is cut after it.
   std::vector<Frame> frames{start(first_token)};
   frames.insert(frames.end(), prefix_frames.begin(), prefix_frames.end());
   frames.push_back(end(0)); frames.push_back(stop("\"end_turn\"", R"({"output_tokens":5})"));
-  const auto& cut = failed(stream(frames, {false, ErrorKind::Cancelled}), ErrorKind::Cancelled).partial.usage;
+  const auto cut_outcome = stream(frames, {false, ErrorKind::Cancelled});
+  const auto& cut = failed(cut_outcome, ErrorKind::Cancelled).partial.usage;
   CHECK(cut.stage == UsageStage::Partial && cut.output_total && cut.output_total->value == 5 && cut.output_total->evidence == Evidence::Reported);
   frames.push_back(done);
-  const auto& whole = completed(stream(frames)).usage;
+  const auto whole_outcome = stream(frames);
+  const auto& whole = completed(whole_outcome).usage;
   CHECK(whole.stage == UsageStage::Final && whole.output_total->value == 5 && whole.input_total->value == 2 && whole.total->value == 7);
   CHECK(whole.quality == UsageQuality::Consistent);
   // A final count below the one in message_start is still a conflict.
