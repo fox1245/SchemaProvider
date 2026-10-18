@@ -25,6 +25,7 @@
 #endif
 #include "transport/http_transport.h"
 #include "transport/io_thread.h"
+#include "transport/ws_transport.h"
 
 #include <asio/bind_executor.hpp>
 #include <asio/executor_work_guard.hpp>
@@ -48,6 +49,7 @@
 #include <future>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <span>
 #include <stdexcept>
 #include <thread>
@@ -275,6 +277,57 @@ struct ResolverPool : std::enable_shared_from_this<ResolverPool> {
 // ---------------------------------------------------------------------------------------------
 // Operation state
 // ---------------------------------------------------------------------------------------------
+// A WebSocket session on top of its connect-only operation (see ws_transport.h). Strand-confined
+// once the operation is active, except `accepting`, which public sends read from any thread.
+struct WsState {
+  WsState(WsRequest request, WsCallbacks callbacks)
+      : req(std::move(request)), cb(std::move(callbacks)), decoder(req.limits) {}
+  enum class Phase : std::uint8_t { Connecting, Handshake, Open, Closing };
+  // How the session ends once the server closes TCP or close_timer expires.
+  struct Ending {
+    Status status;
+    FailureKind failure;
+    std::string detail;
+  };
+
+  WsRequest req;
+  WsCallbacks cb;
+  WsDecoder decoder;
+  Phase phase = Phase::Connecting;
+  bool secure = false;  // wss
+  std::atomic<bool> accepting{true};  // cleared by close() and at completion
+  curl_socket_t fd = CURL_SOCKET_BAD;
+  std::string key;
+  std::string head;  // handshake response bytes until the blank line
+  // Messages sent before the handshake completed: RFC 6455 4.1 forbids writing them earlier.
+  std::vector<std::pair<WsOpcode, std::string>> pending;
+  std::string out;  // encoded bytes not yet written
+  std::size_t out_offset = 0;
+  std::random_device entropy;  // masking keys and the handshake nonce (RFC 6455 4.1, 5.3)
+  bool sent_close = false;
+  bool received_close = false;
+  bool closed_by_peer = false;
+  bool callback_threw = false;
+  std::uint16_t close_code = ws_close::Abnormal;
+  std::string close_reason;
+  int http_status = 0;
+  std::optional<Ending> ending;
+  std::optional<asio::steady_timer> close_timer;
+
+  std::array<unsigned char, 4> mask() {
+    const std::uint32_t r = entropy();
+    return {static_cast<unsigned char>(r), static_cast<unsigned char>(r >> 8), static_cast<unsigned char>(r >> 16),
+            static_cast<unsigned char>(r >> 24)};
+  }
+  void queue(WsOpcode opcode, std::string_view payload) {
+    if (out_offset > 65536 && out_offset * 2 > out.size()) {
+      out.erase(0, out_offset);
+      out_offset = 0;
+    }
+    out += ws_encode_frame(opcode, payload, mask());
+  }
+};
+
 struct OperationState {
   OperationState(std::weak_ptr<TransportCore> core, HttpRequest request, Callbacks callbacks,
                  const TransportOptions& options)
@@ -343,6 +396,9 @@ struct OperationState {
   // Socket bookkeeping for pause handling (see TransportCore::read_suppressed).
   curl_socket_t sock = CURL_SOCKET_BAD;
   bool counted_pause = false;
+
+  // Set for a WebSocket session: a connect-only attempt whose connection the session then drives.
+  std::unique_ptr<WsState> ws;
 
   // Name resolution (see TransportOptions::resolver_threads).
   std::string host;
@@ -452,6 +508,9 @@ struct TransportCore : std::enable_shared_from_this<TransportCore> {
     bool want_read = false;
     bool want_write = false;
     bool removed = false;
+    // The WebSocket session that drives this socket after its connect-only transfer; libcurl's
+    // own interest in it is then ignored.
+    OperationState* ws_owner = nullptr;
   };
 
   explicit TransportCore(TransportOptions options)
@@ -534,6 +593,20 @@ struct TransportCore : std::enable_shared_from_this<TransportCore> {
   void rearm_socket(curl_socket_t s);
   void shutdown();
 
+  // WebSocket sessions (ws_transport.h), all on the strand.
+  void ws_connected(const std::shared_ptr<OperationState>& op);
+  void ws_ready(const std::shared_ptr<SockWatch>& w, int flags);
+  void ws_interest(const std::shared_ptr<OperationState>& op);
+  void ws_flush(const std::shared_ptr<OperationState>& op);
+  void ws_read(const std::shared_ptr<OperationState>& op);
+  bool ws_consume(const std::shared_ptr<OperationState>& op, std::string_view bytes);
+  bool ws_handshake(const std::shared_ptr<OperationState>& op, std::string_view& bytes);
+  void ws_send(const std::shared_ptr<OperationState>& op, WsOpcode opcode, std::string payload);
+  void ws_close(const std::shared_ptr<OperationState>& op, std::uint16_t code, std::string reason);
+  void ws_send_close(const std::shared_ptr<OperationState>& op, std::uint16_t code, std::string_view reason);
+  void ws_end(const std::shared_ptr<OperationState>& op);
+  void ws_release(OperationState& op);
+
   static int socket_cb(CURL* easy, curl_socket_t s, int what, void* userp, void*) {
 #ifdef _WIN32
     auto* self = static_cast<TransportCore*>(userp);
@@ -600,6 +673,17 @@ void OperationState::setup() {
   set(CURLOPT_WRITEDATA, static_cast<void*>(this));
   set(CURLOPT_PREREQFUNCTION, &OperationState::prereq_cb);
   set(CURLOPT_PREREQDATA, static_cast<void*>(this));
+
+  if (ws) {
+    // libcurl only connects (TCP and TLS with ALPN http/1.1); the session writes the request. A
+    // fresh connection, never a pooled one: it leaves HTTP once the server switches protocols.
+    // libcurl never pools a connect-only connection; FORBID_REUSE would close it at once.
+    set(CURLOPT_CONNECT_ONLY, 1L);
+    set(CURLOPT_HTTP_VERSION, static_cast<long>(CURL_HTTP_VERSION_1_1));
+    set(CURLOPT_FRESH_CONNECT, 1L);
+    if (!req.ca_file.empty()) set(CURLOPT_CAINFO, req.ca_file.c_str());
+    return;
+  }
 
   const auto features = curl_version_info(CURLVERSION_NOW)->features;
   const long normal_http = (features & CURL_VERSION_HTTP2) ? CURL_HTTP_VERSION_2TLS : CURL_HTTP_VERSION_1_1;
@@ -1104,6 +1188,10 @@ void TransportCore::finish(std::shared_ptr<OperationState> op, Status status, Fa
     }
   }
 
+  if (op->ws) {
+    ws_release(*op);
+    r.http_status = op->ws->http_status;
+  }
   if (op->in_multi && multi) {
     curl_multi_remove_handle(multi, op->easy);
     op->in_multi = false;
@@ -1149,6 +1237,10 @@ void TransportCore::finish(std::shared_ptr<OperationState> op, Status status, Fa
   {
     Callbacks released = std::move(op->cb);
     op->cb = Callbacks{};
+    if (op->ws) {
+      WsCallbacks session = std::move(op->ws->cb);
+      op->ws->cb = WsCallbacks{};
+    }
   }  // Destroy callback storage before join() can return.
   {
     std::lock_guard lock(op->mu);
@@ -1197,6 +1289,10 @@ void TransportCore::rearm_socket(curl_socket_t s) {
 }
 
 void TransportCore::complete_from_curl(const std::shared_ptr<OperationState>& op, CURLcode code) {
+  if (op->ws && code == CURLE_OK) {
+    ws_connected(op);
+    return;
+  }
   if (code == CURLE_OK) {
     if (!op->head_delivered) {
       finish(op, Status::Failed, FailureKind::Protocol, code, "response ended without a head");
@@ -1375,6 +1471,8 @@ void TransportCore::set_timer(long ms) {
 }
 
 void TransportCore::on_socket(CURL* easy, curl_socket_t s, int what) {
+  if (const auto session = socks.find(s); session != socks.end() && session->second->ws_owner)
+    return;  // a WebSocket session watches this socket now; ws_release ends that
   if (what == CURL_POLL_REMOVE) {
     auto it = socks.find(s);
     if (it != socks.end()) {
@@ -1539,6 +1637,10 @@ void TransportCore::arm(const std::shared_ptr<SockWatch>& w) {
 
 void TransportCore::on_socket_event(const std::shared_ptr<SockWatch>& w, int flags) {
   if (!multi) return;
+  if (w->ws_owner) {
+    ws_ready(w, flags);
+    return;
+  }
   int running = 0;
   curl_multi_socket_action(multi, w->fd, flags, &running);
   check_multi_info();
@@ -1636,6 +1738,335 @@ void TransportCore::shutdown() {
   cleaned_future.wait();
   guard.reset();
   for (auto& t : threads) t.join();
+}
+
+// ---------------------------------------------------------------------------------------------
+// WebSocket sessions (ws_transport.h). A session is a connect-only operation: libcurl resolves,
+// connects and completes TLS, then complete_from_curl() hands the connection to ws_connected().
+// The easy handle stays in the multi handle until finish(), because removing it would close the
+// connection. From then on the session watches the socket itself (SockWatch::ws_owner) and moves
+// bytes with curl_easy_send/curl_easy_recv, all on the strand.
+// ---------------------------------------------------------------------------------------------
+namespace {
+
+// The request target (path and query) of a ws/wss URL; a fragment is never sent.
+std::string request_target(std::string_view url) {
+  const auto scheme_end = url.find("://");
+  const auto start = url.find_first_of("/?#", scheme_end == std::string_view::npos ? 0 : scheme_end + 3);
+  if (start == std::string_view::npos) return "/";
+  std::string target(url.substr(start));
+  if (const auto hash = target.find('#'); hash != std::string::npos) target.erase(hash);
+  if (target.empty() || target.front() != '/') target.insert(0, "/");
+  return target;
+}
+
+WsResult ws_result(const WsState& ws, const Result& r) {
+  WsResult out;
+  out.transport = r;
+  out.http_status = ws.http_status;
+  if (ws.sent_close || ws.received_close) {
+    out.close_code = ws.close_code;
+    out.close_reason = ws.close_reason;
+  }
+  out.closed_by_peer = ws.closed_by_peer;
+  out.clean = ws.sent_close && ws.received_close && r.status == Status::Completed;
+  return out;
+}
+
+bool header_line_safe(std::string_view s) {
+  return std::none_of(s.begin(), s.end(), [](char c) { return c == '\r' || c == '\n' || c == '\0'; });
+}
+
+}  // namespace
+
+void TransportCore::ws_connected(const std::shared_ptr<OperationState>& op) {
+  auto& ws = *op->ws;
+  curl_socket_t fd = CURL_SOCKET_BAD;
+  if (curl_easy_getinfo(op->easy, CURLINFO_ACTIVESOCKET, &fd) != CURLE_OK || fd == CURL_SOCKET_BAD) {
+    finish(op, Status::Failed, FailureKind::Connect, CURLE_COULDNT_CONNECT, "no connected socket");
+    return;
+  }
+  op->note_connected();
+  try {
+    auto& slot = socks[fd];
+    if (!slot) slot = std::make_shared<SockWatch>(ctx, fd);
+    slot->ws_owner = op.get();
+  } catch (...) {
+    socks.erase(fd);
+    finish(op, Status::Failed, FailureKind::Other, CURLE_FAILED_INIT, "socket readiness monitoring failed");
+    return;
+  }
+  ws.fd = fd;
+  std::array<unsigned char, 16> nonce{};
+  for (std::size_t i = 0; i < nonce.size(); i += 4) {
+    const auto random = ws.mask();
+    std::copy(random.begin(), random.end(), nonce.begin() + static_cast<std::ptrdiff_t>(i));
+  }
+  ws.key = ws_key_from(nonce);
+  std::string authority = op->host;
+  if (op->port != (ws.secure ? "443" : "80")) authority += ":" + op->port;
+  std::vector<std::pair<std::string, std::string>> headers;
+  headers.reserve(ws.req.headers.size());
+  for (const Header& h : ws.req.headers) headers.emplace_back(h.name, h.value);
+  ws.out = ws_handshake_request(authority, request_target(ws.req.url), ws.key, headers);
+  if (ws.out.empty()) {
+    finish(op, Status::Failed, FailureKind::Other, CURLE_OK, "invalid handshake request");
+    return;
+  }
+  ws.phase = WsState::Phase::Handshake;
+  op->prereq_count = 1;  // request bytes may leave from here on (AttemptObservation::reached)
+  ws_flush(op);
+  if (!op->finished) ws_interest(op);
+}
+
+void TransportCore::ws_ready(const std::shared_ptr<SockWatch>& w, int flags) {
+  const auto it = active.find(w->ws_owner);
+  if (it == active.end()) return;
+  const std::shared_ptr<OperationState> op = it->second;
+  if (flags & CURL_CSELECT_OUT) ws_flush(op);
+  if (!op->finished && (flags & (CURL_CSELECT_IN | CURL_CSELECT_ERR))) ws_read(op);
+  if (!op->finished) ws_interest(op);
+}
+
+void TransportCore::ws_interest(const std::shared_ptr<OperationState>& op) {
+  auto& ws = *op->ws;
+  const auto it = socks.find(ws.fd);
+  if (it == socks.end()) return;
+  it->second->want_read = true;  // until the end: a Close, the server's TCP close or an error
+  it->second->want_write = ws.out_offset < ws.out.size();
+  arm(it->second);
+}
+
+void TransportCore::ws_flush(const std::shared_ptr<OperationState>& op) {
+  auto& ws = *op->ws;
+  while (ws.out_offset < ws.out.size()) {
+    std::size_t sent = 0;
+    const CURLcode rc = curl_easy_send(op->easy, ws.out.data() + ws.out_offset, ws.out.size() - ws.out_offset, &sent);
+    if (rc == CURLE_AGAIN || (rc == CURLE_OK && sent == 0)) return;  // wait for write readiness
+    if (rc != CURLE_OK) {
+      finish(op, Status::Failed, FailureKind::Send, rc, "send failed");
+      return;
+    }
+    ws.out_offset += sent;
+    op->note_activity();
+  }
+  ws.out.clear();
+  ws.out_offset = 0;
+}
+
+void TransportCore::ws_read(const std::shared_ptr<OperationState>& op) {
+  auto& ws = *op->ws;
+  char buffer[16384];
+  for (int round = 0; round < 64; ++round) {
+    std::size_t got = 0;
+    const CURLcode rc = curl_easy_recv(op->easy, buffer, sizeof buffer, &got);
+    if (rc == CURLE_AGAIN) return;
+    if (rc != CURLE_OK || got == 0) {
+      // The server closed the connection (got == 0) or reset it. After both Close frames, or after
+      // the client failed the session, that is the expected end (RFC 6455 7.1.1, 7.1.7); otherwise
+      // the session was lost.
+      if ((ws.sent_close && ws.received_close) || ws.ending) ws_end(op);
+      else if (rc != CURLE_OK) finish(op, Status::Failed, FailureKind::Receive, rc, "receive failed");
+      else
+        finish(op, Status::Failed, FailureKind::Receive, CURLE_RECV_ERROR,
+               ws.phase == WsState::Phase::Handshake ? "connection closed during the handshake"
+                                                     : "connection closed without a Close frame");
+      return;
+    }
+    op->note_activity();
+    if (!ws_consume(op, std::string_view(buffer, got))) return;
+  }
+  // TLS may hold more decrypted bytes than socket readiness can show: continue on a later turn
+  // instead of starving the other operations on the strand.
+  asio::post(strand, [self = shared_from_this(), op] {
+    if (op->finished) return;
+    self->ws_read(op);
+    if (!op->finished) self->ws_interest(op);
+  });
+}
+
+bool TransportCore::ws_handshake(const std::shared_ptr<OperationState>& op, std::string_view& bytes) {
+  auto& ws = *op->ws;
+  const std::size_t before = ws.head.size();
+  ws.head.append(bytes);
+  op->response_seen = true;
+  const auto end = ws.head.find("\r\n\r\n", before >= 3 ? before - 3 : 0);
+  if (end == std::string::npos || end > op->max_head_bytes) {
+    if (ws.head.size() > op->max_head_bytes) {
+      finish(op, Status::Failed, FailureKind::ResponseTooLarge, CURLE_OK, "handshake response head too large");
+      return false;
+    }
+    bytes = {};
+    return true;
+  }
+  bytes.remove_prefix(end + 4 - before);
+  ws.head.resize(end);
+  op->note_response_started();
+  const WsHandshakeResponse checked = ws_check_handshake(ws.head, ws.key);
+  ws.http_status = checked.status;
+  if (!checked.error.empty()) {
+    finish(op, Status::Failed, FailureKind::Protocol, CURLE_OK, checked.error.c_str());
+    return false;
+  }
+  op->head.status = checked.status;
+  op->head.version = ResponseVersion::Http1_1;
+  op->head.framing = BodyFraming::None;
+  for (const auto& [name, value] : checked.headers) op->head.headers.push_back(Header{lower(name), value});
+  op->head_delivered = true;
+  std::string().swap(ws.head);
+  ws.phase = WsState::Phase::Open;
+  try {
+    if (ws.cb.on_open) ws.cb.on_open(op->head);
+  } catch (...) {
+    finish(op, Status::Failed, FailureKind::CallbackError, CURLE_OK, "a session callback threw");
+    return false;
+  }
+  for (auto& [opcode, payload] : ws.pending) ws.queue(opcode, payload);
+  ws.pending.clear();
+  return true;
+}
+
+bool TransportCore::ws_consume(const std::shared_ptr<OperationState>& op, std::string_view bytes) {
+  auto& ws = *op->ws;
+  if (ws.phase == WsState::Phase::Handshake && !ws_handshake(op, bytes)) return false;
+  // After the server's Close, or a protocol failure, bytes are ignored until the server closes TCP.
+  if (!bytes.empty() && !ws.received_close && !ws.decoder.stopped()) {
+    ws.decoder.feed(bytes, [&](const WsEvent& event) {
+      try {
+        switch (event.kind) {
+          case WsEvent::Kind::Text:
+          case WsEvent::Kind::Binary:
+            if (ws.cb.on_message)
+              ws.cb.on_message(event.kind == WsEvent::Kind::Text ? WsMessageKind::Text : WsMessageKind::Binary,
+                               event.payload);
+            break;
+          case WsEvent::Kind::Ping:
+            if (!ws.sent_close) ws.queue(WsOpcode::Pong, event.payload);  // RFC 6455 5.5.2
+            break;
+          case WsEvent::Kind::Pong:
+            break;
+          case WsEvent::Kind::Close:
+            ws.received_close = true;
+            ws.close_code = event.close_code;
+            ws.close_reason = std::string(event.payload);
+            if (!ws.sent_close) {
+              ws.closed_by_peer = true;
+              if (ws.cb.on_close) ws.cb.on_close(event.close_code, event.payload);
+            }
+            break;
+        }
+      } catch (...) {
+        ws.callback_threw = true;
+        return false;
+      }
+      return true;
+    });
+    if (op->finished) return false;
+    if (ws.callback_threw) {
+      finish(op, Status::Failed, FailureKind::CallbackError, CURLE_OK, "a session callback threw");
+      return false;
+    }
+    std::optional<std::uint16_t> close;
+    if (ws.received_close) {
+      // Answer the server's Close with its code, or without one when it sent none (RFC 6455 5.5.1).
+      if (!ws.ending) ws.ending = WsState::Ending{Status::Completed, FailureKind::None, ""};
+      close = ws.close_code == ws_close::NoStatus ? std::uint16_t{0} : ws.close_code;
+    } else if (const WsError error = ws.decoder.error(); error != WsError::None) {
+      ws.ending = WsState::Ending{Status::Failed,
+                                  error == WsError::TooBig ? FailureKind::ResponseTooLarge : FailureKind::Protocol,
+                                  error == WsError::InvalidUtf8 ? "the server sent invalid UTF-8"
+                                  : error == WsError::TooBig    ? "a server message exceeds the limit"
+                                                                : "the server violated the WebSocket protocol"};
+      close = ws.decoder.close_code_for_error();
+    }
+    if (close) {
+      // Through the strand, so that what the callbacks above sent is written before the Close.
+      asio::post(strand, [self = shared_from_this(), op, code = *close] {
+        if (op->finished) return;
+        self->ws_send_close(op, code, {});
+        self->ws_flush(op);
+        if (!op->finished) self->ws_interest(op);
+      });
+    }
+  }
+  ws_flush(op);
+  return !op->finished;
+}
+
+void TransportCore::ws_send(const std::shared_ptr<OperationState>& op, WsOpcode opcode, std::string payload) {
+  if (op->finished) return;
+  auto& ws = *op->ws;
+  if (ws.sent_close) return;
+  if (ws.phase != WsState::Phase::Open) {
+    ws.pending.emplace_back(opcode, std::move(payload));
+    return;
+  }
+  ws.queue(opcode, payload);
+  ws_flush(op);
+  if (!op->finished) ws_interest(op);
+}
+
+void TransportCore::ws_close(const std::shared_ptr<OperationState>& op, std::uint16_t code, std::string reason) {
+  if (op->finished) return;
+  auto& ws = *op->ws;
+  if (ws.phase != WsState::Phase::Open && ws.phase != WsState::Phase::Closing) {
+    finish(op, Status::Cancelled, FailureKind::None, CURLE_OK, "closed before the handshake completed");
+    return;
+  }
+  ws_send_close(op, code, reason);  // nothing when a Close was already sent
+  ws_flush(op);
+  if (!op->finished) ws_interest(op);
+}
+
+// Queues the client's Close frame (code 0: an empty payload) and bounds the wait for the server's
+// Close and, after it, for the server's TCP close.
+void TransportCore::ws_send_close(const std::shared_ptr<OperationState>& op, std::uint16_t code,
+                                  std::string_view reason) {
+  auto& ws = *op->ws;
+  if (ws.sent_close) return;
+  ws.sent_close = true;
+  ws.accepting.store(false, std::memory_order_relaxed);
+  ws.phase = WsState::Phase::Closing;
+  if (!ws.received_close) {
+    ws.close_code = code;
+    ws.close_reason = std::string(reason);
+  }
+  ws.queue(WsOpcode::Close, code == 0 ? std::string() : ws_close_payload(code, reason));
+  ws.close_timer.emplace(ctx);
+  ws.close_timer->expires_after(ws.req.close_timeout);
+  ws.close_timer->async_wait(asio::bind_executor(strand, [self = shared_from_this(), op](const asio::error_code& ec) {
+    if (ec || op->finished) return;
+    const auto& state = *op->ws;
+    if (state.received_close || state.ending) self->ws_end(op);
+    else
+      self->finish(op, Status::Failed, FailureKind::Receive, CURLE_OPERATION_TIMEDOUT,
+                   "the server did not answer the Close frame");
+  }));
+}
+
+void TransportCore::ws_end(const std::shared_ptr<OperationState>& op) {
+  const auto& ws = *op->ws;
+  if (ws.ending) finish(op, ws.ending->status, ws.ending->failure, CURLE_OK, ws.ending->detail.c_str());
+  else finish(op, Status::Completed, FailureKind::None, CURLE_OK, "");
+}
+
+// Called by finish() before the easy handle, and with it the connection, is released.
+void TransportCore::ws_release(OperationState& op) {
+  auto& ws = *op.ws;
+  ws.accepting.store(false, std::memory_order_relaxed);
+  if (ws.close_timer) {
+    ws.close_timer->cancel();
+    ws.close_timer.reset();
+  }
+  if (ws.fd == CURL_SOCKET_BAD) return;
+  const auto it = socks.find(ws.fd);
+  if (it != socks.end() && it->second->ws_owner == &op) {
+    it->second->ws_owner = nullptr;
+    it->second->removed = true;
+    it->second->release_quiet();
+    socks.erase(it);
+  }
+  ws.fd = CURL_SOCKET_BAD;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1741,6 +2172,144 @@ RuntimeInfo Transport::runtime_info() const {
 }
 
 unsigned Transport::io_threads() const noexcept { return static_cast<unsigned>(core_->threads.size()); }
+
+struct WsSessionState {
+  std::shared_ptr<OperationState> op;
+};
+
+WsSession::WsSession(WsSession&& other) noexcept : state_(std::move(other.state_)) {}
+
+WsSession& WsSession::operator=(WsSession&& other) noexcept {
+  if (this != &other) {
+    if (state_) cancel();
+    state_ = std::move(other.state_);
+  }
+  return *this;
+}
+
+WsSession::~WsSession() {
+  if (state_) cancel();
+}
+
+bool WsSession::send(WsOpcode opcode, std::string message) {
+  if (!state_) return false;
+  const auto& op = state_->op;
+  if (op->finishing.load(std::memory_order_relaxed) || !op->ws->accepting.load(std::memory_order_relaxed))
+    return false;
+  auto core = op->owner.lock();
+  if (!core) return false;
+  try {
+    asio::post(core->strand, [weak = op->owner, op, opcode, message = std::move(message)]() mutable {
+      if (auto self = weak.lock()) self->ws_send(op, opcode, std::move(message));
+    });
+  } catch (...) {
+    return false;
+  }
+  return true;
+}
+
+bool WsSession::send_text(std::string message) {
+  return ws_utf8_valid(message) && send(WsOpcode::Text, std::move(message));
+}
+
+bool WsSession::send_binary(std::string message) { return send(WsOpcode::Binary, std::move(message)); }
+
+void WsSession::close(std::uint16_t code, std::string reason) {
+  if (!state_) return;
+  const auto& op = state_->op;
+  if (op->finishing.load(std::memory_order_relaxed)) return;
+  op->ws->accepting.store(false, std::memory_order_relaxed);
+  auto core = op->owner.lock();
+  if (!core) return;
+  if (!ws_close_code_valid(code)) code = ws_close::Normal;
+  if (reason.size() > 123 || !ws_utf8_valid(reason)) reason.clear();
+  try {
+    asio::post(core->strand, [weak = op->owner, op, code, reason = std::move(reason)]() mutable {
+      if (auto self = weak.lock()) self->ws_close(op, code, std::move(reason));
+    });
+  } catch (...) {
+  }
+}
+
+void WsSession::cancel() noexcept {
+  if (!state_) return;
+  const auto& op = state_->op;
+  if (op->finishing.load(std::memory_order_relaxed)) return;
+  auto core = op->owner.lock();
+  if (!core) return;  // transport gone: shutdown already delivered the outcome
+  try {
+    asio::post(core->strand, [weak = op->owner, op] {
+      if (auto self = weak.lock()) self->finish(op, Status::Cancelled, FailureKind::None, CURLE_OK, "cancelled");
+    });
+  } catch (...) {
+  }
+}
+
+void WsSession::detach() noexcept { state_.reset(); }
+
+WsResult WsSession::join() {
+  const std::shared_ptr<WsSessionState> state = state_;
+  WsResult misuse;
+  misuse.transport.failure = FailureKind::Misuse;
+  if (!state) {
+    misuse.transport.detail = "join() on an empty handle";
+    return misuse;
+  }
+  if (on_io_thread()) {
+    misuse.transport.detail = "join() called from an I/O thread";
+    return misuse;
+  }
+  OperationState& op = *state->op;
+  std::unique_lock lock(op.mu);
+  op.cv.wait(lock, [&op] { return op.done; });
+  return ws_result(*op.ws, op.result);
+}
+
+WsSession open_websocket(Transport& transport, WsRequest request, WsCallbacks callbacks) {
+  const std::shared_ptr<TransportCore>& core = transport.core_;
+  HttpRequest http;
+  http.method = "GET";
+  http.deadline = request.deadline;
+  http.http_version = HttpVersion::Http1_1;
+  http.ca_file = request.ca_file;
+  http.connect_timeout = request.connect_timeout;
+  http.first_byte_timeout = request.handshake_timeout;
+  http.idle_timeout = request.idle_timeout;
+  std::string error;
+  bool secure = false;
+  const std::string_view url = request.url;
+  if (url.size() > 6 && iequals(url.substr(0, 6), "wss://")) {
+    http.url = "https://" + std::string(url.substr(6));
+    secure = true;
+  } else if (url.size() > 5 && iequals(url.substr(0, 5), "ws://")) {
+    http.url = "http://" + std::string(url.substr(5));
+  } else {
+    error = "a WebSocket URL must use ws or wss";
+  }
+  for (const Header& h : request.headers)
+    if (h.name.empty() || h.name.find(':') != std::string::npos || !header_line_safe(h.name) ||
+        !header_line_safe(h.value))
+      error = "invalid handshake header";
+
+  auto op = std::make_shared<OperationState>(core, std::move(http), Callbacks{}, core->opts);
+  op->ws = std::make_unique<WsState>(std::move(request), std::move(callbacks));
+  op->ws->secure = secure;
+  // The operation's single outcome becomes the session's; the raw pointer cannot dangle because
+  // finish() holds the operation while it calls on_done.
+  op->cb.on_done = [raw = op.get()](const Result& r) {
+    const WsState& ws = *raw->ws;
+    if (ws.cb.on_done) ws.cb.on_done(ws_result(ws, r));
+  };
+  op->core = core.get();
+  op->setup();
+  if (!error.empty()) {
+    op->setup_error = error;
+    op->setup_failure = FailureKind::Misuse;
+    op->setup_code = CURLE_URL_MALFORMAT;
+  }
+  asio::post(core->strand, [core, op] { core->begin(op); });
+  return WsSession(std::make_shared<WsSessionState>(WsSessionState{op}));
+}
 
 
 }  // namespace sp::transport

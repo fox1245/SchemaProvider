@@ -148,7 +148,7 @@ target_link_libraries(sp_codecs PUBLIC sp_core sp_json sp_descriptor)
 
 # Wire types, SSE framing and the I/O-thread marker: everything the runtime client needs from the
 # transport without libcurl.
-add_library(sp_wire src/transport/sse_framer.cpp src/transport/io_thread.cpp)
+add_library(sp_wire src/transport/sse_framer.cpp src/transport/ws_frame.cpp src/transport/io_thread.cpp)
 target_compile_options(sp_wire PRIVATE ${SP_WARNING_OPTIONS})
 # The libcurl backend and the public Client constructor that uses it.
 add_library(sp_transport src/transport/http_transport.cpp src/transport/real_attempt_transport.cpp)
@@ -332,6 +332,16 @@ if(SP_BUILD_TESTS)
 
   add_executable(sp_sse_tests tests/sse_framer_test.cpp)
   target_link_libraries(sp_sse_tests PRIVATE sp_transport)
+  add_executable(sp_ws_frame_tests tests/ws_frame_test.cpp)
+  target_link_libraries(sp_ws_frame_tests PRIVATE sp_wire)
+  target_compile_options(sp_ws_frame_tests PRIVATE ${SP_WARNING_OPTIONS})
+  add_executable(sp_ws_transport_tests tests/ws_transport_test.cpp)
+  target_link_libraries(sp_ws_transport_tests PRIVATE sp_transport sp_json)
+  target_compile_options(sp_ws_transport_tests PRIVATE ${SP_WARNING_OPTIONS})
+  # Conformance and live driver of the WebSocket transport; see tests/autobahn/README.md.
+  add_executable(sp_ws_client_tool tests/support/ws_client_tool.cpp)
+  target_link_libraries(sp_ws_client_tool PRIVATE sp_transport)
+  target_compile_options(sp_ws_client_tool PRIVATE ${SP_WARNING_OPTIONS})
   add_executable(sp_descriptor_tests tests/descriptor_properties_test.cpp)
   target_link_libraries(sp_descriptor_tests PRIVATE sp_descriptor sp_json)
   add_executable(sp_chat_tests tests/chat_semantic_test.cpp)
@@ -430,6 +440,10 @@ if(SP_BUILD_TESTS)
                      ${CMAKE_CURRENT_SOURCE_DIR}/tests/support)
     set_tests_properties(transport_properties PROPERTIES TIMEOUT 300 ENVIRONMENT "SP_NODE=${SP_NODE};SP_OPENSSL=${SP_OPENSSL}")
   add_test(NAME sse_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_sse_tests>)
+  add_test(NAME ws_frame_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_ws_frame_tests>)
+  add_test(NAME ws_transport_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_ws_transport_tests>
+           ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/ws_server.mjs)
+  set_tests_properties(ws_transport_properties PROPERTIES TIMEOUT 180 ENVIRONMENT "SP_OPENSSL=${SP_OPENSSL}")
   add_test(NAME descriptor_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_descriptor_tests>)
   add_test(NAME chat_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_chat_tests>)
   add_test(NAME error_reason COMMAND ${sp_test_runner} $<TARGET_FILE:sp_error_reason_tests> ${CMAKE_CURRENT_SOURCE_DIR}/src)
