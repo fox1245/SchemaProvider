@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "id": "claude-haiku-4-5-20251001",
+      "families": ["anthropic.messages"],
+      "input_limit": 200000,
+      "output_limit": 64000,
+      "source": "verified"
+    },
+    {
+      "id": "gemini-2.5-flash-lite",
+      "families": ["google.generate", "google.interactions"],
+      "input_limit": 1048576,
+      "output_limit": 65536,
+      "defaults": {
+        "google.generate": {"include_thoughts": true},
+        "google.interactions": {"thinking_summaries": true}
+      },
+      "source": "verified"
+    },
+    {
+      "id": "gemini-omni-1.1-flash",
+      "families": ["google.interactions"],
+      "source": "verified"
+    },
+    {
+      "id": "gpt-6-luna",
+      "families": ["openai.chat", "openai.responses"],
+      "input_limit": 922000,
+      "output_limit": 128000,
+      "source": "verified"
+    }
+  ]
+}

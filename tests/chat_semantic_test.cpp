@@ -883,8 +883,8 @@ void output_cap_member_by_origin() {
       families += member + '}';
     }
     families += ']';
-    return descriptor::load_policy("{\"version\":1,\"revision\":" + std::to_string(root.get("revision").as_uint()) + ",\"families\":" + families +
-                                   ",\"models\":" + root.get("models").dump() + '}', config_defaults::codec_defaults_json);
+    return descriptor::load_policy("{\"version\":1,\"revision\":" + std::to_string(root.get("revision").as_uint()) + ",\"families\":" + families + '}',
+                                   config_defaults::codec_defaults_json);
   };
   auto admitted = snapshot("openai.chat", {});
   CHECK(std::holds_alternative<descriptor::PolicySnapshot>(admitted));

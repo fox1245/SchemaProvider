@@ -64,7 +64,8 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/config/error-policy.json"
   "${CMAKE_CURRENT_SOURCE_DIR}/config/descriptor-policy.json"
   "${CMAKE_CURRENT_SOURCE_DIR}/config/codec-defaults.json"
-  "${CMAKE_CURRENT_SOURCE_DIR}/config/model-catalog.json")
+  "${CMAKE_CURRENT_SOURCE_DIR}/config/model-catalog.json"
+  "${CMAKE_CURRENT_SOURCE_DIR}/config/models.json")
 execute_process(
   COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_configuration.py"
     --runtime "${CMAKE_CURRENT_SOURCE_DIR}/config/runtime-defaults.json"
@@ -72,6 +73,7 @@ execute_process(
     --descriptor-policy "${CMAKE_CURRENT_SOURCE_DIR}/config/descriptor-policy.json"
     --codec-defaults "${CMAKE_CURRENT_SOURCE_DIR}/config/codec-defaults.json"
     --asset model_catalog_json "${CMAKE_CURRENT_SOURCE_DIR}/config/model-catalog.json"
+    --asset model_catalogue_json "${CMAKE_CURRENT_SOURCE_DIR}/config/models.json"
     --output "${SP_GENERATED_INCLUDE_DIR}/sp/config_defaults.h"
   RESULT_VARIABLE SP_CONFIGURATION_RESULT)
 if(NOT SP_CONFIGURATION_RESULT EQUAL 0)
@@ -133,7 +135,7 @@ else()
   set(SP_EXTERNAL_YYJSON ON)
 endif()
 
-add_library(sp_descriptor src/descriptor/descriptor.cpp src/descriptor/policy.cpp)
+add_library(sp_descriptor src/descriptor/descriptor.cpp src/descriptor/policy.cpp src/descriptor/catalogue.cpp)
 target_compile_options(sp_descriptor PRIVATE ${SP_WARNING_OPTIONS})
 target_link_libraries(sp_descriptor PUBLIC sp_json)
 
@@ -344,6 +346,8 @@ if(SP_BUILD_TESTS)
   target_compile_options(sp_ws_client_tool PRIVATE ${SP_WARNING_OPTIONS})
   add_executable(sp_descriptor_tests tests/descriptor_properties_test.cpp)
   target_link_libraries(sp_descriptor_tests PRIVATE sp_descriptor sp_json)
+  add_executable(sp_catalogue_tests tests/catalogue_test.cpp)
+  target_link_libraries(sp_catalogue_tests PRIVATE sp_descriptor sp_json)
   add_executable(sp_chat_tests tests/chat_semantic_test.cpp)
   target_link_libraries(sp_chat_tests PRIVATE sp_codecs sp_descriptor sp_json sp_transport)
   add_executable(sp_error_reason_tests tests/error_reason_test.cpp)
@@ -430,7 +434,7 @@ if(SP_BUILD_TESTS)
   foreach(target sp_runtime_policy_tests sp_runtime_scheduler_tests)
     target_compile_options(${target} PRIVATE ${SP_WARNING_OPTIONS})
   endforeach()
-  foreach(target sp_sse_tests sp_descriptor_tests sp_chat_tests sp_error_reason_tests sp_messages_tests sp_messages_replay_tests sp_native_continuation_tests)
+  foreach(target sp_sse_tests sp_descriptor_tests sp_catalogue_tests sp_chat_tests sp_error_reason_tests sp_messages_tests sp_messages_replay_tests sp_native_continuation_tests)
     target_compile_options(${target} PRIVATE ${SP_WARNING_OPTIONS})
   endforeach()
 
@@ -445,6 +449,7 @@ if(SP_BUILD_TESTS)
            ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/ws_server.mjs)
   set_tests_properties(ws_transport_properties PROPERTIES TIMEOUT 180 ENVIRONMENT "SP_OPENSSL=${SP_OPENSSL}")
   add_test(NAME descriptor_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_descriptor_tests>)
+  add_test(NAME catalogue_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_catalogue_tests>)
   add_test(NAME chat_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_chat_tests>)
   add_test(NAME error_reason COMMAND ${sp_test_runner} $<TARGET_FILE:sp_error_reason_tests> ${CMAKE_CURRENT_SOURCE_DIR}/src)
   add_test(NAME stop_reasoning_preservation COMMAND ${sp_test_runner} $<TARGET_FILE:sp_stop_reasoning_preservation_tests>)
@@ -497,7 +502,7 @@ if(SP_BUILD_TESTS)
     set_tests_properties(vision_control_runtime PROPERTIES TIMEOUT 300)
   endif()
   set_tests_properties(runtime_policy runtime_scheduler PROPERTIES TIMEOUT 300)
-  set_tests_properties(sse_properties descriptor_properties chat_properties
+  set_tests_properties(sse_properties descriptor_properties catalogue_properties chat_properties
                        messages_properties messages_replay native_continuation_bounds PROPERTIES TIMEOUT 300)
 
   # Transport stall bounds (connect / first byte / idle): one binary, one CTest entry per suite. A suite

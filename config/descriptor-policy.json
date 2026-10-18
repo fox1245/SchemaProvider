@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "revision": 5,
+  "revision": 6,
   "families": [
     {
       "family": "openai.chat",
@@ -432,108 +432,6 @@
       "header_versions": [],
       "header_version": null,
       "server_tools": []
-    }
-  ],
-  "models": [
-    {
-      "family": "openai.chat",
-      "model": "gpt-6-luna",
-      "defaults": {
-        "max_output_tokens": null,
-        "thinking_budget": null,
-        "include_thoughts": null,
-        "thinking_summaries": null,
-        "reasoning_enabled": false,
-        "reasoning_effort": null,
-        "reasoning_summary": null,
-        "thinking_level": null,
-        "service_tier": null,
-        "temperature": null,
-        "top_p": null,
-        "strict_tools": null
-      },
-      "output_limit": 128000,
-      "input_limit": 922000
-    },
-    {
-      "family": "openai.responses",
-      "model": "gpt-6-luna",
-      "defaults": {
-        "max_output_tokens": null,
-        "thinking_budget": null,
-        "include_thoughts": null,
-        "thinking_summaries": null,
-        "reasoning_enabled": false,
-        "reasoning_effort": "low",
-        "reasoning_summary": "auto",
-        "thinking_level": null,
-        "service_tier": null,
-        "temperature": null,
-        "top_p": null,
-        "strict_tools": true
-      },
-      "output_limit": 128000,
-      "input_limit": 922000
-    },
-    {
-      "family": "anthropic.messages",
-      "model": "claude-haiku-4-5-20251001",
-      "defaults": {
-        "max_output_tokens": 1024,
-        "thinking_budget": null,
-        "include_thoughts": null,
-        "thinking_summaries": null,
-        "reasoning_enabled": false,
-        "reasoning_effort": null,
-        "reasoning_summary": null,
-        "thinking_level": null,
-        "service_tier": null,
-        "temperature": null,
-        "top_p": null,
-        "strict_tools": null
-      },
-      "output_limit": 64000,
-      "input_limit": 200000
-    },
-    {
-      "family": "google.generate",
-      "model": "gemini-2.5-flash-lite",
-      "defaults": {
-        "max_output_tokens": 4096,
-        "thinking_budget": null,
-        "include_thoughts": true,
-        "thinking_summaries": null,
-        "reasoning_enabled": false,
-        "reasoning_effort": null,
-        "reasoning_summary": null,
-        "thinking_level": null,
-        "service_tier": null,
-        "temperature": null,
-        "top_p": null,
-        "strict_tools": null
-      },
-      "output_limit": 65536,
-      "input_limit": 1048576
-    },
-    {
-      "family": "google.interactions",
-      "model": "gemini-2.5-flash-lite",
-      "defaults": {
-        "max_output_tokens": 4096,
-        "thinking_budget": null,
-        "include_thoughts": null,
-        "thinking_summaries": true,
-        "reasoning_enabled": false,
-        "reasoning_effort": null,
-        "reasoning_summary": null,
-        "thinking_level": null,
-        "service_tier": "standard",
-        "temperature": null,
-        "top_p": null,
-        "strict_tools": null
-      },
-      "output_limit": 65536,
-      "input_limit": 1048576
     }
   ]
 }

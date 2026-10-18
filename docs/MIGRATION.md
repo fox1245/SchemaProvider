@@ -88,6 +88,13 @@ Editing admission data no longer makes sealed history `ReplayIneligible`. `Descr
 
 No struct of the outcome or request changes. `DescriptorPolicy` gains a private member, and the interface revision stays 7.
 
+Model facts moved from the descriptor policy to a model catalogue (`<descriptor/catalogue.h>`, embedded from `config/models.json`). The policy's `models[]` held five exact `(family, model)` entries: any other id, a dated snapshot or a gateway spelling matched nothing, and adding one changed the policy file. A catalogue entry can now match by id, alias or prefix profile, be scoped to origins, and carry limits, modalities, prices and defaults. A model the catalogue does not know is still admitted with the family defaults.
+- **Policy file.** `descriptor-policy.json` no longer has `models`, and `load_policy` refuses a snapshot that still lists it. Move each entry to a catalogue entry (`model` becomes `id`, and `defaults` becomes `defaults` keyed by the family).
+- **Defaults.** Entry defaults now apply over the family's, member by member: an absent member keeps the family default, and `null` leaves the control unset. `models[]` replaced the whole object.
+- **Lookups.** `DescriptorPolicy::defaults`, `output_limit` and `input_limit` take the origin as well (`family, origin, model`). `descriptor::model_defaults(descriptor, model)` and `model_match(descriptor, model)` are the descriptor-level forms. `ModelDefaults` is removed.
+- **Loading.** `load_policy(family_json, resource_json, catalogue)` and `DescriptorPolicy::with_catalogue(catalogue)` attach a catalogue; the two-argument `load_policy` uses the embedded one. A policy bundle may carry `model_catalogue`, and `builtin_policy_bundle_json()` includes it.
+- **Digests.** The content digest, which pins check, covers the catalogue. The replay identity does not.
+
 ## From interface 5 to 6
 
 Package 0.3.0 alpha adds `Usage::provider_cost` and the fixed-size `ProviderReportedCost`, `UsdAmount`, `CostSource`, `CostStatus` and `CostRounding` types. Existing field access remains source-compatible, but `Usage`, `UsageUpdate`, `Completion`, `PartialCompletion` and the containing `Event` layouts grow. Rebuild every consumer against the same headers and generation 6 libraries (`libsp_*.so.6`); interface 5 binaries must not load interface 6 libraries. CMake consumers select `SchemaProvider 0.3.0 EXACT`.
