@@ -11,6 +11,8 @@
 namespace sp::descriptor {
 namespace {
 using json::Value;
+// A bundle may carry a refreshed catalogue, which load_catalogue bounds to 8 MiB.
+constexpr std::size_t bundle_catalogue_bytes = 8u * 1024u * 1024u;
 [[noreturn]] void fail(std::string_view path, std::string_view expected) {
   throw ConfigError{std::string(path), std::string(expected), 0, "descriptor policy value rejected"};
 }
@@ -207,7 +209,7 @@ bool within_depth(Value v, std::size_t remaining) {
 } // namespace
 class PolicyLoader {
  public:
-  PolicyResult run(std::string_view source,std::string_view resources) {
+  PolicyResult run(std::string_view source,std::string_view resources,CatalogueSnapshot catalogue) {
     std::uint64_t revision = 0;
     try {
       auto p=json::parse(source,{config_defaults::codec_admission_policy_bytes,config_defaults::codec_admission_policy_depth});
@@ -217,7 +219,7 @@ class PolicyLoader {
       if(!pd || !rd)fail("","strict bounded JSON policy");
       auto policy=std::shared_ptr<DescriptorPolicy>(new DescriptorPolicy);
       auto root=pd->root(); auto rr=rd->root();
-      closed(root,{"version","revision","families","models"},""); closed(rr,{"version","resources","admission"},"/resources");
+      closed(root,{"version","revision","families"},""); closed(rr,{"version","resources","admission"},"/resources");
       if(integer(root.get("version"),"/version")!=1 || integer(rr.get("version"),"/version")!=1 || !integer(root.get("revision"),"/revision"))fail("/version","version 1 and positive revision");
       auto rv=rr.get("resources"), av=rr.get("admission");
       closed(rv,{"json_bytes","json_depth","request_bytes","chat_text_request_bytes","request_messages","request_tools","request_parts","native_bytes","native_depth","native_members","image_decoded_bytes","audio_decoded_bytes","video_decoded_bytes","document_decoded_bytes","descriptor_bytes","descriptor_depth","policy_bytes","policy_depth"},"/resources");
@@ -319,33 +321,16 @@ class PolicyLoader {
         if(f.defaults.strict_tools && f.family!="openai.responses") fail("/defaults/strict_tools","Responses strict tools only");
         policy->families_.push_back(std::move(f));
       }
-      auto models=root.get("models"); if(!models.is_array() || models.size()>1024)fail("/models","bounded model defaults");
-      for (auto v : models.elements()) {
-        closed(v, {"family","model","defaults","output_limit","input_limit"}, "/models");
-        ModelDefaults m{text(v.get("family"),"/models"), text(v.get("model"),"/models"),
-                        ::sp::descriptor::defaults(v.get("defaults")),
-                        optional_integer(v.get("output_limit"),"/models"),
-                        optional_integer(v.get("input_limit"),"/models")};
-        const auto* f = policy->family(m.family);
-        if (!f || (m.output_limit && !*m.output_limit) || (m.input_limit && !*m.input_limit))
-          fail("/models", "declared family and positive optional input/output model limits");
-        for (const auto& old : policy->models_)
-          if (old.family == m.family && old.model == m.model) fail("/models", "unique model");
-        if (auto error = validate(*f, choices(m.defaults), m.output_limit, false))
-          fail("/models/defaults", *error);
-        if (m.defaults.strict_tools && m.family != "openai.responses")
-          fail("/models/defaults/strict_tools", "Responses strict tools only");
-        policy->models_.push_back(std::move(m));
-      }
       {
         crypto::Sha256 hash;
         hash.update(pd->root().dump());
         hash.update("\n");
         hash.update(rd->root().dump());
         const auto digest = hash.finish();
-        policy->content_digest_.assign(reinterpret_cast<const char*>(digest.data()), digest.size());
+        policy->pair_digest_.assign(reinterpret_cast<const char*>(digest.data()), digest.size());
       }
       policy->identity_ = replay_identity(policy->families_);
+      attach(*policy, std::move(catalogue));
       // Reuse descriptor admission for slot collisions, escaped usage segments,
       // and reserved wire fields instead of introducing a second convention.
       for (const auto& family : policy->families_) {
@@ -363,11 +348,77 @@ class PolicyLoader {
       return PolicySnapshot(std::move(policy));
     } catch (ConfigError& error) { error.revision = revision; return std::move(error); }
   }
+  // Resolves each catalogue entry's defaults over its family's and checks them like family
+  // defaults; then binds the catalogue into the content digest.
+  static void attach(DescriptorPolicy& policy, CatalogueSnapshot catalogue) {
+    if (!catalogue) fail("/model_catalogue", "model catalogue");
+    policy.resolved_.clear();
+    const auto& entries = catalogue->entries();
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+      for (const auto& overlay : entries[i].defaults) {
+        const auto* f = policy.family(overlay.family);
+        if (!f) fail("/model_catalogue", "declared family");
+        std::string pointer = "/model_catalogue/models/";
+        for (const char c : entries[i].id) pointer += c == '~' ? std::string("~0") : c == '/' ? std::string("~1") : std::string(1, c);
+        pointer += "/defaults/" + overlay.family;
+        auto resolved = over(f->defaults, overlay);
+        if (auto error = validate(*f, choices(resolved), entries[i].output_limit, false)) fail(pointer, *error);
+        if (resolved.strict_tools && f->family != "openai.responses") fail(pointer + "/strict_tools", "Responses strict tools only");
+        policy.resolved_.push_back({i, overlay.family, std::move(resolved)});
+      }
+    }
+    crypto::Sha256 hash;
+    hash.update("sp.descriptor-policy.content.v2\n");
+    hash.update(policy.pair_digest_);
+    hash.update(catalogue->digest());
+    const auto digest = hash.finish();
+    policy.content_digest_.assign(reinterpret_cast<const char*>(digest.data()), digest.size());
+    policy.catalogue_ = std::move(catalogue);
+  }
+  static RequestDefaults over(const RequestDefaults& base, const DefaultsOverlay& o) {
+    RequestDefaults r = base;
+    if (o.max_output_tokens) r.max_output_tokens = *o.max_output_tokens;
+    if (o.thinking_budget) r.thinking_budget = *o.thinking_budget;
+    if (o.include_thoughts) r.include_thoughts = *o.include_thoughts;
+    if (o.thinking_summaries) r.thinking_summaries = *o.thinking_summaries;
+    if (o.strict_tools) r.strict_tools = *o.strict_tools;
+    if (o.reasoning_enabled) r.reasoning_enabled = *o.reasoning_enabled;
+    if (o.reasoning_effort) r.reasoning_effort = *o.reasoning_effort;
+    if (o.reasoning_summary) r.reasoning_summary = *o.reasoning_summary;
+    if (o.thinking_level) r.thinking_level = *o.thinking_level;
+    if (o.service_tier) r.service_tier = *o.service_tier;
+    if (o.temperature) r.temperature = *o.temperature;
+    if (o.top_p) r.top_p = *o.top_p;
+    return r;
+  }
 };
 const FamilyPolicy* DescriptorPolicy::family(std::string_view name) const noexcept { for(const auto& f:families_)if(f.family==name)return &f; return nullptr; }
-const RequestDefaults& DescriptorPolicy::defaults(std::string_view name,std::string_view model) const noexcept { for(const auto& m:models_)if(m.family==name && m.model==model)return m.defaults; return family(name)->defaults; }
-std::optional<std::uint64_t> DescriptorPolicy::output_limit(std::string_view name,std::string_view model) const noexcept {for(const auto& m:models_)if(m.family==name && m.model==model)return m.output_limit;return {};}
-std::optional<std::uint64_t> DescriptorPolicy::input_limit(std::string_view name,std::string_view model) const noexcept {for(const auto& m:models_)if(m.family==name && m.model==model)return m.input_limit;return {};}
+ModelMatch DescriptorPolicy::model(std::string_view name, std::string_view origin, std::string_view model) const noexcept {
+  return catalogue_ ? catalogue_->find(name, origin, model) : ModelMatch{};
+}
+const RequestDefaults& DescriptorPolicy::defaults(std::string_view name, std::string_view origin, std::string_view model) const noexcept {
+  if (const auto match = this->model(name, origin, model); match.entry) {
+    const auto index = static_cast<std::size_t>(match.entry - catalogue_->entries().data());
+    for (const auto& resolved : resolved_)
+      if (resolved.entry == index && resolved.family == name) return resolved.defaults;
+  }
+  return family(name)->defaults;
+}
+std::optional<std::uint64_t> DescriptorPolicy::output_limit(std::string_view name, std::string_view origin, std::string_view model) const noexcept {
+  const auto match = this->model(name, origin, model);
+  return match.entry ? match.entry->output_limit : std::nullopt;
+}
+std::optional<std::uint64_t> DescriptorPolicy::input_limit(std::string_view name, std::string_view origin, std::string_view model) const noexcept {
+  const auto match = this->model(name, origin, model);
+  return match.entry ? match.entry->input_limit : std::nullopt;
+}
+PolicyResult DescriptorPolicy::with_catalogue(CatalogueSnapshot catalogue) const {
+  try {
+    auto copy = std::shared_ptr<DescriptorPolicy>(new DescriptorPolicy(*this));
+    PolicyLoader::attach(*copy, std::move(catalogue));
+    return PolicySnapshot(std::move(copy));
+  } catch (ConfigError& error) { return std::move(error); }
+}
 namespace {
 std::string lower_hex(std::string_view bytes) {
   static constexpr char hex[] = "0123456789abcdef";
@@ -382,7 +433,8 @@ std::string lower_hex(std::string_view bytes) {
 } // namespace
 std::string DescriptorPolicy::identity_hex() const { return lower_hex(identity_); }
 std::string DescriptorPolicy::content_digest_hex() const { return lower_hex(content_digest_); }
-PolicyResult load_policy(std::string_view f,std::string_view r){return PolicyLoader{}.run(f,r);}
+PolicyResult load_policy(std::string_view f,std::string_view r){return PolicyLoader{}.run(f,r,builtin_catalogue());}
+PolicyResult load_policy(std::string_view f,std::string_view r,CatalogueSnapshot c){return PolicyLoader{}.run(f,r,std::move(c));}
 namespace {
 bool matches_sha256_hex(std::string_view actual_lower_hex, std::string_view expected_hex) noexcept {
   if (expected_hex.size() != 64 || actual_lower_hex.size() != 64) return false;
@@ -422,9 +474,10 @@ std::variant<std::string, ConfigError> read_bounded_policy_file(
   return contents;
 }
 } // namespace
-PolicyResult load_verified_policy(std::string_view family_json, std::string_view resource_json,
-                                  std::string_view expected_sha256_hex) {
-  auto loaded = load_policy(family_json, resource_json);
+namespace {
+PolicyResult verified_policy(std::string_view family_json, std::string_view resource_json, CatalogueSnapshot catalogue,
+                             std::string_view expected_sha256_hex) {
+  auto loaded = load_policy(family_json, resource_json, std::move(catalogue));
   auto* snapshot = std::get_if<PolicySnapshot>(&loaded);
   if (!snapshot || expected_sha256_hex.empty()) return loaded;
   if (!matches_sha256_hex((*snapshot)->content_digest_hex(), expected_sha256_hex)) {
@@ -432,6 +485,11 @@ PolicyResult load_verified_policy(std::string_view family_json, std::string_view
                        "policy content SHA-256 digest mismatch"};
   }
   return loaded;
+}
+} // namespace
+PolicyResult load_verified_policy(std::string_view family_json, std::string_view resource_json,
+                                  std::string_view expected_sha256_hex) {
+  return verified_policy(family_json, resource_json, builtin_catalogue(), expected_sha256_hex);
 }
 PolicyResult load_policy_files(std::string_view family_json_path, std::string_view resource_json_path,
                                std::string_view expected_sha256_hex) {
@@ -447,8 +505,8 @@ PolicyResult load_policy_files(std::string_view family_json_path, std::string_vi
 }
 PolicyResult load_policy_bundle(std::string_view bundle_json,
                                 std::string_view expected_sha256_hex) {
-  const json::Limits limits{config_defaults::codec_admission_policy_bytes * 2,
-                            config_defaults::codec_admission_policy_depth + 2};
+  const json::Limits limits{config_defaults::codec_admission_policy_bytes * 2 + bundle_catalogue_bytes,
+                            std::max<std::size_t>(config_defaults::codec_admission_policy_depth, 6) + 2};
   auto parsed = json::parse(bundle_json, limits);
   if (auto* error = std::get_if<json::ParseError>(&parsed)) {
     return ConfigError{error->pointer, "valid JSON policy bundle", 0,
@@ -456,14 +514,24 @@ PolicyResult load_policy_bundle(std::string_view bundle_json,
   }
   try {
     const auto root = std::get<json::Document>(parsed).root();
-    closed(root, {"version", "descriptor_policy", "codec_defaults"}, "");
+    closed(root, {"version", "descriptor_policy", "codec_defaults"}, "", {"model_catalogue"});
     if (!root.get("version").is_uint() || root.get("version").as_uint() != 1)
       fail("/version", "integer version 1");
     const auto family_node = root.get("descriptor_policy");
     const auto resource_node = root.get("codec_defaults");
     if (!family_node.is_object()) fail("/descriptor_policy", "descriptor policy object");
     if (!resource_node.is_object()) fail("/codec_defaults", "codec defaults object");
-    return load_verified_policy(family_node.dump(), resource_node.dump(), expected_sha256_hex);
+    auto catalogue = builtin_catalogue();
+    if (const auto node = root.get("model_catalogue"); node.valid()) {
+      if (!node.is_object()) fail("/model_catalogue", "model catalogue object");
+      auto loaded = load_catalogue(node.dump());
+      if (auto* error = std::get_if<ConfigError>(&loaded)) {
+        error->pointer = "/model_catalogue" + error->pointer;
+        return std::move(*error);
+      }
+      catalogue = std::get<CatalogueSnapshot>(std::move(loaded));
+    }
+    return verified_policy(family_node.dump(), resource_node.dump(), std::move(catalogue), expected_sha256_hex);
   } catch (ConfigError& error) {
     return std::move(error);
   }
@@ -471,7 +539,7 @@ PolicyResult load_policy_bundle(std::string_view bundle_json,
 PolicyResult load_policy_bundle_file(std::string_view bundle_path,
                                      std::string_view expected_sha256_hex) {
   auto bundle_file = read_bounded_policy_file(
-      bundle_path, config_defaults::codec_admission_policy_bytes * 2, "");
+      bundle_path, config_defaults::codec_admission_policy_bytes * 2 + bundle_catalogue_bytes, "");
   if (auto* error = std::get_if<ConfigError>(&bundle_file)) return std::move(*error);
   return load_policy_bundle(std::get<std::string>(bundle_file), expected_sha256_hex);
 }
@@ -479,12 +547,19 @@ std::string builtin_policy_bundle_json() {
   return std::string("{\"version\":1,\"descriptor_policy\":") +
          std::string(config_defaults::descriptor_policy_json) +
          ",\"codec_defaults\":" +
-         std::string(config_defaults::codec_defaults_json) + "}";
+         std::string(config_defaults::codec_defaults_json) +
+         ",\"model_catalogue\":" + builtin_catalogue_json() + "}";
 }
-PolicySnapshot builtin_policy(){static const auto value=[] {auto r=load_policy(config_defaults::descriptor_policy_json,config_defaults::codec_defaults_json); if(auto* e=std::get_if<ConfigError>(&r))throw std::logic_error(e->message);return std::get<PolicySnapshot>(std::move(r));}();return value;}
+PolicySnapshot builtin_policy(){static const auto value=[] {auto r=load_policy(config_defaults::descriptor_policy_json,config_defaults::codec_defaults_json,builtin_catalogue()); if(auto* e=std::get_if<ConfigError>(&r))throw std::logic_error(e->message);return std::get<PolicySnapshot>(std::move(r));}();return value;}
 std::optional<std::string_view> borrowed(const std::optional<std::string>& value){if(value)return *value;return {};}
 bool contains(const std::vector<std::string>& values,std::string_view value){return std::find(values.begin(),values.end(),value)!=values.end();}
-EffectiveChoices effective_defaults(const ValidatedDescriptor& d,std::string_view model){return choices(d.policy()->defaults(d.family(),model));}
+EffectiveChoices effective_defaults(const ValidatedDescriptor& d,std::string_view model){return choices(model_defaults(d,model));}
+const RequestDefaults& model_defaults(const ValidatedDescriptor& d, std::string_view model) noexcept {
+  return d.policy()->defaults(d.family(), d.base_url(), model);
+}
+ModelMatch model_match(const ValidatedDescriptor& d, std::string_view model) noexcept {
+  return d.policy()->model(d.family(), d.base_url(), model);
+}
 const MediaPolicy& media_policy(const ValidatedDescriptor& d) noexcept {
   const auto& family = d.family_policy();
   return family.openrouter_media && routed_gateway(d) ? *family.openrouter_media : family.media;
@@ -553,6 +628,8 @@ std::string_view DescriptorPolicy::default_output_cap_member(std::string_view fa
   return declared ? std::string_view(declared->cap_member) : std::string_view{};
 }
 bool temperature_forbidden(const ValidatedDescriptor& d, std::string_view model) {
+  // A catalogue entry that states the fact wins over the family's sampling rules.
+  if (const auto match = model_match(d, model); match.entry && match.entry->temperature) return !*match.entry->temperature;
   const auto slash = model.rfind('/');
   const auto suffix = slash == std::string_view::npos ? model : model.substr(slash + 1);
   auto starts = [](std::string_view value, std::string_view prefix) {
@@ -570,7 +647,7 @@ bool temperature_forbidden(const ValidatedDescriptor& d, std::string_view model)
 }
 std::optional<std::string> validate_choices(const ValidatedDescriptor& d,std::string_view model,const EffectiveChoices& c) {
   if (c.temperature && temperature_forbidden(d, model)) return "temperature is prohibited for the admitted model";
-  return validate(d.family_policy(),c,d.policy()->output_limit(d.family(),model),true);
+  return validate(d.family_policy(),c,d.policy()->output_limit(d.family(),d.base_url(),model),true);
 }
 std::uint32_t interface_revision() noexcept { return 7; }
 } // namespace sp::descriptor

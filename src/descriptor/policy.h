@@ -1,4 +1,5 @@
 #pragma once
+#include "descriptor/catalogue.h"
 #include "descriptor/descriptor.h"
 #include "json/json.h"
 #include <array>
@@ -53,11 +54,6 @@ struct FamilyPolicy {
   // Replaces `media` for a base URL in openrouter_origins, whose gateway admits more content.
   std::optional<MediaPolicy> openrouter_media;
 };
-struct ModelDefaults {
-  std::string family, model;
-  RequestDefaults defaults;
-  std::optional<std::uint64_t> output_limit, input_limit;
-};
 class DescriptorPolicy;
 using PolicySnapshot = std::shared_ptr<const DescriptorPolicy>;
 using PolicyResult = std::variant<PolicySnapshot, ConfigError>;
@@ -65,9 +61,18 @@ class DescriptorPolicy final {
  public:
   const CodecResources& resources() const noexcept { return resources_; }
   const FamilyPolicy* family(std::string_view) const noexcept;
-  const RequestDefaults& defaults(std::string_view family, std::string_view model) const noexcept;
-  std::optional<std::uint64_t> output_limit(std::string_view family, std::string_view model) const noexcept;
-  std::optional<std::uint64_t> input_limit(std::string_view family, std::string_view model) const noexcept;
+  // What the model catalogue says about `model` at `origin`: the family's defaults with the
+  // matching entry's defaults over them, and the entry's limits. A model the catalogue does not
+  // know gets the family defaults and no limits; it is never refused for that.
+  const RequestDefaults& defaults(std::string_view family, std::string_view origin, std::string_view model) const noexcept;
+  std::optional<std::uint64_t> output_limit(std::string_view family, std::string_view origin, std::string_view model) const noexcept;
+  std::optional<std::uint64_t> input_limit(std::string_view family, std::string_view origin, std::string_view model) const noexcept;
+  ModelMatch model(std::string_view family, std::string_view origin, std::string_view model) const noexcept;
+  const CatalogueSnapshot& catalogue() const noexcept { return catalogue_; }
+  // This policy with another catalogue. The replay identity stays; the content digest changes.
+  // Entry defaults are checked against the family rules, and a refusal points into the catalogue
+  // (`/model_catalogue/models/<id>/defaults/<family>`, with the entry id in place of an index).
+  PolicyResult with_catalogue(CatalogueSnapshot catalogue) const;
   // The replay identity: SHA-256 over the facts that decide how sealed history is written to and
   // read from the wire (each family's bindings, stop reasons and Messages header version). It is
   // part of every native origin and archive, so a policy that changes one of them makes earlier
@@ -76,8 +81,9 @@ class DescriptorPolicy final {
   // that data keeps sealed history replayable.
   std::string_view identity() const noexcept { return identity_; }
   std::string identity_hex() const;
-  // SHA-256 over the whole policy pair, admission data included. This is what a pin
-  // (`expected_sha256_hex`) checks. It is computed from the parsed documents, not the file bytes.
+  // SHA-256 over the whole policy pair and the model catalogue, admission data included. This is
+  // what a pin (`expected_sha256_hex`) checks. It is computed from the parsed documents, not the
+  // file bytes.
   std::string_view content_digest() const noexcept { return content_digest_; }
   std::string content_digest_hex() const;
   // True when `model` belongs to a series that the family's `temperature_forbidden_generations`
@@ -95,13 +101,18 @@ class DescriptorPolicy final {
   struct GenerationRule { std::string family, series; std::uint32_t major = 0, minor = 0; };
   CodecResources resources_{};
   std::vector<FamilyPolicy> families_;
-  std::vector<ModelDefaults> models_;
-  std::string identity_, content_digest_;
+  // Defaults of one catalogue entry for one family, resolved over the family's defaults.
+  struct ResolvedDefaults { std::size_t entry; std::string family; RequestDefaults defaults; };
+  std::string identity_, content_digest_, pair_digest_;
+  CatalogueSnapshot catalogue_;
+  std::vector<ResolvedDefaults> resolved_;
   std::vector<GenerationRule> generation_rules_;
   std::vector<std::pair<std::string, std::string>> completion_cap_origins_;  // family, origin
   friend class PolicyLoader;
 };
+// Without a catalogue argument, a policy uses builtin_catalogue().
 PolicyResult load_policy(std::string_view family_json, std::string_view resource_json);
+PolicyResult load_policy(std::string_view family_json, std::string_view resource_json, CatalogueSnapshot catalogue);
 PolicyResult load_verified_policy(std::string_view family_json, std::string_view resource_json,
                                   std::string_view expected_sha256_hex = {});
 PolicyResult load_policy_files(std::string_view family_json_path, std::string_view resource_json_path,
@@ -122,6 +133,10 @@ struct EffectiveChoices {
   std::optional<double> temperature, top_p;
 };
 EffectiveChoices effective_defaults(const ValidatedDescriptor&, std::string_view model);
+// The policy's defaults for `model` at this descriptor's family and origin.
+const RequestDefaults& model_defaults(const ValidatedDescriptor&, std::string_view model) noexcept;
+// How the policy's catalogue matched `model` at this descriptor's family and origin.
+ModelMatch model_match(const ValidatedDescriptor&, std::string_view model) noexcept;
 std::optional<std::string_view> borrowed(const std::optional<std::string>&);
 bool contains(const std::vector<std::string>&, std::string_view);
 bool temperature_forbidden(const ValidatedDescriptor&, std::string_view model);

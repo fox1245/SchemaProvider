@@ -228,11 +228,12 @@ void diagnostic_documents_roundtrip_without_executable_upgrade() {
 std::string with_member(json::Value object,std::string_view key,std::string_view raw) {
   std::string out="{";for(auto member:object.members()){if(out.size()>1)out+=',';out+=json::quote(member.key)+':'+(member.key==key?std::string(raw):member.value.dump());}return out+'}';
 }
-// The embedded policy with an extra model entry (admission data) or with another Messages header
-// version (a wire fact).
+// The embedded policy with another model catalogue (admission data) or with another Messages
+// header version (a wire fact).
 descriptor::PolicySnapshot edited_policy(bool wire_fact) {
   auto source=document(config_defaults::descriptor_policy_json);const auto root=source->root();std::string edited;
-  if(!wire_fact){std::string models=root.get("models").dump();models.insert(models.size()-1,","+with_member(root.get("models").at(0),"model","\"archive-added-model\""));edited=with_member(root,"models",models);}
+  if(!wire_fact){auto catalogue=descriptor::load_catalogue(R"({"version":1,"models":[{"id":"archive-added-model","output_limit":4096}]})");CHECK(std::holds_alternative<descriptor::CatalogueSnapshot>(catalogue));
+    auto added=descriptor::builtin_policy()->with_catalogue(std::get<descriptor::CatalogueSnapshot>(std::move(catalogue)));CHECK(std::holds_alternative<descriptor::PolicySnapshot>(added));return std::get<descriptor::PolicySnapshot>(std::move(added));}
   else{std::string families="[";for(auto family:root.get("families").elements()){if(families.size()>1)families+=',';
     if(family.get("family").as_string()=="anthropic.messages"){auto versions=document(with_member(family,"header_versions",R"(["2023-06-01","2026-01-01"])"));families+=with_member(versions->root(),"header_version","\"2026-01-01\"");}
     else families+=family.dump();}

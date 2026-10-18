@@ -116,7 +116,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (descriptor.family() != "openai.responses") return Error{ErrorKind::InvalidConfig, "Responses encoder requires Responses descriptor"};
   if (request.model.empty() || request.messages.empty()) return bad("model and messages are required");
   const auto& resources = descriptor.policy()->resources();
-  const auto& defaults = descriptor.policy()->defaults(descriptor.family(), request.model);
+  const auto& defaults = descriptor::model_defaults(descriptor, request.model);
   auto effective = descriptor::effective_defaults(descriptor, request.model);
   if (request.max_output_tokens) effective.max_output_tokens = request.max_output_tokens;
   if (request.service_tier) effective.service_tier = *request.service_tier;

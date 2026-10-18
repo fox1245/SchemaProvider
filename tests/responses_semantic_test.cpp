@@ -177,7 +177,7 @@ void openrouter_max_price() {
 }
 void strict_tool_schemas() {
   // The embedded policy defaults Responses function tools to strict.
-  CHECK(desc().policy()->defaults("openai.responses", "fixture-model").strict_tools == std::optional<bool>(true));
+  CHECK(desc().policy()->defaults("openai.responses", desc().base_url(), "fixture-model").strict_tools == std::optional<bool>(true));
   const std::string plain = R"({"type":"object","properties":{"x":{"type":"integer"}},"required":["x"]})";
   const std::string closed = R"({"type":"object","properties":{"x":{"type":"integer"}},"required":["x"],"additionalProperties":false})";
   const auto with = [](std::string_view schema, std::optional<bool> strict) {

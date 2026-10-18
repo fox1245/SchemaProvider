@@ -442,7 +442,7 @@ void claude_temperature_by_generation() {
             if (family.get("family").as_string() == "anthropic.messages" && !rule.empty()) member += ",\"temperature_forbidden_generations\":" + std::string(rule);
             families += member + '}';
         }
-        return "{\"version\":1,\"revision\":" + std::to_string(root.get("revision").as_uint()) + ",\"families\":" + families + "],\"models\":" + root.get("models").dump() + '}';
+        return "{\"version\":1,\"revision\":" + std::to_string(root.get("revision").as_uint()) + ",\"families\":" + families + "]}";
     };
     auto admit = [&](std::string_view rule) {
         auto result = load_policy(policy_text(rule), sp::config_defaults::codec_defaults_json);
@@ -548,8 +548,6 @@ void replay_identity_covers_wire_facts_only() {
     const auto codec_root = std::get<sp::json::Document>(codec).root();
 
     // Admission data: the replay identity stays, the content digest changes.
-    std::string added_model = root.get("models").dump();
-    added_model.insert(added_model.size() - 1, "," + with_member(root.get("models").at(0), "model", "\"policy-test-added-model\""));
     std::string reversed = "[";
     for (std::size_t i = root.get("families").size(); i-- > 0;) {
         if (reversed.size() > 1) reversed += ',';
@@ -565,7 +563,6 @@ void replay_identity_covers_wire_facts_only() {
     const auto anthropic_defaults = with_member(root.get("families").at(1).get("defaults"), "max_output_tokens", "321");
     CHECK(root.get("families").at(1).get("family").as_string() == "anthropic.messages");
     const std::string admission_edits[] = {
-        with_member(root, "models", added_model),
         with_member(root, "families", reversed),
         with_member(root, "revision", std::to_string(root.get("revision").as_uint() + 1)),
         with_family_member("openai.chat", "temperature_forbidden_model_prefixes", prefixes),
@@ -578,6 +575,16 @@ void replay_identity_covers_wire_facts_only() {
         if (!policy) continue;
         CHECK(policy->identity() == builtin->identity());
         CHECK(policy->content_digest() != builtin->content_digest());
+    }
+    {
+        auto catalogue = load_catalogue(R"({"version":1,"models":[{"id":"policy-test-added-model","output_limit":4096}]})");
+        CHECK(std::holds_alternative<CatalogueSnapshot>(catalogue));
+        auto added = builtin->with_catalogue(std::get<CatalogueSnapshot>(std::move(catalogue)));
+        CHECK(std::holds_alternative<PolicySnapshot>(added));
+        if (auto* policy = std::get_if<PolicySnapshot>(&added)) {
+            CHECK((*policy)->identity() == builtin->identity());
+            CHECK((*policy)->content_digest() != builtin->content_digest());
+        }
     }
     const auto resources = with_member(codec_root.get("resources"), "request_bytes", "4096");
     if (const auto policy = load_pair(sp::config_defaults::descriptor_policy_json, with_member(codec_root, "resources", resources))) {

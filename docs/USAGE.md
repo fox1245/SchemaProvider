@@ -145,7 +145,7 @@ There are two independent immutable policy snapshots:
 | Inputs | Loader | Consumer |
 |---|---|---|
 | `config/runtime-defaults.json`, `config/error-policy.json` | `configuration::load_runtime_policy(runtime_json, error_json)` or `load_runtime_policy_files(runtime_path, error_path)` | Construct `runtime::Options(snapshot)` and then a new `Client`. |
-| `config/descriptor-policy.json`, `config/codec-defaults.json` | `descriptor::load_policy(family_json, resource_json)` | Call `descriptor::load(descriptor_json, snapshot)`. |
+| `config/descriptor-policy.json`, `config/codec-defaults.json`, and the model catalogue `config/models.json` | `descriptor::load_policy(family_json, resource_json)`, or `load_policy(family_json, resource_json, catalogue)` | Call `descriptor::load(descriptor_json, snapshot)`. |
 
 Both loaders return a variant of snapshot or `descriptor::ConfigError`. Embedded snapshots are the default; they are generated during SDK configuration. External loads are explicit and bounded. Files are source inputs, not files that every installed process must discover. Existing clients/descriptors retain their admitted policy; loading a replacement affects only newly constructed values.
 
@@ -165,6 +165,45 @@ A policy has two digests. Both are lowercase 64-digit SHA-256 values computed fr
 A nonempty `expected_sha256_hex` must be 64 hexadecimal digits (either case) equal to the content digest, otherwise the load returns a `ConfigError` at `/content_digest`, so a malformed or wrong pin is never ignored. An empty pin means no check. The pin compares against a value you obtained out of band; it is an integrity check, not proof of who produced the file. The bundle covers the descriptor/codec pair only: runtime and error policy still load with `configuration::load_runtime_policy`.
 
 Family/model defaults are resolved before encoding. An unset request optional uses its admitted default, which may also be unset. An explicit value replaces that default; false and allowed zero values remain distinct from absence. Output caps must be positive, so explicit zero is rejected there. Caller caps are not silently clamped: an admitted model limit or representation/resource bound rejects an incompatible value. No policy snapshot or canary profile grants financial authority.
+
+### Model catalogue
+
+What the SDK knows about models is data in a model catalogue (`<descriptor/catalogue.h>`), not code. A policy snapshot carries one. The embedded catalogue, `config/models.json`, holds only facts confirmed by live calls; it is not a provider listing.
+
+A catalogue never refuses a model. A model it does not know gets the family defaults and no limits, and a known model gets its entry's facts:
+- **Defaults.** The entry's `defaults` for the family, over the family's own defaults. An absent member keeps the family default, and `null` leaves the control unset.
+- **Limits.** `output_limit` refuses a larger output cap before dispatch, as an admitted model limit always did. `input_limit` and `context_window` are reported, not enforced.
+- **Temperature.** `temperature` (`true` or `false`) replaces the family's sampling rules for that model.
+
+Ask how a model matched with `descriptor::model_match(descriptor, model)` or `DescriptorPolicy::model(family, origin, model)`. The result names the entry and the relation:
+- `Exact`, the entry's `id`;
+- `Alias`, one of its `aliases`;
+- `Prefix`, the longest profile (`"match": "prefix"`) whose `id` starts the model;
+- `Unknown`, no entry.
+
+Among entries of the same rank, one that lists the family wins over one that lists other families, and one scoped to the descriptor's origin wins over an unscoped one. An entry whose `origins` does not include the descriptor's `base_url` never matches. `family_listed` is false when the entry lists other families only; the request is still admitted.
+
+The file is closed JSON, `{"version": 1, "models": [entry, ...]}`, at most 8 MiB and 16384 entries. Only `id` is required:
+
+| Member | Meaning |
+|---|---|
+| `id`, `match` | The model name (printable ASCII without spaces, at most 256 bytes), and `"exact"` (the default) or `"prefix"` for a profile. One entry per id and match. |
+| `families`, `origins` | The families that serve the model, and the descriptor origins the entry applies to. Empty or absent: not stated, and every origin. |
+| `aliases`, `served_as`, `alias_of` | Other names that request this model, names a response may report for it, and the model a provider-resolved alias points to. A profile has no aliases. |
+| `name`, `lifecycle`, `retires_at`, `source` | Display name, lifecycle token, retirement date, and where the entry came from (`verified` in the embedded file). |
+| `context_window`, `input_limit`, `output_limit` | Positive token counts. |
+| `input_modalities`, `output_modalities`, `methods`, `parameters` | Tokens as a provider lists them. |
+| `temperature` | Whether the model accepts `temperature`. |
+| `pricing` | USD per unit as decimal text, by unit name (`{"prompt": "0.00000015"}`). |
+| `defaults` | Request defaults by family, with the members of the family `defaults`, each optional. |
+
+To use your own catalogue:
+- **Load it.** `load_catalogue(json)` or `load_catalogue_file(path)`, or build one from entries in memory with `make_catalogue(entries)`.
+- **Layer it.** `merge_catalogues(layers)` applies layers in order. An entry with the same id and match is merged member by member, so a later layer replaces only what it sets (one price unit, one default) and adds new entries. Put the provider facts first, verified corrections next and your own file last.
+- **Attach it.** `policy->with_catalogue(catalogue)` returns a new snapshot, and descriptors built from it use the catalogue. A bundle may carry it as `model_catalogue`; without one, the embedded catalogue applies. Entry defaults are checked against the family rules, and a refusal points into the catalogue (`/model_catalogue/models/<id>/defaults/<family>`, with the entry id in place of an index).
+- **Compare it.** `diff_catalogues(before, after)` lists the added, removed and changed entries. `to_json()` is the canonical text, and `digest()` its SHA-256.
+
+The catalogue is admission data: it changes the policy's content digest, not its replay identity, so a new catalogue keeps sealed history replayable.
 
 ### Served model identity and routing gateways
 

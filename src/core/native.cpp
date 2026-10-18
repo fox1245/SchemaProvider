@@ -341,7 +341,7 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
   // Per-turn tool selection can be cleared after the forced client call.
   hash.number(request.tools.size());
   for (const auto& tool : request.tools) {
-    const auto& defaults = descriptor.policy()->defaults(descriptor.family(), request.model);
+    const auto& defaults = descriptor::model_defaults(descriptor, request.model);
     hash.text(tool.name); hash.text(tool.description); hash.document(tool.parameters);
     // Binds the requested strictness, not the sent flag. The encoder derives the
     // sent flag from it and the schema hashed above (a policy default on an
