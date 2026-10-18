@@ -120,4 +120,27 @@ struct CatalogueDiff {
 };
 CatalogueDiff diff_catalogues(const ModelCatalogue& before, const ModelCatalogue& after);
 
+// The provider model listings a catalogue can be generated from (transport/catalogue_refresh.h
+// fetches them).
+enum class Listing : std::uint8_t {
+  OpenRouter,  // GET /api/v1/models?output_modalities=all, public
+  Gemini,      // GET /v1beta/models, paged by nextPageToken
+  Anthropic,   // GET /v1/models, paged by after_id
+  OpenAI,      // GET /v1/models, ids only
+};
+// "openrouter", "gemini", "anthropic" or "openai": the `source` of the entries a listing gives.
+std::string_view listing_name(Listing) noexcept;
+struct ListingPage {
+  std::vector<CatalogueEntry> entries;
+  // The token that asks for the next page, or empty on the last page.
+  std::string next;
+  // Listed models left out because their id is not a model name the catalogue can hold.
+  std::size_t skipped = 0;
+};
+using ListingResult = std::variant<ListingPage, ConfigError>;
+// Reads one page of a listing. Every entry gets the listing's `source` and `origins = {origin}`.
+// The listing is provider data, so unknown members are ignored and a value the catalogue cannot
+// hold is left out; only a body that is not that listing at all is refused.
+ListingResult parse_listing(Listing listing, std::string_view body, std::string_view origin);
+
 } // namespace sp::descriptor

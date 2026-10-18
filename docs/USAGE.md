@@ -205,6 +205,55 @@ To use your own catalogue:
 
 The catalogue is admission data: it changes the policy's content digest, not its replay identity, so a new catalogue keeps sealed history replayable.
 
+### Refreshing the catalogue from provider listings
+
+`transport::refresh_catalogue(transport, request)` (`<transport/catalogue_refresh.h>`) builds a catalogue from the providers' model listings. The SDK never calls it on its own and never polls. Call it when your harness decides: at start-up, from a scheduled job or by hand. Then attach the result to a new policy for the clients you build next; existing clients keep their policy.
+
+```cpp
+#include <descriptor/policy.h>
+#include <transport/catalogue_refresh.h>
+
+sp::transport::Transport transport;
+sp::transport::RefreshRequest request;
+request.sources = {{sp::descriptor::Listing::OpenRouter},                       // public, no key
+                   {sp::descriptor::Listing::Anthropic, {}, anthropic_key},
+                   {sp::descriptor::Listing::Gemini, {}, gemini_key},
+                   {sp::descriptor::Listing::OpenAI, {}, openai_key}};
+request.previous = last_generated;                                  // optional
+request.overlays = {sp::descriptor::builtin_catalogue(), my_catalogue};  // verified facts, then yours
+auto refreshed = sp::transport::refresh_catalogue(transport, request);
+if (auto* result = std::get_if<sp::transport::RefreshResult>(&refreshed)) {
+    auto policy = sp::descriptor::builtin_policy()->with_catalogue(result->catalogue);
+    // Build descriptors from `policy`; keep result->generated as the next `previous`.
+}
+```
+
+The four listings:
+
+| `Listing` | Request | Credential | Entries |
+|---|---|---|---|
+| `OpenRouter` | `GET /api/v1/models?output_modalities=all` | none needed (`authorization: Bearer` if given) | Name, context window, output limit, modalities, supported parameters, string prices, canonical slug as `served_as`, alias target and expiration date. Text models list the Chat, Responses and Messages families. |
+| `Gemini` | `GET /v1beta/models?pageSize=1000`, then `pageToken` | `x-goog-api-key` | Id without `models/`, display name, input and output limits and methods. Models with `generateContent` list the Generate and Interactions families. |
+| `Anthropic` | `GET /v1/models?limit=1000`, then `after_id` | `x-api-key`, `anthropic-version: 2023-06-01` | Display name, input and output limits, lifecycle, retirement date and image or PDF input. |
+| `OpenAI` | `GET /v1/models` | `authorization: Bearer` | Ids and shutdown dates only. |
+
+The rules of a refresh:
+- **Source URL and origin.** A source's `url` is where the listing is served (https, or http on a loopback host). Its `origin` is the descriptor origin the entries are scoped to. Both default to the provider's API.
+- **What a source owns.** Each source owns the entries whose `source` is the listing's name (`openrouter`, `gemini`, `anthropic`, `openai`) and whose origins are its origin.
+- **Failures keep old entries.** A source that fails keeps its entries from `previous`, so an outage never drops models. `RefreshResult::sources` reports the failure as fixed text: never a URL, header, credential or body.
+- **Listings are provider data.** Unknown members are ignored. A value the catalogue cannot hold is left out, and an id that is not a model name is counted in `skipped`. A body that is not a listing fails that source.
+- **Bounds.** Each page waits at most `page_timeout` and may be at most 32 MiB. A source stops after 64 pages, or when it repeats its page token.
+- **Result.** `generated` is the provider facts alone, `catalogue` is `generated` with the overlays merged over it, and `diff` runs from `previous` to `generated`.
+- **Blocking.** The call waits for each page, so it must not run on one of the transport's I/O threads.
+
+Listings are sometimes wrong. On 2026-10-19 the Gemini listing named `generateContent` for `gemini-omni-1.1-flash`, which answers only on Interactions. The embedded catalogue corrects that, so pass it as the first overlay.
+
+The `sp_catalogue_refresh` tool, built with the tests, runs a refresh from the command line. It reads `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` and never prints them:
+
+```bash
+sp_catalogue_refresh --out models.json --generated generated.json --builtin-overlay [--previous generated.json] [--overlay mine.json]
+```
+
 ### Served model identity and routing gateways
 
 A response must report the model that was requested. Native history is sealed against the requested model, and the exact echo is what keeps another model's output from entering that lineage unnoticed, so a mismatch fails the call with `ProtocolCorrupt` (`invalid response protocol`) and is not relaxed by default. The rule is per family:

@@ -94,6 +94,7 @@ Model facts moved from the descriptor policy to a model catalogue (`<descriptor/
 - **Lookups.** `DescriptorPolicy::defaults`, `output_limit` and `input_limit` take the origin as well (`family, origin, model`). `descriptor::model_defaults(descriptor, model)` and `model_match(descriptor, model)` are the descriptor-level forms. `ModelDefaults` is removed.
 - **Loading.** `load_policy(family_json, resource_json, catalogue)` and `DescriptorPolicy::with_catalogue(catalogue)` attach a catalogue; the two-argument `load_policy` uses the embedded one. A policy bundle may carry `model_catalogue`, and `builtin_policy_bundle_json()` includes it.
 - **Digests.** The content digest, which pins check, covers the catalogue. The replay identity does not.
+- **Refresh.** `transport::refresh_catalogue` builds a catalogue from the OpenRouter, Gemini, Anthropic and OpenAI model listings when the host calls it. Nothing refreshes on its own. The `sp_catalogue_refresh` tool does the same from the command line.
 
 ## From interface 5 to 6
 
