@@ -21,6 +21,28 @@ Family C++ code now owns request structure, tool/native checks, stream correlati
 
 `sp::runtime::Request` is the five-family typed variant. `Result` is `std::shared_ptr<const sp::Outcome>`, not a flat successful completion object. This lets callers retain ordered parts, native sidecars, raw observations and failure partials without borrowing a client or callback.
 
+## Package 0.3.4 (interface 6)
+
+Package 0.3.4 is a maintenance release of this line:
+- The interface revision and the shared-library generation stay 6.
+- No installed struct or enum changes layout or gains an enumerator.
+- The embedded descriptor policy and its identity are unchanged.
+
+The fixes below change behaviour. Both used to throw away an answer the provider had already billed.
+
+**Generated images on Chat Completions are kept.** An image model (OpenRouter `google/gemini-3.1-flash-lite-image` and the like) returns its images in `message.images` even without `modalities`. The codec ignored that member, so the outcome had no image although its tokens were billed.
+- Each image is now an `Opaque` part of wire type `images`, after the text and tool parts. Its `wire_metadata` is `{"type":"images","image":<the wire entry>}`, so the data URL is at `image.image_url.url`.
+- Interface 6 has no generated-media part, so the part is not typed. Interface 7 returns a typed `Media` part.
+- A history may keep the part on its assistant message. The request encoder does not send it back, so the provider receives that turn as it did before. On any other role it is `InvalidRequest`.
+
+**A Messages response with `container` or `diagnostics` is accepted.**
+- `container` is the code-execution container. The dynamic filtering of `web_search_20260318` and `web_fetch_20260318` opens one even without a code-execution tool. `diagnostics` is the cache diagnostics object.
+- Either one made the whole response `Unsupported`. Both describe the response and leave its content as it is, so they are now accepted and stay in the raw observations (`raw_events`).
+- A non-empty `context_management` or `input_transformations` still means the server changed what was answered, and is still `Unsupported`.
+- On a model without programmatic tool calling, such as `claude-haiku-4-5`, the `_20260318` web tools need `allowed_callers`, which this line cannot send; the API answers 400. Use `web_search_20250305` or `web_fetch_20250910` there.
+
+See [outcomes](USAGE.md#outcomes-raw-data-and-nullable-usage).
+
 ## Package 0.3.3 (interface 6)
 
 Package 0.3.3 is a maintenance release of this line. The interface revision and shared-library generation stay 6, no installed struct or enum changes layout or gains an enumerator, and the embedded descriptor policy and its identity are unchanged. The fixes below change behaviour.
