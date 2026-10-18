@@ -22,6 +22,10 @@ class Accumulator {
   // Terminal ownership transfer; discard the accumulator after taking its outcome.
   std::optional<Outcome> take_outcome() { return std::move(outcome_); }
   bool terminal() const { return outcome_.has_value(); }
+  // The model the response reported, recorded by the decoder when it first sees one.
+  void served_model(ServedModel model) { if (!terminal()) served_ = std::move(model); }
+  // Messages already begun are sealed without replay authority (an unexplained served model).
+  void withhold_replay();
  private:
   enum class State { Created, Receiving, Draining, Terminal };
   struct CursorHeader {
@@ -67,5 +71,6 @@ class Accumulator {
   std::size_t raw_bytes_ = 0, raw_bytes_limit_ = 0;
   const Error* failure_override_ = nullptr;
   std::optional<Outcome> outcome_;
+  ServedModel served_;
 };
 } // namespace sp

@@ -1,4 +1,5 @@
 #include "codecs/interactions.h"
+#include "codecs/served_model.h"
 #include "codecs/media_output.h"
 #include "codecs/reason.h"
 #include "core/native.h"
@@ -32,7 +33,9 @@ bool thought_shape(json::Value content) {
 } // namespace
 Codec::Codec(const descriptor::ValidatedDescriptor& descriptor, Mode mode, Accumulator& accumulator,
              std::shared_ptr<const NativeContext> context, SemanticLimits limits)
-    : descriptor_(descriptor), mode_(mode), accumulator_(accumulator), context_(std::move(context)), limits_(limits) {}
+    : descriptor_(descriptor), mode_(mode), accumulator_(accumulator), context_(std::move(context)), limits_(limits) {
+  served::observe(descriptor_, accumulator_, context_, {});
+}
 bool Codec::emit(const Event& event) { return accumulator_.accept(event, buffered_failure_ ? &*buffered_failure_ : nullptr); }
 bool Codec::fail(ErrorKind kind, std::string label) {
   if (buffered_failure_ && !closed_) return false;
@@ -79,9 +82,19 @@ bool Codec::identity(json::Value resource, bool initial) {
     return fail(ErrorKind::Unsupported, "agent or environment interaction unsupported");
   if (resource.get("error").valid() && !resource.get("error").is_null()) return fail(ErrorKind::RemoteFailure, "remote interaction error");
   auto model = resource.get("model");
-  if ((model.valid() && (!nonempty(model) || model.as_string() != context_->model())) ||
-      (!initial && !generation_.empty() && id.is_string() && id.as_string() != generation_))
+  if (model.valid() && !nonempty(model)) return fail(ErrorKind::ProtocolCorrupt, "invalid interaction model");
+  if (!initial && !generation_.empty() && id.is_string() && id.as_string() != generation_)
     return fail(ErrorKind::ProtocolCorrupt, "interaction identity changed");
+  // The served name is recorded and classified, never refused (lyria-3-pro-preview answers as
+  // lyria-3.5); it must stay the same for the whole interaction.
+  if (model.valid()) {
+    if (model_.empty()) {
+      served::observe(descriptor_, accumulator_, context_, model.as_string());
+      model_ = model.as_string();
+    } else if (model_ != model.as_string()) {
+      return fail(ErrorKind::ProtocolCorrupt, "interaction model changed");
+    }
+  }
   unknown(resource, {"id", "model", "object", "created", "updated", "status", "steps", "usage", "service_tier", "error"});
   return true;
 }

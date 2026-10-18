@@ -2,7 +2,7 @@
 #include "codecs/media_output.h"
 #include "codecs/provider_cost.h"
 #include "codecs/reason.h"
-#include "codecs/responses_model.h"
+#include "codecs/served_model.h"
 #include "core/native.h"
 #include "descriptor/descriptor.h"
 #include "descriptor/policy.h"
@@ -85,7 +85,9 @@ bool equal_completed_item(json::Value done, json::Value terminal) {
 Codec::Codec(const descriptor::ValidatedDescriptor& d, Mode mode, Accumulator& a,
              std::shared_ptr<const NativeContext> context, SemanticLimits limits)
     : descriptor_(d), mode_(mode), accumulator_(a), context_(std::move(context)),
-      context_valid_(context_ && context_->matches_descriptor(d)), limits_(limits) {}
+      context_valid_(context_ && context_->matches_descriptor(d)), limits_(limits) {
+  served::observe(descriptor_, accumulator_, context_, {});
+}
 bool Codec::emit(const Event& event) { return accumulator_.accept(event, buffered_failure_ ? &*buffered_failure_ : nullptr); }
 bool Codec::fail(ErrorKind kind, std::string message) {
   if (buffered_failure_ && !closed_) return false;
@@ -299,9 +301,7 @@ bool Codec::identity(json::Value v) {
   auto id = v.get("id"), object = v.get("object"), model = v.get("model"), created = v.get("created_at");
   if (!nonempty(id) || !object.is_string() || object.as_string() != "response" || !nonempty(model) || !created.is_number() || !std::isfinite(created.as_double()) || created.as_double() < 0)
     return fail(ErrorKind::ProtocolCorrupt, "invalid response identity metadata");
-  if (model.as_string() != context_->model() &&
-      !requested_model_matches(context_->model(), model.as_string(), descriptor_.base_url(), descriptor::routed_gateway(descriptor_)))
-    return fail(ErrorKind::ProtocolCorrupt, "response model differs from request");
+  if (!begun_) served::observe(descriptor_, accumulator_, context_, model.as_string());
   if (begun_ && (id.as_string() != generation_ || model.as_string() != model_ || created.as_double() != created_at_)) return fail(ErrorKind::ProtocolCorrupt, "response identity changed");
   return true;
 }

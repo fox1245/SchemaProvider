@@ -448,20 +448,26 @@ std::vector<Message> Accumulator::take_messages(bool partial) {
   messages_.clear();
   return result;
 }
+void Accumulator::withhold_replay() {
+  for (auto& [id, m] : messages_) {
+    (void)id;
+    if (m.native_context && m.native_context->replay_eligible()) m.native_context = m.native_context->decoding_only();
+  }
+}
 bool Accumulator::apply(const Commit& e) {
   if (state_ != State::Draining || !stop_ || e.evidence.empty()) return reject(ErrorKind::ProtocolCorrupt, "commit without evidence");
   for (const auto& [id, m] : messages_) { (void)id; if (!m.sealed) return reject(ErrorKind::ProtocolCorrupt, "commit with open message"); }
   auto messages = take_messages(false);
   if (usage_.stage != UsageStage::Missing) usage_.stage = UsageStage::Final;
   outcome_ = Completion{std::move(messages), std::move(*stop_), std::move(usage_),
-      std::move(wire_envelope_), {}, std::move(raw_events_)};
+      std::move(wire_envelope_), {}, std::move(raw_events_), std::move(served_)};
   state_ = State::Terminal; return true;
 }
 bool Accumulator::apply(const Fail& e) {
   if (terminal()) return false;
   if (usage_.stage != UsageStage::Missing) usage_.stage = UsageStage::Partial;
   outcome_ = Failure{e.error, PartialCompletion{take_messages(true), std::move(usage_),
-      std::move(stop_), std::move(wire_envelope_), std::move(raw_events_)}};
+      std::move(stop_), std::move(wire_envelope_), std::move(raw_events_), std::move(served_)}};
   state_ = State::Terminal; return true;
 }
 } // namespace sp

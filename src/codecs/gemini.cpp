@@ -1,4 +1,5 @@
 #include "codecs/gemini.h"
+#include "codecs/served_model.h"
 #include "codecs/media_output.h"
 #include "codecs/reason.h"
 #include "core/native.h"
@@ -44,7 +45,9 @@ StopKind stop_kind(std::string_view reason, bool call) {
 }
 Codec::Codec(const descriptor::ValidatedDescriptor& d, Mode mode, Accumulator& a,
              std::shared_ptr<const NativeContext> context, SemanticLimits limits)
-    : descriptor_(d), mode_(mode), accumulator_(a), context_(std::move(context)), limits_(limits) {}
+    : descriptor_(d), mode_(mode), accumulator_(a), context_(std::move(context)), limits_(limits) {
+  served::observe(descriptor_, accumulator_, context_, {});
+}
 bool Codec::emit(const Event& e) { return accumulator_.accept(e, buffered_failure_ ? &*buffered_failure_ : nullptr); }
 bool Codec::fail(ErrorKind kind, std::string label) {
   if (buffered_failure_ && !closed_) return false;
@@ -86,16 +89,10 @@ bool Codec::identity(json::Value root) {
   }
   if (model.valid()) {
     if (!nonempty(model) || (!model_.empty() && model_ != model.as_string())) return fail(ErrorKind::ProtocolCorrupt, "Gemini model identity changed");
-    const auto expected = context_->model();
-    auto value = model.as_string();
-    bool match = value == expected;
-    // An alias can resolve to a numeric version, but never to another model.
-    if (!match && value.starts_with(expected) && value.size() > expected.size() + 1 && value[expected.size()] == '-') {
-      match = true;
-      for (auto c : value.substr(expected.size() + 1)) if ((c < '0' || c > '9') && c != '-') match = false;
-    }
-    if (!match) return fail(ErrorKind::ProtocolCorrupt, "Gemini response model mismatch");
-    model_ = value;
+    // Google serves aliases and auto-routed models under other names (gemini-3.5-flash as
+    // gemini-3.6-flash, lyria-3-pro-preview as lyria-3.5); the name is recorded, never refused.
+    if (model_.empty()) served::observe(descriptor_, accumulator_, context_, model.as_string());
+    model_ = model.as_string();
   }
   return true;
 }
