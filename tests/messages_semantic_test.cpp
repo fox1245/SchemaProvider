@@ -735,6 +735,25 @@ void empty_text_delta_is_withheld() {
   CHECK(thinking.trace == "[begin][other:][other:hm][seal]");
 }
 } // namespace
+// A code-execution container (dynamic filtering in the _20260318 web tools) and cache diagnostics
+// describe the response; refusing them threw away a billed answer (#46). They stay in the raw events.
+void response_metadata_is_kept() {
+  const std::string container = R"("container":{"id":"container_fixture","expires_at":"2026-10-18T00:00:00Z"})";
+  const auto b = buffered(body(R"([{"type":"text","text":"Blue"}])", "\"end_turn\"", initial_usage,
+                               "," + container + R"(,"diagnostics":{"cache":{"status":"miss"}})"));
+  const auto& c = completed(b);
+  CHECK(text(c.messages) == "Blue");
+  bool kept = false;
+  for (const auto& raw : c.raw_events)
+    if (raw.payload && raw.payload->root().get("container").get("id").is_string()) kept = true;
+  CHECK(kept);
+  const auto s = stream({start(), block(0, R"({"type":"text","text":""})"), delta(0, R"({"type":"text_delta","text":"Blue"})"), end(0),
+                         stop("\"end_turn\"", R"({"output_tokens":3})", "," + container), done});
+  CHECK(text(completed(s).messages) == "Blue");
+  // A server-side context edit still changes what was answered.
+  failed(buffered(body("[]", "\"end_turn\"", initial_usage, R"(,"context_management":{"applied_edits":[{"type":"clear_tool_uses_20250919"}]})")), ErrorKind::Unsupported);
+  failed(buffered(body("[]", "\"end_turn\"", initial_usage, R"(,"container":"container_fixture")")), ErrorKind::ProtocolCorrupt);
+}
 int main() {
   try {
     routed_gateway_model(); openrouter_sentinel_and_cost(); direct_dated_snapshot_alias();
@@ -743,6 +762,7 @@ int main() {
     usage_detail_forward_compatibility(); toolset_metadata_shapes();
     terminal_matrix(); text_thinking_and_order(); tool_fragments(); server_semantics(); server_result_shapes();
     stop_classes(); corruption_matrix(); usage_knowledge(); cut_stream_usage_has_no_placeholder_output(); uncached_input_rule(); limits_and_close_priority(); empty_text_delta_is_withheld();
+    response_metadata_is_kept();
     std::cout << "messages semantic tests passed\n";
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }
