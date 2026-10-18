@@ -192,10 +192,19 @@ bool Codec::part(json::Value p) {
   std::string content;
   std::string_view fragment;
   std::optional<std::string_view> payload;
+  const auto transcription = p.get("audioTranscription");
   if (data_key == "text") {
     if (!p.get("text").is_string()) return fail(ErrorKind::ProtocolCorrupt, "Gemini text must be string");
     kind = thought.is_bool() && thought.as_bool() ? PartKind::Thinking : PartKind::Text;
     fragment = p.get("text").as_string();
+  } else if (data_key.empty() && transcription.valid()) {
+    // A transcription model answers with a part whose only data is the transcript; it is the answer's text.
+    // Next to inline audio the same member stays metadata of that part.
+    if (!transcription.is_object() || !transcription.get("text").is_string()) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini audio transcription");
+    unknown(transcription, {"text"});
+    header.wire_type = "audioTranscription";
+    kind = PartKind::Text;
+    fragment = transcription.get("text").as_string();
   } else if (data_key == "functionCall") {
     auto call = p.get("functionCall");
     if (!call.is_object() || !nonempty(call.get("name"))) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini function identity");
