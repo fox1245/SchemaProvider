@@ -5,6 +5,7 @@
 #include "codecs/responses.h"
 #include "codecs/gemini.h"
 #include "codecs/interactions.h"
+#include "codecs/reason.h"
 #include "crypto/crypto.h"
 
 #include <array>
@@ -1336,7 +1337,16 @@ PreparedRequest Client::prepare(Request request, RunOptions options) {
         else if constexpr (std::is_same_v<T, gemini::Request>) return gemini::encode(client->descriptor, typed, operation->options.streaming);
         else return interactions::encode(client->descriptor, typed, operation->options.streaming);
       }();
-      if (auto* failure = std::get_if<Error>(&encoded)) { error = std::move(*failure); return; }
+      if (auto* failure = std::get_if<Error>(&encoded)) {
+        error = std::move(*failure);
+        // The encoder's text is replaced by the generic text of its kind below; the code keeps the check.
+        constexpr auto encoder = std::is_same_v<T, chat::Request> ? reason::Source::ChatRequest :
+            std::is_same_v<T, messages::Request> ? reason::Source::MessagesRequest :
+            std::is_same_v<T, responses::Request> ? reason::Source::ResponsesRequest :
+            std::is_same_v<T, gemini::Request> ? reason::Source::GeminiRequest : reason::Source::InteractionsRequest;
+        if (error->reason.empty()) error->reason = std::string(reason::request_code(encoder, error->safe_message));
+        return;
+      }
       auto& value = std::get<0>(encoded);
       auto& wire = operation->request;
       wire.method = std::move(value.method);
