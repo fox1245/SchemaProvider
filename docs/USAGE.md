@@ -610,6 +610,8 @@ Inspect `StopReason::kind` and `raw` rather than assuming all completions mean n
 
 At the semantic event boundary, an otherwise natural `EndTurn` with non-server tool-call intent becomes `ToolUse`, including calls whose arguments later remain `InvalidToolCall`. The Stop event and final outcome use the same normalized kind. Specific MaxTokens/filter/unknown stops remain specific, and server-executed tools alone do not create client execution intent. A ToolUse stop never repairs malformed arguments into an executable call.
 
+**Messages response metadata.** A code-execution `container` and cache `diagnostics` stay in `raw_events`; read `container.id` and `container.expires_at` there. Server-side `context_management` or `input_transformations` that changed the answer still fail the call as `Unsupported`.
+
 ## Native continuation and persistence
 
 A completed `sp::Message` can own both typed parts and an immutable `NativeReplay` sidecar. Native state includes signed thinking, encrypted reasoning and thought signatures that cannot be reconstructed safely from portable text or editable JSON. Keep the whole ordered message, unchanged, with its sidecar and wire output.
