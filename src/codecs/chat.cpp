@@ -181,7 +181,7 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
 }
 bool Codec::item(json::Value value, bool streaming) {
   if (!value.is_object()) return fail(ErrorKind::ProtocolCorrupt, "message or delta must be object");
-  unknown(value, {"role", "content", "refusal", "tool_calls", "function_call", "annotations", "audio", "reasoning", "reasoning_content", "reasoning_details"});
+  unknown(value, {"role", "content", "refusal", "tool_calls", "function_call", "annotations", "audio", "images", "reasoning", "reasoning_content", "reasoning_details"});
   auto role = value.get("role");
   if ((!streaming && !role.valid()) || (role.valid() && (!role.is_string() || role.as_string() != "assistant"))) return fail(ErrorKind::ProtocolCorrupt, "assistant role required");
   for (auto key : {"function_call", "audio"}) {
@@ -209,6 +209,41 @@ bool Codec::item(json::Value value, bool streaming) {
     if (!calls.is_array()) return fail(ErrorKind::ProtocolCorrupt, "tool_calls must be array");
     uint64_t pos = 0;
     for (auto call : calls.elements()) if (!tool(call, streaming, pos++)) return false;
+  }
+  return images(value.get("images"));
+}
+// Image models (OpenRouter) return generated images in `images`, with or without
+// `modalities`. Interface 6 has no generated-media part, so each image is kept whole
+// as an Opaque part of wire type "images" instead of being dropped. Interface 7 types it.
+bool Codec::images(json::Value value) {
+  if (!value.valid() || value.is_null()) return true;
+  if (!value.is_array()) return fail(ErrorKind::ProtocolCorrupt, "images must be array");
+  const json::Limits limits{limits_.max_content_bytes, limits_.max_json_depth};
+  for (auto entry : value.elements()) {
+    if (!entry.is_object()) return fail(ErrorKind::ProtocolCorrupt, "generated image must be object");
+    const auto location = entry.get("image_url");
+    if (!location.is_object() || !location.get("url").is_string() || location.get("url").as_string().empty())
+      return fail(ErrorKind::ProtocolCorrupt, "generated image requires image_url.url");
+    auto write = [&](json::BoundedWriter& writer) {
+      writer.raw("{\"type\":\"images\",\"image\":").value(entry, 1).raw("}");
+    };
+    json::BoundedWriter measure(limits);
+    write(measure);
+    if (!measure.ok()) return fail(ErrorKind::ResourceLimit, "generated image metadata limit");
+    std::string bytes;
+    bytes.reserve(measure.size());
+    json::BoundedWriter output(limits, &bytes);
+    write(output);
+    auto parsed = json::parse(bytes, limits);
+    auto* document = std::get_if<json::Document>(&parsed);
+    if (!document) return fail(ErrorKind::ResourceLimit, "generated image metadata cannot be retained");
+    const LocalId id{next_part_++};
+    // After every text, refusal and tool order (tools stay below base + max_parts^2).
+    const uint64_t order = 3 + limits_.max_parts + uint64_t(limits_.max_parts) * limits_.max_parts + id.value;
+    if (!emit(PartBegin{{0}, id, PartKind::Opaque,
+                        {{}, {}, ToolCallKind::ClientExecuted, "images",
+                         std::make_shared<const json::Document>(std::move(*document))}, order}) ||
+        !emit(PartSeal{id, {}})) return false;
   }
   return true;
 }
