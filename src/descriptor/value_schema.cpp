@@ -134,7 +134,7 @@ std::optional<std::string> check(const ValueSchema& schema, json::Value value, c
       if (!value.is_string() || value.as_string().size() > schema.max_length) return pointer + ": string up to " + std::to_string(schema.max_length) + " bytes";
       const auto text = value.as_string();
       if (schema.token && (text.empty() || !token_text(text))) return pointer + ": token";
-      if (std::any_of(text.begin(), text.end(), [](unsigned char c) { return c < 0x20 && c != '\t' && c != '\n'; })) return pointer + ": text without control characters";
+      if (std::any_of(text.begin(), text.end(), [](unsigned char c) { return c < 0x20 && c != '\t' && c != '\n' && c != '\r'; })) return pointer + ": text without control characters";
       return std::nullopt;
     }
     case Kind::Enum:

@@ -331,6 +331,16 @@ void identity_tamper_permissions_and_bounds() {
   Fixture weak;CHECK(::chmod(weak.root.c_str(),0755)==0);CHECK(std::holds_alternative<Error>(NativeArchive::provision(weak.directory(),weak.key(),"owner",d)));
 }
 }
+// A tool result that carries an input block (#53) keeps it through a save and a load.
+void input_block_restart() {
+  Fixture f;auto d=desc("anthropic.messages","https://api.anthropic.com");auto a=admitted(NativeArchive::provision(f.directory(),f.key(),"block-owner",d));
+  ToolResult result{"call_kb",""};result.content_parts={Text{"one result"},Opaque{"search_result",document(R"({"type":"search_result","source":"kb://1","title":"T","content":[{"type":"text","text":"x"}]})")}};
+  const std::vector<Message> history{Message{{},Role::User,{Opaque{"search_result",document(R"({"type":"search_result","source":"kb://2","title":"U","content":[{"type":"text","text":"y"}]})")},Text{"q"}}},Message{{},Role::User,{result}}};
+  const auto ref=saved(a->save(history,"block-call"));const auto restored=loaded(a->load(ref,"block-call"));
+  CHECK(restored.size()==2);same_part(restored[0].parts[0],history[0].parts[0]);
+  const auto& back=std::get<ToolResult>(restored[1].parts[0]);CHECK(back.content_parts.size()==2);
+  const auto* block=std::get_if<Opaque>(&back.content_parts[1]);CHECK(block && block->wire_type=="search_result" && block->wire_metadata->root().get("source").as_string()=="kb://1");
+}
 // A compaction summary that begins a history (#53) survives a save and a load: the record keeps the configuration it
 // was answered under, so the restored summary still replays in place of the messages it summarizes.
 void compaction_root_restart() {
@@ -349,6 +359,7 @@ int main(int argc,char** argv) {
     if(argc==5 && std::string_view(argv[1])=="--restart") {const std::string root=argv[2];auto d=desc();auto a=admitted(NativeArchive::open(root+"/records",root+"/activation","restart-owner",d));auto r=request();r.messages=loaded(a->load(argv[3],"restart-call"));CHECK(digest(encoded(d,r).body)==argv[4]);return 0;}
     extended_tool_result_archive_bounds();
     compaction_root_restart();
+    input_block_restart();
     full_portable_and_native_roundtrip();responses_ordered_restart();chat_encrypted_legacy_to_canonical_restart();google_tool_loop_restart();deprivileged_decode_preserves_result_without_issuing_seals();diagnostic_documents_roundtrip_without_executable_upgrade();descriptor_semantics_are_archive_authority();admission_policy_edit_keeps_archive_replayable();process_restart(argv[0]);identity_tamper_permissions_and_bounds();std::cout<<"native archive behavioral tests passed\n";return 0;
   }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

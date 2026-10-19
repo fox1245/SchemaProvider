@@ -850,9 +850,65 @@ void compaction_and_history_roots() {
   auto loopback = summarize; loopback.messages.resize(1);
   rejected(descriptor_value(), loopback, ErrorKind::Unsupported);
 }
+// Input blocks the caller writes (#53): a `search_result` goes as given in a user message or a tool result, checked
+// against the policy's schema of the whole block, and binds native replay like any input. Agent Skills load into the
+// code-execution container and are bound; the container id is not.
+void input_blocks_and_skills() {
+  const auto anthropic = descriptor_value("https://api.anthropic.com");
+  const std::string guide = R"({"type":"search_result","source":"kb://guide","title":"Guide","content":[{"type":"text","text":"Keys are made in the dashboard.\r\nRotate them monthly."}],"citations":{"enabled":true}})";
+  auto request = base_request(); request.max_tokens = 1024;
+  request.messages[0] = Message{{}, Role::User, {Opaque{"search_result", document(guide)}, Text{"Where are keys made?"}}};
+  const auto wire = encoded(anthropic, request);
+  const auto body = document(wire.body);
+  const auto content = body->root().get("messages").at(0).get("content");
+  CHECK(content.size() == 2 && content.at(0).get("type").as_string() == "search_result" && content.at(0).get("source").as_string() == "kb://guide" &&
+        content.at(1).get("type").as_string() == "text" && beta_header(wire).empty());
+  // The answer binds the block like any input: an edited block breaks the history after it.
+  auto next = request; next.messages.push_back(capture(anthropic, request, R"([{"type":"text","text":"In the dashboard."}])")); next.messages.push_back(user("How often?"));
+  encoded(anthropic, next);
+  auto edited = next; edited.messages[0].parts[0] = Opaque{"search_result", document(R"({"type":"search_result","source":"kb://other","title":"Guide","content":[{"type":"text","text":"x"}]})")};
+  rejected(anthropic, edited);
+  // From a tool: the result's parts carry the blocks.
+  auto tools = base_request(); tools.max_tokens = 1024;
+  tools.tools.push_back({"kb", "Search the knowledge base.", document(R"({"type":"object","properties":{"q":{"type":"string"}}})"), {}, {}});
+  tools.messages.push_back(capture(anthropic, tools, R"([{"type":"tool_use","id":"call_kb","name":"kb","input":{"q":"keys"}}])", "tool_use"));
+  ToolResult found{"call_kb", ""}; found.content_parts = {Opaque{"search_result", document(guide)}, Text{"1 result"}};
+  tools.messages.push_back(Message{{}, Role::User, {found}});
+  const auto tool_body = document(encoded(anthropic, tools).body);
+  const auto result = tool_body->root().get("messages").at(2).get("content").at(0);
+  CHECK(result.get("type").as_string() == "tool_result" && result.get("content").at(0).get("title").as_string() == "Guide" &&
+        result.get("content").at(1).get("text").as_string() == "1 result");
+  // Refused: a block the policy does not list, one outside its schema or naming another type, and one in an
+  // assistant message nobody captured.
+  auto refused = [&](std::string_view block, std::string type, ErrorKind kind) {
+    auto r = request; r.messages[0].parts[0] = Opaque{std::move(type), document(block)}; rejected(anthropic, r, kind);
+  };
+  refused(R"({"type":"widget","x":1})", "widget", ErrorKind::Unsupported);
+  refused(R"({"type":"search_result","source":"kb://guide","content":[{"type":"text","text":"x"}]})", "search_result", ErrorKind::InvalidRequest);
+  refused(R"({"type":"search_result","source":"kb://guide","title":"T","content":[{"type":"image","text":"x"}]})", "search_result", ErrorKind::InvalidRequest);
+  refused(guide, "document", ErrorKind::Unsupported);
+  auto forged = request; forged.messages.push_back(Message{{}, Role::Assistant, {Opaque{"search_result", document(guide)}}}); rejected(anthropic, forged);
+
+  // Skills go in the container object, with the id when one is reused; the id is not bound, the skills are.
+  auto skills = base_request(); skills.max_tokens = 4096;
+  skills.tools.push_back({"code_execution", {}, {}, "code_execution_20250825", std::nullopt});
+  skills.skills = {messages::ContainerSkill{"anthropic", "xlsx", std::string("latest")}};
+  const auto skill_body = document(encoded(anthropic, skills).body);
+  CHECK(!skill_body->root().get("container").get("id").valid() && skill_body->root().get("container").get("skills").at(0).get("skill_id").as_string() == "xlsx");
+  auto reuse = skills; reuse.messages.push_back(capture(anthropic, skills, R"([{"type":"text","text":"Made budget.xlsx."}])")); reuse.messages.push_back(user("Add a row."));
+  reuse.container = "container_011";
+  const auto reuse_body = document(encoded(anthropic, reuse).body);
+  CHECK(reuse_body->root().get("container").get("id").as_string() == "container_011" && reuse_body->root().get("container").get("skills").size() == 1);
+  auto changed = reuse; changed.skills.push_back({"anthropic", "pdf", std::nullopt}); rejected(anthropic, changed);
+  auto many = skills; many.skills.assign(21, {"custom", "skill_01", std::nullopt});
+  for (std::size_t i = 0; i < many.skills.size(); ++i) many.skills[i].skill_id += std::to_string(i);
+  rejected(anthropic, many, ErrorKind::InvalidRequest);
+  auto twice = skills; twice.skills.push_back(twice.skills[0]); rejected(anthropic, twice, ErrorKind::InvalidRequest);
+  auto spaced = skills; spaced.skills[0].skill_id = "has space"; rejected(anthropic, spaced, ErrorKind::InvalidRequest);
+}
 int main() {
   try {
-    server_tool_options(); typed_client_tools_and_betas(); mcp_connector_and_replay(); compaction_and_history_roots();
+    server_tool_options(); typed_client_tools_and_betas(); mcp_connector_and_replay(); compaction_and_history_roots(); input_blocks_and_skills();
     typed_wire_request(); native_retention_and_content_integrity(); prefix_and_origin_binding();
     immutable_context_and_failed_capture(); client_loop_ownership(); server_loop_ownership_and_pause(); signature_accumulation_and_limits();
     invalid_calls_are_not_repaired();

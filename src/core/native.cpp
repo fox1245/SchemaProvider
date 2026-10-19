@@ -125,6 +125,7 @@ class Hash {
               if (!valid_) break;
               number(nested.index());
               if (const auto* t = std::get_if<Text>(&nested)) text(t->value);
+              else if (const auto* o = std::get_if<Opaque>(&nested)) { text(o->wire_type); document(o->wire_metadata); }
               else {
                 const auto& m = std::get<Media>(nested);
                 number(static_cast<uint64_t>(m.kind)); number(static_cast<uint64_t>(m.source)); text(m.mime);
@@ -348,7 +349,15 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
     if (tool.options) { hash.text("sp.messages.tool.options.v1"); hash.document(tool.options); }
   }
   // The code-execution container is not bound (#98): its id names state the service holds and reports after the
-  // first turn, so a conversation reuses it from the second turn on without changing what it means.
+  // first turn, so a conversation reuses it from the second turn on without changing what it means. The skills it
+  // loads are what the model can use, like tools, and are bound.
+  if (!request.skills.empty()) {
+    hash.text("sp.messages.skills.v1"); hash.number(request.skills.size());
+    for (const auto& skill : request.skills) {
+      hash.text(skill.type); hash.text(skill.skill_id);
+      hash.number(skill.version.has_value()); if (skill.version) hash.text(*skill.version);
+    }
+  }
   if (!request.betas.empty()) {
     hash.text("sp.messages.betas.v1"); hash.number(request.betas.size());
     for (const auto& beta : request.betas) hash.text(beta);
@@ -805,7 +814,8 @@ void NativeContext::bind_history(const std::vector<Message>& messages, bool port
     // A Messages block kept whole (`fallback`, `mcp_tool_listing`) is an Opaque part of a captured assistant message.
     if (family_ == Family::Messages && (message.wire_output || std::any_of(message.parts.begin(), message.parts.end(), [&](const Part& part) {
           return std::holds_alternative<Reasoning>(part) || std::holds_alternative<Thought>(part) ||
-                 (std::holds_alternative<Opaque>(part) && (!message.native || message.role != Role::Assistant));
+                 // A user message's block is one the caller writes (`search_result`), admitted by the encoder.
+                 (std::holds_alternative<Opaque>(part) && (message.role == Role::Assistant) != static_cast<bool>(message.native));
         }))) { history_valid_ = false; return; }
     if (family_ != Family::Messages && family_ != Family::Chat) {
       if (message.native) {

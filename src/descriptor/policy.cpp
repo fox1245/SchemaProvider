@@ -234,7 +234,7 @@ class PolicyLoader {
         fail("", "configured policy depth limit");
       auto families=root.get("families"); if(!families.is_array() || families.size()!=5)fail("/families","all five typed families");
       for(auto v:families.elements()) {
-        closed(v,{"family","bindings","stop_reasons","defaults","required_output_cap","temperature_range","top_p_range","thinking_minimum","thinking_top_p_minimum","reasoning_efforts","reasoning_summaries","thinking_levels","service_tiers","header_versions","header_version","server_tools","openrouter_origins","temperature_forbidden_model_prefixes","media","openrouter_media"},"/families",{"temperature_forbidden_generations","max_completion_tokens_origins","unreplayable_parts","extensions","openrouter_plugins","openrouter_server_tools","betas","response_blocks"});
+        closed(v,{"family","bindings","stop_reasons","defaults","required_output_cap","temperature_range","top_p_range","thinking_minimum","thinking_top_p_minimum","reasoning_efforts","reasoning_summaries","thinking_levels","service_tiers","header_versions","header_version","server_tools","openrouter_origins","temperature_forbidden_model_prefixes","media","openrouter_media"},"/families",{"temperature_forbidden_generations","max_completion_tokens_origins","unreplayable_parts","extensions","openrouter_plugins","openrouter_server_tools","betas","response_blocks","input_blocks"});
         FamilyPolicy f; f.family=text(v.get("family"),"/families");
         if(f.family!="openai.chat" && f.family!="anthropic.messages" && f.family!="openai.responses" && f.family!="google.generate" && f.family!="google.interactions")fail("/families","typed family");
         if(policy->family(f.family))fail("/families","unique families");
@@ -361,6 +361,26 @@ class PolicyLoader {
             if (b.get("opens_history").valid()) fact.opens_history = boolean(b.get("opens_history"), "/response_blocks/opens_history");
             for (const auto& existing : f.response_blocks) if (existing.type == fact.type) fail("/response_blocks/type", "unique block types");
             f.response_blocks.push_back(std::move(fact));
+          }
+        }
+        // Input blocks the caller writes, each checked against the schema of the whole block: never a block the codec
+        // types.
+        if (auto blocks = v.get("input_blocks"); blocks.valid()) {
+          if (f.family != "anthropic.messages") fail("/input_blocks", "Messages input block facts only");
+          if (!blocks.is_array() || blocks.size() > 64) fail("/input_blocks", "bounded array of block facts");
+          for (auto b : blocks.elements()) {
+            closed(b, {"type","value"}, "/input_blocks");
+            InputBlockFact fact{text(b.get("type"), "/input_blocks/type"), schema_of(b.get("value"), "/input_blocks/value")};
+            if (!std::all_of(fact.type.begin(), fact.type.end(), [](unsigned char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'; }) ||
+                fact.type.empty() || fact.type == "text" || fact.type == "image" || fact.type == "document" || fact.type == "tool_result" ||
+                fact.type == "tool_use" || fact.type == "thinking" || fact.type == "redacted_thinking" || fact.type == "server_tool_use" ||
+                fact.type == "mcp_tool_use" || fact.type.ends_with("_tool_result"))
+              fail("/input_blocks/type", "a lower-case block type the codec does not type");
+            // The schema is the whole block's, so it declares the block's type.
+            if (fact.value.kind != ValueSchema::Kind::Object || !std::binary_search(fact.value.names.begin(), fact.value.names.end(), "type"))
+              fail("/input_blocks/value", "object schema that declares type");
+            for (const auto& existing : f.input_blocks) if (existing.type == fact.type) fail("/input_blocks/type", "unique block types");
+            f.input_blocks.push_back(std::move(fact));
           }
         }
         auto tools=v.get("server_tools"); if(!tools.is_array() || tools.size()>64)fail("/server_tools","bounded reviewed tool facts");

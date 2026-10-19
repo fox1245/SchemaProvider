@@ -163,6 +163,11 @@ void policy_facts() {
   refused_at("anthropic.messages", R"("response_blocks":[{"type":"compaction","opens_history":"yes"}])", "/response_blocks/opens_history");
   refused_at("anthropic.messages", R"("extensions":[{"key":"compaction","origins":["https://api.anthropic.com"],"value":{"type":"null"},"replay_eligible":true,"bound":false,"beta":"fixture-missing"}])", "/extensions/beta");
   refused_at("openai.chat", R"("extensions":[{"key":"fixture","origins":["https://api.openai.com"],"value":{"type":"null"},"replay_eligible":true,"beta":"compact-2026-09-04"}])", "/extensions/beta");
+  // Input blocks (#53) belong to Messages, never name a typed block, and declare the whole block in an object schema.
+  refused_at("openai.chat", R"("input_blocks":[{"type":"search_result","value":{"type":"object","properties":{"type":{"type":"enum","values":["search_result"]}}}}])", "/input_blocks");
+  refused_at("anthropic.messages", R"("input_blocks":[{"type":"text","value":{"type":"object","properties":{"type":{"type":"enum","values":["text"]}}}}])", "/input_blocks/type");
+  refused_at("anthropic.messages", R"("input_blocks":[{"type":"widget","value":{"type":"object","properties":{"x":{"type":"null"}}}}])", "/input_blocks/value");
+  refused_at("anthropic.messages", R"("input_blocks":[{"type":"widget","value":{"type":"null"}}])", "/input_blocks/value");
   {
     const auto* messages = descriptor::builtin_policy()->family("anthropic.messages");
     const auto compaction = std::find_if(messages->response_blocks.begin(), messages->response_blocks.end(), [](const auto& fact) { return fact.type == "compaction"; });

@@ -350,6 +350,13 @@ void corruption_matrix() {
   CHECK(text(completed(cited_stream).messages) == "x");
   CHECK(std::get<Text>(completed(cited_stream).messages[0].parts[0]).citations.size() == 1 &&
         std::get<Text>(completed(cited_stream).messages[0].parts[0]).citations[0].url == "https://example.test");
+  // A citation of a search result the caller wrote (#53) names its source and the cited block range.
+  const std::string result_location = R"({"type":"search_result_location","cited_text":"Rotate them monthly.","source":"kb://guide","title":"Guide","search_result_index":0,"start_block_index":1,"end_block_index":2})";
+  const auto from_search = buffered(body("[{\"type\":\"text\",\"text\":\"Monthly.\",\"citations\":[" + result_location + "]}]"));
+  const auto& from_result = std::get<Text>(completed(from_search).messages[0].parts[0]);
+  CHECK(from_result.citations.size() == 1 && from_result.citations[0].kind == "search_result_location" && from_result.citations[0].url == "kb://guide" &&
+        from_result.citations[0].title == "Guide" && from_result.citations[0].start == 1u && from_result.citations[0].end == 2u &&
+        from_result.citations[0].raw->root().get("search_result_index").as_uint() == 0u);
   failed(buffered(body(R"([{"type":"future_block","file_id":"x"}])")), ErrorKind::Unsupported);
   std::string wrong_model = body(); wrong_model.replace(wrong_model.find("fixture-model"), 13, "other-model");
   CHECK(completed(buffered(wrong_model)).model.relation == ServedRelation::Unexplained);

@@ -54,6 +54,12 @@ struct ServerToolResult {
   std::string tool_use_id, wire_type;
   std::shared_ptr<const json::Document> content;
 };
+// A block the SDK does not type, kept whole: a response block the policy keeps (Messages `fallback`, `compaction`),
+// or an input block the caller writes and the policy admits (Messages `search_result`). `wire_metadata` is the block.
+struct Opaque {
+  std::string wire_type;
+  std::shared_ptr<const json::Document> wire_metadata;
+};
 struct ToolResultHostMetadata {
   std::string name, status;
   bool retryable = false, effect_uncertain = false;
@@ -64,18 +70,14 @@ struct ToolResult {
   std::optional<ToolResultHostMetadata> host{};
   // Ordered typed output; nonempty parts require an empty legacy content string, except that Generate takes a JSON
   // object content beside media-only parts as the response object. Generate partitions these into separately
-  // ordered text and media lanes.
-  std::vector<std::variant<Text, Media>> content_parts{};
+  // ordered text and media lanes. An Opaque part is an input block the policy admits (Messages `search_result`).
+  std::vector<std::variant<Text, Media, Opaque>> content_parts{};
 };
 struct Reasoning {
   std::string id;
   std::vector<std::string> summary;
   std::optional<std::string> encrypted_content{}, status{};
   std::vector<std::string> content{};
-};
-struct Opaque {
-  std::string wire_type;
-  std::shared_ptr<const json::Document> wire_metadata;
 };
 struct Thought {
   std::vector<std::string> summary;

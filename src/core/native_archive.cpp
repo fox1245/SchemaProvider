@@ -134,6 +134,7 @@ void write_part(Writer& w, const Part& part, size_t& parts) {
         for(const auto& nested:p.content_parts) {
           w.number(nested.index());
           if(const auto* text=std::get_if<Text>(&nested))w.text(text->value);
+          else if(const auto* block=std::get_if<Opaque>(&nested)){w.text(block->wire_type);w.document(block->wire_metadata);}
           else write_media(w,std::get<Media>(nested));
         }
       }
@@ -165,6 +166,7 @@ Part read_part(Reader& r, size_t& parts) {
         switch(r.number()) {
           case 0:p.content_parts.emplace_back(Text{r.text()});break;
           case 1:p.content_parts.emplace_back(read_media(r));break;
+          case 2:{Opaque block;block.wire_type=r.text();block.wire_metadata=r.document(true);p.content_parts.emplace_back(std::move(block));break;}
           default:throw Rejected{};
         }
       }
