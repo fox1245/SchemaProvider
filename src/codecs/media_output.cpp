@@ -75,4 +75,49 @@ void append_audio(std::string& joined, std::string_view chunk) {
   if (available) joined.push_back(alphabet[(bits << (6 - available)) & 63]);
   while (joined.size() % 4) joined.push_back('=');
 }
+namespace {
+constexpr std::string_view base64_alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+unsigned base64_value(unsigned char c) {
+  if (c >= 'A' && c <= 'Z') return c - 'A';
+  if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+  if (c >= '0' && c <= '9') return c - '0' + 52;
+  return c == '+' ? 62 : 63;
+}
+void encode_groups(std::string& out, std::string_view bytes) {
+  std::size_t i = 0;
+  for (; i + 3 <= bytes.size(); i += 3) {
+    const unsigned v = (static_cast<unsigned char>(bytes[i]) << 16) | (static_cast<unsigned char>(bytes[i + 1]) << 8) |
+                       static_cast<unsigned char>(bytes[i + 2]);
+    out.push_back(base64_alphabet[(v >> 18) & 63]); out.push_back(base64_alphabet[(v >> 12) & 63]);
+    out.push_back(base64_alphabet[(v >> 6) & 63]); out.push_back(base64_alphabet[v & 63]);
+  }
+  if (const auto rest = bytes.size() - i; rest) {
+    const unsigned v = (static_cast<unsigned char>(bytes[i]) << 16) | (rest == 2 ? static_cast<unsigned char>(bytes[i + 1]) << 8 : 0);
+    out.push_back(base64_alphabet[(v >> 18) & 63]); out.push_back(base64_alphabet[(v >> 12) & 63]);
+    out.push_back(rest == 2 ? base64_alphabet[(v >> 6) & 63] : '='); out.push_back('=');
+  }
+}
+}  // namespace
+
+std::string stream_chunk(std::string& carry, std::string_view chunk) {
+  std::string bytes = std::move(carry);
+  bytes.reserve(bytes.size() + chunk.size() / 4 * 3);
+  unsigned bits = 0, available = 0;
+  for (const unsigned char c : chunk) {
+    if (c == '=') break;
+    bits = (bits << 6) | base64_value(c); available += 6;
+    if (available >= 8) { available -= 8; bytes.push_back(static_cast<char>((bits >> available) & 0xFF)); }
+  }
+  const auto whole = bytes.size() / 3 * 3;
+  std::string out;
+  encode_groups(out, std::string_view(bytes).substr(0, whole));
+  carry.assign(bytes, whole, std::string::npos);
+  return out;
+}
+std::string finish_stream(std::string& carry) {
+  std::string out;
+  encode_groups(out, carry);
+  carry.clear();
+  return out;
+}
 } // namespace sp::media_output

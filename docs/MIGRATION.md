@@ -119,6 +119,11 @@ A streamed Chat audio answer through a declared OpenRouter origin now completes.
 - OpenAI `error.code`, then `error.type` (lower_snake).
 Each value is at most 64 characters, and free text never passes. A blocked Gemini answer also carries its `finishReason` or `blockReason` here. Code that treated an empty `vendor_code` as "not a listed error" should compare against the listed values instead.
 
+Streamed Gemini audio is one part, and Gemini's empty closing text part is gone from the typed message:
+- **Audio frames.** Streamed TTS sends one `inlineData` part per frame, 26 or more a second, and each became its own `Media` part, while the buffered call returned one. Consecutive inline audio frames of the same MIME are now one `Media` part when the format concatenates: raw PCM (`audio/l16`, `audio/pcm`) or MP3. Each frame is a `PartDelta` of that part, re-encoded as an append-only canonical base64 stream, so the deltas a sink sees join to the sealed payload, and audio can still play as it arrives. A different MIME, a container format such as WAV, an image or video, or any other part in between starts a new part.
+- **Empty text.** Gemini ends most answers with a part whose text is `""`. Without a `thoughtSignature` it is no longer a typed part. The part opened and sealed as an empty `Text` before, which #37 already kept from `on_event`. With a signature it stays.
+- **Replay.** `wire_output` keeps every frame and the empty part as received, and native replay sends them unchanged.
+
 ## From interface 5 to 6
 
 Package 0.3.0 alpha adds `Usage::provider_cost` and the fixed-size `ProviderReportedCost`, `UsdAmount`, `CostSource`, `CostStatus` and `CostRounding` types. Existing field access remains source-compatible, but `Usage`, `UsageUpdate`, `Completion`, `PartialCompletion` and the containing `Event` layouts grow. Rebuild every consumer against the same headers and generation 6 libraries (`libsp_*.so.6`); interface 5 binaries must not load interface 6 libraries. CMake consumers select `SchemaProvider 0.3.0 EXACT`.

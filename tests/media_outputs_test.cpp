@@ -948,6 +948,56 @@ void gemini_tts_and_transcripts() {
   const auto malformed = gemini_decode(gemini_body(R"([{"audioTranscription":{"text":1}}])"), false);
   CHECK(std::holds_alternative<Failure>(malformed) && std::get<Failure>(malformed).error.reason == "gemini.part.transcription_invalid");
 }
+// Streamed audio arrives as one inlineData part per frame (26 or more a second of TTS). Consecutive frames of one
+// concatenable MIME are one Media part: each frame is a delta of an append-only canonical base64 stream, so the deltas
+// a sink sees join to the sealed payload. The retained wire keeps every frame for native replay.
+void gemini_audio_frames_merge() {
+  const std::string l16 = "audio/l16; rate=24000; channels=1";
+  auto frame = [](std::string_view mime, std::string_view data) {
+    return std::string(R"({"inlineData":{"mimeType":)") + json::quote(mime) + R"(,"data":")" + std::string(data) + R"("}})";
+  };
+  // Independently padded frames: the joined payload is the canonical base64 of all their bytes.
+  const std::vector<std::string> chunks{gemini_body("[" + frame(l16, "AAE=") + "]", false), gemini_body("[" + frame(l16, "Ag==") + "]", false),
+                                        gemini_body("[" + frame(l16, "AwQFBg==") + R"(,{"text":""}])")};
+  std::string deltas;
+  Accumulator a({}, [&](const Event& event) {
+    if (const auto* d = std::get_if<PartDelta>(&event); d && d->payload.kind == PartKind::Media) deltas += std::string(d->payload.bytes);
+  });
+  auto encoded = gemini::encode(gemini_desc(), gemini_request(), true);
+  gemini::Codec c(gemini_desc(), gemini::Mode::Sse, a, std::get<gemini::EncodedRequest>(encoded).context);
+  for (const auto& chunk : chunks) CHECK(c.frame({}, chunk));
+  c.finish();
+  CHECK(a.outcome());
+  const auto& completion = completed(*a.outcome());
+  const auto& parts = parts_of(completion);
+  CHECK(parts.size() == 1 && std::holds_alternative<Media>(parts[0]));
+  const auto& media = std::get<Media>(parts[0]);
+  CHECK(media.mime == l16 && media.data && *media.data == "AAECAwQFBg==" && deltas == *media.data);
+  CHECK(completion.messages[0].wire_output && completion.messages[0].wire_output->root().size() == 4);
+  // Native replay sends the frames as received.
+  auto next = gemini_request(); next.messages.push_back(completion.messages[0]); next.messages.push_back(Message{"", Role::User, {Text{"again"}}});
+  const auto replay = gemini::encode(gemini_desc(), next, false);
+  CHECK(std::holds_alternative<gemini::EncodedRequest>(replay));
+  CHECK(parse_doc(std::get<gemini::EncodedRequest>(replay).body)->root().get("contents").at(1).get("parts").size() == 4);
+  // A buffered body with consecutive frames is the same one part.
+  const auto buffered_frames = gemini_decode(gemini_body("[" + frame(l16, "AAE=") + "," + frame(l16, "Ag==") + "," + frame(l16, "AwQFBg==") + "]"), false);
+  CHECK(parts_of(completed(buffered_frames)).size() == 1 && *std::get<Media>(parts_of(completed(buffered_frames))[0]).data == "AAECAwQFBg==");
+  // Another MIME, a container format, or a part in between starts a new part.
+  const auto mixed = gemini_decode(gemini_body("[" + frame(l16, "AAA=") + "," + frame("audio/l16; rate=16000", "AAA=") + "]"), true);
+  CHECK(parts_of(completed(mixed)).size() == 2);
+  const auto wav = gemini_decode(gemini_body("[" + frame("audio/wav", "AAA=") + "," + frame("audio/wav", "AAA=") + "]"), true);
+  CHECK(parts_of(completed(wav)).size() == 2);
+  const auto split = gemini_decode(gemini_body("[" + frame(l16, "AAA=") + R"(,{"text":"between"},)" + frame(l16, "AAA=") + "]"), true);
+  CHECK(parts_of(completed(split)).size() == 3);
+  // A stream cut inside a run keeps the description and no payload.
+  Accumulator cut_acc;
+  gemini::Codec cut(gemini_desc(), gemini::Mode::Sse, cut_acc, std::get<gemini::EncodedRequest>(encoded).context);
+  CHECK(cut.frame({}, chunks[0]) && cut.frame({}, chunks[1]));
+  cut.finish({false, ErrorKind::Truncated});
+  CHECK(cut_acc.outcome() && std::holds_alternative<Failure>(*cut_acc.outcome()));
+  for (const auto& m : std::get<Failure>(*cut_acc.outcome()).partial.messages)
+    for (const auto& p : m.parts) if (const auto* x = std::get_if<Media>(&p)) CHECK(!x->data);
+}
 void gemini_generated() {
   const auto payload = b64(bytes_of(43));
   const auto native = R"([{"text":"before"},{"inlineData":{"mimeType":"image/png","data":)" + json::quote(payload) +
@@ -1192,6 +1242,7 @@ int main() {
     responses_fixture::generated_images();
     google_fixture::gemini_generated();
     google_fixture::gemini_tts_and_transcripts();
+    google_fixture::gemini_audio_frames_merge();
     google_fixture::interactions_generated();
     google_fixture::interactions_transcription_annotations();
     google_fixture::media_kinds_and_unknown_formats();

@@ -699,16 +699,17 @@ Traced traced(std::initializer_list<std::string> chunks, gemini::Close close = {
 }
 void empty_text_delta_is_withheld() {
   // Every wire part with a text member is a part of its own, and Gemini ends most answers with a part whose text is
-  // "" next to the finish reason. The part is still opened and sealed, in the same place as before, but the sink is
-  // shown only deltas that carry text.
+  // "" next to the finish reason. Without a signature that part says nothing: it is not a typed part, and the
+  // retained wire still holds it for native replay.
   const auto streamed = traced({body(R"([{"text":"Hel"}])", "", "null"), body(R"([{"text":"lo"}])", "", "null"), body(R"([{"text":""}])")});
-  CHECK(streamed.trace == "[begin][delta:Hel][seal][begin][delta:lo][seal][begin][seal]");
+  CHECK(streamed.trace == "[begin][delta:Hel][seal][begin][delta:lo][seal]");
   const auto& completion = complete(streamed.outcome);
-  CHECK(completion.joined_text() == "Hello" && completion.messages.size() == 1 && completion.messages[0].parts.size() == 3);
-  // The same three parts in one buffered body.
+  CHECK(completion.joined_text() == "Hello" && completion.messages.size() == 1 && completion.messages[0].parts.size() == 2);
+  CHECK(completion.messages[0].wire_output && completion.messages[0].wire_output->root().size() == 3);
+  // The same parts in one buffered body.
   const auto whole = complete(buffered(body(R"([{"text":"Hel"},{"text":"lo"},{"text":""}])")));
-  CHECK(whole.joined_text() == "Hello" && whole.messages[0].parts.size() == 3 && whole.stop.kind == completion.stop.kind);
-  for (size_t i = 0; i < 3; ++i) CHECK(std::holds_alternative<Text>(completion.messages[0].parts[i]) && std::holds_alternative<Text>(whole.messages[0].parts[i]));
+  CHECK(whole.joined_text() == "Hello" && whole.messages[0].parts.size() == 2 && whole.stop.kind == completion.stop.kind);
+  for (size_t i = 0; i < 2; ++i) CHECK(std::holds_alternative<Text>(completion.messages[0].parts[i]) && std::holds_alternative<Text>(whole.messages[0].parts[i]));
 
   // An empty text part that carries a signature is the same part with the same signature in both modes.
   const auto signed_empty = R"([{"text":"","thoughtSignature":"EMPTY_TEXT_SIG"}])";
@@ -718,11 +719,11 @@ void empty_text_delta_is_withheld() {
   CHECK(signed_parts.size() == 2 && std::get<Text>(signed_parts[1]).value.empty());
   CHECK(complete(signed_stream.outcome).messages[0].wire_output && complete(signed_stream.outcome).messages[0].wire_output->root().at(1).get("thoughtSignature").as_string() == "EMPTY_TEXT_SIG");
 
-  // A call cut after an empty part keeps it in its partial output, as it did.
+  // A call cut after an empty part has no typed part in its partial output either.
   const auto cut = traced({body(R"([{"text":""}])", "", "null")}, {false, ErrorKind::Truncated});
-  CHECK(cut.trace == "[begin][seal]");
+  CHECK(cut.trace.empty());
   const auto& partial = failure(cut.outcome, ErrorKind::Truncated).partial;
-  CHECK(partial.messages.size() == 1 && partial.messages[0].parts.size() == 1 && std::holds_alternative<Text>(partial.messages[0].parts[0]));
+  CHECK(partial.messages.empty() || partial.messages[0].parts.empty());
 
   // Only text deltas are withheld: an empty thought part is delivered as it was.
   const auto thought = traced({body(R"([{"text":"","thought":true}])", "", "null"), body(R"([{"text":"ok"}])")});
