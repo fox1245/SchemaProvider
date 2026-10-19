@@ -380,8 +380,16 @@ void creation_without_status_transcription() {
   const auto& done = complete(outcome);
   CHECK(done.stop.kind == StopKind::EndTurn && done.messages.size() == 1);
   const auto& message = done.messages[0];
-  CHECK(std::get<Text>(message.parts[0]).value == "7421");
+  CHECK(std::get<Text>(message.parts[0]).value == "7421" && std::get<Text>(message.parts[0]).citations.empty());
   CHECK(message.id.empty() && message.native && message.native->complete());
+  // A citation annotation is a citation of the text; word timings are not.
+  const auto cited = R"([{"type":"url_citation","start_index":0,"end_index":4,"url":"https://example.invalid/source","title":"source"}])";
+  const auto cited_outcome = stream({initial, frame("interaction.status_update", R"(,"status":"in_progress")"),
+      start(0, R"({"type":"model_output"})"), delta(0, R"({"type":"text","text":"7421"})"), annotation,
+      delta(0, std::string(R"({"type":"text_annotation_delta","annotations":)") + cited + "}"), stop(0), terminal, {"done", "[DONE]"}});
+  const auto& cited_text = std::get<Text>(complete(cited_outcome).messages[0].parts[0]);
+  CHECK(cited_text.citations.size() == 1 && cited_text.citations[0].kind == "url_citation" && cited_text.citations[0].url == "https://example.invalid/source" &&
+        cited_text.citations[0].title == "source" && cited_text.citations[0].start == 0u && cited_text.citations[0].end == 4u);
   const auto content = message.wire_output->root().at(0).get("content").at(0);
   CHECK(json::equal(content.get("annotations"), parse(words).root()));
   auto next = request(); next.messages.push_back(message);

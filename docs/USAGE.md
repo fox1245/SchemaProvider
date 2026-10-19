@@ -287,7 +287,7 @@ auto loaded = sp::descriptor::load(descriptor_json, std::get<sp::descriptor::Pol
 
 A preset takes the same snapshot in `PresetOptions::policy`, together with the replaced `base_url`.
 
-The declaration is not a model-only switch. It makes the origin an OpenRouter-profile origin for that family, so besides classifying another name as `Routed` it admits the `provider` routing object (`OpenRouterRouting`), Chat's gateway controls (`reasoning`, `include_reasoning`, `usage_include`, `models`) and image output, the policy's declared-origin media admission (`openrouter_media`) in place of `media`, assistant content arrays, `reasoning_details` and file annotations in Chat responses, one `[DONE]` after a Messages `message_stop`, an absent Chat cache-write counter as unknown instead of zero, and `usage.cost` read as USD (`CostSource::OpenRouterUsd`). Declare only an origin that behaves like OpenRouter in those respects; otherwise the SDK sends controls the service ignores or reads its cost in the wrong unit.
+The declaration is not a model-only switch. It makes the origin an OpenRouter-profile origin for that family, so besides classifying another name as `Routed` it admits the `provider` routing object (`OpenRouterRouting`), Chat's gateway controls (`reasoning`, `include_reasoning`, `usage_include`, `models`, `plugins`), Responses `plugins`, OpenRouter server tools and image output, the policy's declared-origin media admission (`openrouter_media`) in place of `media`, assistant content arrays, `reasoning_details` and file annotations in Chat responses, one `[DONE]` after a Messages `message_stop`, an absent Chat cache-write counter as unknown instead of zero, and `usage.cost` read as USD (`CostSource::OpenRouterUsd`). Declare only an origin that behaves like OpenRouter in those respects; otherwise the SDK sends controls the service ignores or reads its cost in the wrong unit.
 
 What the declaration keeps: the served identity must still stay the same for the whole response, the reported model is in `Completion::model` (as `Routed`) and the raw wire envelope, and native history stays bound to the requested model. What it does not cost: the origin list is admission data, so it changes `DescriptorPolicy::content_digest_hex()` and leaves the replay identity as it was, and history sealed under the embedded policy stays replayable. Use the same snapshot for every client of the deployment, and pin it with `expected_content_digest_hex`.
 
@@ -297,9 +297,9 @@ What the declaration keeps: the served identity must still stay the same for the
 
 | Request type / header | Family-specific fields besides model, messages and tools |
 |---|---|
-| `sp::chat::Request`, `<codecs/chat.h>` | `temperature`, `top_p`, `max_output_tokens`, scalar `reasoning_effort`, `service_tier`, `provider`, `response_format`, `modalities`, `audio`, OpenRouter `image_config`, `reasoning`, `include_reasoning`, `usage_include`, alternative `models`; choose either simple `messages` or ordered `canonical_messages`, never both. |
+| `sp::chat::Request`, `<codecs/chat.h>` | `temperature`, `top_p`, `max_output_tokens`, scalar `reasoning_effort`, `service_tier`, `provider`, `response_format`, `modalities`, `audio`, OpenRouter `image_config`, `reasoning`, `include_reasoning`, `usage_include`, alternative `models`, `plugins`; choose either simple `messages` or ordered `canonical_messages`, never both. |
 | `sp::messages::Request`, `<codecs/messages_request.h>` | `system`, `account_scope`, **`max_tokens`**, `thinking_budget`, `thinking_mode`, `output_effort`, `cache_control`, `tool_choice`, `temperature`, `top_p`, `provider`, `container`. |
-| `sp::responses::Request`, `<codecs/responses_request.h>` | `instructions`, `account_scope`, `max_output_tokens`, `reasoning` (`effort`, `summary`), `required_tool`, `service_tier`, `temperature`, `top_p`, `store`, `response_format`, `provider`, `hosted_tools`, `max_tool_calls`, `previous_response_id`, `previous_response_history`, `parallel_tool_calls`, `verbosity`, `truncation`, `include`, `modalities`, `image_config`, `mcp_approvals`. |
+| `sp::responses::Request`, `<codecs/responses_request.h>` | `instructions`, `account_scope`, `max_output_tokens`, `reasoning` (`effort`, `summary`), `required_tool`, `service_tier`, `temperature`, `top_p`, `store`, `response_format`, `provider`, `hosted_tools`, `max_tool_calls`, `previous_response_id`, `previous_response_history`, `parallel_tool_calls`, `verbosity`, `truncation`, `include`, `modalities`, `image_config`, `mcp_approvals`, `plugins`. |
 | `sp::gemini::Request`, `<codecs/gemini_request.h>` | `system`, `account_scope`, `max_output_tokens`, `thinking_budget`, typed `thinking_level`, `include_thoughts`, `temperature`, `safety_settings`, `tool_choice`, `required_tool`, `history_mode`, `response_modalities`, `speech_config`, `image_config`, `audio_transcription_config`, `audio_format`, `builtin_tools`, `mcp_servers`, `server_tool_invocations`, `retrieval_config`. |
 | `sp::interactions::Request`, `<codecs/interactions_request.h>` | `system`, `account_scope`, `max_output_tokens`, `thinking_level`, `thinking_summaries`, `service_tier`, `required_tool`, typed `response_format`, `speech_config`, `transcription_config`, `builtin_tools`, `previous_interaction_id`, `store`, `video_task`, `background`, `agent`, `lifecycle`, `interaction_id`. |
 
@@ -407,7 +407,7 @@ Generated `Media` lives in `Completion::messages[].parts`: inline `data` is owne
 
 OpenAI Chat audio SSE has an observed provider variation: metadata heartbeats may omit `choices`, and a late expiry-only audio delta after final usage may omit `finish_reason`. When validated, complete audio, final usage, `audio.expires_at`, `[DONE]` and normal transport close all agree, the SDK derives `StopKind::EndTurn` with raw stop evidence `derived:audio_usage+audio.expires_at+DONE`; it does not invent a provider finish reason. A declared OpenRouter origin orders the tail differently: the expiry-only delta comes first, then the final usage on a choice whose delta holds only the assistant role and empty text and whose `finish_reason` is null, then `[DONE]`. That order derives the same stop there and nowhere else. Heartbeats, usage alone, incomplete audio prefixes, missing terminal evidence or abnormal close cannot produce success or complete native replay authority. Ordinary Chat streams still require their chosen choice's finish reason and `[DONE]`.
 
-Retain the owned messages/native sidecars, not just a text projection, when extending history. Chat accepts assistant content arrays and preserves generated-image native history; declared-origin parsed-PDF `file` annotations and URL citations remain owned raw-wire observations, not synthesized semantic parts or file/replay authority. Interactions `text_annotation_delta` transcription annotations merge into the current native text run; they do not reach backward across media or create a missing text part.
+Retain the owned messages/native sidecars, not just a text projection, when extending history. Chat accepts assistant content arrays and preserves generated-image native history; URL citations become `Text::citations` (see [OpenRouter plugins and citations](#openrouter-plugins-and-citations)), and declared-origin parsed-PDF `file` annotations remain owned raw-wire observations, not synthesized semantic parts or file/replay authority. Interactions `text_annotation_delta` transcription annotations merge into the current native text run; they do not reach backward across media or create a missing text part.
 
 Dedicated image/video jobs, uploads/downloads, operation polling and Gemini Live WebSocket remain separate endpoints. Primary references: [OpenAI Chat](https://developers.openai.com/api/reference/resources/chat), [Responses](https://developers.openai.com/api/reference/resources/responses/methods/create), [Anthropic vision](https://platform.claude.com/docs/en/build-with-claude/vision)/[PDFs](https://platform.claude.com/docs/en/build-with-claude/pdf-support), [Gemini media](https://ai.google.dev/gemini-api/docs/image-understanding)/[Interactions](https://ai.google.dev/api/interactions-api), [OpenRouter audio](https://openrouter.ai/docs/guides/overview/multimodal/audio)/[images](https://openrouter.ai/docs/guides/overview/multimodal/image-generation). Schema research is not live API qualification.
 
@@ -465,7 +465,7 @@ A Messages server tool (`ToolDefinition` with a `type` the policy lists, such as
 - `allowed_callers` (`{"direct"}`): the `_20260318` web tools default to programmatic callers, and a model without programmatic tool calling (`claude-haiku-4-5`) refuses them with HTTP 400 unless `direct` is listed;
 - `allowed_domains` or `blocked_domains` (one of the two), and `user_location` (`UserLocation`: city, region, country, timezone; sent as `approximate`);
 - for `web_fetch`, `citations` (`{"enabled": …}`) and `max_content_tokens`.
-`Request::container` reuses a code-execution container by the id an earlier response reported. Citations on text blocks (`citations`, streamed `citations_delta`) stay observations in `raw_events`, like Chat annotations: they never fail the answer.
+`Request::container` reuses a code-execution container by the id an earlier response reported. Citations on text blocks (`citations`, streamed `citations_delta`) become the text's `Text::citations`; they never fail the answer.
 
 Generate's `ThinkingLevel` is Minimal/Low/Medium/High, mutually exclusive with an explicit `thinking_budget`. `ToolChoice` uses Auto/Any/None/Validated and optional `allowed_function_names`; names must be declared and unique, and allow-lists apply only to Any/Validated. Do not combine it with `required_tool`.
 
@@ -488,6 +488,34 @@ request.tool_choice = sp::gemini::ToolChoice{sp::gemini::ToolChoiceMode::None};
 Safety categories are Harassment/HateSpeech/SexuallyExplicit/DangerousContent/CivicIntegrity; thresholds are BlockNone/BlockOnlyHigh/BlockMediumAndAbove/BlockLowAndAbove/Off. Duplicate categories and invalid values reject. These are explicit service controls, not a safety guarantee about returned content.
 
 The immutable family policy's `temperature_forbidden_model_prefixes` supplies model facts. Matching is ASCII case-insensitive against the full model or the suffix after its final `/`, so a gateway namespace does not bypass a prohibition. The embedded OpenAI facts cover gpt-5/gpt-6/o1/o3/o4 prefixes. Messages facts list the known Claude models and add the optional `temperature_forbidden_generations`, a rule by generation: every model of the `claude-` series from generation 4.7 on refuses `temperature`, whatever its family word (`opus`, `sonnet`, `haiku`, `fable` or one not yet released), dated suffix, gateway namespace or dotted gateway version (`anthropic/claude-opus-4.7`). The generation is the first one or two numbers of one or two digits after the series, so `claude-haiku-5-5` is 5.5 and `claude-opus-4-20250514` is 4.0 (a longer number is a date). A Claude id whose generation cannot be read is treated as the newest one and refused, which costs an omitted optional control instead of an HTTP 400. A snapshot without the key keeps only its listed prefixes. Loading a different closed policy creates a new identity, not a live edit to an existing client's behavior. Read the admitted facts for the selected deployment; do not guess temperature support from a model name alone.
+
+## OpenRouter plugins and citations
+
+**Plugins.** `chat::Request::plugins` and `responses::Request::plugins` send OpenRouter plugins at a declared OpenRouter origin. Each `OpenRouterPlugin` is an `id` plus an optional `options` object, whose members are sent beside the id: `{"id": "web", "max_results": 2}`.
+- **Catalogue.** OpenRouter's catalogue (`web`, `file-parser`, `response-healing`, `context-compression`, and the beta `alignment` and `armor`) is not compiled in, so a new plugin needs no SDK release.
+- **Checks.** Ids must be unique short tokens, and the options must be an object without `id`.
+- **Replay.** The plugins are bound in the configuration digest when present.
+
+**Citations.** `Text::citations` lists the sources an answer cites. Each `Citation` has:
+- `kind`, the provider's type;
+- `url`, `title`, `file_id` and `filename` where the kind has them;
+- `start` and `end` offsets when the provider gives them;
+- the provider's object in `raw`.
+
+| Family | Source |
+|---|---|
+| Chat | `message.annotations` of type `url_citation`, buffered or streamed (a repeated streamed annotation counts once). Plain string content only. |
+| Responses | Every `output_text` annotation: `url_citation`, `file_citation` (its `index` is `start`), `container_file_citation`, `file_path`. |
+| Messages | Text block `citations` and `citations_delta`: `web_search_result_location` and `search_result_location` name a source, and the location kinds give character, page or block offsets into the cited document. |
+| Interactions | Text annotations of type `url_citation`, `file_citation` and `place_citation`. `word_info` and `speech_metadata` describe a transcript and are not citations. |
+| Generate | None: `groundingMetadata` cites spans of the whole candidate and stays in `Completion::stop.details`. |
+
+Citations are read from the wire the message keeps. They are not part of its native seal, and an archived message restores without them: the archive keeps that wire.
+
+**Live check.** On 2026-10-19 through OpenRouter (`openai/gpt-5-nano`), each case was answered:
+- the `web` plugin with cited answers on Chat and Responses, buffered and streamed;
+- `response-healing` with `context-compression` on a JSON object answer;
+- `file-parser` (`pdf-text`) reading an inline PDF.
 
 ## Responses hosted tools
 

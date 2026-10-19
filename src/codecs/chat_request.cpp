@@ -102,10 +102,11 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (request.reasoning_effort) effective.reasoning_effort = *request.reasoning_effort;
   if (request.service_tier) effective.service_tier = *request.service_tier;
   if (auto error = descriptor::validate_choices(descriptor, request.model, effective)) return bad(std::move(*error));
-  if (request.reasoning || request.include_reasoning || request.usage_include || !request.models.empty()) {
+  if (request.reasoning || request.include_reasoning || request.usage_include || !request.models.empty() || !request.plugins.empty()) {
     if (!descriptor::contains(descriptor.family_policy().openrouter_origins, descriptor.base_url()))
       return bad("gateway controls require declared OpenRouter origin");
   }
+  if (auto error = request_controls::validate_plugins(request.plugins, resources.request_tools)) return bad(std::move(*error));
   if (request.reasoning) {
     const auto& reasoning = *request.reasoning;
     if (!reasoning.effort && !reasoning.max_tokens && !reasoning.exclude && !reasoning.enabled)
@@ -444,6 +445,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     }
     if (request.include_reasoning) body.raw(",\"include_reasoning\":").raw(*request.include_reasoning ? "true" : "false");
     if (request.usage_include) body.raw(",\"usage\":{\"include\":").raw(*request.usage_include ? "true}" : "false}");
+    if (!request.plugins.empty()) { body.raw(",\"plugins\":"); request_controls::write_plugins(body, request.plugins); }
     if (!request.models.empty()) {
       body.raw(",\"models\":[");
       bool model_comma = false;

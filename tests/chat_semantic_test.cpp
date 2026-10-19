@@ -983,6 +983,58 @@ void gateway_request_controls() {
     CHECK(std::get<Error>(chat::encode(gateway, changed, false)).kind == ErrorKind::ReplayIneligible);
   }
 }
+// OpenRouter plugins are sent as given at a declared origin, and URL citations of the answer become typed
+// citations of its text, buffered and streamed.
+void gateway_plugins_and_citations() {
+  auto loaded = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"gateway","family":"openai.chat","connection":{"base_url":"https://openrouter.ai","paths":{"buffered":"/api/v1/chat/completions","streaming":"/api/v1/chat/completions"}}})");
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
+  const auto& gateway = std::get<descriptor::ValidatedDescriptor>(loaded);
+  auto options = [](std::string_view text) {
+    auto parsed = json::parse(text); CHECK(std::holds_alternative<json::Document>(parsed));
+    return std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
+  };
+  chat::Request request; request.model = "fixture-model"; request.messages.push_back({Role::User, "hello"});
+  request.plugins = {{"web", options(R"({"max_results":2,"engine":"exa"})")}, {"response-healing", {}}};
+  auto result = chat::encode(gateway, request, false);
+  CHECK(std::holds_alternative<chat::EncodedRequest>(result));
+  auto parsed = json::parse(std::get<chat::EncodedRequest>(result).body); CHECK(std::holds_alternative<json::Document>(parsed));
+  const auto plugins = std::get<json::Document>(parsed).root().get("plugins");
+  CHECK(plugins.size() == 2 && plugins.at(0).get("id").as_string() == "web" && plugins.at(0).get("max_results").as_uint() == 2u &&
+        plugins.at(0).get("engine").as_string() == "exa" && plugins.at(1).size() == 1 && plugins.at(1).get("id").as_string() == "response-healing");
+  CHECK(std::get<Error>(chat::encode(descriptor_value(), request, false)).kind == ErrorKind::InvalidRequest);
+  auto reject = [&](const chat::Request& changed) { CHECK(std::get<Error>(chat::encode(gateway, changed, false)).kind == ErrorKind::InvalidRequest); };
+  auto changed = request; changed.plugins.push_back(changed.plugins.front()); reject(changed);
+  changed = request; changed.plugins[0].options = options(R"({"id":"other"})"); reject(changed);
+  changed = request; changed.plugins[0].options = options("[1]"); reject(changed);
+  changed = request; changed.plugins[0].id = "not a token"; reject(changed);
+
+  const std::string cite = R"({"type":"url_citation","url_citation":{"url":"https://example.com","title":"Example","content":"Excerpt","start_index":0,"end_index":7}})";
+  auto check = [&](const Outcome& outcome) {
+    const auto& text = std::get<Text>(completed(outcome).messages.at(0).parts.at(0));
+    CHECK(text.value == "Example Domain" && text.citations.size() == 1);
+    const auto& c = text.citations[0];
+    CHECK(c.kind == "url_citation" && c.url == "https://example.com" && c.title == "Example" && c.start == 0u && c.end == 7u &&
+          c.raw && c.raw->root().get("url_citation").get("content").as_string() == "Excerpt");
+  };
+  Accumulator accumulator;
+  chat::Codec codec(gateway, chat::Mode::Buffered, accumulator, {}, std::get<chat::EncodedRequest>(result).context);
+  codec.buffered(body(R"({"role":"assistant","content":"Example Domain","annotations":[)" + cite + "]}"), {});
+  CHECK(accumulator.outcome()); check(*accumulator.outcome());
+  // A stream that repeats the annotation still has one citation.
+  auto streamed = chat::encode(gateway, request, true); CHECK(std::holds_alternative<chat::EncodedRequest>(streamed));
+  Accumulator stream_accumulator;
+  chat::Codec stream_codec(gateway, chat::Mode::Sse, stream_accumulator, {}, std::get<chat::EncodedRequest>(streamed).context);
+  for (const auto& frame : {chunk(R"({"role":"assistant","content":"Example "})"), chunk(R"({"content":"Domain","annotations":[)" + cite + "]}"),
+                            chunk(R"({"annotations":[)" + cite + "]}", "\"stop\""), std::string("[DONE]")})
+    CHECK(stream_codec.frame("message", frame));
+  stream_codec.finish({true, ErrorKind::Truncated});
+  CHECK(stream_accumulator.outcome()); check(*stream_accumulator.outcome());
+  // The plugins are configuration of the conversation.
+  request.messages.clear(); request.canonical_messages = {Message{{}, Role::User, {Text{"hello"}}}, completed(*accumulator.outcome()).messages.at(0), Message{{}, Role::User, {Text{"next"}}}};
+  CHECK(std::holds_alternative<chat::EncodedRequest>(chat::encode(gateway, request, false)));
+  changed = request; changed.plugins.pop_back();
+  CHECK(std::get<Error>(chat::encode(gateway, changed, false)).kind == ErrorKind::ReplayIneligible);
+}
 // OpenRouter provider.max_price (https://openrouter.ai/docs/guides/routing/provider-selection#max-price).
 void gateway_max_price() {
   auto loaded = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"gateway","family":"openai.chat","connection":{"base_url":"https://openrouter.ai","paths":{"buffered":"/api/v1/chat/completions","streaming":"/api/v1/chat/completions"}}})");
@@ -1402,7 +1454,7 @@ int main() {
     required_metadata_and_identity(); per_chunk_creation_clock(); omitted_open_finish_reason(); empty_text_delta_is_withheld(); failure_reasons(); required_usage_and_unknown_cache(); unindexed_tool_order_and_optional_function(); buffered_close_precedence();
     accumulator_interleaved_ordering(); accumulator_order_uniqueness_and_limits();
     tool_history_and_escaped_arguments(); one_tool_message_with_several_results(); output_cap_member_by_origin(); quoted_json_and_request_bounds();
-    gateway_request_controls(); gateway_max_price();
+    gateway_request_controls(); gateway_max_price(); gateway_plugins_and_citations();
     value_builders_and_projections(); simple_requests_all_families();
     std::cout << "chat semantic properties passed\n";
     return 0;

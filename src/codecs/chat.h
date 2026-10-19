@@ -46,6 +46,7 @@ struct Request {
   std::optional<ReasoningOptions> reasoning{};
   std::optional<bool> include_reasoning{}, usage_include{};
   std::vector<std::string> models{};
+  std::vector<sp::OpenRouterPlugin> plugins{};
   // Generated media. Audio output needs the Audio modality together with `audio`; image output
   // (modalities and image_config) is an OpenRouter extension.
   std::vector<OutputModality> modalities{};
@@ -118,6 +119,9 @@ class Codec {
   bool text(json::Value, PartKind, bool streaming);
   bool content(json::Value, bool streaming);
   bool annotations(json::Value);
+  // URL citations of the answer's text, attached when the text part is sealed.
+  std::vector<Citation> citations_;
+  std::size_t citation_bytes_ = 0;
   bool reasoning_details(json::Value, bool streaming);
   bool finish_reasoning_details();
   bool audio(json::Value, bool streaming);

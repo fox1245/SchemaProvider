@@ -50,6 +50,28 @@ bool valid_annotation(json::Value value) {
   }
   return false;
 }
+// The annotations of a finished output_text as citations of that text. Every annotation was checked by
+// valid_annotation; the fields a kind does not have stay empty.
+std::vector<Citation> citations_of(json::Value annotations) {
+  std::vector<Citation> out;
+  if (!annotations.is_array()) return out;
+  for (auto annotation : annotations.elements()) {
+    auto parsed = json::parse(annotation.dump());
+    if (!std::holds_alternative<json::Document>(parsed)) continue;
+    Citation cited;
+    cited.kind = annotation.get("type").as_string();
+    if (annotation.get("url").is_string()) cited.url = annotation.get("url").as_string();
+    if (annotation.get("title").is_string()) cited.title = annotation.get("title").as_string();
+    if (annotation.get("file_id").is_string()) cited.file_id = annotation.get("file_id").as_string();
+    if (annotation.get("filename").is_string()) cited.filename = annotation.get("filename").as_string();
+    if (count_value(annotation.get("start_index"))) cited.start = number(annotation.get("start_index"));
+    else if (count_value(annotation.get("index"))) cited.start = number(annotation.get("index"));
+    if (count_value(annotation.get("end_index"))) cited.end = number(annotation.get("end_index"));
+    cited.raw = std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
+    out.push_back(std::move(cited));
+  }
+  return out;
+}
 bool valid_annotations(json::Value value) {
   if (!value.is_array()) return false;
   for (auto element : value.elements()) if (!valid_annotation(element)) return false;
@@ -531,7 +553,7 @@ bool Codec::part(Item& item, uint64_t position, json::Value v, bool summary, boo
   text.done = own(v); if (!text.done) return false;
   text.part_done = true; text.text_done = true;
   if (item.type == "message") {
-    if (!emit(PartSeal{text.local, std::string_view(text.bytes)})) return false;
+    if (!emit(PartSeal{text.local, std::string_view(text.bytes), {}, type == "output_text" ? citations_of(annotations) : std::vector<Citation>{}})) return false;
   }
   return !summary || emit_summary(item);
 }

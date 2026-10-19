@@ -22,7 +22,16 @@ class NativeReplay;
 enum class Role { System, Developer, User, Assistant, Tool };
 enum class ToolCallKind { ClientExecuted, ServerExecuted, ApprovalRequest };
 enum class InvalidReason { Truncated, NotJson, DuplicateKey, DepthExceeded, Empty, Other };
-struct Text { std::string value; };
+// A source an answer cites. `kind` is the provider's annotation type (url_citation, file_citation,
+// container_file_citation, file_path, ...); the fields it does not have stay empty. `start` and `end` are the
+// provider's offsets into the text when it gives them. The provider's object is kept whole in `raw`.
+// Citations are read from the wire the message keeps: they are not part of its native seal.
+struct Citation {
+  std::string kind, url, title, file_id, filename;
+  std::optional<std::uint64_t> start, end;
+  std::shared_ptr<const json::Document> raw;
+};
+struct Text { std::string value; std::vector<Citation> citations{}; };
 struct Refusal { std::string text; std::string raw_code; };
 struct ToolCall {
   std::string id, name;
@@ -479,6 +488,8 @@ struct PartSeal {
   LocalId part;
   std::optional<std::string_view> snapshot;
   std::shared_ptr<const json::Document> wire_metadata{};
+  // Text only.
+  std::vector<Citation> citations{};
 };
 struct MessageSeal {
   LocalId message;

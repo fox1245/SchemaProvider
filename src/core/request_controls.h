@@ -37,6 +37,9 @@ struct ResponseFormat {
   std::shared_ptr<const json::Document> schema;
   std::optional<bool> strict;
 };
+// An OpenRouter plugin (web, file-parser, response-healing, context-compression, ...): its id and the plugin's
+// other members, sent as given as {"id": ..., ...options}. OpenRouter's catalogue of plugins is not compiled in.
+struct OpenRouterPlugin { std::string id; std::shared_ptr<const json::Document> options; };
 // OpenRouter image_config, for image output on Chat and Responses. Every present field is sent as given.
 struct OpenRouterImageConfig {
   std::optional<std::string> aspect_ratio, image_size, size, quality, background, output_format, moderation;
@@ -351,6 +354,27 @@ inline bool config_token(std::string_view text, std::size_t maximum = 64) noexce
     if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == ':' || c == '.' ||
           c == '_' || c == '-' || c == '/')) return false;
   return true;
+}
+inline std::optional<std::string> validate_plugins(const std::vector<OpenRouterPlugin>& plugins, std::size_t limit) {
+  if (plugins.size() > limit) return "OpenRouter plugin count limit exceeded";
+  std::set<std::string_view> ids;
+  for (const auto& plugin : plugins) {
+    if (!config_token(plugin.id) || !ids.insert(plugin.id).second) return "OpenRouter plugins require unique ids";
+    if (plugin.options && (!plugin.options->root().is_object() || plugin.options->root().get("id").valid()))
+      return "OpenRouter plugin options must be an object without id";
+  }
+  return std::nullopt;
+}
+inline void write_plugins(json::BoundedWriter& body, const std::vector<OpenRouterPlugin>& plugins) {
+  body.raw("[");
+  for (std::size_t i = 0; i < plugins.size(); ++i) {
+    if (i) body.raw(",");
+    body.raw("{\"id\":").quoted(plugins[i].id);
+    if (plugins[i].options)
+      for (auto member : plugins[i].options->root().members()) body.raw(",").quoted(member.key).raw(":").value(member.value, 3);
+    body.raw("}");
+  }
+  body.raw("]");
 }
 inline std::optional<std::string> validate_image_config(const OpenRouterImageConfig& config) {
   for (const auto* field : {&config.aspect_ratio, &config.image_size, &config.size, &config.quality, &config.background,

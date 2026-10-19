@@ -264,6 +264,11 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
   hash.number(request.include_reasoning.has_value()); if (request.include_reasoning) hash.number(*request.include_reasoning);
   hash.number(request.usage_include.has_value()); if (request.usage_include) hash.number(*request.usage_include);
   hash.number(request.models.size()); for (const auto& model : request.models) hash.text(model);
+  // Plugins change what the router does with the conversation; bound only when present.
+  if (!request.plugins.empty()) {
+    hash.text("sp.chat.plugins.v1"); hash.number(request.plugins.size());
+    for (const auto& plugin : request.plugins) { hash.text(plugin.id); hash.document(plugin.options); }
+  }
   hash.number(request.modalities.size());
   for (const auto modality : request.modalities) hash.number(static_cast<uint64_t>(modality));
   hash.number(request.audio.has_value());
@@ -412,6 +417,10 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
     const auto strict = tool.strict ? tool.strict : defaults.strict_tools;
     hash.number(strict.has_value()); if (strict) hash.number(*strict);
     hash.number(tool.defer_loading.value_or(false));
+  }
+  if (!request.plugins.empty()) {
+    hash.text("sp.responses.plugins.v1"); hash.number(request.plugins.size());
+    for (const auto& plugin : request.plugins) { hash.text(plugin.id); hash.document(plugin.options); }
   }
   // Image output is configuration; MCP approvals answer one turn and are not bound.
   if (!request.modalities.empty() || request.image_config) {

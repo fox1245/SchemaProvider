@@ -507,6 +507,7 @@ constexpr Entry accumulator_table[] = {
   {"contradictory sealed snapshot", "accumulator.part.sealed_contradiction"},
   {"contradictory part snapshot", "accumulator.part.snapshot_contradiction"},
   {"invalid generated media payload", "accumulator.media.payload_invalid"},
+  {"citations on a part that is not text", "accumulator.citations.not_text"},
   {"invalid server result block", "accumulator.part.server_result_invalid"},
   {"invalid message seal", "accumulator.message.seal_invalid"},
   {"unsealed message part", "accumulator.message.part_unsealed"},
@@ -669,6 +670,7 @@ constexpr Entry responses_request_table[] = {
   {"a computer call result is one screenshot image", "request.responses.a_computer_call_result_is_one_screenshot_image"},
   {"a computer call result's content may only acknowledge safety checks", "request.responses.a_computer_call_result_s_content_may_only"},
   {"an MCP approval gives a reason only when it refuses", "request.responses.an_mcp_approval_gives_a_reason_only_when_it"},
+  {"OpenRouter plugins require a declared OpenRouter origin", "request.responses.openrouter_plugins_require_a_declared"},
   {"an MCP approval answers a captured approval request", "request.responses.an_mcp_approval_answers_a_captured_approval"},
   {"model and messages are required", "request.responses.model_and_messages_are_required"},
   {"request count limit exceeded", "request.responses.request_count_limit_exceeded"},
@@ -844,6 +846,9 @@ constexpr Entry interactions_request_table[] = {
   {"a background interaction needs store", "request.interactions.background_needs_store"},
 };
 constexpr Entry shared_request_table[] = {
+  {"OpenRouter plugin count limit exceeded", "request.plugins.count_limit_exceeded"},
+  {"OpenRouter plugins require unique ids", "request.plugins.require_unique_ids"},
+  {"OpenRouter plugin options must be an object without id", "request.plugins.options_must_be_an_object_without_id"},
   {"image_config values must be short tokens", "request.image_config.values_must_be_short_tokens"},
   {"image_config output_compression is 0 to 100", "request.image_config.output_compression_is_0_to_100"},
   {"positive output cap required", "request.choice.positive_output_cap_required"},
