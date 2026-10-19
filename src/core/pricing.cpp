@@ -1,10 +1,59 @@
 #include "core/pricing.h"
 #include <algorithm>
+#include <cstdint>
 #include <limits>
 #include <utility>
 
 namespace sp::pricing {
 namespace {
+// An unsigned 128-bit value in two 64-bit halves (MSVC has no 128-bit integer). `overflow` records a carry out of
+// 128 bits.
+struct Wide {
+  std::uint64_t high = 0, low = 0;
+  bool overflow = false;
+
+  static Wide product(std::uint64_t a, std::uint64_t b) {
+    constexpr std::uint64_t mask = 0xffffffffu;
+    const std::uint64_t ll = (a & mask) * (b & mask), lh = (a & mask) * (b >> 32), hl = (a >> 32) * (b & mask),
+                        hh = (a >> 32) * (b >> 32);
+    const std::uint64_t middle = (ll >> 32) + (lh & mask) + (hl & mask);
+    return {hh + (lh >> 32) + (hl >> 32) + (middle >> 32), (middle << 32) | (ll & mask), false};
+  }
+  Wide& operator+=(const Wide& other) {
+    const auto old_low = low, old_high = high;
+    low += other.low;
+    const std::uint64_t carry = low < old_low ? 1 : 0;
+    high += other.high;
+    const bool wrapped = high < old_high;
+    const auto before_carry = high;
+    high += carry;
+    overflow = overflow || other.overflow || wrapped || high < before_carry;
+    return *this;
+  }
+  Wide& operator+=(std::uint64_t value) { return *this += Wide{0, value, false}; }
+  // value * 10 + digit
+  Wide shifted(unsigned digit) const {
+    auto result = product(low, 10);
+    const auto top = product(high, 10);
+    result.overflow = overflow || top.high != 0 || result.high > std::numeric_limits<std::uint64_t>::max() - top.low;
+    result.high += top.low;
+    result += digit;
+    return result;
+  }
+  bool fits() const { return !overflow && high == 0; }
+  // The quotient by a divisor below 2^32, by 32-bit long division.
+  Wide divided(std::uint32_t divisor) const {
+    const std::uint64_t limbs[4] = {high >> 32, high & 0xffffffffu, low >> 32, low & 0xffffffffu};
+    std::uint64_t quotient[4] = {}, remainder = 0;
+    for (int i = 0; i < 4; ++i) {
+      const auto current = (remainder << 32) | limbs[i];
+      quotient[i] = current / divisor;
+      remainder = current % divisor;
+    }
+    return {(quotient[0] << 32) | quotient[1], (quotient[2] << 32) | quotient[3], overflow};
+  }
+};
+
 // Decimal USD per unit as nano-USD per million units (USD x 1e15), rounded up past the fifteenth fractional digit.
 std::optional<std::uint64_t> per_million(std::string_view text) {
   if (text.empty() || text.front() == '-') return std::nullopt;
@@ -12,25 +61,25 @@ std::optional<std::uint64_t> per_million(std::string_view text) {
   const auto whole = text.substr(0, dot);
   const auto fraction = dot == std::string_view::npos ? std::string_view{} : text.substr(dot + 1);
   constexpr unsigned scale = 15;
-  unsigned __int128 value = 0;
+  Wide value;
   for (const char c : whole) {
     if (c < '0' || c > '9') return std::nullopt;
-    value = value * 10 + static_cast<unsigned>(c - '0');
-    if (value > std::numeric_limits<std::uint64_t>::max()) return std::nullopt;
+    value = value.shifted(static_cast<unsigned>(c - '0'));
+    if (!value.fits()) return std::nullopt;
   }
   bool remainder = false;
   for (unsigned i = 0; i < scale; ++i) {
     const char c = i < fraction.size() ? fraction[i] : '0';
     if (c < '0' || c > '9') return std::nullopt;
-    value = value * 10 + static_cast<unsigned>(c - '0');
+    value = value.shifted(static_cast<unsigned>(c - '0'));
   }
   for (std::size_t i = scale; i < fraction.size(); ++i) {
     if (fraction[i] < '0' || fraction[i] > '9') return std::nullopt;
     remainder = remainder || fraction[i] != '0';
   }
-  if (remainder) ++value;
-  if (value > std::numeric_limits<std::uint64_t>::max()) return std::nullopt;
-  return static_cast<std::uint64_t>(value);
+  if (remainder) value += 1;
+  if (!value.fits()) return std::nullopt;
+  return value.low;
 }
 } // namespace
 
@@ -82,12 +131,12 @@ CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_v
     const auto total = usage.input_total->value;
     uncached = total >= cache_read + cache_write ? total - cache_read - cache_write : 0;
   }
-  unsigned __int128 sum = 0;  // nano-USD x 1e6
+  Wide sum;  // nano-USD x 1e6
   bool complete = true;
   auto charge = [&](std::uint64_t units, const std::optional<std::uint64_t>& rate, std::string_view name) {
     if (!units) return;
     if (!rate) { out.unpriced.emplace_back(name); complete = false; return; }
-    sum += static_cast<unsigned __int128>(units) * *rate;
+    sum += Wide::product(units, *rate);
   };
   if (!uncached) { out.unpriced.emplace_back("input"); complete = false; }
   else charge(*uncached, price.input, "input");
@@ -121,9 +170,10 @@ CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_v
   }
   if (price.request) sum += *price.request;
   if (!complete) return out;
-  const auto nano = (sum + 999'999) / 1'000'000;
-  if (nano > std::numeric_limits<std::uint64_t>::max()) { out.unpriced.emplace_back("overflow"); return out; }
-  out.total = UsdAmount{static_cast<std::uint64_t>(nano), Evidence::Derived, CostRounding::CeilingCatalogueProduct};
+  sum += 999'999;
+  const auto nano = sum.divided(1'000'000);
+  if (!nano.fits()) { out.unpriced.emplace_back("overflow"); return out; }
+  out.total = UsdAmount{nano.low, Evidence::Derived, CostRounding::CeilingCatalogueProduct};
   return out;
 }
 
