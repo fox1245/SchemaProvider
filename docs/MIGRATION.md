@@ -176,6 +176,11 @@ Chat and Responses take OpenRouter plugins, and the cited sources of an answer a
 - **Citations.** `Text` gains `citations`, filled from Chat URL citations, Responses annotations, Messages citations and Interactions citation annotations. These were only raw observations before. `Text{value}` still compiles, and the native seal is unchanged.
 - **Events.** `PartSeal` gains `citations`, filled for text parts.
 
+The catalogue prices a call:
+- **New module.** `<core/pricing.h>` adds `sp::pricing::price_of` and `sp::pricing::estimate`.
+- **Fallback.** An estimate prices the served model's entry, else the requested model's, and says so.
+- **New enum value.** `CostRounding` gains `CeilingCatalogueProduct`, added last, for these estimates.
+
 ## From interface 5 to 6
 
 Package 0.3.0 alpha adds `Usage::provider_cost` and the fixed-size `ProviderReportedCost`, `UsdAmount`, `CostSource`, `CostStatus` and `CostRounding` types. Existing field access remains source-compatible, but `Usage`, `UsageUpdate`, `Completion`, `PartialCompletion` and the containing `Event` layouts grow. Rebuild every consumer against the same headers and generation 6 libraries (`libsp_*.so.6`); interface 5 binaries must not load interface 6 libraries. CMake consumers select `SchemaProvider 0.3.0 EXACT`.
