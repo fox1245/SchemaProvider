@@ -142,4 +142,10 @@ struct EncodedRequest {
 };
 using EncodeResult = std::variant<EncodedRequest, Error>;
 EncodeResult encode(const descriptor::ValidatedDescriptor&, const Request&, bool streaming);
+
+// A captured answer as portable history, for HistoryMode::PortableForeign: its text and client function calls,
+// without the native seal, signatures or the service's own parts. The SDK never applies it by itself; it is for a
+// caller whose captured answer cannot be sent back as it is. `dropped` names the wire type of each part left out.
+struct PortableProjection { Message message; std::vector<std::string> dropped; };
+PortableProjection project_portable(const Message& captured);
 } // namespace sp::gemini

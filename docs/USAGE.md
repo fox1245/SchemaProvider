@@ -577,7 +577,17 @@ On 2026-10-19 a background `gemini-3.1-flash-lite` interaction answered `Pending
 
 **Service limits seen in that check.** These are the service's decisions, so the SDK sends the fields either way:
 - **Image search.** Not enabled for `gemini-3.1-flash-lite` or `gemini-3.6-flash`.
-- **MCP replay.** The service refuses its own MCP `toolCall` in the next turn's history ("Tool type of tool_call part does not match with tool call context"); that part has no `toolType`. Without invocations, the MCP conversation continued, also next to a client function. OpenAI Responses accepted its own `mcp_call` items in the next turn.
+- **MCP replay.** The service refuses its own MCP `toolCall` in the next turn's history ("Tool type of tool_call part does not match with tool call context"); that part has no `toolType`. Without invocations, the MCP conversation continued, also next to a client function. OpenAI Responses accepted its own `mcp_call` items in the next turn. See the next paragraph for what the SDK does about it.
+
+**Parts the service refuses to take back.** The Generate family policy lists them as `unreplayable_parts`: a part whose data member (`toolCall`) lacks a member (`toolType`). The built-in policy lists the MCP case above.
+- **Refusal.** Native history holding such a part is refused before dispatch: `Unsupported`, reason `request.generate.captured_part_refused_by_the_service`, and nothing is sent.
+- **Lifting it.** A policy without the entry sends the history again, so if the service starts accepting it, a policy update is enough.
+- **Projection.** To continue such a conversation, `gemini::project_portable(captured)` returns the answer's text and client function calls as portable history, with `dropped` naming each part it left out. Send it with `HistoryMode::PortableForeign`. The projection gives up the native seal and the signatures, and the SDK never applies it by itself.
+- **Live check.** On 2026-10-19 (`gemini-3.1-flash-lite`, context7, next to a client function, buffered and streamed):
+  - with invocations on, turn 2 was refused before dispatch;
+  - the projected turn 2 was answered;
+  - with invocations unset, both turns were answered;
+  - Search next to a client function still replayed.
 - **TTS formats.** `gemini-3.8-flash-lite-tts` honoured `AUDIO_L16`, `AUDIO_WAV`, `AUDIO_MULAW` and `AUDIO_MP3`, refused `AUDIO_OGG_OPUS`, `bit_rate` and `delivery`, and answered at 24 kHz whatever `sample_rate` said. The `Media` MIME parameters report the rate it used.
 
 ## Explicit portable Gemini history

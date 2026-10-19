@@ -556,6 +556,12 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         if (!pending.empty()) return invalid("all function results must precede the next model message");
         if (m.native) {
           if (!m.wire_output || !m.wire_output->root().is_array()) return Error{ErrorKind::ReplayIneligible, "native parts array required"};
+          // The service refuses some of its own parts when they come back (an MCP toolCall has no toolType). The
+          // policy lists those shapes, and such a message fails here instead of as the service's 400.
+          for (const auto part : m.wire_output->root().elements())
+            for (const auto& [member, missing] : descriptor.family_policy().unreplayable_parts)
+              if (part.get(member).is_object() && !part.get(member).get(missing).valid())
+                return Error{ErrorKind::Unsupported, "captured part is one the service refuses to take back"};
           for (const auto& part : m.parts) if (auto call = std::get_if<ToolCall>(&part)) {
             // The service ran its own calls and answered them in the same message; they replay with the wire.
             if (call->kind == ToolCallKind::ServerExecuted) continue;
@@ -677,5 +683,27 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   result.context = std::move(context);
   result.max_output_tokens = effective.max_output_tokens;
   return result;
+}
+PortableProjection project_portable(const Message& captured) {
+  PortableProjection out;
+  out.message.id = captured.id;
+  out.message.role = captured.role;
+  for (const auto& part : captured.parts) {
+    if (const auto* text = std::get_if<Text>(&part); text && !text->value.empty()) { out.message.parts.push_back(Text{text->value}); continue; }
+    if (const auto* call = std::get_if<ToolCall>(&part); call && call->kind == ToolCallKind::ClientExecuted && call->input && call->input->root().is_object()) {
+      ToolCall portable; portable.id = call->id; portable.name = call->name; portable.input = call->input;
+      out.message.parts.push_back(std::move(portable));
+      continue;
+    }
+    out.dropped.push_back(std::visit([](const auto& value) -> std::string {
+      using T = std::decay_t<decltype(value)>;
+      if constexpr (std::is_same_v<T, Text>) return "text";
+      else if constexpr (std::is_same_v<T, ToolCall> || std::is_same_v<T, ServerToolResult> || std::is_same_v<T, Opaque> || std::is_same_v<T, InvalidToolCall>) return value.wire_type;
+      else if constexpr (std::is_same_v<T, Thinking>) return "thought";
+      else if constexpr (std::is_same_v<T, Media>) return "inlineData";
+      else return "part";
+    }, part));
+  }
+  return out;
 }
 } // namespace sp::gemini

@@ -154,6 +154,12 @@ Generate gains the service's tools and an audio output format:
 - **Tool results.** A JSON object `content` beside media-only `content_parts` used to be `InvalidRequest`. It is now the `functionResponse.response` object, with the media as its `parts`.
 - **G.711 audio.** Streamed `audio/mulaw`, `audio/alaw` and `audio/basic` frames merge into one `Media` part, like raw PCM and MP3.
 
+Generate refuses history the service would refuse:
+- **The policy key.** The family policy gains the optional key `unreplayable_parts`, for `google.generate` only, and the built-in policy lists the MCP `toolCall` without `toolType`.
+- **The refusal.** Native history with such a part is now `Unsupported` before dispatch (`request.generate.captured_part_refused_by_the_service`). Before, the service answered the next turn with HTTP 400.
+- **Projection.** `gemini::project_portable` turns such an answer into portable history.
+- **Policy pin.** The policy's content digest changes, so a host pinning it updates the pin.
+
 ## From interface 5 to 6
 
 Package 0.3.0 alpha adds `Usage::provider_cost` and the fixed-size `ProviderReportedCost`, `UsdAmount`, `CostSource`, `CostStatus` and `CostRounding` types. Existing field access remains source-compatible, but `Usage`, `UsageUpdate`, `Completion`, `PartialCompletion` and the containing `Event` layouts grow. Rebuild every consumer against the same headers and generation 6 libraries (`libsp_*.so.6`); interface 5 binaries must not load interface 6 libraries. CMake consumers select `SchemaProvider 0.3.0 EXACT`.
