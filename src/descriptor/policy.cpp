@@ -233,7 +233,7 @@ class PolicyLoader {
         fail("", "configured policy depth limit");
       auto families=root.get("families"); if(!families.is_array() || families.size()!=5)fail("/families","all five typed families");
       for(auto v:families.elements()) {
-        closed(v,{"family","bindings","stop_reasons","defaults","required_output_cap","temperature_range","top_p_range","thinking_minimum","thinking_top_p_minimum","reasoning_efforts","reasoning_summaries","thinking_levels","service_tiers","header_versions","header_version","server_tools","openrouter_origins","temperature_forbidden_model_prefixes","media","openrouter_media"},"/families",{"temperature_forbidden_generations","max_completion_tokens_origins","unreplayable_parts","extensions","openrouter_plugins","openrouter_server_tools","betas"});
+        closed(v,{"family","bindings","stop_reasons","defaults","required_output_cap","temperature_range","top_p_range","thinking_minimum","thinking_top_p_minimum","reasoning_efforts","reasoning_summaries","thinking_levels","service_tiers","header_versions","header_version","server_tools","openrouter_origins","temperature_forbidden_model_prefixes","media","openrouter_media"},"/families",{"temperature_forbidden_generations","max_completion_tokens_origins","unreplayable_parts","extensions","openrouter_plugins","openrouter_server_tools","betas","response_blocks"});
         FamilyPolicy f; f.family=text(v.get("family"),"/families");
         if(f.family!="openai.chat" && f.family!="anthropic.messages" && f.family!="openai.responses" && f.family!="google.generate" && f.family!="google.interactions")fail("/families","typed family");
         if(policy->family(f.family))fail("/families","unique families");
@@ -337,6 +337,26 @@ class PolicyLoader {
               if (!valid_origin(origin) || origin.ends_with('/')) fail("/betas/origins", "canonical origins without path");
             for (const auto& existing : f.betas) if (existing.value == fact.value) fail("/betas/value", "unique beta values");
             f.betas.push_back(std::move(fact));
+          }
+        }
+        // Response blocks kept whole and replayed as captured: never a block the codec types.
+        if (auto blocks = v.get("response_blocks"); blocks.valid()) {
+          if (f.family != "anthropic.messages") fail("/response_blocks", "Messages response block facts only");
+          if (!blocks.is_array() || blocks.size() > 64) fail("/response_blocks", "bounded array of block facts");
+          for (auto b : blocks.elements()) {
+            closed(b, {"type"}, "/response_blocks", {"beta"});
+            ResponseBlockFact fact{text(b.get("type"), "/response_blocks/type")};
+            if (!std::all_of(fact.type.begin(), fact.type.end(), [](unsigned char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'; }) ||
+                fact.type == "text" || fact.type == "thinking" || fact.type == "redacted_thinking" || fact.type == "tool_use" ||
+                fact.type == "server_tool_use" || fact.type == "mcp_tool_use" || fact.type.ends_with("_tool_result"))
+              fail("/response_blocks/type", "a lower-case block type the codec does not type");
+            if (b.get("beta").valid()) {
+              fact.beta = text(b.get("beta"), "/response_blocks/beta");
+              if (std::none_of(f.betas.begin(), f.betas.end(), [&](const BetaFact& beta) { return beta.value == fact.beta; }))
+                fail("/response_blocks/beta", "a value of the family's betas");
+            }
+            for (const auto& existing : f.response_blocks) if (existing.type == fact.type) fail("/response_blocks/type", "unique block types");
+            f.response_blocks.push_back(std::move(fact));
           }
         }
         auto tools=v.get("server_tools"); if(!tools.is_array() || tools.size()>64)fail("/server_tools","bounded reviewed tool facts");

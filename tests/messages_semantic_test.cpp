@@ -350,7 +350,7 @@ void corruption_matrix() {
   CHECK(text(completed(cited_stream).messages) == "x");
   CHECK(std::get<Text>(completed(cited_stream).messages[0].parts[0]).citations.size() == 1 &&
         std::get<Text>(completed(cited_stream).messages[0].parts[0]).citations[0].url == "https://example.test");
-  failed(buffered(body(R"([{"type":"container_upload","file_id":"x"}])")), ErrorKind::Unsupported);
+  failed(buffered(body(R"([{"type":"future_block","file_id":"x"}])")), ErrorKind::Unsupported);
   std::string wrong_model = body(); wrong_model.replace(wrong_model.find("fixture-model"), 13, "other-model");
   CHECK(completed(buffered(wrong_model)).model.relation == ServedRelation::Unexplained);
   Accumulator acc; messages::Codec no_context(descriptor_value(), messages::Mode::Buffered, acc, nullptr);
@@ -839,6 +839,36 @@ void response_metadata_is_kept() {
 }
 // An advisor call and its result, with the advisor's iteration in usage (#53): the result block is kept whole, the
 // advisor's model and the response's speed are labels, not counters.
+// The MCP connector's blocks, and blocks the policy keeps whole (#53): a listing and a fallback are kept as captured,
+// an MCP call is a server call that names its server, and its result pairs with it by id.
+void mcp_and_kept_blocks() {
+  const std::string listing = R"({"type":"mcp_tool_listing","mcp_server_name":"ctx","tools":[{"name":"resolve","input_schema":{"type":"object"}}]})";
+  const std::string call = R"({"type":"mcp_tool_use","id":"mcptoolu_1","name":"resolve","server_name":"ctx","input":{"q":"react"}})";
+  const std::string result = R"({"type":"mcp_tool_result","tool_use_id":"mcptoolu_1","is_error":false,"content":[{"type":"text","text":"/facebook/react"}]})";
+  const std::string fallback = R"({"type":"fallback","from":{"model":"fixture-model"},"to":{"model":"fixture-other"},"trigger":{"type":"refusal","category":null}})";
+  auto check = [&](const Outcome& outcome) {
+    const auto& parts = completed(outcome).messages[0].parts;
+    CHECK(parts.size() == 5);
+    CHECK(std::get<Opaque>(parts[0]).wire_type == "mcp_tool_listing" && std::get<Opaque>(parts[0]).wire_metadata->root().get("tools").size() == 1);
+    const auto& mcp = std::get<ToolCall>(parts[1]);
+    CHECK(mcp.kind == ToolCallKind::ServerExecuted && mcp.name == "resolve" && mcp.wire_type == "mcp_tool_use" &&
+          mcp.wire_metadata->root().get("server_name").as_string() == "ctx" && mcp.input->root().get("q").as_string() == "react");
+    CHECK(std::get<ServerToolResult>(parts[2]).wire_type == "mcp_tool_result" && std::get<ServerToolResult>(parts[2]).tool_use_id == "mcptoolu_1");
+    CHECK(std::get<Opaque>(parts[3]).wire_type == "fallback");
+  };
+  check(buffered(body("[" + listing + "," + call + "," + result + "," + fallback + R"(,{"type":"text","text":"ok"}])")));
+  std::string open_call = call; open_call.replace(open_call.find(R"({"q":"react"})"), 13, "{}");
+  check(stream({start(), block(0, listing), end(0), block(1, open_call), delta(1, R"({"type":"input_json_delta","partial_json":"{\"q\":\"react\"}"})"), end(1),
+                block(2, result), end(2), block(3, fallback), end(3), block(4, R"({"type":"text","text":""})"), delta(4, R"({"type":"text_delta","text":"ok"})"), end(4),
+                stop(), done}));
+  // An MCP call names its server; a kept block takes no delta; an MCP result answers only an MCP call.
+  std::string nameless = call; nameless.replace(nameless.find(R"("server_name":"ctx",)"), 20, "");
+  failed(buffered(body("[" + nameless + "]", "\"tool_use\"")), ErrorKind::ProtocolCorrupt);
+  failed(stream({start(), block(0, fallback), delta(0, R"({"type":"text_delta","text":"x"})")}), ErrorKind::ProtocolCorrupt);
+  const std::string search = R"({"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{}})";
+  failed(buffered(body("[" + search + R"(,{"type":"mcp_tool_result","tool_use_id":"srvtoolu_1","content":"x"}])")), ErrorKind::ProtocolCorrupt);
+  failed(buffered(body("[" + call + R"(,{"type":"mcp_tool_result","tool_use_id":"mcptoolu_1","content":17}])")), ErrorKind::ProtocolCorrupt);
+}
 void advisor_result_and_iterations() {
   const std::string content = R"([{"type":"server_tool_use","id":"srvtoolu_adv","name":"advisor","input":{}},)"
                               R"({"type":"advisor_tool_result","tool_use_id":"srvtoolu_adv","content":{"type":"advisor_result","text":"Use a queue."}},)"
@@ -864,7 +894,7 @@ int main() {
     usage_detail_forward_compatibility(); toolset_metadata_shapes();
     terminal_matrix(); text_thinking_and_order(); tool_fragments(); server_semantics(); server_result_shapes();
     stop_classes(); corruption_matrix(); usage_knowledge(); cut_stream_usage_has_no_placeholder_output(); uncached_input_rule(); limits_and_close_priority(); empty_text_delta_is_withheld(); failure_reasons(); response_metadata_is_kept();
-    advisor_result_and_iterations();
+    advisor_result_and_iterations(); mcp_and_kept_blocks();
     std::cout << "messages semantic tests passed\n";
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

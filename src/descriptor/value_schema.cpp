@@ -102,7 +102,12 @@ ValueSchema parse(json::Value value, const std::string& pointer, std::size_t dep
         out.required.emplace_back(item.as_string());
       }
     }
-  } else fail(at(pointer, "type"), "boolean, null, integer, number, string, enum, array or object");
+  } else if (name == "map") {
+    closed(value, {"type", "values", "max_items"}, pointer);
+    out.kind = ValueSchema::Kind::Map;
+    out.max_items = count(value.get("max_items"), at(pointer, "max_items"), 4096);
+    out.children.push_back(parse(value.get("values"), at(pointer, "values"), depth + 1));
+  } else fail(at(pointer, "type"), "boolean, null, integer, number, string, enum, array, object or map");
   return out;
 }
 bool token_text(std::string_view text) {
@@ -151,6 +156,16 @@ std::optional<std::string> check(const ValueSchema& schema, json::Value value, c
         if (auto error = check(schema.children[static_cast<std::size_t>(found - schema.names.begin())], member.value, at(pointer, member.key), depth + 1)) return error;
       }
       for (const auto& name : schema.required) if (!seen.contains(name)) return at(pointer, name) + ": required property";
+      return std::nullopt;
+    }
+    case Kind::Map: {
+      if (!value.is_object() || value.size() > schema.max_items) return pointer + ": object of up to " + std::to_string(schema.max_items) + " members";
+      std::set<std::string_view> seen;
+      for (auto member : value.members()) {
+        if (!name_token(member.key)) return at(pointer, member.key) + ": member name token";
+        if (!seen.insert(member.key).second) return at(pointer, member.key) + ": unique member";
+        if (auto error = check(schema.children[0], member.value, at(pointer, member.key), depth + 1)) return error;
+      }
       return std::nullopt;
     }
     case Kind::OneOf:

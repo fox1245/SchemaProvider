@@ -7,6 +7,7 @@
 //   {"type":"enum","values":["a","b"]}
 //   {"type":"array","items":<schema>,"max_items":N}
 //   {"type":"object","properties":{"name":<schema>},"required":["name"]}   (closed: only the listed properties)
+//   {"type":"map","values":<schema>,"max_items":N}   (keys the caller names, such as tool names: name tokens)
 //   {"one_of":[<schema>, ...]}
 #include "descriptor/descriptor.h"
 #include "json/json.h"
@@ -20,14 +21,14 @@
 namespace sp::descriptor {
 
 struct ValueSchema {
-  enum class Kind : std::uint8_t { Boolean, Null, Integer, Number, String, Enum, Array, Object, OneOf };
+  enum class Kind : std::uint8_t { Boolean, Null, Integer, Number, String, Enum, Array, Object, OneOf, Map };
   Kind kind = Kind::Null;
   std::optional<double> minimum, maximum;
   std::size_t max_length = 0, max_items = 0;
   bool token = false;
   std::vector<std::string> values;  // enum
   // Object properties in name order, with their schemas at the same index; array items at children[0]; one_of
-  // alternatives in order.
+  // alternatives in order; map values at children[0].
   std::vector<std::string> names, required;
   std::vector<ValueSchema> children;
 };
