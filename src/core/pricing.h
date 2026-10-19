@@ -52,11 +52,12 @@ struct CostEstimate {
   std::string entry;
   // The served model had no priced entry, so the requested model's priced it.
   bool requested_entry = false;
-  // Rules applied where the entry gives no price: "cache_read at input", "cache_write at input",
-  // "reasoning at output".
+  // Rules applied where the entry or the usage says less than the bill: "cache_read at input", "cache_write at
+  // input", "cache_write_1h at cache_write", and the dearer rates "cache_write at cache_write_1h", "output at
+  // output_image" and "route ceiling".
   std::vector<std::string> assumptions;
-  // Why there is no total: "model" (no priced entry), or a counter the call billed with no price or no count
-  // ("input", "output").
+  // Why there is no total: "model" (no priced entry), "ceiling" (no route ceiling), or a counter the call billed
+  // with no price or no count ("input", "output", "cache_write_1h", "output_image").
   std::vector<std::string> unpriced;
 };
 
@@ -68,12 +69,19 @@ struct CostEstimate {
 //   all of output_total at `output`.
 // - Messages: the compaction iterations (Usage::extra `compaction.input_tokens`, `compaction.output_tokens` and
 //   the cache counters) at the same rates, since the top-level counters leave them out.
+// - Cache writes: Messages' 5-minute writes at `cache_write` and 1-hour writes at `cache_write_1h`. Without that
+//   split, all of them at the dearer rate.
+// - Image output: Gemini's image output tokens (Generate `candidatesTokensDetails.IMAGE`, Interactions
+//   `output_tokens_by_modality.image`) at `output_image`. Without a modality breakdown, all output that is not
+//   reasoning at the dearer of `output` and `output_image`.
 // - `request` is charged once.
-// Server tool fees, images and other per-unit charges are not priced.
-// With a `service_tier`, the entry's prices for that tier, and the input band of the call's input tokens
-// (`price_of`).
+// Server tool fees are not priced. With a `service_tier`, the entry's prices for that tier, and the input band of the
+// call's input tokens (`price_of`). With `route_ceiling` (a routing gateway whose served endpoint is unknown),
+// every input token at `ceiling_input`, every output token at `ceiling_output`, and the dearer of `request` and
+// `ceiling_request`; an entry without a ceiling has no total ("ceiling").
 CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_view family, std::string_view origin,
-                      const ServedModel& model, const Usage& usage, std::string_view service_tier = {});
+                      const ServedModel& model, const Usage& usage, std::string_view service_tier = {},
+                      bool route_ceiling = false);
 
 // What a call may use: its admitted input limit, its output cap, and at most `uses` of each server tool type.
 struct BoundRequest {
