@@ -38,9 +38,10 @@ const Source sources[]{{reason::Source::Chat, "chat"}, {reason::Source::Messages
                        {reason::Source::Jobs, "jobs"}, {reason::Source::JobsRequest, "request.jobs"}, {reason::Source::VideosRequest, "request.videos"},
                        {reason::Source::Files, "files"}, {reason::Source::FilesRequest, "request.files"},
                        {reason::Source::Batches, "batches"}, {reason::Source::BatchesRequest, "request.batches"},
-                       {reason::Source::Tokens, "tokens"}, {reason::Source::TokensRequest, "request.tokens"}};
+                       {reason::Source::Tokens, "tokens"}, {reason::Source::TokensRequest, "request.tokens"},
+                       {reason::Source::Webhooks, "webhooks"}};
 // Endpoint decoders (D6) are small: they parse one buffered document.
-const std::set<std::string> endpoint_decoders{"images", "decisions", "embeddings", "rerank", "moderation", "speech", "transcription", "jobs", "files", "batches", "tokens"};
+const std::set<std::string> endpoint_decoders{"images", "decisions", "embeddings", "rerank", "moderation", "speech", "transcription", "jobs", "files", "batches", "tokens", "webhooks"};
 // The sources each encoder table covers, relative to src/.
 struct EncoderSource { reason::Source source; std::vector<const char*> files; };
 const EncoderSource encoder_sources[]{

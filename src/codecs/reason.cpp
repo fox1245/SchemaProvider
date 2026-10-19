@@ -1104,6 +1104,14 @@ constexpr Entry tokens_request_table[] = {
   {"a Google model is a path segment", "request.tokens.model_invalid"},
   {"the count request exceeds the request limit", "request.tokens.size_limit"},
 };
+constexpr Entry webhooks_table[] = {
+  {"a webhook secret is whsec_ and base64", "webhooks.secret.invalid"},
+  {"a webhook carries its id, timestamp and signature headers", "webhooks.headers.missing"},
+  {"a webhook timestamp is Unix seconds", "webhooks.timestamp.invalid"},
+  {"the webhook timestamp is outside the tolerance", "webhooks.timestamp.stale"},
+  {"the webhook signature does not match", "webhooks.signature.mismatch"},
+  {"a webhook body is a JSON object", "webhooks.body.invalid"},
+};
 constexpr Entry speech_table[] = {
   {"speech response is not audio", "speech.response.not_audio"},
   {"speech response is empty", "speech.response.empty"},
@@ -1234,6 +1242,7 @@ std::span<const Entry> entries(Source source) noexcept {
     case Source::BatchesRequest: return batches_request_table;
     case Source::Tokens: return tokens_table;
     case Source::TokensRequest: return tokens_request_table;
+    case Source::Webhooks: return webhooks_table;
   }
   return {};
 }

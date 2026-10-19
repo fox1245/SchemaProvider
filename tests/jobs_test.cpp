@@ -1,6 +1,9 @@
 // Provider jobs (D6): an OpenRouter video submit, a poll of its handle and a download of its output, the request
 // each takes and the typed state or content of a response, and the runtime's file sink for a download.
+#include "codecs/interaction_jobs.h"
 #include "codecs/jobs.h"
+#include "codecs/reason.h"
+#include "descriptor/presets.h"
 #include "codecs/videos.h"
 #include "crypto/crypto.h"
 #include "descriptor/policy.h"
@@ -119,6 +122,36 @@ void job_requests() {
   CHECK(refused(static_cast<DownloadEncode>(jobs::encode), router, unknown) == ErrorKind::Unsupported);
   auto unbounded = download; unbounded.max_bytes = 0;
   CHECK(refused(static_cast<DownloadEncode>(jobs::encode), router, unbounded) == ErrorKind::InvalidRequest);
+}
+
+// A background interaction read as a job: its handle, its poll request, and its state.
+void interaction_jobs() {
+  const auto d = descriptor::presets::google_interactions();
+  Completion pending;
+  Message message;
+  message.id = "v1_ChdkMzRiNmY";
+  pending.messages.push_back(message);
+  pending.stop = StopReason{StopKind::Pending, "in_progress"};
+  pending.model = {"gemini-3.5-flash-lite", {}, ServedRelation::NotReported};
+  const auto handle = jobs::from_interaction(d, pending);
+  CHECK(handle && handle->endpoint == "interactions" && handle->origin == "https://generativelanguage.googleapis.com" &&
+        handle->id == "v1_ChdkMzRiNmY" && handle->model == "gemini-3.5-flash-lite");
+  CHECK(!jobs::from_interaction(descriptor::presets::google_generate(), pending));
+  const auto poll = jobs::interaction_poll(*handle);
+  CHECK(poll.lifecycle == interactions::Lifecycle::Get && poll.interaction_id == handle->id && poll.model == handle->model && poll.messages.empty());
+  const auto state = [&](sp::Outcome outcome) { return jobs::interaction_state(d, outcome); };
+  CHECK(std::get<jobs::State>(state(pending)).status == jobs::Status::Running && std::get<jobs::State>(state(pending)).handle.id == handle->id);
+  auto queued = pending; queued.stop.raw = "queued";
+  CHECK(std::get<jobs::State>(state(queued)).status == jobs::Status::Pending);
+  auto done = pending; done.stop = StopReason{StopKind::EndTurn, "completed"};
+  CHECK(std::get<jobs::State>(state(done)).status == jobs::Status::Completed);
+  auto cancelled = pending; cancelled.stop = StopReason{StopKind::Unknown, "cancelled"};
+  CHECK(std::get<jobs::State>(state(cancelled)).status == jobs::Status::Cancelled);
+  Error failed{ErrorKind::RemoteFailure, "interaction failed"};
+  failed.reason = std::string(reason::code(reason::Source::Interactions, "interaction failed"));
+  CHECK(std::get<jobs::State>(state(Failure{failed, {pending.messages}})).status == jobs::Status::Failed);
+  Error lost{ErrorKind::Transport, "transport failure"};
+  CHECK(std::holds_alternative<Failure>(state(Failure{lost, {}})));
 }
 
 jobs::Outcome state_of(const descriptor::ValidatedDescriptor& d, std::string_view body) {
@@ -259,6 +292,6 @@ void runtime_job() {
 }  // namespace
 
 int main() {
-  try { video_submit(); job_requests(); job_states(); job_content(); runtime_job(); std::cout << "job properties passed\n"; return 0; }
+  try { video_submit(); job_requests(); job_states(); job_content(); interaction_jobs(); runtime_job(); std::cout << "job properties passed\n"; return 0; }
   catch (const std::exception& error) { std::cerr << "job test failed: " << error.what() << '\n'; return 1; }
 }

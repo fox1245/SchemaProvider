@@ -152,7 +152,7 @@ add_library(sp_codecs src/codecs/accumulator.cpp src/codecs/reason.cpp src/codec
             src/codecs/moderation.cpp src/codecs/moderation_request.cpp src/codecs/speech.cpp src/codecs/speech_request.cpp
             src/codecs/transcription.cpp src/codecs/transcription_request.cpp src/codecs/jobs.cpp src/codecs/jobs_request.cpp
             src/codecs/videos_request.cpp src/codecs/files.cpp src/codecs/files_request.cpp
-            src/codecs/batches.cpp src/codecs/batches_request.cpp src/codecs/tokens.cpp src/codecs/tokens_request.cpp
+            src/codecs/batches.cpp src/codecs/batches_request.cpp src/codecs/tokens.cpp src/codecs/tokens_request.cpp src/codecs/webhooks.cpp src/codecs/interaction_jobs.cpp
             src/codecs/endpoint.cpp)
 target_compile_options(sp_codecs PRIVATE ${SP_WARNING_OPTIONS})
 target_link_libraries(sp_codecs PUBLIC sp_core sp_json sp_descriptor)
@@ -378,6 +378,8 @@ if(SP_BUILD_TESTS)
   target_link_libraries(sp_batches_tests PRIVATE sp_codecs sp_descriptor sp_json)
   add_executable(sp_tokens_tests tests/tokens_test.cpp)
   target_link_libraries(sp_tokens_tests PRIVATE sp_codecs sp_descriptor sp_json)
+  add_executable(sp_webhooks_tests tests/webhooks_test.cpp)
+  target_link_libraries(sp_webhooks_tests PRIVATE sp_codecs sp_core sp_json)
   add_executable(sp_chat_tests tests/chat_semantic_test.cpp)
   target_link_libraries(sp_chat_tests PRIVATE sp_codecs sp_descriptor sp_json sp_transport)
   add_executable(sp_error_reason_tests tests/error_reason_test.cpp)
@@ -490,6 +492,7 @@ if(SP_BUILD_TESTS)
   add_test(NAME jobs_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_jobs_tests>)
   add_test(NAME files_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_files_tests>)
   add_test(NAME tokens_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_tokens_tests>)
+  add_test(NAME webhooks_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_webhooks_tests>)
   add_test(NAME batches_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_batches_tests> ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/batches)
   add_test(NAME extension_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_extension_tests>)
   add_test(NAME chat_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_chat_tests>)
