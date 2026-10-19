@@ -636,6 +636,12 @@ constexpr Entry messages_request_table[] = {
   {"max_content_tokens must be positive", "request.messages.max_content_tokens_invalid"},
   {"user location fields must be bounded text", "request.messages.user_location_invalid"},
   {"invalid code execution container id", "request.messages.container_invalid"},
+  {"anthropic-beta value count limit exceeded", "request.messages.beta_count_limit"},
+  {"anthropic-beta values must be single tokens", "request.messages.beta_invalid"},
+  {"an anthropic-beta value is not admitted by the policy for this origin", "request.messages.beta_not_admitted"},
+  {"a tool needs an anthropic-beta value this origin does not admit", "request.messages.tool_beta_not_admitted"},
+  {"the policy admits no options for this tool type", "request.messages.tool_options_not_admitted"},
+  {"tool options do not match the policy's schema", "request.messages.tool_options_invalid"},
 };
 constexpr Entry responses_request_table[] = {
   {"an OpenRouter server tool is not admitted by the policy", "request.responses.an_openrouter_server_tool_is_not_admitted_by"},

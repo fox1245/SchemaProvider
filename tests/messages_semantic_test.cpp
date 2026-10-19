@@ -837,6 +837,25 @@ void response_metadata_is_kept() {
   failed(buffered(body("[]", "\"end_turn\"", initial_usage, R"(,"context_management":{"applied_edits":[{"type":"clear_tool_uses_20250919"}]})")), ErrorKind::Unsupported);
   failed(buffered(body("[]", "\"end_turn\"", initial_usage, R"(,"container":"container_fixture")")), ErrorKind::ProtocolCorrupt);
 }
+// An advisor call and its result, with the advisor's iteration in usage (#53): the result block is kept whole, the
+// advisor's model and the response's speed are labels, not counters.
+void advisor_result_and_iterations() {
+  const std::string content = R"([{"type":"server_tool_use","id":"srvtoolu_adv","name":"advisor","input":{}},)"
+                              R"({"type":"advisor_tool_result","tool_use_id":"srvtoolu_adv","content":{"type":"advisor_result","text":"Use a queue."}},)"
+                              R"({"type":"text","text":"Done."}])";
+  const std::string usage = R"({"input_tokens":2,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":3,"speed":"standard",)"
+                            R"("iterations":[{"type":"message","input_tokens":2,"output_tokens":1},{"type":"advisor_message","model":"fixture-advisor","input_tokens":9,"output_tokens":4}]})";
+  Accumulator acc; messages::Codec codec(descriptor_value(), messages::Mode::Buffered, acc, context());
+  CHECK(codec.buffered(body(content, "\"end_turn\"", usage), {}));
+  const auto& done = completed(*acc.outcome());
+  const auto& parts = done.messages[0].parts;
+  CHECK(std::get<ToolCall>(parts[0]).kind == ToolCallKind::ServerExecuted && std::get<ToolCall>(parts[0]).name == "advisor");
+  const auto& result = std::get<ServerToolResult>(parts[1]);
+  CHECK(result.wire_type == "advisor_tool_result" && result.content->root().get("content").get("text").as_string() == "Use a queue.");
+  CHECK(done.usage.extra.at("iterations.1.input_tokens").value == 9 && !done.usage.extra.contains("iterations.1.model"));
+  CHECK(codec.diagnostics().unknown_properties == 1);  // advisor_result is a shape the SDK keeps without checking
+  failed(buffered(body("[]", "\"end_turn\"", R"({"input_tokens":2,"output_tokens":3,"speed":1})")), ErrorKind::ProtocolCorrupt);
+}
 int main() {
   try {
     routed_gateway_model(); openrouter_sentinel_and_cost(); direct_dated_snapshot_alias(); served_model_is_recorded();
@@ -845,6 +864,7 @@ int main() {
     usage_detail_forward_compatibility(); toolset_metadata_shapes();
     terminal_matrix(); text_thinking_and_order(); tool_fragments(); server_semantics(); server_result_shapes();
     stop_classes(); corruption_matrix(); usage_knowledge(); cut_stream_usage_has_no_placeholder_output(); uncached_input_rule(); limits_and_close_priority(); empty_text_delta_is_withheld(); failure_reasons(); response_metadata_is_kept();
+    advisor_result_and_iterations();
     std::cout << "messages semantic tests passed\n";
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

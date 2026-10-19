@@ -34,7 +34,7 @@ messages::Request base_request() {
 }
 messages::EncodedRequest encoded(const descriptor::ValidatedDescriptor& descriptor, const messages::Request& request, bool stream = false) {
   auto result = messages::encode(descriptor, request, stream);
-  CHECK(std::holds_alternative<messages::EncodedRequest>(result));
+  if (const auto* error = std::get_if<Error>(&result)) throw std::runtime_error("encode refused: " + error->safe_message);
   return std::get<messages::EncodedRequest>(std::move(result));
 }
 void rejected(const descriptor::ValidatedDescriptor& descriptor, const messages::Request& request, ErrorKind kind = ErrorKind::ReplayIneligible, bool stream = false) {
@@ -646,9 +646,93 @@ void tool_role_helper_admission() {
   rejected(descriptor, swapped);
 }
 } // namespace
+// Typed tools the caller executes, a toolset entry without a name, an advisor with policy-admitted options, and the
+// anthropic-beta values they need (#53).
+std::string beta_header(const messages::EncodedRequest& wire) {
+  std::string value;
+  for (const auto& [name, header] : wire.headers) if (name == "anthropic-beta") { CHECK(value.empty()); value = header; }
+  return value;
+}
+messages::ToolDefinition typed(std::string name, std::string type, std::string_view options = {}) {
+  messages::ToolDefinition tool{std::move(name), {}, {}, std::move(type), std::nullopt};
+  if (!options.empty()) tool.options = document(options);
+  return tool;
+}
+void typed_client_tools_and_betas() {
+  const auto anthropic = descriptor_value("https://api.anthropic.com");
+  auto request = base_request(); request.max_tokens = 512;
+  auto advisor = typed("advisor", "advisor_20260301", R"({"model":"fixture-advisor","max_tokens":2048,"caching":{"type":"ephemeral","ttl":"5m"}})");
+  advisor.max_uses = 2;
+  request.tools = {typed("memory", "memory_20250818"), typed("bash", "bash_20250124"),
+                   typed("str_replace_based_edit_tool", "text_editor_20250728", R"({"max_characters":10000})"),
+                   typed("", "computer_toolset_20260801", R"({"configs":{"zoom":{"enabled":false},"wait":null}})"), advisor};
+  auto wire = encoded(anthropic, request);
+  const auto body = document(wire.body);
+  const auto tools = body->root().get("tools");
+  CHECK(tools.at(0).get("type").as_string() == "memory_20250818" && tools.at(0).get("name").as_string() == "memory" && tools.at(0).size() == 2);
+  CHECK(tools.at(2).get("max_characters").as_uint() == 10000);
+  CHECK(!tools.at(3).get("name").valid() && !tools.at(3).get("configs").get("zoom").get("enabled").as_bool());
+  CHECK(tools.at(4).get("model").as_string() == "fixture-advisor" && tools.at(4).get("max_uses").as_uint() == 2 &&
+        tools.at(4).get("caching").get("ttl").as_string() == "5m");
+  CHECK(beta_header(wire) == "advisor-tool-2026-03-01");
+  // The caller runs memory, bash, the editor and the toolset: only the advisor adds model invocations.
+  CHECK(wire.model_invocation_limit == std::optional<std::uint64_t>(3));
+  // The request's own betas come first; the descriptor's header values come before both, without duplicates.
+  request.betas = {"fast-mode-2026-02-01"};
+  CHECK(beta_header(encoded(anthropic, request)) == "fast-mode-2026-02-01,advisor-tool-2026-03-01");
+  auto headed = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"beta-messages","family":"anthropic.messages","connection":{"base_url":"https://api.anthropic.com","paths":{"buffered":"/v1/messages","streaming":"/v1/messages"},"headers":{"anthropic-beta":"host-beta, fast-mode-2026-02-01"}}})");
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(headed));
+  CHECK(beta_header(encoded(std::get<descriptor::ValidatedDescriptor>(headed), request)) == "host-beta,fast-mode-2026-02-01,advisor-tool-2026-03-01");
+  // A named typed tool the caller runs may be forced; a server tool may not.
+  request.tool_choice = messages::ToolChoice{messages::ToolChoiceMode::Tool, "memory", {}};
+  encoded(anthropic, request);
+  auto refused = [&](auto change, ErrorKind kind = ErrorKind::InvalidRequest, const descriptor::ValidatedDescriptor* at = nullptr) {
+    auto r = request; change(r); rejected(at ? *at : anthropic, r, kind);
+  };
+  refused([](auto& r) { r.tool_choice->name = "advisor"; });
+  refused([](auto& r) { r.tools[0].options = document(R"({"path":"/memories"})"); }, ErrorKind::Unsupported);
+  refused([](auto& r) { r.tools[0].max_uses = 1; });
+  refused([](auto& r) { r.tools[2].options = document(R"({"max_characters":0})"); });
+  refused([](auto& r) { r.tools[2].options = document(R"({"max_characters":10,"view_limit":3})"); });
+  refused([](auto& r) { r.tools[3].name = "computer"; });
+  refused([](auto& r) { r.tools[3].options = document(R"({"configs":{"teleport":{"enabled":true}}})"); });
+  refused([](auto& r) { r.tools[4].options = document(R"({"model":"has space"})"); });
+  refused([](auto& r) { r.tools.push_back({"lookup", "d", document(R"({"type":"object"})"), {}, {}}); r.tools.back().options = document("{}"); });
+  refused([](auto& r) { r.betas = {"not-admitted-2026-01-01"}; }, ErrorKind::Unsupported);
+  refused([](auto& r) { r.betas = {"fast-mode-2026-02-01,other"}; });
+  // The advisor's beta is admitted only at the Anthropic origin; the typed client tools need none.
+  const auto loopback = descriptor_value();
+  refused([](auto&) {}, ErrorKind::Unsupported, &loopback);
+  auto plain = request; plain.tools.pop_back(); plain.betas.clear();
+  CHECK(beta_header(encoded(loopback, plain)).empty());
+
+  // A toolset member's call names its toolset, and the result answering it names the toolset back.
+  auto loop = base_request(); loop.max_tokens = 512; loop.tools = {typed("", "computer_toolset_20260801")};
+  auto call = capture(anthropic, loop, R"([{"type":"tool_use","id":"toolu_shot","name":"screenshot","input":{},"toolset_name":"computer"}])", "tool_use");
+  loop.messages.push_back(call);
+  ToolResult shot{"toolu_shot", {}, false};
+  shot.content_parts = {Media::image("image/png", std::make_shared<const std::string>("iVBORw0KGgo="))};
+  loop.messages.push_back(Message{{}, Role::User, {shot}});
+  const auto answered = document(encoded(anthropic, loop).body);
+  const auto replayed = answered->root().get("messages");
+  CHECK(replayed.at(1).get("content").at(0).get("toolset_name").as_string() == "computer");
+  CHECK(replayed.at(2).get("content").at(0).get("toolset_name").as_string() == "computer" &&
+        replayed.at(2).get("content").at(0).get("content").at(0).get("type").as_string() == "image");
+
+  // An advisor turn replays with its result block, and the next turn sends the advisor's beta again.
+  auto asked = base_request(); asked.max_tokens = 512; asked.tools = {advisor};
+  auto advised = capture(anthropic, asked, R"([{"type":"server_tool_use","id":"srvtoolu_adv","name":"advisor","input":{}},)"
+                                           R"({"type":"advisor_tool_result","tool_use_id":"srvtoolu_adv","content":{"type":"advisor_redacted_result","encrypted_content":"SECRET_SERVER"}},)"
+                                           R"({"type":"text","text":"Advised."}])");
+  auto next = asked; next.messages.push_back(advised); next.messages.push_back(user("Thanks"));
+  const auto next_wire = encoded(anthropic, next);
+  CHECK(beta_header(next_wire) == "advisor-tool-2026-03-01");
+  CHECK(document(next_wire.body)->root().get("messages").at(1).get("content").at(1).get("type").as_string() == "advisor_tool_result");
+  rejected(loopback, next, ErrorKind::Unsupported);
+}
 int main() {
   try {
-    server_tool_options();
+    server_tool_options(); typed_client_tools_and_betas();
     typed_wire_request(); native_retention_and_content_integrity(); prefix_and_origin_binding();
     immutable_context_and_failed_capture(); client_loop_ownership(); server_loop_ownership_and_pause(); signature_accumulation_and_limits();
     invalid_calls_are_not_repaired();

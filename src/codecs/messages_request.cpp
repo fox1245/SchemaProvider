@@ -17,18 +17,25 @@ std::string lower(std::string_view text) {
   for (char& c : value) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + ('a' - 'A'));
   return value;
 }
-std::string_view result_name(std::string_view type) {
-  if (type == "web_search_tool_result") return "web_search";
-  if (type == "web_fetch_tool_result") return "web_fetch";
-  if (type == "code_execution_tool_result") return "code_execution";
-  if (type == "bash_code_execution_tool_result") return "bash_code_execution";
-  if (type == "text_editor_code_execution_tool_result") return "text_editor_code_execution";
-  if (type == "tool_search_tool_result") return "tool_search";
-  return {};
-}
+// A server tool's result block is named after the tool: <tool>_tool_result answers a call named <tool>, or one of its
+// variants named <tool>_<variant> (tool_search_tool_regex), as the decoder pairs them.
 bool matching_result(std::string_view name, std::string_view type) {
-  const auto expected = result_name(type);
-  return !expected.empty() && (expected == name || (expected == "tool_search" && (name == "tool_search_tool_regex" || name == "tool_search_tool_bm25")));
+  constexpr std::string_view suffix = "_tool_result";
+  if (type.size() <= suffix.size() || !type.ends_with(suffix)) return false;
+  const auto expected = type.substr(0, type.size() - suffix.size());
+  return expected == name || (name.size() > expected.size() && name.starts_with(expected) && name[expected.size()] == '_');
+}
+// The comma-separated values of an anthropic-beta header, without surrounding spaces.
+void split_betas(std::string_view header, std::vector<std::string>& out) {
+  while (!header.empty()) {
+    const auto comma = header.find(',');
+    auto value = header.substr(0, comma);
+    while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) value.remove_prefix(1);
+    while (!value.empty() && (value.back() == ' ' || value.back() == '\t')) value.remove_suffix(1);
+    if (!value.empty() && std::find(out.begin(), out.end(), value) == out.end()) out.emplace_back(value);
+    if (comma == std::string_view::npos) break;
+    header.remove_prefix(comma + 1);
+  }
 }
 bool native_part(const Part& part) {
   return !std::holds_alternative<Text>(part) && !std::holds_alternative<ToolResult>(part) &&
@@ -131,6 +138,35 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     case CacheTtl::OneHour: ttl = "1h"; break;
     default: return bad("invalid cache TTL");
   }
+  const auto fact_of = [&](std::string_view type) -> const descriptor::ServerToolFact* {
+    const auto found = std::find_if(family.server_tools.begin(), family.server_tools.end(), [&](const auto& fact) { return fact.type == type; });
+    return found == family.server_tools.end() ? nullptr : &*found;
+  };
+  // anthropic-beta values: the descriptor's own, then the request's, then those a declared tool needs. Each one the
+  // request adds must be admitted by the policy at this origin. Replayed history binds the tools it was answered
+  // with, so a replayed advisor call always comes with its declared tool and beta.
+  std::vector<std::string> betas;
+  const auto beta_admitted = [&](std::string_view value) {
+    return std::any_of(family.betas.begin(), family.betas.end(), [&](const auto& fact) {
+      return fact.value == value && descriptor::contains(fact.origins, descriptor.base_url());
+    });
+  };
+  for (const auto& header : descriptor.headers()) if (lower(header.first) == "anthropic-beta") split_betas(header.second, betas);
+  if (request.betas.size() > 64) return bad("anthropic-beta value count limit exceeded");
+  for (const auto& beta : request.betas) {
+    if (beta.empty() || beta.find_first_of(", \t\r\n") != std::string::npos) return bad("anthropic-beta values must be single tokens");
+    if (!beta_admitted(beta)) return Error{ErrorKind::Unsupported, "an anthropic-beta value is not admitted by the policy for this origin"};
+    if (std::find(betas.begin(), betas.end(), beta) == betas.end()) betas.push_back(beta);
+  }
+  const auto need_beta = [&](const descriptor::ServerToolFact& fact) {
+    if (fact.beta.empty()) return true;
+    if (!beta_admitted(fact.beta)) return false;
+    if (std::find(betas.begin(), betas.end(), fact.beta) == betas.end()) betas.push_back(fact.beta);
+    return true;
+  };
+  for (const auto& tool : request.tools)
+    if (const auto* fact = tool.type.empty() ? nullptr : fact_of(tool.type); fact && !need_beta(*fact))
+      return Error{ErrorKind::Unsupported, "a tool needs an anthropic-beta value this origin does not admit"};
   if (request.tool_choice) {
     const auto& choice = *request.tool_choice;
     switch (choice.mode) {
@@ -141,8 +177,11 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       default: return bad("invalid tool choice");
     }
     if (choice.mode == ToolChoiceMode::Tool) {
-      if (choice.name.empty() || std::none_of(request.tools.begin(), request.tools.end(),
-          [&](const auto& tool) { return tool.type.empty() && tool.name == choice.name; }))
+      // A custom tool, or a typed tool the caller executes (memory, bash), named by the request.
+      if (choice.name.empty() || std::none_of(request.tools.begin(), request.tools.end(), [&](const auto& tool) {
+            const auto* fact = tool.type.empty() ? nullptr : fact_of(tool.type);
+            return tool.name == choice.name && (tool.type.empty() || (fact && fact->client));
+          }))
         return bad("named tool choice requires a declared client tool");
     } else if (!choice.name.empty()) return bad("only named tool choice accepts a name");
     if ((choice.mode == ToolChoiceMode::Any || choice.mode == ToolChoiceMode::Tool) &&
@@ -213,12 +252,17 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   std::string_view version = *family.header_version;
   for (const auto& header : descriptor.headers()) {
     auto key = lower(header.first);
-    if (key != "content-type" && key != "accept" && key != "anthropic-version") result.headers.push_back(header);
+    if (key != "content-type" && key != "accept" && key != "anthropic-version" && key != "anthropic-beta") result.headers.push_back(header);
     else if (key == "anthropic-version") version = header.second;
   }
   result.headers.emplace_back("Content-Type", "application/json");
   result.headers.emplace_back("Accept", streaming ? "text/event-stream" : "application/json");
   result.headers.emplace_back("anthropic-version", version);
+  if (!betas.empty()) {
+    std::string joined;
+    for (const auto& beta : betas) { if (!joined.empty()) joined += ','; joined += beta; }
+    result.headers.emplace_back("anthropic-beta", std::move(joined));
+  }
   auto build = [&](json::BoundedWriter& body) -> std::optional<Error> {
   size_t text_document_index = 0;
   auto bad = [](std::string message) { return Error{ErrorKind::InvalidRequest, std::move(message)}; };
@@ -267,19 +311,23 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     body.raw(",\"tools\":[");
     bool comma = false;
     for (const auto& tool : request.tools) {
-      if (tool.name.empty() || !tool_names.insert(tool.name).second) return bad("tools require unique nonempty names");
+      const auto* fact = tool.type.empty() ? nullptr : fact_of(tool.type);
+      if (!tool.type.empty() && !fact) return Error{ErrorKind::Unsupported, "unsupported server tool type"};
+      // A toolset entry carries no name; every other tool has a unique one.
+      if ((!fact || !fact->name.empty()) && (tool.name.empty() || !tool_names.insert(tool.name).second))
+        return bad("tools require unique nonempty names");
       if (comma) body.raw(",");
       comma = true;
       const bool server_options = !tool.allowed_callers.empty() || !tool.allowed_domains.empty() || !tool.blocked_domains.empty() ||
                                   tool.user_location || tool.citations || tool.max_content_tokens;
-      if (tool.type.empty()) {
-        if (!tool.input_schema || !tool.input_schema->root().is_object() || tool.max_uses || server_options)
+      if (!fact) {
+        if (!tool.input_schema || !tool.input_schema->root().is_object() || tool.max_uses || server_options || tool.options)
           return bad("client tools require object schemas and no server fields");
         body.raw("{\"name\":").quoted(tool.name).raw(",\"description\":").quoted(tool.description).raw(",\"input_schema\":").value(tool.input_schema->root(), 3).raw("}");
       } else {
-        const auto fact = std::find_if(family.server_tools.begin(), family.server_tools.end(), [&](const auto& value) { return value.type == tool.type; });
-        if (fact == family.server_tools.end()) return Error{ErrorKind::Unsupported, "unsupported server tool type"};
         if (tool.name != fact->name || tool.input_schema || !tool.description.empty()) return bad("server tool fields do not match typed schema");
+        if (tool.options && !fact->options) return Error{ErrorKind::Unsupported, "the policy admits no options for this tool type"};
+        if (tool.options && descriptor::check_value(*fact->options, tool.options->root())) return bad("tool options do not match the policy's schema");
         if (tool.max_uses && (!*tool.max_uses || !fact->max_uses)) return bad("max_uses is unsupported or out of range");
         // Caller types and domains are values the service extends: bounded tokens and host names, not a fixed list.
         const auto token = [](std::string_view value) {
@@ -310,7 +358,8 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
           for (std::size_t i = 0; i < values.size(); ++i) { if (i) body.raw(","); body.quoted(values[i]); }
           body.raw("]");
         };
-        body.raw("{\"type\":").quoted(tool.type).raw(",\"name\":").quoted(tool.name);
+        body.raw("{\"type\":").quoted(tool.type);
+        if (!tool.name.empty()) body.raw(",\"name\":").quoted(tool.name);
         if (tool.max_uses) body.raw(",\"max_uses\":").raw(std::to_string(*tool.max_uses));
         strings("allowed_callers", tool.allowed_callers);
         strings("allowed_domains", tool.allowed_domains);
@@ -326,6 +375,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         }
         if (tool.citations) body.raw(",\"citations\":{\"enabled\":").raw(*tool.citations ? "true" : "false").raw("}");
         if (tool.max_content_tokens) body.raw(",\"max_content_tokens\":").raw(std::to_string(*tool.max_content_tokens));
+        if (tool.options) for (auto member : tool.options->root().members()) body.raw(",").quoted(member.key).raw(":").value(member.value, 3);
         body.raw("}");
       }
       if (!body.ok()) return Error{has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest,
@@ -334,7 +384,8 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     body.raw("]");
   }
   body.raw(",").quoted(descriptor.request_messages_member()).raw(":[");
-  std::set<std::string_view> all_call_ids, client_pending;
+  std::set<std::string_view> all_call_ids;
+  std::map<std::string_view, std::string_view> client_pending;  // call id -> toolset name of the call, if any
   std::map<std::string_view, std::string_view> server_pending;
   bool message_comma = false;
   for (const auto& message : request.messages) {
@@ -382,7 +433,10 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         const std::string_view type = server ? "server_tool_use" : "tool_use";
         if (call->wire_type != type || !all_call_ids.insert(call->id).second) return bad("tool call type or ownership mismatch");
         if (server) server_pending.emplace(call->id, call->name);
-        else client_pending.insert(call->id);
+        else {
+          const auto toolset = call->wire_metadata ? call->wire_metadata->root().get("toolset_name") : json::Value{};
+          client_pending.emplace(call->id, toolset.is_string() ? toolset.as_string() : std::string_view{});
+        }
         body.raw("{\"type\":").quoted(type).raw(",\"id\":").quoted(call->id).raw(",\"name\":").quoted(call->name).raw(",\"input\":").value(call->input->root(), 5);
         if (call->wire_metadata) {
           if (!call->wire_metadata->root().is_object()) return bad("tool metadata must be object");
@@ -393,8 +447,14 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         }
         body.raw("}");
       } else if (const auto* tool_result = std::get_if<ToolResult>(&part)) {
-        if (assistant || text_seen || client_pending.erase(tool_result->tool_use_id) != 1) return bad("tool result lacks immediate unique client ownership");
-        body.raw("{\"type\":\"tool_result\",\"tool_use_id\":").quoted(tool_result->tool_use_id).raw(",\"content\":");
+        const auto owner = client_pending.find(tool_result->tool_use_id);
+        if (assistant || text_seen || owner == client_pending.end()) return bad("tool result lacks immediate unique client ownership");
+        // A toolset member's result names the toolset of its call.
+        const auto toolset = owner->second;
+        client_pending.erase(owner);
+        body.raw("{\"type\":\"tool_result\",\"tool_use_id\":").quoted(tool_result->tool_use_id);
+        if (!toolset.empty()) body.raw(",\"toolset_name\":").quoted(toolset);
+        body.raw(",\"content\":");
         if (tool_result->content_parts.empty()) body.quoted(tool_result->content);
         else {
           body.raw("["); bool nested_comma = false;
@@ -448,7 +508,8 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (auto error = build(body)) return *error;
   result.context = std::move(context);
   result.max_output_tokens = effective.max_output_tokens;
-  for (const auto& tool : request.tools) if (!tool.type.empty()) {
+  // Only the tools the service runs add model invocations; the caller runs memory, bash and the toolsets.
+  for (const auto& tool : request.tools) if (const auto* fact = tool.type.empty() ? nullptr : fact_of(tool.type); fact && !fact->client) {
     if (!tool.max_uses || !result.model_invocation_limit ||
         *tool.max_uses > std::numeric_limits<std::uint64_t>::max() - *result.model_invocation_limit) {
       result.model_invocation_limit.reset();

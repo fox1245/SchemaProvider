@@ -485,13 +485,19 @@ request.cache_control = sp::messages::CacheControl{sp::messages::CacheTtl::FiveM
 request.tool_choice = sp::messages::ToolChoice{sp::messages::ToolChoiceMode::Auto};
 ```
 
-`OutputEffort` is Low/Medium/High/Max. `CacheControl` requests ephemeral cache control with optional `CacheTtl::FiveMinutes`/`OneHour`; unset TTL emits no duration. This does not promise a cache hit or known cache usage. Tool choice is Auto/Any/None/Tool with an optional parallel-use flag. Named Tool requires a declared client function. The SDK currently rejects forced Any/Tool with enabled thinking, and None cannot carry the parallel-use flag. `provider` routing requires an admitted OpenRouter Messages origin.
+`OutputEffort` is Low/Medium/High/Max. `CacheControl` requests ephemeral cache control with optional `CacheTtl::FiveMinutes`/`OneHour`; unset TTL emits no duration. This does not promise a cache hit or known cache usage. Tool choice is Auto/Any/None/Tool with an optional parallel-use flag. Named Tool requires a declared client tool: a custom tool, or a typed tool the caller runs, such as `memory`. The SDK currently rejects forced Any/Tool with enabled thinking, and None cannot carry the parallel-use flag. `provider` routing requires an admitted OpenRouter Messages origin.
 
 A Messages server tool (`ToolDefinition` with a `type` the policy lists, such as `web_search_20260318`) takes options. Each is sent only when it is set, and the service judges whether that tool version accepts it:
 - `allowed_callers` (`{"direct"}`): the `_20260318` web tools default to programmatic callers, and a model without programmatic tool calling (`claude-haiku-4-5`) refuses them with HTTP 400 unless `direct` is listed;
 - `allowed_domains` or `blocked_domains` (one of the two), and `user_location` (`UserLocation`: city, region, country, timezone; sent as `approximate`);
 - for `web_fetch`, `citations` (`{"enabled": …}`) and `max_content_tokens`.
 `Request::container` reuses a code-execution container by the id an earlier response reported. Citations on text blocks (`citations`, streamed `citations_delta`) become the text's `Text::citations`; they never fail the answer.
+
+**Typed tools the caller runs, and the advisor (#53).** The policy's `server_tools` facts also list Messages tools that are not plain functions. Declare one as a `ToolDefinition` with its `type`, the `name` the fact gives (none for a toolset), and no schema or description:
+- **Run by the caller.** Facts with `"client": true` are `memory_20250818` (`memory`), `bash_20250124` (`bash`), the `text_editor_*` versions (`str_replace_editor` or `str_replace_based_edit_tool`), and the toolsets `computer_toolset_20260801` and `browser_toolset_20260801`, which carry no name. The model calls them with ordinary `tool_use` blocks; answer with `ToolResult` as for a custom tool. A toolset member's call names its toolset in `wire_metadata` (`toolset_name`), and the result answering it is sent with the same `toolset_name`. These tools add no model invocations.
+- **Options.** `ToolDefinition::options` holds a typed tool's other members, written after the typed ones: `{"max_characters": 10000}` for `text_editor_20250728`, `{"configs": {"zoom": {"enabled": false}}}` for a toolset, `{"model": "…", "max_tokens": 2048, "caching": {"type": "ephemeral", "ttl": "5m"}}` for `advisor_20260301`. The fact's schema declares them (see [Policy-admitted extensions](#policy-admitted-extensions)). Options on a tool whose fact has no schema are `Unsupported`, and members outside the schema are `InvalidRequest`.
+- **The advisor.** `advisor_20260301` runs on the service like `web_search`. Its `server_tool_use` and `advisor_tool_result` blocks decode as a server call and its result, and replay as captured. Usage keeps the advisor's iteration under `iterations.<n>.*`; the advisor's `model` is a label, not a counter.
+- **Beta headers.** A fact may name the `anthropic-beta` value its tool needs (`advisor-tool-2026-03-01`); the encoder adds it while the tool is declared. `Request::betas` adds other values, each admitted by the policy's `betas` facts at the descriptor's origin, and an unlisted value is `Unsupported`. The header carries the descriptor's own values first, then the request's, then the tools', without duplicates. A tool whose beta the origin does not admit is `Unsupported` there (the advisor through a gateway, for instance).
 
 Generate's `ThinkingLevel` is Minimal/Low/Medium/High, mutually exclusive with an explicit `thinking_budget`. `ToolChoice` uses Auto/Any/None/Validated and optional `allowed_function_names`; names must be declared and unique, and allow-lists apply only to Any/Validated. Do not combine it with `required_tool`.
 
@@ -600,9 +606,9 @@ A provider adds request members faster than the SDK releases. Every request stru
   - A value that does not match its schema is `InvalidRequest`.
   - A key the encoder owns is `InvalidRequest`, in any letter case: a typed control, an alias such as `functions`, or provider-held state such as `conversation`.
 - **Replay.** A replay-eligible value joins the configuration digest. A replay-ineligible one leaves the answer without a native seal.
-- **Default policy.** The built-in policy admits no extension. A host admits one in its own policy, for example `{"key": "inference_geo", "origins": ["https://api.anthropic.com"], "value": {"type": "string", "max_length": 32, "token": true}, "replay_eligible": true}` on `anthropic.messages`.
+- **Default policy.** The built-in policy admits `speed`, `inference_geo` and `diagnostics` on `anthropic.messages` at `https://api.anthropic.com`, all replay-eligible. A host admits more in its own policy, for example `{"key": "service_hint", "origins": ["https://api.anthropic.com"], "value": {"type": "string", "max_length": 32, "token": true}, "replay_eligible": true}`.
 
-The same schemas admit the options of typed containers: OpenRouter plugins (`openrouter_plugins`), OpenRouter server tools (`openrouter_server_tools`) and generic Responses tools (`server_tools` entries with `"generic": true`). `sp::capability::PolicyAdmittedExtensions` is part of `RequiredProvider`.
+The same schemas admit the options of typed containers: OpenRouter plugins (`openrouter_plugins`), OpenRouter server tools (`openrouter_server_tools`), generic Responses tools (`server_tools` entries with `"generic": true`) and typed Messages tools (`server_tools` entries with `options`). `sp::capability::PolicyAdmittedExtensions` is part of `RequiredProvider`.
 
 ## Responses provider-held continuation
 

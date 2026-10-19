@@ -233,7 +233,7 @@ class PolicyLoader {
         fail("", "configured policy depth limit");
       auto families=root.get("families"); if(!families.is_array() || families.size()!=5)fail("/families","all five typed families");
       for(auto v:families.elements()) {
-        closed(v,{"family","bindings","stop_reasons","defaults","required_output_cap","temperature_range","top_p_range","thinking_minimum","thinking_top_p_minimum","reasoning_efforts","reasoning_summaries","thinking_levels","service_tiers","header_versions","header_version","server_tools","openrouter_origins","temperature_forbidden_model_prefixes","media","openrouter_media"},"/families",{"temperature_forbidden_generations","max_completion_tokens_origins","unreplayable_parts","extensions","openrouter_plugins","openrouter_server_tools"});
+        closed(v,{"family","bindings","stop_reasons","defaults","required_output_cap","temperature_range","top_p_range","thinking_minimum","thinking_top_p_minimum","reasoning_efforts","reasoning_summaries","thinking_levels","service_tiers","header_versions","header_version","server_tools","openrouter_origins","temperature_forbidden_model_prefixes","media","openrouter_media"},"/families",{"temperature_forbidden_generations","max_completion_tokens_origins","unreplayable_parts","extensions","openrouter_plugins","openrouter_server_tools","betas"});
         FamilyPolicy f; f.family=text(v.get("family"),"/families");
         if(f.family!="openai.chat" && f.family!="anthropic.messages" && f.family!="openai.responses" && f.family!="google.generate" && f.family!="google.interactions")fail("/families","typed family");
         if(policy->family(f.family))fail("/families","unique families");
@@ -323,21 +323,49 @@ class PolicyLoader {
           if (auto* error = std::get_if<ConfigError>(&parsed)) fail(error->pointer, error->expected);
           return std::get<ValueSchema>(std::move(parsed));
         };
+        // anthropic-beta values the policy admits, each at declared origins. Tool facts below may name one.
+        if (auto betas = v.get("betas"); betas.valid()) {
+          if (f.family != "anthropic.messages") fail("/betas", "Messages beta facts only");
+          if (!betas.is_array() || betas.size() > 64) fail("/betas", "bounded array of beta facts");
+          for (auto b : betas.elements()) {
+            closed(b, {"value","origins"}, "/betas");
+            BetaFact fact{text(b.get("value"), "/betas/value"), strings(b.get("origins"), "/betas/origins", true)};
+            if (!std::all_of(fact.value.begin(), fact.value.end(), [](unsigned char c) {
+                  return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.'; }))
+              fail("/betas/value", "lower-case beta token");
+            for (const auto& origin : fact.origins)
+              if (!valid_origin(origin) || origin.ends_with('/')) fail("/betas/origins", "canonical origins without path");
+            for (const auto& existing : f.betas) if (existing.value == fact.value) fail("/betas/value", "unique beta values");
+            f.betas.push_back(std::move(fact));
+          }
+        }
         auto tools=v.get("server_tools"); if(!tools.is_array() || tools.size()>64)fail("/server_tools","bounded reviewed tool facts");
         for (auto t : tools.elements()) {
-          closed(t, {"type","name","max_uses"}, "/server_tools", {"options","generic"});
-          if (f.family != "anthropic.messages" && f.family != "openai.responses")
+          const bool messages = f.family == "anthropic.messages";
+          // A Messages tool entry may carry no name (a toolset); every other fact names its tool.
+          if (messages) closed(t, {"type","max_uses"}, "/server_tools", {"name","options","client","beta"});
+          else closed(t, {"type","name","max_uses"}, "/server_tools", {"options","generic"});
+          if (!messages && f.family != "openai.responses")
             fail("/server_tools", "typed Messages or Responses tool facts only");
           ServerToolFact fact{text(t.get("type"),"/server_tools"),
-                              text(t.get("name"),"/server_tools"),
+                              t.get("name").valid() ? text(t.get("name"),"/server_tools") : std::string(),
                               boolean(t.get("max_uses"),"/server_tools")};
           if (t.get("generic").valid()) fact.generic = boolean(t.get("generic"), "/server_tools/generic");
+          if (t.get("client").valid()) fact.client = boolean(t.get("client"), "/server_tools/client");
+          if (t.get("beta").valid()) {
+            fact.beta = text(t.get("beta"), "/server_tools/beta");
+            if (std::none_of(f.betas.begin(), f.betas.end(), [&](const BetaFact& b) { return b.value == fact.beta; }))
+              fail("/server_tools/beta", "a value of the family's betas");
+          }
+          if (fact.client && fact.max_uses) fail("/server_tools/max_uses", "no use limit on a tool the caller executes");
           if (t.get("options").valid()) {
             fact.options = schema_of(t.get("options"), "/server_tools/options");
             // The options are the tool's other members: an object whose properties never name an owned member.
             if (fact.options->kind != ValueSchema::Kind::Object) fail("/server_tools/options", "object schema");
             for (const auto& name : fact.options->names)
-              if (name == "type" || name == "name" || name == "max_uses" || name == "input_schema" || name == "description")
+              if (name == "type" || name == "name" || name == "max_uses" || name == "input_schema" || name == "description" ||
+                  (messages && (name == "allowed_callers" || name == "allowed_domains" || name == "blocked_domains" ||
+                                name == "user_location" || name == "citations" || name == "max_content_tokens")))
                 fail("/server_tools/options", "properties other than the tool's typed members");
           }
           if (f.family == "openai.responses") {

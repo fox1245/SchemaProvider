@@ -1,4 +1,5 @@
 // Policy-admitted extensions (#32): the closed value schema, the policy facts, and every encoder's handling.
+#include <algorithm>
 #include "codecs/chat.h"
 #include "codecs/gemini.h"
 #include "codecs/gemini_request.h"
@@ -54,11 +55,53 @@ void value_schemas() {
   CHECK(std::holds_alternative<descriptor::ConfigError>(schema(deep)));
 }
 
-// Builds a policy from the built-in one with `fragment` added to a family's object.
+// Builds a policy from the built-in one with `fragment` added to a family's object, in place of the member of the same
+// name the family already has. The built-in text is minified, so members are found by a scan that tracks strings and
+// nesting.
 std::variant<descriptor::PolicySnapshot, descriptor::ConfigError> policy_with(std::string_view family, std::string_view fragment) {
   std::string text(config_defaults::descriptor_policy_json);
   const std::string anchor = "\"family\":\"" + std::string(family) + "\"";
-  const auto at = text.find(anchor); CHECK(at != std::string::npos);
+  auto at = text.find(anchor); CHECK(at != std::string::npos);
+  const auto key = std::string(fragment.substr(0, fragment.find(':') + 1));
+  // The family's object opens at nesting depth 2 (root, families array) and its own members sit at depth 3.
+  std::size_t open = 0, member = std::string::npos;
+  int depth = 0; bool quoted = false;
+  for (std::size_t i = 0; i < text.size() && member == std::string::npos; ++i) {
+    const char c = text[i];
+    if (quoted) { if (c == '\\') ++i; else if (c == '"') quoted = false; continue; }
+    if (c == '{' || c == '[') { if (++depth == 3) open = i; }
+    else if (c == '}' || c == ']') --depth;
+    else if (c == '"') {
+      if (depth == 3 && open < at && text.compare(i, key.size(), key) == 0 && (text[i - 1] == '{' || text[i - 1] == ',')) {
+        // A member of the family's object: its object closes after the anchor.
+        int inner = 0; bool in = false; std::size_t close = open;
+        for (; close < text.size(); ++close) {
+          const char d = text[close];
+          if (in) { if (d == '\\') ++close; else if (d == '"') in = false; continue; }
+          if (d == '"') in = true; else if (d == '{' || d == '[') ++inner; else if ((d == '}' || d == ']') && --inner == 0) break;
+        }
+        if (close > at) member = i;
+      }
+      quoted = true;
+    }
+  }
+  if (member != std::string::npos) {
+    std::size_t end = member + key.size();
+    int inner = 0; bool in = false;
+    for (; end < text.size(); ++end) {
+      const char c = text[end];
+      if (in) { if (c == '\\') ++end; else if (c == '"') in = false; continue; }
+      if (c == '"') in = true;
+      else if (c == '[' || c == '{') ++inner;
+      else if (c == ']' || c == '}') { if (inner == 0) { --end; break; } if (--inner == 0) break; }
+      else if (c == ',' && inner == 0) { --end; break; }
+    }
+    // The value and one comma next to it.
+    const bool comma_after = end + 1 < text.size() && text[end + 1] == ',';
+    if (comma_after) text.erase(member, end + 2 - member);
+    else text.erase(member - 1, end + 2 - member);
+    at = text.find(anchor);
+  }
   text.insert(at, std::string(fragment) + ",");
   return descriptor::load_policy(text, config_defaults::codec_defaults_json);
 }
@@ -87,6 +130,32 @@ void policy_facts() {
   CHECK(std::holds_alternative<descriptor::ConfigError>(policy_with("google.generate", R"("openrouter_plugins":[{"id":"web"}])")));
   CHECK(std::holds_alternative<descriptor::ConfigError>(policy_with("openai.chat", R"("openrouter_server_tools":[{"type":"web"}])")));
   CHECK(descriptor::builtin_policy()->family("openai.chat")->openrouter_plugins.size() > 5);
+  // Messages tool facts (#53): a tool the caller runs takes no use limit, a fact's beta is one of the family's betas,
+  // and options never name a member the encoder types. Beta facts belong to Messages.
+  auto refused_at = [](std::string_view family, std::string_view fragment, std::string_view pointer) {
+    const auto loaded = policy_with(family, fragment);
+    CHECK(std::holds_alternative<descriptor::ConfigError>(loaded) && std::get<descriptor::ConfigError>(loaded).pointer == pointer);
+  };
+  CHECK(admitted("anthropic.messages", R"("betas":[{"value":"advisor-tool-2026-03-01","origins":["https://api.anthropic.com"]},)"
+                                       R"({"value":"fixture-beta-2026-01-01","origins":["https://api.anthropic.com"]}])")
+            ->family("anthropic.messages")->betas.size() == 2);
+  // The built-in advisor fact names its beta, so dropping that beta refuses the policy.
+  refused_at("anthropic.messages", R"("betas":[{"value":"fixture-beta-2026-01-01","origins":["https://api.anthropic.com"]}])", "/server_tools/beta");
+  refused_at("google.generate", R"("betas":[{"value":"fixture-beta","origins":["https://example.test"]}])", "/betas");
+  refused_at("anthropic.messages", R"("betas":[{"value":"Upper-Case","origins":["https://example.test"]}])", "/betas/value");
+  refused_at("anthropic.messages", R"("server_tools":[{"type":"memory_20250818","name":"memory","max_uses":true,"client":true}])", "/server_tools/max_uses");
+  refused_at("anthropic.messages", R"("server_tools":[{"type":"advisor_20260301","name":"advisor","max_uses":true,"beta":"unlisted-beta"}])", "/server_tools/beta");
+  refused_at("anthropic.messages", R"("server_tools":[{"type":"text_editor_20250728","name":"e","max_uses":false,"options":{"type":"object","properties":{"allowed_callers":{"type":"boolean"}}}}])",
+             "/server_tools/options");
+  refused_at("openai.responses", R"("server_tools":[{"type":"computer","name":"computer","max_uses":false,"client":true}])", "/server_tools");
+  const auto& messages = *descriptor::builtin_policy()->family("anthropic.messages");
+  auto fact = [&](std::string_view type) {
+    const auto found = std::find_if(messages.server_tools.begin(), messages.server_tools.end(), [&](const auto& f) { return f.type == type; });
+    CHECK(found != messages.server_tools.end()); return *found;
+  };
+  CHECK(fact("memory_20250818").client && fact("memory_20250818").name == "memory" && !fact("memory_20250818").options);
+  CHECK(fact("computer_toolset_20260801").client && fact("computer_toolset_20260801").name.empty());
+  CHECK(!fact("advisor_20260301").client && fact("advisor_20260301").beta == "advisor-tool-2026-03-01");
 }
 
 descriptor::ValidatedDescriptor load(std::string_view family, std::string_view base_url, const descriptor::PolicySnapshot& policy) {

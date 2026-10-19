@@ -327,8 +327,13 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
       hash.number(tool.citations.has_value()); if (tool.citations) hash.number(*tool.citations);
       hash.number(tool.max_content_tokens.has_value()); if (tool.max_content_tokens) hash.number(*tool.max_content_tokens);
     }
+    if (tool.options) { hash.text("sp.messages.tool.options.v1"); hash.document(tool.options); }
   }
   if (request.container) { hash.text("sp.messages.container.v1"); hash.text(*request.container); }
+  if (!request.betas.empty()) {
+    hash.text("sp.messages.betas.v1"); hash.number(request.betas.size());
+    for (const auto& beta : request.betas) hash.text(beta);
+  }
   extensions_digest(hash, request.extensions);
   return hash.finish(digest);
 }
