@@ -3,6 +3,7 @@
 // which the endpoint's `typed()` turns into its own result.
 #include "codecs/accumulator.h"
 #include "descriptor/descriptor.h"
+#include "descriptor/policy.h"
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -12,6 +13,13 @@
 #include <vector>
 
 namespace sp::endpoints {
+// Bytes of a local file an upload sends: `size` bytes from `offset`, with their SHA-256 (lower-case hex) when the
+// caller knows it. The transport checks the file's length before it sends and the digest before the last bytes.
+struct FileSlice {
+  std::string path;
+  std::uint64_t offset = 0, size = 0;
+  std::string sha256{};
+};
 // An encoded endpoint call: the path at the origin, the body and its media type, what the call accepts back, the
 // model it names, the authentication header, and whether the provider charges once it accepts it.
 struct Encoded {
@@ -23,6 +31,11 @@ struct Encoded {
   // A download written to this file as it arrives, at most `sink_limit` bytes, instead of held in memory.
   std::string sink{};
   std::uint64_t sink_limit = 0;
+  // Request headers beside the content and authentication headers (a resumable upload's commands).
+  std::vector<std::pair<std::string, std::string>> headers{};
+  // An upload read from a file as it is sent: `body`, then the slice, then `body_suffix`.
+  std::optional<FileSlice> file{};
+  std::string body_suffix{};
 };
 // A download the runtime wrote to a file: where, how many bytes, and their SHA-256 (hex).
 struct Sink { std::string path; std::uint64_t bytes = 0; std::string sha256; };
@@ -32,7 +45,13 @@ struct Close {
   ErrorKind error = ErrorKind::Truncated;
   std::vector<std::pair<std::string, std::string>> headers{};
   std::optional<Sink> sink{};
+  // The SHA-256 of an uploaded file slice, as the transport read it.
+  std::string upload_sha256{};
 };
+// The literal headers of the endpoint's fact, added to an encoded call.
+inline void add_fact_headers(Encoded& encoded, const descriptor::EndpointFact& fact) {
+  for (const auto& header : fact.headers) encoded.headers.push_back(header);
+}
 class Codec {
  public:
   virtual ~Codec() = default;

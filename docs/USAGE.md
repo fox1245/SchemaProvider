@@ -628,7 +628,7 @@ The same schemas admit the options of typed containers: OpenRouter plugins (`ope
 
 ## Non-chat endpoints
 
-Endpoints outside the chat families run on the same `runtime::Client`, with request and result types of their own (decision [D6](decisions/D6-endpoints.md)). A call uses the client's origin, credential and descriptor headers, and shares its admission slots, retry budget, deadline handling and error classification. The chat `Request`, `Outcome` and `Completion` do not change. Image generation and edits, decisions, embeddings, rerank, moderation, speech, transcription and OpenRouter video jobs are available; the other endpoints follow.
+Endpoints outside the chat families run on the same `runtime::Client`, with request and result types of their own (decision [D6](decisions/D6-endpoints.md)). A call uses the client's origin, credential and descriptor headers, and shares its admission slots, retry budget, deadline handling and error classification. The chat `Request`, `Outcome` and `Completion` do not change. Image generation and edits, decisions, embeddings, rerank, moderation, speech, transcription, OpenRouter video jobs and files are available; the other endpoints follow ([D7](decisions/D7-files-batches.md)).
 
 ```cpp
 sp::runtime::Client openai(sp::descriptor::presets::openai_chat(), api_key);
@@ -694,26 +694,52 @@ while (auto* state = std::get_if<sp::jobs::State>(&outcome)) {    // journal sta
   outcome = router.complete(sp::jobs::Poll{state->handle});
 }
 ```
+- **Files.** OpenAI and Anthropic `/v1/files` and Google Files hold files a chat request can name ([D7](decisions/D7-files-batches.md)). Every provider's file is one `files::File`. It has:
+  - the origin and id (OpenAI `file-…`, Anthropic `file_…`, Google `files/…`) and Google's URI;
+  - the name, the MIME type and the size;
+  - creation and expiry times in Unix seconds, and a `State`;
+  - OpenAI's purpose and Anthropic's `downloadable`;
+  - Google's SHA-256 of the content, and `uploaded_sha256`, the digest of the bytes the call sent;
+  - the provider's object.
+
+  The calls are these:
+  - `files::Upload` sends a whole file in one request: multipart form data at OpenAI and Anthropic, Google's multipart upload. Its `Source` is bytes in memory, held to the request limit (16 MiB by default), or a slice of a local file: a path, an offset, a size and an optional SHA-256. The transport reads a slice while it sends it. It checks the file's length first and hashes the slice on the way. With a SHA-256, it holds back the slice's last bytes until the digest matches, so a file changed since it was hashed never reaches the provider whole. Such a failure is `InvalidRequest` with the reason `transport.upload.source`. OpenAI needs a `purpose` and takes `expires_after` seconds; the others take neither.
+  - `files::Get` and `files::Delete` take the id. `files::List` returns a `files::Page`; pass its `next` as the following request's `after` (OpenAI can filter by purpose).
+  - `files::Download` fetches content like `jobs::Download`, to a file or to memory. Providers serve only the content of files they made: OpenAI batch output, Anthropic files a tool wrote, Google generated media.
+
+  `files::media(file, origin, now)` makes the `Media::file` reference a chat request names: Google's URI, or the OpenAI or Anthropic id, with the MIME type. It refuses a file of another origin, one not yet active (Google processes video first), and one that has expired. None of these calls is charged. An upload is not sent again once it may have reached the provider, unless the retry policy accepts duplicate risk; a read is retried.
+
+```cpp
+sp::runtime::Client claude(sp::descriptor::presets::anthropic_messages(), api_key);
+sp::files::Upload upload{{nullptr, {"/data/report.pdf", 0, size, sha256_hex}}, "report.pdf", "application/pdf"};
+auto uploaded = claude.complete(upload);
+if (auto* file = std::get_if<sp::files::File>(&uploaded)) {
+  auto reference = sp::files::media(*file, "https://api.anthropic.com", unix_now());
+  // put std::get<sp::Media>(reference) in a user message, beside its text
+}
+```
 - **Policy facts.** The descriptor policy's `endpoints` list admits each endpoint at its origins. A fact has these members:
   - `endpoint` (`images`);
   - `shape`, the codec's wire (`openai`, `openrouter`);
   - `paths`, the path of each operation (`generate`, `edit`; a job's `submit`, `poll` and `download`);
   - an `options` schema for the members a request may add (OpenAI `moderation`, OpenRouter `aspect_ratio`, `seed`, `provider`), never a member the codec writes;
   - `auth` (`bearer`, `x-api-key`, `x-goog-api-key`);
-  - `charge_on_accept`.
+  - `charge_on_accept`;
+  - `headers`, literal headers every call sends (Anthropic's `anthropic-version`). A header the descriptor sets wins, and a fact cannot name a credential or content header.
 
   The built-in policy admits images, decisions and embeddings at `https://api.openai.com` and `https://openrouter.ai`, and also these:
   - embeddings at `https://generativelanguage.googleapis.com`;
   - rerank at OpenRouter;
   - moderation at OpenAI;
   - speech and transcription at OpenAI and OpenRouter;
-  - video jobs at OpenRouter.
+  - video jobs at OpenRouter;
+  - files at OpenAI, Anthropic and Google.
 
   A path may hold `{model}`, which the request's model fills, and a job's path `{id}`, which the handle's id fills. An origin without a fact is `Unsupported` at prepare, with no I/O.
 - **Money.** A call whose fact sets `charge_on_accept` is retried only when it provably never reached the provider, or when the provider refused it before accepting it (429, 503). A failure after the request may have arrived is reported after one attempt, even when the retry policy allows duplicate billing risk.
 - **Video.** OpenRouter's video models run as jobs (above). Veo is not ported: its preview models end on 2026-10-22. Use Gemini Omni through Interactions (`video_config`, background jobs).
 
-On 2026-10-19 OpenAI `gpt-image-2` (low quality) generated an image and then edited it from a data URL, and OpenRouter `google/gemini-3.1-flash-lite-image` did the same with a reference image and `aspect_ratio`, reporting its cost. The same day `gpt-6-luna` and OpenRouter `typesafe/jev-1.13` each answered a predicate, a choice and a score about a support ticket. OpenRouter served a dated snapshot of the model and reported the cost. Embeddings from `text-embedding-3-small` (OpenAI, and through OpenRouter) and `gemini-embedding-2` (with an image input) put two related sentences closest. OpenRouter `cohere/rerank-v3.5` ranked the relevant document first, and `omni-moderation-latest` flagged a threat and passed a harmless sentence. `gpt-4o-mini-tts` spoke a sentence that `gpt-4o-mini-transcribe` transcribed back word for word. Through OpenRouter, `mistralai/voxtral-mini-tts-2603` and `openai/whisper-large-v3` did the same. OpenRouter `x-ai/grok-imagine-video-1.5-lite` made a one-second 480p video for 2 cents. The job was pending for about half a minute. Its download went to a file with the SHA-256 the result reported, and the same output downloaded to memory matched it. A download past its limit and an output index the job does not have both failed and left no file.
+On 2026-10-19 OpenAI `gpt-image-2` (low quality) generated an image and then edited it from a data URL, and OpenRouter `google/gemini-3.1-flash-lite-image` did the same with a reference image and `aspect_ratio`, reporting its cost. The same day `gpt-6-luna` and OpenRouter `typesafe/jev-1.13` each answered a predicate, a choice and a score about a support ticket. OpenRouter served a dated snapshot of the model and reported the cost. Embeddings from `text-embedding-3-small` (OpenAI, and through OpenRouter) and `gemini-embedding-2` (with an image input) put two related sentences closest. OpenRouter `cohere/rerank-v3.5` ranked the relevant document first, and `omni-moderation-latest` flagged a threat and passed a harmless sentence. `gpt-4o-mini-tts` spoke a sentence that `gpt-4o-mini-transcribe` transcribed back word for word. Through OpenRouter, `mistralai/voxtral-mini-tts-2603` and `openai/whisper-large-v3` did the same. OpenRouter `x-ai/grok-imagine-video-1.5-lite` made a one-second 480p video for 2 cents. The job was pending for about half a minute. Its download went to a file with the SHA-256 the result reported, and the same output downloaded to memory matched it. A download past its limit and an output index the job does not have both failed and left no file. Each provider took a note from memory and a 300 KB slice of a local file, reported the slice's digest, and refused the slice when its stated SHA-256 was wrong. Gets, listings with a next page, and deletions answered, and each provider served a file it had made (an OpenAI batch output, an Anthropic spreadsheet, a Google video) while refusing the content of an upload. `claude-haiku-4-5` and `gemini-3.5-flash-lite` read the uploaded slice through `files::media` and answered with the code word in it.
 
 ## Responses provider-held continuation
 

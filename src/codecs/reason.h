@@ -15,6 +15,8 @@ enum class Source {
   Moderation, ModerationRequest, Speech, SpeechRequest, Transcription, TranscriptionRequest,
   // Provider jobs: the state and download decoder, poll and download requests, and the video submit.
   Jobs, JobsRequest, VideosRequest,
+  // Provider files (D7).
+  Files, FilesRequest,
 };
 struct Entry { std::string_view message, code; };
 std::span<const Entry> entries(Source) noexcept;

@@ -79,6 +79,7 @@ struct Conn : std::enable_shared_from_this<Conn> {
   asio::steady_timer timer;
   std::string buf;
   std::string path;
+  std::string echoed;
   std::string query;
   bool holding = false;
   char scratch[256];
@@ -150,6 +151,7 @@ struct Conn : std::enable_shared_from_this<Conn> {
   }
 
   void on_request(std::size_t body_len) {
+    echoed = path == "/echo-body" ? buf.substr(0, body_len) : std::string();
     buf.erase(0, body_len);
     ++g_stats.requests;
     ++g_stats.by_path[path];
@@ -171,6 +173,9 @@ struct Conn : std::enable_shared_from_this<Conn> {
     if (path == "/ok") {
       ++g_stats.ok;
       return write(simple(200, "OK", "ok"), [self] { self->keepalive_next(); });
+    }
+    if (path == "/echo-body") {  // the request body, byte for byte
+      return write(simple(200, "OK", echoed), [self] { self->keepalive_next(); });
     }
     if (path == "/echo-len") {
       return write(simple(200, "OK", std::to_string(body_len)), [self] { self->keepalive_next(); });

@@ -1,6 +1,7 @@
 #include "codecs/endpoint.h"
 #include "codecs/decisions.h"
 #include "codecs/embeddings.h"
+#include "codecs/files.h"
 #include "codecs/images.h"
 #include "codecs/jobs.h"
 #include "codecs/moderation.h"
@@ -21,6 +22,10 @@ std::unique_ptr<Codec> make_codec(std::string_view name, const descriptor::Valid
   // A job's state, from a submit or a poll, and one output it made.
   if (name == "videos") return std::make_unique<jobs::StateCodec>(descriptor, accumulator, std::move(requested), std::string(name), limits);
   if (name == "content") return std::make_unique<jobs::ContentCodec>(accumulator, limits);
+  // A file, a page of files, or a deletion; `requested` is the file id the call named.
+  if (name == "files") return std::make_unique<files::Codec>(descriptor, accumulator, files::Codec::Kind::File, std::move(requested), limits);
+  if (name == "files.list") return std::make_unique<files::Codec>(descriptor, accumulator, files::Codec::Kind::Page, std::move(requested), limits);
+  if (name == "files.delete") return std::make_unique<files::Codec>(descriptor, accumulator, files::Codec::Kind::Deleted, std::move(requested), limits);
   return nullptr;
 }
 }  // namespace sp::endpoints

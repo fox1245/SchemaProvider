@@ -557,6 +557,7 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
       bounded.curl_code = value.curl_code;
       bounded.attempt = value.attempt;
       bounded.elapsed = value.elapsed;
+      bounded.upload_sha256 = value.upload_sha256;
       done_input = std::move(bounded);
       post = mark_scheduled_locked();
     }
@@ -832,6 +833,7 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
       } else {
         if (endpoint_codec) {
           endpoints::Close ended{normal, close_error.kind, {}};
+          ended.upload_sha256 = wire.upload_sha256;
           if (response) for (const auto& header : response->value.headers) ended.headers.emplace_back(header.name, header.value);
           if (!sink_path.empty() && normal) {
             ended.sink.emplace();
@@ -1508,13 +1510,22 @@ PreparedRequest Client::prepare_endpoint(RunOptions options, std::string_view en
     auto& wire = operation.request;
     wire.method = std::move(value.method);
     wire.url = std::string(client->descriptor.base_url()) + value.path;
-    wire.body = std::move(value.body);
+    if (value.file) {
+      wire.file_body = transport::FileBody{std::move(value.body), std::move(value.file->path), value.file->offset, value.file->size,
+                                           std::move(value.body_suffix), std::move(value.file->sha256)};
+    } else wire.body = std::move(value.body);
     // The descriptor's own headers go with every call to its origin; the codec owns the content headers.
     for (const auto& header : client->descriptor.headers())
       if (!detail::equal_ascii(header.first, "content-type") && !detail::equal_ascii(header.first, "accept"))
         wire.headers.push_back({header.first, header.second});
     if (!value.content_type.empty()) wire.headers.push_back({"Content-Type", value.content_type});
     wire.headers.push_back({"Accept", value.accept});
+    // A header the descriptor sets wins over the same header of the endpoint's fact.
+    for (auto& [name, text] : value.headers) {
+      const bool overridden = std::any_of(client->descriptor.headers().begin(), client->descriptor.headers().end(),
+                                          [&](const auto& header) { return detail::equal_ascii(header.first, name); });
+      if (!overridden) wire.headers.push_back({std::move(name), std::move(text)});
+    }
     if (!client->options.api_key.empty()) {
       if (value.auth == "x-api-key") wire.headers.push_back({"x-api-key", client->options.api_key});
       else if (value.auth == "x-goog-api-key") wire.headers.push_back({"x-goog-api-key", client->options.api_key});
@@ -1692,6 +1703,60 @@ EndpointCall<jobs::DownloadOutcome> Client::start(PreparedEndpoint<jobs::Downloa
   Callbacks callbacks;
   if (on_outcome) callbacks.on_outcome = [deliver = std::move(on_outcome)](Result result) { deliver(jobs::typed_content(*result)); };
   return EndpointCall<jobs::DownloadOutcome>(start(std::move(call.prepared_), std::move(callbacks)));
+}
+template <class Outcome> Outcome Client::complete_endpoint(PreparedEndpoint<Outcome> call) {
+  constexpr const Outcome* typed = nullptr;
+  if (!state_ || state_->in_thread()) return detail::typed_outcome(*detail::misuse_result(), typed);
+  try { return start_endpoint(std::move(call), {}).join(); }
+  catch (const AdmissionError& error) { return detail::typed_outcome(*error.outcome(), typed); }
+}
+template <class Outcome> EndpointCall<Outcome> Client::start_endpoint(PreparedEndpoint<Outcome> call, std::function<void(Outcome)> on_outcome) {
+  Callbacks callbacks;
+  if (on_outcome)
+    callbacks.on_outcome = [deliver = std::move(on_outcome)](Result result) { deliver(detail::typed_outcome(*result, static_cast<const Outcome*>(nullptr))); };
+  return EndpointCall<Outcome>(start(std::move(call.prepared_), std::move(callbacks)));
+}
+PreparedEndpoint<files::Outcome> Client::prepare(files::Upload upload, RunOptions options) {
+  auto client = state_;
+  return PreparedEndpoint<files::Outcome>(prepare_endpoint<files::Encoded>(std::move(options), "files",
+      static_cast<int>(reason::Source::FilesRequest), [&] { return files::encode(client->descriptor, upload); }));
+}
+PreparedEndpoint<files::Outcome> Client::prepare(files::Get get, RunOptions options) {
+  auto client = state_;
+  return PreparedEndpoint<files::Outcome>(prepare_endpoint<files::Encoded>(std::move(options), "files",
+      static_cast<int>(reason::Source::FilesRequest), [&] { return files::encode(client->descriptor, get); }));
+}
+PreparedEndpoint<files::PageOutcome> Client::prepare(files::List list, RunOptions options) {
+  auto client = state_;
+  return PreparedEndpoint<files::PageOutcome>(prepare_endpoint<files::Encoded>(std::move(options), "files.list",
+      static_cast<int>(reason::Source::FilesRequest), [&] { return files::encode(client->descriptor, list); }));
+}
+PreparedEndpoint<files::DeleteOutcome> Client::prepare(files::Delete del, RunOptions options) {
+  auto client = state_;
+  return PreparedEndpoint<files::DeleteOutcome>(prepare_endpoint<files::Encoded>(std::move(options), "files.delete",
+      static_cast<int>(reason::Source::FilesRequest), [&] { return files::encode(client->descriptor, del); }));
+}
+PreparedEndpoint<jobs::DownloadOutcome> Client::prepare(files::Download download, RunOptions options) {
+  auto client = state_;
+  return PreparedEndpoint<jobs::DownloadOutcome>(prepare_endpoint<files::Encoded>(std::move(options), "content",
+      static_cast<int>(reason::Source::FilesRequest), [&] { return files::encode(client->descriptor, download); }));
+}
+files::Outcome Client::complete(files::Upload upload, RunOptions options) { return complete(prepare(std::move(upload), std::move(options))); }
+files::Outcome Client::complete(files::Get get, RunOptions options) { return complete(prepare(std::move(get), std::move(options))); }
+files::PageOutcome Client::complete(files::List list, RunOptions options) { return complete(prepare(std::move(list), std::move(options))); }
+files::DeleteOutcome Client::complete(files::Delete del, RunOptions options) { return complete(prepare(std::move(del), std::move(options))); }
+jobs::DownloadOutcome Client::complete(files::Download download, RunOptions options) { return complete(prepare(std::move(download), std::move(options))); }
+files::Outcome Client::complete(PreparedEndpoint<files::Outcome> call) { return complete_endpoint(std::move(call)); }
+files::PageOutcome Client::complete(PreparedEndpoint<files::PageOutcome> call) { return complete_endpoint(std::move(call)); }
+files::DeleteOutcome Client::complete(PreparedEndpoint<files::DeleteOutcome> call) { return complete_endpoint(std::move(call)); }
+EndpointCall<files::Outcome> Client::start(PreparedEndpoint<files::Outcome> call, std::function<void(files::Outcome)> on_outcome) {
+  return start_endpoint(std::move(call), std::move(on_outcome));
+}
+EndpointCall<files::PageOutcome> Client::start(PreparedEndpoint<files::PageOutcome> call, std::function<void(files::PageOutcome)> on_outcome) {
+  return start_endpoint(std::move(call), std::move(on_outcome));
+}
+EndpointCall<files::DeleteOutcome> Client::start(PreparedEndpoint<files::DeleteOutcome> call, std::function<void(files::DeleteOutcome)> on_outcome) {
+  return start_endpoint(std::move(call), std::move(on_outcome));
 }
 Diagnostics Client::diagnostics() const noexcept {
   if (!state_) return {};

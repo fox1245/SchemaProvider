@@ -495,12 +495,14 @@ class PolicyLoader {
         static constexpr std::string_view transcription_members[]{"model", "file", "input_audio", "language", "prompt", "response_format", "stream"};
         static constexpr std::string_view video_members[]{"model", "prompt", "input_references", "frame_images", "duration", "aspect_ratio",
                                                           "resolution", "size", "generate_audio"};
+        static constexpr std::string_view file_members[]{"file", "purpose", "expires_after"};
         const auto owned_by = [](std::string_view endpoint, std::string_view name) {
           const auto in = [&](const auto& list) { return std::find(std::begin(list), std::end(list), name) != std::end(list); };
           return (endpoint == "images" && in(image_members)) || (endpoint == "decisions" && in(decision_members)) ||
                  (endpoint == "embeddings" && in(embedding_members)) || (endpoint == "rerank" && in(rerank_members)) ||
                  (endpoint == "moderation" && in(moderation_members)) || (endpoint == "speech" && in(speech_members)) ||
-                 (endpoint == "transcription" && in(transcription_members)) || (endpoint == "videos" && in(video_members));
+                 (endpoint == "transcription" && in(transcription_members)) || (endpoint == "videos" && in(video_members)) ||
+                 (endpoint == "files" && in(file_members));
         };
         const auto operations_of = [](std::string_view endpoint, std::string_view shape) -> std::vector<std::string_view> {
           if (endpoint == "images" && shape == "openai") return {"generate", "edit"};
@@ -513,10 +515,11 @@ class PolicyLoader {
           if (endpoint == "transcription" && (shape == "openai" || shape == "openrouter")) return {"transcribe"};
           // A job: submit starts it, poll reads its state, download fetches one output.
           if (endpoint == "videos" && shape == "openrouter") return {"submit", "poll", "download"};
+          if (endpoint == "files" && (shape == "openai" || shape == "anthropic" || shape == "google")) return {"upload", "get", "list", "delete", "content"};
           return {};
         };
         for (auto e : endpoints.elements()) {
-          closed(e, {"endpoint","shape","origins","paths"}, "/endpoints", {"options","auth","charge_on_accept"});
+          closed(e, {"endpoint","shape","origins","paths"}, "/endpoints", {"options","auth","charge_on_accept","headers"});
           EndpointFact fact{text(e.get("endpoint"), "/endpoints/endpoint"), text(e.get("shape"), "/endpoints/shape"),
                             strings(e.get("origins"), "/endpoints/origins")};
           const auto operations = operations_of(fact.endpoint, fact.shape);
@@ -549,6 +552,22 @@ class PolicyLoader {
               fail("/endpoints/auth", "bearer, x-api-key or x-goog-api-key");
           }
           if (e.get("charge_on_accept").valid()) fact.charge_on_accept = boolean(e.get("charge_on_accept"), "/endpoints/charge_on_accept");
+          if (const auto headers = e.get("headers"); headers.valid()) {
+            if (!headers.is_object() || headers.size() > 8) fail("/endpoints/headers", "object with at most 8 literal headers");
+            for (auto member : headers.members()) {
+              std::string name(member.key);
+              std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+              constexpr std::string_view reserved[]{"authorization", "x-api-key", "x-goog-api-key", "proxy-authorization", "cookie", "host",
+                                                    "connection", "content-type", "content-length", "accept", "transfer-encoding", "expect"};
+              if (name.empty() || name.size() > 64 || !std::all_of(name.begin(), name.end(), [](char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-'; }) ||
+                  std::find(std::begin(reserved), std::end(reserved), name) != std::end(reserved))
+                fail("/endpoints/headers", "a non-reserved ASCII header name");
+              const auto value = text(member.value, "/endpoints/headers");
+              if (value.empty() || value.size() > 256 || !std::all_of(value.begin(), value.end(), [](unsigned char c) { return c >= 0x20 && c < 0x7f; }))
+                fail("/endpoints/headers", "a printable header value");
+              fact.headers.emplace_back(std::string(member.key), value);
+            }
+          }
           for (const auto& existing : policy->endpoints_)
             if (existing.endpoint == fact.endpoint)
               for (const auto& origin : fact.origins)

@@ -51,6 +51,19 @@ struct Header {
   std::string value;
 };
 
+// A request body read from a file while it is sent: `prefix`, then `size` bytes of the file at `path` from
+// `offset`, then `suffix`. The file is opened and its length checked before any request byte leaves. The slice is
+// hashed as it is read; with `expected_sha256` (lower-case hex) its last bytes are handed over only once the digest
+// matches, so a file changed since the caller hashed it never reaches the server whole. A body libcurl must send
+// again starts over from its first byte.
+struct FileBody {
+  std::string prefix;
+  std::string path;
+  std::uint64_t offset = 0, size = 0;
+  std::string suffix;
+  std::string expected_sha256;
+};
+
 struct HttpRequest {
   std::string method = "POST";
   std::string url;                 // http(s) only; redirects are never followed
@@ -69,6 +82,8 @@ struct HttpRequest {
   std::optional<std::chrono::milliseconds> connect_timeout;
   std::optional<std::chrono::milliseconds> first_byte_timeout;
   std::optional<std::chrono::milliseconds> idle_timeout;
+  // In place of `body`, which must then be empty.
+  std::optional<FileBody> file_body;
 };
 
 enum class ResponseVersion : std::uint8_t { Unknown, Http1_0, Http1_1, Http2, Http3 };
@@ -137,6 +152,7 @@ enum class FailureKind : std::uint8_t {
   FirstByteTimeout, // first_byte_timeout expired before the first response header line arrived
   IdleTimeout,      // idle_timeout: no byte moved in either direction for that long
   Other,
+  UploadSource,     // a file request body could not be read, or no longer matched its length or digest
 };
 
 struct Result {
@@ -147,6 +163,8 @@ struct Result {
   std::string detail;          // safe text: never a URL, header value or body
   AttemptObservation attempt;
   std::chrono::steady_clock::duration elapsed{};
+  // The SHA-256 (lower-case hex) of a file body's slice, once it was read whole.
+  std::string upload_sha256;
 };
 
 struct Callbacks {

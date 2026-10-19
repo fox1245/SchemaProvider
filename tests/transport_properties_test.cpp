@@ -4,6 +4,7 @@
 //
 // Usage: sp_transport_tests <path-to-sp_loopback_server> <fixture-directory> [test-name-substring]
 #include "transport/http_transport.h"
+#include "crypto/crypto.h"
 
 #include "support/portable.h"
 #ifdef _WIN32
@@ -27,6 +28,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <future>
@@ -423,6 +425,7 @@ const char* name_of(FailureKind k) {
     case FailureKind::CallbackError: return "CallbackError";
     case FailureKind::Misuse: return "Misuse";
     case FailureKind::Other: return "Other";
+    case FailureKind::UploadSource: return "UploadSource";
   }
   return "?";
 }
@@ -472,6 +475,50 @@ TEST(basic_roundtrip_and_connection_reuse) {
   CHECK(r3.status == Status::Completed);
   CHECK_MSG(c3->body == std::to_string(1 << 20), "server saw '%s'", c3->body.c_str());
   CHECK_MSG(r3.attempt.request_body_bytes == (1 << 20), "uploaded %lld bytes", static_cast<long long>(r3.attempt.request_body_bytes));
+}
+
+// A file body is read as it is sent: the prefix, the file slice, the suffix. Its digest is reported, a slice whose
+// digest does not match never reaches the server whole, and a missing file fails before any byte leaves.
+TEST(file_body_streams_slice_and_guards_digest) {
+  const auto path = std::filesystem::temp_directory_path() / ("sp-file-body-" + std::to_string(steady_clock::now().time_since_epoch().count()));
+  std::string content;
+  for (std::size_t i = 0; i < 700000; ++i) content += static_cast<char>('a' + (i * 7) % 26);
+  { std::ofstream(path, std::ios::binary) << content; }
+  const auto slice = content.substr(10, 600000);
+  std::string digest;
+  for (const auto byte : sp::crypto::sha256(slice)) { digest += "0123456789abcdef"[byte >> 4]; digest += "0123456789abcdef"[byte & 15]; }
+  auto request = [&](std::string expected, std::string file = {}) {
+    HttpRequest r = post(g_server.url("/echo-body"), {});
+    r.file_body = FileBody{"PRE|", file.empty() ? path.string() : file, 10, slice.size(), "|SUF", std::move(expected)};
+    return r;
+  };
+  Transport t;
+  for (const auto& expected : {std::string(), digest}) {
+    auto c = std::make_shared<Collector>();
+    Result r = t.start(request(expected), c->callbacks()).join();
+    CHECK(r.status == Status::Completed);
+    CHECK_MSG(c->body == "PRE|" + slice + "|SUF", "echoed %zu bytes", c->body.size());
+    CHECK(r.upload_sha256 == digest);
+    CHECK(r.attempt.request_body_bytes == static_cast<long long>(slice.size() + 8));
+  }
+  const Stats before = fetch_stats();
+  auto changed = std::make_shared<Collector>();
+  Result r = t.start(request(std::string(64, '0')), changed->callbacks()).join();
+  CHECK(r.status == Status::Failed && r.failure == FailureKind::UploadSource && r.upload_sha256.empty());
+  CHECK(r.attempt.request_body_bytes < static_cast<long long>(slice.size() + 8));
+  auto missing = std::make_shared<Collector>();
+  Result absent = t.start(request({}, path.string() + ".absent"), missing->callbacks()).join();
+  CHECK(absent.status == Status::Failed && absent.failure == FailureKind::UploadSource && absent.attempt.request_body_bytes == 0 &&
+        absent.attempt.reached < Stage::RequestStarted);
+  // A slice past the end of the file is refused the same way.
+  HttpRequest beyond = request({});
+  beyond.file_body->size = content.size();
+  Result past = t.start(std::move(beyond), std::make_shared<Collector>()->callbacks()).join();
+  CHECK(past.failure == FailureKind::UploadSource && past.attempt.request_body_bytes == 0);
+  const Stats after = fetch_stats();
+  CHECK_MSG(after["path/echo-body"] == before["path/echo-body"], "the server completed %ld refused uploads",
+            after["path/echo-body"] - before["path/echo-body"]);
+  std::filesystem::remove(path);
 }
 
 TEST(single_active_starts_keep_callback_order_and_reuse) {
