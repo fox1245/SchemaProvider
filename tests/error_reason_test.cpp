@@ -27,13 +27,16 @@ const Source sources[]{{reason::Source::Chat, "chat"}, {reason::Source::Messages
                        {reason::Source::Accumulator, "accumulator"},
                        {reason::Source::ChatRequest, "request.chat"}, {reason::Source::MessagesRequest, "request.messages"},
                        {reason::Source::ResponsesRequest, "request.responses"}, {reason::Source::GeminiRequest, "request.generate"},
-                       {reason::Source::InteractionsRequest, "request.interactions"}, {reason::Source::SharedRequest, "request"}};
+                       {reason::Source::InteractionsRequest, "request.interactions"}, {reason::Source::SharedRequest, "request"},
+                       {reason::Source::Images, "images"}, {reason::Source::ImagesRequest, "request.images"}};
+// Endpoint decoders (D6) are small: they parse one buffered document.
+const std::set<std::string> endpoint_decoders{"images"};
 // The sources each encoder table covers, relative to src/.
 struct EncoderSource { reason::Source source; std::vector<const char*> files; };
 const EncoderSource encoder_sources[]{
     {reason::Source::ChatRequest, {"codecs/chat_request.cpp"}}, {reason::Source::MessagesRequest, {"codecs/messages_request.cpp"}},
     {reason::Source::ResponsesRequest, {"codecs/responses_request.cpp"}}, {reason::Source::GeminiRequest, {"codecs/gemini_request.cpp"}},
-    {reason::Source::InteractionsRequest, {"codecs/interactions_request.cpp"}},
+    {reason::Source::InteractionsRequest, {"codecs/interactions_request.cpp"}}, {reason::Source::ImagesRequest, {"codecs/images_request.cpp"}},
     {reason::Source::SharedRequest, {"descriptor/policy.cpp", "core/request_controls.h", "codecs/media_input.cpp", "core/media.cpp", "core/native.cpp"}}};
 // The strings for an abnormal close belong to the transport: the close error's kind is the transport's, and so is its lack of a reason.
 const std::set<std::string> transport_strings{"abnormal response close", "abnormal Gemini response close", "abnormal interaction close"};
@@ -134,7 +137,7 @@ void every_failure_string_has_a_code(const std::filesystem::path& root) {
     CHECK(file.good());
     const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
     const auto found = failure_strings(text);
-    CHECK(found.size() > 20);
+    CHECK(found.size() > (endpoint_decoders.contains(prefix) ? 4 : 20));
     std::set<std::string> used;
     for (const auto& message : found) {
       if (transport_strings.contains(message)) continue;

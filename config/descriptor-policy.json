@@ -522,5 +522,11 @@
       "header_version": null,
       "server_tools": []
     }
+  ],
+  "endpoints": [
+    {"endpoint":"images","shape":"openai","origins":["https://api.openai.com"],"paths":{"generate":"/v1/images/generations","edit":"/v1/images/edits"},"charge_on_accept":true,
+     "options":{"type":"object","properties":{"moderation":{"type":"string","max_length":32,"token":true},"safety_identifier":{"type":"string","max_length":128},"user":{"type":"string","max_length":256}}}},
+    {"endpoint":"images","shape":"openrouter","origins":["https://openrouter.ai"],"paths":{"generate":"/api/v1/images"},"charge_on_accept":true,
+     "options":{"type":"object","properties":{"aspect_ratio":{"type":"string","max_length":16,"token":true},"resolution":{"type":"string","max_length":16,"token":true},"seed":{"type":"integer","minimum":0},"session_id":{"type":"string","max_length":256},"user":{"type":"string","max_length":256},"trace":{"type":"map","values":{"type":"string","max_length":256},"max_items":16},"provider":{"type":"object","properties":{"allow_fallbacks":{"one_of":[{"type":"boolean"},{"type":"null"}]},"order":{"type":"array","items":{"type":"string","max_length":128},"max_items":64},"only":{"type":"array","items":{"type":"string","max_length":128},"max_items":64},"ignore":{"type":"array","items":{"type":"string","max_length":128},"max_items":64},"sort":{"type":"string","max_length":32,"token":true}}}}}}
   ]
 }

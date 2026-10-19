@@ -1,4 +1,6 @@
 #include "runtime/testing.h"
+#include "descriptor/policy.h"
+#include "sp/config_defaults.h"
 #include "json/json.h"
 #include "support/runtime_peer.h"
 
@@ -891,6 +893,59 @@ void real_paused_redelivery(const char* node, const char* script) {
 }
 }  // namespace
 
+// Endpoint calls (D6) run on the chat client's lifecycle. An image call the provider charges for is attempted once
+// when it may have reached the provider, even where a chat call with the same failure is retried; one that never
+// left, or that the provider refused before accepting it, is retried.
+void endpoint_money_guard() {
+  auto parsed = json::parse(config_defaults::descriptor_policy_json);
+  CHECK(std::holds_alternative<json::Document>(parsed));
+  std::string text = "{";
+  for (auto member : std::get<json::Document>(parsed).root().members()) {
+    if (text.size() > 1) text += ',';
+    text += json::quote(member.key) + ":" + (member.key == "endpoints"
+        ? std::string(R"([{"endpoint":"images","shape":"openai","origins":["http://127.0.0.1:18080"],"paths":{"generate":"/v1/images/generations"},"charge_on_accept":true}])")
+        : member.value.dump());
+  }
+  auto policy = descriptor::load_policy(text + "}", config_defaults::codec_defaults_json);
+  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(policy));
+  auto loaded = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"scheduler-chat","family":"openai.chat","connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":"/v1/chat/completions","streaming":"/v1/chat/completions"}}})",
+                                 std::get<descriptor::PolicySnapshot>(policy));
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
+  const auto image = std::string(R"({"created":1,"output_format":"png","data":[{"b64_json":"aGVsbG8="}],"usage":{"input_tokens":3,"output_tokens":5,"total_tokens":8}})");
+  struct Case { std::function<void(Call&)> first; bool image_retried, chat_retried; };
+  const std::vector<Case> cases{
+      // The connection failed before the request left: both retry.
+      {[](Call& call) { call.result.attempt.request_body_bytes = 0; call.fail(transport::FailureKind::Connect, transport::Stage::Resolved, "synthetic connect failure"); }, true, true},
+      // The connection broke after the request left: the image call is not retried.
+      {[](Call& call) { call.fail(transport::FailureKind::Receive, transport::Stage::RequestStarted, "synthetic reset"); }, false, true},
+      // A server error after the request arrived.
+      {[](Call& call) { call.reply(500, R"({"error":{"code":"synthetic_server"}})"); }, false, true},
+      // A rate limit refuses the call before the provider accepts it.
+      {[](Call& call) { call.reply(429, R"({"error":{"code":"rate_limit_exceeded"}})"); }, true, true}};
+  for (const auto& [first, image_retried, chat_retried] : cases) {
+    auto executor = std::make_shared<ManualExecutor>();
+    auto wire = std::make_shared<ModelTransport>();
+    auto client = detail::ClientAccess::make(std::get<descriptor::ValidatedDescriptor>(loaded), {}, executor, wire);
+    RunOptions run;
+    run.streaming = false;
+    run.retry = RetryPolicy{true, true, 3, 0ms, 0ms};  // a host that accepts duplicate billing risk for chat
+    run.deadline = executor->now() + 1s;
+    wire->on_start = [&](const auto& call) { if (wire->calls.size() == 1) first(*call); else call->reply(200, call->request.url.ends_with("/generations") ? image : body()); };
+    auto started = client.start(client.prepare(images::Request{"gpt-image-2", "a fox"}, run));
+    executor->drain();
+    const auto outcome = started.join();
+    CHECK(wire->calls.size() == (image_retried ? 2u : 1u) && std::holds_alternative<images::Result>(outcome) == image_retried);
+    if (image_retried) CHECK(std::get<images::Result>(outcome).images.size() == 1 && std::get<images::Result>(outcome).attempt.attempts == 2);
+    else CHECK(std::get<Failure>(outcome).error.attempt.attempts == 1);
+    CHECK(wire->calls.front()->request.url == "http://127.0.0.1:18080/v1/images/generations");
+    wire->calls.clear();
+    auto chat = client.start(request(), run);
+    executor->drain();
+    CHECK(wire->calls.size() == (chat_retried ? 2u : 1u));
+    wire->on_start = {};
+  }
+}
+
 int main(int argc, char** argv) {
 #ifdef _WIN32
   runtime_test::Arguments arguments(argc, argv);
@@ -907,6 +962,7 @@ int main(int argc, char** argv) {
     admission_and_preflight();
     prepared_admission();
     external_policy_boundaries();
+    endpoint_money_guard();
     real_paused_redelivery(argv[1], argv[2]);
     return 0;
   } catch (const std::exception& error) {

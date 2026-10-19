@@ -145,7 +145,8 @@ add_library(sp_codecs src/codecs/accumulator.cpp src/codecs/reason.cpp src/codec
             src/codecs/messages.cpp src/codecs/messages_request.cpp
             src/codecs/responses.cpp src/codecs/responses_request.cpp
             src/codecs/gemini.cpp src/codecs/gemini_request.cpp
-            src/codecs/interactions.cpp src/codecs/interactions_request.cpp)
+            src/codecs/interactions.cpp src/codecs/interactions_request.cpp
+            src/codecs/images.cpp src/codecs/images_request.cpp)
 target_compile_options(sp_codecs PRIVATE ${SP_WARNING_OPTIONS})
 target_link_libraries(sp_codecs PUBLIC sp_core sp_json sp_descriptor)
 
@@ -356,6 +357,8 @@ if(SP_BUILD_TESTS)
   target_link_libraries(sp_extension_tests PRIVATE sp_codecs sp_core sp_descriptor sp_json)
   add_executable(sp_pricing_tests tests/pricing_test.cpp)
   target_link_libraries(sp_pricing_tests PRIVATE sp_core sp_descriptor sp_json)
+  add_executable(sp_images_tests tests/images_test.cpp)
+  target_link_libraries(sp_images_tests PRIVATE sp_runtime sp_codecs sp_descriptor sp_json)
   add_executable(sp_chat_tests tests/chat_semantic_test.cpp)
   target_link_libraries(sp_chat_tests PRIVATE sp_codecs sp_descriptor sp_json sp_transport)
   add_executable(sp_error_reason_tests tests/error_reason_test.cpp)
@@ -462,6 +465,7 @@ if(SP_BUILD_TESTS)
   add_test(NAME descriptor_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_descriptor_tests>)
   add_test(NAME catalogue_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_catalogue_tests>)
   add_test(NAME pricing_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_pricing_tests>)
+  add_test(NAME images_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_images_tests>)
   add_test(NAME extension_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_extension_tests>)
   add_test(NAME chat_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_chat_tests>)
   add_test(NAME error_reason COMMAND ${sp_test_runner} $<TARGET_FILE:sp_error_reason_tests> ${CMAKE_CURRENT_SOURCE_DIR}/src)

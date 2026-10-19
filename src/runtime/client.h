@@ -6,6 +6,7 @@
 #include "codecs/responses_request.h"
 #include "codecs/gemini_request.h"
 #include "codecs/interactions_request.h"
+#include "codecs/images.h"
 #include "descriptor/presets.h"
 #include "runtime/policy.h"
 #include "transport/sse_framer.h"
@@ -169,12 +170,48 @@ class PreparedRequest {
   const Limits* limits() const noexcept;
   const NativeContext* native_context() const noexcept;
   std::optional<std::uint64_t> model_invocation_limit() const noexcept;
+  // The non-chat endpoint a prepared call reaches (`images`, D6), empty for a chat request.
+  std::string_view endpoint() const noexcept;
  private:
   explicit PreparedRequest(std::shared_ptr<detail::OperationState>);
   void release() noexcept;
   std::shared_ptr<detail::OperationState> state_;
   friend class Client;
   friend class detail::ClientAccess;
+};
+
+// A prepared non-chat endpoint call (D6) whose outcome is typed. It holds the same admission slot and absolute
+// deadline as a PreparedRequest, and a host journals it the same way, from `prepared()`.
+template <class Outcome>
+class PreparedEndpoint {
+ public:
+  PreparedEndpoint() = default;
+  const PreparedRequest& prepared() const noexcept { return prepared_; }
+  bool valid() const noexcept { return prepared_.valid(); }
+  const Error* error() const noexcept { return prepared_.error(); }
+ private:
+  explicit PreparedEndpoint(PreparedRequest prepared) : prepared_(std::move(prepared)) {}
+  PreparedRequest prepared_;
+  friend class Client;
+};
+
+namespace detail {
+inline images::Outcome typed_outcome(const sp::Outcome& outcome, const images::Outcome*) { return images::typed(outcome); }
+}  // namespace detail
+// A started non-chat endpoint call. Like an Operation, destruction requests cancellation and detach relinquishes it;
+// join waits for the typed outcome, the one the callback received.
+template <class Outcome>
+class EndpointCall {
+ public:
+  EndpointCall() = default;
+  void cancel() noexcept { operation_.cancel(); }
+  void detach() noexcept { operation_.detach(); }
+  bool valid() const noexcept { return operation_.valid(); }
+  Outcome join() const { return detail::typed_outcome(*operation_.join(), static_cast<const Outcome*>(nullptr)); }
+ private:
+  explicit EndpointCall(Operation operation) : operation_(std::move(operation)) {}
+  Operation operation_;
+  friend class Client;
 };
 
 class Client {
@@ -200,9 +237,19 @@ class Client {
   // AdmissionError is translated to the same owned Failure result.
   Result complete(Request, RunOptions = {});
   Result complete(PreparedRequest);
+  // Non-chat endpoints (D6). A call uses this client's origin, credential and descriptor headers, and shares its
+  // admission slots, retry budget, deadline handling and error classification. The policy's endpoint fact for the
+  // origin admits it. A call the provider charges for once it accepts it is not retried once it may have reached
+  // the provider. Calls are buffered.
+  PreparedEndpoint<images::Outcome> prepare(images::Request, RunOptions = {});
+  images::Outcome complete(images::Request, RunOptions = {});
+  images::Outcome complete(PreparedEndpoint<images::Outcome>);
+  EndpointCall<images::Outcome> start(PreparedEndpoint<images::Outcome>, std::function<void(images::Outcome)> on_outcome = {});
   Diagnostics diagnostics() const noexcept;
  private:
   explicit Client(std::shared_ptr<detail::ClientState>);
+  // The admission and option checks every call shares; `encode` fills the operation's wire request and model.
+  PreparedRequest prepare_call(RunOptions, const std::function<void(detail::OperationState&, std::optional<Error>&)>& encode);
   std::shared_ptr<detail::ClientState> state_;
   friend class detail::ClientAccess;
 };

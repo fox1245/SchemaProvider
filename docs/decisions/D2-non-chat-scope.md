@@ -1,6 +1,6 @@
 # D2 — Non-chat scope
 
-- Status: FIRM, 2026-10-01
+- Status: SUPERSEDED by [D6](D6-endpoints.md) on 2026-10-19 (FIRM from 2026-10-01). The owner moved every provider surface into the SDK on 2026-10-18; the text below is the historical record.
 - Deciders: maintainer + two-family review panel
 
 The approved typed C++ cutover removed the old interpreter and retained separate Images/Veo/Decisions clients in NeoGraph, not this SDK. [Recorded integrated proof](../POC_PLAN.md#current-typed-c-cutover-provenance) and [sanitized media observations](../../config/media-minimal-validation.json) preserve distinct host authority and one-shot scope; they are not universal endpoint qualification, invoices or permission for more requests. The original checklist below is historical acceptance rationale, not unfinished cutover work.
