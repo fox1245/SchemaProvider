@@ -1006,6 +1006,39 @@ constexpr Entry videos_request_table[] = {
   {"video options do not match the policy's schema", "request.videos.options_invalid"},
   {"video request exceeds JSON limits", "request.videos.json_limit"},
 };
+constexpr Entry files_table[] = {
+  {"file endpoints are not admitted at this origin", "files.endpoint.not_admitted"},
+  {"invalid response JSON", "files.response.json_invalid"},
+  {"response must be object", "files.response.not_object"},
+  {"a file object names its id", "files.file.id_required"},
+  {"a file listing holds a list", "files.page.list_required"},
+  {"a file listing exceeds the part limit", "files.page.limit"},
+  {"a page cursor is a string", "files.page.cursor_invalid"},
+  {"the response does not confirm the deletion", "files.delete.unconfirmed"},
+  {"a file is named only at the origin that holds it", "files.media.origin_mismatch"},
+  {"a file is named once it is active", "files.media.not_active"},
+  {"the file has expired", "files.media.expired"},
+};
+constexpr Entry files_request_table[] = {
+  {"file endpoints are not admitted at this origin", "request.files.endpoint_not_admitted"},
+  {"the file endpoint has no path for this operation", "request.files.path_missing"},
+  {"a file id is a token, or files/<token> at Google", "request.files.id_invalid"},
+  {"an upload sends bytes or a file slice, not both", "request.files.source_ambiguous"},
+  {"an upload is not empty", "request.files.source_empty"},
+  {"a file slice digest is lower-case hex SHA-256", "request.files.digest_invalid"},
+  {"a file name is bounded text without quotes or control characters", "request.files.name_invalid"},
+  {"an upload names its MIME type", "request.files.mime_invalid"},
+  {"an OpenAI file needs a purpose", "request.files.purpose_required"},
+  {"only OpenAI files take a purpose or an expiry", "request.files.purpose_unsupported"},
+  {"a file expiry is positive", "request.files.expiry_invalid"},
+  {"no random boundary for the upload", "request.files.boundary_unavailable"},
+  {"an upload in memory exceeds the request limit", "request.files.size_limit"},
+  {"a page limit is positive", "request.files.limit_invalid"},
+  {"a page cursor is bounded", "request.files.cursor_invalid"},
+  {"a file purpose is a token", "request.files.purpose_invalid"},
+  {"only OpenAI lists files by purpose", "request.files.purpose_filter_unsupported"},
+  {"a download needs a positive byte limit", "request.files.download_limit_invalid"},
+};
 constexpr Entry speech_table[] = {
   {"speech response is not audio", "speech.response.not_audio"},
   {"speech response is empty", "speech.response.empty"},
@@ -1130,6 +1163,8 @@ std::span<const Entry> entries(Source source) noexcept {
     case Source::Jobs: return jobs_table;
     case Source::JobsRequest: return jobs_request_table;
     case Source::VideosRequest: return videos_request_table;
+    case Source::Files: return files_table;
+    case Source::FilesRequest: return files_request_table;
   }
   return {};
 }

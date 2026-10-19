@@ -26,6 +26,7 @@
 #include "transport/http_transport.h"
 #include "transport/io_thread.h"
 #include "transport/ws_transport.h"
+#include "crypto/crypto.h"
 
 #include <asio/bind_executor.hpp>
 #include <asio/executor_work_guard.hpp>
@@ -45,7 +46,10 @@
 #include <atomic>
 #include <cctype>
 #include <condition_variable>
+#include <cstdio>
+#include <cstring>
 #include <exception>
+#include <filesystem>
 #include <future>
 #include <mutex>
 #include <optional>
@@ -345,6 +349,7 @@ struct OperationState {
     if (easy) curl_easy_cleanup(easy);  // before freeing lists libcurl may still reference
     if (hdrs) curl_slist_free_all(hdrs);
     if (resolve_list) curl_slist_free_all(resolve_list);
+    if (upload_file) std::fclose(upload_file);
   }
 
   // immutable after construction
@@ -361,6 +366,13 @@ struct OperationState {
   curl_slist* hdrs = nullptr;
   std::string setup_error;
   FailureKind setup_failure = FailureKind::Other;
+  // A file request body (HttpRequest::file_body): the open file, the body bytes handed to libcurl, the slice's
+  // running digest, and its hex once read whole.
+  std::FILE* upload_file = nullptr;
+  std::uint64_t upload_sent = 0;
+  std::optional<crypto::Sha256> upload_hash;
+  std::string upload_digest;
+  bool upload_failed = false;
   CURLcode setup_code = CURLE_OK;
   std::optional<asio::steady_timer> deadline_timer;
   // Optional stall bounds (zero = disabled, or unable to expire before the deadline). Timers and
@@ -434,6 +446,12 @@ struct OperationState {
     }
   }
 
+  bool open_upload();
+  bool rewind_upload();
+  std::size_t abort_upload() noexcept { upload_failed = true; return CURL_READFUNC_ABORT; }
+  bool finish_upload_digest();
+  static std::size_t read_cb(char* buf, std::size_t size, std::size_t n, void* ud);
+  static int seek_cb(void* ud, curl_off_t offset, int origin);
   static std::size_t header_cb(char* buf, std::size_t size, std::size_t n, void* ud);
   static std::size_t write_cb(char* ptr, std::size_t size, std::size_t n, void* ud);
   static int prereq_cb(void* ud, char* primary_ip, char* local_ip, int primary_port, int local_port);
@@ -719,18 +737,33 @@ void OperationState::setup() {
   const bool is_head = iequals(req.method, "HEAD");
   const bool is_post = iequals(req.method, "POST");
   const bool sends_body_fields = !is_get && !is_head;
-  if (!sends_body_fields && !req.body.empty()) {
+  if (!sends_body_fields && (!req.body.empty() || req.file_body)) {
     setup_error = "GET and HEAD requests cannot carry a body";
+    return;
+  }
+  if (req.file_body && !req.body.empty()) {
+    setup_error = "a file body replaces the in-memory body";
     return;
   }
   if (is_head) {
     set(CURLOPT_NOBODY, 1L);
   } else if (sends_body_fields) {
     // POSTFIELDS installs the owned body and its length for every body-carrying method; for
-    // methods other than POST, CUSTOMREQUEST then only replaces the method token.
+    // methods other than POST, CUSTOMREQUEST then only replaces the method token. A file body is
+    // read by the read callback instead, with its length declared up front.
     set(CURLOPT_POST, 1L);
-    set(CURLOPT_POSTFIELDS, req.body.data());
-    set(CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(req.body.size()));
+    if (req.file_body) {
+      if (!open_upload()) return;
+      const auto& file = *req.file_body;
+      set(CURLOPT_READFUNCTION, &OperationState::read_cb);
+      set(CURLOPT_READDATA, this);
+      set(CURLOPT_SEEKFUNCTION, &OperationState::seek_cb);
+      set(CURLOPT_SEEKDATA, this);
+      set(CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(file.prefix.size() + file.size + file.suffix.size()));
+    } else {
+      set(CURLOPT_POSTFIELDS, req.body.data());
+      set(CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(req.body.size()));
+    }
     if (!is_post) set(CURLOPT_CUSTOMREQUEST, req.method.c_str());
   }
 
@@ -813,6 +846,78 @@ BodyFraming derive_framing(const ResponseHead& head, bool head_request) {
 }
 
 }  // namespace
+
+bool OperationState::open_upload() {
+  const auto& file = *req.file_body;
+  std::error_code error;
+  const auto length = std::filesystem::file_size(file.path, error);
+  constexpr std::uint64_t limit = std::uint64_t{1} << 62;
+  if (!error && file.offset <= length && file.size <= length - file.offset && file.size < limit &&
+      file.prefix.size() + file.suffix.size() < limit) upload_file = std::fopen(file.path.c_str(), "rb");
+  if (!upload_file || !rewind_upload()) {
+    setup_error = "upload source unreadable";
+    setup_failure = FailureKind::UploadSource;
+    return false;
+  }
+  return true;
+}
+bool OperationState::rewind_upload() {
+  upload_sent = 0;
+  upload_digest.clear();
+  upload_hash.emplace();
+  const auto offset = req.file_body->offset;
+#ifdef _WIN32
+  return _fseeki64(upload_file, static_cast<__int64>(offset), SEEK_SET) == 0;
+#else
+  return fseeko(upload_file, static_cast<off_t>(offset), SEEK_SET) == 0;
+#endif
+}
+// The slice was read whole: its digest must match before its last bytes leave.
+bool OperationState::finish_upload_digest() {
+  static constexpr char digits[] = "0123456789abcdef";
+  std::string hex;
+  for (const auto byte : upload_hash->finish()) { hex += digits[byte >> 4]; hex += digits[byte & 15]; }
+  if (!req.file_body->expected_sha256.empty() && hex != req.file_body->expected_sha256) return false;
+  upload_digest = std::move(hex);
+  return true;
+}
+std::size_t OperationState::read_cb(char* buf, std::size_t size, std::size_t n, void* ud) {
+  auto* op = static_cast<OperationState*>(ud);
+  const auto& file = *op->req.file_body;
+  const std::size_t capacity = size * n;
+  const std::uint64_t slice_end = file.prefix.size() + file.size;
+  std::size_t out = 0;
+  while (out < capacity) {
+    const auto at = op->upload_sent;
+    std::size_t take = 0;
+    if (at < file.prefix.size()) {
+      take = static_cast<std::size_t>(std::min<std::uint64_t>(capacity - out, file.prefix.size() - at));
+      std::memcpy(buf + out, file.prefix.data() + at, take);
+    } else if (at < slice_end) {
+      const auto remaining = slice_end - at;
+      take = static_cast<std::size_t>(std::min<std::uint64_t>(capacity - out, remaining));
+      if (std::fread(buf + out, 1, take, op->upload_file) != take) return op->abort_upload();
+      op->upload_hash->update(buf + out, take);
+      if (take == remaining && !op->finish_upload_digest()) return op->abort_upload();
+    } else {
+      // An empty slice has no last bytes to hold back; its digest is checked before the suffix.
+      if (op->upload_digest.empty() && !op->finish_upload_digest()) return op->abort_upload();
+      const auto suffix_at = at - slice_end;
+      if (suffix_at >= file.suffix.size()) break;
+      take = static_cast<std::size_t>(std::min<std::uint64_t>(capacity - out, file.suffix.size() - suffix_at));
+      std::memcpy(buf + out, file.suffix.data() + suffix_at, take);
+    }
+    out += take;
+    op->upload_sent += take;
+  }
+  return out;
+}
+// libcurl rewinds a body it must send again; only a restart from the first byte is possible.
+int OperationState::seek_cb(void* ud, curl_off_t offset, int origin) {
+  auto* op = static_cast<OperationState*>(ud);
+  if (origin != SEEK_SET || offset != 0) return CURL_SEEKFUNC_CANTSEEK;
+  return op->rewind_upload() ? CURL_SEEKFUNC_OK : CURL_SEEKFUNC_FAIL;
+}
 
 std::size_t OperationState::header_cb(char* buf, std::size_t size, std::size_t n, void* ud) {
   auto* op = static_cast<OperationState*>(ud);
@@ -1159,6 +1264,7 @@ void TransportCore::finish(std::shared_ptr<OperationState> op, Status status, Fa
   r.attempt.version = op->head.version;
   r.attempt.response_head_seen = op->head_delivered;
   r.attempt.transport_internal_resends = op->prereq_count > 1 ? op->prereq_count - 1 : 0;
+  r.upload_sha256 = op->upload_digest;
 
   if (op->easy) {
     long http_status = 0;
@@ -1311,6 +1417,7 @@ void TransportCore::complete_from_curl(const std::shared_ptr<OperationState>& op
   switch (code) {
     case CURLE_ABORTED_BY_CALLBACK:
       if (op->resend_refused) kind = FailureKind::ResendRefused;
+      else if (op->upload_failed) kind = FailureKind::UploadSource;
       break;
     case CURLE_WRITE_ERROR:
       if (op->callback_threw) kind = FailureKind::CallbackError;
@@ -1354,7 +1461,7 @@ void TransportCore::complete_from_curl(const std::shared_ptr<OperationState>& op
     case CURLE_UNSUPPORTED_PROTOCOL: kind = FailureKind::Protocol; break;
     default: break;
   }
-  finish(op, Status::Failed, kind, code, curl_easy_strerror(code));
+  finish(op, Status::Failed, kind, code, kind == FailureKind::UploadSource ? "upload source changed" : curl_easy_strerror(code));
 }
 
 void TransportCore::check_multi_info() {

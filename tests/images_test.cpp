@@ -155,6 +155,10 @@ void policy_facts() {
   refused_at(R"([{"endpoint":"images","shape":"openai","origins":["https://api.openai.com"],"paths":{"generate":"/v1/images"},"options":{"type":"object","properties":{"prompt":{"type":"null"}}}}])", "/endpoints/options");
   refused_at(R"([{"endpoint":"images","shape":"openai","origins":["https://api.openai.com"],"paths":{"generate":"/v1/images"},"auth":"basic"}])", "/endpoints/auth");
   refused_at("[" + fact + "," + fact + "]", "/endpoints/origins");
+  // Literal headers: never the credential or content headers, and printable values.
+  refused_at(R"([{"endpoint":"images","shape":"openai","origins":["https://api.openai.com"],"paths":{"generate":"/v1/images"},"headers":{"Authorization":"Bearer x"}}])", "/endpoints/headers");
+  refused_at(R"([{"endpoint":"images","shape":"openai","origins":["https://api.openai.com"],"paths":{"generate":"/v1/images"},"headers":{"x-note":"a\nb"}}])", "/endpoints/headers");
+  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(policy_with(R"([{"endpoint":"images","shape":"openai","origins":["https://api.openai.com"],"paths":{"generate":"/v1/images"},"headers":{"OpenAI-Beta":"x"}}])")));
   const auto* built_in = descriptor::builtin_policy()->endpoint("images", "https://openrouter.ai");
   CHECK(built_in && built_in->shape == "openrouter" && built_in->charge_on_accept && descriptor::endpoint_path(*built_in, "generate") == "/api/v1/images" &&
         !descriptor::endpoint_path(*built_in, "edit"));

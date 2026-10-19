@@ -14,6 +14,7 @@
 #include "codecs/speech.h"
 #include "codecs/transcription.h"
 #include "codecs/videos.h"
+#include "codecs/files.h"
 #include "descriptor/presets.h"
 #include "runtime/policy.h"
 #include "transport/sse_framer.h"
@@ -212,6 +213,9 @@ inline speech::Outcome typed_outcome(const sp::Outcome& outcome, const speech::O
 inline transcription::Outcome typed_outcome(const sp::Outcome& outcome, const transcription::Outcome*) { return transcription::typed(outcome); }
 inline jobs::Outcome typed_outcome(const sp::Outcome& outcome, const jobs::Outcome*) { return jobs::typed(outcome); }
 inline jobs::DownloadOutcome typed_outcome(const sp::Outcome& outcome, const jobs::DownloadOutcome*) { return jobs::typed_content(outcome); }
+inline files::Outcome typed_outcome(const sp::Outcome& outcome, const files::Outcome*) { return files::typed(outcome); }
+inline files::PageOutcome typed_outcome(const sp::Outcome& outcome, const files::PageOutcome*) { return files::typed_page(outcome); }
+inline files::DeleteOutcome typed_outcome(const sp::Outcome& outcome, const files::DeleteOutcome*) { return files::typed_deleted(outcome); }
 }  // namespace detail
 // A started non-chat endpoint call. Like an Operation, destruction requests cancellation and detach relinquishes it;
 // join waits for the typed outcome, the one the callback received.
@@ -296,6 +300,25 @@ class Client {
   jobs::DownloadOutcome complete(PreparedEndpoint<jobs::DownloadOutcome>);
   EndpointCall<jobs::Outcome> start(PreparedEndpoint<jobs::Outcome>, std::function<void(jobs::Outcome)> on_outcome = {});
   EndpointCall<jobs::DownloadOutcome> start(PreparedEndpoint<jobs::DownloadOutcome>, std::function<void(jobs::DownloadOutcome)> on_outcome = {});
+  // Provider files (D7) at this client's origin: upload, get, list, delete, and download the content of a file the
+  // provider made. None is charged. An upload is not retried once it may have reached the provider, unless the
+  // retry policy accepts duplicate risk; reads are.
+  PreparedEndpoint<files::Outcome> prepare(files::Upload, RunOptions = {});
+  PreparedEndpoint<files::Outcome> prepare(files::Get, RunOptions = {});
+  PreparedEndpoint<files::PageOutcome> prepare(files::List, RunOptions = {});
+  PreparedEndpoint<files::DeleteOutcome> prepare(files::Delete, RunOptions = {});
+  PreparedEndpoint<jobs::DownloadOutcome> prepare(files::Download, RunOptions = {});
+  files::Outcome complete(files::Upload, RunOptions = {});
+  files::Outcome complete(files::Get, RunOptions = {});
+  files::PageOutcome complete(files::List, RunOptions = {});
+  files::DeleteOutcome complete(files::Delete, RunOptions = {});
+  jobs::DownloadOutcome complete(files::Download, RunOptions = {});
+  files::Outcome complete(PreparedEndpoint<files::Outcome>);
+  files::PageOutcome complete(PreparedEndpoint<files::PageOutcome>);
+  files::DeleteOutcome complete(PreparedEndpoint<files::DeleteOutcome>);
+  EndpointCall<files::Outcome> start(PreparedEndpoint<files::Outcome>, std::function<void(files::Outcome)> on_outcome = {});
+  EndpointCall<files::PageOutcome> start(PreparedEndpoint<files::PageOutcome>, std::function<void(files::PageOutcome)> on_outcome = {});
+  EndpointCall<files::DeleteOutcome> start(PreparedEndpoint<files::DeleteOutcome>, std::function<void(files::DeleteOutcome)> on_outcome = {});
   Diagnostics diagnostics() const noexcept;
  private:
   explicit Client(std::shared_ptr<detail::ClientState>);
@@ -304,6 +327,9 @@ class Client {
   // An endpoint call's wire request from its encoder's result (D6).
   template <class Encoded> PreparedRequest prepare_endpoint(RunOptions, std::string_view endpoint, int reason_source,
                                                            const std::function<std::variant<Encoded, Error>()>& encode);
+  // `complete` and `start` for a prepared endpoint call of any typed outcome.
+  template <class Outcome> Outcome complete_endpoint(PreparedEndpoint<Outcome>);
+  template <class Outcome> EndpointCall<Outcome> start_endpoint(PreparedEndpoint<Outcome>, std::function<void(Outcome)>);
   std::shared_ptr<detail::ClientState> state_;
   friend class detail::ClientAccess;
 };

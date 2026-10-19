@@ -61,8 +61,9 @@ struct InputBlockFact { std::string type; ValueSchema value; };
 struct ExtensionFact { std::string key; std::vector<std::string> origins; ValueSchema value; bool replay_eligible = false; bool bound = true; std::string beta{}; };
 // A non-chat endpoint the policy admits (D6): what it does (`images`), the wire shape a compiled codec speaks
 // (`openai`, `openrouter`), the origins that serve it, the path of each operation (`generate`, `edit`), the
-// schema of the members a request may add beside the typed ones, the authentication header, and whether the
-// provider charges once it accepts a call (such a call is not retried once it may have reached the provider).
+// schema of the members a request may add beside the typed ones, the authentication header, whether the
+// provider charges once it accepts a call (such a call is not retried once it may have reached the provider), and
+// literal headers every call sends (Anthropic's `anthropic-version`) unless the descriptor sets the same header.
 struct EndpointFact {
   std::string endpoint, shape;
   std::vector<std::string> origins;
@@ -70,6 +71,7 @@ struct EndpointFact {
   std::optional<ValueSchema> options{};
   std::string auth = "bearer";
   bool charge_on_accept = false;
+  std::vector<std::pair<std::string, std::string>> headers{};
 };
 // The path of one operation of an endpoint fact, if it has one.
 std::optional<std::string_view> endpoint_path(const EndpointFact&, std::string_view operation) noexcept;

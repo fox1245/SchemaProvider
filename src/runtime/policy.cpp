@@ -289,6 +289,8 @@ Error classify_failure(const transport::Result& result, const ResponseInfo& info
   else if (result.failure == transport::FailureKind::Protocol) { error.kind = ErrorKind::ProtocolCorrupt; error.reason = "transport.protocol"; }
   else if (result.failure == transport::FailureKind::ResponseTooLarge) error.kind = ErrorKind::ResourceLimit;
   else if (result.failure == transport::FailureKind::CallbackError || result.failure == transport::FailureKind::Misuse) error.kind = ErrorKind::Misuse;
+  // The caller's file could not be read, or changed since it was described: the provider never got it whole.
+  else if (result.failure == transport::FailureKind::UploadSource) { error.kind = ErrorKind::InvalidRequest; error.reason = "transport.upload.source"; }
   else if (result.http_status >= 400 || result.status == transport::Status::Completed) {
     error.kind = info.kind; error.retry_class = info.retry_class;
   } else {
