@@ -38,6 +38,53 @@ struct AudioTranscriptionConfig {
   std::optional<bool> word_timestamp, diarization;
   std::optional<TranscriptionMode> mode;
 };
+// generationConfig.responseFormat.audio. The encodings (AUDIO_WAV, AUDIO_L16, AUDIO_MP3, AUDIO_OGG_OPUS,
+// AUDIO_MULAW, AUDIO_ALAW) and delivery modes (INLINE, URI) are the service's UPPER_SNAKE names, sent as given.
+struct AudioFormat {
+  std::optional<std::string> mime_type;
+  std::optional<std::uint32_t> sample_rate;
+  std::optional<std::uint32_t> bit_rate;  // bits per second, for compressed formats
+  std::optional<std::string> delivery;
+};
+// Tools the service runs itself. Code execution's calls and results always arrive as ServerExecuted ToolCall and
+// ServerToolResult parts; the other tools' do with server_tool_invocations. Candidate metadata (groundingMetadata,
+// urlContextMetadata) is in Completion::stop.details. Every part replays as received.
+struct GoogleSearchTool {
+  // timeRangeFilter, as RFC 3339 timestamps. The service needs both ends or neither.
+  std::optional<std::string> start_time, end_time;
+  // searchTypes. Neither set: web search only.
+  bool web_search = false, image_search = false;
+};
+struct UrlContextTool {};
+struct CodeExecutionTool {};
+struct GoogleMapsTool { std::optional<bool> enable_widget; };
+// The service declares the environment's actions (navigate, click_at, ...) as functions. The model calls them like
+// client functions: the caller performs each one and answers with a ToolResult.
+struct ComputerUseTool {
+  std::string environment = "ENVIRONMENT_BROWSER";
+  std::vector<std::string> excluded_functions, disabled_safety_policies;
+  std::optional<bool> prompt_injection_detection;
+};
+struct FileSearchTool {
+  std::vector<std::string> store_names;  // fileSearchStores/<id>
+  std::optional<std::string> metadata_filter;
+  std::optional<std::uint32_t> top_k;
+};
+// New alternatives go at the end: the configuration digest binds the index.
+using BuiltinTool = std::variant<GoogleSearchTool, UrlContextTool, CodeExecutionTool, GoogleMapsTool, ComputerUseTool, FileSearchTool>;
+// A remote MCP server that the service connects to over streamable HTTP and whose tools it runs.
+struct McpServer {
+  std::string name, url;
+  // Sent to the server, typically a credential. Only the names are bound, so a rotated value keeps history replayable.
+  std::vector<std::pair<std::string, std::string>> headers;
+  std::optional<std::string> timeout, sse_read_timeout;  // durations such as "30s"
+  std::optional<bool> terminate_on_close;
+};
+// toolConfig.retrievalConfig: the user's location and language for Maps and Search grounding.
+struct RetrievalConfig {
+  std::optional<double> latitude, longitude;
+  std::optional<std::string> language_code;
+};
 struct Request {
   std::string model, account_scope, system;
   std::vector<Message> messages;
@@ -55,6 +102,14 @@ struct Request {
   std::optional<SpeechConfig> speech_config;
   std::optional<ImageConfig> image_config;
   std::optional<AudioTranscriptionConfig> audio_transcription_config;
+  std::optional<AudioFormat> audio_format;
+  std::vector<BuiltinTool> builtin_tools;
+  std::vector<McpServer> mcp_servers;
+  // toolConfig.includeServerSideToolInvocations: the answer also carries the calls and results of the tools the
+  // service runs (every built-in tool but computer use, and MCP servers). Unset: on exactly when such a tool and a
+  // client function are both declared, which the service requires.
+  std::optional<bool> server_tool_invocations;
+  std::optional<RetrievalConfig> retrieval_config;
 
   static Request simple(std::string model_name, std::string user_prompt,
                         std::optional<uint64_t> max_tokens = std::nullopt,

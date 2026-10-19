@@ -329,10 +329,13 @@ Part Accumulator::seal_value(Cursor& c, bool partial) {
     auto parsed = json::parse(c.bytes, {limits_.max_content_bytes, limits_.max_json_depth});
     std::shared_ptr<const json::Document> content;
     if (auto* doc = std::get_if<json::Document>(&parsed); doc && doc->root().is_object()) {
-      // Messages names the call `tool_use_id`; Interactions names it `call_id`.
+      // Messages names the call `tool_use_id`; Interactions names it `call_id`. A Gemini part holds the result in
+      // its data member, whose optional `id` names the call.
       const auto type = doc->root().get("type");
       const auto id = doc->root().get("tool_use_id").valid() ? doc->root().get("tool_use_id") : doc->root().get("call_id");
-      if (type.is_string() && id.is_string() && type.as_string() == c.header.wire_type && id.as_string() == c.header.wire_id)
+      const auto data = doc->root().get(c.header.wire_type), data_id = data.get("id");
+      if (c.google_part ? data.is_object() && !type.valid() && (!data_id.valid() || (data_id.is_string() && data_id.as_string() == c.header.wire_id))
+                        : type.is_string() && id.is_string() && type.as_string() == c.header.wire_type && id.as_string() == c.header.wire_id)
         content = std::make_shared<const json::Document>(std::move(*doc));
     }
     if (content) std::string{}.swap(c.bytes);

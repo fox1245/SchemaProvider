@@ -147,6 +147,13 @@ Messages server tools take their options, and cited answers decode:
 - **Citations.** A text block with `citations` failed as `Unsupported` (`messages.block.citations_unsupported`, now removed), and a streamed `citations_delta` failed as `messages.delta.unsupported`. That threw away every web-search answer that cited its sources. Citations are now kept as raw-wire observations; a malformed one is `messages.block.citation_invalid`.
 - **Configuration digest.** It binds the options only when they are set.
 
+Generate gains the service's tools and an audio output format:
+- **New request fields.** `gemini::Request` gains `audio_format`, `builtin_tools` (`GoogleSearchTool`, `UrlContextTool`, `CodeExecutionTool`, `GoogleMapsTool`, `ComputerUseTool`, `FileSearchTool`), `mcp_servers`, `server_tool_invocations` and `retrieval_config`. The configuration digest binds the tools only when they are set, so existing digests do not change.
+- **Typed service parts.** `executableCode` and `toolCall` parts were `Opaque`; they are now `ServerExecuted` `ToolCall` parts. `codeExecutionResult` and `toolResponse` are `ServerToolResult` parts. Code that read these parts from `Opaque::wire_metadata` reads the typed parts instead. `wire_output` and native replay are unchanged.
+- **Computer use calls.** With `ComputerUseTool`, a call to a function the service declared is a `ClientExecuted` `ToolCall`. Without it, an undeclared function still fails the response as `Unsupported`.
+- **Tool results.** A JSON object `content` beside media-only `content_parts` used to be `InvalidRequest`. It is now the `functionResponse.response` object, with the media as its `parts`.
+- **G.711 audio.** Streamed `audio/mulaw`, `audio/alaw` and `audio/basic` frames merge into one `Media` part, like raw PCM and MP3.
+
 ## From interface 5 to 6
 
 Package 0.3.0 alpha adds `Usage::provider_cost` and the fixed-size `ProviderReportedCost`, `UsdAmount`, `CostSource`, `CostStatus` and `CostRounding` types. Existing field access remains source-compatible, but `Usage`, `UsageUpdate`, `Completion`, `PartialCompletion` and the containing `Event` layouts grow. Rebuild every consumer against the same headers and generation 6 libraries (`libsp_*.so.6`); interface 5 binaries must not load interface 6 libraries. CMake consumers select `SchemaProvider 0.3.0 EXACT`.
