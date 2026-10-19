@@ -42,12 +42,15 @@ class NativeContext final {
   NativeContext(const descriptor::ValidatedDescriptor&, const gemini::Request&, const descriptor::EffectiveChoices&, bool streaming);
   NativeContext(const descriptor::ValidatedDescriptor&, const interactions::Request&, const descriptor::EffectiveChoices&, bool streaming);
   NativeContext(const descriptor::ValidatedDescriptor&, const chat::Request&, const descriptor::EffectiveChoices&, bool streaming);
-  void bind_history(const std::vector<Message>&, bool portable_gemini = false);
+  // `start`: a Messages history is bound from its last summary (`compaction`) on; what comes before is not sent.
+  void bind_history(const std::vector<Message>&, bool portable_gemini = false, size_t start = 0);
   const Family family_;
   const std::string model_, route_;
   const size_t prefix_count_;
   const descriptor::PolicySnapshot policy_;
   std::array<unsigned char, 32> origin_{}, prefix_{};
+  // Messages: the configuration digest before the history, which a message that may begin a history binds.
+  std::array<unsigned char, 32> root_{};
   // In-process Responses cursor custody is separate from portable/native replay.
   // These fields are deliberately not part of archive format 3.
   std::array<unsigned char, 32> configuration_{};

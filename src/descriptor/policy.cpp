@@ -122,6 +122,7 @@ StopKind stop(Value v) {
   if (s == "ContextLimit") return StopKind::ContextLimit;
   if (s == "StopSequence") return StopKind::StopSequence;
   if (s == "MalformedCall") return StopKind::MalformedCall;
+  if (s == "Compaction") return StopKind::Compaction;
   fail("/stop_reasons","typed StopKind");
 }
 // Stop safety remains compiled; policy may add facts, never rewrite standard causality.
@@ -130,7 +131,7 @@ bool safe_stop(std::string_view family, std::string_view raw, StopKind kind) {
   struct Rule { std::string_view family, raw; StopKind kind; };
   static constexpr Rule rules[]{
     {"openai.chat","stop",StopKind::EndTurn},{"openai.chat","length",StopKind::MaxTokens},{"openai.chat","tool_calls",StopKind::ToolUse},{"openai.chat","content_filter",StopKind::ContentFilter},
-    {"anthropic.messages","end_turn",StopKind::EndTurn},{"anthropic.messages","max_tokens",StopKind::MaxTokens},{"anthropic.messages","tool_use",StopKind::ToolUse},{"anthropic.messages","pause_turn",StopKind::PauseTurn},{"anthropic.messages","refusal",StopKind::Refusal},{"anthropic.messages","stop_sequence",StopKind::StopSequence},{"anthropic.messages","model_context_window_exceeded",StopKind::ContextLimit},
+    {"anthropic.messages","end_turn",StopKind::EndTurn},{"anthropic.messages","max_tokens",StopKind::MaxTokens},{"anthropic.messages","tool_use",StopKind::ToolUse},{"anthropic.messages","pause_turn",StopKind::PauseTurn},{"anthropic.messages","compaction",StopKind::Compaction},{"anthropic.messages","refusal",StopKind::Refusal},{"anthropic.messages","stop_sequence",StopKind::StopSequence},{"anthropic.messages","model_context_window_exceeded",StopKind::ContextLimit},
     {"openai.responses","completed",StopKind::EndTurn},{"openai.responses","max_output_tokens",StopKind::MaxTokens},{"openai.responses","content_filter",StopKind::ContentFilter},
     // google.generate mirrors the Gemini codec's compiled finishReason mapping (codecs/gemini.cpp).
     {"google.generate","STOP",StopKind::EndTurn},{"google.generate","MAX_TOKENS",StopKind::MaxTokens},
@@ -344,17 +345,20 @@ class PolicyLoader {
           if (f.family != "anthropic.messages") fail("/response_blocks", "Messages response block facts only");
           if (!blocks.is_array() || blocks.size() > 64) fail("/response_blocks", "bounded array of block facts");
           for (auto b : blocks.elements()) {
-            closed(b, {"type"}, "/response_blocks", {"beta"});
+            closed(b, {"type"}, "/response_blocks", {"beta","signed_beta","opens_history"});
             ResponseBlockFact fact{text(b.get("type"), "/response_blocks/type")};
             if (!std::all_of(fact.type.begin(), fact.type.end(), [](unsigned char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'; }) ||
                 fact.type == "text" || fact.type == "thinking" || fact.type == "redacted_thinking" || fact.type == "tool_use" ||
                 fact.type == "server_tool_use" || fact.type == "mcp_tool_use" || fact.type.ends_with("_tool_result"))
               fail("/response_blocks/type", "a lower-case block type the codec does not type");
-            if (b.get("beta").valid()) {
-              fact.beta = text(b.get("beta"), "/response_blocks/beta");
-              if (std::none_of(f.betas.begin(), f.betas.end(), [&](const BetaFact& beta) { return beta.value == fact.beta; }))
-                fail("/response_blocks/beta", "a value of the family's betas");
+            for (const auto& [member, target] : {std::pair<std::string_view, std::string*>{"beta", &fact.beta}, {"signed_beta", &fact.signed_beta}}) {
+              if (!b.get(member).valid()) continue;
+              const std::string pointer = "/response_blocks/" + std::string(member);
+              *target = text(b.get(member), pointer);
+              if (std::none_of(f.betas.begin(), f.betas.end(), [&](const BetaFact& beta) { return beta.value == *target; }))
+                fail(pointer, "a value of the family's betas");
             }
+            if (b.get("opens_history").valid()) fact.opens_history = boolean(b.get("opens_history"), "/response_blocks/opens_history");
             for (const auto& existing : f.response_blocks) if (existing.type == fact.type) fail("/response_blocks/type", "unique block types");
             f.response_blocks.push_back(std::move(fact));
           }
@@ -408,11 +412,17 @@ class PolicyLoader {
         if (auto extensions = v.get("extensions"); extensions.valid()) {
           if (!extensions.is_array() || extensions.size() > 64) fail("/extensions", "bounded array of extension facts");
           for (auto e : extensions.elements()) {
-            closed(e, {"key","origins","value","replay_eligible"}, "/extensions", {"bound"});
+            closed(e, {"key","origins","value","replay_eligible"}, "/extensions", {"bound","beta"});
             ExtensionFact fact{text(e.get("key"), "/extensions/key"), strings(e.get("origins"), "/extensions/origins"),
                                schema_of(e.get("value"), "/extensions/value"), boolean(e.get("replay_eligible"), "/extensions/replay_eligible")};
             if (e.get("bound").valid()) fact.bound = boolean(e.get("bound"), "/extensions/bound");
             if (!fact.bound && !fact.replay_eligible) fail("/extensions/bound", "an unbound value is replay-eligible");
+            if (e.get("beta").valid()) {
+              if (f.family != "anthropic.messages") fail("/extensions/beta", "Messages extension betas only");
+              fact.beta = text(e.get("beta"), "/extensions/beta");
+              if (std::none_of(f.betas.begin(), f.betas.end(), [&](const BetaFact& beta) { return beta.value == fact.beta; }))
+                fail("/extensions/beta", "a value of the family's betas");
+            }
             if (fact.key.empty() || fact.key.size() > 64 || !std::all_of(fact.key.begin(), fact.key.end(), [](unsigned char c) {
                   return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-'; }))
               fail("/extensions/key", "member name token");

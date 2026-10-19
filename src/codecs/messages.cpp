@@ -43,6 +43,7 @@ StopKind mapped(descriptor::StopKind k) {
     case descriptor::StopKind::ContextLimit: return StopKind::ContextLimit;
     case descriptor::StopKind::StopSequence: return StopKind::StopSequence;
     case descriptor::StopKind::MalformedCall: return StopKind::MalformedCall;
+    case descriptor::StopKind::Compaction: return StopKind::Compaction;
     case descriptor::StopKind::Unknown: return StopKind::Unknown;
   }
   return StopKind::Unknown;
@@ -162,13 +163,14 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
   if (!begun_) return fail(ErrorKind::ProtocolCorrupt, "event before message_start");
   if (!identity(root, false)) return false;
   if (type == "message_delta") {
-    unknown(root, {"type", "delta", "usage", "id", "model", descriptor_.usage_path().front()});
+    // Threshold compaction reports `context_management` beside the delta, not in it.
+    unknown(root, {"type", "delta", "usage", "id", "model", "context_management", descriptor_.usage_path().front()});
     if (!all_blocks_closed()) return false;
     message_delta_ = true;
     auto d = root.get("delta");
     if (!d.is_object()) return fail(ErrorKind::ProtocolCorrupt, "message delta required");
     unknown(d, {"stop_reason", "stop_sequence", "stop_details", "container", "id", "model", "role", "input_transformations", "context_management"});
-    if (!identity(d, false) || !metadata(d) || !usage(usage_at(root), false)) return false;
+    if (!identity(d, false) || !metadata(d) || !metadata(root) || !usage(usage_at(root), false)) return false;
     return terminal(d);
   }
   if (type == "message_stop") {
@@ -208,6 +210,13 @@ bool Codec::metadata(json::Value v) {
     // the retained raw wire observations. Server-side context edits still change what was answered.
     const std::string_view name(key);
     if (name == "container" || name == "diagnostics") continue;
+    // Threshold compaction reports here that it applied no context edit: its summary is a block of the content.
+    if (name == "context_management") {
+      unknown(item, {"applied_edits"});
+      const auto edits = item.get("applied_edits");
+      if (!edits.valid() || edits.is_null() || (edits.is_array() && edits.size() == 0)) continue;
+      if (!edits.is_array()) return fail(ErrorKind::ProtocolCorrupt, "invalid known message metadata");
+    }
     return fail(ErrorKind::Unsupported, "unsupported semantic message metadata");
   }
   return true;
@@ -358,6 +367,7 @@ bool Codec::block(json::Value v, uint64_t index, bool streaming) {
   Block binding{LocalId{static_cast<uint32_t>(index + 1)}, kind};
   binding.initial_input = initial_input;
   binding.citations = std::move(block_citations);
+  if (kind == PartKind::Opaque && streaming) { binding.kept_type = std::string(type); binding.kept_start = header.wire_metadata; }
   if (!emit(PartBegin{{0}, binding.local, kind, std::move(header), index})) return false;
   if (kind != PartKind::Opaque && (kind != PartKind::ToolCall || !streaming || initial_input) && !emit(PartDelta{binding.local, {kind, bytes}})) return false;
   if (kind == PartKind::Thinking && v.get("signature").valid()) {
@@ -373,6 +383,28 @@ bool Codec::delta(json::Value v, uint64_t index) {
   if (!v.is_object() || !nonempty(v.get("type"))) return fail(ErrorKind::ProtocolCorrupt, "delta type required");
   auto& b = found->second;
   auto type = v.get("type").as_string();
+  if (b.kind == PartKind::Opaque && !b.kept_type.empty() && type == b.kept_type + "_delta") {
+    // A kept block streams as its start, then `<type>_delta` events whose members it takes: a string member is
+    // appended to the text so far (a threshold `compaction` block starts with `content: null`), any other value
+    // replaces it.
+    if (!b.kept_changed)
+      for (auto member : b.kept_start->root().members())
+        b.kept.push_back({std::string(member.key), member.value.dump(),
+                          member.value.is_string() ? std::optional<std::string>(std::string(member.value.as_string())) : std::nullopt});
+    for (auto member : v.members()) {
+      if (member.key == "type") continue;
+      auto kept = std::find_if(b.kept.begin(), b.kept.end(), [&](const KeptMember& m) { return m.key == member.key; });
+      if (kept == b.kept.end()) kept = b.kept.insert(b.kept.end(), KeptMember{std::string(member.key), "null", std::nullopt});
+      if (member.value.is_string()) {
+        if (!kept->text) kept->text.emplace();
+        if (member.value.as_string().size() > limits_.max_content_bytes - std::min(kept->text->size(), limits_.max_content_bytes))
+          return fail(ErrorKind::ResourceLimit, "kept block limit");
+        kept->text->append(member.value.as_string());
+      } else { kept->raw = member.value.dump(); kept->text.reset(); }
+    }
+    b.kept_changed = true;
+    return true;
+  }
   std::string_view field;
   DeltaChannel channel = DeltaChannel::Content;
   if (type == "text_delta" && b.kind == PartKind::Text) field = "text";
@@ -409,7 +441,19 @@ bool Codec::end_block(uint64_t index) {
   // that never received actual JSON bytes (empty delta strings do not count).
   if (mode_ == Mode::Sse && b.kind == PartKind::ToolCall && !b.initial_input && !b.argument_bytes)
     if (!emit(PartDelta{b.local, {b.kind, "{}"}})) return false;
-  if (!emit(PartSeal{b.local, {}, {}, b.kind == PartKind::Text ? std::move(b.citations) : std::vector<Citation>{}})) return false;
+  std::shared_ptr<const json::Document> kept;
+  if (b.kept_changed) {
+    std::string text = "{";
+    for (const auto& member : b.kept) {
+      if (text.size() > 1) text += ',';
+      text += json::quote(member.key); text += ':'; text += member.text ? json::quote(*member.text) : member.raw;
+    }
+    text += '}';
+    auto parsed = json::parse(text, {limits_.max_content_bytes, limits_.max_json_depth});
+    if (!std::holds_alternative<json::Document>(parsed)) return fail(ErrorKind::ResourceLimit, "kept block limit");
+    kept = std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
+  }
+  if (!emit(PartSeal{b.local, {}, std::move(kept), b.kind == PartKind::Text ? std::move(b.citations) : std::vector<Citation>{}})) return false;
   b.closed = true; return true;
 }
 bool Codec::server_content(std::string_view outer, json::Value v) {
@@ -544,6 +588,14 @@ json::Value Codec::usage_at(json::Value root) const {
 bool Codec::usage(json::Value v, bool initial, bool placeholder_output) {
   if (!v.is_object() || !v.get("output_tokens").valid() || (initial && !v.get("input_tokens").valid())) return fail(ErrorKind::ProtocolCorrupt, "required usage counters missing");
   usage_.stage = UsageStage::Partial;
+  // A compaction iteration summarized the conversation inside this request: message_start counted the input before
+  // it, and the top-level counters that follow count what remained. They replace the earlier ones.
+  const auto iterations = v.get("iterations");
+  bool compacted = false;
+  if (iterations.is_array())
+    for (auto item : iterations.elements())
+      compacted = compacted || (item.is_object() && item.get("type").is_string() && item.get("type").as_string() == "compaction");
+  if (compacted && !initial) { usage_.input_uncached.reset(); usage_.cache_read.reset(); usage_.cache_write.reset(); }
   // The streaming message_start reports a placeholder output count (the first token, often none), not the count so
   // far. It is validated and remembered, so a later cumulative count below it is still a conflict, but
   // it is no evidence of the output until message_delta reports the cumulative count: a stream cut
@@ -582,15 +634,30 @@ bool Codec::usage(json::Value v, bool initial, bool placeholder_output) {
       }
     }
   }
-  auto iterations = v.get("iterations");
   if (iterations.valid() && !iterations.is_null()) {
     if (!iterations.is_array()) return fail(ErrorKind::ProtocolCorrupt, "usage iterations must be array");
+    // Compaction iterations are billed beside the top-level counters, which leave them out. Their sums are kept
+    // as compaction.<counter> for pricing.
+    std::map<std::string, std::uint64_t, std::less<>> compaction;
     for (auto iteration : iterations.elements()) {
       if (!iteration.is_object()) return fail(ErrorKind::ProtocolCorrupt, "usage iteration must be object");
-      for (auto key : {"input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"})
-        if (auto n = iteration.get(key); n.valid() && !n.is_null() && !count_value(n)) return fail(ErrorKind::ProtocolCorrupt, "invalid iteration counter");
+      const bool summary = iteration.get("type").is_string() && iteration.get("type").as_string() == "compaction";
+      for (auto key : {"input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"}) {
+        auto n = iteration.get(key);
+        if (n.valid() && !n.is_null() && !count_value(n)) return fail(ErrorKind::ProtocolCorrupt, "invalid iteration counter");
+        if (!summary || !n.valid() || n.is_null()) continue;
+        auto& total = compaction[key];
+        if (number(n) > std::numeric_limits<uint64_t>::max() - total) return fail(ErrorKind::ProtocolCorrupt, "usage sum overflow");
+        total += number(n);
+      }
     }
     if (!usage_leaves(iterations, "iterations")) return false;
+    for (const auto& [key, total] : compaction) {
+      const auto address = "compaction." + key;
+      auto found = usage_.extra.find(address);
+      if (found != usage_.extra.end() && total < found->second.value) conflict(address, "cumulative counter regressed");
+      else usage_.extra[address] = Count{total, Evidence::Derived};
+    }
   }
   for (auto key : {"service_tier", "inference_geo", "speed"}) if (!nullable_string(v.get(key))) return fail(ErrorKind::ProtocolCorrupt, "invalid usage metadata");
   // Monetary members are typed provider cost, never token leaves or unknown counters.

@@ -131,6 +131,7 @@ StopKind policy_kind(descriptor::StopKind kind) {
     case descriptor::StopKind::ContextLimit: return StopKind::ContextLimit;
     case descriptor::StopKind::StopSequence: return StopKind::StopSequence;
     case descriptor::StopKind::MalformedCall: return StopKind::MalformedCall;
+    case descriptor::StopKind::Compaction: return StopKind::Compaction;
     case descriptor::StopKind::Unknown: return StopKind::Unknown;
   }
   return StopKind::Unknown;

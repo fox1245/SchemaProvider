@@ -259,7 +259,9 @@ struct Usage {
 };
 // Pending: the provider is still working on a job it runs in the background (an Interactions `background` request,
 // with `raw` its status). The message id names the job; retrieve it later to get its result.
-enum class StopKind { EndTurn, ToolUse, MaxTokens, StopSequence, ContentFilter, Refusal, PauseTurn, ContextLimit, MalformedCall, Unknown, Pending };
+// Compaction: the answer is a summary of the conversation in place of a reply (a Messages `compaction` request), or
+// the turn paused right after writing one (`pause_after_compaction`). Its message carries the summary block.
+enum class StopKind { EndTurn, ToolUse, MaxTokens, StopSequence, ContentFilter, Refusal, PauseTurn, ContextLimit, MalformedCall, Unknown, Pending, Compaction };
 struct StopReason {
   StopKind kind = StopKind::Unknown;
   std::string raw;

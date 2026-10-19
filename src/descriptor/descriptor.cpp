@@ -424,6 +424,7 @@ private:
             else if (mapped == "ContextLimit") kind = StopKind::ContextLimit;
             else if (mapped == "StopSequence") kind = StopKind::StopSequence;
             else if (mapped == "MalformedCall") kind = StopKind::MalformedCall;
+            else if (mapped == "Compaction") kind = StopKind::Compaction;
             else fail(pointer, "existing StopKind");
             auto found = std::find_if(value_.stop_reasons_.begin(), value_.stop_reasons_.end(), [&](const auto& entry) { return entry.first == member.key; });
             if ((value_.family_ == "anthropic.messages" || value_.family_ == "openai.responses") &&

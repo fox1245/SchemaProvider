@@ -20,11 +20,18 @@ class Codec {
   void finish(Close close = {});
   const Diagnostics& diagnostics() const { return diagnostics_; }
  private:
+  // A member of a streamed kept block, as raw JSON or, for a string, its text so far.
+  struct KeptMember { std::string key, raw; std::optional<std::string> text; };
   struct Block {
     LocalId local;
     PartKind kind;
     bool closed = false, argument_bytes = false, initial_input = false, signature_started = false;
     std::vector<Citation> citations{};
+    // A streamed kept block (`compaction`), whose `<type>_delta` events set its members.
+    std::string kept_type{};
+    std::shared_ptr<const json::Document> kept_start{};
+    std::vector<KeptMember> kept{};
+    bool kept_changed = false;
   };
   struct Call { std::string name; ToolCallKind kind; uint64_t index; };
   bool document(std::string_view, std::string_view event, bool streaming);

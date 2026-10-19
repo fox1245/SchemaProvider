@@ -331,10 +331,24 @@ void identity_tamper_permissions_and_bounds() {
   Fixture weak;CHECK(::chmod(weak.root.c_str(),0755)==0);CHECK(std::holds_alternative<Error>(NativeArchive::provision(weak.directory(),weak.key(),"owner",d)));
 }
 }
+// A compaction summary that begins a history (#53) survives a save and a load: the record keeps the configuration it
+// was answered under, so the restored summary still replays in place of the messages it summarizes.
+void compaction_root_restart() {
+  Fixture f;auto d=desc("anthropic.messages","https://api.anthropic.com");auto a=admitted(NativeArchive::provision(f.directory(),f.key(),"compaction-owner",d));
+  auto r=request();r.messages.push_back(genuine(d,r));r.messages.push_back(user("more"));auto summarize=r;summarize.extensions=document(R"({"compaction":{"type":"summarize"}})");
+  auto e=encoded(d,summarize);Accumulator acc;messages::Codec c(d,messages::Mode::Buffered,acc,e.context);
+  c.buffered(R"({"id":"msg_summary","type":"message","role":"assistant","model":"fixture-model","content":[{"type":"compaction","content":"Summary.","signature":"c2ln"}],"stop_reason":"compaction","stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}})",{true,ErrorKind::Truncated});c.finish();
+  CHECK(std::holds_alternative<Completion>(*acc.outcome()));auto next=r;next.messages={std::get<Completion>(*acc.outcome()).messages.at(0),user("go on")};
+  const auto expected=encoded(d,next).body;const auto ref=saved(a->save(next.messages,"compaction-call"));a.reset();
+  a=admitted(NativeArchive::open(f.directory(),f.key(),"compaction-owner",d));next.messages=loaded(a->load(ref,"compaction-call"));
+  CHECK(next.messages[0].native && next.messages[0].native->complete());CHECK(encoded(d,next).body==expected);
+  next.system="changed";CHECK(std::holds_alternative<Error>(messages::encode(d,next,false)));
+}
 int main(int argc,char** argv) {
   try {
     if(argc==5 && std::string_view(argv[1])=="--restart") {const std::string root=argv[2];auto d=desc();auto a=admitted(NativeArchive::open(root+"/records",root+"/activation","restart-owner",d));auto r=request();r.messages=loaded(a->load(argv[3],"restart-call"));CHECK(digest(encoded(d,r).body)==argv[4]);return 0;}
     extended_tool_result_archive_bounds();
+    compaction_root_restart();
     full_portable_and_native_roundtrip();responses_ordered_restart();chat_encrypted_legacy_to_canonical_restart();google_tool_loop_restart();deprivileged_decode_preserves_result_without_issuing_seals();diagnostic_documents_roundtrip_without_executable_upgrade();descriptor_semantics_are_archive_authority();admission_policy_edit_keeps_archive_replayable();process_restart(argv[0]);identity_tamper_permissions_and_bounds();std::cout<<"native archive behavioral tests passed\n";return 0;
   }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

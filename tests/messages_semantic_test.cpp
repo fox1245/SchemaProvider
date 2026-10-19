@@ -886,6 +886,53 @@ void advisor_result_and_iterations() {
   CHECK(codec.diagnostics().unknown_properties == 1);  // advisor_result is a shape the SDK keeps without checking
   failed(buffered(body("[]", "\"end_turn\"", R"({"input_tokens":2,"output_tokens":3,"speed":1})")), ErrorKind::ProtocolCorrupt);
 }
+// Compaction (#53): the summary block is kept whole, its stop is Compaction, and its iterations are counted apart
+// from the top-level counters. A threshold block streams as a start with no content and one delta.
+void compaction_blocks_and_usage() {
+  const std::string signed_block = R"({"type":"compaction","content":"Summary: a recipe app.","signature":"c2lnbmVk"})";
+  const std::string summary_usage = R"({"input_tokens":0,"output_tokens":0,"iterations":[{"input_tokens":170,"output_tokens":171,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"type":"compaction"}]})";
+  const auto check_summary = [&](const Outcome& outcome) {
+    const auto& c = completed(outcome);
+    CHECK(c.stop.kind == StopKind::Compaction && c.stop.raw == "compaction");
+    CHECK(c.messages.size() == 1 && c.messages[0].parts.size() == 1 && c.messages[0].native && c.messages[0].native->complete());
+    const auto* kept = std::get_if<Opaque>(&c.messages[0].parts[0]);
+    CHECK(kept && kept->wire_type == "compaction" && kept->wire_metadata->root().get("content").as_string() == "Summary: a recipe app." &&
+          kept->wire_metadata->root().get("signature").as_string() == "c2lnbmVk");
+    CHECK(c.usage.extra.at("compaction.input_tokens").value == 170 && c.usage.extra.at("compaction.output_tokens").value == 171);
+    CHECK(c.usage.input_uncached && c.usage.input_uncached->value == 0 && c.usage.quality == UsageQuality::Consistent);
+  };
+  check_summary(buffered(body("[" + signed_block + "]", "\"compaction\"", summary_usage)));
+  // On demand, the block arrives whole in content_block_start.
+  check_summary(stream({start(R"({"input_tokens":0,"output_tokens":0})"), block(0, signed_block), ping, end(0), stop("\"compaction\"", summary_usage), done}));
+
+  // At a threshold the block comes first and the answer follows. message_start counts the input before the summary;
+  // the top-level counters after it count what remained, and replace it.
+  const std::string threshold_usage = R"({"input_tokens":251,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":40,"iterations":[{"input_tokens":112197,"output_tokens":319,"type":"compaction"},{"input_tokens":251,"output_tokens":40,"type":"message"}]})";
+  const auto threshold = stream({start(R"({"input_tokens":112197,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":6})"),
+      block(0, R"({"type":"compaction","content":null})"), delta(0, R"({"type":"compaction_delta","content":"Summary: "})"),
+      delta(0, R"({"type":"compaction_delta","content":"the code word."})"), end(0),
+      block(1, R"({"type":"text","text":""})"), delta(1, R"({"type":"text_delta","text":"HELIOTROPE"})"), end(1),
+      {"message_delta", R"({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":)" + threshold_usage + R"(,"context_management":{"applied_edits":[]}})"}, done});
+  const auto& answered = completed(threshold);
+  CHECK(answered.stop.kind == StopKind::EndTurn && text(answered.messages) == "HELIOTROPE");
+  const auto* summary = std::get_if<Opaque>(&answered.messages[0].parts[0]);
+  CHECK(summary && summary->wire_metadata->root().get("content").as_string() == "Summary: the code word." &&
+        summary->wire_metadata->root().get("type").as_string() == "compaction" && !summary->wire_metadata->root().get("signature").valid());
+  CHECK(answered.usage.input_uncached->value == 251 && answered.usage.output_total->value == 40 && answered.usage.quality == UsageQuality::Consistent);
+  CHECK(answered.usage.extra.at("compaction.input_tokens").value == 112197 && answered.usage.extra.at("compaction.output_tokens").value == 319);
+  const auto whole = buffered(body(R"([{"type":"compaction","content":"Summary: the code word."},{"type":"text","text":"HELIOTROPE"}])", "\"end_turn\"",
+                                   threshold_usage, R"(,"context_management":{"applied_edits":[]})"));
+  CHECK(completed(whole).usage.input_uncached->value == 251 && completed(whole).usage.extra.at("compaction.input_tokens").value == 112197);
+  // Paused after the summary: the stop is Compaction and the message holds the block alone.
+  CHECK(completed(buffered(body(R"([{"type":"compaction","content":"Summary."}])", "\"compaction\"", summary_usage, R"(,"context_management":{"applied_edits":[]})"))).stop.kind == StopKind::Compaction);
+  // A context edit the server applied still changes what was answered, streamed as well; a block of another type
+  // takes no compaction delta.
+  failed(stream({start(), block(0, R"({"type":"text","text":"x"})"), end(0),
+                 {"message_delta", R"({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3},"context_management":{"applied_edits":[{"type":"clear_tool_uses_20250919"}]}})"}, done}),
+         ErrorKind::Unsupported);
+  failed(buffered(body("[]", "\"end_turn\"", initial_usage, R"(,"context_management":{"applied_edits":{}})")), ErrorKind::ProtocolCorrupt);
+  failed(stream({start(), block(0, R"({"type":"fallback","from":{"model":"a"}})"), delta(0, R"({"type":"compaction_delta","content":"x"})")}), ErrorKind::Unsupported);
+}
 int main() {
   try {
     routed_gateway_model(); openrouter_sentinel_and_cost(); direct_dated_snapshot_alias(); served_model_is_recorded();
@@ -894,7 +941,7 @@ int main() {
     usage_detail_forward_compatibility(); toolset_metadata_shapes();
     terminal_matrix(); text_thinking_and_order(); tool_fragments(); server_semantics(); server_result_shapes();
     stop_classes(); corruption_matrix(); usage_knowledge(); cut_stream_usage_has_no_placeholder_output(); uncached_input_rule(); limits_and_close_priority(); empty_text_delta_is_withheld(); failure_reasons(); response_metadata_is_kept();
-    advisor_result_and_iterations(); mcp_and_kept_blocks();
+    advisor_result_and_iterations(); mcp_and_kept_blocks(); compaction_blocks_and_usage();
     std::cout << "messages semantic tests passed\n";
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

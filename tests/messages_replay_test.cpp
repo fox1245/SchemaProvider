@@ -785,9 +785,74 @@ void mcp_connector_and_replay() {
   const auto loopback = descriptor_value();
   rejected(loopback, next, ErrorKind::Unsupported);
 }
+// Compaction (#53): a summary request sends `compaction` with its beta. The summary may begin the history in place
+// of the messages it summarizes, under the configuration it was answered with, and a request sends the history from
+// the last captured summary on. A threshold summary arrives with the answer and is sent from the same way.
+void compaction_and_history_roots() {
+  const auto anthropic = descriptor_value("https://api.anthropic.com");
+  auto request = base_request(); request.max_tokens = 4096; request.system = "Be brief.";
+  request.messages.push_back(capture(anthropic, request, R"([{"type":"text","text":"Recipe, Ingredient."}])"));
+  request.messages.push_back(user("Fields for Recipe?"));
+  auto summarize = request; summarize.extensions = document(R"({"compaction":{"type":"summarize"}})");
+  const auto summary_wire = encoded(anthropic, summarize);
+  CHECK(beta_header(summary_wire) == "compact-2026-09-04");
+  CHECK(document(summary_wire.body)->root().get("compaction").get("type").as_string() == "summarize");
+  const auto summary = capture(anthropic, summarize, R"([{"type":"compaction","content":"Summary.","signature":"c2ln"}])", "compaction");
+  // The summary takes the place of the messages it summarizes; the beta of a signed block goes with it.
+  auto next = request; next.messages = {summary, user("And Ingredient?")};
+  const auto next_wire = encoded(anthropic, next);
+  CHECK(beta_header(next_wire) == "compact-2026-09-04");
+  const auto next_body = document(next_wire.body);
+  CHECK(next_body->root().get("messages").size() == 2 && !next_body->root().get("compaction").valid());
+  CHECK(next_body->root().get("messages").at(0).get("content").at(0).get("signature").as_string() == "c2ln");
+  // Kept after them, only the history from the summary is sent.
+  auto kept = request; kept.messages.push_back(summary); kept.messages.push_back(user("And Ingredient?"));
+  CHECK(encoded(anthropic, kept).body == next_wire.body);
+  // An answer captured with the whole history kept binds the history from the summary, so dropping the messages
+  // before the summary later leaves it replayable, and the request the same.
+  auto longer = kept; longer.messages.push_back(capture(anthropic, kept, R"([{"type":"text","text":"name, unit."}])")); longer.messages.push_back(user("And Step?"));
+  auto trimmed = longer; trimmed.messages.erase(trimmed.messages.begin(), trimmed.messages.begin() + 3);
+  CHECK(trimmed.messages.front().parts.size() == 1 && std::holds_alternative<Opaque>(trimmed.messages.front().parts.front()));
+  CHECK(encoded(anthropic, trimmed).body == encoded(anthropic, longer).body);
+  // Under another configuration the summary does not replay. Whatever comes before it is neither checked nor sent.
+  auto changed = next; changed.system = "Be verbose."; rejected(anthropic, changed);
+  auto earlier = next; earlier.messages.insert(earlier.messages.begin(), user("Earlier"));
+  CHECK(encoded(anthropic, earlier).body == next_wire.body);
+  // A later answer binds the history that begins with the summary; compacting again leaves the newest summary first.
+  auto after = next; after.messages.push_back(capture(anthropic, next, R"([{"type":"text","text":"name, unit."}])"));
+  after.messages.push_back(user("Compact now."));
+  auto again = after; again.extensions = summarize.extensions;
+  auto latest = after;
+  latest.messages.push_back(capture(anthropic, again, R"([{"type":"compaction","content":"Summary two.","signature":"c2lnMg"}])", "compaction"));
+  latest.messages.push_back(user("Go on."));
+  const auto latest_body = document(encoded(anthropic, latest).body);
+  CHECK(latest_body->root().get("messages").size() == 2 &&
+        latest_body->root().get("messages").at(0).get("content").at(0).get("content").as_string() == "Summary two.");
+
+  // At a threshold: `context_management` sends its beta, and the answer that carries the summary is sent from.
+  auto threshold = request;
+  threshold.extensions = document(R"({"context_management":{"edits":[{"type":"compact_20260112","trigger":{"type":"input_tokens","value":50000},"pause_after_compaction":false}]}})");
+  CHECK(beta_header(encoded(anthropic, threshold)) == "compact-2026-01-12");
+  const auto compacted = capture(anthropic, threshold, R"([{"type":"compaction","content":"Summary."},{"type":"text","text":"name, unit."}])");
+  auto continued = threshold; continued.messages.push_back(compacted); continued.messages.push_back(user("And Step?"));
+  const auto continued_wire = encoded(anthropic, continued);
+  CHECK(beta_header(continued_wire) == "compact-2026-01-12");
+  CHECK(document(continued_wire.body)->root().get("messages").size() == 2);
+  auto dropped = continued; dropped.messages = {compacted, user("And Step?")};
+  CHECK(encoded(anthropic, dropped).body == continued_wire.body);
+  // Paused after the summary, the turn continues from it.
+  const auto paused = capture(anthropic, threshold, R"([{"type":"compaction","content":"Summary."}])", "compaction");
+  auto resumed = threshold; resumed.messages = {paused};
+  CHECK(document(encoded(anthropic, resumed).body)->root().get("messages").size() == 1);
+  // A trigger below the documented minimum is refused, and so are both extensions where the policy does not admit them.
+  auto low = threshold; low.extensions = document(R"({"context_management":{"edits":[{"type":"compact_20260112","trigger":{"type":"input_tokens","value":1000}}]}})");
+  rejected(anthropic, low, ErrorKind::InvalidRequest);
+  auto loopback = summarize; loopback.messages.resize(1);
+  rejected(descriptor_value(), loopback, ErrorKind::Unsupported);
+}
 int main() {
   try {
-    server_tool_options(); typed_client_tools_and_betas(); mcp_connector_and_replay();
+    server_tool_options(); typed_client_tools_and_betas(); mcp_connector_and_replay(); compaction_and_history_roots();
     typed_wire_request(); native_retention_and_content_integrity(); prefix_and_origin_binding();
     immutable_context_and_failed_capture(); client_loop_ownership(); server_loop_ownership_and_pause(); signature_accumulation_and_limits();
     invalid_calls_are_not_repaired();

@@ -2,6 +2,7 @@
 #include "core/value.h"
 #include "descriptor/descriptor.h"
 #include "core/request_controls.h"
+#include <algorithm>
 #include <utility>
 
 namespace sp::messages {
@@ -94,4 +95,17 @@ struct EncodedRequest {
 };
 using EncodeResult = std::variant<EncodedRequest, Error>;
 EncodeResult encode(const descriptor::ValidatedDescriptor&, const Request&, bool streaming);
+// The fact of a block the policy keeps whole (`fallback`, `compaction`), or null.
+inline const descriptor::ResponseBlockFact* kept_block(const descriptor::FamilyPolicy& family, std::string_view type) {
+  const auto found = std::find_if(family.response_blocks.begin(), family.response_blocks.end(), [&](const auto& fact) { return fact.type == type; });
+  return found == family.response_blocks.end() ? nullptr : &*found;
+}
+// A captured assistant message that carries a kept block standing for the conversation before it (`compaction`).
+inline bool opens_history(const descriptor::FamilyPolicy& family, const Message& message) {
+  return message.role == Role::Assistant && message.native && std::any_of(message.parts.begin(), message.parts.end(), [&](const Part& part) {
+    const auto* opaque = std::get_if<Opaque>(&part);
+    const auto* fact = opaque ? kept_block(family, opaque->wire_type) : nullptr;
+    return fact && fact->opens_history;
+  });
+}
 } // namespace sp::messages

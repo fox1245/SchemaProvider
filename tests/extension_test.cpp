@@ -157,6 +157,17 @@ void policy_facts() {
   // The built-in advisor fact names its beta, so dropping that beta refuses the policy.
   refused_at("anthropic.messages", betas_with("fixture-beta-2026-01-01", "advisor-tool-2026-03-01"), "/server_tools/beta");
   refused_at("anthropic.messages", betas_with("fixture-beta-2026-01-01", "mcp-client-2026-09-15"), "/response_blocks/beta");
+  // Compaction (#53): a signed block's beta and an extension's beta are betas of the family, and only Messages
+  // extensions name one.
+  refused_at("anthropic.messages", betas_with("fixture-beta-2026-01-01", "compact-2026-09-04"), "/response_blocks/signed_beta");
+  refused_at("anthropic.messages", R"("response_blocks":[{"type":"compaction","opens_history":"yes"}])", "/response_blocks/opens_history");
+  refused_at("anthropic.messages", R"("extensions":[{"key":"compaction","origins":["https://api.anthropic.com"],"value":{"type":"null"},"replay_eligible":true,"bound":false,"beta":"fixture-missing"}])", "/extensions/beta");
+  refused_at("openai.chat", R"("extensions":[{"key":"fixture","origins":["https://api.openai.com"],"value":{"type":"null"},"replay_eligible":true,"beta":"compact-2026-09-04"}])", "/extensions/beta");
+  {
+    const auto* messages = descriptor::builtin_policy()->family("anthropic.messages");
+    const auto compaction = std::find_if(messages->response_blocks.begin(), messages->response_blocks.end(), [](const auto& fact) { return fact.type == "compaction"; });
+    CHECK(compaction != messages->response_blocks.end() && compaction->opens_history && compaction->signed_beta == "compact-2026-09-04");
+  }
   // Response blocks never name a block the codec types.
   for (const auto* type : {"text", "tool_use", "mcp_tool_use", "web_search_tool_result", "Upper"})
     refused_at("anthropic.messages", std::string(R"("response_blocks":[{"type":")") + type + R"("}])", "/response_blocks/type");
