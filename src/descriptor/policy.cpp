@@ -485,15 +485,17 @@ class PolicyLoader {
       // the schema of the members a request may add beside the typed ones.
       if (auto endpoints = root.get("endpoints"); endpoints.valid()) {
         if (!endpoints.is_array() || endpoints.size() > 64) fail("/endpoints", "bounded array of endpoint facts");
-        struct Shape { std::string_view endpoint, shape; std::initializer_list<std::string_view> operations, owned; };
         static constexpr std::string_view image_members[]{"model", "prompt", "n", "size", "quality", "background", "output_format",
                                                           "output_compression", "images", "input_references", "stream", "partial_images"};
+        static constexpr std::string_view decision_members[]{"model", "input", "state", "questions"};
         const auto owned_by = [](std::string_view endpoint, std::string_view name) {
-          return endpoint == "images" && std::find(std::begin(image_members), std::end(image_members), name) != std::end(image_members);
+          const auto in = [&](const auto& list) { return std::find(std::begin(list), std::end(list), name) != std::end(list); };
+          return (endpoint == "images" && in(image_members)) || (endpoint == "decisions" && in(decision_members));
         };
         const auto operations_of = [](std::string_view endpoint, std::string_view shape) -> std::vector<std::string_view> {
           if (endpoint == "images" && shape == "openai") return {"generate", "edit"};
           if (endpoint == "images" && shape == "openrouter") return {"generate"};
+          if (endpoint == "decisions" && (shape == "openai" || shape == "openrouter")) return {"decide"};
           return {};
         };
         for (auto e : endpoints.elements()) {

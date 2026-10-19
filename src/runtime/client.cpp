@@ -1,5 +1,6 @@
 #include "runtime/client.h"
 #include "codecs/images.h"
+#include "codecs/decisions.h"
 #include "runtime/testing.h"
 #include "core/native.h"
 #include "codecs/messages.h"
@@ -377,6 +378,7 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
   std::unique_ptr<gemini::Codec> gemini_codec;
   std::unique_ptr<interactions::Codec> interactions_codec;
   std::unique_ptr<images::Codec> images_codec;
+  std::unique_ptr<decisions::Codec> decisions_codec;
   std::unique_ptr<transport::SseFramer> framer;
   std::optional<Head> response;
   ResponseInfo response_info;
@@ -543,9 +545,12 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
     gemini_codec.reset();
     interactions_codec.reset();
     images_codec.reset();
+    decisions_codec.reset();
     accumulator = std::make_unique<Accumulator>(client->options.limits.semantic,
         [this](const Event& event) { semantic(event); }, client->options.limits.max_response_bytes);
-    if (family == Family::Endpoint) images_codec = std::make_unique<images::Codec>(client->descriptor, *accumulator,
+    if (family == Family::Endpoint && endpoint == "images") images_codec = std::make_unique<images::Codec>(client->descriptor, *accumulator,
+        prepared_model, client->options.limits.semantic);
+    else if (family == Family::Endpoint) decisions_codec = std::make_unique<decisions::Codec>(client->descriptor, *accumulator,
         prepared_model, client->options.limits.semantic);
     else if (family == Family::Chat) chat_codec = std::make_unique<chat::Codec>(client->descriptor,
         options.streaming ? chat::Mode::Sse : chat::Mode::Buffered, *accumulator,
@@ -781,6 +786,7 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
         else interactions_codec->finish({normal, close_error.kind});
       } else {
         if (images_codec) images_codec->buffered(buffered, {normal, close_error.kind});
+        else if (decisions_codec) decisions_codec->buffered(buffered, {normal, close_error.kind});
         else if (chat_codec) chat_codec->buffered(buffered, {normal, close_error.kind});
         else if (messages_codec) messages_codec->buffered(buffered, {normal, close_error.kind});
         else if (responses_codec) responses_codec->buffered(buffered, {normal, close_error.kind});
@@ -817,7 +823,7 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
         prior_usage_unknown = prior_usage_unknown || !prior_attempt_proves_no_usage(*failure);
         pending_failure = std::move(outcome);
         stage = Stage::Backoff;
-        chat_codec.reset(); messages_codec.reset(); responses_codec.reset(); gemini_codec.reset(); interactions_codec.reset(); images_codec.reset(); accumulator.reset(); framer.reset();
+        chat_codec.reset(); messages_codec.reset(); responses_codec.reset(); gemini_codec.reset(); interactions_codec.reset(); images_codec.reset(); decisions_codec.reset(); accumulator.reset(); framer.reset();
         terminal_wire.reset();
         buffered.clear(); response.reset();
         retry_timer.arm(*executor, *at, [weak = weak_from_this()] { if (auto self = weak.lock()) self->timer(true); });
@@ -1422,19 +1428,21 @@ Result Client::complete(PreparedRequest preparation) {
     return operation.join();
   } catch (const AdmissionError& error) { return error.outcome(); }
 }
-PreparedEndpoint<images::Outcome> Client::prepare(images::Request request, RunOptions options) {
+template <class Encoded>
+PreparedRequest Client::prepare_endpoint(RunOptions options, std::string_view endpoint, int reason_source,
+                                         const std::function<std::variant<Encoded, Error>()>& encode) {
   auto client = state_;
   options.streaming = false;  // endpoint calls are buffered (D6)
-  return PreparedEndpoint<images::Outcome>(prepare_call(std::move(options), [&](detail::OperationState& operation, std::optional<Error>& error) {
-    auto encoded = images::encode(client->descriptor, request);
+  return prepare_call(std::move(options), [&](detail::OperationState& operation, std::optional<Error>& error) {
+    auto encoded = encode();
     if (auto* failure = std::get_if<Error>(&encoded)) {
       error = std::move(*failure);
-      if (error->reason.empty()) error->reason = std::string(reason::request_code(reason::Source::ImagesRequest, error->safe_message));
+      if (error->reason.empty()) error->reason = std::string(reason::request_code(static_cast<reason::Source>(reason_source), error->safe_message));
       return;
     }
-    auto& value = std::get<images::Encoded>(encoded);
+    auto& value = std::get<Encoded>(encoded);
     operation.family = detail::OperationState::Family::Endpoint;
-    operation.endpoint = "images";
+    operation.endpoint = std::string(endpoint);
     operation.charge_on_accept = value.charge_on_accept;
     operation.prepared_model = std::move(value.model);
     auto& wire = operation.request;
@@ -1452,7 +1460,17 @@ PreparedEndpoint<images::Outcome> Client::prepare(images::Request request, RunOp
       else if (value.auth == "x-goog-api-key") wire.headers.push_back({"x-goog-api-key", client->options.api_key});
       else wire.headers.push_back({"Authorization", "Bearer " + client->options.api_key});
     }
-  }));
+  });
+}
+PreparedEndpoint<images::Outcome> Client::prepare(images::Request request, RunOptions options) {
+  auto client = state_;
+  return PreparedEndpoint<images::Outcome>(prepare_endpoint<images::Encoded>(std::move(options), "images",
+      static_cast<int>(reason::Source::ImagesRequest), [&] { return images::encode(client->descriptor, request); }));
+}
+PreparedEndpoint<decisions::Outcome> Client::prepare(decisions::Request request, RunOptions options) {
+  auto client = state_;
+  return PreparedEndpoint<decisions::Outcome>(prepare_endpoint<decisions::Encoded>(std::move(options), "decisions",
+      static_cast<int>(reason::Source::DecisionsRequest), [&] { return decisions::encode(client->descriptor, request); }));
 }
 images::Outcome Client::complete(images::Request request, RunOptions options) {
   return complete(prepare(std::move(request), std::move(options)));
@@ -1466,6 +1484,19 @@ EndpointCall<images::Outcome> Client::start(PreparedEndpoint<images::Outcome> ca
   Callbacks callbacks;
   if (on_outcome) callbacks.on_outcome = [deliver = std::move(on_outcome)](Result result) { deliver(images::typed(*result)); };
   return EndpointCall<images::Outcome>(start(std::move(call.prepared_), std::move(callbacks)));
+}
+decisions::Outcome Client::complete(decisions::Request request, RunOptions options) {
+  return complete(prepare(std::move(request), std::move(options)));
+}
+decisions::Outcome Client::complete(PreparedEndpoint<decisions::Outcome> call) {
+  if (!state_ || state_->in_thread()) return decisions::typed(*detail::misuse_result());
+  try { return start(std::move(call)).join(); }
+  catch (const AdmissionError& error) { return decisions::typed(*error.outcome()); }
+}
+EndpointCall<decisions::Outcome> Client::start(PreparedEndpoint<decisions::Outcome> call, std::function<void(decisions::Outcome)> on_outcome) {
+  Callbacks callbacks;
+  if (on_outcome) callbacks.on_outcome = [deliver = std::move(on_outcome)](Result result) { deliver(decisions::typed(*result)); };
+  return EndpointCall<decisions::Outcome>(start(std::move(call.prepared_), std::move(callbacks)));
 }
 Diagnostics Client::diagnostics() const noexcept {
   if (!state_) return {};
