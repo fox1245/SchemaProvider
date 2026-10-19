@@ -203,7 +203,8 @@ struct UsageConflict { std::string counter, detail; };
 enum class CostSource { None, OpenRouterUsd, UnknownCurrency };
 enum class CostStatus { Missing, Available, Malformed, PrecisionExceeded, Overflow, UnknownCurrency, Conflict };
 // CeilingParsedBinary64 is retained for source compatibility; amounts are no longer produced with it.
-enum class CostRounding { CeilingParsedBinary64, CeilingShortestDecimal };
+// CeilingCatalogueProduct: a catalogue estimate (core/pricing.h), the exact sum of counters times prices rounded up once.
+enum class CostRounding { CeilingParsedBinary64, CeilingShortestDecimal, CeilingCatalogueProduct };
 struct UsdAmount {
   uint64_t nano_usd = 0;
   Evidence evidence = Evidence::Reported;

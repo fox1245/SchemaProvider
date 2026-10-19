@@ -14,7 +14,7 @@ Each reported usage object replaces its monetary snapshot, clearing stale omitte
 
 OpenRouter Chat and Messages report upstream input/output using `upstream_inference_prompt_cost` / `upstream_inference_completions_cost`; Responses uses `upstream_inference_input_cost` / `upstream_inference_output_cost`. They project into the same typed `upstream_input` / `upstream_output` fields. When both spellings are supplied they must agree as parsed binary64 values before quantization; different values become `Conflict`, unavailable amount and inconsistent monetary quality even if both would round into the same nanoUSD bucket. A null/missing primary can use a known alternate. Both raw values remain retained; no arbitrary winner or arithmetic guess is introduced.
 
-Provider-reported costs are not invoices, catalogue estimates or budget authority. This projection does not change a grant, refund an unknown hold, estimate a missing amount, or settle cumulative spending automatically. The qualification catalogue/meter keeps its existing integer microUSD arithmetic, conservative unknown holds and nonrenewable authorization lineage.
+Provider-reported costs are not invoices, catalogue estimates (see [pricing by the catalogue](#pricing-by-the-catalogue)) or budget authority. This projection does not change a grant, refund an unknown hold, estimate a missing amount, or settle cumulative spending automatically. The qualification catalogue/meter keeps its existing integer microUSD arithmetic, conservative unknown holds and nonrenewable authorization lineage.
 
 The monetary snapshot describes the currently observed wire attempt, not an automatically accumulated bill for every retry of one logical operation. Keep `AttemptEvidence::prior_usage_unknown` alongside it: an earlier attempt can incur unreported usage, even when the final attempt reports zero. Cost-only metadata (including reported zero or BYOK false) prevents the runtime from proving that a prior attempt had no usage. Do not infer a refund, free retry or complete logical-call invoice from one reported amount.
 
@@ -253,6 +253,24 @@ The `sp_catalogue_refresh` tool, built with the tests, runs a refresh from the c
 ```bash
 sp_catalogue_refresh --out models.json --generated generated.json --builtin-overlay [--previous generated.json] [--overlay mine.json]
 ```
+
+### Pricing by the catalogue
+
+`sp::pricing` (`<core/pricing.h>`) turns a catalogue entry's prices into exact amounts and estimates a call's cost from its usage. It never fetches: refresh the catalogue first when prices may have changed.
+
+**Prices.** `price_of(entry)` reads the entry's decimal USD per unit as exact nano-USD per million units: `input`, `output`, `cache_read`, `cache_write`, `reasoning`, and `request`, which is per request.
+- **Unit names.** OpenRouter's names (`prompt`, `completion`, `input_cache_read`, `input_cache_write`, `internal_reasoning`) are the same units, and a plain name wins over them.
+- **Variable prices.** A negative listed price, OpenRouter's `-1` for a variable price, is no price.
+- **Precision.** A price finer than 1e-15 USD rounds up.
+
+**Estimate.** `estimate(catalogue, family, origin, completion.model, completion.usage)` prices the call by the served model's priced entry. It falls back to the requested model's entry and then sets `requested_entry`.
+- **Input.** `input_uncached` bills at `input`, or else `input_total` less the cache counters. Cache reads bill at `cache_read` and cache writes at `cache_write`, or at `input` when the entry gives no cache price; `assumptions` names that rule.
+- **Output.** With a `reasoning` price, reasoning tokens bill at it and the rest of `output_total` at `output`. Otherwise all output bills at `output`. `request` is charged once.
+- **Rounding.** The exact sum is rounded up once, to whole nano-USD, with `Evidence::Derived` and `CostRounding::CeilingCatalogueProduct`.
+- **No total.** There is no `total` when the model has no priced entry, or a billed counter has no price or no count; `unpriced` names which.
+- **Not priced.** Server tool fees, images and other per-unit charges are not priced.
+
+**Compared with reported cost.** On 2026-10-19 the estimate from a refreshed OpenRouter catalogue equalled OpenRouter's reported `usage.cost` to the nano-USD for `openai/gpt-5-nano` (with reasoning tokens) and `google/gemini-2.5-flash-lite`, buffered and streamed. For `meta-llama/llama-3.1-8b-instruct` it was higher than the reported cost, because OpenRouter routed the call to a cheaper endpoint than the listed price. On an aggregator the listed price is not the price of the endpoint that served the call, so prefer `Usage::provider_cost` there and use the estimate when the provider reports none.
 
 ### Served model identity and routing gateways
 
