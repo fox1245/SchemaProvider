@@ -109,9 +109,52 @@ void wide_products() {
   // A price whose nano-USD per million units does not fit in 64 bits is not a price.
   CHECK(!pricing::price_of(*c->entry("huge")).input);
 }
+// Service tiers, the dearer rates, route ceilings and tool fees, and the reservation bound.
+void bounds() {
+  const auto c = catalogue(R"({"version":1,"models":[
+    {"id":"direct","pricing":{"input":"0.000002","output":"0.000008","cache_read":"0.0000005","cache_write":"0.0000025",
+      "cache_write_1h":"0.000004","output_image":"0.00003","request":"0.001","input:flex":"0.000001","output:flex":"0.000004",
+      "tool:web_search_20250305":"0.01","tool:free_tool":"0"}},
+    {"id":"vendor/routed","pricing":{"prompt":"0.0000001","completion":"0.0000004","ceiling_input":"0.0000024","ceiling_output":"0.0000096"}}]})");
+  const auto direct = pricing::price_of(*c->entry("direct"));
+  CHECK(direct.cache_write_1h == 4'000'000'000u && direct.output_image == 30'000'000'000u && direct.tool_fees.size() == 2 &&
+        direct.tool_fees[1].first == "web_search_20250305" && direct.tool_fees[1].second == 10'000'000'000'000u && direct.tool_fees[0].second == 0u);
+  // A tier's own units are its prices; the base units are not.
+  const auto flex = pricing::price_of(*c->entry("direct"), "flex");
+  CHECK(flex.input == 1'000'000'000u && flex.output == 4'000'000'000u && !flex.cache_read && !flex.request && flex.tool_fees.empty());
+  CHECK(pricing::price_of(*c->entry("direct"), "priority").empty());
+  // 1000 input tokens at the 1-hour write rate (4e-6), 100 output tokens at the image rate (3e-5), the request fee
+  // (1e-3) and two web searches (0.01 each): 4'000'000 + 3'000'000 + 1'000'000 + 20'000'000 nano-USD.
+  auto b = pricing::upper_bound(direct, {1000, 100, false, {{"web_search_20250305", 2}, {"free_tool", 5}}});
+  CHECK(b.total && b.total->nano_usd == 28'000'000u && b.total->rounding == CostRounding::CeilingCatalogueProduct && b.unpriced.empty());
+  b = pricing::upper_bound(direct, {1000, 100, false, {{"unknown_tool", 1}}});
+  CHECK(!b.total && b.unpriced.size() == 1 && b.unpriced.front() == "tool:unknown_tool");
+  b = pricing::upper_bound(flex, {10, 10, false, {}});
+  CHECK(b.total && b.total->nano_usd == 50'000u);
+  b = pricing::upper_bound(pricing::price_of(*c->entry("direct"), "priority"), {10, 10, false, {}});
+  CHECK(!b.total && b.unpriced == std::vector<std::string>({"input", "output"}));
+  // A routing gateway is bounded by its ceiling, never by its listed price.
+  const auto routed = pricing::price_of(*c->entry("vendor/routed"));
+  b = pricing::upper_bound(routed, {1000, 1000, true, {}});
+  CHECK(b.total && b.total->nano_usd == 12'000'000u);
+  CHECK(!pricing::upper_bound(direct, {1, 1, true, {}}).total);
+  CHECK(pricing::upper_bound(direct, {1, 1, true, {}}).unpriced.front() == "ceiling");
+  // The estimate of any usage within the bounds stays at or below the bound.
+  std::uint64_t seed = 7;
+  auto next = [&](std::uint64_t limit) { seed = seed * 6364136223846793005u + 1442695040888963407u; return (seed >> 33) % (limit + 1); };
+  const ServedModel exact{"direct", "direct", ServedRelation::Exact};
+  for (int i = 0; i < 2000; ++i) {
+    const std::uint64_t input_limit = next(200'000), output_cap = next(50'000);
+    const auto bound = pricing::upper_bound(direct, {input_limit, output_cap, false, {}});
+    const auto output = next(output_cap), reasoning = next(output), read = next(input_limit);
+    const auto write = next(input_limit - read), total = read + write + next(input_limit - read - write);
+    const auto e = pricing::estimate(*c, "openai.chat", "", exact, usage(total, output, read, write, reasoning));
+    CHECK(bound.total && e.total && e.total->nano_usd <= bound.total->nano_usd);
+  }
+}
 } // namespace
 
 int main() {
-  try { prices_from_entries(); estimates(); wide_products(); std::cout << "pricing properties passed\n"; return 0; }
+  try { prices_from_entries(); estimates(); wide_products(); bounds(); std::cout << "pricing properties passed\n"; return 0; }
   catch (const std::exception& error) { std::cerr << "pricing test failed: " << error.what() << '\n'; return 1; }
 }
