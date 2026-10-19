@@ -307,9 +307,10 @@ bool Codec::block(json::Value v, uint64_t index, bool streaming) {
     kind = PartKind::RedactedThinking; unknown(v, {"type", "data"});
     if (!v.get("data").is_string()) return fail(ErrorKind::ProtocolCorrupt, "redacted data required");
     bytes = v.get("data").as_string();
-  } else if (type == "tool_use" || type == "server_tool_use") {
+  } else if (type == "tool_use" || type == "server_tool_use" || type == "mcp_tool_use") {
     kind = PartKind::ToolCall;
     if (!nonempty(v.get("id")) || !nonempty(v.get("name")) || !v.get("input").is_object()) return fail(ErrorKind::ProtocolCorrupt, "invalid tool block");
+    if (type == "mcp_tool_use" && !nonempty(v.get("server_name"))) return fail(ErrorKind::ProtocolCorrupt, "MCP call names no server");
     if (!caller(v.get("caller"))) return false;
     const auto toolset = v.get("toolset_name");
     if (type == "tool_use" && (!nullable_string(toolset) || (toolset.is_string() &&
@@ -318,7 +319,7 @@ bool Codec::block(json::Value v, uint64_t index, bool streaming) {
            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
          }))))) return fail(ErrorKind::ProtocolCorrupt, "invalid toolset name");
     header.wire_id = v.get("id").as_string(); header.name = v.get("name").as_string(); header.wire_type = type;
-    header.tool_kind = type == "server_tool_use" ? ToolCallKind::ServerExecuted : ToolCallKind::ClientExecuted;
+    header.tool_kind = type == "tool_use" ? ToolCallKind::ClientExecuted : ToolCallKind::ServerExecuted;
     if (calls_.contains(header.wire_id) || context_->server_tool_name(header.wire_id)) return fail(ErrorKind::ProtocolCorrupt, "duplicate tool id");
     std::string extras = "{";
     for (auto m : v.members()) if (m.key != "type" && m.key != "id" && m.key != "name" && m.key != "input") {
@@ -330,7 +331,8 @@ bool Codec::block(json::Value v, uint64_t index, bool streaming) {
       if (!std::holds_alternative<json::Document>(doc)) return fail(ErrorKind::ProtocolCorrupt, "invalid tool metadata");
       header.wire_metadata = std::make_shared<const json::Document>(std::move(std::get<json::Document>(doc)));
     }
-    calls_.emplace(header.wire_id, Call{header.name, header.tool_kind, index});
+    // An MCP call is answered by `mcp_tool_result`, so it pairs as a call of the tool `mcp`.
+    calls_.emplace(header.wire_id, Call{type == "mcp_tool_use" ? std::string("mcp") : header.name, header.tool_kind, index});
     initial_input = v.get("input").size() != 0;
     if (!streaming || initial_input) { storage = v.get("input").dump(); bytes = storage; }
   } else if (!result_name(type).empty()) {
@@ -345,12 +347,19 @@ bool Codec::block(json::Value v, uint64_t index, bool streaming) {
     if (!correlated || !results_.insert(header.wire_id).second) return fail(ErrorKind::ProtocolCorrupt, "uncorrelated server result");
     if (!server_content(type, v.get("content"))) return false;
     storage = v.dump(); bytes = storage;
+  } else if (std::any_of(descriptor_.family_policy().response_blocks.begin(), descriptor_.family_policy().response_blocks.end(),
+                         [&](const auto& fact) { return fact.type == type; })) {
+    // A block the policy keeps whole (`fallback`, `mcp_tool_listing`): retained as captured and replayed in place.
+    kind = PartKind::Opaque;
+    header.wire_type = type;
+    header.wire_metadata = own(v);
+    if (!header.wire_metadata) return false;
   } else return fail(ErrorKind::Unsupported, "unsupported content block type");
   Block binding{LocalId{static_cast<uint32_t>(index + 1)}, kind};
   binding.initial_input = initial_input;
   binding.citations = std::move(block_citations);
   if (!emit(PartBegin{{0}, binding.local, kind, std::move(header), index})) return false;
-  if ((kind != PartKind::ToolCall || !streaming || initial_input) && !emit(PartDelta{binding.local, {kind, bytes}})) return false;
+  if (kind != PartKind::Opaque && (kind != PartKind::ToolCall || !streaming || initial_input) && !emit(PartDelta{binding.local, {kind, bytes}})) return false;
   if (kind == PartKind::Thinking && v.get("signature").valid()) {
     if (!emit(PartDelta{binding.local, {kind, v.get("signature").as_string(), DeltaChannel::Signature}})) return false;
     binding.signature_started = !v.get("signature").as_string().empty();
@@ -409,6 +418,16 @@ bool Codec::server_content(std::string_view outer, json::Value v) {
     for (auto key : keys) if (!item.get(key).is_string()) return false;
     return true;
   };
+  // An MCP tool's result: a string, or text blocks (which may carry citations).
+  if (outer == "mcp_tool_result") {
+    if (v.is_string()) return true;
+    if (!v.is_array()) return corrupt();
+    for (auto item : v.elements()) {
+      if (!item.is_object() || !strings(item, {"type", "text"})) return corrupt();
+      if (item.get("type").as_string() != "text") ++diagnostics_.unknown_properties;
+    }
+    return true;
+  }
   if (outer == "web_search_tool_result" && v.is_array()) {
     for (auto item : v.elements()) {
       if (!item.is_object() || !strings(item, {"type", "encrypted_content", "title", "url"}) ||

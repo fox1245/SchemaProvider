@@ -46,6 +46,9 @@ struct ServerToolFact {
 };
 // An anthropic-beta value the policy admits at the listed origins. Messages only.
 struct BetaFact { std::string value; std::vector<std::string> origins; };
+// A Messages response block the SDK keeps whole and replays as captured (`fallback`, `mcp_tool_listing`), with the
+// anthropic-beta value a request that replays it needs.
+struct ResponseBlockFact { std::string type; std::string beta{}; };
 // A top-level request member the policy admits for the listed origins (#32). A replay-ineligible extension makes the
 // turn's answer not continuable natively; an eligible one joins the configuration digest.
 struct ExtensionFact { std::string key; std::vector<std::string> origins; ValueSchema value; bool replay_eligible = false; };
@@ -69,6 +72,7 @@ struct FamilyPolicy {
   std::vector<ExtensionFact> extensions;
   std::vector<GatewayFact> openrouter_plugins, openrouter_server_tools;
   std::vector<BetaFact> betas;
+  std::vector<ResponseBlockFact> response_blocks;
   // Captured response parts the service refuses when they are sent back: a part whose data member `member` lacks
   // the member `missing`. Native replay of such a message is refused before dispatch. Generate only.
   std::vector<std::pair<std::string, std::string>> unreplayable_parts;

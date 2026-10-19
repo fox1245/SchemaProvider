@@ -173,6 +173,7 @@ constexpr Entry messages_table[] = {
   {"invalid thinking fields", "messages.block.thinking_invalid"},
   {"redacted data required", "messages.block.redacted_data_required"},
   {"invalid tool block", "messages.block.tool_invalid"},
+  {"MCP call names no server", "messages.block.mcp_server_missing"},
   {"invalid toolset name", "messages.block.toolset_invalid"},
   {"duplicate tool id", "messages.block.tool_id_duplicate"},
   {"invalid tool metadata", "messages.block.tool_metadata_invalid"},
@@ -642,6 +643,14 @@ constexpr Entry messages_request_table[] = {
   {"a tool needs an anthropic-beta value this origin does not admit", "request.messages.tool_beta_not_admitted"},
   {"the policy admits no options for this tool type", "request.messages.tool_options_not_admitted"},
   {"tool options do not match the policy's schema", "request.messages.tool_options_invalid"},
+  {"a replayed block needs an anthropic-beta value this origin does not admit", "request.messages.block_beta_not_admitted"},
+  {"MCP server count limit exceeded", "request.messages.mcp_server_count_limit"},
+  {"MCP servers require unique bounded names", "request.messages.mcp_server_name_invalid"},
+  {"MCP server URLs must be https", "request.messages.mcp_server_url_invalid"},
+  {"MCP authorization tokens must be bounded text", "request.messages.mcp_server_token_invalid"},
+  {"an MCP toolset must name one declared MCP server", "request.messages.mcp_toolset_server_invalid"},
+  {"every MCP server needs its MCP toolset", "request.messages.mcp_server_without_toolset"},
+  {"captured block metadata mismatch", "request.messages.captured_block_mismatch"},
 };
 constexpr Entry responses_request_table[] = {
   {"an OpenRouter server tool is not admitted by the policy", "request.responses.an_openrouter_server_tool_is_not_admitted_by"},

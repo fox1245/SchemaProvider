@@ -210,6 +210,9 @@ Messages typed tools and beta headers (#53):
 - **Named tool choice** may name a typed tool the caller runs.
 - **Toolsets.** A tool result answering a toolset member's call is sent with that call's `toolset_name`.
 - **Invocation limit.** Typed tools the caller runs no longer clear `model_invocation_limit`.
+- **MCP connector.** `messages::Request::mcp_servers` (`McpServer`) and the `mcp_toolset` fact. `mcp_tool_use` decodes as a server `ToolCall` with that `wire_type` and `mcp_tool_result` as a `ServerToolResult`; both replay as captured. An MCP call pairs as a call of `mcp`, also in a native context's pending server calls.
+- **Kept blocks.** The new `response_blocks` facts make a listed response block an `Opaque` part of the captured message, replayed in place. A Messages history may now hold `Opaque` parts in sealed assistant messages. The built-in policy lists `fallback`, `container_upload` and `mcp_tool_listing`; an unlisted block is still `Unsupported`.
+- **Value schemas** gain `map`.
 
 ## From interface 5 to 6
 

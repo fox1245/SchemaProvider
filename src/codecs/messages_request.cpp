@@ -167,6 +167,34 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   for (const auto& tool : request.tools)
     if (const auto* fact = tool.type.empty() ? nullptr : fact_of(tool.type); fact && !need_beta(*fact))
       return Error{ErrorKind::Unsupported, "a tool needs an anthropic-beta value this origin does not admit"};
+  // A replayed block the service only takes with a beta (`mcp_tool_listing`) sends that beta again.
+  for (const auto& message : request.messages)
+    for (const auto& part : message.parts)
+      if (const auto* opaque = std::get_if<Opaque>(&part)) {
+        const auto fact = std::find_if(family.response_blocks.begin(), family.response_blocks.end(), [&](const auto& f) { return f.type == opaque->wire_type; });
+        if (fact == family.response_blocks.end() || fact->beta.empty()) continue;
+        if (!beta_admitted(fact->beta)) return Error{ErrorKind::Unsupported, "a replayed block needs an anthropic-beta value this origin does not admit"};
+        if (std::find(betas.begin(), betas.end(), fact->beta) == betas.end()) betas.push_back(fact->beta);
+      }
+  // MCP servers: bounded, unique names and https URLs, each named by exactly one `mcp_toolset` entry.
+  if (request.mcp_servers.size() > 20) return bad("MCP server count limit exceeded");
+  std::set<std::string_view> server_names;
+  const auto printable = [](std::string_view value, std::size_t limit) {
+    return !value.empty() && value.size() <= limit && std::none_of(value.begin(), value.end(), [](unsigned char c) { return c < 0x20 || c == 0x7f; });
+  };
+  for (const auto& server : request.mcp_servers) {
+    if (!printable(server.name, 255) || !server_names.insert(server.name).second) return bad("MCP servers require unique bounded names");
+    if (!server.url.starts_with("https://") || server.url.size() <= 8 || !printable(server.url, 2048) || server.url.find_first_of(" \"\\") != std::string::npos)
+      return bad("MCP server URLs must be https");
+    if (server.authorization_token && !printable(*server.authorization_token, 8192)) return bad("MCP authorization tokens must be bounded text");
+  }
+  std::map<std::string_view, int> referenced;
+  for (const auto& tool : request.tools) if (tool.type == "mcp_toolset") {
+    const auto name = tool.options ? tool.options->root().get("mcp_server_name") : json::Value{};
+    if (!name.is_string() || !server_names.contains(name.as_string()) || ++referenced[name.as_string()] > 1)
+      return bad("an MCP toolset must name one declared MCP server");
+  }
+  if (referenced.size() != server_names.size()) return bad("every MCP server needs its MCP toolset");
   if (request.tool_choice) {
     const auto& choice = *request.tool_choice;
     switch (choice.mode) {
@@ -383,6 +411,17 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     }
     body.raw("]");
   }
+  if (!request.mcp_servers.empty()) {
+    body.raw(",\"mcp_servers\":[");
+    for (std::size_t i = 0; i < request.mcp_servers.size(); ++i) {
+      const auto& server = request.mcp_servers[i];
+      if (i) body.raw(",");
+      body.raw("{\"type\":\"url\",\"url\":").quoted(server.url).raw(",\"name\":").quoted(server.name);
+      if (server.authorization_token) body.raw(",\"authorization_token\":").quoted(*server.authorization_token);
+      body.raw("}");
+    }
+    body.raw("]");
+  }
   body.raw(",").quoted(descriptor.request_messages_member()).raw(":[");
   std::set<std::string_view> all_call_ids;
   std::map<std::string_view, std::string_view> client_pending;  // call id -> toolset name of the call, if any
@@ -430,9 +469,11 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         if (!assistant || call->id.empty() || call->name.empty() || !call->input || !call->input->root().is_object()) return bad("invalid tool call history");
         if (call->kind == ToolCallKind::ApprovalRequest) return Error{ErrorKind::Unsupported, "approval request replay is unsupported"};
         const bool server = call->kind == ToolCallKind::ServerExecuted;
-        const std::string_view type = server ? "server_tool_use" : "tool_use";
+        const bool mcp = server && call->wire_type == "mcp_tool_use";
+        const std::string_view type = mcp ? "mcp_tool_use" : server ? "server_tool_use" : "tool_use";
         if (call->wire_type != type || !all_call_ids.insert(call->id).second) return bad("tool call type or ownership mismatch");
-        if (server) server_pending.emplace(call->id, call->name);
+        // An MCP call is answered by `mcp_tool_result`, so it pairs as a call of the tool `mcp`.
+        if (server) server_pending.emplace(call->id, mcp ? std::string_view("mcp") : std::string_view(call->name));
         else {
           const auto toolset = call->wire_metadata ? call->wire_metadata->root().get("toolset_name") : json::Value{};
           client_pending.emplace(call->id, toolset.is_string() ? toolset.as_string() : std::string_view{});
@@ -481,6 +522,12 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         const auto raw = server_result->content->root();
         if (!raw.is_object() || !raw.get("type").is_string() || raw.get("type").as_string() != server_result->wire_type || !raw.get("tool_use_id").is_string() || raw.get("tool_use_id").as_string() != server_result->tool_use_id) return bad("server result metadata mismatch");
         server_pending.erase(found);
+        body.value(raw, 4);
+      } else if (const auto* opaque = std::get_if<Opaque>(&part); opaque && assistant && opaque->wire_metadata &&
+                 std::any_of(family.response_blocks.begin(), family.response_blocks.end(), [&](const auto& f) { return f.type == opaque->wire_type; })) {
+        // A block the policy keeps whole (`fallback`, `mcp_tool_listing`) goes back exactly as captured, in place.
+        const auto raw = opaque->wire_metadata->root();
+        if (!raw.is_object() || !raw.get("type").is_string() || raw.get("type").as_string() != opaque->wire_type) return bad("captured block metadata mismatch");
         body.value(raw, 4);
       } else return Error{ErrorKind::Unsupported, "part cannot be replayed as Messages input"};
       if (!body.ok()) return Error{has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest,

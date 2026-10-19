@@ -50,6 +50,15 @@ void value_schemas() {
                           R"({"type":"enum","values":["a","a"]})", R"({"type":"object","properties":{},"required":["x"]})",
                           R"({"one_of":[{"type":"null"}]})", R"({"type":"integer","minimum":3,"maximum":1})", R"({"type":"integer","minimum":1.5})"})
     CHECK(std::holds_alternative<descriptor::ConfigError>(schema(bad)));
+  // A map: keys the caller names (tool names) as name tokens, each value of one schema.
+  auto map = schema(R"({"type":"map","max_items":2,"values":{"type":"object","properties":{"enabled":{"type":"boolean"}}}})");
+  CHECK(std::holds_alternative<descriptor::ValueSchema>(map));
+  const auto& m = std::get<descriptor::ValueSchema>(map);
+  CHECK(conforms(m, R"({"resolve-library-id":{"enabled":true},"get.docs_2":{}})") && conforms(m, "{}"));
+  for (const auto* bad : {R"({"a":{},"b":{},"c":{}})", R"({"has space":{}})", R"({"a":{"enabled":1}})", R"({"a":{"other":true}})", R"([])"})
+    CHECK(!conforms(m, bad));
+  for (const auto* bad : {R"({"type":"map","values":{"type":"null"}})", R"({"type":"map","max_items":2})", R"({"type":"map","max_items":2,"values":{"type":"null"},"keys":{}})"})
+    CHECK(std::holds_alternative<descriptor::ConfigError>(schema(bad)));
   std::string deep = R"({"type":"null"})";
   for (int i = 0; i < 9; ++i) deep = R"({"type":"array","max_items":1,"items":)" + deep + "}";
   CHECK(std::holds_alternative<descriptor::ConfigError>(schema(deep)));
@@ -136,11 +145,22 @@ void policy_facts() {
     const auto loaded = policy_with(family, fragment);
     CHECK(std::holds_alternative<descriptor::ConfigError>(loaded) && std::get<descriptor::ConfigError>(loaded).pointer == pointer);
   };
-  CHECK(admitted("anthropic.messages", R"("betas":[{"value":"advisor-tool-2026-03-01","origins":["https://api.anthropic.com"]},)"
-                                       R"({"value":"fixture-beta-2026-01-01","origins":["https://api.anthropic.com"]}])")
-            ->family("anthropic.messages")->betas.size() == 2);
+  // The built-in betas plus `extra`, without `dropped`.
+  auto betas_with = [](std::string_view extra, std::string_view dropped = {}) {
+    std::string fragment = R"("betas":[)";
+    for (const auto& beta : descriptor::builtin_policy()->family("anthropic.messages")->betas)
+      if (beta.value != dropped) fragment += R"({"value":")" + beta.value + R"(","origins":["https://api.anthropic.com"]},)";
+    return fragment + R"({"value":")" + std::string(extra) + R"(","origins":["https://api.anthropic.com"]}])";
+  };
+  const auto builtin_betas = descriptor::builtin_policy()->family("anthropic.messages")->betas.size();
+  CHECK(admitted("anthropic.messages", betas_with("fixture-beta-2026-01-01"))->family("anthropic.messages")->betas.size() == builtin_betas + 1);
   // The built-in advisor fact names its beta, so dropping that beta refuses the policy.
-  refused_at("anthropic.messages", R"("betas":[{"value":"fixture-beta-2026-01-01","origins":["https://api.anthropic.com"]}])", "/server_tools/beta");
+  refused_at("anthropic.messages", betas_with("fixture-beta-2026-01-01", "advisor-tool-2026-03-01"), "/server_tools/beta");
+  refused_at("anthropic.messages", betas_with("fixture-beta-2026-01-01", "mcp-client-2026-09-15"), "/response_blocks/beta");
+  // Response blocks never name a block the codec types.
+  for (const auto* type : {"text", "tool_use", "mcp_tool_use", "web_search_tool_result", "Upper"})
+    refused_at("anthropic.messages", std::string(R"("response_blocks":[{"type":")") + type + R"("}])", "/response_blocks/type");
+  refused_at("openai.chat", R"("response_blocks":[{"type":"fallback"}])", "/response_blocks");
   refused_at("google.generate", R"("betas":[{"value":"fixture-beta","origins":["https://example.test"]}])", "/betas");
   refused_at("anthropic.messages", R"("betas":[{"value":"Upper-Case","origins":["https://example.test"]}])", "/betas/value");
   refused_at("anthropic.messages", R"("server_tools":[{"type":"memory_20250818","name":"memory","max_uses":true,"client":true}])", "/server_tools/max_uses");

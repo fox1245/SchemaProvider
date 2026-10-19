@@ -334,6 +334,11 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
     hash.text("sp.messages.betas.v1"); hash.number(request.betas.size());
     for (const auto& beta : request.betas) hash.text(beta);
   }
+  // The servers are configuration; their authorization tokens are credentials, rotated without changing it.
+  if (!request.mcp_servers.empty()) {
+    hash.text("sp.messages.mcp_servers.v1"); hash.number(request.mcp_servers.size());
+    for (const auto& server : request.mcp_servers) { hash.text(server.name); hash.text(server.url); }
+  }
   extensions_digest(hash, request.extensions);
   return hash.finish(digest);
 }
@@ -774,8 +779,10 @@ void NativeContext::bind_history(const std::vector<Message>& messages, bool port
   std::map<std::string, std::string> pending;
   for (size_t index = 0; index < messages.size(); ++index) {
     const auto& message = messages[index];
-    if (family_ == Family::Messages && (message.wire_output || std::any_of(message.parts.begin(), message.parts.end(), [](const Part& part) {
-          return std::holds_alternative<Reasoning>(part) || std::holds_alternative<Opaque>(part) || std::holds_alternative<Thought>(part);
+    // A Messages block kept whole (`fallback`, `mcp_tool_listing`) is an Opaque part of a captured assistant message.
+    if (family_ == Family::Messages && (message.wire_output || std::any_of(message.parts.begin(), message.parts.end(), [&](const Part& part) {
+          return std::holds_alternative<Reasoning>(part) || std::holds_alternative<Thought>(part) ||
+                 (std::holds_alternative<Opaque>(part) && (!message.native || message.role != Role::Assistant));
         }))) { history_valid_ = false; return; }
     if (family_ != Family::Messages && family_ != Family::Chat) {
       if (message.native) {
@@ -808,7 +815,9 @@ void NativeContext::bind_history(const std::vector<Message>& messages, bool port
     // One bounded content hash per history message, not one rehash per capsule.
     if (!append_prefix(prefix_, content, index, family_name(family_), policy_->resources())) { valid_ = false; return; }
     for (const auto& part : message.parts) {
-      if (const auto* call = std::get_if<ToolCall>(&part); call && call->kind == ToolCallKind::ServerExecuted) pending.emplace(call->id, call->name);
+      // A Messages MCP call is answered by `mcp_tool_result`, so it pairs as a call of the tool `mcp`.
+      if (const auto* call = std::get_if<ToolCall>(&part); call && call->kind == ToolCallKind::ServerExecuted)
+        pending.emplace(call->id, call->wire_type == "mcp_tool_use" ? std::string("mcp") : call->name);
       if (const auto* result = std::get_if<ServerToolResult>(&part)) pending.erase(result->tool_use_id);
     }
   }

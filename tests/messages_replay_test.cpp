@@ -730,9 +730,57 @@ void typed_client_tools_and_betas() {
   CHECK(document(next_wire.body)->root().get("messages").at(1).get("content").at(1).get("type").as_string() == "advisor_tool_result");
   rejected(loopback, next, ErrorKind::Unsupported);
 }
+// The MCP connector (#53): servers each named by one toolset entry, written with their token, which native replay
+// never binds; MCP blocks and kept blocks replay as captured, and a replayed listing sends its beta again.
+void mcp_connector_and_replay() {
+  const auto anthropic = descriptor_value("https://api.anthropic.com");
+  auto request = base_request(); request.max_tokens = 512;
+  request.mcp_servers = {messages::McpServer{"ctx", "https://mcp.example.test/mcp", std::string("SECRET_TOKEN_A")}};
+  request.tools = {typed("", "mcp_toolset", R"({"mcp_server_name":"ctx","default_config":{"enabled":false},"configs":{"resolve-library-id":{"enabled":true}}})")};
+  const auto wire = encoded(anthropic, request);
+  const auto body = document(wire.body);
+  const auto server = body->root().get("mcp_servers").at(0);
+  CHECK(server.get("type").as_string() == "url" && server.get("name").as_string() == "ctx" && server.get("authorization_token").as_string() == "SECRET_TOKEN_A");
+  CHECK(body->root().get("tools").at(0).get("mcp_server_name").as_string() == "ctx" && !body->root().get("tools").at(0).get("name").valid());
+  CHECK(beta_header(wire) == "mcp-client-2025-11-20");
+  CHECK(!wire.model_invocation_limit);  // the service calls MCP tools without a declared limit
+  auto refused = [&](auto change) { auto r = request; change(r); rejected(anthropic, r, ErrorKind::InvalidRequest); };
+  refused([](auto& r) { r.tools.clear(); });
+  refused([](auto& r) { r.mcp_servers.push_back({"other", "https://other.example.test", std::nullopt}); });
+  refused([](auto& r) { r.tools.push_back(r.tools[0]); });
+  refused([](auto& r) { r.mcp_servers[0].url = "http://mcp.example.test"; });
+  refused([](auto& r) { r.mcp_servers[0].name = ""; });
+  refused([](auto& r) { r.mcp_servers[0].authorization_token = "line\nbreak"; });
+  refused([](auto& r) { r.tools[0].options = document(R"({"mcp_server_name":"ctx","configs":{"has space":{"enabled":true}}})"); });
+  refused([](auto& r) { r.tools[0].options = document(R"({"mcp_server_name":"missing"})"); });
+  for (const auto& error : {messages::encode(anthropic, [&] { auto r = request; r.mcp_servers[0].url = "http://x"; return r; }(), false)})
+    CHECK(std::get<Error>(error).safe_message.find("SECRET_TOKEN") == std::string::npos);
+
+  // A captured turn with a listing, an MCP call and its result, and a fallback block replays in place.
+  const std::string captured = R"([{"type":"mcp_tool_listing","mcp_server_name":"ctx","tools":[{"name":"resolve-library-id","input_schema":{"type":"object"}}]},)"
+                               R"({"type":"mcp_tool_use","id":"mcptoolu_1","name":"resolve-library-id","server_name":"ctx","input":{"libraryName":"react"}},)"
+                               R"({"type":"mcp_tool_result","tool_use_id":"mcptoolu_1","is_error":false,"content":[{"type":"text","text":"/facebook/react"}]},)"
+                               R"({"type":"fallback","from":{"model":"fixture-model"},"to":{"model":"fixture-other"},"trigger":{"type":"refusal","category":null}},)"
+                               R"({"type":"text","text":"/facebook/react"}])";
+  auto answered = capture(anthropic, request, captured);
+  auto next = request; next.messages.push_back(answered); next.messages.push_back(user("And Vue?"));
+  // A rotated token keeps the conversation continuable; a different server does not.
+  next.mcp_servers[0].authorization_token = "SECRET_TOKEN_B";
+  const auto next_wire = encoded(anthropic, next);
+  CHECK(beta_header(next_wire) == "mcp-client-2025-11-20,mcp-client-2026-09-15");
+  const auto next_body = document(next_wire.body);
+  const auto replayed = next_body->root().get("messages").at(1).get("content");
+  CHECK(replayed.size() == 5 && replayed.at(0).get("type").as_string() == "mcp_tool_listing" && replayed.at(1).get("server_name").as_string() == "ctx" &&
+        replayed.at(2).get("type").as_string() == "mcp_tool_result" && replayed.at(3).get("to").get("model").as_string() == "fixture-other");
+  auto moved = next; moved.mcp_servers[0].url = "https://elsewhere.example.test/mcp";
+  rejected(anthropic, moved);
+  // The listing's beta is admitted only at the Anthropic origin.
+  const auto loopback = descriptor_value();
+  rejected(loopback, next, ErrorKind::Unsupported);
+}
 int main() {
   try {
-    server_tool_options(); typed_client_tools_and_betas();
+    server_tool_options(); typed_client_tools_and_betas(); mcp_connector_and_replay();
     typed_wire_request(); native_retention_and_content_integrity(); prefix_and_origin_binding();
     immutable_context_and_failed_capture(); client_loop_ownership(); server_loop_ownership_and_pause(); signature_accumulation_and_limits();
     invalid_calls_are_not_repaired();

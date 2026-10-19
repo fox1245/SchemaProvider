@@ -23,6 +23,13 @@ struct ToolDefinition {
   // policy's fact for the tool type declares their schema (#32); nothing it does not name is sent.
   std::shared_ptr<const json::Document> options{};
 };
+// A remote MCP server the service connects to (the MCP connector). An `mcp_toolset` tool entry names it in its
+// options (`mcp_server_name`), and each server is named by exactly one. The authorization token is sent as given
+// and never bound into native replay state.
+struct McpServer {
+  std::string name, url;
+  std::optional<std::string> authorization_token{};
+};
 enum class ThinkingMode { Manual, Adaptive, Disabled };
 // New values go at the end.
 enum class OutputEffort { Low, Medium, High, Max, XHigh };
@@ -53,6 +60,8 @@ struct Request {
   // anthropic-beta values to send, each admitted by the policy at this origin. A value a declared tool or a replayed
   // block needs is added without being listed here.
   std::vector<std::string> betas{};
+  // MCP servers the service calls tools on (`mcp_servers`), each named by one `mcp_toolset` tool entry.
+  std::vector<McpServer> mcp_servers{};
 
   static Request simple(std::string model_name, std::string user_prompt,
                         std::optional<uint64_t> output_cap = std::nullopt,
