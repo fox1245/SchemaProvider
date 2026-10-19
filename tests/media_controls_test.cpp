@@ -248,10 +248,13 @@ void gemini_service_tool_options() {
   refused([](auto& r) { r.audio_format->delivery = "uri"; });
   refused([](auto& r) { r.audio_format->bit_rate = 0u; });
 
-  // Next to a client function, an MCP server turns the invocations on; computer use alone runs nothing on the
-  // service, so it neither needs them nor may ask for them.
+  // Next to a client function only a built-in tool turns the invocations on: the service requires them there, not
+  // for an MCP server, which may still ask for them. Computer use runs nothing on the service, so it neither needs
+  // them nor may ask for them.
   auto schema = own(R"({"type":"object","properties":{}})");
   auto mcp_only = request<gemini::Request>(); mcp_only.mcp_servers = {server}; mcp_only.tools = {gemini::ToolDefinition{"lookup", "Looks up", schema}};
+  CHECK(!parse(encoded_ok(descriptor, mcp_only).body).root().get("toolConfig").valid());
+  mcp_only.server_tool_invocations = true;
   CHECK(parse(encoded_ok(descriptor, mcp_only).body).root().get("toolConfig").get("includeServerSideToolInvocations").as_bool());
   auto computer_only = request<gemini::Request>(); computer_only.builtin_tools = {gemini::ComputerUseTool{}}; computer_only.tools = mcp_only.tools;
   CHECK(!parse(encoded_ok(descriptor, computer_only).body).root().get("toolConfig").valid());

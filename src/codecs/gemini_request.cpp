@@ -381,7 +381,8 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     const bool computer_use = std::any_of(request.builtin_tools.begin(), request.builtin_tools.end(),
                                           [](const BuiltinTool& tool) { return std::holds_alternative<ComputerUseTool>(tool); });
     // Every built-in tool but computer use, and every MCP server, runs on the service.
-    const bool service_runs_tools = !request.mcp_servers.empty() || request.builtin_tools.size() > (computer_use ? 1u : 0u);
+    const bool builtin_service_tools = request.builtin_tools.size() > (computer_use ? 1u : 0u);
+    const bool service_runs_tools = !request.mcp_servers.empty() || builtin_service_tools;
     if (!request.tools.empty() || !request.builtin_tools.empty() || !request.mcp_servers.empty()) {
       w.raw(",\"tools\":[");
       bool tool_comma = false;
@@ -486,9 +487,9 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       }
       w.raw("]");
     }
-    // The service refuses its own tools next to client functions unless it also returns their invocations
-    // (toolCall and toolResponse parts), so that combination turns them on by default.
-    const bool server_invocations = request.server_tool_invocations.value_or(!request.tools.empty() && service_runs_tools);
+    // The service refuses a built-in tool next to a client function unless it also returns the tool's invocations
+    // (toolCall and toolResponse parts), so that combination turns them on by default. MCP servers do not need them.
+    const bool server_invocations = request.server_tool_invocations.value_or(!request.tools.empty() && builtin_service_tools);
     if (server_invocations && !service_runs_tools) return invalid("server tool invocations require a service-run tool");
     const bool write_invocations = service_runs_tools && (request.server_tool_invocations || server_invocations);
     if (request.retrieval_config) {

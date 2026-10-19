@@ -557,7 +557,7 @@ On 2026-10-19 a background `gemini-3.1-flash-lite` interaction answered `Pending
 
 `mcp_servers` lists remote MCP servers that the service connects to over streamable HTTP and whose tools it runs: `name`, an https `url`, `headers` (single-line values), `timeout` and `sse_read_timeout` as durations such as `"30s"`, and `terminate_on_close`. `retrieval_config` writes `toolConfig.retrievalConfig`: a `latitude`/`longitude` pair and a `language_code` for Maps and Search grounding.
 
-**Invocations.** `server_tool_invocations` writes `toolConfig.includeServerSideToolInvocations`. The service then also returns the calls and results of the tools it runs: every built-in tool except computer use, and MCP servers. The service refuses such a tool next to a client function unless the flag is on, so when it is unset the SDK turns it on for exactly that combination. Turning it on with no tool the service runs is `InvalidRequest`.
+**Invocations.** `server_tool_invocations` writes `toolConfig.includeServerSideToolInvocations`. The service then also returns the calls and results of the tools it runs: every built-in tool except computer use, and MCP servers. The service refuses a built-in tool next to a client function unless the flag is on, so when it is unset the SDK turns it on for exactly that combination. An MCP server next to a client function does not need it, and the SDK leaves it off there (see the MCP replay limit below). Turning it on with no tool the service runs is `InvalidRequest`.
 
 **Decoding.**
 - **Calls.** `executableCode` (always) and `toolCall` (with invocations) are `ToolCall`s of kind `ServerExecuted` with the part's `wire_type`. Code execution's name is `code_execution` and its input is the `executableCode` object. A `toolCall` is named by its `toolName` (an MCP server's `context7:resolve-library-id`) or else its lower-cased `toolType` (`google_search_web`), and its input is its `args`.
@@ -577,7 +577,7 @@ On 2026-10-19 a background `gemini-3.1-flash-lite` interaction answered `Pending
 
 **Service limits seen in that check.** These are the service's decisions, so the SDK sends the fields either way:
 - **Image search.** Not enabled for `gemini-3.1-flash-lite` or `gemini-3.6-flash`.
-- **MCP replay.** The service refuses its own MCP `toolCall` in the next turn's history ("Tool type of tool_call part does not match with tool call context"); that part has no `toolType`. MCP conversations continue without invocations.
+- **MCP replay.** The service refuses its own MCP `toolCall` in the next turn's history ("Tool type of tool_call part does not match with tool call context"); that part has no `toolType`. Without invocations, the MCP conversation continued, also next to a client function. OpenAI Responses accepted its own `mcp_call` items in the next turn.
 - **TTS formats.** `gemini-3.8-flash-lite-tts` honoured `AUDIO_L16`, `AUDIO_WAV`, `AUDIO_MULAW` and `AUDIO_MP3`, refused `AUDIO_OGG_OPUS`, `bit_rate` and `delivery`, and answered at 24 kHz whatever `sample_rate` said. The `Media` MIME parameters report the rate it used.
 
 ## Explicit portable Gemini history
