@@ -47,18 +47,16 @@ StopKind mapped(descriptor::StopKind k) {
   }
   return StopKind::Unknown;
 }
+// A server tool's result block is named after the tool: <tool>_tool_result answers a call named <tool>, or one of
+// its variants named <tool>_<variant> (tool_search_tool_regex). A tool the service adds needs no SDK release.
 std::string_view result_name(std::string_view type) {
-  if (type == "web_search_tool_result") return "web_search";
-  if (type == "web_fetch_tool_result") return "web_fetch";
-  if (type == "code_execution_tool_result") return "code_execution";
-  if (type == "bash_code_execution_tool_result") return "bash_code_execution";
-  if (type == "text_editor_code_execution_tool_result") return "text_editor_code_execution";
-  if (type == "tool_search_tool_result") return "tool_search";
-  return {};
+  constexpr std::string_view suffix = "_tool_result";
+  if (type.size() <= suffix.size() || !type.ends_with(suffix)) return {};
+  return type.substr(0, type.size() - suffix.size());
 }
 bool result_matches(std::string_view type, std::string_view name) {
   const auto expected = result_name(type);
-  return expected == name || (expected == "tool_search" && (name == "tool_search_tool_regex" || name == "tool_search_tool_bm25"));
+  return !expected.empty() && (expected == name || (name.size() > expected.size() && name.starts_with(expected) && name[expected.size()] == '_'));
 }
 // Only tool argument objects may retain duplicate keys as InvalidToolCall.
 // Validate every other subtree of a rejected-but-syntactically-valid document.
@@ -268,7 +266,10 @@ bool Codec::caller(json::Value v) {
     if (v.get("tool_id").valid()) return fail(ErrorKind::ProtocolCorrupt, "direct caller has tool id");
     return true;
   }
-  if (type != "code_execution_20250825" && type != "code_execution_20260120" && type != "code_execution_20260521") return fail(ErrorKind::Unsupported, "unknown tool caller type");
+  // A server tool calling a client tool (programmatic calling) is named by its type, which the policy admits.
+  const auto& tools = descriptor_.family_policy().server_tools;
+  if (std::none_of(tools.begin(), tools.end(), [&](const auto& fact) { return fact.type == type; }))
+    return fail(ErrorKind::Unsupported, "unknown tool caller type");
   return nonempty(v.get("tool_id")) || fail(ErrorKind::ProtocolCorrupt, "server caller id required");
 }
 bool Codec::block(json::Value v, uint64_t index, bool streaming) {
@@ -427,8 +428,9 @@ bool Codec::server_content(std::string_view outer, json::Value v) {
         !doc.is_object() || !strings(doc, {"type"}) || doc.get("type").as_string() != "document" ||
         !nullable_string(doc.get("title")) || !source.is_object() || !strings(source, {"type", "data", "media_type"})) return corrupt();
     if (citations.valid() && !citations.is_null() && (!citations.is_object() || !citations.get("enabled").is_bool())) return corrupt();
+    // Another document source stays in the retained block: the answer is not refused for it.
     if (!((source.get("type").as_string() == "base64" && source.get("media_type").as_string() == "application/pdf") ||
-          (source.get("type").as_string() == "text" && source.get("media_type").as_string() == "text/plain"))) return fail(ErrorKind::Unsupported, "unknown fetch document source");
+          (source.get("type").as_string() == "text" && source.get("media_type").as_string() == "text/plain"))) ++diagnostics_.unknown_properties;
     return true;
   }
   const bool code = outer == "code_execution_tool_result" && (type == "code_execution_result" || type == "encrypted_code_execution_result");
@@ -446,7 +448,7 @@ bool Codec::server_content(std::string_view outer, json::Value v) {
     if (type == "text_editor_code_execution_view_result") {
       if (!strings(v, {"content", "file_type"})) return corrupt();
       const auto file = v.get("file_type").as_string();
-      if (file != "text" && file != "image" && file != "pdf") return fail(ErrorKind::Unsupported, "unknown editor file type");
+      if (file != "text" && file != "image" && file != "pdf") ++diagnostics_.unknown_properties;
       for (auto key : {"num_lines", "start_line", "total_lines"}) {
         auto n = v.get(key); if (n.valid() && !n.is_null() && !count_value(n)) return corrupt();
       }
@@ -471,7 +473,10 @@ bool Codec::server_content(std::string_view outer, json::Value v) {
         !ref.get("type").is_string() || ref.get("type").as_string() != "tool_reference") return corrupt();
     return true;
   }
-  return fail(ErrorKind::Unsupported, "unknown server result content type");
+  // A result shape the SDK does not know (a new tool, or a new kind of result) stays whole in the retained block and
+  // is counted as unknown; the billed answer is not refused for it.
+  ++diagnostics_.unknown_properties;
+  return true;
 }
 void Codec::conflict(std::string_view key, std::string_view detail) {
   usage_.quality = UsageQuality::Inconsistent;

@@ -242,6 +242,10 @@ void tool_fragments() {
   CHECK((*member).key == "x" && (*member++).value.as_uint() == 1);
   CHECK((*member).key == "x" && (*member++).value.as_uint() == 2 && member == members.end());
   failed(buffered(body(R"([{"type":"tool_use","id":"a","name":"f","input":{"x":1,"x":2},"caller":{"type":"direct","type":"direct"}}])")), ErrorKind::ProtocolCorrupt);
+  // A server caller is a server tool type the policy admits, so a new code execution version admits its calls.
+  CHECK(completed(buffered(body(R"([{"type":"tool_use","id":"a","name":"lookup","input":{},"caller":{"type":"code_execution_20260521","tool_id":"srv_1"}}])", "\"tool_use\""))).stop.kind == StopKind::ToolUse);
+  failed(buffered(body(R"([{"type":"tool_use","id":"a","name":"lookup","input":{},"caller":{"type":"future_runner_20270101","tool_id":"srv_1"}}])", "\"tool_use\"")), ErrorKind::Unsupported);
+  failed(buffered(body(R"([{"type":"tool_use","id":"a","name":"lookup","input":{},"caller":{"type":"code_execution_20260521"}}])", "\"tool_use\"")), ErrorKind::ProtocolCorrupt);
 }
 void server_semantics() {
   const std::string call = R"({"type":"server_tool_use","id":"srv_a","name":"web_search","input":{"query":"x"}})";
@@ -273,7 +277,11 @@ void server_result_shapes() {
     {"text_editor_code_execution", "text_editor_code_execution_tool_result", R"({"type":"text_editor_code_execution_view_result","content":"one\n","file_type":"text","num_lines":1,"start_line":1,"total_lines":1})"},
     {"text_editor_code_execution", "text_editor_code_execution_tool_result", R"({"type":"text_editor_code_execution_create_result","is_file_update":false})"},
     {"text_editor_code_execution", "text_editor_code_execution_tool_result", R"({"type":"text_editor_code_execution_str_replace_result","lines":["one"],"new_lines":1,"new_start":0,"old_lines":1,"old_start":0})"},
-    {"tool_search_tool_regex", "tool_search_tool_result", R"({"type":"tool_search_tool_search_result","tool_references":[{"type":"tool_reference","tool_name":"lookup"}]})"}
+    {"tool_search_tool_regex", "tool_search_tool_result", R"({"type":"tool_search_tool_search_result","tool_references":[{"type":"tool_reference","tool_name":"lookup"}]})"},
+    // A tool the service adds, and a result kind the SDK does not know, decode by the block's name.
+    {"advisor", "advisor_tool_result", R"({"type":"advisor_result","text":"consider the edge case"})"},
+    {"web_fetch", "web_fetch_tool_result", R"({"type":"web_fetch_result","url":"https://example.test","retrieved_at":null,"content":{"type":"document","title":null,"source":{"type":"base64","media_type":"image/png","data":"AA=="}}})"},
+    {"code_execution", "code_execution_tool_result", R"({"type":"future_execution_result","note":"new"})"}
   };
   for (const auto& item : cases) {
     const std::string call = "{\"type\":\"server_tool_use\",\"id\":\"srv\",\"name\":" + json::quote(item.name) + ",\"input\":{}}";
@@ -287,6 +295,9 @@ void server_result_shapes() {
       CHECK(json::equal(stored.content->root(), std::get<json::Document>(expected).root()));
     }
   }
+  // A result names its own tool: one for another tool is still uncorrelated.
+  failed(buffered(body(R"([{"type":"server_tool_use","id":"srv","name":"advisor","input":{}},{"type":"web_search_tool_result","tool_use_id":"srv","content":[]}])")), ErrorKind::ProtocolCorrupt);
+  failed(buffered(body(R"([{"type":"server_tool_use","id":"srv","name":"advisory","input":{}},{"type":"advisor_tool_result","tool_use_id":"srv","content":{"type":"advisor_result"}}])")), ErrorKind::ProtocolCorrupt);
 }
 void stop_classes() {
   const std::vector<std::pair<std::string, StopKind>> cases{{"end_turn", StopKind::EndTurn}, {"tool_use", StopKind::ToolUse}, {"max_tokens", StopKind::MaxTokens}, {"pause_turn", StopKind::PauseTurn}, {"refusal", StopKind::Refusal}, {"model_context_window_exceeded", StopKind::ContextLimit}, {"stop_sequence", StopKind::StopSequence}, {"future_reason", StopKind::Unknown}};

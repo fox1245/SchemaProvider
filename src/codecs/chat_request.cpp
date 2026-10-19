@@ -55,8 +55,9 @@ std::string_view modality_name(OutputModality modality) noexcept {
   }
   return {};
 }
+// The service names the formats (wav, mp3, pcm16, ...); the SDK checks the shape.
 bool audio_format_name(std::string_view format) noexcept {
-  return format == "wav" || format == "aac" || format == "mp3" || format == "flac" || format == "opus" || format == "pcm16";
+  return !format.empty() && format.size() <= 16 && std::all_of(format.begin(), format.end(), [](char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'); });
 }
 bool config_token(std::string_view text, std::size_t maximum = 64) noexcept {
   if (text.empty() || text.size() > maximum) return false;

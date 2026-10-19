@@ -341,6 +341,10 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
     hash.number(request.include->size());
     for (const auto value : *request.include) hash.number(static_cast<unsigned>(value));
   }
+  if (!request.include_names.empty()) {
+    hash.text("sp.responses.include_names.v1"); hash.number(request.include_names.size());
+    for (const auto& name : request.include_names) hash.text(name);
+  }
   hash.number(request.hosted_tools.size());
   auto optional_text = [&](const std::optional<std::string>& value) { hash.number(value.has_value()); if (value) hash.text(*value); };
   auto optional_number = [&](const auto& value) { hash.number(value.has_value()); if (value) hash.number(static_cast<uint64_t>(*value)); };
@@ -400,6 +404,7 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
         hash.text(tool.environment); hash.number(tool.display_width); hash.number(tool.display_height);
       } else if constexpr (std::is_same_v<T, responses::OpenRouterServerTool>) {
         hash.text(tool.type); hash.document(tool.parameters);
+
       } else if constexpr (std::is_same_v<T, responses::ShellTool>) {
         hash.number(tool.environment.skills.size());
         for (const auto& skill : tool.environment.skills) hash.text(skill.skill_id);

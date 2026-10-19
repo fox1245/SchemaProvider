@@ -21,7 +21,8 @@ struct ToolDefinition {
   std::optional<uint64_t> max_content_tokens;
 };
 enum class ThinkingMode { Manual, Adaptive, Disabled };
-enum class OutputEffort { Low, Medium, High, Max };
+// New values go at the end.
+enum class OutputEffort { Low, Medium, High, Max, XHigh };
 enum class CacheTtl { FiveMinutes, OneHour };
 struct CacheControl { std::optional<CacheTtl> ttl; };
 enum class ToolChoiceMode { Auto, Any, None, Tool };

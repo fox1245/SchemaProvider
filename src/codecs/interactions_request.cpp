@@ -23,10 +23,6 @@ std::string lower(std::string_view text) {
   for (char& c : value) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + ('a' - 'A'));
   return value;
 }
-bool one_of(std::string_view value, std::initializer_list<std::string_view> values) {
-  for (auto item : values) if (item == value) return true;
-  return false;
-}
 bool duration_valid(std::string_view value) {
   if (value.empty() || value.back() != 's') return false;
   value.remove_suffix(1);
@@ -171,18 +167,18 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       if constexpr (!std::is_same_v<T, TextResponseFormat>)
         if (value.delivery && *value.delivery != Delivery::Inline && *value.delivery != Delivery::Uri) error = "invalid delivery mode";
       if constexpr (std::is_same_v<T, AudioResponseFormat>) {
-        if (value.mime_type && !one_of(*value.mime_type, {"audio/mp3","audio/ogg_opus","audio/l16","audio/wav","audio/alaw","audio/mulaw"})) error = "unsupported audio output MIME type";
-        if (value.bit_rate && value.mime_type && !one_of(*value.mime_type, {"audio/mp3","audio/ogg_opus"})) error = "audio bit rate only applies to MP3 or Opus";
+        // The service names the formats; the SDK checks their shape and the media kind.
+        if (value.mime_type && (!mime_syntax(*value.mime_type) || mime_kind(*value.mime_type) != MediaKind::Audio)) error = "audio output MIME type must be an audio MIME type";
       } else if constexpr (std::is_same_v<T, ImageResponseFormat>) {
-        if (value.mime_type && *value.mime_type != "image/jpeg") error = "unsupported image output MIME type";
-        if (value.aspect_ratio && !one_of(*value.aspect_ratio, {"1:1","1:4","4:1","1:8","8:1","2:3","3:2","3:4","4:3","4:5","5:4","9:16","16:9","21:9"})) error = "unsupported image aspect ratio";
-        if (value.image_size && !one_of(*value.image_size, {"512","1K","2K","4K"})) error = "unsupported image size";
+        if (value.mime_type && (!mime_syntax(*value.mime_type) || mime_kind(*value.mime_type) != MediaKind::Image)) error = "image output MIME type must be an image MIME type";
+        if (value.aspect_ratio && !request_controls::aspect_ratio_syntax(*value.aspect_ratio)) error = "image aspect ratio must be W:H";
+        if (value.image_size && !request_controls::size_token(*value.image_size)) error = "image size must be a short token";
       } else if constexpr (std::is_same_v<T, VideoResponseFormat>) {
-        if (value.aspect_ratio && !one_of(*value.aspect_ratio, {"16:9","9:16"})) error = "unsupported video aspect ratio";
-        if (value.resolution && !one_of(*value.resolution, {"360p","720p","1080p","4k"})) error = "unsupported video resolution";
+        if (value.aspect_ratio && !request_controls::aspect_ratio_syntax(*value.aspect_ratio)) error = "video aspect ratio must be W:H";
+        if (value.resolution && !request_controls::size_token(*value.resolution)) error = "video resolution must be a short token";
         if (value.duration && !duration_valid(*value.duration)) error = "video duration requires protobuf Duration syntax";
       } else {
-        if (value.mime_type && !one_of(*value.mime_type, {"application/json","text/plain"})) error = "unsupported text output MIME type";
+        if (value.mime_type && !mime_syntax(*value.mime_type)) error = "text output MIME type must be a MIME type";
         if (value.schema && (!value.mime_type || *value.mime_type != "application/json" || !value.schema->root().is_object())) error = "text schema requires application/json and an object schema";
       }
     }, format);

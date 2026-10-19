@@ -563,7 +563,7 @@ void thinking_cache_tool_controls() {
   CHECK(document(encoded(descriptor, request).body)->root().get("tool_choice").get("type").as_string() == "none");
   for (const auto& [value, name] : std::vector<std::pair<messages::OutputEffort, std::string_view>>{
       {messages::OutputEffort::Low, "low"}, {messages::OutputEffort::Medium, "medium"},
-      {messages::OutputEffort::High, "high"}, {messages::OutputEffort::Max, "max"}}) {
+      {messages::OutputEffort::High, "high"}, {messages::OutputEffort::Max, "max"}, {messages::OutputEffort::XHigh, "xhigh"}}) {
     auto effort_request = request; effort_request.output_effort = value;
     CHECK(document(encoded(descriptor, effort_request).body)->root().get("output_config").get("effort").as_string() == name);
   }

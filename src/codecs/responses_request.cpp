@@ -189,6 +189,14 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     for (const auto selection : *request.include)
       if (include_name(selection).empty() || !selections.insert(selection).second) return bad("invalid or duplicate include selection");
   }
+  {
+    std::set<std::string_view> names;
+    if (request.include) for (const auto selection : *request.include) names.insert(include_name(selection));
+    else names.insert("reasoning.encrypted_content");
+    if (request.include_names.size() > resources.request_parts) return bad("request count limit exceeded");
+    for (const auto& name : request.include_names)
+      if (!lower_token(name, 128) || !names.insert(name).second) return bad("invalid or duplicate include selection");
+  }
   if (request.provider)
     if (auto error = request_controls::validate_routing(descriptor, *request.provider)) return bad(std::move(*error));
   if (request.response_format)
@@ -388,14 +396,11 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     if (request.parallel_tool_calls) body.raw(",\"parallel_tool_calls\":").raw(*request.parallel_tool_calls ? "true" : "false");
     if (request.truncation) body.raw(",\"truncation\":").quoted(truncation_name(*request.truncation));
     body.raw(",\"include\":[");
-    if (request.include) {
-      bool comma = false;
-      for (const auto selection : *request.include) {
-        if (comma) body.raw(",");
-        comma = true;
-        body.quoted(include_name(selection));
-      }
-    } else body.quoted("reasoning.encrypted_content");
+    bool include_comma = false;
+    auto include_one = [&](std::string_view name) { if (include_comma) body.raw(","); include_comma = true; body.quoted(name); };
+    if (request.include) for (const auto selection : *request.include) include_one(include_name(selection));
+    else include_one("reasoning.encrypted_content");
+    for (const auto& name : request.include_names) include_one(name);
     body.raw("]");
     auto number = [&](std::string_view key, double value) {
       char bytes[64];
@@ -548,6 +553,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
                 .raw(",\"display_height\":").raw(std::to_string(value.display_height));
           } else if constexpr (std::is_same_v<T, OpenRouterServerTool>) {
             if (value.parameters) body.raw(",\"parameters\":").value(value.parameters->root(), 3);
+
           } else if constexpr (std::is_same_v<T, ShellTool>) {
             body.raw(",\"environment\":{\"type\":\"container_auto\"");
             if (!value.environment.skills.empty()) {

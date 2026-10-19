@@ -64,6 +64,7 @@
       "thinking_top_p_minimum": 0,
       "reasoning_efforts": [
         "none",
+        "minimal",
         "low",
         "medium",
         "high",
@@ -274,7 +275,8 @@
         "low",
         "medium",
         "high",
-        "xhigh"
+        "xhigh",
+        "max"
       ],
       "reasoning_summaries": [
         "auto",

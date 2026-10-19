@@ -371,7 +371,10 @@ void interaction_boundaries_and_binding() {
   CHECK(std::holds_alternative<interactions::EncodedRequest>(interactions::encode(descriptor, next, false)));
   auto changed = next; std::get<interactions::AudioResponseFormat>(changed.response_format[0]).bit_rate = 128000; replay_rejected(interactions::encode(descriptor, changed, false));
   changed = next; std::get<interactions::SpeakerConfig>(*changed.speech_config).conversational = false; replay_rejected(interactions::encode(descriptor, changed, false));
-  auto bad = value; std::get<interactions::AudioResponseFormat>(bad.response_format[0]).mime_type = "audio/wav"; invalid(interactions::encode(descriptor, bad, false));
+  // The service names the encodings: a bit rate beside WAV is sent, and only a MIME type of another kind is refused.
+  auto wav = value; std::get<interactions::AudioResponseFormat>(wav.response_format[0]).mime_type = "audio/wav";
+  CHECK(std::holds_alternative<interactions::EncodedRequest>(interactions::encode(descriptor, wav, false)));
+  auto bad = value; std::get<interactions::AudioResponseFormat>(bad.response_format[0]).mime_type = "image/png"; invalid(interactions::encode(descriptor, bad, false));
   value = request<interactions::Request>();
   value.response_format = {interactions::TextResponseFormat{}, interactions::ImageResponseFormat{{}, std::string("1:8"), std::string("4K"), {}}};
   encoded = interactions::encode(descriptor, value, false); CHECK(std::holds_alternative<interactions::EncodedRequest>(encoded));
@@ -409,6 +412,37 @@ void responses_format_binding() {
   std::get<responses::ImageGenerationTool>(value.hosted_tools[0]).output_format = "gif"; CHECK(std::holds_alternative<responses::EncodedRequest>(responses::encode(descriptor, value, false)));
   std::get<responses::ImageGenerationTool>(value.hosted_tools[0]).output_format = "Not A Token"; invalid(responses::encode(descriptor, value, false));
 }
+// Values the providers extend (languages, ratios, sizes, encodings, schema keywords) are checked by shape: a new,
+// well-formed value is sent, and a malformed one is refused.
+void open_value_shapes() {
+  auto generate = descriptor_for("google.generate");
+  auto value = request<gemini::Request>();
+  value.response_modalities = {gemini::ResponseModality::Audio};
+  value.speech_config = gemini::SpeechConfig{gemini::VoiceConfig{std::string("Kore"), {}}, {}, std::string("sw-KE")};
+  CHECK(std::holds_alternative<gemini::EncodedRequest>(gemini::encode(generate, value, false)));
+  value.speech_config->language_code = "en US"; invalid(gemini::encode(generate, value, false));
+  value = request<gemini::Request>(); value.response_modalities = {gemini::ResponseModality::Image};
+  value.image_config = gemini::ImageConfig{std::string("7:3"), std::string("8K")};
+  CHECK(std::holds_alternative<gemini::EncodedRequest>(gemini::encode(generate, value, false)));
+  for (const auto& [ratio, size] : std::vector<std::pair<std::string, std::string>>{{"wide", "8K"}, {"7:3", "8 K"}, {"7:", "8K"}}) {
+    auto bad = value; bad.image_config = gemini::ImageConfig{ratio, size}; invalid(gemini::encode(generate, bad, false));
+  }
+  auto interactions_descriptor = descriptor_for("google.interactions");
+  auto ask = request<interactions::Request>();
+  ask.response_format = {interactions::VideoResponseFormat{std::string("1:1"), std::string("8k"), {}, {}}, interactions::ImageResponseFormat{std::string("image/webp"), std::string("3:1"), std::string("8K"), {}}};
+  CHECK(std::holds_alternative<interactions::EncodedRequest>(interactions::encode(interactions_descriptor, ask, false)));
+  auto bad_ask = ask; std::get<interactions::VideoResponseFormat>(bad_ask.response_format[0]).resolution = "8 k"; invalid(interactions::encode(interactions_descriptor, bad_ask, false));
+  bad_ask = ask; std::get<interactions::ImageResponseFormat>(bad_ask.response_format[1]).mime_type = "audio/wav"; invalid(interactions::encode(interactions_descriptor, bad_ask, false));
+  // Chat names a new audio encoding and passes a schema keyword the SDK does not know.
+  auto chat_descriptor = descriptor_for("openai.chat"); chat::Request speak; speak.model = "fixture-model";
+  speak.messages.push_back({Role::User, "Speak"}); speak.modalities = {chat::OutputModality::Audio}; speak.audio = chat::AudioOutput{"alloy", "ogg"};
+  speak.response_format = ResponseFormat{ResponseFormat::Kind::JsonSchema, "answer", {}, own(R"({"type":"object","x-provider-hint":{"any":true},"properties":{}})"), {}};
+  auto spoken = chat::encode(chat_descriptor, speak, false); CHECK(std::holds_alternative<chat::EncodedRequest>(spoken));
+  CHECK(std::get<chat::EncodedRequest>(spoken).context->audio_format() == "ogg");
+  auto bad_speak = speak; bad_speak.audio->format = "OGG!"; CHECK(std::holds_alternative<Error>(chat::encode(chat_descriptor, bad_speak, false)));
+  // A known keyword keeps its shape check.
+  bad_speak = speak; bad_speak.response_format->schema = own(R"({"type":"object","minLength":-1})"); CHECK(std::holds_alternative<Error>(chat::encode(chat_descriptor, bad_speak, false)));
+}
 void decode_only_audio_scope() {
   const auto descriptor = descriptor_for("openai.chat"); chat::Request value; value.model = "fixture-model";
   value.messages.push_back({Role::User, "Speak"}); value.modalities = {chat::OutputModality::Audio}; value.audio = chat::AudioOutput{"alloy", "wav"};
@@ -421,6 +455,6 @@ void decode_only_audio_scope() {
 }
 }
 int main() {
-  try { gemini_nonthinking_media_request(); interaction_nonthinking_transcription_request(); gemini_boundaries_and_binding(); gemini_builtin_tools_and_audio_format(); gemini_service_tool_options(); gemini_unreplayable_service_parts(); interaction_boundaries_and_binding(); responses_format_binding(); decode_only_audio_scope(); }
+  try { gemini_nonthinking_media_request(); interaction_nonthinking_transcription_request(); gemini_boundaries_and_binding(); gemini_builtin_tools_and_audio_format(); gemini_service_tool_options(); gemini_unreplayable_service_parts(); interaction_boundaries_and_binding(); responses_format_binding(); decode_only_audio_scope(); open_value_shapes(); }
   catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }
