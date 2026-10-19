@@ -106,8 +106,8 @@ struct Request {
   std::vector<BuiltinTool> builtin_tools;
   std::vector<McpServer> mcp_servers;
   // toolConfig.includeServerSideToolInvocations: the answer also carries the calls and results of the tools the
-  // service runs (every built-in tool but computer use, and MCP servers). Unset: on exactly when such a tool and a
-  // client function are both declared, which the service requires.
+  // service runs (every built-in tool but computer use, and MCP servers). Unset: on exactly when such a built-in tool
+  // and a client function are both declared, which the service requires; MCP servers do not need it.
   std::optional<bool> server_tool_invocations;
   std::optional<RetrievalConfig> retrieval_config;
 
