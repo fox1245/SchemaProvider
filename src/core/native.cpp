@@ -301,7 +301,23 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
   for (const auto& tool : request.tools) {
     hash.text(tool.name); hash.text(tool.description); hash.document(tool.input_schema); hash.text(tool.type);
     hash.number(tool.max_uses.has_value()); if (tool.max_uses) hash.number(*tool.max_uses);
+    // Server tool options are bound only when set, so a tool without them keeps the digest it had.
+    if (!tool.allowed_callers.empty() || !tool.allowed_domains.empty() || !tool.blocked_domains.empty() || tool.user_location ||
+        tool.citations || tool.max_content_tokens) {
+      hash.text("sp.messages.server_tool.options.v1");
+      for (const auto* list : {&tool.allowed_callers, &tool.allowed_domains, &tool.blocked_domains}) {
+        hash.number(list->size()); for (const auto& value : *list) hash.text(value);
+      }
+      hash.number(tool.user_location.has_value());
+      if (tool.user_location)
+        for (const auto* field : {&tool.user_location->city, &tool.user_location->region, &tool.user_location->country, &tool.user_location->timezone}) {
+          hash.number(field->has_value()); if (*field) hash.text(**field);
+        }
+      hash.number(tool.citations.has_value()); if (tool.citations) hash.number(*tool.citations);
+      hash.number(tool.max_content_tokens.has_value()); if (tool.max_content_tokens) hash.number(*tool.max_content_tokens);
+    }
   }
+  if (request.container) { hash.text("sp.messages.container.v1"); hash.text(*request.container); }
   return hash.finish(digest);
 }
 bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, const responses::Request& request, const descriptor::EffectiveChoices& choices, Digest& digest) {

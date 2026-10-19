@@ -5,11 +5,20 @@
 #include <utility>
 
 namespace sp::messages {
+// web_search's approximate user location.
+struct UserLocation { std::optional<std::string> city, region, country, timezone; };
 struct ToolDefinition {
   std::string name, description;
   std::shared_ptr<const json::Document> input_schema;
   std::string type;
   std::optional<uint64_t> max_uses;
+  // Server tool options. Each is sent only when set, and the service judges whether the tool's version takes it:
+  // allowed_callers (`direct`, which the _20260318 web tools need on models without programmatic tool calling),
+  // the domain filters and user_location (web_search, web_fetch), citations and max_content_tokens (web_fetch).
+  std::vector<std::string> allowed_callers, allowed_domains, blocked_domains;
+  std::optional<UserLocation> user_location;
+  std::optional<bool> citations;
+  std::optional<uint64_t> max_content_tokens;
 };
 enum class ThinkingMode { Manual, Adaptive, Disabled };
 enum class OutputEffort { Low, Medium, High, Max };
@@ -33,6 +42,8 @@ struct Request {
   std::optional<CacheControl> cache_control{};
   std::optional<ToolChoice> tool_choice{};
   std::optional<sp::OpenRouterRouting> provider{};
+  // A code-execution container to reuse, by the id an earlier response reported.
+  std::optional<std::string> container{};
 
   static Request simple(std::string model_name, std::string user_prompt,
                         std::optional<uint64_t> output_cap = std::nullopt,

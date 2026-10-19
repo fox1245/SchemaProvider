@@ -269,10 +269,14 @@ bool Codec::block(json::Value v, uint64_t index, bool streaming) {
     kind = PartKind::Text;
     unknown(v, {"type", "text", "citations"});
     if (!v.get("text").is_string()) return fail(ErrorKind::ProtocolCorrupt, "text required");
+    // Citations (web_search_result_location, char_location, ...) stay observations in the retained raw wire, like
+    // Chat annotations: they never fail the answer, and they are not semantic parts.
     auto citations = v.get("citations");
     if (citations.valid() && !citations.is_null()) {
       if (!citations.is_array()) return fail(ErrorKind::ProtocolCorrupt, "invalid citations");
-      if (citations.size()) return fail(ErrorKind::Unsupported, "citations not mapped");
+      if (citations.size() > limits_.max_parts) return fail(ErrorKind::ResourceLimit, "citation count limit");
+      for (auto citation : citations.elements())
+        if (!citation.is_object() || !nonempty(citation.get("type"))) return fail(ErrorKind::ProtocolCorrupt, "invalid citation");
     }
     bytes = v.get("text").as_string();
   } else if (type == "thinking") {
@@ -347,6 +351,12 @@ bool Codec::delta(json::Value v, uint64_t index) {
     field = "thinking";
   } else if (type == "signature_delta" && b.kind == PartKind::Thinking) { field = "signature"; channel = DeltaChannel::Signature; b.signature_started = true; }
   else if (type == "input_json_delta" && b.kind == PartKind::ToolCall) field = "partial_json";
+  else if (type == "citations_delta" && b.kind == PartKind::Text) {
+    unknown(v, {"type", "citation"});
+    const auto citation = v.get("citation");
+    if (!citation.is_object() || !nonempty(citation.get("type"))) return fail(ErrorKind::ProtocolCorrupt, "invalid citation");
+    return true;
+  }
   else if (type == "citations_delta" || type == "refusal_delta") return fail(ErrorKind::Unsupported, "unsupported semantic delta");
   else if (type == "text_delta" || type == "thinking_delta" || type == "signature_delta" || type == "input_json_delta") return fail(ErrorKind::ProtocolCorrupt, "delta kind differs from block");
   else return fail(ErrorKind::Unsupported, "unknown content delta");

@@ -483,6 +483,41 @@ void effective_policy_lineage() {
       config_defaults::codec_defaults_json);
   CHECK(std::holds_alternative<descriptor::ConfigError>(closed));
 }
+// Server tool options are sent only when set; the service judges which tool version takes which.
+void server_tool_options() {
+  const auto descriptor = descriptor_value();
+  auto request = base_request(); request.max_tokens = 512;
+  messages::ToolDefinition search{"web_search", {}, {}, "web_search_20260318", 3};
+  search.allowed_callers = {"direct"};
+  search.allowed_domains = {"example.com", "docs.example.org"};
+  search.user_location = messages::UserLocation{"Seoul", std::nullopt, "KR", "Asia/Seoul"};
+  messages::ToolDefinition fetch{"web_fetch", {}, {}, "web_fetch_20260318", std::nullopt};
+  fetch.allowed_callers = {"direct"}; fetch.blocked_domains = {"blocked.example"}; fetch.citations = true; fetch.max_content_tokens = 4000;
+  request.tools = {search, fetch};
+  request.container = "container_011";
+  const auto wire = document(encoded(descriptor, request).body);
+  const auto tools = wire->root().get("tools");
+  CHECK(tools.at(0).get("allowed_callers").at(0).as_string() == "direct" && tools.at(0).get("max_uses").as_uint() == 3);
+  CHECK(tools.at(0).get("allowed_domains").size() == 2 && !tools.at(0).get("blocked_domains").valid());
+  CHECK(tools.at(0).get("user_location").get("type").as_string() == "approximate" && tools.at(0).get("user_location").get("city").as_string() == "Seoul" &&
+        !tools.at(0).get("user_location").get("region").valid() && tools.at(0).get("user_location").get("timezone").as_string() == "Asia/Seoul");
+  CHECK(tools.at(1).get("blocked_domains").at(0).as_string() == "blocked.example" && tools.at(1).get("citations").get("enabled").as_bool() &&
+        tools.at(1).get("max_content_tokens").as_uint() == 4000 && !tools.at(1).get("max_uses").valid());
+  CHECK(wire->root().get("container").as_string() == "container_011");
+  // A tool without options is written as before.
+  auto plain = base_request(); plain.max_tokens = 512; plain.tools = {messages::ToolDefinition{"web_search", {}, {}, "web_search_20250305", 2}};
+  const auto plain_wire = document(encoded(descriptor, plain).body);
+  CHECK(plain_wire->root().get("tools").at(0).size() == 3 && !plain_wire->root().get("container").valid());
+  auto refused = [&](auto change) { auto r = request; change(r); rejected(descriptor, r, ErrorKind::InvalidRequest); };
+  refused([](auto& r) { r.tools[0].allowed_callers = {"Direct!"}; });
+  refused([](auto& r) { r.tools[0].allowed_callers = {"direct", "direct"}; });
+  refused([](auto& r) { r.tools[0].blocked_domains = {"x.example"}; });
+  refused([](auto& r) { r.tools[0].allowed_domains = {"has space"}; });
+  refused([](auto& r) { r.tools[1].max_content_tokens = 0; });
+  refused([](auto& r) { r.tools[0].user_location = messages::UserLocation{std::string(), std::nullopt, std::nullopt, std::nullopt}; });
+  refused([](auto& r) { r.container = "bad id"; });
+  refused([](auto& r) { r.tools.push_back({"client", "a client tool", document(R"({"type":"object"})"), {}, {}}); r.tools.back().allowed_callers = {"direct"}; });
+}
 void thinking_cache_tool_controls() {
   const auto descriptor = descriptor_value();
   auto request = base_request(); request.max_tokens = 2048; request.thinking_budget = 1024;
@@ -613,6 +648,7 @@ void tool_role_helper_admission() {
 } // namespace
 int main() {
   try {
+    server_tool_options();
     typed_wire_request(); native_retention_and_content_integrity(); prefix_and_origin_binding();
     immutable_context_and_failed_capture(); client_loop_ownership(); server_loop_ownership_and_pause(); signature_accumulation_and_limits();
     invalid_calls_are_not_repaired();
