@@ -782,7 +782,11 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
         else if (gemini_codec) gemini_codec->finish({normal, close_error.kind});
         else interactions_codec->finish({normal, close_error.kind});
       } else {
-        if (endpoint_codec) endpoint_codec->buffered(buffered, {normal, close_error.kind});
+        if (endpoint_codec) {
+          endpoints::Close ended{normal, close_error.kind, {}};
+          if (response) for (const auto& header : response->value.headers) ended.headers.emplace_back(header.name, header.value);
+          endpoint_codec->buffered(buffered, std::move(ended));
+        }
         else if (chat_codec) chat_codec->buffered(buffered, {normal, close_error.kind});
         else if (messages_codec) messages_codec->buffered(buffered, {normal, close_error.kind});
         else if (responses_codec) responses_codec->buffered(buffered, {normal, close_error.kind});
@@ -1449,8 +1453,8 @@ PreparedRequest Client::prepare_endpoint(RunOptions options, std::string_view en
     for (const auto& header : client->descriptor.headers())
       if (!detail::equal_ascii(header.first, "content-type") && !detail::equal_ascii(header.first, "accept"))
         wire.headers.push_back({header.first, header.second});
-    wire.headers.push_back({"Content-Type", "application/json"});
-    wire.headers.push_back({"Accept", "application/json"});
+    wire.headers.push_back({"Content-Type", value.content_type});
+    wire.headers.push_back({"Accept", value.accept});
     if (!client->options.api_key.empty()) {
       if (value.auth == "x-api-key") wire.headers.push_back({"x-api-key", client->options.api_key});
       else if (value.auth == "x-goog-api-key") wire.headers.push_back({"x-goog-api-key", client->options.api_key});
@@ -1482,6 +1486,16 @@ PreparedEndpoint<moderation::Outcome> Client::prepare(moderation::Request reques
   auto client = state_;
   return PreparedEndpoint<moderation::Outcome>(prepare_endpoint<moderation::Encoded>(std::move(options), "moderation",
       static_cast<int>(reason::Source::ModerationRequest), [&] { return moderation::encode(client->descriptor, request); }));
+}
+PreparedEndpoint<speech::Outcome> Client::prepare(speech::Request request, RunOptions options) {
+  auto client = state_;
+  return PreparedEndpoint<speech::Outcome>(prepare_endpoint<speech::Encoded>(std::move(options), "speech",
+      static_cast<int>(reason::Source::SpeechRequest), [&] { return speech::encode(client->descriptor, request); }));
+}
+PreparedEndpoint<transcription::Outcome> Client::prepare(transcription::Request request, RunOptions options) {
+  auto client = state_;
+  return PreparedEndpoint<transcription::Outcome>(prepare_endpoint<transcription::Encoded>(std::move(options), "transcription",
+      static_cast<int>(reason::Source::TranscriptionRequest), [&] { return transcription::encode(client->descriptor, request); }));
 }
 images::Outcome Client::complete(images::Request request, RunOptions options) {
   return complete(prepare(std::move(request), std::move(options)));
@@ -1547,6 +1561,32 @@ EndpointCall<moderation::Outcome> Client::start(PreparedEndpoint<moderation::Out
   Callbacks callbacks;
   if (on_outcome) callbacks.on_outcome = [deliver = std::move(on_outcome)](Result result) { deliver(moderation::typed(*result)); };
   return EndpointCall<moderation::Outcome>(start(std::move(call.prepared_), std::move(callbacks)));
+}
+speech::Outcome Client::complete(speech::Request request, RunOptions options) {
+  return complete(prepare(std::move(request), std::move(options)));
+}
+speech::Outcome Client::complete(PreparedEndpoint<speech::Outcome> call) {
+  if (!state_ || state_->in_thread()) return speech::typed(*detail::misuse_result());
+  try { return start(std::move(call)).join(); }
+  catch (const AdmissionError& error) { return speech::typed(*error.outcome()); }
+}
+EndpointCall<speech::Outcome> Client::start(PreparedEndpoint<speech::Outcome> call, std::function<void(speech::Outcome)> on_outcome) {
+  Callbacks callbacks;
+  if (on_outcome) callbacks.on_outcome = [deliver = std::move(on_outcome)](Result result) { deliver(speech::typed(*result)); };
+  return EndpointCall<speech::Outcome>(start(std::move(call.prepared_), std::move(callbacks)));
+}
+transcription::Outcome Client::complete(transcription::Request request, RunOptions options) {
+  return complete(prepare(std::move(request), std::move(options)));
+}
+transcription::Outcome Client::complete(PreparedEndpoint<transcription::Outcome> call) {
+  if (!state_ || state_->in_thread()) return transcription::typed(*detail::misuse_result());
+  try { return start(std::move(call)).join(); }
+  catch (const AdmissionError& error) { return transcription::typed(*error.outcome()); }
+}
+EndpointCall<transcription::Outcome> Client::start(PreparedEndpoint<transcription::Outcome> call, std::function<void(transcription::Outcome)> on_outcome) {
+  Callbacks callbacks;
+  if (on_outcome) callbacks.on_outcome = [deliver = std::move(on_outcome)](Result result) { deliver(transcription::typed(*result)); };
+  return EndpointCall<transcription::Outcome>(start(std::move(call.prepared_), std::move(callbacks)));
 }
 Diagnostics Client::diagnostics() const noexcept {
   if (!state_) return {};

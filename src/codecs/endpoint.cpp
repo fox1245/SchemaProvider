@@ -4,6 +4,8 @@
 #include "codecs/images.h"
 #include "codecs/moderation.h"
 #include "codecs/rerank.h"
+#include "codecs/speech.h"
+#include "codecs/transcription.h"
 
 namespace sp::endpoints {
 std::unique_ptr<Codec> make_codec(std::string_view name, const descriptor::ValidatedDescriptor& descriptor, Accumulator& accumulator,
@@ -13,6 +15,8 @@ std::unique_ptr<Codec> make_codec(std::string_view name, const descriptor::Valid
   if (name == "embeddings") return std::make_unique<embeddings::Codec>(descriptor, accumulator, std::move(requested), limits);
   if (name == "rerank") return std::make_unique<rerank::Codec>(descriptor, accumulator, std::move(requested), limits);
   if (name == "moderation") return std::make_unique<moderation::Codec>(descriptor, accumulator, std::move(requested), limits);
+  if (name == "speech") return std::make_unique<speech::Codec>(descriptor, accumulator, std::move(requested), limits);
+  if (name == "transcription") return std::make_unique<transcription::Codec>(descriptor, accumulator, std::move(requested), limits);
   return nullptr;
 }
 }  // namespace sp::endpoints

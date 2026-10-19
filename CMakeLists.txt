@@ -149,7 +149,8 @@ add_library(sp_codecs src/codecs/accumulator.cpp src/codecs/reason.cpp src/codec
             src/codecs/images.cpp src/codecs/images_request.cpp
             src/codecs/decisions.cpp src/codecs/decisions_request.cpp
             src/codecs/embeddings.cpp src/codecs/embeddings_request.cpp src/codecs/rerank.cpp src/codecs/rerank_request.cpp
-            src/codecs/moderation.cpp src/codecs/moderation_request.cpp src/codecs/endpoint.cpp)
+            src/codecs/moderation.cpp src/codecs/moderation_request.cpp src/codecs/speech.cpp src/codecs/speech_request.cpp
+            src/codecs/transcription.cpp src/codecs/transcription_request.cpp src/codecs/endpoint.cpp)
 target_compile_options(sp_codecs PRIVATE ${SP_WARNING_OPTIONS})
 target_link_libraries(sp_codecs PUBLIC sp_core sp_json sp_descriptor)
 
