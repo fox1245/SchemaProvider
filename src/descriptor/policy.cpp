@@ -525,10 +525,11 @@ class PolicyLoader {
           if (endpoint == "batches" && shape == "openai") return {"submit", "get", "cancel"};
           if (endpoint == "batches" && shape == "anthropic") return {"submit", "get", "cancel", "delete", "results"};
           if (endpoint == "batches" && shape == "google") return {"submit", "get", "cancel", "delete"};
+          if (endpoint == "tokens" && (shape == "openai" || shape == "anthropic" || shape == "google")) return {"count"};
           return {};
         };
         for (auto e : endpoints.elements()) {
-          closed(e, {"endpoint","shape","origins","paths"}, "/endpoints", {"options","auth","charge_on_accept","headers"});
+          closed(e, {"endpoint","shape","origins","paths"}, "/endpoints", {"options","auth","charge_on_accept","headers","keep"});
           EndpointFact fact{text(e.get("endpoint"), "/endpoints/endpoint"), text(e.get("shape"), "/endpoints/shape"),
                             strings(e.get("origins"), "/endpoints/origins")};
           const auto operations = operations_of(fact.endpoint, fact.shape);
@@ -561,6 +562,13 @@ class PolicyLoader {
               fail("/endpoints/auth", "bearer, x-api-key or x-goog-api-key");
           }
           if (e.get("charge_on_accept").valid()) fact.charge_on_accept = boolean(e.get("charge_on_accept"), "/endpoints/charge_on_accept");
+          if (e.get("keep").valid()) {
+            fact.keep = strings(e.get("keep"), "/endpoints/keep");
+            if (fact.keep.size() > 64 || std::any_of(fact.keep.begin(), fact.keep.end(), [](const std::string& name) {
+                  return name.empty() || name.size() > 64 || !std::all_of(name.begin(), name.end(), [](char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'; });
+                }))
+              fail("/endpoints/keep", "at most 64 member names");
+          }
           if (const auto headers = e.get("headers"); headers.valid()) {
             if (!headers.is_object() || headers.size() > 8) fail("/endpoints/headers", "object with at most 8 literal headers");
             for (auto member : headers.members()) {

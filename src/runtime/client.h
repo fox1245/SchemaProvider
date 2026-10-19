@@ -16,6 +16,7 @@
 #include "codecs/videos.h"
 #include "codecs/files.h"
 #include "codecs/batches.h"
+#include "codecs/tokens.h"
 #include "descriptor/presets.h"
 #include "runtime/policy.h"
 #include "transport/sse_framer.h"
@@ -220,6 +221,7 @@ inline files::DeleteOutcome typed_outcome(const sp::Outcome& outcome, const file
 inline files::ProgressOutcome typed_outcome(const sp::Outcome& outcome, const files::ProgressOutcome*) { return files::typed_progress(outcome); }
 inline batches::Outcome typed_outcome(const sp::Outcome& outcome, const batches::Outcome*) { return batches::typed(outcome); }
 inline batches::DeleteOutcome typed_outcome(const sp::Outcome& outcome, const batches::DeleteOutcome*) { return batches::typed_deleted(outcome); }
+inline tokens::Outcome typed_outcome(const sp::Outcome& outcome, const tokens::Outcome*) { return tokens::typed(outcome); }
 }  // namespace detail
 // A started non-chat endpoint call. Like an Operation, destruction requests cancellation and detach relinquishes it;
 // join waits for the typed outcome, the one the callback received.
@@ -352,6 +354,11 @@ class Client {
   batches::DeleteOutcome complete(PreparedEndpoint<batches::DeleteOutcome>);
   EndpointCall<batches::Outcome> start(PreparedEndpoint<batches::Outcome>, std::function<void(batches::Outcome)> on_outcome = {});
   EndpointCall<batches::DeleteOutcome> start(PreparedEndpoint<batches::DeleteOutcome>, std::function<void(batches::DeleteOutcome)> on_outcome = {});
+  // Token counting (D7): the input tokens of a chat request of this client's family, without running it. Free.
+  PreparedEndpoint<tokens::Outcome> prepare(tokens::Count, RunOptions = {});
+  tokens::Outcome complete(tokens::Count, RunOptions = {});
+  tokens::Outcome complete(PreparedEndpoint<tokens::Outcome>);
+  EndpointCall<tokens::Outcome> start(PreparedEndpoint<tokens::Outcome>, std::function<void(tokens::Outcome)> on_outcome = {});
   Diagnostics diagnostics() const noexcept;
  private:
   explicit Client(std::shared_ptr<detail::ClientState>);

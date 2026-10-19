@@ -4,12 +4,9 @@
 // them inline. A `Batch` is a plain value a host journals and polls. Its results are JSONL lines, downloaded with
 // `Results` (Google's inline results come with the batch: `inline_lines`), and `decode` turns each line into the
 // outcome its request would have had, through the family codec of that request.
-#include "codecs/chat.h"
 #include "codecs/endpoint.h"
-#include "codecs/gemini_request.h"
+#include "codecs/family_request.h"
 #include "codecs/jobs.h"
-#include "codecs/messages_request.h"
-#include "codecs/responses_request.h"
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -18,7 +15,7 @@
 
 namespace sp::batches {
 // One request of a batch: what the host would otherwise send on its own.
-using Request = std::variant<chat::Request, messages::Request, responses::Request, gemini::Request>;
+using Request = FamilyRequest;
 struct Item {
   // Up to 64 letters, digits, `_` and `-`; unique in the batch.
   std::string custom_id;
