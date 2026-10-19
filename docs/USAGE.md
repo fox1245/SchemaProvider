@@ -298,7 +298,7 @@ What the declaration keeps: the served identity must still stay the same for the
 | Request type / header | Family-specific fields besides model, messages and tools |
 |---|---|
 | `sp::chat::Request`, `<codecs/chat.h>` | `temperature`, `top_p`, `max_output_tokens`, scalar `reasoning_effort`, `service_tier`, `provider`, `response_format`, `modalities`, `audio`, OpenRouter `image_config`, `reasoning`, `include_reasoning`, `usage_include`, alternative `models`; choose either simple `messages` or ordered `canonical_messages`, never both. |
-| `sp::messages::Request`, `<codecs/messages_request.h>` | `system`, `account_scope`, **`max_tokens`**, `thinking_budget`, `thinking_mode`, `output_effort`, `cache_control`, `tool_choice`, `temperature`, `top_p`, `provider`. |
+| `sp::messages::Request`, `<codecs/messages_request.h>` | `system`, `account_scope`, **`max_tokens`**, `thinking_budget`, `thinking_mode`, `output_effort`, `cache_control`, `tool_choice`, `temperature`, `top_p`, `provider`, `container`. |
 | `sp::responses::Request`, `<codecs/responses_request.h>` | `instructions`, `account_scope`, `max_output_tokens`, `reasoning` (`effort`, `summary`), `required_tool`, `service_tier`, `temperature`, `top_p`, `store`, `response_format`, `provider`, `hosted_tools`, `max_tool_calls`, `previous_response_id`, `previous_response_history`, `parallel_tool_calls`, `verbosity`, `truncation`, `include`. |
 | `sp::gemini::Request`, `<codecs/gemini_request.h>` | `system`, `account_scope`, `max_output_tokens`, `thinking_budget`, typed `thinking_level`, `include_thoughts`, `temperature`, `safety_settings`, `tool_choice`, `required_tool`, `history_mode`, `response_modalities`, `speech_config`, `image_config`, `audio_transcription_config`. |
 | `sp::interactions::Request`, `<codecs/interactions_request.h>` | `system`, `account_scope`, `max_output_tokens`, `thinking_level`, `thinking_summaries`, `service_tier`, `required_tool`, typed `response_format`, `speech_config`, `transcription_config`, `builtin_tools`, `previous_interaction_id`, `store`, `video_task`, `background`, `agent`, `lifecycle`, `interaction_id`. |
@@ -460,6 +460,12 @@ request.tool_choice = sp::messages::ToolChoice{sp::messages::ToolChoiceMode::Aut
 ```
 
 `OutputEffort` is Low/Medium/High/Max. `CacheControl` requests ephemeral cache control with optional `CacheTtl::FiveMinutes`/`OneHour`; unset TTL emits no duration. This does not promise a cache hit or known cache usage. Tool choice is Auto/Any/None/Tool with an optional parallel-use flag. Named Tool requires a declared client function. The SDK currently rejects forced Any/Tool with enabled thinking, and None cannot carry the parallel-use flag. `provider` routing requires an admitted OpenRouter Messages origin.
+
+A Messages server tool (`ToolDefinition` with a `type` the policy lists, such as `web_search_20260318`) takes options. Each is sent only when it is set, and the service judges whether that tool version accepts it:
+- `allowed_callers` (`{"direct"}`): the `_20260318` web tools default to programmatic callers, and a model without programmatic tool calling (`claude-haiku-4-5`) refuses them with HTTP 400 unless `direct` is listed;
+- `allowed_domains` or `blocked_domains` (one of the two), and `user_location` (`UserLocation`: city, region, country, timezone; sent as `approximate`);
+- for `web_fetch`, `citations` (`{"enabled": …}`) and `max_content_tokens`.
+`Request::container` reuses a code-execution container by the id an earlier response reported. Citations on text blocks (`citations`, streamed `citations_delta`) stay observations in `raw_events`, like Chat annotations: they never fail the answer.
 
 Generate's `ThinkingLevel` is Minimal/Low/Medium/High, mutually exclusive with an explicit `thinking_budget`. `ToolChoice` uses Auto/Any/None/Validated and optional `allowed_function_names`; names must be declared and unique, and allow-lists apply only to Any/Validated. Do not combine it with `required_tool`.
 

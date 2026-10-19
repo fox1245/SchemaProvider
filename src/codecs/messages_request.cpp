@@ -223,6 +223,12 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   body.raw(",").quoted(descriptor.max_output_tokens_member()).raw(":").raw(std::to_string(*effective.max_output_tokens));
   body.raw(",").quoted(descriptor.request_stream_member()).raw(streaming ? ":true" : ":false");
   if (!request.system.empty()) body.raw(",\"system\":").quoted(request.system);
+  if (request.container) {
+    const auto& id = *request.container;
+    if (id.empty() || id.size() > 256 || std::any_of(id.begin(), id.end(), [](unsigned char c) { return c <= 0x20 || c >= 0x7f || c == '"' || c == '\\'; }))
+      return bad("invalid code execution container id");
+    body.raw(",\"container\":").quoted(id);
+  }
   if (thinking_mode) {
     body.raw(",\"thinking\":{\"type\":");
     switch (*thinking_mode) {
@@ -261,16 +267,62 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       if (tool.name.empty() || !tool_names.insert(tool.name).second) return bad("tools require unique nonempty names");
       if (comma) body.raw(",");
       comma = true;
+      const bool server_options = !tool.allowed_callers.empty() || !tool.allowed_domains.empty() || !tool.blocked_domains.empty() ||
+                                  tool.user_location || tool.citations || tool.max_content_tokens;
       if (tool.type.empty()) {
-        if (!tool.input_schema || !tool.input_schema->root().is_object() || tool.max_uses) return bad("client tools require object schemas and no server fields");
+        if (!tool.input_schema || !tool.input_schema->root().is_object() || tool.max_uses || server_options)
+          return bad("client tools require object schemas and no server fields");
         body.raw("{\"name\":").quoted(tool.name).raw(",\"description\":").quoted(tool.description).raw(",\"input_schema\":").value(tool.input_schema->root(), 3).raw("}");
       } else {
         const auto fact = std::find_if(family.server_tools.begin(), family.server_tools.end(), [&](const auto& value) { return value.type == tool.type; });
         if (fact == family.server_tools.end()) return Error{ErrorKind::Unsupported, "unsupported server tool type"};
         if (tool.name != fact->name || tool.input_schema || !tool.description.empty()) return bad("server tool fields do not match typed schema");
         if (tool.max_uses && (!*tool.max_uses || !fact->max_uses)) return bad("max_uses is unsupported or out of range");
+        // Caller types and domains are values the service extends: bounded tokens and host names, not a fixed list.
+        const auto token = [](std::string_view value) {
+          return !value.empty() && value.size() <= 64 && std::all_of(value.begin(), value.end(), [](char c) {
+            return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_';
+          });
+        };
+        const auto domain = [](std::string_view value) {
+          return !value.empty() && value.size() <= 253 && std::all_of(value.begin(), value.end(), [](unsigned char c) {
+            return c > 0x20 && c < 0x7f && c != '"' && c != '\\';
+          });
+        };
+        const auto bounded = [](const std::vector<std::string>& values, auto check) {
+          std::set<std::string_view> seen;
+          return values.size() <= 64 && std::all_of(values.begin(), values.end(), [&](const std::string& v) { return check(v) && seen.insert(v).second; });
+        };
+        if (!bounded(tool.allowed_callers, token)) return bad("allowed callers must be unique tokens");
+        if (!bounded(tool.allowed_domains, domain) || !bounded(tool.blocked_domains, domain)) return bad("domain filters must be unique host names");
+        if (!tool.allowed_domains.empty() && !tool.blocked_domains.empty()) return bad("allowed and blocked domains are mutually exclusive");
+        if (tool.max_content_tokens && !*tool.max_content_tokens) return bad("max_content_tokens must be positive");
+        if (tool.user_location) {
+          for (const auto* field : {&tool.user_location->city, &tool.user_location->region, &tool.user_location->country, &tool.user_location->timezone})
+            if (*field && (field->value().empty() || field->value().size() > 128)) return bad("user location fields must be bounded text");
+        }
+        const auto strings = [&](std::string_view key, const std::vector<std::string>& values) {
+          if (values.empty()) return;
+          body.raw(",").quoted(key).raw(":[");
+          for (std::size_t i = 0; i < values.size(); ++i) { if (i) body.raw(","); body.quoted(values[i]); }
+          body.raw("]");
+        };
         body.raw("{\"type\":").quoted(tool.type).raw(",\"name\":").quoted(tool.name);
         if (tool.max_uses) body.raw(",\"max_uses\":").raw(std::to_string(*tool.max_uses));
+        strings("allowed_callers", tool.allowed_callers);
+        strings("allowed_domains", tool.allowed_domains);
+        strings("blocked_domains", tool.blocked_domains);
+        if (tool.user_location) {
+          body.raw(",\"user_location\":{\"type\":\"approximate\"");
+          const auto& location = *tool.user_location;
+          if (location.city) body.raw(",\"city\":").quoted(*location.city);
+          if (location.region) body.raw(",\"region\":").quoted(*location.region);
+          if (location.country) body.raw(",\"country\":").quoted(*location.country);
+          if (location.timezone) body.raw(",\"timezone\":").quoted(*location.timezone);
+          body.raw("}");
+        }
+        if (tool.citations) body.raw(",\"citations\":{\"enabled\":").raw(*tool.citations ? "true" : "false").raw("}");
+        if (tool.max_content_tokens) body.raw(",\"max_content_tokens\":").raw(std::to_string(*tool.max_content_tokens));
         body.raw("}");
       }
       if (!body.ok()) return Error{has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest,

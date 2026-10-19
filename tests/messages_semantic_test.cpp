@@ -320,8 +320,16 @@ void corruption_matrix() {
   };
   for (const auto& frames : invalid) failed(stream(frames), ErrorKind::ProtocolCorrupt);
   failed(stream({start(), {"future_event", R"({"type":"future_event"})"}}), ErrorKind::Unsupported);
-  for (auto type : {"citations_delta", "refusal_delta"}) failed(stream({start(), block(0, R"({"type":"text","text":""})"), delta(0, "{\"type\":" + json::quote(type) + "}")}), ErrorKind::Unsupported);
-  failed(buffered(body(R"([{"type":"text","text":"x","citations":[{}]}])")), ErrorKind::Unsupported);
+  failed(stream({start(), block(0, R"({"type":"text","text":""})"), delta(0, R"({"type":"refusal_delta"})")}), ErrorKind::Unsupported);
+  // Citations are observations in the raw wire: a malformed one is corrupt, a valid one never fails the answer.
+  failed(stream({start(), block(0, R"({"type":"text","text":""})"), delta(0, R"({"type":"citations_delta"})")}), ErrorKind::ProtocolCorrupt);
+  failed(buffered(body(R"([{"type":"text","text":"x","citations":[{}]}])")), ErrorKind::ProtocolCorrupt);
+  const std::string citation = R"({"type":"web_search_result_location","url":"https://example.test","title":"t","encrypted_index":"EI","cited_text":"x"})";
+  const auto cited = buffered(body("[{\"type\":\"text\",\"text\":\"x\",\"citations\":[" + citation + "]}]"));
+  CHECK(text(completed(cited).messages) == "x" && !completed(cited).raw_events.empty());
+  const auto cited_stream = stream({start(), block(0, R"({"type":"text","text":"","citations":[]})"), delta(0, R"({"type":"text_delta","text":"x"})"),
+                                    delta(0, "{\"type\":\"citations_delta\",\"citation\":" + citation + "}"), end(0), stop(), done});
+  CHECK(text(completed(cited_stream).messages) == "x");
   failed(buffered(body(R"([{"type":"container_upload","file_id":"x"}])")), ErrorKind::Unsupported);
   std::string wrong_model = body(); wrong_model.replace(wrong_model.find("fixture-model"), 13, "other-model");
   CHECK(completed(buffered(wrong_model)).model.relation == ServedRelation::Unexplained);

@@ -141,6 +141,12 @@ Interactions runs in the background and acts on stored interactions:
 - **Echoed input.** A stored interaction read back lists the request's input as a `user_input` step first. That step is not output, and it is no longer refused.
 - **Agents.** An `agent` member in the resource is admitted. An `environment` still is not.
 
+Messages server tools take their options, and cited answers decode:
+- **Tool options.** `messages::ToolDefinition` gains `allowed_callers`, `allowed_domains`, `blocked_domains`, `user_location` (`UserLocation`), `citations` and `max_content_tokens`. They are sent only when set. Without `allowed_callers: ["direct"]`, `claude-haiku-4-5` refused the `_20260318` web tools with HTTP 400.
+- **Container.** `messages::Request` gains `container`.
+- **Citations.** A text block with `citations` failed as `Unsupported` (`messages.block.citations_unsupported`, now removed), and a streamed `citations_delta` failed as `messages.delta.unsupported`. That threw away every web-search answer that cited its sources. Citations are now kept as raw-wire observations; a malformed one is `messages.block.citation_invalid`.
+- **Configuration digest.** It binds the options only when they are set.
+
 ## From interface 5 to 6
 
 Package 0.3.0 alpha adds `Usage::provider_cost` and the fixed-size `ProviderReportedCost`, `UsdAmount`, `CostSource`, `CostStatus` and `CostRounding` types. Existing field access remains source-compatible, but `Usage`, `UsageUpdate`, `Completion`, `PartialCompletion` and the containing `Event` layouts grow. Rebuild every consumer against the same headers and generation 6 libraries (`libsp_*.so.6`); interface 5 binaries must not load interface 6 libraries. CMake consumers select `SchemaProvider 0.3.0 EXACT`.

@@ -168,7 +168,8 @@ constexpr Entry messages_table[] = {
   {"content block type required", "messages.block.type_required"},
   {"text required", "messages.block.text_required"},
   {"invalid citations", "messages.block.citations_invalid"},
-  {"citations not mapped", "messages.block.citations_unsupported"},
+  {"citation count limit", "messages.block.citation_limit"},
+  {"invalid citation", "messages.block.citation_invalid"},
   {"invalid thinking fields", "messages.block.thinking_invalid"},
   {"redacted data required", "messages.block.redacted_data_required"},
   {"invalid tool block", "messages.block.tool_invalid"},
@@ -628,6 +629,12 @@ constexpr Entry messages_request_table[] = {
   {"Messages history supports only user and assistant roles", "request.messages.messages_history_supports_only_user_and"},
   {"approval request replay is unsupported", "request.messages.approval_request_replay_is_unsupported"},
   {"part cannot be replayed as Messages input", "request.messages.part_cannot_be_replayed_as_messages_input"},
+  {"allowed callers must be unique tokens", "request.messages.allowed_callers_invalid"},
+  {"domain filters must be unique host names", "request.messages.domain_filters_invalid"},
+  {"allowed and blocked domains are mutually exclusive", "request.messages.domain_filters_exclusive"},
+  {"max_content_tokens must be positive", "request.messages.max_content_tokens_invalid"},
+  {"user location fields must be bounded text", "request.messages.user_location_invalid"},
+  {"invalid code execution container id", "request.messages.container_invalid"},
 };
 constexpr Entry responses_request_table[] = {
   {"model and messages are required", "request.responses.model_and_messages_are_required"},
