@@ -1055,6 +1055,42 @@ constexpr Entry files_request_table[] = {
   {"an upload part id is a token", "request.files.part_id_invalid"},
   {"only a Google upload says how much it holds", "request.files.query_unsupported"},
 };
+constexpr Entry batches_table[] = {
+  {"batch endpoints are not admitted at this origin", "batches.endpoint.not_admitted"},
+  {"invalid response JSON", "batches.response.json_invalid"},
+  {"response must be object", "batches.response.not_object"},
+  {"a batch object names its id and status", "batches.batch.id_required"},
+  {"the response does not confirm the deletion", "batches.delete.unconfirmed"},
+  {"the provider failed the batch request", "batches.line.failed"},
+  {"the batch request was cancelled", "batches.line.cancelled"},
+  {"the batch request expired", "batches.line.expired"},
+  {"a result line is not a batch result", "batches.line.invalid"},
+  {"a result line did not decode to an outcome", "batches.line.undecided"},
+};
+constexpr Entry batches_request_table[] = {
+  {"batch endpoints are not admitted at this origin", "request.batches.endpoint_not_admitted"},
+  {"the batch endpoint has no path for this operation", "request.batches.path_missing"},
+  {"a batch has items", "request.batches.items_required"},
+  {"a batch has at most 100000 items", "request.batches.items_limit"},
+  {"a batch item has a unique custom id of up to 64 letters, digits, _ and -", "request.batches.custom_id_invalid"},
+  {"a batch item is a request of the origin's family", "request.batches.item_family"},
+  {"a batch id is a token, or batches/<token> at Google", "request.batches.id_invalid"},
+  {"an OpenAI batch file holds Chat or Responses requests", "request.batches.file_family"},
+  {"the batch endpoint admits no options", "request.batches.options_not_admitted"},
+  {"batch options do not match the policy's schema", "request.batches.options_invalid"},
+  {"an OpenAI batch reads its items from an uploaded file", "request.batches.items_unsupported"},
+  {"an OpenAI batch names its uploaded input file", "request.batches.input_file_required"},
+  {"an OpenAI batch names the path its lines call", "request.batches.endpoint_invalid"},
+  {"a batch item needs no beta header", "request.batches.item_beta"},
+  {"a Google batch runs one model", "request.batches.one_model"},
+  {"a Google batch model is a path segment", "request.batches.model_invalid"},
+  {"a batch exceeds the request limit", "request.batches.size_limit"},
+  {"a download needs a positive byte limit", "request.batches.download_limit_invalid"},
+  {"a batch is reached at the origin that started it", "request.batches.origin_mismatch"},
+  {"only an OpenAI batch has a separate error file", "request.batches.errors_unsupported"},
+  {"the batch has no results file yet", "request.batches.results_missing"},
+  {"a batch results file is a file id", "request.batches.results_file_invalid"},
+};
 constexpr Entry speech_table[] = {
   {"speech response is not audio", "speech.response.not_audio"},
   {"speech response is empty", "speech.response.empty"},
@@ -1181,6 +1217,8 @@ std::span<const Entry> entries(Source source) noexcept {
     case Source::VideosRequest: return videos_request_table;
     case Source::Files: return files_table;
     case Source::FilesRequest: return files_request_table;
+    case Source::Batches: return batches_table;
+    case Source::BatchesRequest: return batches_request_table;
   }
   return {};
 }

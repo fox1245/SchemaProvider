@@ -77,13 +77,15 @@ class StateCodec final : public endpoints::Codec {
 // A downloaded output: its body in memory, or the file the runtime wrote it to.
 class ContentCodec final : public endpoints::Codec {
  public:
-  ContentCodec(Accumulator&, SemanticLimits = {});
+  // With `documents`, a JSON or text body is the content (batch results), not an error the status hid.
+  ContentCodec(Accumulator&, SemanticLimits = {}, bool documents = false);
   bool buffered(std::string_view body, Close close) override;
  private:
   bool fail(ErrorKind, std::string);
   bool emit(const Event&);
   Accumulator& accumulator_;
   SemanticLimits limits_;
+  bool documents_;
 };
 Outcome typed(const sp::Outcome&);
 DownloadOutcome typed_content(const sp::Outcome&);

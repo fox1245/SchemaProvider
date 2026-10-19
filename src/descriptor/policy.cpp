@@ -496,13 +496,14 @@ class PolicyLoader {
         static constexpr std::string_view video_members[]{"model", "prompt", "input_references", "frame_images", "duration", "aspect_ratio",
                                                           "resolution", "size", "generate_audio"};
         static constexpr std::string_view file_members[]{"file", "purpose", "expires_after"};
+        static constexpr std::string_view batch_members[]{"input_file_id", "endpoint", "completion_window", "requests", "batch"};
         const auto owned_by = [](std::string_view endpoint, std::string_view name) {
           const auto in = [&](const auto& list) { return std::find(std::begin(list), std::end(list), name) != std::end(list); };
           return (endpoint == "images" && in(image_members)) || (endpoint == "decisions" && in(decision_members)) ||
                  (endpoint == "embeddings" && in(embedding_members)) || (endpoint == "rerank" && in(rerank_members)) ||
                  (endpoint == "moderation" && in(moderation_members)) || (endpoint == "speech" && in(speech_members)) ||
                  (endpoint == "transcription" && in(transcription_members)) || (endpoint == "videos" && in(video_members)) ||
-                 (endpoint == "files" && in(file_members));
+                 (endpoint == "files" && in(file_members)) || (endpoint == "batches" && in(batch_members));
         };
         const auto operations_of = [](std::string_view endpoint, std::string_view shape) -> std::vector<std::string_view> {
           if (endpoint == "images" && shape == "openai") return {"generate", "edit"};
@@ -520,6 +521,10 @@ class PolicyLoader {
           if (endpoint == "files" && shape == "openai") return {"upload", "get", "list", "delete", "content", "start", "part", "complete", "cancel"};
           if (endpoint == "files" && shape == "google") return {"upload", "get", "list", "delete", "content", "start"};
           if (endpoint == "files" && shape == "anthropic") return {"upload", "get", "list", "delete", "content"};
+          // Batches: OpenAI reads results from its files, Anthropic serves them itself.
+          if (endpoint == "batches" && shape == "openai") return {"submit", "get", "cancel"};
+          if (endpoint == "batches" && shape == "anthropic") return {"submit", "get", "cancel", "delete", "results"};
+          if (endpoint == "batches" && shape == "google") return {"submit", "get", "cancel", "delete"};
           return {};
         };
         for (auto e : endpoints.elements()) {

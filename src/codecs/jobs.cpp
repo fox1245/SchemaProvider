@@ -71,7 +71,8 @@ bool StateCodec::buffered(std::string_view body, Close close) {
          emit(MessageSeal{{0}}) && emit(Commit{"job.state+normal_close"});
 }
 
-ContentCodec::ContentCodec(Accumulator& accumulator, SemanticLimits limits) : accumulator_(accumulator), limits_(limits) {}
+ContentCodec::ContentCodec(Accumulator& accumulator, SemanticLimits limits, bool documents)
+    : accumulator_(accumulator), limits_(limits), documents_(documents) {}
 bool ContentCodec::emit(const Event& event) { return accumulator_.accept(event); }
 bool ContentCodec::fail(ErrorKind kind, std::string text) {
   Error error{kind, std::move(text)};
@@ -82,7 +83,7 @@ bool ContentCodec::fail(ErrorKind kind, std::string text) {
 bool ContentCodec::buffered(std::string_view body, Close close) {
   if (!close.normal) return fail(close.error, "abnormal response close");
   const auto type = essence(header(close, "content-type"));
-  if (type.starts_with("application/json") || type.starts_with("text/")) return fail(ErrorKind::ProtocolCorrupt, "a download is not a document");
+  if (!documents_ && (type.starts_with("application/json") || type.starts_with("text/"))) return fail(ErrorKind::ProtocolCorrupt, "a download is not a document");
   std::string record = "{\"content_type\":" + json::quote(type);
   std::string encoded;
   if (close.sink) {

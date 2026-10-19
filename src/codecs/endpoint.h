@@ -48,6 +48,8 @@ struct Close {
   // The SHA-256 of an uploaded file slice, as the transport read it.
   std::string upload_sha256{};
 };
+// An RFC 3339 time (`2026-10-19T13:02:22.150902Z`, or with an offset) as Unix seconds.
+std::optional<std::uint64_t> unix_seconds(std::string_view);
 // The literal headers of the endpoint's fact, added to an encoded call.
 inline void add_fact_headers(Encoded& encoded, const descriptor::EndpointFact& fact) {
   for (const auto& header : fact.headers) encoded.headers.push_back(header);

@@ -17,6 +17,8 @@ enum class Source {
   Jobs, JobsRequest, VideosRequest,
   // Provider files (D7).
   Files, FilesRequest,
+  // Batches (D7).
+  Batches, BatchesRequest,
 };
 struct Entry { std::string_view message, code; };
 std::span<const Entry> entries(Source) noexcept;

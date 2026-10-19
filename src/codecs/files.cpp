@@ -6,46 +6,7 @@
 
 namespace sp::files {
 namespace {
-// RFC 3339 (`2026-10-19T13:02:22.150902Z`, or an offset) as Unix seconds.
-std::optional<std::uint64_t> unix_seconds(std::string_view text) {
-  const auto number = [&](std::size_t at, std::size_t digits) -> std::optional<int> {
-    if (at + digits > text.size()) return std::nullopt;
-    int value = 0;
-    for (std::size_t i = at; i < at + digits; ++i) {
-      if (text[i] < '0' || text[i] > '9') return std::nullopt;
-      value = value * 10 + (text[i] - '0');
-    }
-    return value;
-  };
-  const auto year = number(0, 4), month = number(5, 2), day = number(8, 2), hour = number(11, 2), minute = number(14, 2), second = number(17, 2);
-  if (!year || !month || !day || !hour || !minute || !second || text.size() < 20 || text[4] != '-' || text[7] != '-' ||
-      (text[10] != 'T' && text[10] != 't') || text[13] != ':' || text[16] != ':' || *month < 1 || *month > 12 || *day < 1 ||
-      *day > 31 || *hour > 23 || *minute > 59 || *second > 60 || *year < 1970)
-    return std::nullopt;
-  std::size_t at = 19;
-  if (text[at] == '.') {
-    ++at;
-    const auto start = at;
-    while (at < text.size() && text[at] >= '0' && text[at] <= '9') ++at;
-    if (at == start) return std::nullopt;
-  }
-  std::int64_t offset = 0;
-  if (at < text.size() && (text[at] == 'Z' || text[at] == 'z')) ++at;
-  else if (at < text.size() && (text[at] == '+' || text[at] == '-')) {
-    const auto hours = number(at + 1, 2), minutes = number(at + 4, 2);
-    if (!hours || !minutes || at + 6 > text.size() || text[at + 3] != ':') return std::nullopt;
-    offset = (text[at] == '+' ? 1 : -1) * (std::int64_t{*hours} * 3600 + std::int64_t{*minutes} * 60);
-    at += 6;
-  } else return std::nullopt;
-  if (at != text.size()) return std::nullopt;
-  // Days from the civil date (Howard Hinnant's algorithm).
-  const int y = *year - (*month <= 2), era = y / 400, yoe = y - era * 400;
-  const int doy = (153 * (*month + (*month > 2 ? -3 : 9)) + 2) / 5 + *day - 1, doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-  const std::int64_t days = static_cast<std::int64_t>(era) * 146097 + doe - 719468;
-  const std::int64_t seconds = days * 86400 + std::int64_t{*hour} * 3600 + std::int64_t{*minute} * 60 + *second - offset;
-  if (seconds < 0) return std::nullopt;
-  return static_cast<std::uint64_t>(seconds);
-}
+using endpoints::unix_seconds;
 std::string text_of(json::Value value) { return value.is_string() ? std::string(value.as_string()) : std::string(); }
 // A member that is absent or null, or of the kind `check` accepts.
 template <class Check> bool optional_member(json::Value value, Check check) { return !value.valid() || value.is_null() || check(value); }
