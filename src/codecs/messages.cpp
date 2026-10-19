@@ -16,6 +16,22 @@ bool count_value(json::Value v) { return v.is_uint() || (v.is_int() && v.as_int(
 uint64_t number(json::Value v) { return v.is_uint() ? v.as_uint() : static_cast<uint64_t>(v.as_int()); }
 bool nonempty(json::Value v) { return v.is_string() && !v.as_string().empty(); }
 bool nullable_string(json::Value v) { return !v.valid() || v.is_null() || v.is_string(); }
+// A text block's citation: web_search_result_location and search_result_location name a source, the location kinds
+// give character, page or block offsets into the cited document.
+Citation citation_of(json::Value citation) {
+  Citation cited;
+  cited.kind = citation.get("type").as_string();
+  for (const char* key : {"url", "source"}) if (citation.get(key).is_string() && cited.url.empty()) cited.url = citation.get(key).as_string();
+  for (const char* key : {"title", "document_title"}) if (citation.get(key).is_string() && cited.title.empty()) cited.title = citation.get(key).as_string();
+  for (const auto& [from, to] : std::initializer_list<std::pair<const char*, const char*>>{
+           {"start_char_index", "end_char_index"}, {"start_page_number", "end_page_number"}, {"start_block_index", "end_block_index"}}) {
+    if (count_value(citation.get(from)) && !cited.start) cited.start = number(citation.get(from));
+    if (count_value(citation.get(to)) && !cited.end) cited.end = number(citation.get(to));
+  }
+  auto parsed = json::parse(citation.dump());
+  if (std::holds_alternative<json::Document>(parsed)) cited.raw = std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
+  return cited;
+}
 StopKind mapped(descriptor::StopKind k) {
   switch (k) {
     case descriptor::StopKind::EndTurn: return StopKind::EndTurn;
@@ -265,18 +281,21 @@ bool Codec::block(json::Value v, uint64_t index, bool streaming) {
   std::string storage;
   std::string_view bytes;
   bool initial_input = false;
+  std::vector<Citation> block_citations;
   if (type == "text") {
     kind = PartKind::Text;
     unknown(v, {"type", "text", "citations"});
     if (!v.get("text").is_string()) return fail(ErrorKind::ProtocolCorrupt, "text required");
-    // Citations (web_search_result_location, char_location, ...) stay observations in the retained raw wire, like
-    // Chat annotations: they never fail the answer, and they are not semantic parts.
+    // Citations (web_search_result_location, char_location, ...) become citations of the text; the retained wire
+    // keeps them as received.
     auto citations = v.get("citations");
     if (citations.valid() && !citations.is_null()) {
       if (!citations.is_array()) return fail(ErrorKind::ProtocolCorrupt, "invalid citations");
       if (citations.size() > limits_.max_parts) return fail(ErrorKind::ResourceLimit, "citation count limit");
-      for (auto citation : citations.elements())
+      for (auto citation : citations.elements()) {
         if (!citation.is_object() || !nonempty(citation.get("type"))) return fail(ErrorKind::ProtocolCorrupt, "invalid citation");
+        block_citations.push_back(citation_of(citation));
+      }
     }
     bytes = v.get("text").as_string();
   } else if (type == "thinking") {
@@ -328,6 +347,7 @@ bool Codec::block(json::Value v, uint64_t index, bool streaming) {
   } else return fail(ErrorKind::Unsupported, "unsupported content block type");
   Block binding{LocalId{static_cast<uint32_t>(index + 1)}, kind};
   binding.initial_input = initial_input;
+  binding.citations = std::move(block_citations);
   if (!emit(PartBegin{{0}, binding.local, kind, std::move(header), index})) return false;
   if ((kind != PartKind::ToolCall || !streaming || initial_input) && !emit(PartDelta{binding.local, {kind, bytes}})) return false;
   if (kind == PartKind::Thinking && v.get("signature").valid()) {
@@ -355,6 +375,8 @@ bool Codec::delta(json::Value v, uint64_t index) {
     unknown(v, {"type", "citation"});
     const auto citation = v.get("citation");
     if (!citation.is_object() || !nonempty(citation.get("type"))) return fail(ErrorKind::ProtocolCorrupt, "invalid citation");
+    if (b.citations.size() >= limits_.max_parts) return fail(ErrorKind::ResourceLimit, "citation count limit");
+    b.citations.push_back(citation_of(citation));
     return true;
   }
   else if (type == "citations_delta" || type == "refusal_delta") return fail(ErrorKind::Unsupported, "unsupported semantic delta");
@@ -377,7 +399,7 @@ bool Codec::end_block(uint64_t index) {
   // that never received actual JSON bytes (empty delta strings do not count).
   if (mode_ == Mode::Sse && b.kind == PartKind::ToolCall && !b.initial_input && !b.argument_bytes)
     if (!emit(PartDelta{b.local, {b.kind, "{}"}})) return false;
-  if (!emit(PartSeal{b.local, {}})) return false;
+  if (!emit(PartSeal{b.local, {}, {}, b.kind == PartKind::Text ? std::move(b.citations) : std::vector<Citation>{}})) return false;
   b.closed = true; return true;
 }
 bool Codec::server_content(std::string_view outer, json::Value v) {

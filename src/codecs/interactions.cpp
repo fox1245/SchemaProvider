@@ -196,6 +196,28 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
 namespace {
 // Steps of the service's own tools are <tool>_call and <tool>_result; function_call and function_result are the
 // client's. Any such type is admitted, so a tool the service adds needs no change here.
+// The citation annotations of a finished text (url_citation, file_citation, place_citation) as citations of that
+// text; word_info and speech_metadata describe a transcript and are not citations.
+std::vector<Citation> citations_of(json::Value annotations) {
+  std::vector<Citation> out;
+  if (!annotations.is_array()) return out;
+  for (auto annotation : annotations.elements()) {
+    const auto type = annotation.get("type").as_string();
+    if (type != "url_citation" && type != "file_citation" && type != "place_citation") continue;
+    Citation cited;
+    cited.kind = type;
+    for (const char* key : {"url", "document_uri"}) if (annotation.get(key).is_string() && cited.url.empty()) cited.url = annotation.get(key).as_string();
+    for (const char* key : {"title", "name"}) if (annotation.get(key).is_string() && cited.title.empty()) cited.title = annotation.get(key).as_string();
+    if (annotation.get("file_name").is_string()) cited.filename = annotation.get("file_name").as_string();
+    if (annotation.get("media_id").is_string()) cited.file_id = annotation.get("media_id").as_string();
+    if (annotation.get("start_index").is_uint()) cited.start = annotation.get("start_index").as_uint();
+    if (annotation.get("end_index").is_uint()) cited.end = annotation.get("end_index").as_uint();
+    auto parsed = json::parse(annotation.dump());
+    if (std::holds_alternative<json::Document>(parsed)) cited.raw = std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
+    out.push_back(std::move(cited));
+  }
+  return out;
+}
 bool server_call(std::string_view type) noexcept { return type != "function_call" && type.size() > 5 && type.ends_with("_call"); }
 bool server_result(std::string_view type) noexcept { return type != "function_result" && type.size() > 7 && type.ends_with("_result"); }
 bool server_step(std::string_view type) noexcept { return server_call(type) || server_result(type); }
@@ -614,7 +636,7 @@ bool Codec::seal(Step& step, json::Value final, uint64_t index) {
                           index * (static_cast<uint64_t>(limits_.max_parts) + 1) + i})) return false;
       if (data.is_string()) snapshot = data.as_string();
     }
-    if (!emit(PartSeal{step.parts[i], snapshot})) return false;
+    if (!emit(PartSeal{step.parts[i], snapshot, {}, step.content[i].type == "text" ? citations_of(item.get("annotations")) : std::vector<Citation>{}})) return false;
   }
   return true;
 }

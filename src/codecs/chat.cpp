@@ -330,6 +330,23 @@ bool Codec::annotations(json::Value value) {
           uint_value(citation.get("start_index")) > uint_value(citation.get("end_index")) ||
           (citation.get("content").valid() && !citation.get("content").is_string()))
         return fail(ErrorKind::ProtocolCorrupt, "invalid URL citation annotation");
+      // A stream may repeat an annotation; each distinct one becomes a citation of the text.
+      const auto bytes = annotation.dump();
+      if (citation_bytes_ + bytes.size() > limits_.max_content_bytes || citations_.size() >= limits_.max_parts)
+        return fail(ErrorKind::ResourceLimit, "annotation count limit");
+      if (std::none_of(citations_.begin(), citations_.end(), [&](const Citation& seen) { return json::equal(seen.raw->root(), annotation); })) {
+        auto parsed = json::parse(bytes);
+        if (!std::holds_alternative<json::Document>(parsed)) return fail(ErrorKind::ProtocolCorrupt, "invalid URL citation annotation");
+        Citation cited;
+        cited.kind = "url_citation";
+        cited.url = citation.get("url").as_string();
+        cited.title = citation.get("title").as_string();
+        cited.start = uint_value(citation.get("start_index"));
+        cited.end = uint_value(citation.get("end_index"));
+        cited.raw = std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
+        citation_bytes_ += bytes.size();
+        citations_.push_back(std::move(cited));
+      }
     } else return fail(ErrorKind::Unsupported, "unsupported annotation type");
   }
   return true;
@@ -371,7 +388,7 @@ bool Codec::text(json::Value value, PartKind kind, bool streaming) {
     if (!emit(PartBegin{{0}, *id, kind, {}, order})) return false;
   }
   if (streaming) return emit(PartDelta{*id, {kind, value.as_string()}});
-  return emit(PartSeal{*id, value.as_string()});
+  return emit(PartSeal{*id, value.as_string(), {}, kind == PartKind::Text ? citations_ : std::vector<Citation>{}});
 }
 bool Codec::reasoning_details(json::Value value, bool streaming) {
   if (!value.valid() || value.is_null()) return true;
@@ -653,7 +670,7 @@ void Codec::finish(Close close) {
   if (!begun_ || !stopped_ || (mode_ == Mode::Sse && !done_)) { fail(ErrorKind::Truncated, "missing family terminal evidence"); return; }
   if (mode_ == Mode::Sse) {
     if (!finish_audio()) return;
-    if (text_ && !emit(PartSeal{*text_, {}})) return;
+    if (text_ && !emit(PartSeal{*text_, {}, {}, citations_})) return;
     if (refusal_ && !emit(PartSeal{*refusal_, {}})) return;
     if (thinking_ && !emit(PartSeal{*thinking_, {}})) return;
     for (const auto& tool : tools_) if (!emit(PartSeal{tool.local, {}})) return;

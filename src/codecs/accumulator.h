@@ -43,6 +43,7 @@ class Accumulator {
     bool sealed = false;
     // Media holds its owned description here while open; only sealed values carry payload.
     std::optional<Part> value;
+    std::vector<Citation> citations{};
   };
   struct MessageCursor {
     Message message;

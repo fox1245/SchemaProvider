@@ -171,6 +171,11 @@ Responses gains code interpreter, MCP, computer use and OpenRouter's tools and i
 - **OpenRouter images.** An image result given as a data URL was refused as an invalid payload. It is now decoded, with its MIME.
 - **Chat.** `chat::ImageOutput` is now an alias of `sp::OpenRouterImageConfig`. Its two reason codes moved to `request.image_config.values_must_be_short_tokens` and `request.image_config.output_compression_is_0_to_100`.
 
+Chat and Responses take OpenRouter plugins, and the cited sources of an answer are typed:
+- **Plugins.** `chat::Request` and `responses::Request` gain `plugins` (`sp::OpenRouterPlugin`), for declared OpenRouter origins.
+- **Citations.** `Text` gains `citations`, filled from Chat URL citations, Responses annotations, Messages citations and Interactions citation annotations. These were only raw observations before. `Text{value}` still compiles, and the native seal is unchanged.
+- **Events.** `PartSeal` gains `citations`, filled for text parts.
+
 ## From interface 5 to 6
 
 Package 0.3.0 alpha adds `Usage::provider_cost` and the fixed-size `ProviderReportedCost`, `UsdAmount`, `CostSource`, `CostStatus` and `CostRounding` types. Existing field access remains source-compatible, but `Usage`, `UsageUpdate`, `Completion`, `PartialCompletion` and the containing `Event` layouts grow. Rebuild every consumer against the same headers and generation 6 libraries (`libsp_*.so.6`); interface 5 binaries must not load interface 6 libraries. CMake consumers select `SchemaProvider 0.3.0 EXACT`.

@@ -321,15 +321,24 @@ void corruption_matrix() {
   for (const auto& frames : invalid) failed(stream(frames), ErrorKind::ProtocolCorrupt);
   failed(stream({start(), {"future_event", R"({"type":"future_event"})"}}), ErrorKind::Unsupported);
   failed(stream({start(), block(0, R"({"type":"text","text":""})"), delta(0, R"({"type":"refusal_delta"})")}), ErrorKind::Unsupported);
-  // Citations are observations in the raw wire: a malformed one is corrupt, a valid one never fails the answer.
+  // Citations become citations of the text: a malformed one is corrupt, a valid one never fails the answer.
   failed(stream({start(), block(0, R"({"type":"text","text":""})"), delta(0, R"({"type":"citations_delta"})")}), ErrorKind::ProtocolCorrupt);
   failed(buffered(body(R"([{"type":"text","text":"x","citations":[{}]}])")), ErrorKind::ProtocolCorrupt);
   const std::string citation = R"({"type":"web_search_result_location","url":"https://example.test","title":"t","encrypted_index":"EI","cited_text":"x"})";
-  const auto cited = buffered(body("[{\"type\":\"text\",\"text\":\"x\",\"citations\":[" + citation + "]}]"));
+  const std::string location = R"({"type":"char_location","cited_text":"x","document_index":0,"document_title":"Notes","start_char_index":2,"end_char_index":5})";
+  const auto cited = buffered(body("[{\"type\":\"text\",\"text\":\"x\",\"citations\":[" + citation + "," + location + "]}]"));
   CHECK(text(completed(cited).messages) == "x" && !completed(cited).raw_events.empty());
+  {
+    const auto& part = std::get<Text>(completed(cited).messages[0].parts[0]);
+    CHECK(part.citations.size() == 2 && part.citations[0].kind == "web_search_result_location" && part.citations[0].url == "https://example.test" &&
+          part.citations[0].title == "t" && !part.citations[0].start && part.citations[0].raw->root().get("encrypted_index").as_string() == "EI");
+    CHECK(part.citations[1].kind == "char_location" && part.citations[1].title == "Notes" && part.citations[1].start == 2u && part.citations[1].end == 5u);
+  }
   const auto cited_stream = stream({start(), block(0, R"({"type":"text","text":"","citations":[]})"), delta(0, R"({"type":"text_delta","text":"x"})"),
                                     delta(0, "{\"type\":\"citations_delta\",\"citation\":" + citation + "}"), end(0), stop(), done});
   CHECK(text(completed(cited_stream).messages) == "x");
+  CHECK(std::get<Text>(completed(cited_stream).messages[0].parts[0]).citations.size() == 1 &&
+        std::get<Text>(completed(cited_stream).messages[0].parts[0]).citations[0].url == "https://example.test");
   failed(buffered(body(R"([{"type":"container_upload","file_id":"x"}])")), ErrorKind::Unsupported);
   std::string wrong_model = body(); wrong_model.replace(wrong_model.find("fixture-model"), 13, "other-model");
   CHECK(completed(buffered(wrong_model)).model.relation == ServedRelation::Unexplained);

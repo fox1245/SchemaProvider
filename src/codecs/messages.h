@@ -24,6 +24,7 @@ class Codec {
     LocalId local;
     PartKind kind;
     bool closed = false, argument_bytes = false, initial_input = false, signature_started = false;
+    std::vector<Citation> citations{};
   };
   struct Call { std::string name; ToolCallKind kind; uint64_t index; };
   bool document(std::string_view, std::string_view event, bool streaming);

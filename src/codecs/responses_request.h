@@ -113,6 +113,7 @@ struct Request {
   // Declared OpenRouter origins only.
   std::vector<OutputModality> modalities;
   std::optional<sp::OpenRouterImageConfig> image_config;
+  std::vector<sp::OpenRouterPlugin> plugins;
   // Sent as mcp_approval_response input items after the messages. Each answers an mcp_approval_request in the
   // captured history, or of the response that previous_response_id continues.
   std::vector<McpApproval> mcp_approvals;

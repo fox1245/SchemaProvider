@@ -170,6 +170,10 @@ bool Accumulator::apply(const PartSeal& e) {
   auto p = parts_.find(e.part.value);
   if ((state_ != State::Receiving && state_ != State::Draining) || p == parts_.end()) return reject(ErrorKind::ProtocolCorrupt, "invalid part seal");
   auto& c = p->second;
+  if (!e.citations.empty()) {
+    if (c.kind != PartKind::Text) return reject(ErrorKind::ProtocolCorrupt, "citations on a part that is not text");
+    if (!c.sealed) c.citations = e.citations;
+  }
   if (e.wire_metadata) {
     const auto metadata = e.wire_metadata->root();
     if (!metadata.is_object() ||
@@ -280,7 +284,7 @@ bool Accumulator::apply(const PartSeal& e) {
   return true;
 }
 Part Accumulator::seal_value(Cursor& c, bool partial) {
-  if (c.kind == PartKind::Text) return Text{std::move(c.bytes)};
+  if (c.kind == PartKind::Text) return Text{std::move(c.bytes), std::move(c.citations)};
   if (c.kind == PartKind::Refusal) return Refusal{std::move(c.bytes), {}};
   if (c.kind == PartKind::Thinking) return Thinking{std::move(c.bytes), std::move(c.signature)};
   if (c.kind == PartKind::RedactedThinking) return RedactedThinking{std::move(c.bytes)};

@@ -679,6 +679,53 @@ void openrouter_server_tools_and_images() {
   encoded_ok(gateway, next);
   auto changed = next; changed.image_config->image_size = "2K"; CHECK(refused(responses::encode(gateway, changed, false)) == ErrorKind::ReplayIneligible);
 }
+void plugins_and_citations() {
+  static const auto loaded = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"gateway-responses","family":"openai.responses","connection":{"base_url":"https://openrouter.ai","paths":{"buffered":"/api/v1/responses","streaming":"/api/v1/responses"}}})");
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
+  const auto& gateway = std::get<descriptor::ValidatedDescriptor>(loaded);
+  auto r = request(); r.plugins = {{"web", owned(R"({"max_results":2})")}};
+  const auto sent = encoded_ok(gateway, r);
+  const auto wire = parse(sent.body);
+  CHECK(wire.root().get("plugins").at(0).get("id").as_string() == "web" && wire.root().get("plugins").at(0).get("max_results").as_uint() == 2u);
+  CHECK(refused(responses::encode(desc(), r, false)) == ErrorKind::Unsupported);
+  auto twice = r; twice.plugins.push_back(twice.plugins[0]); CHECK(refused(responses::encode(gateway, twice, false)) == ErrorKind::InvalidRequest);
+  // Every annotation of an output_text is a citation of that text; the kinds keep their own fields.
+  const std::string cited = R"({"id":"msg_c","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"see the source","annotations":[)"
+      R"({"type":"url_citation","url":"https://example.com","title":"Example","start_index":4,"end_index":10,"content":"excerpt"},)"
+      R"({"type":"file_citation","file_id":"file-1","filename":"notes.txt","index":3}]}]})";
+  for (const bool streaming : {false, true}) {
+    Accumulator acc; responses::Codec codec(gateway, streaming ? responses::Mode::Sse : responses::Mode::Buffered, acc, sent.context);
+    if (streaming) {
+      const std::string opening = R"({"id":"msg_c","type":"message","status":"in_progress","role":"assistant","content":[]})";
+      const std::string part = R"({"type":"output_text","text":"","annotations":[]})";
+      const auto cited_doc = parse(cited);
+      const auto annotation = cited_doc.root().get("content").at(0).get("annotations");
+      std::vector<Frame> frames{created(), added(0, opening), event("response.content_part.added", R"(,"item_id":"msg_c","output_index":0,"content_index":0,"part":)" + part),
+          text_delta("msg_c", 0, "see the source")};
+      for (std::size_t n = 0; n < 2; ++n)
+        frames.push_back(event("response.output_text.annotation.added", R"(,"item_id":"msg_c","output_index":0,"content_index":0,"annotation_index":)" + std::to_string(n) +
+                               ",\"annotation\":" + annotation.at(n).dump()));
+      const auto done_part = parse(cited).root().get("content").at(0).dump();
+      frames.push_back(event("response.output_text.done", R"(,"item_id":"msg_c","output_index":0,"content_index":0,"text":"see the source")"));
+      frames.push_back(event("response.content_part.done", R"(,"item_id":"msg_c","output_index":0,"content_index":0,"part":)" + done_part));
+      frames.push_back(item_done(0, cited)); frames.push_back(terminal("[" + cited + "]"));
+      for (const auto& [name, data] : frames) CHECK(codec.frame(name, data));
+      codec.finish({});
+    } else codec.buffered(body("[" + cited + "]"), {});
+    CHECK(acc.outcome());
+    const auto& text = std::get<Text>(completed(*acc.outcome()).messages[0].parts[0]);
+    CHECK(text.value == "see the source" && text.citations.size() == 2);
+    CHECK(text.citations[0].kind == "url_citation" && text.citations[0].url == "https://example.com" && text.citations[0].title == "Example" &&
+          text.citations[0].start == 4u && text.citations[0].end == 10u && text.citations[0].raw->root().get("content").as_string() == "excerpt");
+    CHECK(text.citations[1].kind == "file_citation" && text.citations[1].file_id == "file-1" && text.citations[1].filename == "notes.txt" &&
+          text.citations[1].start == 3u && !text.citations[1].end && text.citations[1].url.empty());
+    // Citations are read from the wire the message keeps, so the next turn replays it as received.
+    auto next = r; next.messages.push_back(completed(*acc.outcome()).messages[0]); next.messages.push_back(Message{"", Role::User, {Text{"again"}}});
+    const auto replayed = parse(encoded_ok(gateway, next).body);
+    CHECK(json::equal(replayed.root().get("input").at(1), parse(cited).root()));
+    auto changed = next; changed.plugins.clear(); CHECK(refused(responses::encode(gateway, changed, false)) == ErrorKind::ReplayIneligible);
+  }
+}
 void service_item_progress_events() {
   // Code interpreter and MCP calls stream their code and arguments under the item's own event names.
   const std::string code_added = R"({"id":"ci_1","type":"code_interpreter_call","status":"in_progress","code":"","container_id":"cntr_1","outputs":null})";
@@ -1144,7 +1191,7 @@ void empty_text_delta_is_withheld() {
 } // namespace
 int main() {
   try { empty_text_delta_is_withheld(); failure_reasons(); provider_money_and_snapshot_aliases(); named_error_precedence(); named_error_raw_capacity(); completed_reasoning_ciphertext_authority(); reviewed_wire_boundaries(); typed_encode(); controls_and_cursor_boundaries(); openrouter_max_price(); strict_tool_schemas(); previous_response_ownership(); grouped_native_and_owned_outcomes(); normal_close_required(); cancellation_observation_boundary(); reasoning_stream_snapshots(); tools_interleaving_and_ownership(); incomplete_and_server_items(); unknown_hosted_item_ownership(); unknown_wire_observation_boundary(); usage_boundaries(); uncached_input_rule(); corruption_and_bounds();
-    hosted_tool_options(); openrouter_server_tools_and_images(); service_item_progress_events(); computer_calls_and_mcp_approvals();
+    hosted_tool_options(); openrouter_server_tools_and_images(); service_item_progress_events(); computer_calls_and_mcp_approvals(); plugins_and_citations();
     std::cout << "Responses semantic contracts passed\n"; return 0;
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

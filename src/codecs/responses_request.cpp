@@ -288,6 +288,10 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
           return bad("shell skill references must be nonempty and unique");
     }
   }
+  if (!request.plugins.empty()) {
+    if (!router) return Error{ErrorKind::Unsupported, "OpenRouter plugins require a declared OpenRouter origin"};
+    if (auto error = request_controls::validate_plugins(request.plugins, resources.request_tools)) return bad(std::move(*error));
+  }
   if (!request.modalities.empty() || request.image_config) {
     if (!router) return Error{ErrorKind::Unsupported, "output modalities and image_config require a declared OpenRouter origin"};
     unsigned mask = 0;
@@ -575,6 +579,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       body.raw(",\"image_config\":");
       request_controls::write_image_config(body, *request.image_config);
     }
+    if (!request.plugins.empty()) { body.raw(",\"plugins\":"); request_controls::write_plugins(body, request.plugins); }
     if (request.required_tool) {
       if (!tool_names.contains(*request.required_tool)) return invalid("required_tool must name a declared client function");
       body.raw(",\"tool_choice\":{\"type\":\"function\",\"name\":").quoted(*request.required_tool).raw("}");
