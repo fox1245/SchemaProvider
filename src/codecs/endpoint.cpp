@@ -25,6 +25,11 @@ std::unique_ptr<Codec> make_codec(std::string_view name, const descriptor::Valid
   // A file, a page of files, or a deletion; `requested` is the file id the call named.
   if (name == "files") return std::make_unique<files::Codec>(descriptor, accumulator, files::Codec::Kind::File, std::move(requested), limits);
   if (name == "files.list") return std::make_unique<files::Codec>(descriptor, accumulator, files::Codec::Kind::Page, std::move(requested), limits);
+  // A step of a chunked upload; `requested` is the session it advances.
+  using Step = files::SessionCodec::Step;
+  for (const auto& [step_name, step] : {std::pair{"files.start", Step::Start}, std::pair{"files.part", Step::Part},
+                                        std::pair{"files.complete", Step::Complete}, std::pair{"files.query", Step::Query}, std::pair{"files.cancel", Step::Cancel}})
+    if (name == step_name) return std::make_unique<files::SessionCodec>(descriptor, accumulator, step, std::move(requested), limits);
   if (name == "files.delete") return std::make_unique<files::Codec>(descriptor, accumulator, files::Codec::Kind::Deleted, std::move(requested), limits);
   return nullptr;
 }

@@ -1018,6 +1018,13 @@ constexpr Entry files_table[] = {
   {"a file is named only at the origin that holds it", "files.media.origin_mismatch"},
   {"a file is named once it is active", "files.media.not_active"},
   {"the file has expired", "files.media.expired"},
+  {"the upload session is not readable", "files.session.unreadable"},
+  {"a Google upload reports its status", "files.session.status_required"},
+  {"a Google upload begins with its upload URL", "files.session.url_required"},
+  {"a finished upload names its file", "files.session.file_required"},
+  {"a Google upload reports its size as digits", "files.session.size_invalid"},
+  {"the response does not confirm the cancellation", "files.session.cancel_unconfirmed"},
+  {"an upload step names its id", "files.session.id_required"},
 };
 constexpr Entry files_request_table[] = {
   {"file endpoints are not admitted at this origin", "request.files.endpoint_not_admitted"},
@@ -1038,6 +1045,15 @@ constexpr Entry files_request_table[] = {
   {"a file purpose is a token", "request.files.purpose_invalid"},
   {"only OpenAI lists files by purpose", "request.files.purpose_filter_unsupported"},
   {"a download needs a positive byte limit", "request.files.download_limit_invalid"},
+  {"an upload continues at the origin that began it", "request.files.session_origin_mismatch"},
+  {"a Google upload URL is under the origin's upload path", "request.files.session_url_invalid"},
+  {"an upload id is a token", "request.files.session_id_invalid"},
+  {"a part fits in what remains of the upload", "request.files.part_too_large"},
+  {"a Google chunk before the last is a multiple of the granularity", "request.files.part_granularity"},
+  {"a Google upload completes with its last chunk", "request.files.complete_unsupported"},
+  {"an upload completes once every part is sent", "request.files.complete_early"},
+  {"an upload part id is a token", "request.files.part_id_invalid"},
+  {"only a Google upload says how much it holds", "request.files.query_unsupported"},
 };
 constexpr Entry speech_table[] = {
   {"speech response is not audio", "speech.response.not_audio"},

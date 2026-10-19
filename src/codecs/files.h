@@ -84,7 +84,54 @@ struct Download {
   std::uint64_t max_bytes = std::uint64_t{1} << 32;
 };
 
+// A chunked upload: OpenAI Uploads (start, parts, complete) or Google's resumable upload (start, then chunks, the
+// last of which completes the file). Each step is an ordinary call; the session is a plain value a host journals
+// between them, and resumes after a restart.
+struct Session {
+  std::string origin, shape;
+  // OpenAI's upload id.
+  std::string id{};
+  // Google's upload URL. It lets anyone write the file without the API key: keep it as private as a credential.
+  std::string url{};
+  std::uint64_t size = 0, sent = 0;
+  // Google: every chunk but the last is a multiple of this many bytes.
+  std::uint64_t granularity = 0;
+  // OpenAI: the ids of the parts sent so far, in order.
+  std::vector<std::string> parts{};
+  std::optional<std::uint64_t> expires_at{};
+  // The provider's word for the upload (`pending`, `active`, `final`, `completed`, `cancelled`).
+  std::string status{};
+};
+struct Progress {
+  Session session;
+  // The file, once the upload completed it.
+  std::optional<File> file{};
+  AttemptEvidence attempt{};
+  std::vector<RawWire> raw_events;
+};
+using ProgressOutcome = std::variant<Progress, Failure>;
+struct Start {
+  std::string filename, mime;
+  std::uint64_t size = 0;
+  // OpenAI only, as for `Upload`.
+  std::string purpose{};
+  std::optional<std::uint64_t> expires_after{};
+};
+// The file's next bytes, from `session.sent`, in memory or as a file slice. An OpenAI part is at most 64 MB. At
+// Google every chunk but the last is a multiple of the session's granularity, and the last one completes the file.
+struct Part { Session session; Source source; };
+// OpenAI: assemble the parts, in order, into the file.
+struct Complete { Session session; };
+// Google: how many bytes the provider holds, to resume a session after a call whose answer was lost.
+struct Query { Session session; };
+struct Cancel { Session session; };
+
 using Encoded = endpoints::Encoded;
+std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor&, const Start&);
+std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor&, const Part&);
+std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor&, const Complete&);
+std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor&, const Query&);
+std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor&, const Cancel&);
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor&, const Upload&);
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor&, const Get&);
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor&, const Delete&);
@@ -113,7 +160,25 @@ class Codec final : public endpoints::Codec {
   std::string subject_;
   SemanticLimits limits_;
 };
+// A step of a chunked upload. `subject` is the session the call advanced, as `session_document` writes it.
+class SessionCodec final : public endpoints::Codec {
+ public:
+  enum class Step { Start, Part, Complete, Query, Cancel };
+  SessionCodec(const descriptor::ValidatedDescriptor&, Accumulator&, Step, std::string subject, SemanticLimits = {});
+  bool buffered(std::string_view body, Close close) override;
+ private:
+  bool fail(ErrorKind, std::string);
+  bool emit(const Event&);
+  const descriptor::ValidatedDescriptor& descriptor_;
+  Accumulator& accumulator_;
+  Step step_;
+  std::string subject_;
+  SemanticLimits limits_;
+};
+// A session, and the size of the part a call sends, as the JSON a step's decoder reads back.
+std::string session_document(const Session&, std::uint64_t part = 0);
 Outcome typed(const sp::Outcome&);
+ProgressOutcome typed_progress(const sp::Outcome&);
 PageOutcome typed_page(const sp::Outcome&);
 DeleteOutcome typed_deleted(const sp::Outcome&);
 }  // namespace sp::files

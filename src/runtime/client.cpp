@@ -1758,6 +1758,40 @@ EndpointCall<files::PageOutcome> Client::start(PreparedEndpoint<files::PageOutco
 EndpointCall<files::DeleteOutcome> Client::start(PreparedEndpoint<files::DeleteOutcome> call, std::function<void(files::DeleteOutcome)> on_outcome) {
   return start_endpoint(std::move(call), std::move(on_outcome));
 }
+PreparedEndpoint<files::ProgressOutcome> Client::prepare(files::Start step, RunOptions options) {
+  auto client = state_;
+  return PreparedEndpoint<files::ProgressOutcome>(prepare_endpoint<files::Encoded>(std::move(options), "files.start",
+      static_cast<int>(reason::Source::FilesRequest), [&] { return files::encode(client->descriptor, step); }));
+}
+files::ProgressOutcome Client::complete(files::Start step, RunOptions options) { return complete(prepare(std::move(step), std::move(options))); }
+PreparedEndpoint<files::ProgressOutcome> Client::prepare(files::Part step, RunOptions options) {
+  auto client = state_;
+  return PreparedEndpoint<files::ProgressOutcome>(prepare_endpoint<files::Encoded>(std::move(options), "files.part",
+      static_cast<int>(reason::Source::FilesRequest), [&] { return files::encode(client->descriptor, step); }));
+}
+files::ProgressOutcome Client::complete(files::Part step, RunOptions options) { return complete(prepare(std::move(step), std::move(options))); }
+PreparedEndpoint<files::ProgressOutcome> Client::prepare(files::Complete step, RunOptions options) {
+  auto client = state_;
+  return PreparedEndpoint<files::ProgressOutcome>(prepare_endpoint<files::Encoded>(std::move(options), "files.complete",
+      static_cast<int>(reason::Source::FilesRequest), [&] { return files::encode(client->descriptor, step); }));
+}
+files::ProgressOutcome Client::complete(files::Complete step, RunOptions options) { return complete(prepare(std::move(step), std::move(options))); }
+PreparedEndpoint<files::ProgressOutcome> Client::prepare(files::Query step, RunOptions options) {
+  auto client = state_;
+  return PreparedEndpoint<files::ProgressOutcome>(prepare_endpoint<files::Encoded>(std::move(options), "files.query",
+      static_cast<int>(reason::Source::FilesRequest), [&] { return files::encode(client->descriptor, step); }));
+}
+files::ProgressOutcome Client::complete(files::Query step, RunOptions options) { return complete(prepare(std::move(step), std::move(options))); }
+PreparedEndpoint<files::ProgressOutcome> Client::prepare(files::Cancel step, RunOptions options) {
+  auto client = state_;
+  return PreparedEndpoint<files::ProgressOutcome>(prepare_endpoint<files::Encoded>(std::move(options), "files.cancel",
+      static_cast<int>(reason::Source::FilesRequest), [&] { return files::encode(client->descriptor, step); }));
+}
+files::ProgressOutcome Client::complete(files::Cancel step, RunOptions options) { return complete(prepare(std::move(step), std::move(options))); }
+files::ProgressOutcome Client::complete(PreparedEndpoint<files::ProgressOutcome> call) { return complete_endpoint(std::move(call)); }
+EndpointCall<files::ProgressOutcome> Client::start(PreparedEndpoint<files::ProgressOutcome> call, std::function<void(files::ProgressOutcome)> on_outcome) {
+  return start_endpoint(std::move(call), std::move(on_outcome));
+}
 Diagnostics Client::diagnostics() const noexcept {
   if (!state_) return {};
   return {state_->slow_callbacks.load(), state_->callback_exceptions.load()};

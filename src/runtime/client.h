@@ -216,6 +216,7 @@ inline jobs::DownloadOutcome typed_outcome(const sp::Outcome& outcome, const job
 inline files::Outcome typed_outcome(const sp::Outcome& outcome, const files::Outcome*) { return files::typed(outcome); }
 inline files::PageOutcome typed_outcome(const sp::Outcome& outcome, const files::PageOutcome*) { return files::typed_page(outcome); }
 inline files::DeleteOutcome typed_outcome(const sp::Outcome& outcome, const files::DeleteOutcome*) { return files::typed_deleted(outcome); }
+inline files::ProgressOutcome typed_outcome(const sp::Outcome& outcome, const files::ProgressOutcome*) { return files::typed_progress(outcome); }
 }  // namespace detail
 // A started non-chat endpoint call. Like an Operation, destruction requests cancellation and detach relinquishes it;
 // join waits for the typed outcome, the one the callback received.
@@ -319,6 +320,19 @@ class Client {
   EndpointCall<files::Outcome> start(PreparedEndpoint<files::Outcome>, std::function<void(files::Outcome)> on_outcome = {});
   EndpointCall<files::PageOutcome> start(PreparedEndpoint<files::PageOutcome>, std::function<void(files::PageOutcome)> on_outcome = {});
   EndpointCall<files::DeleteOutcome> start(PreparedEndpoint<files::DeleteOutcome>, std::function<void(files::DeleteOutcome)> on_outcome = {});
+  // A chunked upload, one step per call; each answers with the advanced session, and the file once it is whole.
+  PreparedEndpoint<files::ProgressOutcome> prepare(files::Start, RunOptions = {});
+  PreparedEndpoint<files::ProgressOutcome> prepare(files::Part, RunOptions = {});
+  PreparedEndpoint<files::ProgressOutcome> prepare(files::Complete, RunOptions = {});
+  PreparedEndpoint<files::ProgressOutcome> prepare(files::Query, RunOptions = {});
+  PreparedEndpoint<files::ProgressOutcome> prepare(files::Cancel, RunOptions = {});
+  files::ProgressOutcome complete(files::Start, RunOptions = {});
+  files::ProgressOutcome complete(files::Part, RunOptions = {});
+  files::ProgressOutcome complete(files::Complete, RunOptions = {});
+  files::ProgressOutcome complete(files::Query, RunOptions = {});
+  files::ProgressOutcome complete(files::Cancel, RunOptions = {});
+  files::ProgressOutcome complete(PreparedEndpoint<files::ProgressOutcome>);
+  EndpointCall<files::ProgressOutcome> start(PreparedEndpoint<files::ProgressOutcome>, std::function<void(files::ProgressOutcome)> on_outcome = {});
   Diagnostics diagnostics() const noexcept;
  private:
   explicit Client(std::shared_ptr<detail::ClientState>);
