@@ -49,11 +49,24 @@ std::variant<Route, Error> route(const descriptor::ValidatedDescriptor& descript
   return Route{fact, std::string(*path)};
 }
 // A call about one file: its id is a token at OpenAI and Anthropic, and `files/<token>` at Google.
-std::variant<Encoded, Error> by_id(const descriptor::ValidatedDescriptor& descriptor, std::string_view id, std::string_view operation,
+// Google names a file `files/<id>`; a result delivered by URI names it by its URI at the origin
+// (`https://…/v1beta/files/<id>:download?alt=media`), which stands for the same name.
+std::string google_name(const descriptor::ValidatedDescriptor& descriptor, std::string_view id) {
+  const auto origin = descriptor.base_url();
+  if (!id.starts_with(origin) || id.size() == origin.size() || id[origin.size()] != '/') return std::string(id);
+  const auto rest = id.substr(origin.size());
+  const auto at = rest.find("/files/");
+  if (at == std::string_view::npos || rest.find_first_of("?#", 0) < at) return std::string(id);
+  auto name = rest.substr(at + 1);
+  return std::string(name.substr(0, name.find_first_of(":?#")));
+}
+std::variant<Encoded, Error> by_id(const descriptor::ValidatedDescriptor& descriptor, std::string_view named, std::string_view operation,
                                    std::string method) {
   auto found = route(descriptor, operation);
   if (auto* error = std::get_if<Error>(&found)) return *error;
   auto& [fact, path] = std::get<Route>(found);
+  const auto resolved = fact->shape == "google" ? google_name(descriptor, named) : std::string(named);
+  const std::string_view id = resolved;
   if (fact->shape == "google" ? !(id.starts_with("files/") && token(id.substr(6))) : !token(id))
     return bad("a file id is a token, or files/<token> at Google");
   if (const auto at = path.find("{id}"); at != std::string::npos) path.replace(at, 4, id);
