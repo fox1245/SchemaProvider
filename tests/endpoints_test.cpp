@@ -3,6 +3,8 @@
 #include "codecs/embeddings.h"
 #include "codecs/moderation.h"
 #include "codecs/rerank.h"
+#include "codecs/speech.h"
+#include "codecs/transcription.h"
 #include "descriptor/descriptor.h"
 #include "json/json.h"
 #include <cmath>
@@ -150,9 +152,74 @@ void moderation_endpoint() {
   const auto failed = decoded<moderation::Codec>(moderation::typed, openai, R"({"results":[{"categories":{}}]})", "m");
   CHECK(std::holds_alternative<Failure>(failed));
 }
+template <class Codec, class Typed> auto decoded_with(Typed typed, const descriptor::ValidatedDescriptor& d, std::string_view body,
+                                                     std::vector<std::pair<std::string, std::string>> headers, std::string model) {
+  Accumulator accumulator;
+  Codec codec(d, accumulator, std::move(model));
+  codec.buffered(body, {true, ErrorKind::Truncated, std::move(headers)});
+  CHECK(accumulator.outcome());
+  return typed(*accumulator.outcome());
+}
+void speech_endpoint() {
+  const auto openai = at("https://api.openai.com"), router = at("https://openrouter.ai");
+  speech::Request request{"gpt-4o-mini-tts", "Hello there.", "alloy"};
+  request.instructions = "Speak slowly."; request.format = "mp3"; request.speed = 1.25;
+  const auto wire = encoded<speech::Encoded>(speech::encode, openai, request);
+  CHECK(wire.path == "/v1/audio/speech" && wire.accept == "audio/*" && wire.content_type == "application/json");
+  {
+    const auto body = document(wire.body);
+    CHECK(body->root().get("voice").as_string() == "alloy" && body->root().get("response_format").as_string() == "mp3" && body->root().get("speed").as_double() == 1.25);
+  }
+  CHECK(encoded<speech::Encoded>(speech::encode, router, request).path == "/api/v1/audio/speech");
+  auto slow = request; slow.speed = 0.0; CHECK(refused(speech::encode, openai, slow) == ErrorKind::InvalidRequest);
+  // The body is the audio: its type comes from the response header, and the raw record keeps its size and digest.
+  const std::string mp3("ID3\x03\x00\x00\x00\x00\x00\x00 synthetic frames", 26);
+  const auto spoken = decoded_with<speech::Codec>(speech::typed, router, mp3, {{"content-type", "audio/mpeg"}, {"x-generation-id", "gen-tts-1"}}, "openai/gpt-4o-mini-tts");
+  const auto& audio = std::get<speech::Result>(spoken);
+  std::string bytes;
+  CHECK(audio.audio.kind == MediaKind::Audio && audio.audio.mime == "audio/mpeg" && base64_decode(*audio.audio.data, bytes) && bytes == mp3 && audio.id == "gen-tts-1");
+  CHECK(audio.raw_events.size() == 1 && audio.raw_events[0].payload->root().get("bytes").as_uint() == mp3.size() &&
+        audio.raw_events[0].payload->root().get("sha256").as_string().size() == 64);
+  for (const auto& [body, type] : std::initializer_list<std::pair<std::string, std::string>>{{R"({"text":"no"})", "application/json"}, {"", "audio/mpeg"}}) {
+    const auto failed = decoded_with<speech::Codec>(speech::typed, openai, body, {{"content-type", type}}, "m");
+    CHECK(std::holds_alternative<Failure>(failed) && std::get<Failure>(failed).error.kind == ErrorKind::ProtocolCorrupt);
+  }
+}
+void transcription_endpoint() {
+  const auto openai = at("https://api.openai.com"), router = at("https://openrouter.ai");
+  const auto wav = std::make_shared<const std::string>(base64_encode(std::string("RIFF\x24\x00\x00\x00WAVEfmt synthetic", 24)));
+  transcription::Request request{"gpt-4o-mini-transcribe", Media::audio("audio/wav", wav)};
+  request.language = "en"; request.prompt = "A greeting.";
+  request.extensions = document(R"({"temperature":0,"timestamp_granularities":["word"]})");
+  // OpenAI takes a multipart upload: the fields, then the audio's bytes under `file`.
+  const auto wire = encoded<transcription::Encoded>(transcription::encode, openai, request);
+  CHECK(wire.path == "/v1/audio/transcriptions" && wire.content_type.starts_with("multipart/form-data; boundary=sp-boundary-"));
+  const auto boundary = wire.content_type.substr(wire.content_type.find('=') + 1);
+  CHECK(wire.body.find("--" + boundary + "\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\ngpt-4o-mini-transcribe\r\n") == 0);
+  CHECK(wire.body.find("name=\"language\"\r\n\r\nen\r\n") != std::string::npos && wire.body.find("name=\"timestamp_granularities[]\"\r\n\r\nword\r\n") != std::string::npos &&
+        wire.body.find("filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\nRIFF") != std::string::npos && wire.body.ends_with("--" + boundary + "--\r\n"));
+  // OpenRouter takes JSON with the audio inline or by URL, and no prompt.
+  auto routed = request; routed.model = "openai/gpt-4o-mini-transcribe"; routed.prompt.reset(); routed.extensions.reset();
+  {
+    const auto body = document(encoded<transcription::Encoded>(transcription::encode, router, routed).body);
+    CHECK(body->root().get("input_audio").get("data").as_string() == *wav && body->root().get("input_audio").get("format").as_string() == "wav" && body->root().get("language").as_string() == "en");
+  }
+  auto linked = routed; linked.audio = Media::url(MediaKind::Audio, "https://example.test/a.mp3", "audio/mpeg");
+  CHECK(document(encoded<transcription::Encoded>(transcription::encode, router, linked).body)->root().get("input_audio").get("url").as_string() == "https://example.test/a.mp3");
+  CHECK(refused(transcription::encode, openai, [&] { auto r = linked; r.model = "gpt-4o-mini-transcribe"; return r; }()) == ErrorKind::Unsupported);
+  CHECK(refused(transcription::encode, router, [&] { auto r = routed; r.prompt = "x"; return r; }()) == ErrorKind::Unsupported);
+  const auto result = decoded<transcription::Codec>(transcription::typed, openai,
+      R"({"text":"Hello there.","usage":{"type":"tokens","input_tokens":14,"output_tokens":4,"total_tokens":18}})", "gpt-4o-mini-transcribe");
+  CHECK(std::get<transcription::Result>(result).text == "Hello there." && std::get<transcription::Result>(result).usage.total->value == 18);
+  const auto routed_result = decoded<transcription::Codec>(transcription::typed, router,
+      R"({"text":"Hello there.","language":"en","duration":1.4,"usage":{"cost":0.0001,"seconds":1.4}})", "openai/gpt-4o-mini-transcribe");
+  CHECK(std::get<transcription::Result>(routed_result).seconds == 1.4 && std::get<transcription::Result>(routed_result).language == "en" &&
+        std::get<transcription::Result>(routed_result).usage.provider_cost.total->nano_usd == 100'000u);
+  CHECK(std::holds_alternative<Failure>(decoded<transcription::Codec>(transcription::typed, openai, R"({"segments":[]})", "m")));
+}
 }  // namespace
 
 int main() {
-  try { embedding_endpoints(); rerank_endpoint(); moderation_endpoint(); std::cout << "endpoint properties passed\n"; return 0; }
+  try { embedding_endpoints(); rerank_endpoint(); moderation_endpoint(); speech_endpoint(); transcription_endpoint(); std::cout << "endpoint properties passed\n"; return 0; }
   catch (const std::exception& error) { std::cerr << "endpoint test failed: " << error.what() << '\n'; return 1; }
 }

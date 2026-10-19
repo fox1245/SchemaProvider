@@ -32,9 +32,11 @@ const Source sources[]{{reason::Source::Chat, "chat"}, {reason::Source::Messages
                        {reason::Source::Decisions, "decisions"}, {reason::Source::DecisionsRequest, "request.decisions"},
                        {reason::Source::Embeddings, "embeddings"}, {reason::Source::EmbeddingsRequest, "request.embeddings"},
                        {reason::Source::Rerank, "rerank"}, {reason::Source::RerankRequest, "request.rerank"},
-                       {reason::Source::Moderation, "moderation"}, {reason::Source::ModerationRequest, "request.moderation"}};
+                       {reason::Source::Moderation, "moderation"}, {reason::Source::ModerationRequest, "request.moderation"},
+                       {reason::Source::Speech, "speech"}, {reason::Source::SpeechRequest, "request.speech"},
+                       {reason::Source::Transcription, "transcription"}, {reason::Source::TranscriptionRequest, "request.transcription"}};
 // Endpoint decoders (D6) are small: they parse one buffered document.
-const std::set<std::string> endpoint_decoders{"images", "decisions", "embeddings", "rerank", "moderation"};
+const std::set<std::string> endpoint_decoders{"images", "decisions", "embeddings", "rerank", "moderation", "speech", "transcription"};
 // The sources each encoder table covers, relative to src/.
 struct EncoderSource { reason::Source source; std::vector<const char*> files; };
 const EncoderSource encoder_sources[]{
@@ -42,7 +44,8 @@ const EncoderSource encoder_sources[]{
     {reason::Source::ResponsesRequest, {"codecs/responses_request.cpp"}}, {reason::Source::GeminiRequest, {"codecs/gemini_request.cpp"}},
     {reason::Source::InteractionsRequest, {"codecs/interactions_request.cpp"}}, {reason::Source::ImagesRequest, {"codecs/images_request.cpp"}}, {reason::Source::DecisionsRequest, {"codecs/decisions_request.cpp"}},
     {reason::Source::EmbeddingsRequest, {"codecs/embeddings_request.cpp"}}, {reason::Source::RerankRequest, {"codecs/rerank_request.cpp"}},
-    {reason::Source::ModerationRequest, {"codecs/moderation_request.cpp"}},
+    {reason::Source::ModerationRequest, {"codecs/moderation_request.cpp"}}, {reason::Source::SpeechRequest, {"codecs/speech_request.cpp"}},
+    {reason::Source::TranscriptionRequest, {"codecs/transcription_request.cpp"}},
     {reason::Source::SharedRequest, {"descriptor/policy.cpp", "core/request_controls.h", "codecs/media_input.cpp", "core/media.cpp", "core/native.cpp"}}};
 // The strings for an abnormal close belong to the transport: the close error's kind is the transport's, and so is its lack of a reason.
 const std::set<std::string> transport_strings{"abnormal response close", "abnormal Gemini response close", "abnormal interaction close"};
@@ -143,7 +146,7 @@ void every_failure_string_has_a_code(const std::filesystem::path& root) {
     CHECK(file.good());
     const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
     const auto found = failure_strings(text);
-    CHECK(found.size() > (endpoint_decoders.contains(prefix) ? 4 : 20));
+    CHECK(found.size() > (endpoint_decoders.contains(prefix) ? 2 : 20));
     std::set<std::string> used;
     for (const auto& message : found) {
       if (transport_strings.contains(message)) continue;

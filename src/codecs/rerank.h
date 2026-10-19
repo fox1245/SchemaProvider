@@ -34,11 +34,7 @@ struct Result {
 };
 using Outcome = std::variant<Result, Failure>;
 
-struct Encoded {
-  std::string path, body, model;
-  bool charge_on_accept = false;
-  std::string auth;
-};
+using Encoded = endpoints::Encoded;
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor&, const Request&);
 
 using Close = endpoints::Close;

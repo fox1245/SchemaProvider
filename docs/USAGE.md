@@ -628,7 +628,7 @@ The same schemas admit the options of typed containers: OpenRouter plugins (`ope
 
 ## Non-chat endpoints
 
-Endpoints outside the chat families run on the same `runtime::Client`, with request and result types of their own (decision [D6](decisions/D6-endpoints.md)). A call uses the client's origin, credential and descriptor headers, and shares its admission slots, retry budget, deadline handling and error classification. The chat `Request`, `Outcome` and `Completion` do not change. Image generation and edits, decisions, embeddings, rerank and moderation are available; the other endpoints follow.
+Endpoints outside the chat families run on the same `runtime::Client`, with request and result types of their own (decision [D6](decisions/D6-endpoints.md)). A call uses the client's origin, credential and descriptor headers, and shares its admission slots, retry budget, deadline handling and error classification. The chat `Request`, `Outcome` and `Completion` do not change. Image generation and edits, decisions, embeddings, rerank, moderation, speech and transcription are available; the other endpoints follow.
 
 ```cpp
 sp::runtime::Client openai(sp::descriptor::presets::openai_chat(), api_key);
@@ -658,6 +658,12 @@ if (auto* result = std::get_if<sp::images::Result>(&outcome))
 
   `dimensions` shortens the vectors. `task` is Google's `taskType` or OpenRouter's `input_type`. `embeddings::Result` has one `std::vector<float>` per input, in input order.
 - **Rerank.** `rerank::Request` (OpenRouter `/api/v1/rerank`) ranks `documents` against a `query`, optionally only the `top` few. `rerank::Result` lists each document's request index and relevance, most relevant first, with the provider and its cost.
+- **Speech.** `speech::Request` (OpenAI `/v1/audio/speech`, OpenRouter `/api/v1/audio/speech`) has the model, the text, the voice, and optional `instructions`, `format` (`mp3`, `wav`, `opus`, `pcm`) and `speed`. The response body is the audio. `speech::Result` holds it as inline `Media`, with the MIME type the response named. OpenRouter adds its generation id (`X-Generation-Id`). `raw_events` records the body's type, size and SHA-256, never the bytes.
+- **Transcription.** `transcription::Request` turns `audio` into text, with an optional `language`, and on OpenAI a `prompt`.
+  - OpenAI (`/v1/audio/transcriptions`) takes the audio inline, as a multipart upload. Options become form fields, and an array is sent as repeated `name[]` fields.
+  - OpenRouter (`/api/v1/audio/transcriptions`) takes the audio inline or by URL, as `input_audio`.
+
+  `transcription::Result` has the text, the language and the audio's length when the provider reports them, and usage with OpenRouter's cost.
 - **Moderation.** `moderation::Request` (OpenAI `/v1/moderations`) checks text and images. `moderation::Result` has one verdict per input: whether it is flagged, and each category with its score. It is free, so its fact does not set `charge_on_accept`.
 - **Policy facts.** The descriptor policy's `endpoints` list admits each endpoint at its origins. A fact has these members:
   - `endpoint` (`images`);
@@ -670,13 +676,14 @@ if (auto* result = std::get_if<sp::images::Result>(&outcome))
   The built-in policy admits images, decisions and embeddings at `https://api.openai.com` and `https://openrouter.ai`, and also these:
   - embeddings at `https://generativelanguage.googleapis.com`;
   - rerank at OpenRouter;
-  - moderation at OpenAI.
+  - moderation at OpenAI;
+  - speech and transcription at OpenAI and OpenRouter.
 
   A path may hold `{model}`, which the request's model fills. An origin without a fact is `Unsupported` at prepare, with no I/O.
 - **Money.** A call whose fact sets `charge_on_accept` is retried only when it provably never reached the provider, or when the provider refused it before accepting it (429, 503). A failure after the request may have arrived is reported after one attempt, even when the retry policy allows duplicate billing risk.
 - **Video.** Veo is not ported: its preview models end on 2026-10-22. Use Gemini Omni through Interactions (`video_config`, background jobs).
 
-On 2026-10-19 OpenAI `gpt-image-2` (low quality) generated an image and then edited it from a data URL, and OpenRouter `google/gemini-3.1-flash-lite-image` did the same with a reference image and `aspect_ratio`, reporting its cost. The same day `gpt-6-luna` and OpenRouter `typesafe/jev-1.13` each answered a predicate, a choice and a score about a support ticket. OpenRouter served a dated snapshot of the model and reported the cost. Embeddings from `text-embedding-3-small` (OpenAI, and through OpenRouter) and `gemini-embedding-2` (with an image input) put two related sentences closest. OpenRouter `cohere/rerank-v3.5` ranked the relevant document first, and `omni-moderation-latest` flagged a threat and passed a harmless sentence.
+On 2026-10-19 OpenAI `gpt-image-2` (low quality) generated an image and then edited it from a data URL, and OpenRouter `google/gemini-3.1-flash-lite-image` did the same with a reference image and `aspect_ratio`, reporting its cost. The same day `gpt-6-luna` and OpenRouter `typesafe/jev-1.13` each answered a predicate, a choice and a score about a support ticket. OpenRouter served a dated snapshot of the model and reported the cost. Embeddings from `text-embedding-3-small` (OpenAI, and through OpenRouter) and `gemini-embedding-2` (with an image input) put two related sentences closest. OpenRouter `cohere/rerank-v3.5` ranked the relevant document first, and `omni-moderation-latest` flagged a threat and passed a harmless sentence. `gpt-4o-mini-tts` spoke a sentence that `gpt-4o-mini-transcribe` transcribed back word for word. Through OpenRouter, `mistralai/voxtral-mini-tts-2603` and `openai/whisper-large-v3` did the same.
 
 ## Responses provider-held continuation
 

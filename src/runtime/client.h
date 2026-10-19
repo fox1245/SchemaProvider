@@ -11,6 +11,8 @@
 #include "codecs/embeddings.h"
 #include "codecs/moderation.h"
 #include "codecs/rerank.h"
+#include "codecs/speech.h"
+#include "codecs/transcription.h"
 #include "descriptor/presets.h"
 #include "runtime/policy.h"
 #include "transport/sse_framer.h"
@@ -205,6 +207,8 @@ inline decisions::Outcome typed_outcome(const sp::Outcome& outcome, const decisi
 inline embeddings::Outcome typed_outcome(const sp::Outcome& outcome, const embeddings::Outcome*) { return embeddings::typed(outcome); }
 inline rerank::Outcome typed_outcome(const sp::Outcome& outcome, const rerank::Outcome*) { return rerank::typed(outcome); }
 inline moderation::Outcome typed_outcome(const sp::Outcome& outcome, const moderation::Outcome*) { return moderation::typed(outcome); }
+inline speech::Outcome typed_outcome(const sp::Outcome& outcome, const speech::Outcome*) { return speech::typed(outcome); }
+inline transcription::Outcome typed_outcome(const sp::Outcome& outcome, const transcription::Outcome*) { return transcription::typed(outcome); }
 }  // namespace detail
 // A started non-chat endpoint call. Like an Operation, destruction requests cancellation and detach relinquishes it;
 // join waits for the typed outcome, the one the callback received.
@@ -269,6 +273,14 @@ class Client {
   moderation::Outcome complete(moderation::Request, RunOptions = {});
   moderation::Outcome complete(PreparedEndpoint<moderation::Outcome>);
   EndpointCall<moderation::Outcome> start(PreparedEndpoint<moderation::Outcome>, std::function<void(moderation::Outcome)> on_outcome = {});
+  PreparedEndpoint<speech::Outcome> prepare(speech::Request, RunOptions = {});
+  speech::Outcome complete(speech::Request, RunOptions = {});
+  speech::Outcome complete(PreparedEndpoint<speech::Outcome>);
+  EndpointCall<speech::Outcome> start(PreparedEndpoint<speech::Outcome>, std::function<void(speech::Outcome)> on_outcome = {});
+  PreparedEndpoint<transcription::Outcome> prepare(transcription::Request, RunOptions = {});
+  transcription::Outcome complete(transcription::Request, RunOptions = {});
+  transcription::Outcome complete(PreparedEndpoint<transcription::Outcome>);
+  EndpointCall<transcription::Outcome> start(PreparedEndpoint<transcription::Outcome>, std::function<void(transcription::Outcome)> on_outcome = {});
   Diagnostics diagnostics() const noexcept;
  private:
   explicit Client(std::shared_ptr<detail::ClientState>);

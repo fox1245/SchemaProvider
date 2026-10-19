@@ -6,9 +6,24 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace sp::endpoints {
-struct Close { bool normal = true; ErrorKind error = ErrorKind::Truncated; };
+// An encoded endpoint call: the path at the origin, the body and its media type, what the call accepts back, the
+// model it names, the authentication header, and whether the provider charges once it accepts it.
+struct Encoded {
+  std::string path, body, model;
+  bool charge_on_accept = false;
+  std::string auth;
+  std::string content_type = "application/json", accept = "application/json";
+};
+// How the response ended, and its headers (lower-case names), which a binary body's decoder reads its type from.
+struct Close {
+  bool normal = true;
+  ErrorKind error = ErrorKind::Truncated;
+  std::vector<std::pair<std::string, std::string>> headers{};
+};
 class Codec {
  public:
   virtual ~Codec() = default;

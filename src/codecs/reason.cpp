@@ -979,6 +979,44 @@ constexpr Entry moderation_request_table[] = {
   {"moderation options do not match the policy's schema", "request.moderation.options_invalid"},
   {"moderation request exceeds JSON limits", "request.moderation.json_limit"},
 };
+constexpr Entry speech_table[] = {
+  {"speech response is not audio", "speech.response.not_audio"},
+  {"speech response is empty", "speech.response.empty"},
+  {"speech audio limit", "speech.audio.limit"},
+};
+constexpr Entry speech_request_table[] = {
+  {"speech endpoints are not admitted at this origin", "request.speech.endpoint_not_admitted"},
+  {"the speech endpoint has no path", "request.speech.path_missing"},
+  {"speech needs a model and input", "request.speech.model_and_input_required"},
+  {"a speech voice is bounded text", "request.speech.voice_invalid"},
+  {"a speech format is a token", "request.speech.format_invalid"},
+  {"speech speed must be positive", "request.speech.speed_invalid"},
+  {"the speech endpoint admits no options", "request.speech.options_not_admitted"},
+  {"speech options do not match the policy's schema", "request.speech.options_invalid"},
+  {"speech request exceeds JSON limits", "request.speech.json_limit"},
+};
+constexpr Entry transcription_table[] = {
+  {"invalid response JSON", "transcription.response.json_invalid"},
+  {"response must be object", "transcription.response.not_object"},
+  {"remote error property", "transcription.response.remote_error"},
+  {"transcript text required", "transcription.text.required"},
+  {"an audio duration is a number", "transcription.duration.invalid"},
+};
+constexpr Entry transcription_request_table[] = {
+  {"transcription endpoints are not admitted at this origin", "request.transcription.endpoint_not_admitted"},
+  {"the transcription endpoint has no path", "request.transcription.path_missing"},
+  {"a transcription needs a model", "request.transcription.model_required"},
+  {"a transcription takes audio", "request.transcription.audio_required"},
+  {"this endpoint takes the audio inline or (OpenRouter) by URL", "request.transcription.audio_source_unsupported"},
+  {"the audio type has no format name", "request.transcription.audio_format_unknown"},
+  {"a transcription language is a token", "request.transcription.language_invalid"},
+  {"a transcription prompt is OpenAI only", "request.transcription.prompt_unsupported"},
+  {"the transcription endpoint admits no options", "request.transcription.options_not_admitted"},
+  {"transcription options do not match the policy's schema", "request.transcription.options_invalid"},
+  {"the audio is not base64", "request.transcription.audio_not_base64"},
+  {"no random boundary for the upload", "request.transcription.boundary_unavailable"},
+  {"transcription request exceeds the size limit", "request.transcription.size_limit"},
+};
 constexpr Entry shared_request_table[] = {
   {"options are not admitted by the policy", "request.options.options_are_not_admitted_by_the_policy"},
   {"options do not match the policy's schema", "request.options.options_do_not_match_the_policy_s_schema"},
@@ -1058,6 +1096,10 @@ std::span<const Entry> entries(Source source) noexcept {
     case Source::RerankRequest: return rerank_request_table;
     case Source::Moderation: return moderation_table;
     case Source::ModerationRequest: return moderation_request_table;
+    case Source::Speech: return speech_table;
+    case Source::SpeechRequest: return speech_request_table;
+    case Source::Transcription: return transcription_table;
+    case Source::TranscriptionRequest: return transcription_request_table;
   }
   return {};
 }

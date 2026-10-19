@@ -12,7 +12,7 @@ enum class Source {
   ChatRequest, MessagesRequest, ResponsesRequest, GeminiRequest, InteractionsRequest, SharedRequest,
   // Non-chat endpoints (D6): each decoder, then its request encoder.
   Images, ImagesRequest, Decisions, DecisionsRequest, Embeddings, EmbeddingsRequest, Rerank, RerankRequest,
-  Moderation, ModerationRequest,
+  Moderation, ModerationRequest, Speech, SpeechRequest, Transcription, TranscriptionRequest,
 };
 struct Entry { std::string_view message, code; };
 std::span<const Entry> entries(Source) noexcept;
