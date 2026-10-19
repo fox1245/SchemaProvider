@@ -52,6 +52,7 @@ struct Upload {
   std::string purpose{};
   std::optional<std::uint64_t> expires_after{};
 };
+// At Google `id` may also be the file's URI at this origin, as a result delivered by URI names it.
 struct Get { std::string id; };
 struct Delete { std::string id; };
 // One page of the provider's files, newest first where the provider orders them. Pass a page's `next` as the
@@ -79,6 +80,7 @@ using DeleteOutcome = std::variant<Deleted, Failure>;
 // A file's content, written to `path` as it arrives (see `jobs::Download`) or held in memory. Providers serve the
 // content of files they made: OpenAI batch output, Anthropic files a tool wrote, Google generated media.
 struct Download {
+  // As for `Get`.
   std::string id;
   std::string path{};
   std::uint64_t max_bytes = std::uint64_t{1} << 32;

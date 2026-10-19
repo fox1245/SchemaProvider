@@ -105,6 +105,12 @@ void reads() {
   const auto download = encoded(at(google), files::Download{"files/4jn7p8olfxjg", "/tmp/clip.mp4"});
   CHECK(download.path == "/v1beta/files/4jn7p8olfxjg:download?alt=media" && download.accept == "*/*" && download.sink == "/tmp/clip.mp4");
   CHECK(encoded(at(openai), files::Download{"file-JAmK8oxEAZEPYrjL4VHYcv"}).path == "/v1/files/file-JAmK8oxEAZEPYrjL4VHYcv/content");
+  // A result delivered by URI names its file by that URI, at the same origin only.
+  const auto by_uri = encoded(at(google), files::Download{"https://generativelanguage.googleapis.com/v1beta/files/hrn9uffqzcaj:download?alt=media"});
+  CHECK(by_uri.path == "/v1beta/files/hrn9uffqzcaj:download?alt=media" && by_uri.model == "files/hrn9uffqzcaj");
+  CHECK(encoded(at(google), files::Get{"https://generativelanguage.googleapis.com/v1beta/files/hrn9uffqzcaj"}).path == "/v1beta/files/hrn9uffqzcaj");
+  CHECK(refused(at(google), files::Download{"https://example.com/v1beta/files/hrn9uffqzcaj:download?alt=media"}) == ErrorKind::InvalidRequest);
+  CHECK(refused(at(google), files::Get{"https://generativelanguage.googleapis.com/v1beta/files/a/../b"}) == ErrorKind::InvalidRequest);
 }
 
 sp::Outcome decoded(std::string_view origin, files::Codec::Kind kind, std::string_view body, std::string subject = {}, std::string uploaded = {}) {
