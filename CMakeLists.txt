@@ -237,6 +237,10 @@ if(SP_BUILD_TESTS)
   if(WIN32)
     add_compile_definitions(_WIN32_WINNT=0x0601)
   endif()
+  # MSVC refuses a string literal over 16380 bytes (C2026); the generator writes a large asset as a character array.
+  add_test(NAME embedded_configuration_literals COMMAND "${Python3_EXECUTABLE}" -c
+    "import sys; sys.exit(any(len(line) > 16384 for line in open(sys.argv[1], encoding='utf-8')))"
+    "${SP_GENERATED_INCLUDE_DIR}/sp/config_defaults.h")
   if(SP_BUILD_CANARY)
     add_executable(sp_qualification_meter_test tests/qualification_meter_test.cpp)
     target_compile_options(sp_qualification_meter_test PRIVATE ${SP_WARNING_OPTIONS})

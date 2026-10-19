@@ -123,6 +123,9 @@ def validate(runtime, errors):
             raise ValueError('error header format rejected')
         seen.add((rule['family'], name))
 
+LITERAL_LIMIT = 16000
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--runtime', required=True)
@@ -170,9 +173,21 @@ def main():
         if not name or not name.isascii() or not name.isidentifier() or name.startswith('_') or name in assets or name in reserved:
             raise ValueError('configuration asset symbol rejected')
         assets[name] = load(path)
+    # MSVC refuses a string literal over 16380 bytes, and a concatenation over 65535 bytes (C2026), so a large
+    # asset is a character array instead.
+    arrays = []
     for name, value in sorted(assets.items()):
         encoded = json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=True, allow_nan=False)
-        lines.append(f'inline constexpr std::string_view {name} = {json.dumps(encoded)};')
+        if len(encoded) <= LITERAL_LIMIT:
+            lines.append(f'inline constexpr std::string_view {name} = {json.dumps(encoded)};')
+            continue
+        data = encoded.encode('ascii')
+        rows = [','.join(str(byte) for byte in data[i:i + 32]) for i in range(0, len(data), 32)]
+        arrays.append(f'inline constexpr char {name}[] = {{\n' + ',\n'.join(rows) + '};')
+        lines.append(f'inline constexpr std::string_view {name}{{detail::{name}, {len(data)}}};')
+    if arrays:
+        start = lines.index('namespace sp::config_defaults {') + 1
+        lines[start:start] = ['namespace detail {', *arrays, '}  // namespace detail']
     lines += ['}', '']
     destination = Path(args.output)
     destination.parent.mkdir(parents=True, exist_ok=True)
