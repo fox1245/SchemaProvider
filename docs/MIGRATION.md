@@ -113,6 +113,12 @@ Two Gemini media answers that failed or hid their content now decode:
 
 A streamed Chat audio answer through a declared OpenRouter origin now completes. OpenRouter never sends `finish_reason` for it: after the audio it sends the expiry-only delta, an empty delta, and the final usage on a choice with an empty delta and a null `finish_reason`, then `[DONE]`. The SDK only admitted the direct OpenAI order (a usage-only frame, then the expiry), so every such stream failed with `chat.done.without_terminal`. On a declared OpenRouter origin the OpenRouter order derives the same `EndTurn` (`derived:audio_usage+audio.expires_at+DONE`). Every other omission of `finish_reason`, and the same order at another origin, is still refused.
 
+`Error::vendor_code` now names the provider's code even when the error policy does not list it. It used to be set only for listed values (such as `API_KEY_INVALID` or `rate_limit_exceeded`), so every other Gemini 400 or 404, and most OpenAI and Anthropic refusals, reached the caller with an empty code. A value with the shape of a machine code is now kept, and it does not change `kind` or `retry_class`:
+- Google `details[].reason`, then `status` (UPPER_SNAKE, such as `INVALID_ARGUMENT`);
+- Anthropic `error.type`;
+- OpenAI `error.code`, then `error.type` (lower_snake).
+Each value is at most 64 characters, and free text never passes. A blocked Gemini answer also carries its `finishReason` or `blockReason` here. Code that treated an empty `vendor_code` as "not a listed error" should compare against the listed values instead.
+
 ## From interface 5 to 6
 
 Package 0.3.0 alpha adds `Usage::provider_cost` and the fixed-size `ProviderReportedCost`, `UsdAmount`, `CostSource`, `CostStatus` and `CostRounding` types. Existing field access remains source-compatible, but `Usage`, `UsageUpdate`, `Completion`, `PartialCompletion` and the containing `Event` layouts grow. Rebuild every consumer against the same headers and generation 6 libraries (`libsp_*.so.6`); interface 5 binaries must not load interface 6 libraries. CMake consumers select `SchemaProvider 0.3.0 EXACT`.

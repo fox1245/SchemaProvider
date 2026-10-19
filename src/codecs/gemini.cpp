@@ -49,10 +49,13 @@ Codec::Codec(const descriptor::ValidatedDescriptor& d, Mode mode, Accumulator& a
   served::observe(descriptor_, accumulator_, context_, {});
 }
 bool Codec::emit(const Event& e) { return accumulator_.accept(e, buffered_failure_ ? &*buffered_failure_ : nullptr); }
-bool Codec::fail(ErrorKind kind, std::string label) {
+bool Codec::fail(ErrorKind kind, std::string label, std::string_view vendor_code) {
   if (buffered_failure_ && !closed_) return false;
   Error error{kind, std::move(label)};
   error.reason = reason::code(reason::Source::Gemini, error.safe_message);
+  const bool machine = !vendor_code.empty() && vendor_code.size() <= 64 && vendor_code.front() >= 'A' && vendor_code.front() <= 'Z' &&
+      std::all_of(vendor_code.begin(), vendor_code.end(), [](char c) { return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; });
+  if (machine) error.vendor_code = std::string(vendor_code);
   emit(Fail{std::move(error)}); return false;
 }
 void Codec::unknown(json::Value v, std::initializer_list<std::string_view> keys) {
@@ -134,7 +137,8 @@ bool Codec::document(std::string_view bytes, std::string_view event) {
   if (auto feedback = root.get("promptFeedback"); feedback.valid()) {
     if (!feedback.is_object()) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini prompt feedback");
     auto blocked = feedback.get("blockReason");
-    if (blocked.valid() && (!blocked.is_string() || (blocked.as_string() != "BLOCK_REASON_UNSPECIFIED" && !blocked.as_string().empty()))) return fail(blocked.is_string() ? ErrorKind::RemoteFailure : ErrorKind::ProtocolCorrupt, "Gemini prompt blocked");
+    if (blocked.valid() && (!blocked.is_string() || (blocked.as_string() != "BLOCK_REASON_UNSPECIFIED" && !blocked.as_string().empty()))) return fail(blocked.is_string() ? ErrorKind::RemoteFailure : ErrorKind::ProtocolCorrupt, "Gemini prompt blocked",
+                                                                                                                                       blocked.is_string() ? blocked.as_string() : std::string_view{});
   }
   if (auto candidates = root.get("candidates"); candidates.valid()) {
     if (!candidates.is_array() || candidates.size() > 1) return fail(ErrorKind::ProtocolCorrupt, "Gemini requires a single candidate");
@@ -168,7 +172,8 @@ bool Codec::candidate(json::Value c) {
     if (!emit(Stop{*stop_})) return false;
     for (auto local : pending_seals_) if (!emit(PartSeal{local, {}, {}})) return false;
     pending_seals_.clear();
-    if (stop_->kind == StopKind::ContentFilter || raw == "MISSING_THOUGHT_SIGNATURE" || raw == "MALFORMED_RESPONSE") return fail(ErrorKind::RemoteFailure, "Gemini generation blocked or rejected");
+    if (stop_->kind == StopKind::ContentFilter || raw == "MISSING_THOUGHT_SIGNATURE" || raw == "MALFORMED_RESPONSE")
+      return fail(ErrorKind::RemoteFailure, "Gemini generation blocked or rejected", raw);
   }
   return true;
 }

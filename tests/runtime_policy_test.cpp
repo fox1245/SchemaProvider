@@ -256,12 +256,21 @@ void google_api_key_errors() {
       CHECK(info.kind == ErrorKind::Authentication && info.retry_class == RetryClass::Never);
       CHECK(info.vendor_code == "API_KEY_INVALID");
     }
-    for (const auto& body : {bad_request, other_reason, odd_details, "[" + bad_request + "]",
-                             "[" + invalid_key + "," + invalid_key + "]", std::string("[]")}) {
+    // An unlisted reason, else the google.rpc status, is kept as the vendor code without changing the classification.
+    const std::pair<std::string, std::string_view> unlisted[]{
+        {bad_request, "INVALID_ARGUMENT"}, {other_reason, "SERVICE_DISABLED"}, {odd_details, "INVALID_ARGUMENT"},
+        {"[" + bad_request + "]", "INVALID_ARGUMENT"}, {"[" + invalid_key + "," + invalid_key + "]", ""}, {std::string("[]"), ""}};
+    for (const auto& [body, code] : unlisted) {
       const auto info = inspect(400, body, {}, family);
       CHECK(info.kind == ErrorKind::InvalidRequest && info.retry_class == RetryClass::Never);
+      CHECK(info.vendor_code == code);
+    }
+    // Only a machine-code shape passes: free text, lower case, digits first and long values never do.
+    for (const std::string_view status : {"Invalid argument", "invalid_argument", "1NVALID", "INVALID-ARGUMENT", "INVALID ARGUMENT"}) {
+      const auto info = inspect(400, std::string(R"({"error":{"code":400,"status":)") + "\"" + std::string(status) + "\"" + "}}", {}, family);
       CHECK(info.vendor_code.empty());
     }
+    CHECK(inspect(400, R"({"error":{"status":")" + std::string(65, 'A') + R"("}})", {}, family).vendor_code.empty());
     CHECK(inspect(400, {}, {}, family).kind == ErrorKind::InvalidRequest);
     CHECK(inspect(403, R"({"error":{"details":[{"reason":"API_KEY_SERVICE_BLOCKED"}]}})", {}, family).kind ==
           ErrorKind::Permission);
