@@ -228,6 +228,12 @@ Messages compaction (#53):
 - **Usage and pricing.** `Usage::extra` gains the `compaction.*` sums. `pricing::estimate` charges them for Messages. After a compaction iteration, a streamed answer's input counters replace those of `message_start` instead of recording a conflict.
 - **Archive.** A v3 record of a native message also keeps its context's configuration digest, so the layout grows by one digest. Records written before this change are refused at load, as the policy identity change already makes them. Stop kinds are read up to `Compaction`.
 
+Messages input blocks and skills (#53):
+- **`ToolResult::content_parts`** is now `std::vector<std::variant<Text, Media, Opaque>>`. `Opaque` moved before `ToolResult` in `<core/value.h>`. Visitors and `std::get<Media>` on a part that is not text need a case for it. The archive stores such a part under a new nested tag, and the native digest hashes it.
+- **Input blocks.** The new `input_blocks` policy facts (Messages only) admit content blocks the caller writes; the built-in policy lists `search_result`. A Messages user message may hold `Opaque` parts of a listed type. The other families refuse an `Opaque` part in a tool result as `Unsupported`.
+- **Skills.** `messages::Request::skills` (`ContainerSkill`) sends `container` as an object with `skills`, and its `id` when `container` is set. The configuration digest binds the skills; a request without skills keeps its digest.
+- **Value schemas.** A string may now hold carriage returns, like tabs and line feeds.
+
 ## From interface 5 to 6
 
 Package 0.3.0 alpha adds `Usage::provider_cost` and the fixed-size `ProviderReportedCost`, `UsdAmount`, `CostSource`, `CostStatus` and `CostRounding` types. Existing field access remains source-compatible, but `Usage`, `UsageUpdate`, `Completion`, `PartialCompletion` and the containing `Event` layouts grow. Rebuild every consumer against the same headers and generation 6 libraries (`libsp_*.so.6`); interface 5 binaries must not load interface 6 libraries. CMake consumers select `SchemaProvider 0.3.0 EXACT`.

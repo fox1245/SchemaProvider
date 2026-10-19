@@ -51,6 +51,9 @@ struct BetaFact { std::string value; std::vector<std::string> origins; };
 // `signature`. A block that `opens_history` (`compaction`) stands for the conversation before it: a request sends
 // the history from the last captured message that carries one, and such a message may begin a history.
 struct ResponseBlockFact { std::string type; std::string beta{}; std::string signed_beta{}; bool opens_history = false; };
+// A Messages content block the caller writes (`search_result`), as an Opaque part of a user message or of a tool
+// result, checked against the schema of the whole block and sent as given.
+struct InputBlockFact { std::string type; ValueSchema value; };
 // A top-level request member the policy admits for the listed origins (#32). A replay-ineligible extension makes the
 // turn's answer not continuable natively; an eligible one joins the configuration digest unless it is unbound
 // (`bound` false): a per-request service control that does not change what the conversation means, which may change
@@ -77,6 +80,7 @@ struct FamilyPolicy {
   std::vector<GatewayFact> openrouter_plugins, openrouter_server_tools;
   std::vector<BetaFact> betas;
   std::vector<ResponseBlockFact> response_blocks;
+  std::vector<InputBlockFact> input_blocks;
   // Captured response parts the service refuses when they are sent back: a part whose data member `member` lacks
   // the member `missing`. Native replay of such a message is refused before dispatch. Generate only.
   std::vector<std::pair<std::string, std::string>> unreplayable_parts;

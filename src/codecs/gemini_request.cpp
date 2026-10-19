@@ -229,6 +229,8 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         tool_error = Error{ErrorKind::InvalidRequest, "tool result content and content_parts are mutually exclusive"};
       else if (tool->content_parts.size() > resources.request_parts)
         tool_error = Error{ErrorKind::InvalidRequest, "tool result part count limit exceeded"};
+      else if (std::any_of(tool->content_parts.begin(), tool->content_parts.end(), [](const auto& nested) { return std::holds_alternative<Opaque>(nested); }))
+        tool_error = Error{ErrorKind::Unsupported, "tool result blocks are not admitted for this family"};
       else for (const auto& nested : tool->content_parts) if (const auto* media = std::get_if<Media>(&nested)) {
         has_media = true;
         // Inline only, in any form the family's media policy admits; the service decides what a model reads.

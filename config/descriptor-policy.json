@@ -184,6 +184,9 @@
         {"type":"container_upload"},
         {"type":"compaction","beta":"compact-2026-01-12","signed_beta":"compact-2026-09-04","opens_history":true}
       ],
+      "input_blocks": [
+        {"type":"search_result","value":{"type":"object","properties":{"type":{"type":"enum","values":["search_result"]},"source":{"type":"string","max_length":4096},"title":{"type":"string","max_length":4096},"content":{"type":"array","max_items":256,"items":{"type":"object","properties":{"type":{"type":"enum","values":["text"]},"text":{"type":"string","max_length":1048576}},"required":["type","text"]}},"citations":{"type":"object","properties":{"enabled":{"type":"boolean"}},"required":["enabled"]},"cache_control":{"type":"object","properties":{"type":{"type":"enum","values":["ephemeral"]},"ttl":{"type":"enum","values":["5m","1h"]}},"required":["type"]}},"required":["type","source","title","content"]}}
+      ],
       "server_tools": [
         {
           "type": "web_search_20250305",

@@ -31,6 +31,12 @@ struct McpServer {
   std::string name, url;
   std::optional<std::string> authorization_token{};
 };
+// An Agent Skill loaded into the code-execution container: `type` is `anthropic` or `custom`, `version` a version or
+// `latest`.
+struct ContainerSkill {
+  std::string type, skill_id;
+  std::optional<std::string> version{};
+};
 enum class ThinkingMode { Manual, Adaptive, Disabled };
 // New values go at the end.
 enum class OutputEffort { Low, Medium, High, Max, XHigh };
@@ -56,6 +62,8 @@ struct Request {
   std::optional<sp::OpenRouterRouting> provider{};
   // A code-execution container to reuse, by the id an earlier response reported.
   std::optional<std::string> container{};
+  // Agent Skills the container loads (`container.skills`); they need the code-execution tool.
+  std::vector<ContainerSkill> skills{};
   // Top-level members the policy admits for this origin (#32), sent as given after the typed ones.
   std::shared_ptr<const json::Document> extensions{};
   // anthropic-beta values to send, each admitted by the policy at this origin. A value a declared tool or a replayed
@@ -99,6 +107,11 @@ EncodeResult encode(const descriptor::ValidatedDescriptor&, const Request&, bool
 inline const descriptor::ResponseBlockFact* kept_block(const descriptor::FamilyPolicy& family, std::string_view type) {
   const auto found = std::find_if(family.response_blocks.begin(), family.response_blocks.end(), [&](const auto& fact) { return fact.type == type; });
   return found == family.response_blocks.end() ? nullptr : &*found;
+}
+// The fact of an input block the caller writes (`search_result`), or null.
+inline const descriptor::InputBlockFact* input_block(const descriptor::FamilyPolicy& family, std::string_view type) {
+  const auto found = std::find_if(family.input_blocks.begin(), family.input_blocks.end(), [&](const auto& fact) { return fact.type == type; });
+  return found == family.input_blocks.end() ? nullptr : &*found;
 }
 // A captured assistant message that carries a kept block standing for the conversation before it (`compaction`).
 inline bool opens_history(const descriptor::FamilyPolicy& family, const Message& message) {

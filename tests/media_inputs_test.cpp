@@ -959,6 +959,12 @@ void nested_tool_family_sources_and_limits() {
             (source==MediaSource::Inline ? "base64" : source==MediaSource::Url ? "url" : "file"));
       }
     }
+    // A block the caller writes in a tool result (`search_result`) is a Messages input block; elsewhere it is refused.
+    ToolResult blocks{"call1",""};
+    blocks.content_parts={Opaque{"search_result",parse_json(R"({"type":"search_result","source":"kb://1","title":"Guide","content":[{"type":"text","text":"Step one."}],"citations":{"enabled":true}})")}};
+    const auto with_block=tool_history(family,d,with_tool_results(family,prefix,blocks));
+    if(family==Fam::Messages)CHECK(is_wire(with_block) && first_tool_result(family,wire_of(with_block).root()).get("content").at(0).get("source").as_string()=="kb://1");
+    else expect_error(with_block,ErrorKind::Unsupported);
     ToolResult result{"call1",""};
     auto raw=sample_bytes("image/png");raw.resize(193,'x');
     result.content_parts={inline_media(MediaKind::Image,"image/png",raw)};

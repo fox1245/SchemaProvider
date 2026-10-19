@@ -250,13 +250,29 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       decoded_documents.push_back(std::move(decoded_text));
     }
   };
+  // A block the caller writes is one the policy admits, matching the schema of the whole block.
+  auto admit_block = [&](const Opaque& block) -> std::optional<Error> {
+    const auto* fact = input_block(family, block.wire_type);
+    if (!fact) return Error{ErrorKind::Unsupported, "an input block is not admitted by the policy"};
+    const auto raw = block.wire_metadata ? block.wire_metadata->root() : json::Value{};
+    if (!raw.is_object() || !raw.get("type").is_string() || raw.get("type").as_string() != block.wire_type)
+      return Error{ErrorKind::InvalidRequest, "input block metadata mismatch"};
+    if (descriptor::check_value(fact->value, raw)) return Error{ErrorKind::InvalidRequest, "an input block does not match its declared schema"};
+    return std::nullopt;
+  };
   for (size_t i = 0; i < request.messages.size(); ++i) {
     const auto& message = request.messages[i];
     if (message.parts.size() > resources.request_parts) return bad("request part count limit exceeded");
-    if (!message.native) for (const auto& part : message.parts) if (native_part(part)) return replay_bad();
+    // A block the caller writes in a user message (`search_result`) is input, not native state; it is admitted below.
+    if (!message.native) for (const auto& part : message.parts)
+      if (native_part(part) && (message.role == Role::Assistant || !std::holds_alternative<Opaque>(part))) return replay_bad();
     captured_history = captured_history || static_cast<bool>(message.native);
     if (i < first) continue;  // not sent
     for (const auto& part : message.parts) {
+      if (const auto* block = std::get_if<Opaque>(&part); block && !media_error && message.role != Role::Assistant) {
+        media_error = admit_block(*block);
+        continue;
+      }
       if (const auto* media = std::get_if<Media>(&part); media && !media_error) {
         if (message.role != Role::User) media_error = Error{ErrorKind::InvalidRequest, "media inputs require user role"};
         else retain_media(*media);
@@ -267,7 +283,9 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
           media_error = Error{ErrorKind::InvalidRequest, "tool result part count limit exceeded"};
         else if (!tool->content_parts.empty() && message.role != Role::User && message.role != Role::Tool)
           media_error = Error{ErrorKind::InvalidRequest, "tool results require user or tool role"};
-        else for (const auto& nested : tool->content_parts) if (const auto* media = std::get_if<Media>(&nested)) {
+        else for (const auto& nested : tool->content_parts) if (const auto* block = std::get_if<Opaque>(&nested); block && !media_error) {
+          media_error = admit_block(*block);
+        } else if (const auto* media = std::get_if<Media>(&nested)) {
           retain_media(*media);
           if (!media_error && (!media->id.empty() || !media->transcript.empty() ||
               (media->kind == MediaKind::Image && !media->name.empty()) ||
@@ -320,8 +338,31 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     const auto& id = *request.container;
     if (id.empty() || id.size() > 256 || std::any_of(id.begin(), id.end(), [](unsigned char c) { return c <= 0x20 || c >= 0x7f || c == '"' || c == '\\'; }))
       return bad("invalid code execution container id");
-    body.raw(",\"container\":").quoted(id);
   }
+  if (!request.skills.empty()) {
+    // The service names skill types and versions: bounded tokens, not a fixed list.
+    const auto token = [](std::string_view value) {
+      return !value.empty() && value.size() <= 64 && std::all_of(value.begin(), value.end(), [](char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+      });
+    };
+    std::set<std::pair<std::string_view, std::string_view>> skills;
+    if (request.skills.size() > 20) return bad("container skills are limited to 20");
+    for (const auto& skill : request.skills)
+      if (!token(skill.type) || !token(skill.skill_id) || (skill.version && !token(*skill.version)) || !skills.emplace(skill.type, skill.skill_id).second)
+        return bad("container skills require unique token ids, types and versions");
+    body.raw(",\"container\":{");
+    if (request.container) body.raw("\"id\":").quoted(*request.container).raw(",");
+    body.raw("\"skills\":[");
+    for (std::size_t i = 0; i < request.skills.size(); ++i) {
+      const auto& skill = request.skills[i];
+      if (i) body.raw(",");
+      body.raw("{\"type\":").quoted(skill.type).raw(",\"skill_id\":").quoted(skill.skill_id);
+      if (skill.version) body.raw(",\"version\":").quoted(*skill.version);
+      body.raw("}");
+    }
+    body.raw("]}");
+  } else if (request.container) body.raw(",\"container\":").quoted(*request.container);
   if (thinking_mode) {
     body.raw(",\"thinking\":{\"type\":");
     switch (*thinking_mode) {
@@ -523,6 +564,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
             nested_comma = true;
             if (const auto* text = std::get_if<Text>(&nested))
               body.raw("{\"type\":\"text\",\"text\":").quoted(text->value).raw("}");
+            else if (const auto* block = std::get_if<Opaque>(&nested)) body.value(block->wire_metadata->root(), 6);
             else {
               const auto& media = std::get<Media>(nested);
               const auto decoded = media.kind == MediaKind::Document && media.source == MediaSource::Inline && plain_text(media)
@@ -542,6 +584,11 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         if (!raw.is_object() || !raw.get("type").is_string() || raw.get("type").as_string() != server_result->wire_type || !raw.get("tool_use_id").is_string() || raw.get("tool_use_id").as_string() != server_result->tool_use_id) return bad("server result metadata mismatch");
         server_pending.erase(found);
         body.value(raw, 4);
+      } else if (const auto* block = std::get_if<Opaque>(&part); block && !assistant) {
+        // An input block the caller writes (`search_result`), admitted above, goes as given.
+        if (responding_to_tools && server_waiting) return bad("pending server tools require tool-results-only continuation");
+        text_seen = true; // Tool results, when present, must precede ordinary input.
+        body.value(block->wire_metadata->root(), 4);
       } else if (const auto* opaque = std::get_if<Opaque>(&part); opaque && assistant && opaque->wire_metadata && kept_block(family, opaque->wire_type)) {
         // A block the policy keeps whole (`fallback`, `mcp_tool_listing`, `compaction`) goes back exactly as captured, in place.
         const auto raw = opaque->wire_metadata->root();
