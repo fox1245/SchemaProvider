@@ -405,7 +405,9 @@ void responses_format_binding() {
   auto next = value; next.messages.push_back(std::get<Completion>(*accumulator.outcome()).messages.front()); next.messages.push_back(Message{"", Role::User, {Text{"again"}}});
   CHECK(std::holds_alternative<responses::EncodedRequest>(responses::encode(descriptor, next, false)));
   std::get<responses::ImageGenerationTool>(next.hosted_tools[0]).output_format = "jpeg"; replay_rejected(responses::encode(descriptor, next, false));
-  std::get<responses::ImageGenerationTool>(value.hosted_tools[0]).output_format = "gif"; invalid(responses::encode(descriptor, value, false));
+  // The service names the formats: a well-formed new one is sent, a malformed one is refused.
+  std::get<responses::ImageGenerationTool>(value.hosted_tools[0]).output_format = "gif"; CHECK(std::holds_alternative<responses::EncodedRequest>(responses::encode(descriptor, value, false)));
+  std::get<responses::ImageGenerationTool>(value.hosted_tools[0]).output_format = "Not A Token"; invalid(responses::encode(descriptor, value, false));
 }
 void decode_only_audio_scope() {
   const auto descriptor = descriptor_for("openai.chat"); chat::Request value; value.model = "fixture-model";

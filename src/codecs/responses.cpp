@@ -23,7 +23,7 @@ bool item_status(json::Value v, bool optional, bool final) {
   return v.as_string() == "completed" || v.as_string() == "incomplete" || (!final && v.as_string() == "in_progress");
 }
 bool opaque(std::string_view type) {
-  return type != "message" && type != "function_call" && type != "reasoning";
+  return type != "message" && type != "function_call" && type != "reasoning" && type != "computer_call" && type != "mcp_approval_request";
 }
 // Opaque server execution is observable metadata, never a host tool invocation.
 bool server_event(std::string_view type) {
@@ -235,8 +235,11 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
   const bool lifecycle = event == "response.created" || event == "response.in_progress" ||
       event == "response.completed" || event == "response.incomplete" || event == "response.done";
   const bool output_item = event == "response.output_item.added" || event == "response.output_item.done";
-  // Raw ownership does not establish that an undeclared event is semantically harmless.
-  if (!supported && !lifecycle && !output_item)
+  // An event named after a service-run item (response.<item type>.<step> or response.<item type>_<field>.<step>)
+  // is that item's progress; the item itself is checked when it is done. Any other undeclared event is not shown
+  // to be harmless.
+  const bool progress = !supported && !lifecycle && !output_item && event.starts_with("response.") && root.get("item_id").is_string();
+  if (!supported && !lifecycle && !output_item && !progress)
     return fail(ErrorKind::Unsupported, "unsupported semantic Responses event");
   if (terminal_) return fail(ErrorKind::ProtocolCorrupt, "output after response terminal");
   if (lifecycle) return response(root.get("response"), event, true);
@@ -285,9 +288,11 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
     auto metadata = own(root.get("annotation")); if (!metadata) return false;
     found->second.annotations.emplace(annotation, std::move(metadata)); return true;
   }
-  if (server_event(event)) {
-    const auto prefix = std::string("response.") + item->type + ".";
-    if (!opaque(item->type) || !event.starts_with(prefix)) return fail(ErrorKind::ProtocolCorrupt, "server event item type mismatch");
+  if (server_event(event) || progress) {
+    const auto prefix = std::string("response.") + item->type;
+    const bool named = event.starts_with(prefix) && event.size() > prefix.size() && (event[prefix.size()] == '.' || event[prefix.size()] == '_');
+    if (progress && (!opaque(item->type) || !named)) return fail(ErrorKind::Unsupported, "unsupported semantic Responses event");
+    if (!opaque(item->type) || !named) return fail(ErrorKind::ProtocolCorrupt, "server event item type mismatch");
     // A preview frame is an observation retained as raw wire; the finished image arrives with the
     // completed item, so its payload is only checked for shape here.
     if (event == "response.image_generation_call.partial_image" &&
@@ -409,6 +414,17 @@ bool Codec::item_fields(json::Value v, bool final) {
     if (!nonempty(v.get("call_id")) || !nonempty(v.get("name")) || !v.get("arguments").is_string() || !item_status(v.get("status"), true, final)) return fail(ErrorKind::ProtocolCorrupt, "invalid function item fields");
     if (v.get("arguments").as_string().size() > limits_.max_tool_bytes) return fail(ErrorKind::ResourceLimit, "tool argument limit");
     unknown(v, {"id", "type", "call_id", "name", "arguments", "status"});
+  } else if (type == "computer_call") {
+    // A computer action for the caller to perform: one action or a batch of them.
+    const auto action = v.get("action"), actions = v.get("actions"), checks = v.get("pending_safety_checks");
+    if (!nonempty(v.get("call_id")) || !item_status(v.get("status"), true, final) || (action.valid() && !action.is_null() && !action.is_object()) ||
+        (actions.valid() && !actions.is_null() && !actions.is_array()) || (checks.valid() && !checks.is_array()))
+      return fail(ErrorKind::ProtocolCorrupt, "invalid computer call item fields");
+  } else if (type == "mcp_approval_request") {
+    // An MCP call the service waits to have approved: the caller answers it with Request::mcp_approvals.
+    if (!v.get("server_label").is_string() || !nonempty(v.get("name")) || !v.get("arguments").is_string())
+      return fail(ErrorKind::ProtocolCorrupt, "invalid MCP approval request fields");
+    if (v.get("arguments").as_string().size() > limits_.max_tool_bytes) return fail(ErrorKind::ResourceLimit, "tool argument limit");
   } else if (type == "reasoning") {
     if (!v.get("summary").is_array() || !nullable_string(v.get("encrypted_content")) || !item_status(v.get("status"), true, final) ||
         (v.get("content").valid() && !v.get("content").is_null() && !v.get("content").is_array())) return fail(ErrorKind::ProtocolCorrupt, "invalid reasoning item fields");
@@ -442,7 +458,15 @@ bool Codec::add_item(json::Value v, uint64_t position, bool streaming) {
   if (!ids_.insert(item.id).second) return fail(ErrorKind::ProtocolCorrupt, "duplicate output item id");
   if (streaming) { item.added = own(v); if (!item.added) return false; }
   PartHeader header; header.wire_type = item.type; header.wire_id = item.id;
-  if (item.type == "function_call") {
+  if (item.type == "computer_call") {
+    // Its part opens when the item is done, with the final actions as the call's input.
+    item.call_id = v.get("call_id").as_string();
+    if (!call_ids_.insert(item.call_id).second) return fail(ErrorKind::ProtocolCorrupt, "duplicate function call id");
+    function_seen_ = true;
+  } else if (item.type == "mcp_approval_request") {
+    // An approval request waits for the caller like a client call does, so the stop is ToolUse.
+    function_seen_ = true;
+  } else if (item.type == "function_call") {
     item.call_id = v.get("call_id").as_string(); item.name = v.get("name").as_string();
     if (!call_ids_.insert(item.call_id).second) return fail(ErrorKind::ProtocolCorrupt, "duplicate function call id");
     header.wire_id = item.call_id; header.name = item.name; function_seen_ = true;
@@ -617,7 +641,7 @@ bool Codec::done_item(json::Value v, uint64_t position, bool streaming) {
   // identity and terminal status are checked; retain each full wire observation
   // and the final opaque snapshot without inventing field-level semantics.
   if (item.added && !opaque(item.type) &&
-      !initial_metadata(item.added->root(), v, {"status", "content", "summary", "arguments", "encrypted_content", "output", "error", "code", "results", "action", "tools"})) return false;
+      !initial_metadata(item.added->root(), v, {"status", "content", "summary", "arguments", "encrypted_content", "output", "error", "code", "results", "action", "actions", "pending_safety_checks", "tools"})) return false;
   if (item.added) {
     auto previous = item.added->root().get("status"), next = v.get("status");
     if (previous.is_string() && (previous.as_string() == "completed" || previous.as_string() == "incomplete" || previous.as_string() == "failed") &&
@@ -633,6 +657,21 @@ bool Codec::done_item(json::Value v, uint64_t position, bool streaming) {
     auto metadata = own(v); if (!metadata) return false;
     if (!emit(PartSeal{item.local, args, metadata})) return false;
     item.done = std::move(metadata);
+  } else if (item.type == "mcp_approval_request") {
+    auto metadata = own(v); if (!metadata) return false;
+    PartHeader header; header.wire_type = item.type; header.wire_id = item.id; header.name = v.get("name").as_string();
+    header.tool_kind = ToolCallKind::ApprovalRequest;
+    if (!begin_part(item.local, PartKind::ToolCall, std::move(header), order(position)) ||
+        !emit(PartSeal{item.local, v.get("arguments").as_string(), metadata})) return false;
+    item.done = std::move(metadata);
+  } else if (item.type == "computer_call") {
+    if (v.get("call_id").as_string() != item.call_id) return fail(ErrorKind::ProtocolCorrupt, "function done snapshot contradiction");
+    auto metadata = own(v); if (!metadata) return false;
+    PartHeader header; header.wire_type = item.type; header.wire_id = item.call_id; header.name = "computer";
+    const auto input = v.dump();
+    if (!begin_part(item.local, PartKind::ToolCall, std::move(header), order(position)) ||
+        !emit(PartSeal{item.local, input, metadata})) return false;
+    item.done = std::move(metadata);
   } else if (item.type == "reasoning") {
     if (!reconcile_parts(item, v.get("summary"), true, streaming) || !reconcile_parts(item, v.get("content"), false, streaming)) return false;
     auto metadata = own(v); if (!metadata) return false;
@@ -646,17 +685,26 @@ bool Codec::done_item(json::Value v, uint64_t position, bool streaming) {
     auto metadata = own(v); if (!metadata) return false;
     const auto result = v.get("result"), format = v.get("output_format"), status = v.get("status");
     PartHeader header; header.wire_type = item.type; header.wire_id = item.id;
-    if (result.is_string() && !result.as_string().empty() && status.as_string() == "completed") {
-      std::string_view mime;
+    // OpenRouter sends the image as a base64 data URL, whose MIME stands in for a missing output_format.
+    std::string_view payload = result.is_string() ? result.as_string() : std::string_view{}, url_mime;
+    if (payload.starts_with("data:")) {
+      const auto comma = payload.find(',');
+      const auto meta = comma == std::string_view::npos ? std::string_view{} : payload.substr(5, comma - 5);
+      if (!meta.ends_with(";base64") || !mime_syntax(meta.substr(0, meta.size() - 7))) return fail(ErrorKind::ProtocolCorrupt, "invalid image data URL");
+      url_mime = meta.substr(0, meta.size() - 7);
+      payload = payload.substr(comma + 1);
+    }
+    if (!payload.empty() && status.as_string() == "completed") {
+      std::string_view mime = url_mime;
       if (format.is_string()) {
         const auto name = format.as_string();
-        mime = name == "png" ? "image/png" : name == "jpeg" ? "image/jpeg" : name == "webp" ? "image/webp" : std::string_view{};
+        mime = name == "png" ? "image/png" : name == "jpeg" ? "image/jpeg" : name == "webp" ? "image/webp" : url_mime;
       }
       header.media = media_output::describe(mime, MediaSource::Inline);
       header.media.kind = MediaKind::Image;
       header.media.id = std::string(item.id);
       if (!begin_part(item.local, PartKind::Media, std::move(header), order(position)) ||
-          !emit(PartSeal{item.local, result.as_string(), nullptr})) return false;
+          !emit(PartSeal{item.local, payload, nullptr})) return false;
     } else {
       if (!begin_part(item.local, PartKind::Opaque, std::move(header), order(position)) ||
           !emit(PartSeal{item.local, std::nullopt, metadata})) return false;

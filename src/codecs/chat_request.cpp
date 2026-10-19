@@ -83,13 +83,7 @@ std::optional<std::string> validate_output(const descriptor::ValidatedDescriptor
   if (request.image_config && !image) return "image_config needs the image modality";
   if (image && !descriptor::contains(descriptor.family_policy().openrouter_origins, descriptor.base_url()))
     return "image output requires a declared OpenRouter origin";
-  if (request.image_config) {
-    const auto& config = *request.image_config;
-    for (const auto* field : {&config.aspect_ratio, &config.image_size, &config.size, &config.quality, &config.background,
-                              &config.output_format, &config.moderation})
-      if (*field && !config_token(**field)) return "image_config values must be short tokens";
-    if (config.output_compression && *config.output_compression > 100) return "image_config output_compression is 0 to 100";
-  }
+  if (request.image_config) return request_controls::validate_image_config(*request.image_config);
   return std::nullopt;
 }
 } // namespace
@@ -481,28 +475,8 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       body.raw(",\"format\":").quoted(request.audio->format).raw("}");
     }
     if (request.image_config) {
-      const auto& config = *request.image_config;
-      body.raw(",\"image_config\":{");
-      bool field_comma = false;
-      auto text_field = [&](std::string_view key, const std::optional<std::string>& value) {
-        if (!value) return;
-        if (field_comma) body.raw(",");
-        field_comma = true;
-        body.quoted(key).raw(":").quoted(*value);
-      };
-      text_field("aspect_ratio", config.aspect_ratio);
-      text_field("image_size", config.image_size);
-      text_field("size", config.size);
-      text_field("quality", config.quality);
-      text_field("background", config.background);
-      text_field("output_format", config.output_format);
-      if (config.output_compression) {
-        if (field_comma) body.raw(",");
-        field_comma = true;
-        body.raw("\"output_compression\":").raw(std::to_string(*config.output_compression));
-      }
-      text_field("moderation", config.moderation);
-      body.raw("}");
+      body.raw(",\"image_config\":");
+      request_controls::write_image_config(body, *request.image_config);
     }
     body.raw("}");
     if (!body.ok()) return limit_error();

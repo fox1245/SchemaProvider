@@ -160,6 +160,17 @@ Generate refuses history the service would refuse:
 - **Projection.** `gemini::project_portable` turns such an answer into portable history.
 - **Policy pin.** The policy's content digest changes, so a host pinning it updates the pin.
 
+Responses gains code interpreter, MCP, computer use and OpenRouter's tools and image output:
+- **New tools.** `HostedTool` gains `CodeInterpreterTool`, `McpTool`, `ComputerTool`, `ComputerUsePreviewTool` and `OpenRouterServerTool`, added last. `WebSearchTool`, `ImageGenerationTool` and `FileSearchTool` gain options. The policy admits the new OpenAI tool types.
+- **New request fields.** `responses::Request` gains `modalities`, `image_config` and `mcp_approvals`.
+- **Configuration digest.** Unset options leave existing digests unchanged.
+- **Image generation values.** `size`, `quality` and `output_format` were limited to fixed lists. The SDK now checks their shape only, so `xhigh` or `2048x1152` is sent. The reason codes `request.responses.unsupported_image_generation_*` are replaced by shape codes.
+- **Computer calls.** A `computer_call` item was an `Opaque` part; it is now a `ClientExecuted` `ToolCall` named `computer`, and the stop is `ToolUse`.
+- **Approval requests.** An `mcp_approval_request` item was an `Opaque` part with an `EndTurn` stop. It is now a `ToolCall` of kind `ApprovalRequest`, as the design describes, and the stop is `ToolUse`.
+- **Progress events.** Events named after a service item (`response.code_interpreter_call_code.delta`, `response.mcp_call_arguments.delta`) failed the stream as `Unsupported`; they are now that item's progress.
+- **OpenRouter images.** An image result given as a data URL was refused as an invalid payload. It is now decoded, with its MIME.
+- **Chat.** `chat::ImageOutput` is now an alias of `sp::OpenRouterImageConfig`. Its two reason codes moved to `request.image_config.values_must_be_short_tokens` and `request.image_config.output_compression_is_0_to_100`.
+
 ## From interface 5 to 6
 
 Package 0.3.0 alpha adds `Usage::provider_cost` and the fixed-size `ProviderReportedCost`, `UsdAmount`, `CostSource`, `CostStatus` and `CostRounding` types. Existing field access remains source-compatible, but `Usage`, `UsageUpdate`, `Completion`, `PartialCompletion` and the containing `Event` layouts grow. Rebuild every consumer against the same headers and generation 6 libraries (`libsp_*.so.6`); interface 5 binaries must not load interface 6 libraries. CMake consumers select `SchemaProvider 0.3.0 EXACT`.

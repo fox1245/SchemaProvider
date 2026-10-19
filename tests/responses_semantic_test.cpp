@@ -555,6 +555,224 @@ void unknown_hosted_item_ownership() {
     CHECK(std::holds_alternative<Error>(foreign) && std::get<Error>(foreign).kind == ErrorKind::ReplayIneligible);
   }
 }
+responses::EncodedRequest encoded_ok(const descriptor::ValidatedDescriptor& d, const responses::Request& r) {
+  auto encoded = responses::encode(d, r, false); CHECK(std::holds_alternative<responses::EncodedRequest>(encoded));
+  return std::get<responses::EncodedRequest>(std::move(encoded));
+}
+template<class Result> ErrorKind refused(const Result& result) { CHECK(std::holds_alternative<Error>(result)); return std::get<Error>(result).kind; }
+void hosted_tool_options() {
+  auto r = request();
+  responses::WebSearchTool search; search.allowed_domains = {"example.com"}; search.user_location = responses::ApproximateLocation{std::string("Seoul"), std::string("KR"), {}, std::string("Asia/Seoul")};
+  search.search_context_size = "low"; search.external_web_access = false;
+  responses::ImageGenerationTool image; image.size = "2048x1152"; image.quality = "xhigh"; image.model = "gpt-image-1-mini"; image.action = "edit";
+  image.partial_images = 2; image.output_compression = 50; image.mask_file_id = "file-mask";
+  responses::CodeInterpreterTool code; code.file_ids = {"file-1"}; code.memory_limit = "4g";
+  code.network_policy = responses::ContainerNetworkPolicy{false, {"api.example.com"}, {{"api.example.com", "X-Token", "one"}}};
+  responses::McpTool mcp; mcp.server_label = "docs"; mcp.server_url = "https://mcp.example.test/mcp"; mcp.authorization = "token-one";
+  mcp.headers = {{"X-Key", "one"}}; mcp.allowed_tools = responses::McpToolFilter{{"search"}, {}};
+  mcp.approval_never = responses::McpToolFilter{{}, true}; mcp.server_description = "Docs"; mcp.defer_loading = true;
+  r.hosted_tools = {search, image, responses::FileSearchTool{{"vs_1"}, 5}, code, mcp, responses::ComputerTool{}};
+  const auto sent = encoded_ok(desc(), r);
+  const auto wire = parse(sent.body);
+  const auto tools = wire.root().get("tools");
+  CHECK(tools.size() == 7);
+  const auto web = tools.at(1);
+  CHECK(web.get("type").as_string() == "web_search" && web.get("filters").get("allowed_domains").at(0).as_string() == "example.com" &&
+        web.get("user_location").get("type").as_string() == "approximate" && web.get("user_location").get("city").as_string() == "Seoul" &&
+        !web.get("user_location").get("region").valid() && web.get("search_context_size").as_string() == "low" && !web.get("external_web_access").as_bool());
+  const auto generate = tools.at(2);
+  CHECK(generate.get("size").as_string() == "2048x1152" && generate.get("quality").as_string() == "xhigh" && generate.get("model").as_string() == "gpt-image-1-mini" &&
+        generate.get("action").as_string() == "edit" && generate.get("partial_images").as_uint() == 2u && generate.get("output_compression").as_uint() == 50u &&
+        generate.get("input_image_mask").get("file_id").as_string() == "file-mask");
+  CHECK(tools.at(3).get("max_num_results").as_uint() == 5u);
+  const auto container = tools.at(4).get("container");
+  CHECK(tools.at(4).get("type").as_string() == "code_interpreter" && container.get("type").as_string() == "auto" && container.get("file_ids").at(0).as_string() == "file-1" &&
+        container.get("memory_limit").as_string() == "4g" && container.get("network_policy").get("type").as_string() == "allowlist" &&
+        container.get("network_policy").get("domain_secrets").at(0).get("value").as_string() == "one");
+  const auto server = tools.at(5);
+  CHECK(server.get("type").as_string() == "mcp" && server.get("server_label").as_string() == "docs" && server.get("server_url").as_string() == "https://mcp.example.test/mcp" &&
+        server.get("authorization").as_string() == "token-one" && server.get("headers").get("X-Key").as_string() == "one" &&
+        server.get("allowed_tools").get("tool_names").at(0).as_string() == "search" && server.get("require_approval").get("never").get("read_only").as_bool() &&
+        server.get("server_description").as_string() == "Docs" && server.get("defer_loading").as_bool());
+  CHECK(tools.at(6).get("type").as_string() == "computer" && tools.at(6).size() == 1);
+  auto by_id = r; by_id.hosted_tools = {responses::CodeInterpreterTool{std::string("cntr_1"), {}, {}, {}}};
+  CHECK(parse(encoded_ok(desc(), by_id).body).root().get("tools").at(1).get("container").as_string() == "cntr_1");
+  auto preview = r; preview.hosted_tools = {responses::ComputerUsePreviewTool{"browser", 1024, 768}};
+  const auto preview_wire = parse(encoded_ok(desc(), preview).body);
+  const auto screen = preview_wire.root().get("tools").at(1);
+  CHECK(screen.get("type").as_string() == "computer_use_preview" && screen.get("display_width").as_uint() == 1024u && screen.get("environment").as_string() == "browser");
+
+  // Credentials rotate without losing the history; the tools' other settings are configuration.
+  Accumulator acc; responses::Codec codec(desc(), responses::Mode::Buffered, acc, sent.context);
+  codec.buffered(body("[" + message + "]"), {}); CHECK(acc.outcome());
+  auto next = r; next.messages.push_back(completed(*acc.outcome()).messages[0]); next.messages.push_back(Message{"", Role::User, {Text{"again"}}});
+  encoded_ok(desc(), next);
+  auto changed = next; std::get<responses::McpTool>(changed.hosted_tools[4]).authorization = "token-two";
+  std::get<responses::McpTool>(changed.hosted_tools[4]).headers[0].second = "two";
+  std::get<responses::CodeInterpreterTool>(changed.hosted_tools[3]).network_policy->domain_secrets[0].value = "two";
+  encoded_ok(desc(), changed);
+  changed = next; std::get<responses::McpTool>(changed.hosted_tools[4]).server_label = "other";
+  CHECK(refused(responses::encode(desc(), changed, false)) == ErrorKind::ReplayIneligible);
+  changed = next; std::get<responses::ImageGenerationTool>(changed.hosted_tools[1]).partial_images = 3;
+  CHECK(refused(responses::encode(desc(), changed, false)) == ErrorKind::ReplayIneligible);
+  changed = next; std::get<responses::WebSearchTool>(changed.hosted_tools[0]).search_context_size = "high";
+  CHECK(refused(responses::encode(desc(), changed, false)) == ErrorKind::ReplayIneligible);
+
+  auto bad = [&](auto edit) { auto copy = r; edit(copy); CHECK(refused(responses::encode(desc(), copy, false)) == ErrorKind::InvalidRequest); };
+  bad([](auto& q) { std::get<responses::ImageGenerationTool>(q.hosted_tools[1]).size = "big"; });
+  bad([](auto& q) { std::get<responses::ImageGenerationTool>(q.hosted_tools[1]).quality = "Extra High"; });
+  bad([](auto& q) { std::get<responses::ImageGenerationTool>(q.hosted_tools[1]).output_compression = 101; });
+  bad([](auto& q) { std::get<responses::FileSearchTool>(q.hosted_tools[2]).max_num_results = 0u; });
+  bad([](auto& q) { std::get<responses::CodeInterpreterTool>(q.hosted_tools[3]).container_id = "cntr_1"; });
+  bad([](auto& q) { std::get<responses::CodeInterpreterTool>(q.hosted_tools[3]).network_policy->domain_secrets[0].domain = "other.example.com"; });
+  bad([](auto& q) { std::get<responses::CodeInterpreterTool>(q.hosted_tools[3]).network_policy->disabled = true; });
+  bad([](auto& q) { std::get<responses::McpTool>(q.hosted_tools[4]).connector_id = "connector_gmail"; });
+  bad([](auto& q) { std::get<responses::McpTool>(q.hosted_tools[4]).server_url = "http://mcp.example.test/mcp"; });
+  bad([](auto& q) { std::get<responses::McpTool>(q.hosted_tools[4]).headers.push_back({"x-key", "again"}); });
+  bad([](auto& q) { std::get<responses::McpTool>(q.hosted_tools[4]).authorization = "line\nbreak"; });
+  bad([](auto& q) { std::get<responses::McpTool>(q.hosted_tools[4]).require_approval = "never"; });
+  bad([](auto& q) { std::get<responses::McpTool>(q.hosted_tools[4]).allowed_tools = responses::McpToolFilter{}; });
+  bad([](auto& q) { q.hosted_tools.push_back(q.hosted_tools[4]); });
+  bad([](auto& q) { q.hosted_tools.push_back(responses::ComputerTool{}); });
+  bad([](auto& q) { q.hosted_tools = {responses::ComputerUsePreviewTool{"browser", 0, 768}}; });
+  // Two servers with their own labels are two tools.
+  auto two = r; auto second = mcp; second.server_label = "more"; two.hosted_tools.push_back(second); encoded_ok(desc(), two);
+  // OpenRouter's own tools and image output exist only at a declared OpenRouter origin.
+  auto routed = request(); routed.hosted_tools = {responses::OpenRouterServerTool{"openrouter:datetime", {}}};
+  CHECK(refused(responses::encode(desc(), routed, false)) == ErrorKind::Unsupported);
+  routed = request(); routed.modalities = {responses::OutputModality::Image};
+  CHECK(refused(responses::encode(desc(), routed, false)) == ErrorKind::Unsupported);
+}
+void openrouter_server_tools_and_images() {
+  static const auto loaded = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"gateway-responses","family":"openai.responses","connection":{"base_url":"https://openrouter.ai","paths":{"buffered":"/api/v1/responses","streaming":"/api/v1/responses"}}})");
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
+  const auto& gateway = std::get<descriptor::ValidatedDescriptor>(loaded);
+  auto r = request();
+  r.hosted_tools = {responses::OpenRouterServerTool{"openrouter:datetime", {}}, responses::OpenRouterServerTool{"openrouter:image_generation", owned(R"({"model":"vendor/image-model","quality":"high"})")}};
+  r.modalities = {responses::OutputModality::Image, responses::OutputModality::Text};
+  OpenRouterImageConfig config; config.aspect_ratio = "1:1"; config.image_size = "1K"; r.image_config = config;
+  const auto sent = encoded_ok(gateway, r);
+  const auto wire = parse(sent.body);
+  CHECK(wire.root().get("tools").at(1).get("type").as_string() == "openrouter:datetime" && !wire.root().get("tools").at(1).get("parameters").valid());
+  CHECK(wire.root().get("tools").at(2).get("parameters").get("model").as_string() == "vendor/image-model");
+  CHECK(wire.root().get("modalities").at(0).as_string() == "image" && wire.root().get("modalities").at(1).as_string() == "text" &&
+        wire.root().get("image_config").get("aspect_ratio").as_string() == "1:1" && wire.root().get("image_config").get("image_size").as_string() == "1K");
+  auto bad = r; bad.hosted_tools = {responses::OpenRouterServerTool{"datetime", {}}}; CHECK(refused(responses::encode(gateway, bad, false)) == ErrorKind::InvalidRequest);
+  bad = r; bad.hosted_tools = {responses::OpenRouterServerTool{"openrouter:datetime", owned("[1]")}}; CHECK(refused(responses::encode(gateway, bad, false)) == ErrorKind::InvalidRequest);
+  bad = r; bad.modalities = {responses::OutputModality::Text}; CHECK(refused(responses::encode(gateway, bad, false)) == ErrorKind::InvalidRequest);
+  bad = r; bad.modalities.push_back(responses::OutputModality::Text); CHECK(refused(responses::encode(gateway, bad, false)) == ErrorKind::InvalidRequest);
+  bad = r; bad.image_config->aspect_ratio = "one to one"; CHECK(refused(responses::encode(gateway, bad, false)) == ErrorKind::InvalidRequest);
+  // The router's tool step is an opaque item, and a generated image without a format keeps an empty MIME.
+  const std::string step = R"({"type":"openrouter:datetime","id":"st_1","status":"completed","datetime":"2026-10-19T03:04:14Z","timezone":"UTC"})";
+  const std::string picture = R"({"id":"ig_1","type":"image_generation_call","status":"completed","result":"iVBORw0KGgo="})";
+  // OpenRouter sends a base64 data URL; its MIME is the image's when the item names no format.
+  const std::string url_picture = R"({"id":"ig_2","type":"image_generation_call","status":"completed","result":"data:image/png;base64,iVBORw0KGgo="})";
+  Accumulator acc; responses::Codec codec(gateway, responses::Mode::Buffered, acc, sent.context);
+  codec.buffered(body("[" + step + "," + picture + "," + url_picture + "," + message + "]"), {}); CHECK(acc.outcome());
+  const auto& parts = completed(*acc.outcome()).messages[0].parts;
+  CHECK(std::get<Opaque>(parts[0]).wire_type == "openrouter:datetime" && std::get<Media>(parts[1]).kind == MediaKind::Image && std::get<Media>(parts[1]).mime.empty());
+  CHECK(std::get<Media>(parts[2]).mime == "image/png" && *std::get<Media>(parts[2]).data == "iVBORw0KGgo=");
+  CHECK(json::equal(completed(*acc.outcome()).messages[0].wire_output->root().at(2), parse(url_picture).root()));
+  const std::string broken = R"({"id":"ig_3","type":"image_generation_call","status":"completed","result":"data:image/png,iVBORw0KGgo="})";
+  failed(buffered(body("[" + broken + "]")), ErrorKind::ProtocolCorrupt);
+  auto next = r; next.messages.push_back(completed(*acc.outcome()).messages[0]); next.messages.push_back(Message{"", Role::User, {Text{"again"}}});
+  encoded_ok(gateway, next);
+  auto changed = next; changed.image_config->image_size = "2K"; CHECK(refused(responses::encode(gateway, changed, false)) == ErrorKind::ReplayIneligible);
+}
+void service_item_progress_events() {
+  // Code interpreter and MCP calls stream their code and arguments under the item's own event names.
+  const std::string code_added = R"({"id":"ci_1","type":"code_interpreter_call","status":"in_progress","code":"","container_id":"cntr_1","outputs":null})";
+  const std::string code_done = R"({"id":"ci_1","type":"code_interpreter_call","status":"completed","code":"17*23","container_id":"cntr_1","outputs":null})";
+  const std::string mcp_added = R"({"id":"mcp_1","type":"mcp_call","status":"in_progress","server_label":"docs","name":"search","arguments":"","output":null,"error":null,"approval_request_id":null})";
+  const std::string mcp_done = R"({"id":"mcp_1","type":"mcp_call","status":"completed","server_label":"docs","name":"search","arguments":"{\"q\":\"x\"}","output":"y","error":null,"approval_request_id":null})";
+  const auto on = [](std::string type, std::string id, size_t index, std::string fields) {
+    return event(std::move(type), ",\"item_id\":" + json::quote(id) + ",\"output_index\":" + std::to_string(index) + std::move(fields));
+  };
+  const auto output = "[" + code_done + "," + mcp_done + "," + message + "]";
+  std::vector<Frame> frames{created(), added(0, code_added), on("response.code_interpreter_call.in_progress", "ci_1", 0, ""),
+      on("response.code_interpreter_call_code.delta", "ci_1", 0, R"(,"delta":"17*")"), on("response.code_interpreter_call_code.done", "ci_1", 0, R"(,"code":"17*23")"),
+      on("response.code_interpreter_call.interpreting", "ci_1", 0, ""), on("response.code_interpreter_call.completed", "ci_1", 0, ""), item_done(0, code_done),
+      added(1, mcp_added), on("response.mcp_call.in_progress", "mcp_1", 1, ""), on("response.mcp_call_arguments.delta", "mcp_1", 1, R"(,"delta":"{\"q\"")"),
+      on("response.mcp_call_arguments.done", "mcp_1", 1, R"(,"arguments":"{\"q\":\"x\"}")"), on("response.mcp_call.completed", "mcp_1", 1, ""), item_done(1, mcp_done),
+      added(2, message), item_done(2, message), terminal(output)};
+  const auto outcome = stream(frames);
+  const auto& c = completed(outcome);
+  CHECK(text(c.messages) == "hello" && std::get<Opaque>(c.messages[0].parts[0]).wire_type == "code_interpreter_call" && std::get<Opaque>(c.messages[0].parts[1]).wire_type == "mcp_call");
+  CHECK(json::equal(c.messages[0].wire_output->root(), parse(output).root()));
+  // A progress name must belong to its item, and a message item has no progress events.
+  auto wrong = frames; wrong[3] = on("response.mcp_call_arguments.delta", "ci_1", 0, R"(,"delta":"x")");
+  failed(stream(wrong), ErrorKind::Unsupported);
+  const auto frames_text = text_frames();
+  std::vector<Frame> on_message(frames_text.begin(), frames_text.begin() + 3);
+  on_message.push_back(on("response.output_text.future", "msg_1", 0, ""));
+  failed(stream(on_message), ErrorKind::Unsupported);
+}
+void computer_calls_and_mcp_approvals() {
+  auto r = request(); r.hosted_tools = {responses::ComputerTool{}};
+  const std::string action = R"({"id":"cu_1","type":"computer_call","status":"completed","call_id":"call_cu","actions":[{"type":"screenshot"}],"pending_safety_checks":[{"id":"sc_1","code":"malicious_instructions","message":"check"}]})";
+  const auto output = "[" + action + "]";
+  const auto sent = encoded_ok(desc(), r);
+  for (const bool streaming : {false, true}) {
+    Accumulator acc; responses::Codec codec(desc(), streaming ? responses::Mode::Sse : responses::Mode::Buffered, acc, sent.context);
+    if (streaming) {
+      const std::string opening = R"({"id":"cu_1","type":"computer_call","status":"in_progress","call_id":"call_cu","actions":[],"pending_safety_checks":[]})";
+      for (const auto& [name, data] : std::vector<Frame>{created(), added(0, opening), item_done(0, action), terminal(output)}) CHECK(codec.frame(name, data));
+      codec.finish({});
+    } else codec.buffered(body(output), {});
+    CHECK(acc.outcome());
+    const auto& c = completed(*acc.outcome());
+    const auto& call = std::get<ToolCall>(c.messages[0].parts[0]);
+    CHECK(c.stop.kind == StopKind::ToolUse && call.kind == ToolCallKind::ClientExecuted && call.name == "computer" && call.id == "call_cu" &&
+          call.wire_type == "computer_call" && call.input->root().get("actions").at(0).get("type").as_string() == "screenshot");
+    auto png = std::make_shared<const std::string>("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==");
+    ToolResult shot; shot.tool_use_id = "call_cu"; shot.content = R"({"acknowledged_safety_checks":[{"id":"sc_1"}]})"; shot.content_parts = {Media::image("image/png", png)};
+    auto next = r; next.messages.push_back(c.messages[0]); next.messages.push_back(Message{"", Role::Tool, {shot}});
+    const auto wire = parse(encoded_ok(desc(), next).body);
+    const auto answer = wire.root().get("input").at(2);
+    CHECK(answer.get("type").as_string() == "computer_call_output" && answer.get("call_id").as_string() == "call_cu" &&
+          answer.get("output").get("type").as_string() == "computer_screenshot" && answer.get("output").get("image_url").as_string().starts_with("data:image/png;base64,iVBOR") &&
+          answer.get("acknowledged_safety_checks").at(0).get("id").as_string() == "sc_1");
+    auto plain = shot; plain.content.clear(); next.messages.back() = Message{"", Role::Tool, {plain}};
+    CHECK(!parse(encoded_ok(desc(), next).body).root().get("input").at(2).get("acknowledged_safety_checks").valid());
+    auto worded = shot; worded.content_parts.push_back(Text{"note"}); next.messages.back() = Message{"", Role::Tool, {worded}};
+    CHECK(refused(responses::encode(desc(), next, false)) == ErrorKind::InvalidRequest);
+    auto extra = shot; extra.content = R"({"note":"x"})"; next.messages.back() = Message{"", Role::Tool, {extra}};
+    CHECK(refused(responses::encode(desc(), next, false)) == ErrorKind::InvalidRequest);
+    auto two = shot; two.content_parts.push_back(Media::image("image/png", png)); next.messages.back() = Message{"", Role::Tool, {two}};
+    CHECK(refused(responses::encode(desc(), next, false)) == ErrorKind::InvalidRequest);
+    // A function result may not carry content beside its parts.
+  }
+  // An approval answers a request the history holds, or one the continued response holds.
+  auto m = request(); responses::McpTool mcp; mcp.server_label = "docs"; mcp.server_url = "https://mcp.example.test/mcp"; mcp.require_approval = "always";
+  m.hosted_tools = {mcp};
+  const std::string ask = R"({"id":"mcpr_1","type":"mcp_approval_request","server_label":"docs","name":"search","arguments":"{}"})";
+  const auto asked = encoded_ok(desc(), m);
+  Accumulator acc; responses::Codec codec(desc(), responses::Mode::Buffered, acc, asked.context);
+  codec.buffered(body("[" + ask + "]"), {}); CHECK(acc.outcome());
+  const auto& reply = completed(*acc.outcome());
+  const auto& request_part = std::get<ToolCall>(reply.messages[0].parts[0]);
+  CHECK(reply.stop.kind == StopKind::ToolUse && request_part.kind == ToolCallKind::ApprovalRequest && request_part.id == "mcpr_1" &&
+        request_part.name == "search" && request_part.wire_type == "mcp_approval_request" && reply.executable_tool_calls().empty());
+  auto approve = m; approve.messages.push_back(reply.messages[0]); approve.mcp_approvals = {{"mcpr_1", true, {}}};
+  const auto approved_wire = parse(encoded_ok(desc(), approve).body);
+  const auto approved = approved_wire.root().get("input");
+  CHECK(approved.size() == 3 && approved.at(2).get("type").as_string() == "mcp_approval_response" && approved.at(2).get("approval_request_id").as_string() == "mcpr_1" &&
+        approved.at(2).get("approve").as_bool() && !approved.at(2).get("reason").valid());
+  // The service takes a reason only with a refusal.
+  auto refusal = approve; refusal.mcp_approvals = {{"mcpr_1", false, std::string("not now")}};
+  CHECK(parse(encoded_ok(desc(), refusal).body).root().get("input").at(2).get("reason").as_string() == "not now");
+  auto reasoned = approve; reasoned.mcp_approvals = {{"mcpr_1", true, std::string("fine")}}; CHECK(refused(responses::encode(desc(), reasoned, false)) == ErrorKind::InvalidRequest);
+  auto unknown = approve; unknown.mcp_approvals = {{"mcpr_2", false, {}}}; CHECK(refused(responses::encode(desc(), unknown, false)) == ErrorKind::InvalidRequest);
+  auto twice = approve; twice.mcp_approvals.push_back(twice.mcp_approvals[0]); CHECK(refused(responses::encode(desc(), twice, false)) == ErrorKind::InvalidRequest);
+  auto cursor = m; cursor.previous_response_id = "resp_1"; cursor.mcp_approvals = {{"mcpr_9", false, {}}};
+  CHECK(parse(encoded_ok(desc(), cursor).body).root().get("input").at(1).get("approve").as_bool() == false);
+  // Without a computer tool a computer call is not the caller's to answer.
+  auto undeclared = request(); undeclared.messages.push_back(reply.messages[0]);
+  Accumulator bare; responses::Codec bare_codec(desc(), responses::Mode::Buffered, bare, encoded_ok(desc(), r).context);
+  bare_codec.buffered(body(output), {}); CHECK(bare.outcome());
+  undeclared = request(); undeclared.messages.push_back(completed(*bare.outcome()).messages[0]);
+  CHECK(refused(responses::encode(desc(), undeclared, false)) != ErrorKind::Unsupported);
+}
 void unknown_wire_observation_boundary() {
   const auto unknown = event("response.future_semantic.delta",
       R"(,"delta":"not assistant text","status":"completed","metadata":{"nested":[{"value":"owned unknown payload"}]})");
@@ -926,6 +1144,7 @@ void empty_text_delta_is_withheld() {
 } // namespace
 int main() {
   try { empty_text_delta_is_withheld(); failure_reasons(); provider_money_and_snapshot_aliases(); named_error_precedence(); named_error_raw_capacity(); completed_reasoning_ciphertext_authority(); reviewed_wire_boundaries(); typed_encode(); controls_and_cursor_boundaries(); openrouter_max_price(); strict_tool_schemas(); previous_response_ownership(); grouped_native_and_owned_outcomes(); normal_close_required(); cancellation_observation_boundary(); reasoning_stream_snapshots(); tools_interleaving_and_ownership(); incomplete_and_server_items(); unknown_hosted_item_ownership(); unknown_wire_observation_boundary(); usage_boundaries(); uncached_input_rule(); corruption_and_bounds();
+    hosted_tool_options(); openrouter_server_tools_and_images(); service_item_progress_events(); computer_calls_and_mcp_approvals();
     std::cout << "Responses semantic contracts passed\n"; return 0;
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

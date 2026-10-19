@@ -299,7 +299,7 @@ What the declaration keeps: the served identity must still stay the same for the
 |---|---|
 | `sp::chat::Request`, `<codecs/chat.h>` | `temperature`, `top_p`, `max_output_tokens`, scalar `reasoning_effort`, `service_tier`, `provider`, `response_format`, `modalities`, `audio`, OpenRouter `image_config`, `reasoning`, `include_reasoning`, `usage_include`, alternative `models`; choose either simple `messages` or ordered `canonical_messages`, never both. |
 | `sp::messages::Request`, `<codecs/messages_request.h>` | `system`, `account_scope`, **`max_tokens`**, `thinking_budget`, `thinking_mode`, `output_effort`, `cache_control`, `tool_choice`, `temperature`, `top_p`, `provider`, `container`. |
-| `sp::responses::Request`, `<codecs/responses_request.h>` | `instructions`, `account_scope`, `max_output_tokens`, `reasoning` (`effort`, `summary`), `required_tool`, `service_tier`, `temperature`, `top_p`, `store`, `response_format`, `provider`, `hosted_tools`, `max_tool_calls`, `previous_response_id`, `previous_response_history`, `parallel_tool_calls`, `verbosity`, `truncation`, `include`. |
+| `sp::responses::Request`, `<codecs/responses_request.h>` | `instructions`, `account_scope`, `max_output_tokens`, `reasoning` (`effort`, `summary`), `required_tool`, `service_tier`, `temperature`, `top_p`, `store`, `response_format`, `provider`, `hosted_tools`, `max_tool_calls`, `previous_response_id`, `previous_response_history`, `parallel_tool_calls`, `verbosity`, `truncation`, `include`, `modalities`, `image_config`, `mcp_approvals`. |
 | `sp::gemini::Request`, `<codecs/gemini_request.h>` | `system`, `account_scope`, `max_output_tokens`, `thinking_budget`, typed `thinking_level`, `include_thoughts`, `temperature`, `safety_settings`, `tool_choice`, `required_tool`, `history_mode`, `response_modalities`, `speech_config`, `image_config`, `audio_transcription_config`, `audio_format`, `builtin_tools`, `mcp_servers`, `server_tool_invocations`, `retrieval_config`. |
 | `sp::interactions::Request`, `<codecs/interactions_request.h>` | `system`, `account_scope`, `max_output_tokens`, `thinking_level`, `thinking_summaries`, `service_tier`, `required_tool`, typed `response_format`, `speech_config`, `transcription_config`, `builtin_tools`, `previous_interaction_id`, `store`, `video_task`, `background`, `agent`, `lifecycle`, `interaction_id`. |
 
@@ -342,7 +342,7 @@ request.store = false;
 request.response_format = sp::ResponseFormat{};  // Kind::JsonObject
 ```
 
-For `Kind::JsonSchema`, provide `name`, `schema` and optional `strict`; the encoder validates the supported schema keyword types and bounds. It does not validate a model's returned text against that schema. Refusal remains a `Refusal` part, not repaired JSON. Responses hosted tool variants include `WebSearchTool`, `ImageGenerationTool`, `FileSearchTool`, `ToolSearchTool` and `ShellTool`. Tool admission and bounded invocation facts are family-specific; hosted tools do not become host-executable `ToolCall`s merely because they have a name.
+For `Kind::JsonSchema`, provide `name`, `schema` and optional `strict`; the encoder validates the supported schema keyword types and bounds. It does not validate a model's returned text against that schema. Refusal remains a `Refusal` part, not repaired JSON. Responses hosted tool variants are `WebSearchTool`, `ImageGenerationTool`, `FileSearchTool`, `ToolSearchTool`, `ShellTool`, `CodeInterpreterTool`, `McpTool`, `ComputerTool`, `ComputerUsePreviewTool` and `OpenRouterServerTool` (see [Responses hosted tools](#responses-hosted-tools)). Tool admission and bounded invocation facts are family-specific; hosted tools do not become host-executable `ToolCall`s merely because they have a name.
 
 A Responses function tool (`sp::responses::ToolDefinition`) has an optional `strict`. When it is unset, the policy's `strict_tools` default applies only to a strict-compatible `parameters` schema: the root is an object schema, and every object schema reached through `properties`, `items`, `prefixItems`, `anyOf`, `$defs` or `definitions` sets `"additionalProperties": false` and lists each of its properties in `required`. Any other schema is sent with `"strict": false`. An explicit `false` is sent as given. An explicit `true` on an incompatible schema returns `InvalidRequest` before dispatch, naming the tool and the first failing JSON pointer. The check is structural: it does not decide which other keywords strict mode supports, so the service still judges those.
 
@@ -401,7 +401,7 @@ sp::gemini::Request request_with_heic(std::string model, std::string_view file_b
 }
 ```
 
-Generation controls are explicit: Chat `OutputModality` with `AudioOutput{voice,format}` or declared-origin `ImageOutput`; Generate `ResponseModality`, `SpeechConfig`, `ImageConfig`, `AudioTranscriptionConfig`, `AudioFormat` (`generationConfig.responseFormat.audio`: the service's `mime_type` and `delivery` tokens such as `AUDIO_L16` or `URI`, `sample_rate`, `bit_rate`); Interactions an ordered `response_format` vector of `AudioResponseFormat`, `ImageResponseFormat`, `VideoResponseFormat` or `TextResponseFormat` (one entry emits an object, multiple entries an array), `SpeechConfiguration` and `TranscriptionConfig`. Interactions transcription uses the modern nested Verbatim/Smart mode; incompatible vocabulary/diarization/timestamp combinations reject before I/O. Responses requests images through `hosted_tools` with `ImageGenerationTool::output_format` (png/jpeg/webp). Select a model that supports the requested output.
+Generation controls are explicit: Chat `OutputModality` with `AudioOutput{voice,format}` or declared-origin `ImageOutput`; Generate `ResponseModality`, `SpeechConfig`, `ImageConfig`, `AudioTranscriptionConfig`, `AudioFormat` (`generationConfig.responseFormat.audio`: the service's `mime_type` and `delivery` tokens such as `AUDIO_L16` or `URI`, `sample_rate`, `bit_rate`); Interactions an ordered `response_format` vector of `AudioResponseFormat`, `ImageResponseFormat`, `VideoResponseFormat` or `TextResponseFormat` (one entry emits an object, multiple entries an array), `SpeechConfiguration` and `TranscriptionConfig`. Interactions transcription uses the modern nested Verbatim/Smart mode; incompatible vocabulary/diarization/timestamp combinations reject before I/O. Responses requests images through `hosted_tools` with `ImageGenerationTool`, or on a declared OpenRouter origin through `modalities` and `image_config` (the same `OpenRouterImageConfig` as Chat's `ImageOutput`). Select a model that supports the requested output.
 
 Generated `Media` lives in `Completion::messages[].parts`: inline `data` is owned canonical base64; URL/file sources use `reference`; audio may carry `id`/`transcript`. Missing format evidence stays an empty MIME, not an assumed PNG/WAV/sample rate. Unsealed failure partials are description-only; sealed parts remain owned. Media descriptions/payloads and controls join native bindings, so copied bytes/provider IDs do not create replay authority.
 
@@ -488,6 +488,46 @@ request.tool_choice = sp::gemini::ToolChoice{sp::gemini::ToolChoiceMode::None};
 Safety categories are Harassment/HateSpeech/SexuallyExplicit/DangerousContent/CivicIntegrity; thresholds are BlockNone/BlockOnlyHigh/BlockMediumAndAbove/BlockLowAndAbove/Off. Duplicate categories and invalid values reject. These are explicit service controls, not a safety guarantee about returned content.
 
 The immutable family policy's `temperature_forbidden_model_prefixes` supplies model facts. Matching is ASCII case-insensitive against the full model or the suffix after its final `/`, so a gateway namespace does not bypass a prohibition. The embedded OpenAI facts cover gpt-5/gpt-6/o1/o3/o4 prefixes. Messages facts list the known Claude models and add the optional `temperature_forbidden_generations`, a rule by generation: every model of the `claude-` series from generation 4.7 on refuses `temperature`, whatever its family word (`opus`, `sonnet`, `haiku`, `fable` or one not yet released), dated suffix, gateway namespace or dotted gateway version (`anthropic/claude-opus-4.7`). The generation is the first one or two numbers of one or two digits after the series, so `claude-haiku-5-5` is 5.5 and `claude-opus-4-20250514` is 4.0 (a longer number is a date). A Claude id whose generation cannot be read is treated as the newest one and refused, which costs an omitted optional control instead of an HTTP 400. A snapshot without the key keeps only its listed prefixes. Loading a different closed policy creates a new identity, not a live edit to an existing client's behavior. Read the admitted facts for the selected deployment; do not guess temperature support from a model name alone.
+
+## Responses hosted tools
+
+**Values the service names.** Sizes, qualities, formats, environments and memory limits are sent as given. The SDK checks only their shape, so a value a newer model accepts needs no SDK release:
+- a size is `auto` or `WIDTHxHEIGHT`;
+- the other names are lower-case tokens.
+
+**The tools.**
+- **`WebSearchTool`.** `allowed_domains` (sent as `filters.allowed_domains`), an approximate `user_location`, `search_context_size` and `external_web_access`.
+- **`ImageGenerationTool`.** `size`, `quality`, `output_format`, `model`, `action`, `background`, `moderation`, `input_fidelity`, `output_compression`, `partial_images`, and an `input_image_mask` given as `mask_file_id` or `mask_image_url`. Partial images stay in the raw events; the finished image is the `Media` part.
+- **`FileSearchTool`.** `vector_store_ids` and `max_num_results`.
+- **`CodeInterpreterTool`.** Either an existing `container_id`, or an automatic container with `file_ids`, `memory_limit` and a `network_policy`. The policy is `disabled`, or an allow-list of domains with optional `domain_secrets`.
+- **`McpTool`.**
+  - Exactly one of an https `server_url`, a `connector_id` or a `tunnel_id`.
+  - `authorization`, `headers`, `allowed_tools` (tool names or `read_only`), `server_description` and `defer_loading`.
+  - `require_approval`: either a mode (`always`, `never`) or the `approval_always` and `approval_never` filters.
+  - Several servers may be declared, each with its own `server_label`.
+- **`ComputerTool`** (`computer`) and **`ComputerUsePreviewTool`** (`computer_use_preview`, with an environment and a display size).
+- **`OpenRouterServerTool`.** Any `openrouter:` type with its `parameters` object, at a declared OpenRouter origin only: `openrouter:web_search`, `openrouter:datetime`, `openrouter:image_generation` and the rest of OpenRouter's catalogue.
+
+**Decoding.**
+- **Service items.** Code interpreter calls, MCP calls and tool listings, and OpenRouter's tool steps are `Opaque` parts holding the whole item, and they replay as received.
+- **Progress events.** Their events are accepted when they are named after the item's type: `response.code_interpreter_call_code.delta` or `response.mcp_call_arguments.done`, for example, where the item is the call. The item itself is checked when it is done. Other undeclared events still fail as `Unsupported`.
+- **Computer calls.** A `computer_call` is a `ClientExecuted` `ToolCall` named `computer`, whose input is the whole item (`actions`, `pending_safety_checks`), and the stop is `ToolUse`. Answer it with a `ToolResult` whose `content_parts` hold the one screenshot: an inline image becomes a data URL, a file reference a `file_id`. To acknowledge safety checks, set `content` to `{"acknowledged_safety_checks": [...]}`.
+
+**MCP approvals.** With approval required, the answer holds an `mcp_approval_request` item. It decodes as a `ToolCall` of kind `ApprovalRequest`, whose id is the request id, whose name is the MCP tool and whose input is its arguments. The stop is `ToolUse`, and `executable_tool_calls()` leaves it out. Answer it in the next request with `mcp_approvals` (`request_id`, `approve`, and a `reason` only when refusing, which is all the service accepts). The approval must answer a request in the captured history, or in the response that `previous_response_id` continues.
+
+**OpenRouter image output.** On a declared OpenRouter origin, `modalities` (`Image`, with `Text` when text is wanted too) and `image_config` request images from an image model. OpenRouter returns the image as a base64 data URL. Its MIME becomes the `Media` MIME, and the wire keeps the URL as received.
+
+**Configuration digest.** The tools, their options and the image output settings are configuration. They are bound only when set, so existing digests do not change. MCP authorization and header values and container domain secrets are credentials: only their names are bound, so a rotated value keeps history replayable. `mcp_approvals` answer one turn and are not bound.
+
+**Live check.** On 2026-10-19 each case was answered:
+- **`gpt-5-nano`.**
+  - Code interpreter, buffered and streamed.
+  - The context7 MCP server without approval, in two turns, buffered and streamed.
+  - An approval filter, then the approval answered with `mcp_approvals`.
+  - Partial images through `gpt-image-1-mini`.
+  - Web search with a domain filter and a location.
+- **`gpt-5.4-mini`.** The `computer` tool, then the screenshot answer.
+- **OpenRouter.** `openrouter:datetime`, and image output from `google/gemini-2.5-flash-image`, buffered and streamed.
 
 ## Responses provider-held continuation
 
