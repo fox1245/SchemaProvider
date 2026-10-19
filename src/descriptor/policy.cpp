@@ -221,7 +221,7 @@ class PolicyLoader {
       if(!pd || !rd)fail("","strict bounded JSON policy");
       auto policy=std::shared_ptr<DescriptorPolicy>(new DescriptorPolicy);
       auto root=pd->root(); auto rr=rd->root();
-      closed(root,{"version","revision","families"},""); closed(rr,{"version","resources","admission"},"/resources");
+      closed(root,{"version","revision","families"},"",{"endpoints"}); closed(rr,{"version","resources","admission"},"/resources");
       if(integer(root.get("version"),"/version")!=1 || integer(rr.get("version"),"/version")!=1 || !integer(root.get("revision"),"/revision"))fail("/version","version 1 and positive revision");
       auto rv=rr.get("resources"), av=rr.get("admission");
       closed(rv,{"json_bytes","json_depth","request_bytes","chat_text_request_bytes","request_messages","request_tools","request_parts","native_bytes","native_depth","native_members","image_decoded_bytes","audio_decoded_bytes","video_decoded_bytes","document_decoded_bytes","descriptor_bytes","descriptor_depth","policy_bytes","policy_depth"},"/resources");
@@ -480,6 +480,62 @@ class PolicyLoader {
         if(auto error=validate(f,choices(f.defaults),{},false))fail("/defaults",*error);
         if(f.defaults.strict_tools && f.family!="openai.responses") fail("/defaults/strict_tools","Responses strict tools only");
         policy->families_.push_back(std::move(f));
+      }
+      // Non-chat endpoints (D6): each names a compiled codec shape, its origins, the path of each operation and
+      // the schema of the members a request may add beside the typed ones.
+      if (auto endpoints = root.get("endpoints"); endpoints.valid()) {
+        if (!endpoints.is_array() || endpoints.size() > 64) fail("/endpoints", "bounded array of endpoint facts");
+        struct Shape { std::string_view endpoint, shape; std::initializer_list<std::string_view> operations, owned; };
+        static constexpr std::string_view image_members[]{"model", "prompt", "n", "size", "quality", "background", "output_format",
+                                                          "output_compression", "images", "input_references", "stream", "partial_images"};
+        const auto owned_by = [](std::string_view endpoint, std::string_view name) {
+          return endpoint == "images" && std::find(std::begin(image_members), std::end(image_members), name) != std::end(image_members);
+        };
+        const auto operations_of = [](std::string_view endpoint, std::string_view shape) -> std::vector<std::string_view> {
+          if (endpoint == "images" && shape == "openai") return {"generate", "edit"};
+          if (endpoint == "images" && shape == "openrouter") return {"generate"};
+          return {};
+        };
+        for (auto e : endpoints.elements()) {
+          closed(e, {"endpoint","shape","origins","paths"}, "/endpoints", {"options","auth","charge_on_accept"});
+          EndpointFact fact{text(e.get("endpoint"), "/endpoints/endpoint"), text(e.get("shape"), "/endpoints/shape"),
+                            strings(e.get("origins"), "/endpoints/origins")};
+          const auto operations = operations_of(fact.endpoint, fact.shape);
+          if (operations.empty()) fail("/endpoints/shape", "an endpoint and shape the SDK has a codec for");
+          if (fact.origins.empty()) fail("/endpoints/origins", "at least one origin");
+          for (const auto& origin : fact.origins)
+            if (!valid_origin(origin) || origin.ends_with('/')) fail("/endpoints/origins", "canonical origins without path");
+          const auto paths = e.get("paths");
+          if (!paths.is_object() || !paths.size()) fail("/endpoints/paths", "object of operation paths");
+          for (auto member : paths.members()) {
+            const auto path = text(member.value, "/endpoints/paths");
+            if (std::find(operations.begin(), operations.end(), member.key) == operations.end())
+              fail("/endpoints/paths", "an operation of the endpoint's shape");
+            if (!path.starts_with('/') || path.size() > 256 || path.find_first_of("?# \\\"") != std::string::npos ||
+                std::any_of(path.begin(), path.end(), [](unsigned char c) { return c < 0x21 || c > 0x7e; }))
+              fail("/endpoints/paths", "an absolute path without query");
+            fact.paths.emplace_back(std::string(member.key), path);
+          }
+          if (e.get("options").valid()) {
+            auto parsed = parse_value_schema(e.get("options"), "/endpoints/options");
+            if (auto* error = std::get_if<ConfigError>(&parsed)) fail(error->pointer, error->expected);
+            fact.options = std::get<ValueSchema>(std::move(parsed));
+            if (fact.options->kind != ValueSchema::Kind::Object) fail("/endpoints/options", "object schema");
+            for (const auto& name : fact.options->names)
+              if (owned_by(fact.endpoint, name)) fail("/endpoints/options", "properties other than the endpoint's typed members");
+          }
+          if (e.get("auth").valid()) {
+            fact.auth = text(e.get("auth"), "/endpoints/auth");
+            if (fact.auth != "bearer" && fact.auth != "x-api-key" && fact.auth != "x-goog-api-key")
+              fail("/endpoints/auth", "bearer, x-api-key or x-goog-api-key");
+          }
+          if (e.get("charge_on_accept").valid()) fact.charge_on_accept = boolean(e.get("charge_on_accept"), "/endpoints/charge_on_accept");
+          for (const auto& existing : policy->endpoints_)
+            if (existing.endpoint == fact.endpoint)
+              for (const auto& origin : fact.origins)
+                if (contains(existing.origins, origin)) fail("/endpoints/origins", "one fact per endpoint and origin");
+          policy->endpoints_.push_back(std::move(fact));
+        }
       }
       {
         crypto::Sha256 hash;
@@ -780,6 +836,15 @@ bool DescriptorPolicy::temperature_forbidden_by_generation(std::string_view fami
     }
   }
   return false;
+}
+const EndpointFact* DescriptorPolicy::endpoint(std::string_view endpoint, std::string_view origin) const noexcept {
+  for (const auto& fact : endpoints_)
+    if (fact.endpoint == endpoint && std::find(fact.origins.begin(), fact.origins.end(), origin) != fact.origins.end()) return &fact;
+  return nullptr;
+}
+std::optional<std::string_view> endpoint_path(const EndpointFact& fact, std::string_view operation) noexcept {
+  for (const auto& [name, path] : fact.paths) if (name == operation) return path;
+  return std::nullopt;
 }
 std::string_view DescriptorPolicy::default_output_cap_member(std::string_view family, std::string_view origin) const noexcept {
   for (const auto& [listed_family, listed_origin] : completion_cap_origins_)

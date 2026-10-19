@@ -1,4 +1,5 @@
 #include "runtime/client.h"
+#include "codecs/images.h"
 #include "runtime/testing.h"
 #include "core/native.h"
 #include "codecs/messages.h"
@@ -332,8 +333,11 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
   SteadyTime deadline;
   transport::HttpRequest request;
   std::shared_ptr<const NativeContext> native_context;
-  enum class Family { Chat, Messages, Responses, Gemini, Interactions };
+  enum class Family { Chat, Messages, Responses, Gemini, Interactions, Endpoint };
   Family family = Family::Chat;
+  // A non-chat endpoint call (D6): which one, and whether the provider charges once it accepts it.
+  std::string endpoint;
+  bool charge_on_accept = false;
   bool admitted = false;
   bool prepared = false;
   std::string prepared_model;
@@ -372,6 +376,7 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
   std::unique_ptr<responses::Codec> responses_codec;
   std::unique_ptr<gemini::Codec> gemini_codec;
   std::unique_ptr<interactions::Codec> interactions_codec;
+  std::unique_ptr<images::Codec> images_codec;
   std::unique_ptr<transport::SseFramer> framer;
   std::optional<Head> response;
   ResponseInfo response_info;
@@ -537,9 +542,12 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
     responses_codec.reset();
     gemini_codec.reset();
     interactions_codec.reset();
+    images_codec.reset();
     accumulator = std::make_unique<Accumulator>(client->options.limits.semantic,
         [this](const Event& event) { semantic(event); }, client->options.limits.max_response_bytes);
-    if (family == Family::Chat) chat_codec = std::make_unique<chat::Codec>(client->descriptor,
+    if (family == Family::Endpoint) images_codec = std::make_unique<images::Codec>(client->descriptor, *accumulator,
+        prepared_model, client->options.limits.semantic);
+    else if (family == Family::Chat) chat_codec = std::make_unique<chat::Codec>(client->descriptor,
         options.streaming ? chat::Mode::Sse : chat::Mode::Buffered, *accumulator,
         client->options.limits.semantic, native_context);
     else if (family == Family::Messages) messages_codec = std::make_unique<messages::Codec>(client->descriptor,
@@ -772,7 +780,8 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
         else if (gemini_codec) gemini_codec->finish({normal, close_error.kind});
         else interactions_codec->finish({normal, close_error.kind});
       } else {
-        if (chat_codec) chat_codec->buffered(buffered, {normal, close_error.kind});
+        if (images_codec) images_codec->buffered(buffered, {normal, close_error.kind});
+        else if (chat_codec) chat_codec->buffered(buffered, {normal, close_error.kind});
         else if (messages_codec) messages_codec->buffered(buffered, {normal, close_error.kind});
         else if (responses_codec) responses_codec->buffered(buffered, {normal, close_error.kind});
         else if (gemini_codec) gemini_codec->buffered(buffered, {normal, close_error.kind});
@@ -800,11 +809,15 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
         random = available && options.retry->enabled ? client->random01() : 0;
       }
       auto at = available ? retry_at(failure->error, *options.retry, attempts, executor->now(), deadline, random) : std::nullopt;
+      // An endpoint call the provider charges for once it accepts it is retried only when it provably never
+      // reached the provider, or when the provider refused it before accepting it (D6).
+      if (at && charge_on_accept && failure->error.retry_safety != RetrySafety::NotSent &&
+          failure->error.http_status != 429 && failure->error.http_status != 503) at.reset();
       if (at) {
         prior_usage_unknown = prior_usage_unknown || !prior_attempt_proves_no_usage(*failure);
         pending_failure = std::move(outcome);
         stage = Stage::Backoff;
-        chat_codec.reset(); messages_codec.reset(); responses_codec.reset(); gemini_codec.reset(); interactions_codec.reset(); accumulator.reset(); framer.reset();
+        chat_codec.reset(); messages_codec.reset(); responses_codec.reset(); gemini_codec.reset(); interactions_codec.reset(); images_codec.reset(); accumulator.reset(); framer.reset();
         terminal_wire.reset();
         buffered.clear(); response.reset();
         retry_timer.arm(*executor, *at, [weak = weak_from_this()] { if (auto self = weak.lock()) self->timer(true); });
@@ -1247,6 +1260,9 @@ const NativeContext* PreparedRequest::native_context() const noexcept {
 std::optional<std::uint64_t> PreparedRequest::model_invocation_limit() const noexcept {
   return state_ ? state_->prepared_model_invocation_limit : std::nullopt;
 }
+std::string_view PreparedRequest::endpoint() const noexcept {
+  return state_ ? std::string_view(state_->endpoint) : std::string_view{};
+}
 Operation Client::start(Request request, RunOptions options, Callbacks callbacks) {
   return start(prepare(std::move(request), std::move(options)), std::move(callbacks));
 }
@@ -1284,7 +1300,7 @@ Operation Client::start(PreparedRequest preparation, Callbacks callbacks) {
   publication.published = true;
   return Operation(std::move(operation));
 }
-PreparedRequest Client::prepare(Request request, RunOptions options) {
+PreparedRequest Client::prepare_call(RunOptions options, const std::function<void(detail::OperationState&, std::optional<Error>&)>& encode) {
   require_interface_contract(EXPECTED_INTERFACE_REVISION, capability::RequiredProvider);
   auto client = state_;
   if (!client) throw AdmissionError(ErrorKind::Misuse);
@@ -1322,6 +1338,30 @@ PreparedRequest Client::prepare(Request request, RunOptions options) {
   else if (operation->options.stop_token.stop_requested()) error = detail::error_for(ErrorKind::Cancelled);
   else if (client->executor->now() >= deadline) error = detail::error_for(ErrorKind::DeadlineExceeded);
   try {
+    if (!error) encode(*operation, error);
+    if (!error) {
+      auto& wire = operation->request;
+      wire.deadline = deadline;
+      // Resolved here, once, so every attempt (and any backend) sees the same effective bounds:
+      // the per-run override, else the client-wide default. Zero means disabled.
+      wire.connect_timeout = operation->options.connect_timeout.value_or(client->options.transport.connect_timeout);
+      wire.first_byte_timeout = operation->options.first_byte_timeout.value_or(client->options.transport.first_byte_timeout);
+      wire.idle_timeout = operation->options.idle_timeout.value_or(client->options.transport.idle_timeout);
+      wire.http_version = client->options.http_version;
+      wire.ca_file = client->options.ca_file;
+    }
+  } catch (...) { error = detail::error_for(ErrorKind::ResourceLimit); }
+  if (error) {
+    error->safe_message = detail::safe_message(error->kind);
+    error->retry_safety = RetrySafety::NotSent;
+    operation->initial_error = std::move(error);
+  }
+  return preparation;
+}
+PreparedRequest Client::prepare(Request request, RunOptions options) {
+  auto client = state_;
+  return prepare_call(std::move(options), [&](detail::OperationState& state, std::optional<Error>& error) {
+    auto* operation = &state;
     if (!error) std::visit([&](const auto& typed) {
       using T = std::decay_t<decltype(typed)>;
       operation->prepared_model = typed.model;
@@ -1364,23 +1404,9 @@ PreparedRequest Client::prepare(Request request, RunOptions options) {
           wire.headers.push_back({"x-goog-api-key", client->options.api_key});
         else wire.headers.push_back({"Authorization", "Bearer " + client->options.api_key});
       }
-      wire.deadline = deadline;
-      // Resolved here, once, so every attempt (and any backend) sees the same effective bounds:
-      // the per-run override, else the client-wide default. Zero means disabled.
-      wire.connect_timeout = operation->options.connect_timeout.value_or(client->options.transport.connect_timeout);
-      wire.first_byte_timeout = operation->options.first_byte_timeout.value_or(client->options.transport.first_byte_timeout);
-      wire.idle_timeout = operation->options.idle_timeout.value_or(client->options.transport.idle_timeout);
-      wire.http_version = client->options.http_version;
-      wire.ca_file = client->options.ca_file;
       operation->native_context = std::move(value.context);
     }, request);
-  } catch (...) { error = detail::error_for(ErrorKind::ResourceLimit); }
-  if (error) {
-    error->safe_message = detail::safe_message(error->kind);
-    error->retry_safety = RetrySafety::NotSent;
-    operation->initial_error = std::move(error);
-  }
-  return preparation;
+  });
 }
 Result Client::complete(Request request, RunOptions options) {
   if (!state_ || state_->in_thread()) return detail::misuse_result();
@@ -1395,6 +1421,51 @@ Result Client::complete(PreparedRequest preparation) {
     auto operation = start(std::move(preparation));
     return operation.join();
   } catch (const AdmissionError& error) { return error.outcome(); }
+}
+PreparedEndpoint<images::Outcome> Client::prepare(images::Request request, RunOptions options) {
+  auto client = state_;
+  options.streaming = false;  // endpoint calls are buffered (D6)
+  return PreparedEndpoint<images::Outcome>(prepare_call(std::move(options), [&](detail::OperationState& operation, std::optional<Error>& error) {
+    auto encoded = images::encode(client->descriptor, request);
+    if (auto* failure = std::get_if<Error>(&encoded)) {
+      error = std::move(*failure);
+      if (error->reason.empty()) error->reason = std::string(reason::request_code(reason::Source::ImagesRequest, error->safe_message));
+      return;
+    }
+    auto& value = std::get<images::Encoded>(encoded);
+    operation.family = detail::OperationState::Family::Endpoint;
+    operation.endpoint = "images";
+    operation.charge_on_accept = value.charge_on_accept;
+    operation.prepared_model = std::move(value.model);
+    auto& wire = operation.request;
+    wire.method = "POST";
+    wire.url = std::string(client->descriptor.base_url()) + value.path;
+    wire.body = std::move(value.body);
+    // The descriptor's own headers go with every call to its origin; the codec owns the content headers.
+    for (const auto& header : client->descriptor.headers())
+      if (!detail::equal_ascii(header.first, "content-type") && !detail::equal_ascii(header.first, "accept"))
+        wire.headers.push_back({header.first, header.second});
+    wire.headers.push_back({"Content-Type", "application/json"});
+    wire.headers.push_back({"Accept", "application/json"});
+    if (!client->options.api_key.empty()) {
+      if (value.auth == "x-api-key") wire.headers.push_back({"x-api-key", client->options.api_key});
+      else if (value.auth == "x-goog-api-key") wire.headers.push_back({"x-goog-api-key", client->options.api_key});
+      else wire.headers.push_back({"Authorization", "Bearer " + client->options.api_key});
+    }
+  }));
+}
+images::Outcome Client::complete(images::Request request, RunOptions options) {
+  return complete(prepare(std::move(request), std::move(options)));
+}
+images::Outcome Client::complete(PreparedEndpoint<images::Outcome> call) {
+  if (!state_ || state_->in_thread()) return images::typed(*detail::misuse_result());
+  try { return start(std::move(call)).join(); }
+  catch (const AdmissionError& error) { return images::typed(*error.outcome()); }
+}
+EndpointCall<images::Outcome> Client::start(PreparedEndpoint<images::Outcome> call, std::function<void(images::Outcome)> on_outcome) {
+  Callbacks callbacks;
+  if (on_outcome) callbacks.on_outcome = [deliver = std::move(on_outcome)](Result result) { deliver(images::typed(*result)); };
+  return EndpointCall<images::Outcome>(start(std::move(call.prepared_), std::move(callbacks)));
 }
 Diagnostics Client::diagnostics() const noexcept {
   if (!state_) return {};

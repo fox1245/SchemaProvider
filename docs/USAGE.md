@@ -626,6 +626,37 @@ A provider adds request members faster than the SDK releases. Every request stru
 
 The same schemas admit the options of typed containers: OpenRouter plugins (`openrouter_plugins`), OpenRouter server tools (`openrouter_server_tools`), generic Responses tools (`server_tools` entries with `"generic": true`) and typed Messages tools (`server_tools` entries with `options`). `sp::capability::PolicyAdmittedExtensions` is part of `RequiredProvider`.
 
+## Non-chat endpoints
+
+Endpoints outside the chat families run on the same `runtime::Client`, with request and result types of their own (decision [D6](decisions/D6-endpoints.md)). A call uses the client's origin, credential and descriptor headers, and shares its admission slots, retry budget, deadline handling and error classification. The chat `Request`, `Outcome` and `Completion` do not change. Image generation and edits ship first; the other endpoints follow.
+
+```cpp
+sp::runtime::Client openai(sp::descriptor::presets::openai_chat(), api_key);
+sp::images::Request request{"gpt-image-2", "A flat icon of a red fox"};
+request.quality = "low";
+request.size = "1024x1024";
+auto prepared = openai.prepare(request);       // PreparedEndpoint<images::Outcome>; journal prepared.prepared()
+auto outcome = openai.complete(std::move(prepared));
+if (auto* result = std::get_if<sp::images::Result>(&outcome))
+  for (const auto& image : result->images) save(image);   // Media: inline base64 with its MIME type, or a URL
+```
+
+- **Calls.** `prepare` returns a `PreparedEndpoint<T>`, which holds the admission slot and absolute deadline of a `PreparedRequest`. Journal it from `prepared()`; `PreparedRequest::endpoint()` names the endpoint (`images`). `complete` runs a call to its typed outcome. `start` returns an `EndpointCall<T>`, whose `join` returns the same outcome its callback receives. Calls are buffered.
+- **Images.** `images::Request` takes a model, a prompt, `count`, and `size`, `quality`, `background` and `output_format` tokens the provider defines, plus `output_compression` (0 to 100). With `references`, OpenAI edits the source images (`/v1/images/edits`) and OpenRouter takes them as references. An inline image goes as a data URL; OpenAI also takes a provider file id. `images::Result` holds the images in order, the prompt OpenAI rewrote for each, `created`, usage (OpenRouter's cost in `Usage::provider_cost`), the requested model (neither provider names one in an image response), the attempt evidence, and the response document in `raw_events`.
+- **Policy facts.** The descriptor policy's `endpoints` list admits each endpoint at its origins. A fact has these members:
+  - `endpoint` (`images`);
+  - `shape`, the codec's wire (`openai`, `openrouter`);
+  - `paths`, the path of each operation (`generate`, `edit`);
+  - an `options` schema for the members a request may add (OpenAI `moderation`, OpenRouter `aspect_ratio`, `seed`, `provider`), never a member the codec writes;
+  - `auth` (`bearer`, `x-api-key`, `x-goog-api-key`);
+  - `charge_on_accept`.
+
+  The built-in policy admits images at `https://api.openai.com` and `https://openrouter.ai`. An origin without a fact is `Unsupported` at prepare, with no I/O.
+- **Money.** A call whose fact sets `charge_on_accept` is retried only when it provably never reached the provider, or when the provider refused it before accepting it (429, 503). A failure after the request may have arrived is reported after one attempt, even when the retry policy allows duplicate billing risk.
+- **Video.** Veo is not ported: its preview models end on 2026-10-22. Use Gemini Omni through Interactions (`video_config`, background jobs).
+
+On 2026-10-19 OpenAI `gpt-image-2` (low quality) generated an image and then edited it from a data URL, and OpenRouter `google/gemini-3.1-flash-lite-image` did the same with a reference image and `aspect_ratio`, reporting its cost.
+
 ## Responses provider-held continuation
 
 Responses supports both full client-held native replay and the distinct `previous_response_id` cursor path. A cursor asks the provider to retrieve its own prior conversation state. With a cursor, `messages` contains **new input only**; including captured assistant messages/native output there rejects before dispatch. `previous_response_history` is local validation evidence and is never emitted. A cursor string or raw response JSON is not `NativeReplay` or archive authority.

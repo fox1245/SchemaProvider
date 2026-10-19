@@ -228,6 +228,13 @@ Messages compaction (#53):
 - **Usage and pricing.** `Usage::extra` gains the `compaction.*` sums. `pricing::estimate` charges them for Messages. After a compaction iteration, a streamed answer's input counters replace those of `message_start` instead of recording a conflict.
 - **Archive.** A v3 record of a native message also keeps its context's configuration digest, so the layout grows by one digest. Records written before this change are refused at load, as the policy identity change already makes them. Stop kinds are read up to `Compaction`.
 
+Non-chat endpoints (D6, #61):
+- **Decision.** [D6](decisions/D6-endpoints.md) supersedes D2: non-chat endpoints run on `runtime::Client` with request and result types of their own.
+- **Client.** `runtime::Client` gains `prepare(images::Request)`, returning `PreparedEndpoint<images::Outcome>`; `complete` for a request or a prepared call; and `start`, returning `EndpointCall<images::Outcome>`. `PreparedRequest` gains `endpoint()`. The chat `Request`, `Outcome` and `Completion` are unchanged, and a test checks that.
+- **Images.** `<codecs/images.h>` adds `images::Request`, `images::Result` and `images::Outcome` (a Result or a `Failure`).
+- **Policy facts.** The descriptor policy gains a top-level `endpoints` list. The built-in policy admits images at the OpenAI and OpenRouter origins. The content digest changes; the replay identity does not.
+- **Reason codes.** New sources `images` and `request.images`.
+
 Messages input blocks and skills (#53):
 - **`ToolResult::content_parts`** is now `std::vector<std::variant<Text, Media, Opaque>>`. `Opaque` moved before `ToolResult` in `<core/value.h>`. Visitors and `std::get<Media>` on a part that is not text need a case for it. The archive stores such a part under a new nested tag, and the native digest hashes it.
 - **Input blocks.** The new `input_blocks` policy facts (Messages only) admit content blocks the caller writes; the built-in policy lists `search_result`. A Messages user message may hold `Opaque` parts of a listed type. The other families refuse an `Opaque` part in a tool result as `Unsupported`.

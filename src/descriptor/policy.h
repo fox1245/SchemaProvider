@@ -59,6 +59,20 @@ struct InputBlockFact { std::string type; ValueSchema value; };
 // (`bound` false): a per-request service control that does not change what the conversation means, which may change
 // from turn to turn (#96). A Messages extension may name the anthropic-beta value a request that sets it needs.
 struct ExtensionFact { std::string key; std::vector<std::string> origins; ValueSchema value; bool replay_eligible = false; bool bound = true; std::string beta{}; };
+// A non-chat endpoint the policy admits (D6): what it does (`images`), the wire shape a compiled codec speaks
+// (`openai`, `openrouter`), the origins that serve it, the path of each operation (`generate`, `edit`), the
+// schema of the members a request may add beside the typed ones, the authentication header, and whether the
+// provider charges once it accepts a call (such a call is not retried once it may have reached the provider).
+struct EndpointFact {
+  std::string endpoint, shape;
+  std::vector<std::string> origins;
+  std::vector<std::pair<std::string, std::string>> paths;
+  std::optional<ValueSchema> options{};
+  std::string auth = "bearer";
+  bool charge_on_accept = false;
+};
+// The path of one operation of an endpoint fact, if it has one.
+std::optional<std::string_view> endpoint_path(const EndpointFact&, std::string_view operation) noexcept;
 // An OpenRouter plugin id or server tool type the policy admits at its declared origins, with the schema of the
 // plugin's other members or of the tool's `parameters` (none: no options).
 struct GatewayFact { std::string name; std::optional<ValueSchema> options; };
@@ -129,6 +143,9 @@ class DescriptorPolicy final {
   // family's own member, except on the origins a family lists in `max_completion_tokens_origins`
   // (direct OpenAI Chat, whose current models reject `max_tokens`).
   std::string_view default_output_cap_member(std::string_view family, std::string_view origin) const noexcept;
+  // The fact of a non-chat endpoint (`images`) at `origin`, or null.
+  const EndpointFact* endpoint(std::string_view endpoint, std::string_view origin) const noexcept;
+  const std::vector<EndpointFact>& endpoints() const noexcept { return endpoints_; }
  private:
   DescriptorPolicy() = default;
   // New facts are kept here, after the members above, so the installed FamilyPolicy layout stays as it was.
@@ -142,6 +159,7 @@ class DescriptorPolicy final {
   std::vector<ResolvedDefaults> resolved_;
   std::vector<GenerationRule> generation_rules_;
   std::vector<std::pair<std::string, std::string>> completion_cap_origins_;  // family, origin
+  std::vector<EndpointFact> endpoints_;
   friend class PolicyLoader;
 };
 // Without a catalogue argument, a policy uses builtin_catalogue().

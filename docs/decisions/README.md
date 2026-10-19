@@ -5,10 +5,11 @@ These records preserve decisions and historical evidence alongside current inter
 | ID | Title | Status | Date | Decision | Open item |
 |---|---|---|---|---|---|
 | [D1](D1-transport.md) | Transport | FIRM (revised) | 2026-10-01 | One libcurl stack; optional HTTP3 implemented and locally exercised plain/ASan+UBSan/TSan with release backend libraries; safe one-POST fallback and incapable-build rejection | Hosted-provider/platform matrix; WebSocket deferred/excluded |
-| [D2](D2-non-chat-scope.md) | Non-chat scope | FIRM | 2026-10-01 | SDK chat/artifacts only; NeoGraph retains separate typed Images/Veo/Decisions clients and authority. Approved single-shot media observations are recorded, not universal endpoint qualification | Future SDK Endpoints scope/qualification; no additional paid authority |
+| [D2](D2-non-chat-scope.md) | Non-chat scope | SUPERSEDED by D6 | 2026-10-01 | SDK chat/artifacts only; NeoGraph retains separate typed Images/Veo/Decisions clients and authority. Approved single-shot media observations are recorded, not universal endpoint qualification | Future SDK Endpoints scope/qualification; no additional paid authority |
 | [D3](D3-async-native.md) | Async-native core | FIRM | 2026-10-01 | Bounded I/O workers, blocking facade over the same operation; gated by cancel and admission properties | NeoGraph target concurrency for the scheduled benchmark |
 | [D4](D4-origin-and-binding.md) | Origin and binding facts | FIRM | 2026-10-01 | Implemented exact-origin/content/binding rejection and explicit archive custody; equivalence/Drop/Demote remain historical proposals | Separate cross-origin implementation/admission; direct credentials and gateway cause evidence |
 | [D5](D5-rule-admission.md) | Descriptor rule admission | FIRM | 2026-10-01 | Admission policy:3 independent cases + truth table + tests; original target v1 only omit and require_greater, not current installed constraint execution | Future rule implementation/admission, vendor-doc review and real fixture paths |
+| [D6](D6-endpoints.md) | Non-chat endpoints | FIRM | 2026-10-19 | Endpoint request and result types of their own on the chat client's lifecycle; closed policy facts per endpoint; typed results with the raw document; a charge-on-accept call is never retried once it may have reached the provider; images and decisions first | The other endpoints in 0.4.x; jobs and file sinks with the first job endpoint |
 
 Machine-readable rule ledger: [rules.json](rules.json). Staged plan: [../ROADMAP.md](../ROADMAP.md).
 

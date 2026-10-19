@@ -870,6 +870,29 @@ constexpr Entry interactions_request_table[] = {
   {"an interaction lifecycle request sends no input and is not streamed", "request.interactions.lifecycle_request_invalid"},
   {"a background interaction needs store", "request.interactions.background_needs_store"},
 };
+constexpr Entry images_table[] = {
+  {"invalid response JSON", "images.response.json_invalid"},
+  {"response must be object", "images.response.not_object"},
+  {"remote error property", "images.response.remote_error"},
+  {"image data required", "images.data.required"},
+  {"image count limit", "images.data.count_limit"},
+  {"image item must be object", "images.item.not_object"},
+  {"image item has no data", "images.item.no_data"},
+};
+constexpr Entry images_request_table[] = {
+  {"image endpoints are not admitted at this origin", "request.images.endpoint_not_admitted"},
+  {"the image endpoint has no path for this operation", "request.images.operation_not_admitted"},
+  {"image model and prompt are required", "request.images.model_and_prompt_required"},
+  {"image size, quality, background and format are tokens", "request.images.controls_invalid"},
+  {"image count must be positive", "request.images.count_invalid"},
+  {"image output compression is 0 to 100", "request.images.compression_invalid"},
+  {"image references are images", "request.images.reference_not_image"},
+  {"image references by file id are OpenAI only", "request.images.file_reference_unsupported"},
+  {"an image file id is a token", "request.images.file_id_invalid"},
+  {"the image endpoint admits no options", "request.images.options_not_admitted"},
+  {"image options do not match the policy's schema", "request.images.options_invalid"},
+  {"image request exceeds JSON limits", "request.images.json_limit"},
+};
 constexpr Entry shared_request_table[] = {
   {"options are not admitted by the policy", "request.options.options_are_not_admitted_by_the_policy"},
   {"options do not match the policy's schema", "request.options.options_do_not_match_the_policy_s_schema"},
@@ -939,6 +962,8 @@ std::span<const Entry> entries(Source source) noexcept {
     case Source::GeminiRequest: return gemini_request_table;
     case Source::InteractionsRequest: return interactions_request_table;
     case Source::SharedRequest: return shared_request_table;
+    case Source::Images: return images_table;
+    case Source::ImagesRequest: return images_request_table;
   }
   return {};
 }
