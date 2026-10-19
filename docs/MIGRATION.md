@@ -215,6 +215,7 @@ Messages typed tools and beta headers (#53):
 - **Value schemas** gain `map`.
 - **Unbound extensions (#96).** An extension fact may set `"bound": false` (replay-eligible only). Its value never joins the configuration digest, so it may change between turns. The built-in Messages facts for `speed`, `inference_geo` and `diagnostics` are unbound. A request that sets only these keeps the digest it would have without extensions.
 - **Container (#98).** `messages::Request::container` no longer joins the configuration digest, so a conversation can reuse the container a response reported. A request that sets it now has the digest it would have without one.
+- **Code interpreter container (#101).** The Responses configuration digest no longer binds the container of a `CodeInterpreterTool`: its `container_id`, `file_ids`, `memory_limit` or `network_policy`. A conversation can move to the container a response reported. A request with a code interpreter tool now has another digest, so history sealed with one before this change is `ReplayIneligible`.
 
 Messages compaction (#53):
 - **`StopKind::Compaction`.** A new value, added last. The answer is a summary in place of a reply, or the turn paused after writing one. Exhaustive switches over `StopKind` need a case. The Messages policy maps `compaction` to it. Stop reasons are part of the policy identity, so history sealed under an earlier snapshot is `ReplayIneligible`.

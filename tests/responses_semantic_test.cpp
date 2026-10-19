@@ -611,6 +611,14 @@ void hosted_tool_options() {
   std::get<responses::McpTool>(changed.hosted_tools[4]).headers[0].second = "two";
   std::get<responses::CodeInterpreterTool>(changed.hosted_tools[3]).network_policy->domain_secrets[0].value = "two";
   encoded_ok(desc(), changed);
+  // The conversation moves to the container a response reported, or changes the automatic one's settings (#101).
+  changed = next; changed.hosted_tools[3] = responses::CodeInterpreterTool{std::string("cntr_1"), {}, {}, {}};
+  CHECK(parse(encoded_ok(desc(), changed).body).root().get("tools").at(4).get("container").as_string() == "cntr_1");
+  changed = next; std::get<responses::CodeInterpreterTool>(changed.hosted_tools[3]).memory_limit = "1g";
+  std::get<responses::CodeInterpreterTool>(changed.hosted_tools[3]).network_policy.reset();
+  encoded_ok(desc(), changed);
+  changed = next; changed.hosted_tools.erase(changed.hosted_tools.begin() + 3);
+  CHECK(refused(responses::encode(desc(), changed, false)) == ErrorKind::ReplayIneligible);
   changed = next; std::get<responses::McpTool>(changed.hosted_tools[4]).server_label = "other";
   CHECK(refused(responses::encode(desc(), changed, false)) == ErrorKind::ReplayIneligible);
   changed = next; std::get<responses::ImageGenerationTool>(changed.hosted_tools[1]).partial_images = 3;

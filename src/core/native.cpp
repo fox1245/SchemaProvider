@@ -421,14 +421,9 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
           optional_text(tool.search_context_size); optional_number(tool.external_web_access);
         }
       } else if constexpr (std::is_same_v<T, responses::CodeInterpreterTool>) {
-        // Domain secret values are credentials: only their domains and names are bound.
-        optional_text(tool.container_id); texts(tool.file_ids); optional_text(tool.memory_limit);
-        hash.number(tool.network_policy.has_value());
-        if (tool.network_policy) {
-          hash.number(tool.network_policy->disabled); texts(tool.network_policy->allowed_domains);
-          hash.number(tool.network_policy->domain_secrets.size());
-          for (const auto& secret : tool.network_policy->domain_secrets) { hash.text(secret.domain); hash.text(secret.name); }
-        }
+        // The container is not bound (#101): an id, or the settings of an automatic one, names state the service
+        // holds and reports, so a conversation moves to the reported container without changing what it means.
+        // The tool itself is bound by its kind.
       } else if constexpr (std::is_same_v<T, responses::McpTool>) {
         // The authorization and header values are credentials: a rotated one keeps history replayable.
         hash.text(tool.server_label); optional_text(tool.server_url); optional_text(tool.connector_id); optional_text(tool.tunnel_id);
