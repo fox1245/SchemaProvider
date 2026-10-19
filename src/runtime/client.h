@@ -15,6 +15,7 @@
 #include "codecs/transcription.h"
 #include "codecs/videos.h"
 #include "codecs/files.h"
+#include "codecs/batches.h"
 #include "descriptor/presets.h"
 #include "runtime/policy.h"
 #include "transport/sse_framer.h"
@@ -217,6 +218,8 @@ inline files::Outcome typed_outcome(const sp::Outcome& outcome, const files::Out
 inline files::PageOutcome typed_outcome(const sp::Outcome& outcome, const files::PageOutcome*) { return files::typed_page(outcome); }
 inline files::DeleteOutcome typed_outcome(const sp::Outcome& outcome, const files::DeleteOutcome*) { return files::typed_deleted(outcome); }
 inline files::ProgressOutcome typed_outcome(const sp::Outcome& outcome, const files::ProgressOutcome*) { return files::typed_progress(outcome); }
+inline batches::Outcome typed_outcome(const sp::Outcome& outcome, const batches::Outcome*) { return batches::typed(outcome); }
+inline batches::DeleteOutcome typed_outcome(const sp::Outcome& outcome, const batches::DeleteOutcome*) { return batches::typed_deleted(outcome); }
 }  // namespace detail
 // A started non-chat endpoint call. Like an Operation, destruction requests cancellation and detach relinquishes it;
 // join waits for the typed outcome, the one the callback received.
@@ -333,6 +336,22 @@ class Client {
   files::ProgressOutcome complete(files::Cancel, RunOptions = {});
   files::ProgressOutcome complete(PreparedEndpoint<files::ProgressOutcome>);
   EndpointCall<files::ProgressOutcome> start(PreparedEndpoint<files::ProgressOutcome>, std::function<void(files::ProgressOutcome)> on_outcome = {});
+  // Batches (D7) at this client's origin. A submit is charged once the provider accepts it; a get, a cancel, a
+  // deletion and a download of the results are not.
+  PreparedEndpoint<batches::Outcome> prepare(batches::Submit, RunOptions = {});
+  PreparedEndpoint<batches::Outcome> prepare(batches::Get, RunOptions = {});
+  PreparedEndpoint<batches::Outcome> prepare(batches::Cancel, RunOptions = {});
+  PreparedEndpoint<batches::DeleteOutcome> prepare(batches::Delete, RunOptions = {});
+  PreparedEndpoint<jobs::DownloadOutcome> prepare(batches::Results, RunOptions = {});
+  batches::Outcome complete(batches::Submit, RunOptions = {});
+  batches::Outcome complete(batches::Get, RunOptions = {});
+  batches::Outcome complete(batches::Cancel, RunOptions = {});
+  batches::DeleteOutcome complete(batches::Delete, RunOptions = {});
+  jobs::DownloadOutcome complete(batches::Results, RunOptions = {});
+  batches::Outcome complete(PreparedEndpoint<batches::Outcome>);
+  batches::DeleteOutcome complete(PreparedEndpoint<batches::DeleteOutcome>);
+  EndpointCall<batches::Outcome> start(PreparedEndpoint<batches::Outcome>, std::function<void(batches::Outcome)> on_outcome = {});
+  EndpointCall<batches::DeleteOutcome> start(PreparedEndpoint<batches::DeleteOutcome>, std::function<void(batches::DeleteOutcome)> on_outcome = {});
   Diagnostics diagnostics() const noexcept;
  private:
   explicit Client(std::shared_ptr<detail::ClientState>);
