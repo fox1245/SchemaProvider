@@ -19,6 +19,9 @@ struct ToolDefinition {
   std::optional<UserLocation> user_location;
   std::optional<bool> citations;
   std::optional<uint64_t> max_content_tokens;
+  // A typed tool's other members (an advisor's model, a toolset's configs), sent as given after the typed ones. The
+  // policy's fact for the tool type declares their schema (#32); nothing it does not name is sent.
+  std::shared_ptr<const json::Document> options{};
 };
 enum class ThinkingMode { Manual, Adaptive, Disabled };
 // New values go at the end.
@@ -47,6 +50,9 @@ struct Request {
   std::optional<std::string> container{};
   // Top-level members the policy admits for this origin (#32), sent as given after the typed ones.
   std::shared_ptr<const json::Document> extensions{};
+  // anthropic-beta values to send, each admitted by the policy at this origin. A value a declared tool or a replayed
+  // block needs is added without being listed here.
+  std::vector<std::string> betas{};
 
   static Request simple(std::string model_name, std::string user_prompt,
                         std::optional<uint64_t> output_cap = std::nullopt,

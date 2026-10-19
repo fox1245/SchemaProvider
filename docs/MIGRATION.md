@@ -203,6 +203,14 @@ Untyped values are admitted by the policy (#32):
 - **Capability.** The new capability bit `sp::capability::PolicyAdmittedExtensions` is part of `RequiredProvider`.
 - **Policy digest.** The policy's content digest changes.
 
+Messages typed tools and beta headers (#53):
+- **Typed tools.** `messages::ToolDefinition` gains `options`, a typed tool's other members, checked against the schema of the tool's policy fact. A custom tool with options is `InvalidRequest`.
+- **Policy facts.** A Messages `server_tools` fact may omit `name` (a toolset), set `"client": true` (the caller runs the tool; no `max_uses`), and name a `beta`. The new `betas` facts admit `anthropic-beta` values per origin. The built-in policy lists memory, bash, the text editors, the computer and browser toolsets, and the advisor, and admits `speed`, `inference_geo` and `diagnostics` as extensions at the Anthropic origin. The policy's content digest changes.
+- **Beta headers.** `messages::Request::betas` adds admitted `anthropic-beta` values. The encoder now writes one `anthropic-beta` header that merges the descriptor's values, the request's and the declared tools'. A request with betas or tool options binds them in its configuration digest; one without keeps its digest.
+- **Named tool choice** may name a typed tool the caller runs.
+- **Toolsets.** A tool result answering a toolset member's call is sent with that call's `toolset_name`.
+- **Invocation limit.** Typed tools the caller runs no longer clear `model_invocation_limit`.
+
 ## From interface 5 to 6
 
 Package 0.3.0 alpha adds `Usage::provider_cost` and the fixed-size `ProviderReportedCost`, `UsdAmount`, `CostSource`, `CostStatus` and `CostRounding` types. Existing field access remains source-compatible, but `Usage`, `UsageUpdate`, `Completion`, `PartialCompletion` and the containing `Event` layouts grow. Rebuild every consumer against the same headers and generation 6 libraries (`libsp_*.so.6`); interface 5 binaries must not load interface 6 libraries. CMake consumers select `SchemaProvider 0.3.0 EXACT`.

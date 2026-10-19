@@ -37,8 +37,15 @@ struct RequestDefaults {
   std::optional<double> temperature, top_p;
 };
 // `options`: the tool's other members the policy admits, with their value schema (#32). `generic`: a Responses tool
-// type the SDK has no struct for, sent through responses::GenericHostedTool.
-struct ServerToolFact { std::string type, name; bool max_uses; std::optional<ValueSchema> options{}; bool generic = false; };
+// type the SDK has no struct for, sent through responses::GenericHostedTool. Messages only: `client`, a typed tool the
+// caller executes (memory, bash, a toolset); an empty `name`, a tool entry that carries none (a toolset); `beta`, the
+// anthropic-beta value a request needs while it declares the tool or replays its blocks.
+struct ServerToolFact {
+  std::string type, name; bool max_uses; std::optional<ValueSchema> options{}; bool generic = false;
+  bool client = false; std::string beta{};
+};
+// An anthropic-beta value the policy admits at the listed origins. Messages only.
+struct BetaFact { std::string value; std::vector<std::string> origins; };
 // A top-level request member the policy admits for the listed origins (#32). A replay-ineligible extension makes the
 // turn's answer not continuable natively; an eligible one joins the configuration digest.
 struct ExtensionFact { std::string key; std::vector<std::string> origins; ValueSchema value; bool replay_eligible = false; };
@@ -61,6 +68,7 @@ struct FamilyPolicy {
   std::vector<ServerToolFact> server_tools;
   std::vector<ExtensionFact> extensions;
   std::vector<GatewayFact> openrouter_plugins, openrouter_server_tools;
+  std::vector<BetaFact> betas;
   // Captured response parts the service refuses when they are sent back: a part whose data member `member` lacks
   // the member `missing`. Native replay of such a message is refused before dispatch. Generate only.
   std::vector<std::pair<std::string, std::string>> unreplayable_parts;

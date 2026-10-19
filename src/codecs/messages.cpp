@@ -268,7 +268,7 @@ bool Codec::caller(json::Value v) {
   }
   // A server tool calling a client tool (programmatic calling) is named by its type, which the policy admits.
   const auto& tools = descriptor_.family_policy().server_tools;
-  if (std::none_of(tools.begin(), tools.end(), [&](const auto& fact) { return fact.type == type; }))
+  if (std::none_of(tools.begin(), tools.end(), [&](const auto& fact) { return !fact.client && fact.type == type; }))
     return fail(ErrorKind::Unsupported, "unknown tool caller type");
   return nonempty(v.get("tool_id")) || fail(ErrorKind::ProtocolCorrupt, "server caller id required");
 }
@@ -504,7 +504,9 @@ bool Codec::usage_leaves(json::Value value, const std::string& prefix) {
     for (auto item : value.elements()) if (!usage_leaves(item, prefix + "." + std::to_string(index++))) return false;
     return true;
   }
-  if (value.is_string() && (prefix.ends_with(".type") || prefix.ends_with(".service_tier") || prefix.ends_with(".inference_geo"))) return true;
+  // Labels of an iteration (its type, the advisor's model) are not counters.
+  if (value.is_string() && (prefix.ends_with(".type") || prefix.ends_with(".model") || prefix.ends_with(".service_tier") ||
+                            prefix.ends_with(".inference_geo") || prefix.ends_with(".speed"))) return true;
   if (!count_value(value)) { ++diagnostics_.unknown_properties; return true; }
   std::optional<Count> count;
   auto found = usage_.extra.find(prefix);
@@ -571,10 +573,10 @@ bool Codec::usage(json::Value v, bool initial, bool placeholder_output) {
     }
     if (!usage_leaves(iterations, "iterations")) return false;
   }
-  for (auto key : {"service_tier", "inference_geo"}) if (!nullable_string(v.get(key))) return fail(ErrorKind::ProtocolCorrupt, "invalid usage metadata");
+  for (auto key : {"service_tier", "inference_geo", "speed"}) if (!nullable_string(v.get(key))) return fail(ErrorKind::ProtocolCorrupt, "invalid usage metadata");
   // Monetary members are typed provider cost, never token leaves or unknown counters.
   usage_.provider_cost = codecs::provider_cost(v, descriptor_);
-  unknown(v, {"input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "cache_creation", "server_tool_use", "output_tokens_details", "iterations", "service_tier", "inference_geo", "cost", "cost_details", "is_byok"});
+  unknown(v, {"input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "cache_creation", "server_tool_use", "output_tokens_details", "iterations", "service_tier", "inference_geo", "speed", "cost", "cost_details", "is_byok"});
   auto sum = [&](uint64_t a, uint64_t b, uint64_t& out) {
     if (b > std::numeric_limits<uint64_t>::max() - a) return fail(ErrorKind::ProtocolCorrupt, "usage sum overflow");
     out = a + b; return true;
