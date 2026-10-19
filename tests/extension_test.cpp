@@ -253,6 +253,42 @@ void extension_replay() {
   const auto unsealed = answer(traced);
   CHECK(!unsealed.native || !unsealed.native->complete());
   CHECK(answer(first).native && answer(first).native->complete());
+
+  // An unbound value (#96) may change every turn, or be dropped, without breaking the conversation; the bound
+  // members next to it still bind.
+  const auto loose = admitted("anthropic.messages", R"("extensions":[{"key":"speed","origins":["https://api.anthropic.com"],"value":{"type":"enum","values":["standard","fast"]},"replay_eligible":true},)"
+                                                    R"({"key":"diagnostics","origins":["https://api.anthropic.com"],"value":{"type":"object","properties":{"previous_message_id":{"one_of":[{"type":"null"},{"type":"string","max_length":64}]}}},"replay_eligible":true,"bound":false}])");
+  const auto ld = load("anthropic.messages", "https://api.anthropic.com", loose);
+  auto reply = [&](const messages::Request& r) {
+    auto encoded = messages::encode(ld, r, false); CHECK(std::holds_alternative<messages::EncodedRequest>(encoded));
+    Accumulator acc; messages::Codec codec(ld, messages::Mode::Buffered, acc, std::get<messages::EncodedRequest>(encoded).context);
+    codec.buffered(R"({"id":"m1","type":"message","role":"assistant","model":"fixture-model","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}})", {});
+    CHECK(acc.outcome() && std::holds_alternative<Completion>(*acc.outcome()));
+    return std::get<Completion>(*acc.outcome()).messages.front();
+  };
+  auto opening = messages::Request::simple("fixture-model", "hi", 64); opening.extensions = owned(R"({"diagnostics":{"previous_message_id":null}})");
+  const auto sealed = reply(opening);
+  CHECK(sealed.native && sealed.native->complete());
+  auto follow = opening; follow.messages.push_back(sealed); follow.messages.push_back(Message::user_text("again"));
+  follow.extensions = owned(R"({"diagnostics":{"previous_message_id":"m1"}})");
+  CHECK(std::holds_alternative<messages::EncodedRequest>(messages::encode(ld, follow, false)));
+  follow.extensions.reset();
+  CHECK(std::holds_alternative<messages::EncodedRequest>(messages::encode(ld, follow, false)));
+  // With a bound member beside it, only the bound one decides.
+  auto mixed = messages::Request::simple("fixture-model", "hi", 64); mixed.extensions = owned(R"({"speed":"fast","diagnostics":{"previous_message_id":null}})");
+  auto mixed_next = mixed; mixed_next.messages.push_back(reply(mixed)); mixed_next.messages.push_back(Message::user_text("again"));
+  mixed_next.extensions = owned(R"({"diagnostics":{"previous_message_id":"m1"},"speed":"fast"})");
+  CHECK(std::holds_alternative<messages::EncodedRequest>(messages::encode(ld, mixed_next, false)));
+  mixed_next.extensions = owned(R"({"speed":"standard","diagnostics":{"previous_message_id":"m1"}})");
+  CHECK(refused(messages::encode(ld, mixed_next, false)) == ErrorKind::ReplayIneligible);
+  // An unbound value is replay-eligible by definition.
+  const auto contradictory = policy_with("anthropic.messages", R"("extensions":[{"key":"diagnostics","origins":["https://api.anthropic.com"],"value":{"type":"null"},"replay_eligible":false,"bound":false}])");
+  CHECK(std::holds_alternative<descriptor::ConfigError>(contradictory) && std::get<descriptor::ConfigError>(contradictory).pointer == "/extensions/bound");
+  for (const char* key : {"speed", "inference_geo", "diagnostics"}) {
+    const auto& facts = descriptor::builtin_policy()->family("anthropic.messages")->extensions;
+    const auto fact = std::find_if(facts.begin(), facts.end(), [&](const auto& f) { return f.key == key; });
+    CHECK(fact != facts.end() && fact->replay_eligible && !fact->bound);
+  }
 }
 
 // The owned lists cover every top-level member the encoders write with their typed controls set.
