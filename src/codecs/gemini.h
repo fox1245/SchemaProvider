@@ -24,7 +24,8 @@ class Codec {
   bool part(json::Value);
   bool usage(json::Value);
   bool emit(const Event&);
-  bool fail(ErrorKind, std::string);
+  // `vendor_code` is kept only when it has the shape of Google's UPPER_SNAKE reasons.
+  bool fail(ErrorKind, std::string, std::string_view vendor_code = {});
   void unknown(json::Value, std::initializer_list<std::string_view>);
   std::shared_ptr<const json::Document> own(json::Value);
   const descriptor::ValidatedDescriptor& descriptor_;

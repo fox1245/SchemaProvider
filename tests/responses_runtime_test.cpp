@@ -410,7 +410,7 @@ void hosted_image_terminal(Peer& peer) {
     for (bool streaming : {false, true}) {
       const auto failed = peer.arm("failed-image", size); const auto failed_result = client.complete(request(failed), run(streaming));
       const auto& f = failure(failed_result, sp::ErrorKind::RemoteFailure);
-      require(f.error.http_status == 200 && f.error.vendor_code.empty() && f.error.retry_class == sp::RetryClass::Unknown,
+      require(f.error.http_status == 200 && f.error.vendor_code == "server_error" && f.error.retry_class == sp::RetryClass::Unknown,
           "admitted response.failed became a local resource limit");
       require(text(f.partial.messages) == "hello" && image(f.partial.messages), "failed response lost the generated image item");
       require(f.partial.wire_envelope && f.partial.wire_envelope->root().get("status").as_string() == "failed" &&

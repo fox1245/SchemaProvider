@@ -657,6 +657,17 @@ void served_model_is_recorded() {
 // A failure names the check that failed with a code of the fixed table, whatever the response says; the codec's own text
 // stays as it was and nothing the vendor sent reaches either.
 void failure_reasons() {
+  // A blocked answer keeps Google's reason as the vendor code; only its UPPER_SNAKE shape passes.
+  for (const std::string_view finish : {"SAFETY", "MISSING_THOUGHT_SIGNATURE"}) {
+    const auto blocked = buffered(body(R"([{"text":"x"}])", finish));
+    const auto& error = failure(blocked, ErrorKind::RemoteFailure).error;
+    CHECK(error.reason == "gemini.remote.generation_blocked" && error.vendor_code == finish);
+    CHECK(failure(blocked, ErrorKind::RemoteFailure).partial.stop && failure(blocked, ErrorKind::RemoteFailure).partial.stop->raw == finish);
+  }
+  const auto prompt = buffered(R"({"promptFeedback":{"blockReason":"PROHIBITED_CONTENT"},"modelVersion":"fixture-model"})");
+  CHECK(failure(prompt, ErrorKind::RemoteFailure).error.vendor_code == "PROHIBITED_CONTENT");
+  const auto odd = buffered(R"({"promptFeedback":{"blockReason":"Blocked: other"},"modelVersion":"fixture-model"})");
+  CHECK(failure(odd, ErrorKind::RemoteFailure).error.vendor_code.empty());
   const std::string secret = "VENDOR_SECRET_MARKER_5d2";
   const auto check = [&](const Outcome& outcome, ErrorKind kind, std::string_view message, std::string_view code) {
     const auto& error = failure(outcome, kind).error;

@@ -396,8 +396,11 @@ Shape shape(Fam f, int status, bool family_body) {
   }
   if (!family_body) return s;
   // error-policy.json "families": codes are matched against the fields listed per family.
+  // A code the policy does not list is still kept as the vendor code when it has the shape of a machine code
+  // (lower_snake for OpenAI and Anthropic, UPPER_SNAKE for Google); it never changes the kind or retry class.
   if (f == Fam::Chat || f == Fam::Responses) {
-    // code_fields [type, code]; peer sends type=requests/code=rate_limit_exceeded, code=invalid_api_key, code=model_not_found.
+    // code_fields [type, code]; the peer sends [type, code] pairs (lifecycle_server.mjs) and the code wins over the type.
+    s.vendor = status == 400 ? "invalid_request_error" : status == 403 ? "insufficient_permissions" : status == 500 ? "server_error" : "overloaded";
     if (status == 401) s.vendor = "invalid_api_key";
     if (status == 404) s.vendor = "model_not_found";
     if (status == 429) s = {ErrorKind::RateLimited, RetryClass::AfterReset, "rate_limit_exceeded"};
@@ -412,8 +415,11 @@ Shape shape(Fam f, int status, bool family_body) {
     if (status == 500) s = {ErrorKind::RemoteFailure, RetryClass::Transient, "api_error"};
     if (status == 503 || status == 529) s.vendor = "overloaded_error";
   }
-  // google.generate / google.interactions: code_fields [details.reason]; the only rule is API_KEY_INVALID,
-  // so these families use the status table alone (429 stays LimitUnknown/Unknown, no vendor code).
+  // google.generate / google.interactions: code_fields [details.reason]; the only rule is API_KEY_INVALID, so these
+  // families use the status table alone (429 stays LimitUnknown/Unknown) and keep the google.rpc status as the code.
+  if (f == Fam::Gemini || f == Fam::Interactions)
+    s.vendor = status == 400 ? "INVALID_ARGUMENT" : status == 401 ? "UNAUTHENTICATED" : status == 403 ? "PERMISSION_DENIED" :
+               status == 404 ? "NOT_FOUND" : status == 429 ? "RESOURCE_EXHAUSTED" : status == 500 ? "INTERNAL" : "UNAVAILABLE";
   return s;
 }
 const char* err_for(int status) {

@@ -125,6 +125,31 @@ bool never_kind(ErrorKind k) {
 }
 }  // namespace
 
+namespace {
+// Google's google.rpc reasons and status names are UPPER_SNAKE; Anthropic's error types and OpenAI's codes and
+// types are lower_snake. At most 64 characters, a letter first, then letters, digits and '_'.
+bool machine_code(std::string_view value, bool upper) noexcept {
+  if (value.empty() || value.size() > 64) return false;
+  const auto letter = [&](char c) { return upper ? (c >= 'A' && c <= 'Z') : (c >= 'a' && c <= 'z'); };
+  if (!letter(value.front())) return false;
+  return std::all_of(value.begin(), value.end(), [&](char c) { return letter(c) || (c >= '0' && c <= '9') || c == '_'; });
+}
+std::string_view vendor_reason(std::string_view family, json::Value error) {
+  const auto code = [](json::Value value, bool upper) -> std::string_view {
+    return value.is_string() && machine_code(value.as_string(), upper) ? value.as_string() : std::string_view{};
+  };
+  if (family == "google.generate" || family == "google.interactions") {
+    if (const auto details = error.get("details"); details.is_array())
+      for (auto detail : details.elements())
+        if (const auto reason = code(detail.get("reason"), true); !reason.empty()) return reason;
+    return code(error.get("status"), true);
+  }
+  if (family == "anthropic.messages") return code(error.get("type"), false);
+  if (const auto found = code(error.get("code"), false); !found.empty()) return found;
+  return code(error.get("type"), false);
+}
+}  // namespace
+
 ResponseInfo inspect_document_response(const configuration::RuntimePolicy& policy, std::string_view family, int status,
     const std::vector<transport::Header>& headers, json::Value document,
     SteadyTime received, WallTime wall_received) {
@@ -185,6 +210,10 @@ ResponseInfo inspect_document_response(const configuration::RuntimePolicy& polic
           for (auto detail : details.elements()) if (detail.is_object()) apply_code(detail.get("reason"));
         } else apply_code(error.get(field));
       }
+      // A value the error policy does not list still names the vendor's check when it has the shape of a machine
+      // code, and is kept without changing the classification. Free text never has that shape, so no message
+      // reaches the error.
+      if (info.vendor_code.empty()) info.vendor_code = std::string(vendor_reason(family, error));
     }
   }
   for (const auto& header : headers) {
