@@ -301,7 +301,7 @@ What the declaration keeps: the served identity must still stay the same for the
 | `sp::messages::Request`, `<codecs/messages_request.h>` | `system`, `account_scope`, **`max_tokens`**, `thinking_budget`, `thinking_mode`, `output_effort`, `cache_control`, `tool_choice`, `temperature`, `top_p`, `provider`. |
 | `sp::responses::Request`, `<codecs/responses_request.h>` | `instructions`, `account_scope`, `max_output_tokens`, `reasoning` (`effort`, `summary`), `required_tool`, `service_tier`, `temperature`, `top_p`, `store`, `response_format`, `provider`, `hosted_tools`, `max_tool_calls`, `previous_response_id`, `previous_response_history`, `parallel_tool_calls`, `verbosity`, `truncation`, `include`. |
 | `sp::gemini::Request`, `<codecs/gemini_request.h>` | `system`, `account_scope`, `max_output_tokens`, `thinking_budget`, typed `thinking_level`, `include_thoughts`, `temperature`, `safety_settings`, `tool_choice`, `required_tool`, `history_mode`, `response_modalities`, `speech_config`, `image_config`, `audio_transcription_config`. |
-| `sp::interactions::Request`, `<codecs/interactions_request.h>` | `system`, `account_scope`, `max_output_tokens`, `thinking_level`, `thinking_summaries`, `service_tier`, `required_tool`, typed `response_format`, `speech_config`, `transcription_config`, `builtin_tools`, `previous_interaction_id`, `store`, `video_task`. |
+| `sp::interactions::Request`, `<codecs/interactions_request.h>` | `system`, `account_scope`, `max_output_tokens`, `thinking_level`, `thinking_summaries`, `service_tier`, `required_tool`, typed `response_format`, `speech_config`, `transcription_config`, `builtin_tools`, `previous_interaction_id`, `store`, `video_task`, `background`, `agent`, `lifecycle`, `interaction_id`. |
 
 This lists the C++ surface, not every field's availability on every model. Admitted enum/range/model facts and compiled family constraints still apply. Generate supports temperature; Interactions does not expose temperature/top-p. OpenRouter controls are admitted only at declared origins for the corresponding family, not arbitrary compatible URLs. Explicit model-prohibited temperature rejects before I/O. Messages enabled thinking has a separately documented omission rule, described below.
 
@@ -524,6 +524,19 @@ Cursor-generated messages retain a separate in-process terminal-ownership scope,
 - **The next turn.** Set `previous_interaction_id` to that id and put only the new input in `messages`. A captured assistant or native message there is refused before dispatch.
 - **No client replay.** The service holds the history, so the result has no native seal.
 - **Chaining.** Store each turn that a later one continues.
+
+**Background and lifecycle.**
+- **Background.** `background = true` (it needs `store = true`) makes the service run the interaction on its own. A buffered request answers at once with `StopKind::Pending` (`stop.raw` is the status, `in_progress` or `queued`). The usage so far is `Partial`, and `messages[0].id` is the interaction id.
+- **Operations on a stored interaction.** `lifecycle` acts on `interaction_id` instead of creating one. These requests send no input, are not streamed, and have no client-held replay authority:
+  - `Get` reads the interaction: `Pending` while it runs, then the result like any call. A cancelled interaction is a `Cancelled` failure with its partial output.
+  - `Cancel` stops a background interaction, and its result is what it produced, with `stop.raw` `cancelled`.
+  - `Delete` removes it, and its result has no message and `stop.raw` `deleted`.
+- **Polling.** The SDK never polls. The caller decides when to send `Get` again.
+- **Echoed input.** A stored interaction read back lists the request's own input as a `user_input` step first. It is not output, so it is left out of the parts and of `wire_output`.
+
+On 2026-10-19 a background `gemini-3.1-flash-lite` interaction answered `Pending`. `Get` returned the answer, `Delete` removed it, and a `Get` after that was `NotFound` (`vendor_code` `not_found`). A cancelled one returned its partial text.
+
+**Agents.** `agent` (`deep-research-preview-04-2026`, for example) runs the interaction instead of `model`; leave `model` empty. An agent's steps (thoughts, service tools, output) decode as above. Its interactions usually run in the background.
 
 **Video task.** `video_task` writes `generation_config.video_config.task` (`text_to_video`, `image_to_video`, `reference_to_video`, `edit`, `extend`; any lower-case token is sent). The service admits only user input with a video task. To edit a generated video in a second turn, continue it by `previous_interaction_id` without a task. On 2026-10-19, `gemini-omni-1.1-flash` returned a `video/mp4` both for the first turn and for the continued edit.
 

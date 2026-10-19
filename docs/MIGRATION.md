@@ -132,6 +132,15 @@ Interactions can continue a stored interaction and use the service's own tools:
 - **Configuration digest.** It binds the new fields only when they are set, so existing digests do not change.
 - **Error codes.** An Interactions HTTP error's lower_snake `code` (`invalid_request`) is now its `vendor_code`.
 
+Interactions runs in the background and acts on stored interactions:
+- **`StopKind::Pending`.** A new value, added last: a buffered answer whose status is `in_progress` or `queued`, such as a `background` request. Its usage is `Partial`, and `messages[0].id` names the interaction. Exhaustive switches over `StopKind` need the new case. The native archive reads it.
+- **New request fields.** `interactions::Request` gains `background` (which needs `store`), `agent` (which replaces `model`), and `lifecycle` with `interaction_id`:
+  - `Get`, `Cancel` and `Delete` act on a stored interaction;
+  - they send no input and are buffered only;
+  - their results have no client-held replay authority.
+- **Echoed input.** A stored interaction read back lists the request's input as a `user_input` step first. That step is not output, and it is no longer refused.
+- **Agents.** An `agent` member in the resource is admitted. An `environment` still is not.
+
 ## From interface 5 to 6
 
 Package 0.3.0 alpha adds `Usage::provider_cost` and the fixed-size `ProviderReportedCost`, `UsdAmount`, `CostSource`, `CostStatus` and `CostRounding` types. Existing field access remains source-compatible, but `Usage`, `UsageUpdate`, `Completion`, `PartialCompletion` and the containing `Event` layouts grow. Rebuild every consumer against the same headers and generation 6 libraries (`libsp_*.so.6`); interface 5 binaries must not load interface 6 libraries. CMake consumers select `SchemaProvider 0.3.0 EXACT`.

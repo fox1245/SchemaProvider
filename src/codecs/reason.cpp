@@ -785,6 +785,11 @@ constexpr Entry interactions_request_table[] = {
   {"google_search search types must be bounded unique tokens", "request.interactions.google_search_search_types_must_be_bounded"},
   {"invalid previous interaction id", "request.interactions.invalid_previous_interaction_id"},
   {"previous interaction input must be new input only", "request.interactions.previous_interaction_input_not_new"},
+  {"exactly one of model or agent required", "request.interactions.model_or_agent_required"},
+  {"invalid interaction agent", "request.interactions.invalid_agent"},
+  {"invalid interaction id", "request.interactions.invalid_interaction_id"},
+  {"an interaction lifecycle request sends no input and is not streamed", "request.interactions.lifecycle_request_invalid"},
+  {"a background interaction needs store", "request.interactions.background_needs_store"},
 };
 constexpr Entry shared_request_table[] = {
   {"positive output cap required", "request.choice.positive_output_cap_required"},

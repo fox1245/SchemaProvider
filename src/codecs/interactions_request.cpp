@@ -112,7 +112,34 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (request.thinking_summaries) effective.thinking_summaries = request.thinking_summaries;
   if (request.service_tier) effective.service_tier = *request.service_tier;
   if (auto error = descriptor::validate_choices(descriptor, request.model, effective)) return bad(std::move(*error));
-  if (request.model.empty() || request.messages.empty() || request.messages.size() > resources.request_messages ||
+  const auto name = [](std::string_view value, std::string_view more) {
+    return !value.empty() && value.size() <= 256 && std::all_of(value.begin(), value.end(), [&](char c) {
+      return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' ||
+             more.find(c) != std::string_view::npos;
+    });
+  };
+  if (request.model.empty() == !request.agent.has_value()) return bad("exactly one of model or agent required");
+  if (request.agent && !name(*request.agent, {})) return bad("invalid interaction agent");
+  if (request.lifecycle != Lifecycle::Create) {
+    // An operation on a stored interaction: no input, no stream, the id in the path.
+    if (!name(request.interaction_id, "=")) return bad("invalid interaction id");
+    if (!request.messages.empty() || streaming) return bad("an interaction lifecycle request sends no input and is not streamed");
+    auto context = std::shared_ptr<const NativeContext>(new NativeContext(descriptor, request, effective, false));
+    if (!context->valid_) return Error{ErrorKind::ResourceLimit, "native binding could not be captured"};
+    const auto cancel = request.lifecycle == Lifecycle::Cancel;
+    EncodedRequest result{request.lifecycle == Lifecycle::Get ? "GET" : cancel ? "POST" : "DELETE",
+                          std::string(descriptor.path(false)) + "/" + request.interaction_id + (cancel ? "/cancel" : ""), {}, {}, {}};
+    for (const auto& header : descriptor.headers()) {
+      auto key = lower(header.first);
+      if (key != "accept" && key != "content-type") result.headers.push_back(header);
+    }
+    if (cancel) { result.headers.emplace_back("Content-Type", "application/json"); result.body = "{}"; }
+    result.headers.emplace_back("Accept", "application/json");
+    result.context = std::move(context);
+    return result;
+  }
+  if (request.background.value_or(false) && !request.store.value_or(false)) return bad("a background interaction needs store");
+  if (request.messages.empty() || request.messages.size() > resources.request_messages ||
       request.tools.size() + request.builtin_tools.size() > resources.request_tools)
     return bad("model and bounded messages/tools required");
   // Values the service extends (tasks, search types) are tokens, not a fixed list; the service judges them.
@@ -234,10 +261,12 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   }
   auto build = [&](json::BoundedWriter& body) -> std::optional<Error> {
     auto invalid = [](std::string label) { return Error{ErrorKind::InvalidRequest, std::move(label)}; };
-    body.raw("{").quoted(descriptor.request_model_member()).raw(":").quoted(request.model)
-        .raw(",\"store\":").raw(request.store.value_or(false) ? "true" : "false").raw(",")
+    if (request.agent) body.raw("{\"agent\":").quoted(*request.agent);
+    else body.raw("{").quoted(descriptor.request_model_member()).raw(":").quoted(request.model);
+    body.raw(",\"store\":").raw(request.store.value_or(false) ? "true" : "false").raw(",")
         .quoted(descriptor.request_stream_member()).raw(":").raw(streaming ? "true" : "false");
     if (request.previous_interaction_id) body.raw(",\"previous_interaction_id\":").quoted(*request.previous_interaction_id);
+    if (request.background) body.raw(",\"background\":").raw(*request.background ? "true" : "false");
     if (effective.service_tier) body.raw(",\"service_tier\":").quoted(*effective.service_tier);
     if (!request.system.empty()) body.raw(",\"system_instruction\":").quoted(request.system);
     if (!request.response_format.empty()) {

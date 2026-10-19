@@ -78,7 +78,7 @@ bool Codec::identity(json::Value resource, bool initial) {
       (!nonempty(status) && !(initial && mode_ == Mode::Sse && !status.valid())) ||
       (id.valid() && !id.is_null() && !id.is_string()))
     return fail(ErrorKind::ProtocolCorrupt, "invalid interaction identity or status");
-  if (resource.get("agent").valid() || resource.get("environment").valid() || resource.get("environment_id").valid())
+  if (resource.get("environment").valid() || resource.get("environment_id").valid())
     return fail(ErrorKind::Unsupported, "agent or environment interaction unsupported");
   if (resource.get("error").valid() && !resource.get("error").is_null()) return fail(ErrorKind::RemoteFailure, "remote interaction error");
   auto model = resource.get("model");
@@ -95,7 +95,7 @@ bool Codec::identity(json::Value resource, bool initial) {
       return fail(ErrorKind::ProtocolCorrupt, "interaction model changed");
     }
   }
-  unknown(resource, {"id", "model", "object", "created", "updated", "status", "steps", "usage", "service_tier", "error"});
+  unknown(resource, {"id", "model", "agent", "object", "created", "updated", "status", "steps", "usage", "service_tier", "error"});
   return true;
 }
 bool Codec::document(std::string_view bytes, std::string_view event, bool streaming) {
@@ -127,14 +127,25 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
   if (!emit(raw)) return false;
   if (root.get("error").valid() && !root.get("error").is_null()) return fail(ErrorKind::RemoteFailure, "remote interaction error");
   if (!streaming) {
-    if (!nonempty(root.get("model"))) return fail(ErrorKind::ProtocolCorrupt, "buffered interaction model required");
+    // Deleting a stored interaction answers {}: the outcome has no message, and its stop says what happened.
+    if (context_->interaction_lifecycle() == static_cast<std::uint8_t>(interactions::Lifecycle::Delete)) {
+      begun_ = true;
+      if (!emit(Begin{{}}) || !emit(Stop{{StopKind::Unknown, "deleted"}})) return false;
+      terminal_ = true; return true;
+    }
+    if (!nonempty(root.get("model")) && !nonempty(root.get("agent"))) return fail(ErrorKind::ProtocolCorrupt, "buffered interaction model required");
     if (!identity(root, true)) return false;
     generation_ = root.get("id").as_string(); begun_ = true;
     if (!emit(Begin{generation_}) || !emit(MessageBegin{{0}, generation_.empty() ? std::optional<std::string>{} : generation_, Role::Assistant, context_})) return false;
     auto steps = root.get("steps");
     if (steps.valid() && !steps.is_array()) return fail(ErrorKind::ProtocolCorrupt, "invalid buffered interaction steps");
     uint64_t index = 0;
-    if (steps.valid()) for (auto step : steps.elements()) { if (!start(step, index) || !stop(index)) return false; ++index; }
+    // A stored interaction read back lists the request's own input first; it is the caller's, not output.
+    if (steps.valid()) for (auto step : steps.elements()) {
+      if (step.get("type").is_string() && step.get("type").as_string() == "user_input") continue;
+      if (!start(step, index) || !stop(index)) return false;
+      ++index;
+    }
     return terminal(root, false);
   }
   if (!type.is_string() || (!event.empty() && event != type.as_string())) return fail(ErrorKind::ProtocolCorrupt, "interaction event discriminator mismatch");
@@ -610,24 +621,35 @@ bool Codec::seal(Step& step, json::Value final, uint64_t index) {
 bool Codec::terminal(json::Value resource, bool streaming) {
   if (!identity(resource, false)) return false;
   auto status = resource.get("status").as_string();
+  const bool cancelling = context_->interaction_lifecycle() == static_cast<std::uint8_t>(interactions::Lifecycle::Cancel);
   if (status == "failed") return fail(ErrorKind::RemoteFailure, "interaction failed");
-  if (status == "cancelled") return fail(ErrorKind::Cancelled, "interaction cancelled");
+  // Cancelled is the outcome a cancel request asked for; anywhere else the interaction did not finish.
+  if (status == "cancelled" && !cancelling) return fail(ErrorKind::Cancelled, "interaction cancelled");
   StopKind kind;
   if (status == "completed") kind = StopKind::EndTurn;
   else if (status == "requires_action") kind = StopKind::ToolUse;
   else if (status == "incomplete") kind = StopKind::MaxTokens;
+  else if (status == "cancelled") kind = StopKind::Unknown;
+  // A background interaction that is still running: what it produced so far, and its id to retrieve it by.
+  else if (!streaming && (status == "in_progress" || status == "queued")) kind = StopKind::Pending;
   else return fail(ErrorKind::Unsupported, "unsupported terminal interaction status");
   if ((kind == StopKind::ToolUse && calls_.empty()) || (kind == StopKind::EndTurn && !calls_.empty()))
     return fail(ErrorKind::ProtocolCorrupt, "terminal status disagrees with client action");
+  // The echoed input of a stored interaction is not output, as above.
+  std::vector<json::Value> final_list;
   auto final_steps = resource.get("steps");
-  if (final_steps.valid() && (!final_steps.is_array() || final_steps.size() != steps_.size())) return fail(ErrorKind::ProtocolCorrupt, "terminal step count mismatch");
+  if (final_steps.valid() && !final_steps.is_array()) return fail(ErrorKind::ProtocolCorrupt, "terminal step count mismatch");
+  if (final_steps.valid())
+    for (auto step : final_steps.elements())
+      if (!(step.get("type").is_string() && step.get("type").as_string() == "user_input")) final_list.push_back(step);
+  if (final_steps.valid() && final_list.size() != steps_.size()) return fail(ErrorKind::ProtocolCorrupt, "terminal step count mismatch");
   std::string bytes; json::BoundedWriter writer({limits_.max_content_bytes, limits_.max_json_depth}, &bytes); writer.raw("[");
   uint64_t expected = 0;
   for (auto& [index, step] : steps_) {
     if (index != expected++ || !step.closed) return fail(ErrorKind::ProtocolCorrupt, "terminal with missing or open steps");
     std::shared_ptr<const json::Document> assembled_step;
     json::Value final;
-    if (final_steps.valid()) final = final_steps.at(index);
+    if (final_steps.valid()) final = final_list[index];
     else {
       assembled_step = assembled(step); if (!assembled_step) return false;
       final = assembled_step->root();
@@ -640,7 +662,7 @@ bool Codec::terminal(json::Value resource, bool streaming) {
   if (!writer.ok()) return fail(ErrorKind::ResourceLimit, "atomic interaction output limit");
   auto parsed = json::parse(bytes, {limits_.max_content_bytes, limits_.max_json_depth});
   auto doc = std::get_if<json::Document>(&parsed); if (!doc) return fail(ErrorKind::ProtocolCorrupt, "invalid atomic interaction output");
-  if (!usage(resource.get("usage"), true) || !emit(MessageSeal{{0}, std::make_shared<const json::Document>(std::move(*doc))}) ||
+  if (!usage(resource.get("usage"), kind != StopKind::Pending) || !emit(MessageSeal{{0}, std::make_shared<const json::Document>(std::move(*doc))}) ||
       !emit(Stop{{kind, std::string(status)}})) return false;
   terminal_ = true; (void)streaming; return true;
 }

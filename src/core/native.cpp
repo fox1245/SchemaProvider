@@ -497,6 +497,7 @@ std::shared_ptr<const NativeContext> NativeContext::decoding_only() const {
   context->replay_eligible_ = false;
   context->thinking_disabled_ = thinking_disabled_;
   context->audio_format_ = audio_format_;
+  context->interaction_lifecycle_ = interaction_lifecycle_;
   return context;
 }
 NativeReplay::NativeReplay(std::shared_ptr<const NativeContext> context, StopKind stop, Digest content, bool complete)
@@ -578,8 +579,10 @@ NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, 
 NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, const interactions::Request& request, const descriptor::EffectiveChoices& choices, bool streaming)
     : family_(Family::Interactions), model_(request.model), route_(descriptor.path(streaming)), prefix_count_(request.messages.size()), policy_(descriptor.policy()) {
   valid_ = descriptor.family() == family_name(family_) && origin_digest(descriptor, origin_) && configuration_digest(descriptor, request, choices, prefix_);
-  // A continued interaction's history is held by the service, so its output has no client-held replay authority.
-  if (request.previous_interaction_id) replay_eligible_ = false;
+  // A continued interaction's history is held by the service, so its output has no client-held replay authority;
+  // neither has a stored interaction read back by id.
+  interaction_lifecycle_ = static_cast<std::uint8_t>(request.lifecycle);
+  if (request.previous_interaction_id || request.lifecycle != interactions::Lifecycle::Create) replay_eligible_ = false;
   if (valid_) {
     client_tools_.reserve(request.tools.size());
     for (const auto& tool : request.tools) client_tools_.push_back(tool.name);
