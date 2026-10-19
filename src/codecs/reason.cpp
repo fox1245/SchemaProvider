@@ -893,6 +893,33 @@ constexpr Entry images_request_table[] = {
   {"image options do not match the policy's schema", "request.images.options_invalid"},
   {"image request exceeds JSON limits", "request.images.json_limit"},
 };
+constexpr Entry decisions_table[] = {
+  {"invalid response JSON", "decisions.response.json_invalid"},
+  {"response must be object", "decisions.response.not_object"},
+  {"remote error property", "decisions.response.remote_error"},
+  {"decision answers required", "decisions.answers.required"},
+  {"decision answer count limit", "decisions.answers.count_limit"},
+  {"decision model must be string", "decisions.model.not_string"},
+  {"decision answer needs a type", "decisions.answer.type_required"},
+  {"decision probabilities and scores are numbers", "decisions.answer.number_invalid"},
+  {"decision answer limit", "decisions.answer.limit"},
+};
+constexpr Entry decisions_request_table[] = {
+  {"decision endpoints are not admitted at this origin", "request.decisions.endpoint_not_admitted"},
+  {"the decision endpoint has no path", "request.decisions.path_missing"},
+  {"a decision needs a model and questions", "request.decisions.model_and_questions_required"},
+  {"decision input is a string, an array or (OpenRouter) an object", "request.decisions.input_invalid"},
+  {"decision questions need unique names", "request.decisions.names_invalid"},
+  {"decision instructions are a string or (OpenRouter) structured guidance", "request.decisions.guidance_invalid"},
+  {"box questions are OpenRouter only", "request.decisions.box_unsupported"},
+  {"choice and score questions list at least two options; others list none", "request.decisions.options_count_invalid"},
+  {"decision options have a value and string or (OpenRouter) structured guidance", "request.decisions.option_invalid"},
+  {"predicate guidance gives both a true and a false answer", "request.decisions.predicate_guidance_invalid"},
+  {"predicate guidance is OpenRouter only", "request.decisions.predicate_guidance_unsupported"},
+  {"the decision endpoint admits no options", "request.decisions.options_not_admitted"},
+  {"decision options do not match the policy's schema", "request.decisions.options_schema_invalid"},
+  {"decision request exceeds JSON limits", "request.decisions.json_limit"},
+};
 constexpr Entry shared_request_table[] = {
   {"options are not admitted by the policy", "request.options.options_are_not_admitted_by_the_policy"},
   {"options do not match the policy's schema", "request.options.options_do_not_match_the_policy_s_schema"},
@@ -964,6 +991,8 @@ std::span<const Entry> entries(Source source) noexcept {
     case Source::SharedRequest: return shared_request_table;
     case Source::Images: return images_table;
     case Source::ImagesRequest: return images_request_table;
+    case Source::Decisions: return decisions_table;
+    case Source::DecisionsRequest: return decisions_request_table;
   }
   return {};
 }

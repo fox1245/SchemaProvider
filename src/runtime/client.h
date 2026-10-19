@@ -7,6 +7,7 @@
 #include "codecs/gemini_request.h"
 #include "codecs/interactions_request.h"
 #include "codecs/images.h"
+#include "codecs/decisions.h"
 #include "descriptor/presets.h"
 #include "runtime/policy.h"
 #include "transport/sse_framer.h"
@@ -197,6 +198,7 @@ class PreparedEndpoint {
 
 namespace detail {
 inline images::Outcome typed_outcome(const sp::Outcome& outcome, const images::Outcome*) { return images::typed(outcome); }
+inline decisions::Outcome typed_outcome(const sp::Outcome& outcome, const decisions::Outcome*) { return decisions::typed(outcome); }
 }  // namespace detail
 // A started non-chat endpoint call. Like an Operation, destruction requests cancellation and detach relinquishes it;
 // join waits for the typed outcome, the one the callback received.
@@ -245,11 +247,18 @@ class Client {
   images::Outcome complete(images::Request, RunOptions = {});
   images::Outcome complete(PreparedEndpoint<images::Outcome>);
   EndpointCall<images::Outcome> start(PreparedEndpoint<images::Outcome>, std::function<void(images::Outcome)> on_outcome = {});
+  PreparedEndpoint<decisions::Outcome> prepare(decisions::Request, RunOptions = {});
+  decisions::Outcome complete(decisions::Request, RunOptions = {});
+  decisions::Outcome complete(PreparedEndpoint<decisions::Outcome>);
+  EndpointCall<decisions::Outcome> start(PreparedEndpoint<decisions::Outcome>, std::function<void(decisions::Outcome)> on_outcome = {});
   Diagnostics diagnostics() const noexcept;
  private:
   explicit Client(std::shared_ptr<detail::ClientState>);
   // The admission and option checks every call shares; `encode` fills the operation's wire request and model.
   PreparedRequest prepare_call(RunOptions, const std::function<void(detail::OperationState&, std::optional<Error>&)>& encode);
+  // An endpoint call's wire request from its encoder's result (D6).
+  template <class Encoded> PreparedRequest prepare_endpoint(RunOptions, std::string_view endpoint, int reason_source,
+                                                           const std::function<std::variant<Encoded, Error>()>& encode);
   std::shared_ptr<detail::ClientState> state_;
   friend class detail::ClientAccess;
 };
