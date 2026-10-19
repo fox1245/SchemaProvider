@@ -347,7 +347,8 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
     }
     if (tool.options) { hash.text("sp.messages.tool.options.v1"); hash.document(tool.options); }
   }
-  if (request.container) { hash.text("sp.messages.container.v1"); hash.text(*request.container); }
+  // The code-execution container is not bound (#98): its id names state the service holds and reports after the
+  // first turn, so a conversation reuses it from the second turn on without changing what it means.
   if (!request.betas.empty()) {
     hash.text("sp.messages.betas.v1"); hash.number(request.betas.size());
     for (const auto& beta : request.betas) hash.text(beta);
