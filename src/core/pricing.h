@@ -32,10 +32,18 @@ struct ModelPrice {
            !output_image && !ceiling_input && !ceiling_output && !ceiling_request && tool_fees.empty();
   }
 };
-// The entry's prices. With a `service_tier`, the units suffixed `:<tier>` (`input:flex`, `output:priority`) are the
-// prices, and units without the suffix are not: a tier the entry does not price has no price, so a priority tier
-// is never billed at the standard rates.
-ModelPrice price_of(const descriptor::CatalogueEntry& entry, std::string_view service_tier = {});
+// The entry's prices for a request in `service_tier` with `input_tokens` input tokens (cache reads and writes
+// included). A unit is `<name>[/<tier>][+<tokens>]`:
+// - `/<tier>` prices a service tier (`input/flex`, `output/priority`). With a tier only its units count, so a tier
+//   the entry does not price has no price and a priority tier is never billed at the standard rates.
+// - `+<tokens>` prices requests above that many input tokens (`input+200000`); the highest band the request is
+//   above wins, unit by unit, over the units without one.
+ModelPrice price_of(const descriptor::CatalogueEntry& entry, std::string_view service_tier = {},
+                    std::uint64_t input_tokens = 0);
+// Each unit at its dearest over every band a request of at most `input_tokens` input tokens may fall in: the
+// prices to reserve with.
+ModelPrice dearest_price_of(const descriptor::CatalogueEntry& entry, std::string_view service_tier,
+                            std::uint64_t input_tokens);
 
 struct CostEstimate {
   // Set when every counter the call billed has a price. Rounded up once, to whole nano-USD.
@@ -62,7 +70,8 @@ struct CostEstimate {
 //   the cache counters) at the same rates, since the top-level counters leave them out.
 // - `request` is charged once.
 // Server tool fees, images and other per-unit charges are not priced.
-// With a `service_tier`, the entry's prices for that tier (`price_of`).
+// With a `service_tier`, the entry's prices for that tier, and the input band of the call's input tokens
+// (`price_of`).
 CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_view family, std::string_view origin,
                       const ServedModel& model, const Usage& usage, std::string_view service_tier = {});
 
@@ -80,7 +89,7 @@ struct Bound {
   // or "overflow".
   std::vector<std::string> unpriced;
 };
-// A reservation bound: input tokens at the dearest input rate (input, cache reads and writes, the 1-hour write),
+// A reservation bound, from `dearest_price_of` when the entry prices input bands: input tokens at the dearest input rate (input, cache reads and writes, the 1-hour write),
 // output tokens at the dearest output rate (output, reasoning, image output), the request fee, and each tool's fee
 // times its uses. With `route_ceiling` the ceiling rates replace the listed ones. For usage within the request,
 // `estimate` with the same prices never exceeds it. Messages compaction iterations bill tokens outside the call's

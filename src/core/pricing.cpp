@@ -83,48 +83,89 @@ std::optional<std::uint64_t> per_million(std::string_view text) {
 }
 } // namespace
 
-ModelPrice price_of(const descriptor::CatalogueEntry& entry, std::string_view service_tier) {
+namespace {
+// A price unit: its name (`input`, `tool:web_search`), its service tier (`/flex`) and the input length above which
+// it applies (`+200000`, 0 for every request).
+struct Unit {
+  std::string_view name, tier;
+  std::uint64_t above = 0;
+};
+std::optional<Unit> parse_unit(std::string_view unit) {
+  Unit out;
+  if (const auto plus = unit.rfind('+'); plus != std::string_view::npos) {
+    const auto digits = unit.substr(plus + 1);
+    if (digits.empty() || digits.size() > 19) return std::nullopt;
+    for (const char c : digits) {
+      if (c < '0' || c > '9') return std::nullopt;
+      out.above = out.above * 10 + static_cast<std::uint64_t>(c - '0');
+    }
+    unit = unit.substr(0, plus);
+  }
+  if (const auto slash = unit.rfind('/'); slash != std::string_view::npos) {
+    out.tier = unit.substr(slash + 1);
+    unit = unit.substr(0, slash);
+  }
+  if (unit.empty() || (unit.starts_with("tool:") && unit.size() == 5)) return std::nullopt;
+  out.name = unit;
+  return out;
+}
+// The plain name of a unit OpenRouter names otherwise.
+std::string_view canonical(std::string_view name) {
+  if (name == "prompt") return "input";
+  if (name == "completion") return "output";
+  if (name == "input_cache_read") return "cache_read";
+  if (name == "input_cache_write") return "cache_write";
+  if (name == "internal_reasoning") return "reasoning";
+  return name;
+}
+// The entry's prices for a request in `service_tier` with `input_tokens` input tokens. Exact: each unit's price from
+// the highest band the request is above. Dearest: each unit's highest price over every band the request may reach.
+ModelPrice select(const descriptor::CatalogueEntry& entry, std::string_view service_tier, std::uint64_t input_tokens,
+                  bool dearest) {
+  struct Pick { std::uint64_t above = 0; bool plain = false; std::optional<std::uint64_t> rate; };
+  std::vector<std::pair<std::string, Pick>> picks;
+  for (const auto& [text_unit, text] : entry.pricing) {
+    const auto unit = parse_unit(text_unit);
+    if (!unit || unit->tier != service_tier || (unit->above && input_tokens <= unit->above)) continue;
+    const auto rate = per_million(text);
+    if (!rate) continue;
+    const auto name = canonical(unit->name);
+    const bool plain = name == unit->name;
+    auto found = std::find_if(picks.begin(), picks.end(), [&](const auto& p) { return p.first == name; });
+    if (found == picks.end()) { picks.emplace_back(std::string(name), Pick{unit->above, plain, rate}); continue; }
+    auto& pick = found->second;
+    if (dearest) {
+      if (*rate > *pick.rate) pick = Pick{unit->above, plain, rate};
+    } else if (unit->above > pick.above || (unit->above == pick.above && plain && !pick.plain)) {
+      pick = Pick{unit->above, plain, rate};
+    }
+  }
   ModelPrice out;
-  // A unit's name for this tier: the plain name, or `<name>:<tier>`.
-  auto named = [&](std::string_view unit, std::string_view name) {
-    if (service_tier.empty()) return unit == name;
-    return unit.size() == name.size() + 1 + service_tier.size() && unit.substr(0, name.size()) == name &&
-           unit[name.size()] == ':' && unit.substr(name.size() + 1) == service_tier;
-  };
-  auto read = [&](std::optional<std::uint64_t>& target, std::string_view plain, std::string_view listed) {
-    std::optional<std::uint64_t> from_listed;
-    for (const auto& [unit, text] : entry.pricing) {
-      if (named(unit, plain)) { target = per_million(text); return; }
-      if (named(unit, listed)) from_listed = per_million(text);
-    }
-    target = from_listed;
-  };
-  read(out.input, "input", "prompt");
-  read(out.output, "output", "completion");
-  read(out.cache_read, "cache_read", "input_cache_read");
-  read(out.cache_write, "cache_write", "input_cache_write");
-  read(out.reasoning, "reasoning", "internal_reasoning");
-  read(out.request, "request", "request");
-  read(out.cache_write_1h, "cache_write_1h", "cache_write_1h");
-  read(out.output_image, "output_image", "output_image");
-  read(out.ceiling_input, "ceiling_input", "ceiling_input");
-  read(out.ceiling_output, "ceiling_output", "ceiling_output");
-  read(out.ceiling_request, "ceiling_request", "ceiling_request");
-  constexpr std::string_view tool = "tool:";
-  for (const auto& [unit, text] : entry.pricing) {
-    if (!unit.starts_with(tool)) continue;
-    std::string_view type = std::string_view(unit).substr(tool.size());
-    if (!service_tier.empty()) {
-      const auto colon = type.rfind(':');
-      if (colon == std::string_view::npos || type.substr(colon + 1) != service_tier) continue;
-      type = type.substr(0, colon);
-    } else if (type.find(':') != std::string_view::npos) {
-      continue;
-    }
-    if (const auto fee = per_million(text); fee && !type.empty()) out.tool_fees.emplace_back(std::string(type), *fee);
+  for (const auto& [name, pick] : picks) {
+    if (name == "input") out.input = pick.rate;
+    else if (name == "output") out.output = pick.rate;
+    else if (name == "cache_read") out.cache_read = pick.rate;
+    else if (name == "cache_write") out.cache_write = pick.rate;
+    else if (name == "reasoning") out.reasoning = pick.rate;
+    else if (name == "request") out.request = pick.rate;
+    else if (name == "cache_write_1h") out.cache_write_1h = pick.rate;
+    else if (name == "output_image") out.output_image = pick.rate;
+    else if (name == "ceiling_input") out.ceiling_input = pick.rate;
+    else if (name == "ceiling_output") out.ceiling_output = pick.rate;
+    else if (name == "ceiling_request") out.ceiling_request = pick.rate;
+    else if (name.starts_with("tool:")) out.tool_fees.emplace_back(name.substr(5), *pick.rate);
   }
   std::sort(out.tool_fees.begin(), out.tool_fees.end());
   return out;
+}
+}  // namespace
+
+ModelPrice price_of(const descriptor::CatalogueEntry& entry, std::string_view service_tier, std::uint64_t input_tokens) {
+  return select(entry, service_tier, input_tokens, false);
+}
+ModelPrice dearest_price_of(const descriptor::CatalogueEntry& entry, std::string_view service_tier,
+                            std::uint64_t input_tokens) {
+  return select(entry, service_tier, input_tokens, true);
 }
 
 CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_view family, std::string_view origin,
@@ -132,11 +173,15 @@ CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_v
   CostEstimate out;
   const descriptor::CatalogueEntry* entry = nullptr;
   ModelPrice price;
+  auto count_of = [](const std::optional<Count>& c) -> std::uint64_t { return c ? c->value : 0; };
+  // The input length that picks the entry's band: every input token, cache reads and writes included.
+  const auto input_length = usage.input_total ? usage.input_total->value
+      : count_of(usage.input_uncached) + count_of(usage.cache_read) + count_of(usage.cache_write);
   auto priced = [&](std::string_view name) {
     if (name.empty()) return false;
     const auto match = catalogue.find(family, origin, name);
     if (!match.entry) return false;
-    auto found = price_of(*match.entry, service_tier);
+    auto found = price_of(*match.entry, service_tier, input_length);
     if (found.empty()) return false;
     entry = match.entry; price = found;
     return true;

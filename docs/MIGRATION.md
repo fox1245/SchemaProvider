@@ -181,7 +181,8 @@ The catalogue prices a call:
 - **Fallback.** An estimate prices the served model's entry, else the requested model's, and says so.
 - **New enum value.** `CostRounding` gains `CeilingCatalogueProduct`, added last, for these estimates.
 - **Reservation bounds (#121).** `ModelPrice` gains `cache_write_1h`, `output_image`, the route ceiling (`ceiling_input`, `ceiling_output`, `ceiling_request`) and `tool_fees` (`tool:<type>` units).
-  - `price_of` and `estimate` take an optional service tier, priced by `<unit>:<tier>` units.
+  - `price_of` and `estimate` take an optional service tier, priced by `<unit>/<tier>` units.
+  - Input bands (`<unit>+<tokens>`) price long-context calls. `price_of` takes the call's input length, `estimate` reads it from the usage, and `dearest_price_of` gives the prices to reserve with.
   - `upper_bound(price, BoundRequest)` bounds a call's cost before dispatch with the same arithmetic as `estimate`.
 
 Values the providers extend are checked by shape, not by compiled lists:

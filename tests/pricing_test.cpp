@@ -109,11 +109,12 @@ void wide_products() {
   // A price whose nano-USD per million units does not fit in 64 bits is not a price.
   CHECK(!pricing::price_of(*c->entry("huge")).input);
 }
+using ModelPricePairs = std::vector<std::pair<std::string, std::uint64_t>>;
 // Service tiers, the dearer rates, route ceilings and tool fees, and the reservation bound.
 void bounds() {
   const auto c = catalogue(R"({"version":1,"models":[
     {"id":"direct","pricing":{"input":"0.000002","output":"0.000008","cache_read":"0.0000005","cache_write":"0.0000025",
-      "cache_write_1h":"0.000004","output_image":"0.00003","request":"0.001","input:flex":"0.000001","output:flex":"0.000004",
+      "cache_write_1h":"0.000004","output_image":"0.00003","request":"0.001","input/flex":"0.000001","output/flex":"0.000004",
       "tool:web_search_20250305":"0.01","tool:free_tool":"0"}},
     {"id":"vendor/routed","pricing":{"prompt":"0.0000001","completion":"0.0000004","ceiling_input":"0.0000024","ceiling_output":"0.0000096"}}]})");
   const auto direct = pricing::price_of(*c->entry("direct"));
@@ -139,6 +140,13 @@ void bounds() {
   CHECK(b.total && b.total->nano_usd == 12'000'000u);
   CHECK(!pricing::upper_bound(direct, {1, 1, true, {}}).total);
   CHECK(pricing::upper_bound(direct, {1, 1, true, {}}).unpriced.front() == "ceiling");
+  // A tool type may itself hold a colon; a tier and a band follow it.
+  const auto typed = catalogue(R"({"version":1,"models":[{"id":"m","pricing":{"input":"0","output":"0",
+    "tool:openrouter:web_search":"0.004","tool:openrouter:web_search/flex":"0.002","input/flex+10":"0.1"}}]})");
+  CHECK(pricing::price_of(*typed->entry("m")).tool_fees == ModelPricePairs({{"openrouter:web_search", 4'000'000'000'000u}}));
+  const auto typed_flex = pricing::price_of(*typed->entry("m"), "flex", 11);
+  CHECK(typed_flex.tool_fees == ModelPricePairs({{"openrouter:web_search", 2'000'000'000'000u}}) &&
+        typed_flex.input == 100'000'000'000'000u && !typed_flex.output);
   // The estimate of any usage within the bounds stays at or below the bound.
   std::uint64_t seed = 7;
   auto next = [&](std::uint64_t limit) { seed = seed * 6364136223846793005u + 1442695040888963407u; return (seed >> 33) % (limit + 1); };
@@ -152,9 +160,46 @@ void bounds() {
     CHECK(bound.total && e.total && e.total->nano_usd <= bound.total->nano_usd);
   }
 }
+// Input bands: above a band's input length, its units price the whole call.
+void bands() {
+  const auto c = catalogue(R"({"version":1,"models":[{"id":"long","pricing":{"input":"0.000001","output":"0.000004",
+    "cache_read":"0.0000001","input+200000":"0.000002","output+200000":"0.000006","cache_read+200000":"0.0000002",
+    "prompt+100000":"0.000009"}}]})");
+  const auto& entry = *c->entry("long");
+  // A plain name wins over OpenRouter's in the same band, but a higher band wins over both.
+  CHECK(pricing::price_of(entry, {}, 150'000).input == 9'000'000'000u);
+  const auto base = pricing::price_of(entry, {}, 200'000), band = pricing::price_of(entry, {}, 200'001);
+  CHECK(base.input == 9'000'000'000u && base.output == 4'000'000'000u && base.cache_read == 100'000'000u);
+  CHECK(band.input == 2'000'000'000u && band.output == 6'000'000'000u && band.cache_read == 200'000'000u);
+  CHECK(pricing::price_of(entry).input == 1'000'000'000u);
+  // The input length counts cache reads: 150'000 uncached and 60'000 read are above the 200'000 band.
+  const ServedModel exact{"long", "long", ServedRelation::Exact};
+  auto e = pricing::estimate(*c, "openai.chat", "", exact, usage(210'000, 1'000, 60'000));
+  // 150'000 x 2e-6 + 60'000 x 2e-7 + 1'000 x 6e-6 USD = 0.3 + 0.012 + 0.006.
+  CHECK(e.total && e.total->nano_usd == 318'000'000u);
+  e = pricing::estimate(*c, "openai.chat", "", exact, usage(1'000, 1'000));
+  CHECK(e.total && e.total->nano_usd == 5'000'000u);
+  // The dearest price over every band a request may reach.
+  const auto dear = pricing::dearest_price_of(entry, {}, 250'000);
+  CHECK(dear.input == 9'000'000'000u && dear.output == 6'000'000'000u && dear.cache_read == 200'000'000u);
+  CHECK(pricing::dearest_price_of(entry, {}, 1'000).input == 1'000'000'000u);
+  std::uint64_t seed = 11;
+  auto next = [&](std::uint64_t limit) { seed = seed * 6364136223846793005u + 1442695040888963407u; return (seed >> 33) % (limit + 1); };
+  for (int i = 0; i < 2000; ++i) {
+    const std::uint64_t input_limit = next(400'000), output_cap = next(50'000);
+    const auto bound = pricing::upper_bound(pricing::dearest_price_of(entry, {}, input_limit), {input_limit, output_cap, false, {}});
+    const auto read = next(input_limit), total = read + next(input_limit - read);
+    e = pricing::estimate(*c, "openai.chat", "", exact, usage(total, next(output_cap), read));
+    CHECK(bound.total && e.total && e.total->nano_usd <= bound.total->nano_usd);
+  }
+  // A malformed band is no unit.
+  const auto odd = catalogue(R"({"version":1,"models":[{"id":"m","pricing":{"input":"0.000001","input+":"1","input+x":"1",
+    "input+200000/flex":"1"}}]})");
+  CHECK(pricing::price_of(*odd->entry("m"), {}, 300'000).input == 1'000'000'000u);
+}
 } // namespace
 
 int main() {
-  try { prices_from_entries(); estimates(); wide_products(); bounds(); std::cout << "pricing properties passed\n"; return 0; }
+  try { prices_from_entries(); estimates(); wide_products(); bounds(); bands(); std::cout << "pricing properties passed\n"; return 0; }
   catch (const std::exception& error) { std::cerr << "pricing test failed: " << error.what() << '\n'; return 1; }
 }

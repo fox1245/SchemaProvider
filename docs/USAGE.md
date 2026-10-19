@@ -273,10 +273,15 @@ sp_catalogue_refresh --out models.json --generated generated.json --builtin-over
 **More units.** An entry's `pricing` may also list, in any catalogue layer a host merges:
 - `cache_write_1h` (a 1-hour cache write) and `output_image` (an image output token);
 - `ceiling_input`, `ceiling_output` and `ceiling_request`, a routing gateway's route ceiling: the dearest of the model's endpoints, which a host pins as OpenRouter's `provider.max_price`;
-- `<unit>:<tier>`, a service tier's prices (`input:flex`, `output:priority`). `price_of(entry, tier)` and `estimate(..., tier)` read only the tier's units, so a tier the entry does not price has no price;
-- `tool:<type>`, a fee per use of a server tool (`tool:web_search_20250305`). A listed `"0"` is a declared zero.
+- `tool:<type>`, a fee per use of a server tool (`tool:web_search_20250305`, `tool:openrouter:web_search`). A listed `"0"` is a declared zero.
+
+Any unit may carry a service tier and an input band, in that order: `<unit>[/<tier>][+<tokens>]`.
+- **Tiers.** `input/flex` and `output/priority` price a service tier. `price_of(entry, tier)` and `estimate(..., tier)` read only the tier's units, so a tier the entry does not price has no price.
+- **Bands.** `input+200000` prices a call with more than 200,000 input tokens, cache reads and writes included, for all of its tokens: a long-context surcharge. Unit by unit, the highest band the call is above wins over the lower ones and the unbanded unit. `price_of(entry, tier, input_tokens)` takes the call's input length, and `estimate` takes it from the usage.
+- **Malformed.** A unit whose band is not a decimal count is no unit.
 
 **Reservation bound.** `upper_bound(price, BoundRequest{input_tokens, output_tokens, route_ceiling, tool_uses})` is the most a call within those bounds can bill.
+- **Prices.** Pass `dearest_price_of(entry, tier, input_tokens)`: each unit at its dearest over every band a call of at most `input_tokens` may fall in.
 - **Rates.** It prices the input tokens at the dearest input rate (input, cache reads, cache writes, 1-hour writes) and the output tokens at the dearest output rate (output, reasoning, image output). With `route_ceiling`, the ceiling rates replace the listed ones.
 - **Fees.** It adds the request fee and each tool's fee times its uses.
 - **Rounding.** It rounds up once, as `estimate` does, so for usage within the bounds `estimate` never exceeds it.
