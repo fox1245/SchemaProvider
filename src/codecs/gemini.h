@@ -39,6 +39,12 @@ class Codec {
   std::string generation_, model_;
   std::optional<StopReason> stop_;
   std::vector<std::shared_ptr<const json::Document>> wire_parts_;
+  // Consecutive inline audio frames of one concatenable MIME (raw PCM, MP3) form one Media part: each frame is a
+  // delta of it, re-encoded as an append-only canonical stream, and the part seals when another part arrives
+  // or the candidate ends. The retained wire keeps every frame, so native replay sends the parts as received.
+  struct AudioRun { LocalId part{0}; std::string mime, carry; bool open = false; };
+  AudioRun run_;
+  bool close_run();
   std::vector<LocalId> pending_seals_;
   std::set<std::string, std::less<>> calls_;
   Usage usage_;

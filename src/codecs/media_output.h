@@ -21,6 +21,11 @@ Media describe(std::string_view mime, MediaSource source, std::string_view refer
 // Concatenates independently padded audio chunks without allocating a decoded payload.
 // Both arguments must be canonical base64 (or `joined` may be empty).
 void append_audio(std::string& joined, std::string_view chunk);
+// An append-only canonical stream of media deltas. `chunk` is canonical base64; `carry` keeps the 0 to 2
+// decoded bytes that do not fill a 3-byte group yet. The return value encodes every complete group, so the
+// concatenation of the returned strings and finish_stream(carry) is the canonical base64 of all the bytes.
+std::string stream_chunk(std::string& carry, std::string_view chunk);
+std::string finish_stream(std::string& carry);
 
 // Emits one complete generated media part through the decoder's event function. `payload` is the
 // canonical base64 of an inline media and must be empty for url or file sources.

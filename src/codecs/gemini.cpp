@@ -43,6 +43,24 @@ StopKind stop_kind(std::string_view reason, bool call) {
   return StopKind::Unknown;
 }
 }
+namespace {
+// Formats whose frames concatenate into one valid stream: raw PCM and MP3. Containers with a header per frame
+// (WAV, Ogg) and every image or video stay one part per frame.
+bool concatenable_audio(std::string_view mime) noexcept {
+  const auto essence = mime_essence(mime);
+  for (const std::string_view known : {"audio/l16", "audio/pcm", "audio/mpeg", "audio/mp3"}) {
+    if (essence.size() != known.size()) continue;
+    bool same = true;
+    for (std::size_t i = 0; i < known.size(); ++i) {
+      char c = essence[i];
+      if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + ('a' - 'A'));
+      if (c != known[i]) { same = false; break; }
+    }
+    if (same) return true;
+  }
+  return false;
+}
+}  // namespace
 Codec::Codec(const descriptor::ValidatedDescriptor& d, Mode mode, Accumulator& a,
              std::shared_ptr<const NativeContext> context, SemanticLimits limits)
     : descriptor_(d), mode_(mode), accumulator_(a), context_(std::move(context)), limits_(limits) {
@@ -169,6 +187,7 @@ bool Codec::candidate(json::Value c) {
     auto details = own(c); if (!details) return false;
     stop_ = StopReason{stop_kind(raw, has_call_), std::string(raw), {}, std::move(details)};
     stopped_ = true;
+    if (run_.open && !close_run()) return false;
     if (!emit(Stop{*stop_})) return false;
     for (auto local : pending_seals_) if (!emit(PartSeal{local, {}, {}})) return false;
     pending_seals_.clear();
@@ -176,6 +195,12 @@ bool Codec::candidate(json::Value c) {
       return fail(ErrorKind::RemoteFailure, "Gemini generation blocked or rejected", raw);
   }
   return true;
+}
+bool Codec::close_run() {
+  run_.open = false;
+  const auto tail = media_output::finish_stream(run_.carry);
+  if (!tail.empty() && !emit(PartDelta{run_.part, {PartKind::Media, tail}})) return false;
+  return emit(PartSeal{run_.part, {}, {}});
 }
 bool Codec::part(json::Value p) {
   if (!p.is_object()) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini part");
@@ -197,6 +222,7 @@ bool Codec::part(json::Value p) {
   std::string content;
   std::string_view fragment;
   std::optional<std::string_view> payload;
+  std::string_view media_mime;
   const auto transcription = p.get("audioTranscription");
   if (data_key == "text") {
     if (!p.get("text").is_string()) return fail(ErrorKind::ProtocolCorrupt, "Gemini text must be string");
@@ -248,7 +274,27 @@ bool Codec::part(json::Value p) {
     header.wire_metadata.reset();
     kind = PartKind::Media;
     if (inline_data) payload = data.as_string();
+    if (mime.is_string()) media_mime = mime.as_string();
   } else if (!data_key.empty() && !p.get(data_key).is_object()) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini opaque part payload");
+  // An empty text part without a signature (Gemini ends most streams with one) says nothing: it stays in the
+  // retained wire for native replay and is not a typed part.
+  if (kind == PartKind::Text && fragment.empty() && !signature.valid()) {
+    wire_parts_.push_back(std::move(retained));
+    return true;
+  }
+  const bool frame = kind == PartKind::Media && payload && !signature.valid() && concatenable_audio(media_mime);
+  if (run_.open && !(frame && run_.mime == media_mime) && !close_run()) return false;
+  if (frame) {
+    if (!canonical_base64(*payload)) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini media part");
+    if (!run_.open) {
+      if (!emit(PartBegin{{0}, local, kind, std::move(header), wire_parts_.size()})) return false;
+      run_.part = local; run_.mime = std::string(media_mime); run_.carry.clear(); run_.open = true;
+    }
+    const auto encoded = media_output::stream_chunk(run_.carry, *payload);
+    if (!encoded.empty() && !emit(PartDelta{run_.part, {PartKind::Media, encoded}})) return false;
+    wire_parts_.push_back(std::move(retained));
+    return true;
+  }
   if (!emit(PartBegin{{0}, local, kind, std::move(header), wire_parts_.size()})) return false;
   if (kind == PartKind::Text || kind == PartKind::Thinking || kind == PartKind::ToolCall)
     if (!emit(PartDelta{local, {kind, fragment}})) return false;
