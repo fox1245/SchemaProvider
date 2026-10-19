@@ -53,8 +53,9 @@ struct ToolResult {
   std::string tool_use_id, content;
   bool is_error = false;
   std::optional<ToolResultHostMetadata> host{};
-  // Ordered typed output; nonempty parts require an empty legacy content string.
-  // Generate partitions these into separately ordered text and media lanes.
+  // Ordered typed output; nonempty parts require an empty legacy content string, except that Generate takes a JSON
+  // object content beside media-only parts as the response object. Generate partitions these into separately
+  // ordered text and media lanes.
   std::vector<std::variant<Text, Media>> content_parts{};
 };
 struct Reasoning {

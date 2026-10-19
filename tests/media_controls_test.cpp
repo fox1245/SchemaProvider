@@ -94,6 +94,197 @@ void gemini_boundaries_and_binding() {
   bad = value; bad.audio_transcription_config->word_timestamp = false; bad.audio_transcription_config->diarization = false; bad.audio_transcription_config->mode = gemini::TranscriptionMode::Smart;
   CHECK(std::holds_alternative<gemini::EncodedRequest>(gemini::encode(descriptor, bad, false)));
 }
+void gemini_builtin_tools_and_audio_format() {
+  const auto descriptor = descriptor_for("google.generate");
+  auto value = request<gemini::Request>();
+  value.builtin_tools = {gemini::GoogleSearchTool{}, gemini::UrlContextTool{}, gemini::CodeExecutionTool{}, gemini::GoogleMapsTool{}};
+  auto encoded = gemini::encode(descriptor, value, false); CHECK(std::holds_alternative<gemini::EncodedRequest>(encoded));
+  auto wire = parse(std::get<gemini::EncodedRequest>(encoded).body);
+  auto tools = wire.root().get("tools");
+  CHECK(tools.size() == 4 && tools.at(0).get("googleSearch").size() == 0 && tools.at(1).get("urlContext").is_object() &&
+        tools.at(2).get("codeExecution").is_object() && tools.at(3).get("googleMaps").size() == 0);
+  CHECK(!wire.root().get("toolConfig").valid());
+  // Next to a client function the service requires its own invocations in the answer: on by default, and an
+  // explicit choice is kept beside the function calling mode.
+  auto combined = value; combined.builtin_tools = {gemini::GoogleSearchTool{}};
+  combined.tools = {gemini::ToolDefinition{"lookup", "Looks up a record", own(R"({"type":"object","properties":{}})")}};
+  encoded = gemini::encode(descriptor, combined, false); CHECK(std::holds_alternative<gemini::EncodedRequest>(encoded));
+  wire = parse(std::get<gemini::EncodedRequest>(encoded).body);
+  tools = wire.root().get("tools");
+  CHECK(tools.size() == 2 && tools.at(0).get("functionDeclarations").size() == 1 && tools.at(1).get("googleSearch").is_object());
+  CHECK(wire.root().get("toolConfig").get("includeServerSideToolInvocations").as_bool());
+  auto chosen = combined; chosen.tool_choice = gemini::ToolChoice{gemini::ToolChoiceMode::Any, {"lookup"}};
+  encoded = gemini::encode(descriptor, chosen, false); CHECK(std::holds_alternative<gemini::EncodedRequest>(encoded));
+  wire = parse(std::get<gemini::EncodedRequest>(encoded).body);
+  CHECK(wire.root().get("toolConfig").get("functionCallingConfig").get("mode").as_string() == "ANY" &&
+        wire.root().get("toolConfig").get("includeServerSideToolInvocations").as_bool());
+  auto off = combined; off.server_tool_invocations = false;
+  encoded = gemini::encode(descriptor, off, false); CHECK(std::holds_alternative<gemini::EncodedRequest>(encoded));
+  wire = parse(std::get<gemini::EncodedRequest>(encoded).body);
+  CHECK(!wire.root().get("toolConfig").get("includeServerSideToolInvocations").as_bool());
+  auto alone = value; alone.server_tool_invocations = true;
+  encoded = gemini::encode(descriptor, alone, false); CHECK(std::holds_alternative<gemini::EncodedRequest>(encoded));
+  wire = parse(std::get<gemini::EncodedRequest>(encoded).body);
+  CHECK(wire.root().get("toolConfig").get("includeServerSideToolInvocations").as_bool() && !wire.root().get("toolConfig").get("functionCallingConfig").valid());
+  auto bad = request<gemini::Request>(); bad.server_tool_invocations = true; invalid(gemini::encode(descriptor, bad, false));
+  bad = value; bad.builtin_tools.push_back(gemini::GoogleSearchTool{}); invalid(gemini::encode(descriptor, bad, false));
+
+  // The service's calls and results are typed parts, its candidate metadata stays in the stop details, and the next
+  // turn sends the parts back as received.
+  encoded = gemini::encode(descriptor, value, false); CHECK(std::holds_alternative<gemini::EncodedRequest>(encoded));
+  Accumulator accumulator; gemini::Codec codec(descriptor, gemini::Mode::Buffered, accumulator, std::get<gemini::EncodedRequest>(encoded).context);
+  codec.buffered(R"re({"modelVersion":"fixture-model","responseId":"g2","candidates":[{"index":0,"content":{"role":"model","parts":[)re"
+                 R"re({"executableCode":{"language":"PYTHON","code":"print(1+1)"},"thoughtSignature":"c2ln"},{"codeExecutionResult":{"outcome":"OUTCOME_OK","output":"2\n"}},)re"
+                 R"re({"toolCall":{"id":"s1","toolType":"GOOGLE_SEARCH_WEB","args":{"queries":["q"]}}},{"toolResponse":{"id":"s1","toolType":"GOOGLE_SEARCH_WEB","response":{}}},{"text":"2"}]},)re"
+                 R"re("finishReason":"STOP","groundingMetadata":{"webSearchQueries":["q"]},"urlContextMetadata":{"urlMetadata":[]}}]})re", {});
+  CHECK(accumulator.outcome() && std::holds_alternative<Completion>(*accumulator.outcome()));
+  const auto& completion = std::get<Completion>(*accumulator.outcome());
+  const auto& parts = completion.messages.front().parts;
+  CHECK(parts.size() == 5 && std::get<ToolCall>(parts[0]).wire_type == "executableCode" && std::get<ServerToolResult>(parts[1]).wire_type == "codeExecutionResult" &&
+        std::get<ToolCall>(parts[2]).wire_type == "toolCall" && std::get<ServerToolResult>(parts[3]).wire_type == "toolResponse" && std::get<Text>(parts[4]).value == "2");
+  CHECK(std::get<ToolCall>(parts[2]).name == "google_search_web" && std::get<ServerToolResult>(parts[3]).tool_use_id == "s1");
+  CHECK(completion.stop.details && completion.stop.details->root().get("groundingMetadata").get("webSearchQueries").size() == 1 &&
+        completion.stop.details->root().get("urlContextMetadata").is_object());
+  auto next = value; next.messages.push_back(completion.messages.front()); next.messages.push_back(Message{"", Role::User, {Text{"again"}}});
+  const auto replay = gemini::encode(descriptor, next, false); CHECK(std::holds_alternative<gemini::EncodedRequest>(replay));
+  const auto replayed = parse(std::get<gemini::EncodedRequest>(replay).body);
+  const auto sent = replayed.root().get("contents").at(1).get("parts");
+  CHECK(sent.size() == 5 && sent.at(0).get("executableCode").get("code").as_string() == "print(1+1)" && sent.at(0).get("thoughtSignature").as_string() == "c2ln" &&
+        sent.at(1).get("codeExecutionResult").is_object() && sent.at(2).get("toolCall").get("id").as_string() == "s1" && sent.at(3).get("toolResponse").is_object());
+  // The tools are configuration. Showing the invocations and the retrieval location are per-turn choices.
+  auto changed = next; changed.builtin_tools.pop_back(); replay_rejected(gemini::encode(descriptor, changed, false));
+  changed = next; std::get<gemini::GoogleSearchTool>(changed.builtin_tools[0]).image_search = true; replay_rejected(gemini::encode(descriptor, changed, false));
+  changed = next; changed.server_tool_invocations = true; changed.retrieval_config = gemini::RetrievalConfig{37.5, 127.0, std::string("ko-KR")};
+  CHECK(std::holds_alternative<gemini::EncodedRequest>(gemini::encode(descriptor, changed, false)));
+
+  value = request<gemini::Request>(); value.response_modalities = {gemini::ResponseModality::Audio};
+  value.audio_format = gemini::AudioFormat{std::string("AUDIO_L16"), 24000u};
+  encoded = gemini::encode(descriptor, value, false); CHECK(std::holds_alternative<gemini::EncodedRequest>(encoded));
+  wire = parse(std::get<gemini::EncodedRequest>(encoded).body);
+  auto audio = wire.root().get("generationConfig").get("responseFormat").get("audio");
+  CHECK(audio.get("mimeType").as_string() == "AUDIO_L16" && audio.get("sampleRate").as_uint() == 24000u);
+  next = value; next.messages.push_back(gemini_reply(descriptor, std::get<gemini::EncodedRequest>(encoded))); next.messages.push_back(Message{"", Role::User, {Text{"again"}}});
+  CHECK(std::holds_alternative<gemini::EncodedRequest>(gemini::encode(descriptor, next, false)));
+  changed = next; changed.audio_format->sample_rate = 16000u; replay_rejected(gemini::encode(descriptor, changed, false));
+  changed = next; changed.audio_format->mime_type = "AUDIO_MP3"; replay_rejected(gemini::encode(descriptor, changed, false));
+  auto rate_only = value; rate_only.audio_format = gemini::AudioFormat{std::nullopt, 16000u};
+  encoded = gemini::encode(descriptor, rate_only, false); CHECK(std::holds_alternative<gemini::EncodedRequest>(encoded));
+  wire = parse(std::get<gemini::EncodedRequest>(encoded).body);
+  audio = wire.root().get("generationConfig").get("responseFormat").get("audio");
+  CHECK(!audio.get("mimeType").valid() && audio.get("sampleRate").as_uint() == 16000u);
+  // An empty format sends nothing and changes nothing.
+  auto empty = value; empty.audio_format = gemini::AudioFormat{};
+  encoded = gemini::encode(descriptor, empty, false); CHECK(std::holds_alternative<gemini::EncodedRequest>(encoded));
+  CHECK(!parse(std::get<gemini::EncodedRequest>(encoded).body).root().get("generationConfig").get("responseFormat").valid());
+  for (const auto* token : {"", "audio/l16", "AUDIO L16"}) { bad = value; bad.audio_format->mime_type = token; invalid(gemini::encode(descriptor, bad, false)); }
+  bad = value; bad.audio_format->sample_rate = 0u; invalid(gemini::encode(descriptor, bad, false));
+}
+gemini::EncodedRequest encoded_ok(const descriptor::ValidatedDescriptor& descriptor, const gemini::Request& value) {
+  auto encoded = gemini::encode(descriptor, value, false); CHECK(std::holds_alternative<gemini::EncodedRequest>(encoded));
+  return std::get<gemini::EncodedRequest>(std::move(encoded));
+}
+void gemini_service_tool_options() {
+  const auto descriptor = descriptor_for("google.generate");
+  auto value = request<gemini::Request>();
+  gemini::GoogleSearchTool search; search.start_time = "2026-01-01T00:00:00Z"; search.end_time = "2026-10-01T00:00:00Z"; search.web_search = search.image_search = true;
+  gemini::ComputerUseTool computer; computer.excluded_functions = {"drag_and_drop"}; computer.disabled_safety_policies = {"SOME_POLICY"}; computer.prompt_injection_detection = true;
+  gemini::FileSearchTool files; files.store_names = {"fileSearchStores/notes-1"}; files.metadata_filter = "kind = \"memo\""; files.top_k = 3;
+  value.builtin_tools = {search, gemini::GoogleMapsTool{true}, computer, files};
+  gemini::McpServer server; server.name = "docs"; server.url = "https://mcp.example.test/mcp"; server.headers = {{"Authorization", "Bearer one"}};
+  server.timeout = "30s"; server.sse_read_timeout = "1.5s"; server.terminate_on_close = true;
+  value.mcp_servers = {server};
+  value.retrieval_config = gemini::RetrievalConfig{37.5665, 126.978, std::string("ko-KR")};
+  value.audio_format = gemini::AudioFormat{std::string("AUDIO_MP3"), 24000u, 64000u, std::string("INLINE")};
+  auto encoded = encoded_ok(descriptor, value);
+  auto wire = parse(encoded.body);
+  auto tools = wire.root().get("tools");
+  CHECK(tools.size() == 5);
+  auto google = tools.at(0).get("googleSearch");
+  CHECK(google.get("timeRangeFilter").get("startTime").as_string() == "2026-01-01T00:00:00Z" && google.get("timeRangeFilter").get("endTime").as_string() == "2026-10-01T00:00:00Z" &&
+        google.get("searchTypes").get("webSearch").is_object() && google.get("searchTypes").get("imageSearch").is_object());
+  CHECK(tools.at(1).get("googleMaps").get("enableWidget").as_bool());
+  auto use = tools.at(2).get("computerUse");
+  CHECK(use.get("environment").as_string() == "ENVIRONMENT_BROWSER" && use.get("excludedPredefinedFunctions").at(0).as_string() == "drag_and_drop" &&
+        use.get("disabledSafetyPolicies").at(0).as_string() == "SOME_POLICY" && use.get("enablePromptInjectionDetection").as_bool());
+  auto search_files = tools.at(3).get("fileSearch");
+  CHECK(search_files.get("fileSearchStoreNames").at(0).as_string() == "fileSearchStores/notes-1" && search_files.get("metadataFilter").as_string() == "kind = \"memo\"" &&
+        search_files.get("topK").as_uint() == 3u);
+  auto transport = tools.at(4).get("mcpServers").at(0);
+  CHECK(transport.get("name").as_string() == "docs");
+  transport = transport.get("streamableHttpTransport");
+  CHECK(transport.get("url").as_string() == "https://mcp.example.test/mcp" && transport.get("headers").get("Authorization").as_string() == "Bearer one" &&
+        transport.get("timeout").as_string() == "30s" && transport.get("sseReadTimeout").as_string() == "1.5s" && transport.get("terminateOnClose").as_bool());
+  auto config = wire.root().get("toolConfig");
+  CHECK(!config.get("includeServerSideToolInvocations").valid() && config.get("retrievalConfig").get("latLng").get("latitude").as_double() == 37.5665 &&
+        config.get("retrievalConfig").get("latLng").get("longitude").as_double() == 126.978 && config.get("retrievalConfig").get("languageCode").as_string() == "ko-KR");
+  auto audio = wire.root().get("generationConfig").get("responseFormat").get("audio");
+  CHECK(audio.get("mimeType").as_string() == "AUDIO_MP3" && audio.get("sampleRate").as_uint() == 24000u && audio.get("bitRate").as_uint() == 64000u && audio.get("delivery").as_string() == "INLINE");
+
+  // A rotated MCP credential keeps the history replayable; another header name, URL or tool option does not.
+  auto next = value; next.messages.push_back(gemini_reply(descriptor, encoded)); next.messages.push_back(Message{"", Role::User, {Text{"again"}}});
+  auto changed = next; changed.mcp_servers[0].headers[0].second = "Bearer two"; encoded_ok(descriptor, changed);
+  changed = next; changed.mcp_servers[0].headers[0].first = "X-Key"; replay_rejected(gemini::encode(descriptor, changed, false));
+  changed = next; changed.mcp_servers[0].url = "https://other.example.test/mcp"; replay_rejected(gemini::encode(descriptor, changed, false));
+  changed = next; std::get<gemini::FileSearchTool>(changed.builtin_tools[3]).top_k = 4; replay_rejected(gemini::encode(descriptor, changed, false));
+  changed = next; std::get<gemini::ComputerUseTool>(changed.builtin_tools[2]).excluded_functions.clear(); replay_rejected(gemini::encode(descriptor, changed, false));
+  changed = next; changed.audio_format->delivery = "URI"; replay_rejected(gemini::encode(descriptor, changed, false));
+
+  auto refused = [&](auto edit) { auto bad = value; edit(bad); invalid(gemini::encode(descriptor, bad, false)); };
+  refused([](auto& r) { std::get<gemini::GoogleSearchTool>(r.builtin_tools[0]).end_time.reset(); });
+  refused([](auto& r) { std::get<gemini::GoogleSearchTool>(r.builtin_tools[0]).start_time = "yesterday"; });
+  refused([](auto& r) { std::get<gemini::ComputerUseTool>(r.builtin_tools[2]).environment = "browser"; });
+  refused([](auto& r) { std::get<gemini::ComputerUseTool>(r.builtin_tools[2]).excluded_functions = {"a", "a"}; });
+  refused([](auto& r) { std::get<gemini::FileSearchTool>(r.builtin_tools[3]).store_names.clear(); });
+  refused([](auto& r) { std::get<gemini::FileSearchTool>(r.builtin_tools[3]).store_names = {"corpora/notes"}; });
+  refused([](auto& r) { std::get<gemini::FileSearchTool>(r.builtin_tools[3]).top_k = 0u; });
+  refused([](auto& r) { r.mcp_servers[0].url = "http://mcp.example.test/mcp"; });
+  refused([](auto& r) { r.mcp_servers.push_back(r.mcp_servers[0]); });
+  refused([](auto& r) { r.mcp_servers[0].headers.push_back({"authorization", "again"}); });
+  refused([](auto& r) { r.mcp_servers[0].headers[0].second = "line\nbreak"; });
+  refused([](auto& r) { r.mcp_servers[0].timeout = "30"; });
+  refused([](auto& r) { r.retrieval_config->latitude = 91.0; });
+  refused([](auto& r) { r.retrieval_config->longitude.reset(); });
+  refused([](auto& r) { r.retrieval_config->language_code = "ko KR"; });
+  refused([](auto& r) { r.audio_format->delivery = "uri"; });
+  refused([](auto& r) { r.audio_format->bit_rate = 0u; });
+
+  // Next to a client function, an MCP server turns the invocations on; computer use alone runs nothing on the
+  // service, so it neither needs them nor may ask for them.
+  auto schema = own(R"({"type":"object","properties":{}})");
+  auto mcp_only = request<gemini::Request>(); mcp_only.mcp_servers = {server}; mcp_only.tools = {gemini::ToolDefinition{"lookup", "Looks up", schema}};
+  CHECK(parse(encoded_ok(descriptor, mcp_only).body).root().get("toolConfig").get("includeServerSideToolInvocations").as_bool());
+  auto computer_only = request<gemini::Request>(); computer_only.builtin_tools = {gemini::ComputerUseTool{}}; computer_only.tools = mcp_only.tools;
+  CHECK(!parse(encoded_ok(descriptor, computer_only).body).root().get("toolConfig").valid());
+  auto bad = computer_only; bad.server_tool_invocations = true; invalid(gemini::encode(descriptor, bad, false));
+  // The service's computer use functions may be required or allowed by name, which the request never declared.
+  auto forced = request<gemini::Request>(); forced.builtin_tools = {gemini::ComputerUseTool{}}; forced.tool_choice = gemini::ToolChoice{gemini::ToolChoiceMode::Any, {"navigate"}};
+  CHECK(parse(encoded_ok(descriptor, forced).body).root().get("toolConfig").get("functionCallingConfig").get("allowedFunctionNames").at(0).as_string() == "navigate");
+
+  // Computer use: the model calls a function the service declared; the caller answers {"url": ...} and a screenshot.
+  auto browse = request<gemini::Request>(); browse.builtin_tools = {gemini::ComputerUseTool{}};
+  const auto sent = encoded_ok(descriptor, browse);
+  Accumulator accumulator; gemini::Codec codec(descriptor, gemini::Mode::Buffered, accumulator, sent.context);
+  codec.buffered(R"({"modelVersion":"fixture-model","responseId":"g3","candidates":[{"index":0,"content":{"role":"model","parts":[{"functionCall":{"id":"c1","name":"navigate","args":{"url":"https://example.com"}},"thoughtSignature":"c2ln"}]},"finishReason":"STOP"}]})", {});
+  CHECK(accumulator.outcome() && std::holds_alternative<Completion>(*accumulator.outcome()));
+  const auto& completion = std::get<Completion>(*accumulator.outcome());
+  const auto& call = std::get<ToolCall>(completion.messages.front().parts.front());
+  CHECK(call.kind == ToolCallKind::ClientExecuted && call.name == "navigate" && call.id == "c1" && completion.stop.kind == StopKind::ToolUse);
+  auto png = std::make_shared<const std::string>("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==");
+  ToolResult answer; answer.tool_use_id = "c1"; answer.content = R"({"url":"https://example.com"})"; answer.content_parts = {Media::image("image/png", png)};
+  auto turn = browse; turn.messages.push_back(completion.messages.front()); turn.messages.push_back(Message{"", Role::Tool, {answer}});
+  const auto replayed = parse(encoded_ok(descriptor, turn).body);
+  const auto response = replayed.root().get("contents").at(2).get("parts").at(0).get("functionResponse");
+  CHECK(response.get("name").as_string() == "navigate" && response.get("response").get("url").as_string() == "https://example.com" &&
+        response.get("parts").at(0).get("inlineData").get("mimeType").as_string() == "image/png");
+  auto mixed = answer; mixed.content_parts.push_back(Text{"note"});
+  auto bad_turn = turn; bad_turn.messages.back() = Message{"", Role::Tool, {mixed}}; invalid(gemini::encode(descriptor, bad_turn, false));
+  auto not_object = answer; not_object.content = "plain";
+  bad_turn.messages.back() = Message{"", Role::Tool, {not_object}}; invalid(gemini::encode(descriptor, bad_turn, false));
+  // Without computer use the same call is a function nobody declared.
+  Accumulator plain; gemini::Codec plain_codec(descriptor, gemini::Mode::Buffered, plain, encoded_ok(descriptor, request<gemini::Request>()).context);
+  plain_codec.buffered(R"({"modelVersion":"fixture-model","responseId":"g4","candidates":[{"index":0,"content":{"role":"model","parts":[{"functionCall":{"id":"c1","name":"navigate","args":{}}}]},"finishReason":"STOP"}]})", {});
+  CHECK(plain.outcome() && std::holds_alternative<Failure>(*plain.outcome()) && std::get<Failure>(*plain.outcome()).error.kind == ErrorKind::Unsupported);
+}
 void interaction_nonthinking_transcription_request() {
   const auto descriptor = descriptor_for("google.interactions");
   auto value = request<interactions::Request>();
@@ -171,6 +362,6 @@ void decode_only_audio_scope() {
 }
 }
 int main() {
-  try { gemini_nonthinking_media_request(); interaction_nonthinking_transcription_request(); gemini_boundaries_and_binding(); interaction_boundaries_and_binding(); responses_format_binding(); decode_only_audio_scope(); }
+  try { gemini_nonthinking_media_request(); interaction_nonthinking_transcription_request(); gemini_boundaries_and_binding(); gemini_builtin_tools_and_audio_format(); gemini_service_tool_options(); interaction_boundaries_and_binding(); responses_format_binding(); decode_only_audio_scope(); }
   catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

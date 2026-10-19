@@ -987,6 +987,11 @@ void gemini_audio_frames_merge() {
   CHECK(parts_of(completed(mixed)).size() == 2);
   const auto wav = gemini_decode(gemini_body("[" + frame("audio/wav", "AAA=") + "," + frame("audio/wav", "AAA=") + "]"), true);
   CHECK(parts_of(completed(wav)).size() == 2);
+  // G.711 is headerless too. A streamed WAV answer is one WAV frame (the header and the first samples), then raw L16.
+  const auto mulaw = gemini_decode(gemini_body("[" + frame("audio/mulaw; rate=24000; channels=1", "AAE=") + "," + frame("audio/mulaw; rate=24000; channels=1", "Ag==") + "]"), true);
+  CHECK(parts_of(completed(mulaw)).size() == 1 && *std::get<Media>(parts_of(completed(mulaw))[0]).data == "AAEC");
+  const auto wav_then_l16 = gemini_decode(gemini_body("[" + frame("audio/wav", "UklGRg==") + "," + frame(l16, "AAA=") + "," + frame(l16, "AAA=") + "]"), true);
+  CHECK(parts_of(completed(wav_then_l16)).size() == 2 && std::get<Media>(parts_of(completed(wav_then_l16))[1]).mime == l16);
   const auto split = gemini_decode(gemini_body("[" + frame(l16, "AAA=") + R"(,{"text":"between"},)" + frame(l16, "AAA=") + "]"), true);
   CHECK(parts_of(completed(split)).size() == 3);
   // A stream cut inside a run keeps the description and no payload.

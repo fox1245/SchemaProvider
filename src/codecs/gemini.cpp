@@ -44,11 +44,11 @@ StopKind stop_kind(std::string_view reason, bool call) {
 }
 }
 namespace {
-// Formats whose frames concatenate into one valid stream: raw PCM and MP3. Containers with a header per frame
-// (WAV, Ogg) and every image or video stay one part per frame.
+// Formats whose frames concatenate into one valid stream: raw PCM, G.711 and MP3. Containers with a header per
+// frame (WAV, Ogg) and every image or video stay one part per frame.
 bool concatenable_audio(std::string_view mime) noexcept {
   const auto essence = mime_essence(mime);
-  for (const std::string_view known : {"audio/l16", "audio/pcm", "audio/mpeg", "audio/mp3"}) {
+  for (const std::string_view known : {"audio/l16", "audio/pcm", "audio/mulaw", "audio/alaw", "audio/basic", "audio/mpeg", "audio/mp3"}) {
     if (essence.size() != known.size()) continue;
     bool same = true;
     for (std::size_t i = 0; i < known.size(); ++i) {
@@ -241,7 +241,8 @@ bool Codec::part(json::Value p) {
     if (!call.is_object() || !nonempty(call.get("name"))) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini function identity");
     auto id = call.get("id");
     if (id.valid() && !nonempty(id)) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini function call id");
-    if (!context_->client_tool_declared(call.get("name").as_string())) return fail(ErrorKind::Unsupported, "undeclared Gemini client function");
+    if (!context_->client_tool_declared(call.get("name").as_string()) && !context_->service_declares_functions())
+      return fail(ErrorKind::Unsupported, "undeclared Gemini client function");
     if (call.get("partialArgs").valid() || call.get("willContinue").valid()) return fail(ErrorKind::Unsupported, "streamed partial function arguments unsupported");
     header.name = call.get("name").as_string();
     if (id.valid()) header.wire_id = id.as_string();
@@ -257,6 +258,53 @@ bool Codec::part(json::Value p) {
     kind = PartKind::ToolCall;
     has_call_ = true;
     unknown(call, {"id", "name", "args"});
+  } else if (data_key == "executableCode" || data_key == "toolCall") {
+    // A call the service runs itself: code execution always, other built-in tools and MCP servers with
+    // includeServerSideToolInvocations. The whole part stays the call's native metadata.
+    const auto call = p.get(data_key);
+    if (!call.is_object()) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini opaque part payload");
+    const auto id = call.get("id"), tool_name = call.get("toolName"), tool_type = call.get("toolType"), args = call.get("args");
+    if ((id.valid() && !nonempty(id)) || (tool_name.valid() && !nonempty(tool_name)) || (tool_type.valid() && !nonempty(tool_type)) ||
+        (args.valid() && !args.is_object()))
+      return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini server tool call");
+    if (data_key == "executableCode") header.name = "code_execution";
+    else if (tool_name.valid()) header.name = tool_name.as_string();
+    else if (tool_type.valid()) {
+      header.name = tool_type.as_string();
+      for (auto& c : header.name) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + ('a' - 'A'));
+    } else return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini server tool call");
+    if (id.valid()) header.wire_id = id.as_string();
+    else {
+      if (!ownership_generation_) ownership_generation_ = next_ownership_generation();
+      if (!ownership_generation_) return fail(ErrorKind::ResourceLimit, "Gemini local ownership id exhausted");
+      header.wire_id = "gemini-local-" + std::to_string(ownership_generation_) + '-' + std::to_string(local.value);
+    }
+    if (!calls_.insert(header.wire_id).second) return fail(ErrorKind::ProtocolCorrupt, "duplicate Gemini function call id");
+    open_server_calls_.emplace_back(data_key == "executableCode" ? "codeExecutionResult" : "toolResponse", header.wire_id);
+    header.tool_kind = ToolCallKind::ServerExecuted;
+    content = data_key == "executableCode" ? call.dump() : args.valid() ? args.dump() : "{}";
+    fragment = content;
+    kind = PartKind::ToolCall;
+  } else if (data_key == "codeExecutionResult" || data_key == "toolResponse") {
+    const auto result = p.get(data_key);
+    if (!result.is_object()) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini opaque part payload");
+    const auto id = result.get("id");
+    if (id.valid() && !nonempty(id)) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini server tool result");
+    // Without an id the result answers the oldest open call of its kind.
+    const auto open = std::find_if(open_server_calls_.begin(), open_server_calls_.end(), [&](const auto& entry) {
+      return entry.first == data_key && (!id.valid() || entry.second == id.as_string());
+    });
+    if (open != open_server_calls_.end()) { header.wire_id = open->second; open_server_calls_.erase(open); }
+    else if (id.valid()) header.wire_id = id.as_string();
+    else {
+      if (!ownership_generation_) ownership_generation_ = next_ownership_generation();
+      if (!ownership_generation_) return fail(ErrorKind::ResourceLimit, "Gemini local ownership id exhausted");
+      header.wire_id = "gemini-local-" + std::to_string(ownership_generation_) + '-' + std::to_string(local.value);
+    }
+    header.wire_metadata.reset();
+    content = p.dump();
+    payload = content;
+    kind = PartKind::ServerToolResult;
   } else if ((data_key == "inlineData" || data_key == "fileData") && !(thought.is_bool() && thought.as_bool())) {
     // Generated media becomes a typed part. A thought image is an interim reasoning artifact and
     // stays opaque wire; the whole part is retained for the native array either way.
@@ -295,11 +343,13 @@ bool Codec::part(json::Value p) {
     wire_parts_.push_back(std::move(retained));
     return true;
   }
+  const auto header_kind = header.tool_kind;
   if (!emit(PartBegin{{0}, local, kind, std::move(header), wire_parts_.size()})) return false;
   if (kind == PartKind::Text || kind == PartKind::Thinking || kind == PartKind::ToolCall)
     if (!emit(PartDelta{local, {kind, fragment}})) return false;
   if (kind == PartKind::Thinking && signature.valid()) if (!emit(PartDelta{local, {kind, signature.as_string(), DeltaChannel::Signature}})) return false;
-  if (kind == PartKind::ToolCall) pending_seals_.push_back(local);
+  // A client call is sealed with the stop reason, which decides whether it is complete; the service's call is.
+  if (kind == PartKind::ToolCall && header_kind == ToolCallKind::ClientExecuted) pending_seals_.push_back(local);
   else if (!emit(PartSeal{local, payload, {}})) return false;
   wire_parts_.push_back(std::move(retained));
   return true;

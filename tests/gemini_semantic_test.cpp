@@ -266,8 +266,33 @@ void errors_and_terminals() {
   o = buffered(R"({"candidates":[{"index":1,"content":{"role":"model","parts":[]},"finishReason":"STOP"}]})"); failure(o, ErrorKind::ProtocolCorrupt);
   o = buffered(R"({"candidates":[{"index":0,"finishReason":"STOP"},{"index":0,"finishReason":"STOP"}]})"); failure(o, ErrorKind::ProtocolCorrupt);
   o = buffered(R"({"candidates":[{"index":0,"index":0,"finishReason":"STOP"}]})"); failure(o, ErrorKind::ProtocolCorrupt);
+  // The service's own calls and results are typed parts. A result without an id answers the oldest open call of its
+  // kind, and one with no open call gets a local id.
   o = buffered(body(R"([{"toolCall":{"id":"server","toolType":"GOOGLE_SEARCH","args":{}}},{"codeExecutionResult":{"outcome":"OUTCOME_OK","output":"one"}}])"));
-  for (const auto& p : complete(o).messages[0].parts) CHECK(std::holds_alternative<Opaque>(p));
+  {
+    const auto& p = complete(o).messages[0].parts;
+    CHECK(p.size() == 2 && complete(o).stop.kind == StopKind::EndTurn);
+    const auto& call = std::get<ToolCall>(p[0]);
+    CHECK(call.kind == ToolCallKind::ServerExecuted && call.id == "server" && call.name == "google_search" && call.wire_type == "toolCall" && call.input->root().size() == 0);
+    const auto& result = std::get<ServerToolResult>(p[1]);
+    CHECK(result.wire_type == "codeExecutionResult" && result.tool_use_id.starts_with("gemini-local-") && result.content->root().get("codeExecutionResult").get("output").as_string() == "one");
+  }
+  o = buffered(body(R"re([{"executableCode":{"language":"PYTHON","code":"print(1)"}},{"executableCode":{"language":"PYTHON","code":"print(2)"}},)re"
+                    R"re({"codeExecutionResult":{"outcome":"OUTCOME_OK","output":"1"}},{"codeExecutionResult":{"outcome":"OUTCOME_OK","output":"2"}},)re"
+                    R"re({"toolCall":{"id":"m1","toolName":"docs:search","args":{"q":"x"}}},{"toolResponse":{"id":"m1","response":{"result":"y"}}}])re"));
+  {
+    const auto& p = complete(o).messages[0].parts;
+    CHECK(p.size() == 6);
+    const auto& first = std::get<ToolCall>(p[0]), &second = std::get<ToolCall>(p[1]);
+    CHECK(first.name == "code_execution" && first.wire_type == "executableCode" && first.input->root().get("code").as_string() == "print(1)" && first.id != second.id);
+    CHECK(std::get<ServerToolResult>(p[2]).tool_use_id == first.id && std::get<ServerToolResult>(p[3]).tool_use_id == second.id);
+    const auto& mcp = std::get<ToolCall>(p[4]);
+    CHECK(mcp.kind == ToolCallKind::ServerExecuted && mcp.name == "docs:search" && mcp.input->root().get("q").as_string() == "x");
+    CHECK(std::get<ServerToolResult>(p[5]).tool_use_id == "m1" && std::get<ServerToolResult>(p[5]).wire_type == "toolResponse");
+  }
+  for (auto p : {R"([{"toolCall":{"id":"s","args":{}}}])", R"([{"toolCall":{"id":"s","toolType":"GOOGLE_SEARCH_WEB","args":[]}}])",
+                 R"([{"executableCode":{"id":"","code":"x"}}])", R"([{"toolResponse":{"id":7}}])", R"([{"toolCall":{"id":"call_owned","toolType":"URL_CONTEXT"}},{"functionCall":{"id":"call_owned","name":"lookup","args":{}}}])"})
+  { o = buffered(body(p)); failure(o, ErrorKind::ProtocolCorrupt); }
 }
 void raw_observation_ownership() {
   auto wire = body(R"([{"toolCall":{"id":"server","toolType":"GOOGLE_SEARCH","args":{"z":[null,2,1]}}}])");
@@ -275,7 +300,7 @@ void raw_observation_ownership() {
   auto outcome = buffered(wire);
   const auto& done = complete(outcome);
   CHECK(done.raw_events.size() == 1 && done.raw_events[0].payload->root().dump() == wire);
-  CHECK(std::holds_alternative<Opaque>(done.messages[0].parts[0]));
+  CHECK(std::get<ToolCall>(done.messages[0].parts[0]).kind == ToolCallKind::ServerExecuted);
   const auto prefix = body(R"([{"text":"owned prefix"}])", "", "null");
   const auto terminal = body("[]", "STOP", "null");
   const auto trailing = R"({"usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":2},"future":[3,2,1]})";

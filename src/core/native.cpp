@@ -415,6 +415,42 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
       hash.number(transcription.mode.has_value()); if (transcription.mode) hash.number(static_cast<unsigned>(*transcription.mode));
     }
   }
+  // Each later control is bound only when set, so earlier configurations keep their digest.
+  auto optional_text = [&](const std::optional<std::string>& value) { hash.number(value.has_value()); if (value) hash.text(*value); };
+  auto optional_number = [&](const auto& value) { hash.number(value.has_value()); if (value) hash.number(static_cast<uint64_t>(*value)); };
+  auto texts = [&](const std::vector<std::string>& values) { hash.number(values.size()); for (const auto& value : values) hash.text(value); };
+  if (request.audio_format && (request.audio_format->mime_type || request.audio_format->sample_rate || request.audio_format->bit_rate || request.audio_format->delivery)) {
+    const auto& format = *request.audio_format;
+    hash.text("sp.gemini.audio_format.v1");
+    optional_text(format.mime_type); optional_number(format.sample_rate); optional_number(format.bit_rate); optional_text(format.delivery);
+  }
+  if (!request.builtin_tools.empty() || !request.mcp_servers.empty()) {
+    hash.text("sp.gemini.service_tools.v1");
+    hash.number(request.builtin_tools.size());
+    for (const auto& tool : request.builtin_tools) {
+      hash.number(tool.index());
+      std::visit([&](const auto& value) {
+        using T = std::decay_t<decltype(value)>;
+        if constexpr (std::is_same_v<T, gemini::GoogleSearchTool>) {
+          optional_text(value.start_time); optional_text(value.end_time); hash.number(value.web_search); hash.number(value.image_search);
+        } else if constexpr (std::is_same_v<T, gemini::GoogleMapsTool>) optional_number(value.enable_widget);
+        else if constexpr (std::is_same_v<T, gemini::ComputerUseTool>) {
+          hash.text(value.environment); texts(value.excluded_functions); texts(value.disabled_safety_policies); optional_number(value.prompt_injection_detection);
+        } else if constexpr (std::is_same_v<T, gemini::FileSearchTool>) {
+          texts(value.store_names); optional_text(value.metadata_filter); optional_number(value.top_k);
+        }
+      }, tool);
+    }
+    // Header values are credentials: they are sent but not bound, so a rotated one keeps history replayable.
+    hash.number(request.mcp_servers.size());
+    for (const auto& server : request.mcp_servers) {
+      hash.text(server.name); hash.text(server.url);
+      hash.number(server.headers.size()); for (const auto& header : server.headers) hash.text(header.first);
+      optional_text(server.timeout); optional_text(server.sse_read_timeout); optional_number(server.terminate_on_close);
+    }
+  }
+  // server_tool_invocations and retrieval_config are per-turn choices like tool_choice: they change what one answer
+  // shows or where it searches, not the lineage.
   return hash.finish(digest);
 }
 bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, const interactions::Request& request, const descriptor::EffectiveChoices& choices, Digest& digest) {
@@ -512,6 +548,7 @@ std::shared_ptr<const NativeContext> NativeContext::decoding_only() const {
   context->client_tools_ = client_tools_;
   context->replay_eligible_ = false;
   context->thinking_disabled_ = thinking_disabled_;
+  context->service_functions_ = service_functions_;
   context->audio_format_ = audio_format_;
   context->interaction_lifecycle_ = interaction_lifecycle_;
   return context;
@@ -585,6 +622,8 @@ NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, 
     : family_(Family::Gemini), model_(request.model), route_(descriptor.resolved_path(false, request.model)), prefix_count_(request.messages.size()), policy_(descriptor.policy()) {
   valid_ = descriptor.family() == family_name(family_) && origin_digest(descriptor, origin_) && configuration_digest(descriptor, request, choices, prefix_);
   thinking_disabled_ = choices.thinking_budget && *choices.thinking_budget == 0 && !choices.thinking_level;
+  service_functions_ = std::any_of(request.builtin_tools.begin(), request.builtin_tools.end(),
+                                   [](const gemini::BuiltinTool& tool) { return std::holds_alternative<gemini::ComputerUseTool>(tool); });
   if (valid_) {
     client_tools_.reserve(request.tools.size());
     for (const auto& tool : request.tools) client_tools_.push_back(tool.name);

@@ -47,6 +47,8 @@ class Codec {
   bool close_run();
   std::vector<LocalId> pending_seals_;
   std::set<std::string, std::less<>> calls_;
+  // Service-run calls whose result has not arrived: the result's data member, then the call id.
+  std::vector<std::pair<std::string, std::string>> open_server_calls_;
   Usage usage_;
   size_t input_bytes_ = 0;
   uint64_t ownership_generation_ = 0;

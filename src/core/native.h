@@ -21,6 +21,8 @@ class NativeContext final {
   bool matches_descriptor(const descriptor::ValidatedDescriptor&) const;
   std::optional<std::string_view> server_tool_name(std::string_view id) const;
   bool client_tool_declared(std::string_view name) const;
+  // Gemini computer use: the service declares functions the client performs, whose names the request never listed.
+  bool service_declares_functions() const noexcept { return service_functions_; }
   // Drops issuing authority permanently while retaining typed decode scope.
   std::shared_ptr<const NativeContext> decoding_only() const;
   bool replay_eligible() const noexcept { return replay_eligible_; }
@@ -54,6 +56,7 @@ class NativeContext final {
   bool history_valid_ = true;
   bool replay_eligible_ = true;
   bool thinking_disabled_ = false;
+  bool service_functions_ = false;
   std::string audio_format_;
   std::uint8_t interaction_lifecycle_ = 0;
   std::vector<std::pair<std::string, std::string>> pending_server_tools_;
