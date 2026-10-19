@@ -107,7 +107,8 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     if (!descriptor::contains(descriptor.family_policy().openrouter_origins, descriptor.base_url()))
       return bad("gateway controls require declared OpenRouter origin");
   }
-  if (auto error = request_controls::validate_plugins(request.plugins, resources.request_tools)) return bad(std::move(*error));
+  if (auto refusal = request_controls::validate_plugins(descriptor.family_policy(), request.plugins, resources.request_tools))
+    return Error{refusal->admitted ? ErrorKind::InvalidRequest : ErrorKind::Unsupported, std::move(refusal->message)};
   if (request.reasoning) {
     const auto& reasoning = *request.reasoning;
     if (!reasoning.effort && !reasoning.max_tokens && !reasoning.exclude && !reasoning.enabled)
@@ -175,6 +176,8 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   // Reject ordinary malformed input before native capture; edited native prefixes
   // still retain replay-mismatch precedence.
   if (media_error && !captured_history) return *media_error;
+  if (auto refusal = request_controls::validate_extensions(descriptor, request.extensions))
+    return Error{refusal->admitted ? ErrorKind::InvalidRequest : ErrorKind::Unsupported, std::move(refusal->message)};
   auto context = std::shared_ptr<const NativeContext>(new NativeContext(descriptor, request, effective, streaming));
   if (!context->history_valid_)
     return Error{ErrorKind::ReplayIneligible, "native replay provenance, binding or content mismatch"};
@@ -481,6 +484,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       body.raw(",\"image_config\":");
       request_controls::write_image_config(body, *request.image_config);
     }
+    request_controls::write_extensions(body, request.extensions);
     body.raw("}");
     if (!body.ok()) return limit_error();
     return {};

@@ -194,6 +194,15 @@ Values the providers extend are checked by shape, not by compiled lists:
 - **Policy data.** The Chat reasoning efforts gain `minimal` and the Responses ones `max`. The policy's content digest changes.
 - **Reason codes.** The refusal reason codes of these checks are renamed after their shape rules.
 
+Untyped values are admitted by the policy (#32):
+- **Extensions.** Every request struct gains `extensions`, top-level members sent only when the policy's new `extensions` facts admit them for the descriptor's origin, with a declared value schema. The built-in policy admits none, and a request without them keeps its body and digest.
+- **OpenRouter plugins and server tools.** These are admitted by the policy's new `openrouter_plugins` and `openrouter_server_tools` facts, with the schemas of their options. The built-in policy lists the documented ones.
+  - An id or type it does not list, which #89 and #90 sent as given, is now `Unsupported`.
+  - Options outside the schema are `InvalidRequest`.
+- **Generic tools.** `responses::GenericHostedTool` sends a tool type the policy lists in `server_tools` with `"generic": true` and an options schema.
+- **Capability.** The new capability bit `sp::capability::PolicyAdmittedExtensions` is part of `RequiredProvider`.
+- **Policy digest.** The policy's content digest changes.
+
 ## From interface 5 to 6
 
 Package 0.3.0 alpha adds `Usage::provider_cost` and the fixed-size `ProviderReportedCost`, `UsdAmount`, `CostSource`, `CostStatus` and `CostRounding` types. Existing field access remains source-compatible, but `Usage`, `UsageUpdate`, `Completion`, `PartialCompletion` and the containing `Event` layouts grow. Rebuild every consumer against the same headers and generation 6 libraries (`libsp_*.so.6`); interface 5 binaries must not load interface 6 libraries. CMake consumers select `SchemaProvider 0.3.0 EXACT`.

@@ -47,6 +47,8 @@ struct Request {
   std::optional<bool> include_reasoning{}, usage_include{};
   std::vector<std::string> models{};
   std::vector<sp::OpenRouterPlugin> plugins{};
+  // Top-level members the policy admits for this origin (#32), sent as given after the typed ones.
+  std::shared_ptr<const json::Document> extensions{};
   // Generated media. Audio output needs the Audio modality together with `audio`; image output
   // (modalities and image_config) is an OpenRouter extension.
   std::vector<OutputModality> modalities{};

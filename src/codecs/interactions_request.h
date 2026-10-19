@@ -79,6 +79,9 @@ struct Request {
   std::optional<std::string> agent;
   Lifecycle lifecycle = Lifecycle::Create;
   std::string interaction_id;
+  // Top-level members the policy admits for this origin (#32), sent as given after the typed ones. Creating
+  // requests only.
+  std::shared_ptr<const json::Document> extensions;
 
   static Request simple(std::string model_name, std::string user_prompt,
                         std::optional<uint64_t> max_tokens = std::nullopt,

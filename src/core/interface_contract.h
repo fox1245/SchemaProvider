@@ -32,9 +32,13 @@ inline constexpr std::uint64_t OpenRouterRoutingMaxPrice = 1ULL << 9;
 // built with this header would read past, so it lacks this bit and a require_interface_contract call
 // with RequiredProvider refuses it.
 inline constexpr std::uint64_t ErrorReason = 1ULL << 10;
+// Every request has `extensions`, the top-level members the policy admits (#32). A library built before the member has
+// smaller requests and would not send them, so it lacks this bit and a require_interface_contract call with
+// RequiredProvider refuses it.
+inline constexpr std::uint64_t PolicyAdmittedExtensions = 1ULL << 11;
 inline constexpr std::uint64_t RequiredProvider = TypedRuntime | PreparedAdmission |
     NullableUsage | All5Native | TrustedArchive | OrderedWireEvents | NativeSocketRuntime |
-    RetainedJsonSize | CompleteAttemptEvidence | OpenRouterRoutingMaxPrice | ErrorReason;
+    RetainedJsonSize | CompleteAttemptEvidence | OpenRouterRoutingMaxPrice | ErrorReason | PolicyAdmittedExtensions;
 }
 InterfaceContract core_interface_contract() noexcept;
 std::uint32_t codec_interface_revision() noexcept;

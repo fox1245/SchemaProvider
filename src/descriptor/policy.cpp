@@ -1,4 +1,5 @@
 #include "descriptor/policy.h"
+#include "descriptor/owned_keys.h"
 #include "crypto/crypto.h"
 #include "sp/config_defaults.h"
 #include <algorithm>
@@ -232,7 +233,7 @@ class PolicyLoader {
         fail("", "configured policy depth limit");
       auto families=root.get("families"); if(!families.is_array() || families.size()!=5)fail("/families","all five typed families");
       for(auto v:families.elements()) {
-        closed(v,{"family","bindings","stop_reasons","defaults","required_output_cap","temperature_range","top_p_range","thinking_minimum","thinking_top_p_minimum","reasoning_efforts","reasoning_summaries","thinking_levels","service_tiers","header_versions","header_version","server_tools","openrouter_origins","temperature_forbidden_model_prefixes","media","openrouter_media"},"/families",{"temperature_forbidden_generations","max_completion_tokens_origins","unreplayable_parts"});
+        closed(v,{"family","bindings","stop_reasons","defaults","required_output_cap","temperature_range","top_p_range","thinking_minimum","thinking_top_p_minimum","reasoning_efforts","reasoning_summaries","thinking_levels","service_tiers","header_versions","header_version","server_tools","openrouter_origins","temperature_forbidden_model_prefixes","media","openrouter_media"},"/families",{"temperature_forbidden_generations","max_completion_tokens_origins","unreplayable_parts","extensions","openrouter_plugins","openrouter_server_tools"});
         FamilyPolicy f; f.family=text(v.get("family"),"/families");
         if(f.family!="openai.chat" && f.family!="anthropic.messages" && f.family!="openai.responses" && f.family!="google.generate" && f.family!="google.interactions")fail("/families","typed family");
         if(policy->family(f.family))fail("/families","unique families");
@@ -317,25 +318,84 @@ class PolicyLoader {
         }
         if(f.family=="anthropic.messages" && (!f.header_version || !contains(f.header_versions,*f.header_version)))fail("/header_version","admitted Messages version");
         if(f.family!="anthropic.messages" && (f.header_version || !f.header_versions.empty()))fail("/header_version","no unsupported header version");
+        auto schema_of = [](Value value, const std::string& pointer) {
+          auto parsed = parse_value_schema(value, pointer);
+          if (auto* error = std::get_if<ConfigError>(&parsed)) fail(error->pointer, error->expected);
+          return std::get<ValueSchema>(std::move(parsed));
+        };
         auto tools=v.get("server_tools"); if(!tools.is_array() || tools.size()>64)fail("/server_tools","bounded reviewed tool facts");
         for (auto t : tools.elements()) {
-          closed(t, {"type","name","max_uses"}, "/server_tools");
+          closed(t, {"type","name","max_uses"}, "/server_tools", {"options","generic"});
           if (f.family != "anthropic.messages" && f.family != "openai.responses")
             fail("/server_tools", "typed Messages or Responses tool facts only");
           ServerToolFact fact{text(t.get("type"),"/server_tools"),
                               text(t.get("name"),"/server_tools"),
                               boolean(t.get("max_uses"),"/server_tools")};
+          if (t.get("generic").valid()) fact.generic = boolean(t.get("generic"), "/server_tools/generic");
+          if (t.get("options").valid()) {
+            fact.options = schema_of(t.get("options"), "/server_tools/options");
+            // The options are the tool's other members: an object whose properties never name an owned member.
+            if (fact.options->kind != ValueSchema::Kind::Object) fail("/server_tools/options", "object schema");
+            for (const auto& name : fact.options->names)
+              if (name == "type" || name == "name" || name == "max_uses" || name == "input_schema" || name == "description")
+                fail("/server_tools/options", "properties other than the tool's typed members");
+          }
           if (f.family == "openai.responses") {
-            // The typed hosted tools the Responses encoder can write; OpenRouter's server tools need no fact.
+            // The typed hosted tools the Responses encoder can write, or a generic one with declared options.
+            // OpenRouter's server tools have their own facts.
             constexpr std::string_view types[]{"web_search","image_generation","file_search","tool_search","shell",
                                                "code_interpreter","mcp","computer","computer_use_preview"};
-            if (fact.max_uses || fact.name != fact.type ||
-                std::find(std::begin(types), std::end(types), fact.type) == std::end(types))
-              fail("/server_tools", "declared typed Responses tool fact");
-          }
+            const bool typed = std::find(std::begin(types), std::end(types), fact.type) != std::end(types);
+            const bool token = !fact.type.empty() && fact.type.size() <= 64 && std::all_of(fact.type.begin(), fact.type.end(), [](unsigned char c) {
+              return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+            });
+            if (fact.max_uses || fact.name != fact.type || (typed ? fact.generic || fact.options : !fact.generic || !fact.options || !token))
+              fail("/server_tools", "declared typed Responses tool fact, or a generic one with options");
+          } else if (fact.generic) fail("/server_tools/generic", "Responses generic tools only");
           for (const auto& existing : f.server_tools)
             if (existing.type == fact.type) fail("/server_tools", "unique tool types");
           f.server_tools.push_back(std::move(fact));
+        }
+        // Policy-admitted extensions (#32): never an owned member, each for declared origins.
+        if (auto extensions = v.get("extensions"); extensions.valid()) {
+          if (!extensions.is_array() || extensions.size() > 64) fail("/extensions", "bounded array of extension facts");
+          for (auto e : extensions.elements()) {
+            closed(e, {"key","origins","value","replay_eligible"}, "/extensions");
+            ExtensionFact fact{text(e.get("key"), "/extensions/key"), strings(e.get("origins"), "/extensions/origins"),
+                               schema_of(e.get("value"), "/extensions/value"), boolean(e.get("replay_eligible"), "/extensions/replay_eligible")};
+            if (fact.key.empty() || fact.key.size() > 64 || !std::all_of(fact.key.begin(), fact.key.end(), [](unsigned char c) {
+                  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-'; }))
+              fail("/extensions/key", "member name token");
+            if (request_key_owned(f.family, fact.key)) fail("/extensions/key", "a member the encoder does not own");
+            if (fact.origins.empty()) fail("/extensions/origins", "at least one origin");
+            for (const auto& origin : fact.origins)
+              if (!valid_origin(origin) || origin.ends_with('/')) fail("/extensions/origins", "canonical origins without path");
+            for (const auto& existing : f.extensions) if (existing.key == fact.key) fail("/extensions/key", "unique extension keys");
+            f.extensions.push_back(std::move(fact));
+          }
+        }
+        // OpenRouter plugins and server tools: admitted names with the schema of their options.
+        for (const auto& [member, target] : {std::pair<std::string_view, std::vector<GatewayFact>*>{"openrouter_plugins", &f.openrouter_plugins},
+                                             std::pair<std::string_view, std::vector<GatewayFact>*>{"openrouter_server_tools", &f.openrouter_server_tools}}) {
+          const auto list = v.get(member);
+          if (!list.valid()) continue;
+          const std::string pointer = "/" + std::string(member);
+          const bool plugins = member == "openrouter_plugins";
+          if ((f.family != "openai.chat" && f.family != "openai.responses") || f.openrouter_origins.empty())
+            fail(pointer, "Chat or Responses families with declared OpenRouter origins");
+          if (!list.is_array() || list.size() > 64) fail(pointer, "bounded array of facts");
+          for (auto item : list.elements()) {
+            closed(item, {plugins ? "id" : "type"}, pointer, {plugins ? "options" : "parameters"});
+            GatewayFact fact{text(item.get(plugins ? "id" : "type"), pointer)};
+            if (!plugins && (!fact.name.starts_with("openrouter:") || fact.name.size() <= 11)) fail(pointer, "openrouter: tool type");
+            if (const auto schema = item.get(plugins ? "options" : "parameters"); schema.valid() && !schema.is_null()) {
+              fact.options = schema_of(schema, pointer + (plugins ? "/options" : "/parameters"));
+              if (fact.options->kind != ValueSchema::Kind::Object) fail(pointer, "object schema");
+              if (plugins && std::binary_search(fact.options->names.begin(), fact.options->names.end(), std::string("id"))) fail(pointer, "options without id");
+            }
+            for (const auto& existing : *target) if (existing.name == fact.name) fail(pointer, "unique names");
+            target->push_back(std::move(fact));
+          }
         }
         if(auto error=validate(f,choices(f.defaults),{},false))fail("/defaults",*error);
         if(f.defaults.strict_tools && f.family!="openai.responses") fail("/defaults/strict_tools","Responses strict tools only");

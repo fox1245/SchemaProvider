@@ -638,6 +638,9 @@ constexpr Entry messages_request_table[] = {
   {"invalid code execution container id", "request.messages.container_invalid"},
 };
 constexpr Entry responses_request_table[] = {
+  {"an OpenRouter server tool is not admitted by the policy", "request.responses.an_openrouter_server_tool_is_not_admitted_by"},
+  {"OpenRouter server tool parameters do not match the policy's schema", "request.responses.openrouter_server_tool_parameters_do_not_match"},
+  {"a generic hosted tool's options do not match the policy's schema", "request.responses.a_generic_hosted_tool_s_options_do_not_match"},
   {"OpenRouter server tools require a declared OpenRouter origin", "request.responses.openrouter_server_tools_require_a_declared"},
   {"OpenRouter server tools require an openrouter: type and object parameters", "request.responses.openrouter_server_tools_require_an_openrouter"},
   {"MCP tools require unique server labels", "request.responses.mcp_tools_require_unique_server_labels"},
@@ -787,6 +790,7 @@ constexpr Entry gemini_request_table[] = {
   {"Gemini supports user, tool and captured model messages", "request.generate.gemini_supports_user_tool_and_captured_model"},
 };
 constexpr Entry interactions_request_table[] = {
+  {"an interaction lifecycle request carries no extensions", "request.interactions.an_interaction_lifecycle_request_carries_no"},
   {"model and bounded messages/tools required", "request.interactions.model_and_bounded_messages_tools_required"},
   {"response format count limit exceeded", "request.interactions.response_format_count_limit_exceeded"},
   {"speech configuration count limit exceeded", "request.interactions.speech_configuration_count_limit_exceeded"},
@@ -842,9 +846,16 @@ constexpr Entry interactions_request_table[] = {
   {"a background interaction needs store", "request.interactions.background_needs_store"},
 };
 constexpr Entry shared_request_table[] = {
+  {"options are not admitted by the policy", "request.options.options_are_not_admitted_by_the_policy"},
+  {"options do not match the policy's schema", "request.options.options_do_not_match_the_policy_s_schema"},
+  {"an OpenRouter plugin is not admitted by the policy", "request.plugins.an_openrouter_plugin_is_not_admitted_by_the"},
+  {"OpenRouter plugin options do not match the policy's schema", "request.plugins.openrouter_plugin_options_do_not_match_the"},
+  {"extensions must be an object", "request.extensions.extensions_must_be_an_object"},
+  {"an extension cannot name a member the SDK writes", "request.extensions.an_extension_cannot_name_a_member_the_sdk"},
+  {"an extension is not admitted by the policy for this origin", "request.extensions.an_extension_is_not_admitted_by_the_policy"},
+  {"an extension value does not match its declared schema", "request.extensions.an_extension_value_does_not_match_its"},
   {"OpenRouter plugin count limit exceeded", "request.plugins.count_limit_exceeded"},
   {"OpenRouter plugins require unique ids", "request.plugins.require_unique_ids"},
-  {"OpenRouter plugin options must be an object without id", "request.plugins.options_must_be_an_object_without_id"},
   {"image_config values must be short tokens", "request.image_config.values_must_be_short_tokens"},
   {"image_config output_compression is 0 to 100", "request.image_config.output_compression_is_0_to_100"},
   {"positive output cap required", "request.choice.positive_output_cap_required"},

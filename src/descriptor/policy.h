@@ -1,6 +1,7 @@
 #pragma once
 #include "descriptor/catalogue.h"
 #include "descriptor/descriptor.h"
+#include "descriptor/value_schema.h"
 #include "json/json.h"
 #include <array>
 #include <memory>
@@ -35,7 +36,15 @@ struct RequestDefaults {
   std::optional<std::string> reasoning_effort, reasoning_summary, thinking_level, service_tier;
   std::optional<double> temperature, top_p;
 };
-struct ServerToolFact { std::string type, name; bool max_uses; };
+// `options`: the tool's other members the policy admits, with their value schema (#32). `generic`: a Responses tool
+// type the SDK has no struct for, sent through responses::GenericHostedTool.
+struct ServerToolFact { std::string type, name; bool max_uses; std::optional<ValueSchema> options{}; bool generic = false; };
+// A top-level request member the policy admits for the listed origins (#32). A replay-ineligible extension makes the
+// turn's answer not continuable natively; an eligible one joins the configuration digest.
+struct ExtensionFact { std::string key; std::vector<std::string> origins; ValueSchema value; bool replay_eligible = false; };
+// An OpenRouter plugin id or server tool type the policy admits at its declared origins, with the schema of the
+// plugin's other members or of the tool's `parameters` (none: no options).
+struct GatewayFact { std::string name; std::optional<ValueSchema> options; };
 struct FamilyPolicy {
   std::string family, model_member, messages_member, stream_member, cap_member;
   std::vector<std::string> usage_path;
@@ -50,6 +59,8 @@ struct FamilyPolicy {
   std::vector<std::string> openrouter_origins;
   std::vector<std::string> temperature_forbidden_model_prefixes;
   std::vector<ServerToolFact> server_tools;
+  std::vector<ExtensionFact> extensions;
+  std::vector<GatewayFact> openrouter_plugins, openrouter_server_tools;
   // Captured response parts the service refuses when they are sent back: a part whose data member `member` lacks
   // the member `missing`. Native replay of such a message is refused before dispatch. Generate only.
   std::vector<std::pair<std::string, std::string>> unreplayable_parts;

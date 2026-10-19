@@ -247,6 +247,11 @@ void response_format_digest(Hash& hash, const std::optional<ResponseFormat>& for
   hash.text(format->name); hash.text(format->description); hash.document(format->schema);
   hash.number(format->strict.has_value()); if (format->strict) hash.number(*format->strict);
 }
+// Policy-admitted extensions join the configuration when present (#32), so a request without them keeps its digest.
+void extensions_digest(Hash& hash, const std::shared_ptr<const json::Document>& extensions) {
+  if (!extensions || !extensions->root().is_object() || !extensions->root().size()) return;
+  hash.text("sp.extensions.v1"); hash.document(extensions);
+}
 bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, const chat::Request& request,
                           const descriptor::EffectiveChoices& choices, Digest& digest) {
   Hash hash(descriptor.policy()->resources()); hash.text("sp.chat.configuration.v1");
@@ -288,6 +293,7 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
   for (const auto& tool : request.tools) {
     hash.text(tool.name); hash.text(tool.description); hash.document(tool.parameters);
   }
+  extensions_digest(hash, request.extensions);
   return hash.finish(digest);
 }
 bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, const messages::Request& request, const descriptor::EffectiveChoices& choices, Digest& digest) {
@@ -323,6 +329,7 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
     }
   }
   if (request.container) { hash.text("sp.messages.container.v1"); hash.text(*request.container); }
+  extensions_digest(hash, request.extensions);
   return hash.finish(digest);
 }
 bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, const responses::Request& request, const descriptor::EffectiveChoices& choices, Digest& digest) {
@@ -404,6 +411,8 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
         hash.text(tool.environment); hash.number(tool.display_width); hash.number(tool.display_height);
       } else if constexpr (std::is_same_v<T, responses::OpenRouterServerTool>) {
         hash.text(tool.type); hash.document(tool.parameters);
+      } else if constexpr (std::is_same_v<T, responses::GenericHostedTool>) {
+        hash.text(tool.type); hash.document(tool.options);
 
       } else if constexpr (std::is_same_v<T, responses::ShellTool>) {
         hash.number(tool.environment.skills.size());
@@ -440,6 +449,7 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
       optional_number(config.output_compression);
     }
   }
+  extensions_digest(hash, request.extensions);
   return hash.finish(digest);
 }
 bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, const gemini::Request& request, const descriptor::EffectiveChoices& choices, Digest& digest) {
@@ -525,6 +535,7 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
   }
   // server_tool_invocations and retrieval_config are per-turn choices like tool_choice: they change what one answer
   // shows or where it searches, not the lineage.
+  extensions_digest(hash, request.extensions);
   return hash.finish(digest);
 }
 bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, const interactions::Request& request, const descriptor::EffectiveChoices& choices, Digest& digest) {
@@ -594,6 +605,7 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
     hash.number(request.store.has_value()); if (request.store) hash.number(*request.store);
     hash.number(request.video_task.has_value()); if (request.video_task) hash.text(*request.video_task);
   }
+  extensions_digest(hash, request.extensions);
   return hash.finish(digest);
 }
 bool content_digest(const Message& message, Digest& digest, std::string_view family, const descriptor::CodecResources& resources) {
@@ -652,11 +664,13 @@ std::string_view NativeContext::family_name(Family family) {
 NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, const messages::Request& request, const descriptor::EffectiveChoices& choices, bool streaming)
     : family_(Family::Messages), model_(request.model), route_(descriptor.path(streaming)), prefix_count_(request.messages.size()), policy_(descriptor.policy()) {
   valid_ = descriptor.family() == "anthropic.messages" && origin_digest(descriptor, origin_) && configuration_digest(descriptor, request, choices, prefix_);
+  if (!request_controls::extensions_replay_eligible(descriptor, request.extensions)) replay_eligible_ = false;
   if (valid_) bind_history(request.messages);
 }
 NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, const responses::Request& request, const descriptor::EffectiveChoices& choices, bool streaming)
     : family_(Family::Responses), model_(request.model), route_(descriptor.path(streaming)), prefix_count_(request.messages.size()), policy_(descriptor.policy()) {
   valid_ = descriptor.family() == "openai.responses" && origin_digest(descriptor, origin_) && configuration_digest(descriptor, request, choices, prefix_);
+  if (!request_controls::extensions_replay_eligible(descriptor, request.extensions)) replay_eligible_ = false;
   if (!valid_) return;
   configuration_ = prefix_;
   if (request.previous_response_id) {
@@ -695,6 +709,7 @@ NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, 
 NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, const gemini::Request& request, const descriptor::EffectiveChoices& choices, bool)
     : family_(Family::Gemini), model_(request.model), route_(descriptor.resolved_path(false, request.model)), prefix_count_(request.messages.size()), policy_(descriptor.policy()) {
   valid_ = descriptor.family() == family_name(family_) && origin_digest(descriptor, origin_) && configuration_digest(descriptor, request, choices, prefix_);
+  if (!request_controls::extensions_replay_eligible(descriptor, request.extensions)) replay_eligible_ = false;
   thinking_disabled_ = choices.thinking_budget && *choices.thinking_budget == 0 && !choices.thinking_level;
   service_functions_ = std::any_of(request.builtin_tools.begin(), request.builtin_tools.end(),
                                    [](const gemini::BuiltinTool& tool) { return std::holds_alternative<gemini::ComputerUseTool>(tool); });
@@ -708,6 +723,7 @@ NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, 
 NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, const interactions::Request& request, const descriptor::EffectiveChoices& choices, bool streaming)
     : family_(Family::Interactions), model_(request.model), route_(descriptor.path(streaming)), prefix_count_(request.messages.size()), policy_(descriptor.policy()) {
   valid_ = descriptor.family() == family_name(family_) && origin_digest(descriptor, origin_) && configuration_digest(descriptor, request, choices, prefix_);
+  if (!request_controls::extensions_replay_eligible(descriptor, request.extensions)) replay_eligible_ = false;
   // A continued interaction's history is held by the service, so its output has no client-held replay authority;
   // neither has a stored interaction read back by id.
   interaction_lifecycle_ = static_cast<std::uint8_t>(request.lifecycle);
@@ -723,6 +739,7 @@ NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, 
     : family_(Family::Chat), model_(request.model), route_(descriptor.path(streaming)),
       prefix_count_(request.canonical_messages.empty() ? request.messages.size() : request.canonical_messages.size()), policy_(descriptor.policy()) {
   valid_ = descriptor.family() == family_name(family_) && origin_digest(descriptor, origin_) && configuration_digest(descriptor, request, choices, prefix_);
+  if (!request_controls::extensions_replay_eligible(descriptor, request.extensions)) replay_eligible_ = false;
   if (!valid_) return;
   if (request.audio) audio_format_ = request.audio->format;
   if (!request.canonical_messages.empty()) { bind_history(request.canonical_messages); return; }
@@ -829,7 +846,7 @@ NativeReplay::NativeReplay(std::shared_ptr<const NativeContext> context, const M
 InterfaceContract core_interface_contract() noexcept {
   std::uint64_t capabilities = capability::NullableUsage |
       capability::All5Native | capability::TrustedArchive | capability::OrderedWireEvents |
-      capability::OpenRouterRoutingMaxPrice | capability::ErrorReason;
+      capability::OpenRouterRoutingMaxPrice | capability::ErrorReason | capability::PolicyAdmittedExtensions;
   if (json::retained_size_contract() == 1) capabilities |= capability::RetainedJsonSize;
 #if defined(__unix__) || defined(__APPLE__) || defined(_WIN32)
   return {7, capabilities | capability::NativeSocketRuntime};

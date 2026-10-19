@@ -1,4 +1,5 @@
 #include "codecs/interactions_request.h"
+#include "core/request_controls.h"
 #include "codecs/media_input.h"
 #include "core/native.h"
 #include "json/json.h"
@@ -120,6 +121,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     // An operation on a stored interaction: no input, no stream, the id in the path.
     if (!name(request.interaction_id, "=")) return bad("invalid interaction id");
     if (!request.messages.empty() || streaming) return bad("an interaction lifecycle request sends no input and is not streamed");
+    if (request.extensions) return bad("an interaction lifecycle request carries no extensions");
     auto context = std::shared_ptr<const NativeContext>(new NativeContext(descriptor, request, effective, false));
     if (!context->valid_) return Error{ErrorKind::ResourceLimit, "native binding could not be captured"};
     const auto cancel = request.lifecycle == Lifecycle::Cancel;
@@ -238,6 +240,8 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     }
   }
   if (tool_error && !captured_history) return *tool_error;
+  if (auto refusal = request_controls::validate_extensions(descriptor, request.extensions))
+    return Error{refusal->admitted ? ErrorKind::InvalidRequest : ErrorKind::Unsupported, std::move(refusal->message)};
   auto context = std::shared_ptr<const NativeContext>(new NativeContext(descriptor, request, effective, streaming));
   if (!context->history_valid_) return replay_bad();
   if (!context->valid_) return Error{ErrorKind::ResourceLimit, "native binding could not be captured"};
@@ -428,7 +432,9 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       if (!body.ok()) return Error{ErrorKind::ResourceLimit, "request exceeds JSON limits"};
     }
     if (!pending.empty()) return invalid("all pending functions require host results");
-    body.raw("]}");
+    body.raw("]");
+    request_controls::write_extensions(body, request.extensions);
+    body.raw("}");
     if (!body.ok()) return Error{ErrorKind::ResourceLimit, "request exceeds JSON limits"};
     return std::nullopt;
   };
