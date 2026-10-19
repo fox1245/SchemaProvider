@@ -21,6 +21,8 @@ enum class Source {
   Batches, BatchesRequest,
   // Token counting (D7).
   Tokens, TokensRequest,
+  // The webhook verifier.
+  Webhooks,
 };
 struct Entry { std::string_view message, code; };
 std::span<const Entry> entries(Source) noexcept;
