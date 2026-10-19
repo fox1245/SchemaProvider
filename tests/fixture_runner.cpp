@@ -98,6 +98,7 @@ const char* stop_name(sp::StopKind kind) {
     case sp::StopKind::ContextLimit: return "ContextLimit";
     case sp::StopKind::MalformedCall: return "MalformedCall";
     case sp::StopKind::Unknown: return "Unknown";
+    case sp::StopKind::Pending: return "Pending";
   }
   throw std::runtime_error("unprojected stop kind");
 }

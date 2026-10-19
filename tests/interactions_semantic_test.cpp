@@ -136,6 +136,64 @@ void service_request_controls() {
   auto bad_search = request(); bad_search.builtin_tools = {interactions::GoogleSearchTool{{"web_search", "web_search"}}};
   CHECK(std::get<Error>(interactions::encode(desc(), bad_search, false)).kind == ErrorKind::InvalidRequest);
 }
+// Background interactions and the operations on a stored one, in the shapes captured live on 2026-10-19.
+void background_and_lifecycle() {
+  const auto decode = [](const interactions::Request& r, std::string_view body) {
+    auto encoded = interactions::encode(desc(), r, false);
+    CHECK(std::holds_alternative<interactions::EncodedRequest>(encoded));
+    Accumulator a; interactions::Codec c(desc(), interactions::Mode::Buffered, a, std::get<interactions::EncodedRequest>(encoded).context);
+    c.buffered(body, {}); CHECK(a.outcome()); return *a.outcome();
+  };
+  // A background create needs store and answers Pending at once.
+  auto background = request(); background.background = true;
+  CHECK(std::get<Error>(interactions::encode(desc(), background, false)).kind == ErrorKind::InvalidRequest);
+  background.store = true;
+  const auto created_wire = interactions::encode(desc(), background, false);
+  CHECK(parse(std::get<interactions::EncodedRequest>(created_wire).body).root().get("background").as_bool());
+  const auto pending = decode(background, R"({"id":"bg1","status":"in_progress","object":"interaction","model":"fixture-model"})");
+  CHECK(complete(pending).stop.kind == StopKind::Pending && complete(pending).messages.at(0).id == "bg1");
+  // Get, Cancel and Delete send no input, put the id in the path and have no client-held replay authority.
+  interactions::Request get; get.model = "fixture-model"; get.lifecycle = interactions::Lifecycle::Get; get.interaction_id = "bg1";
+  const auto get_wire_result = interactions::encode(desc(), get, false);
+  const auto& get_wire = std::get<interactions::EncodedRequest>(get_wire_result);
+  CHECK(get_wire.method == "GET" && get_wire.path == "/v1beta/interactions/bg1" && get_wire.body.empty() && !get_wire.context->replay_eligible());
+  auto cancel = get; cancel.lifecycle = interactions::Lifecycle::Cancel;
+  const auto cancel_wire_result = interactions::encode(desc(), cancel, false);
+  const auto& cancel_wire = std::get<interactions::EncodedRequest>(cancel_wire_result);
+  CHECK(cancel_wire.method == "POST" && cancel_wire.path == "/v1beta/interactions/bg1/cancel" && cancel_wire.body == "{}");
+  auto erase = get; erase.lifecycle = interactions::Lifecycle::Delete;
+  const auto delete_wire_result = interactions::encode(desc(), erase, false);
+  const auto& delete_wire = std::get<interactions::EncodedRequest>(delete_wire_result);
+  CHECK(delete_wire.method == "DELETE" && delete_wire.path == "/v1beta/interactions/bg1");
+  auto with_input = get; with_input.messages.push_back(Message::user_text("x"));
+  CHECK(std::holds_alternative<Error>(interactions::encode(desc(), with_input, false)));
+  CHECK(std::holds_alternative<Error>(interactions::encode(desc(), get, true)));
+  for (const std::string id : std::vector<std::string>{"", "a/b", "a?b", std::string(257, 'a')}) {
+    auto bad = get; bad.interaction_id = id;
+    CHECK(std::holds_alternative<Error>(interactions::encode(desc(), bad, false)));
+  }
+  // A stored interaction read back lists the request's own input first; it is not output.
+  const std::string echoed = R"({"type":"user_input","content":[{"type":"text","text":"Say hello in one word."}]})";
+  const auto done = decode(get, resource("[" + echoed + "," + thought + "," + output + "]"));
+  CHECK(complete(done).stop.kind == StopKind::EndTurn && complete(done).joined_text() == "answer" && !complete(done).messages[0].native);
+  CHECK(complete(done).messages[0].wire_output->root().size() == 2);
+  const auto running = decode(get, R"({"id":"i1","status":"queued","model":"fixture-model"})");
+  CHECK(complete(running).stop.kind == StopKind::Pending && complete(running).stop.raw == "queued");
+  // Cancel succeeds with what the interaction produced; a read-back cancelled one is a cancelled call.
+  const auto cancelled = decode(cancel, resource("[" + echoed + "," + output + "]", "cancelled"));
+  CHECK(complete(cancelled).stop.kind == StopKind::Unknown && complete(cancelled).stop.raw == "cancelled" && complete(cancelled).joined_text() == "answer");
+  failure(decode(get, resource("[" + output + "]", "cancelled")), ErrorKind::Cancelled);
+  const auto deleted = decode(erase, "{}");
+  CHECK(complete(deleted).stop.raw == "deleted" && complete(deleted).messages.empty());
+  // An agent runs instead of a model.
+  auto agent = request(); agent.model.clear(); agent.agent = "deep-research-preview-04-2026"; agent.background = true; agent.store = true;
+  const auto agent_wire = parse(std::get<interactions::EncodedRequest>(interactions::encode(desc(), agent, false)).body);
+  CHECK(agent_wire.root().get("agent").as_string() == "deep-research-preview-04-2026" && !agent_wire.root().get("model").valid());
+  auto both = agent; both.model = "fixture-model";
+  CHECK(std::holds_alternative<Error>(interactions::encode(desc(), both, false)));
+  const auto researched = decode(agent, R"({"id":"r1","status":"completed","agent":"deep-research-preview-04-2026","steps":[)" + output + "]}");
+  CHECK(complete(researched).joined_text() == "answer" && complete(researched).model.relation == ServedRelation::NotReported);
+}
 void exact_steps_and_replay() {
   for (auto o : {buffered(resource("[" + thought + "," + call + "]", "requires_action")), stream(frames(true))}) {
     const auto& c = complete(o); CHECK(c.stop.kind == StopKind::ToolUse && c.messages.size() == 1);
@@ -187,8 +245,14 @@ void input_boundaries() {
 }
 void lifecycle_and_errors() {
   for (auto [status, kind] : std::vector<std::pair<std::string, ErrorKind>>{{"failed", ErrorKind::RemoteFailure}, {"cancelled", ErrorKind::Cancelled}, {"in_progress", ErrorKind::Unsupported}, {"queued", ErrorKind::Unsupported}}) {
-    failure(buffered(resource("[" + output + "]", status)), kind);
+    if (status == "failed" || status == "cancelled") failure(buffered(resource("[" + output + "]", status)), kind);
     failure(stream({created(), start(0, output), stop(0), end("[" + output + "]", status)}), kind);
+  }
+  // Buffered, a running interaction is Pending: what it produced so far, under its id.
+  for (const std::string status : {"in_progress", "queued"}) {
+    const auto pending = buffered(resource("[" + output + "]", status));
+    CHECK(complete(pending).stop.kind == StopKind::Pending && complete(pending).stop.raw == status && complete(pending).messages.at(0).id == "i1");
+    CHECK(complete(pending).usage.stage != UsageStage::Final);
   }
   auto incomplete = buffered(resource("[" + thought + "," + output + "]", "incomplete"));
   CHECK(complete(incomplete).stop.kind == StopKind::MaxTokens && !complete(incomplete).messages[0].native->complete());
@@ -450,7 +514,7 @@ void failure_reasons() {
   CHECK(failure(cut, ErrorKind::Transport).error.reason.empty());
 }
 int main() {
-  try { served_model_is_recorded(); service_tool_steps(); service_request_controls(); failure_reasons(); creation_without_status_transcription(); raw_observation_ownership(); named_error_raw_ownership(); stateless_missing_resource_id(); missing_terminal_usage(); exact_steps_and_replay(); input_boundaries(); lifecycle_and_errors(); unknown_usage_and_signature(); modality_keyed_usage(); uncached_input_and_unmapped_counters();
+  try { served_model_is_recorded(); service_tool_steps(); service_request_controls(); background_and_lifecycle(); failure_reasons(); creation_without_status_transcription(); raw_observation_ownership(); named_error_raw_ownership(); stateless_missing_resource_id(); missing_terminal_usage(); exact_steps_and_replay(); input_boundaries(); lifecycle_and_errors(); unknown_usage_and_signature(); modality_keyed_usage(); uncached_input_and_unmapped_counters();
     std::cout << "Interactions semantic contracts passed\n"; return 0;
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

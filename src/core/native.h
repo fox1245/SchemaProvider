@@ -29,6 +29,8 @@ class NativeContext final {
   bool thinking_disabled() const noexcept { return thinking_disabled_; }
   // The Chat audio output format the request asked for (wav, mp3, ...), empty when none.
   std::string_view audio_format() const noexcept { return audio_format_; }
+  // The Interactions operation the request performed (interactions::Lifecycle), Create for every other family.
+  std::uint8_t interaction_lifecycle() const noexcept { return interaction_lifecycle_; }
  private:
   enum class Family { Messages, Responses, Gemini, Interactions, Chat };
   static std::string_view family_name(Family);
@@ -53,6 +55,7 @@ class NativeContext final {
   bool replay_eligible_ = true;
   bool thinking_disabled_ = false;
   std::string audio_format_;
+  std::uint8_t interaction_lifecycle_ = 0;
   std::vector<std::pair<std::string, std::string>> pending_server_tools_;
   std::vector<std::string> client_tools_;
   friend messages::EncodeResult messages::encode(const descriptor::ValidatedDescriptor&, const messages::Request&, bool);

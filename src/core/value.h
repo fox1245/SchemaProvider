@@ -246,7 +246,9 @@ struct Usage {
     return provider_cost.total ? std::optional<uint64_t>(provider_cost.total->nano_usd) : std::nullopt;
   }
 };
-enum class StopKind { EndTurn, ToolUse, MaxTokens, StopSequence, ContentFilter, Refusal, PauseTurn, ContextLimit, MalformedCall, Unknown };
+// Pending: the provider is still working on a job it runs in the background (an Interactions `background` request,
+// with `raw` its status). The message id names the job; retrieve it later to get its result.
+enum class StopKind { EndTurn, ToolUse, MaxTokens, StopSequence, ContentFilter, Refusal, PauseTurn, ContextLimit, MalformedCall, Unknown, Pending };
 struct StopReason {
   StopKind kind = StopKind::Unknown;
   std::string raw;

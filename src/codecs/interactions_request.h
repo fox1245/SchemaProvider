@@ -48,6 +48,10 @@ struct GoogleSearchTool { std::vector<std::string> search_types; };  // web_sear
 struct UrlContextTool {};
 struct CodeExecutionTool {};
 using BuiltinTool = std::variant<GoogleSearchTool, UrlContextTool, CodeExecutionTool>;
+// What a request does. Create starts an interaction; the others act on the stored interaction `interaction_id`
+// and send no input: Get returns its current state (Pending while it runs), Cancel stops a background one and
+// returns what it produced (stop raw "cancelled"), Delete removes it (stop raw "deleted").
+enum class Lifecycle { Create, Get, Cancel, Delete };
 struct Request {
   std::string model, account_scope, system;
   std::vector<Message> messages;
@@ -69,6 +73,12 @@ struct Request {
   std::optional<bool> store;
   // generation_config.video_config.task: text_to_video, image_to_video, reference_to_video, edit or extend.
   std::optional<std::string> video_task;
+  // The service runs the interaction in the background and answers at once with a Pending result; it needs `store`.
+  std::optional<bool> background;
+  // An agent (deep-research-..., for example) runs the interaction instead of `model`; leave `model` empty.
+  std::optional<std::string> agent;
+  Lifecycle lifecycle = Lifecycle::Create;
+  std::string interaction_id;
 
   static Request simple(std::string model_name, std::string user_prompt,
                         std::optional<uint64_t> max_tokens = std::nullopt,

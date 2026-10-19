@@ -460,7 +460,8 @@ bool Accumulator::apply(const Commit& e) {
   if (state_ != State::Draining || !stop_ || e.evidence.empty()) return reject(ErrorKind::ProtocolCorrupt, "commit without evidence");
   for (const auto& [id, m] : messages_) { (void)id; if (!m.sealed) return reject(ErrorKind::ProtocolCorrupt, "commit with open message"); }
   auto messages = take_messages(false);
-  if (usage_.stage != UsageStage::Missing) usage_.stage = UsageStage::Final;
+  // A job still running (Pending) has the usage it accrued so far, not its final count.
+  if (usage_.stage != UsageStage::Missing) usage_.stage = stop_->kind == StopKind::Pending ? UsageStage::Partial : UsageStage::Final;
   outcome_ = Completion{std::move(messages), std::move(*stop_), std::move(usage_),
       std::move(wire_envelope_), {}, std::move(raw_events_), std::move(served_)};
   state_ = State::Terminal; return true;
