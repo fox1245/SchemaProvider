@@ -979,6 +979,33 @@ constexpr Entry moderation_request_table[] = {
   {"moderation options do not match the policy's schema", "request.moderation.options_invalid"},
   {"moderation request exceeds JSON limits", "request.moderation.json_limit"},
 };
+constexpr Entry jobs_table[] = {
+  {"invalid response JSON", "jobs.response.json_invalid"},
+  {"response must be object", "jobs.response.not_object"},
+  {"a job names its id and status", "jobs.state.id_and_status_required"},
+  {"job outputs are a list", "jobs.state.outputs_invalid"},
+  {"a download is not a document", "jobs.download.is_document"},
+  {"a download is empty", "jobs.download.empty"},
+  {"a download exceeds the content limit", "jobs.download.limit"},
+};
+constexpr Entry jobs_request_table[] = {
+  {"a job is reached at the origin that started it", "request.jobs.origin_mismatch"},
+  {"job endpoints are not admitted at this origin", "request.jobs.endpoint_not_admitted"},
+  {"the job endpoint has no path for this operation", "request.jobs.path_missing"},
+  {"a job id is a token", "request.jobs.id_invalid"},
+  {"a download needs a positive byte limit", "request.jobs.download_limit_invalid"},
+};
+constexpr Entry videos_request_table[] = {
+  {"video endpoints are not admitted at this origin", "request.videos.endpoint_not_admitted"},
+  {"the video endpoint has no submit path", "request.videos.path_missing"},
+  {"a video needs a model and a prompt", "request.videos.model_and_prompt_required"},
+  {"video aspect ratio, resolution and size are tokens", "request.videos.shape_invalid"},
+  {"a video duration must be positive", "request.videos.duration_invalid"},
+  {"video references are images inline or by URL", "request.videos.reference_unsupported"},
+  {"the video endpoint admits no options", "request.videos.options_not_admitted"},
+  {"video options do not match the policy's schema", "request.videos.options_invalid"},
+  {"video request exceeds JSON limits", "request.videos.json_limit"},
+};
 constexpr Entry speech_table[] = {
   {"speech response is not audio", "speech.response.not_audio"},
   {"speech response is empty", "speech.response.empty"},
@@ -1100,6 +1127,9 @@ std::span<const Entry> entries(Source source) noexcept {
     case Source::SpeechRequest: return speech_request_table;
     case Source::Transcription: return transcription_table;
     case Source::TranscriptionRequest: return transcription_request_table;
+    case Source::Jobs: return jobs_table;
+    case Source::JobsRequest: return jobs_request_table;
+    case Source::VideosRequest: return videos_request_table;
   }
   return {};
 }

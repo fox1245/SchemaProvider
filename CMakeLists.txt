@@ -150,7 +150,8 @@ add_library(sp_codecs src/codecs/accumulator.cpp src/codecs/reason.cpp src/codec
             src/codecs/decisions.cpp src/codecs/decisions_request.cpp
             src/codecs/embeddings.cpp src/codecs/embeddings_request.cpp src/codecs/rerank.cpp src/codecs/rerank_request.cpp
             src/codecs/moderation.cpp src/codecs/moderation_request.cpp src/codecs/speech.cpp src/codecs/speech_request.cpp
-            src/codecs/transcription.cpp src/codecs/transcription_request.cpp src/codecs/endpoint.cpp)
+            src/codecs/transcription.cpp src/codecs/transcription_request.cpp src/codecs/jobs.cpp src/codecs/jobs_request.cpp
+            src/codecs/videos_request.cpp src/codecs/endpoint.cpp)
 target_compile_options(sp_codecs PRIVATE ${SP_WARNING_OPTIONS})
 target_link_libraries(sp_codecs PUBLIC sp_core sp_json sp_descriptor)
 
@@ -367,6 +368,8 @@ if(SP_BUILD_TESTS)
   target_link_libraries(sp_decisions_tests PRIVATE sp_codecs sp_descriptor sp_json)
   add_executable(sp_endpoints_tests tests/endpoints_test.cpp)
   target_link_libraries(sp_endpoints_tests PRIVATE sp_codecs sp_descriptor sp_json)
+  add_executable(sp_jobs_tests tests/jobs_test.cpp)
+  target_link_libraries(sp_jobs_tests PRIVATE sp_runtime sp_codecs sp_descriptor sp_json)
   add_executable(sp_chat_tests tests/chat_semantic_test.cpp)
   target_link_libraries(sp_chat_tests PRIVATE sp_codecs sp_descriptor sp_json sp_transport)
   add_executable(sp_error_reason_tests tests/error_reason_test.cpp)
@@ -476,6 +479,7 @@ if(SP_BUILD_TESTS)
   add_test(NAME images_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_images_tests>)
   add_test(NAME decisions_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_decisions_tests>)
   add_test(NAME endpoints_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_endpoints_tests>)
+  add_test(NAME jobs_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_jobs_tests>)
   add_test(NAME extension_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_extension_tests>)
   add_test(NAME chat_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_chat_tests>)
   add_test(NAME error_reason COMMAND ${sp_test_runner} $<TARGET_FILE:sp_error_reason_tests> ${CMAKE_CURRENT_SOURCE_DIR}/src)

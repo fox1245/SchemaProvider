@@ -493,12 +493,14 @@ class PolicyLoader {
         static constexpr std::string_view moderation_members[]{"model", "input"};
         static constexpr std::string_view speech_members[]{"model", "input", "voice", "instructions", "response_format", "speed", "stream_format"};
         static constexpr std::string_view transcription_members[]{"model", "file", "input_audio", "language", "prompt", "response_format", "stream"};
+        static constexpr std::string_view video_members[]{"model", "prompt", "input_references", "frame_images", "duration", "aspect_ratio",
+                                                          "resolution", "size", "generate_audio"};
         const auto owned_by = [](std::string_view endpoint, std::string_view name) {
           const auto in = [&](const auto& list) { return std::find(std::begin(list), std::end(list), name) != std::end(list); };
           return (endpoint == "images" && in(image_members)) || (endpoint == "decisions" && in(decision_members)) ||
                  (endpoint == "embeddings" && in(embedding_members)) || (endpoint == "rerank" && in(rerank_members)) ||
                  (endpoint == "moderation" && in(moderation_members)) || (endpoint == "speech" && in(speech_members)) ||
-                 (endpoint == "transcription" && in(transcription_members));
+                 (endpoint == "transcription" && in(transcription_members)) || (endpoint == "videos" && in(video_members));
         };
         const auto operations_of = [](std::string_view endpoint, std::string_view shape) -> std::vector<std::string_view> {
           if (endpoint == "images" && shape == "openai") return {"generate", "edit"};
@@ -509,6 +511,8 @@ class PolicyLoader {
           if (endpoint == "moderation" && shape == "openai") return {"check"};
           if (endpoint == "speech" && (shape == "openai" || shape == "openrouter")) return {"speak"};
           if (endpoint == "transcription" && (shape == "openai" || shape == "openrouter")) return {"transcribe"};
+          // A job: submit starts it, poll reads its state, download fetches one output.
+          if (endpoint == "videos" && shape == "openrouter") return {"submit", "poll", "download"};
           return {};
         };
         for (auto e : endpoints.elements()) {

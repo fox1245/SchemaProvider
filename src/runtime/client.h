@@ -13,6 +13,7 @@
 #include "codecs/rerank.h"
 #include "codecs/speech.h"
 #include "codecs/transcription.h"
+#include "codecs/videos.h"
 #include "descriptor/presets.h"
 #include "runtime/policy.h"
 #include "transport/sse_framer.h"
@@ -209,6 +210,8 @@ inline rerank::Outcome typed_outcome(const sp::Outcome& outcome, const rerank::O
 inline moderation::Outcome typed_outcome(const sp::Outcome& outcome, const moderation::Outcome*) { return moderation::typed(outcome); }
 inline speech::Outcome typed_outcome(const sp::Outcome& outcome, const speech::Outcome*) { return speech::typed(outcome); }
 inline transcription::Outcome typed_outcome(const sp::Outcome& outcome, const transcription::Outcome*) { return transcription::typed(outcome); }
+inline jobs::Outcome typed_outcome(const sp::Outcome& outcome, const jobs::Outcome*) { return jobs::typed(outcome); }
+inline jobs::DownloadOutcome typed_outcome(const sp::Outcome& outcome, const jobs::DownloadOutcome*) { return jobs::typed_content(outcome); }
 }  // namespace detail
 // A started non-chat endpoint call. Like an Operation, destruction requests cancellation and detach relinquishes it;
 // join waits for the typed outcome, the one the callback received.
@@ -281,6 +284,18 @@ class Client {
   transcription::Outcome complete(transcription::Request, RunOptions = {});
   transcription::Outcome complete(PreparedEndpoint<transcription::Outcome>);
   EndpointCall<transcription::Outcome> start(PreparedEndpoint<transcription::Outcome>, std::function<void(transcription::Outcome)> on_outcome = {});
+  // Provider jobs: a video submit answers with the job's state. Poll its handle until the job finishes, then
+  // download each output. A poll and a download are never charged, so they retry as ordinary reads do.
+  PreparedEndpoint<jobs::Outcome> prepare(videos::Request, RunOptions = {});
+  PreparedEndpoint<jobs::Outcome> prepare(jobs::Poll, RunOptions = {});
+  PreparedEndpoint<jobs::DownloadOutcome> prepare(jobs::Download, RunOptions = {});
+  jobs::Outcome complete(videos::Request, RunOptions = {});
+  jobs::Outcome complete(jobs::Poll, RunOptions = {});
+  jobs::DownloadOutcome complete(jobs::Download, RunOptions = {});
+  jobs::Outcome complete(PreparedEndpoint<jobs::Outcome>);
+  jobs::DownloadOutcome complete(PreparedEndpoint<jobs::DownloadOutcome>);
+  EndpointCall<jobs::Outcome> start(PreparedEndpoint<jobs::Outcome>, std::function<void(jobs::Outcome)> on_outcome = {});
+  EndpointCall<jobs::DownloadOutcome> start(PreparedEndpoint<jobs::DownloadOutcome>, std::function<void(jobs::DownloadOutcome)> on_outcome = {});
   Diagnostics diagnostics() const noexcept;
  private:
   explicit Client(std::shared_ptr<detail::ClientState>);
