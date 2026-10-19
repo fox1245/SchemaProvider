@@ -8,6 +8,9 @@
 #include "codecs/interactions_request.h"
 #include "codecs/images.h"
 #include "codecs/decisions.h"
+#include "codecs/embeddings.h"
+#include "codecs/moderation.h"
+#include "codecs/rerank.h"
 #include "descriptor/presets.h"
 #include "runtime/policy.h"
 #include "transport/sse_framer.h"
@@ -199,6 +202,9 @@ class PreparedEndpoint {
 namespace detail {
 inline images::Outcome typed_outcome(const sp::Outcome& outcome, const images::Outcome*) { return images::typed(outcome); }
 inline decisions::Outcome typed_outcome(const sp::Outcome& outcome, const decisions::Outcome*) { return decisions::typed(outcome); }
+inline embeddings::Outcome typed_outcome(const sp::Outcome& outcome, const embeddings::Outcome*) { return embeddings::typed(outcome); }
+inline rerank::Outcome typed_outcome(const sp::Outcome& outcome, const rerank::Outcome*) { return rerank::typed(outcome); }
+inline moderation::Outcome typed_outcome(const sp::Outcome& outcome, const moderation::Outcome*) { return moderation::typed(outcome); }
 }  // namespace detail
 // A started non-chat endpoint call. Like an Operation, destruction requests cancellation and detach relinquishes it;
 // join waits for the typed outcome, the one the callback received.
@@ -251,6 +257,18 @@ class Client {
   decisions::Outcome complete(decisions::Request, RunOptions = {});
   decisions::Outcome complete(PreparedEndpoint<decisions::Outcome>);
   EndpointCall<decisions::Outcome> start(PreparedEndpoint<decisions::Outcome>, std::function<void(decisions::Outcome)> on_outcome = {});
+  PreparedEndpoint<embeddings::Outcome> prepare(embeddings::Request, RunOptions = {});
+  embeddings::Outcome complete(embeddings::Request, RunOptions = {});
+  embeddings::Outcome complete(PreparedEndpoint<embeddings::Outcome>);
+  EndpointCall<embeddings::Outcome> start(PreparedEndpoint<embeddings::Outcome>, std::function<void(embeddings::Outcome)> on_outcome = {});
+  PreparedEndpoint<rerank::Outcome> prepare(rerank::Request, RunOptions = {});
+  rerank::Outcome complete(rerank::Request, RunOptions = {});
+  rerank::Outcome complete(PreparedEndpoint<rerank::Outcome>);
+  EndpointCall<rerank::Outcome> start(PreparedEndpoint<rerank::Outcome>, std::function<void(rerank::Outcome)> on_outcome = {});
+  PreparedEndpoint<moderation::Outcome> prepare(moderation::Request, RunOptions = {});
+  moderation::Outcome complete(moderation::Request, RunOptions = {});
+  moderation::Outcome complete(PreparedEndpoint<moderation::Outcome>);
+  EndpointCall<moderation::Outcome> start(PreparedEndpoint<moderation::Outcome>, std::function<void(moderation::Outcome)> on_outcome = {});
   Diagnostics diagnostics() const noexcept;
  private:
   explicit Client(std::shared_ptr<detail::ClientState>);

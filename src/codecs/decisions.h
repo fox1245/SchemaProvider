@@ -2,7 +2,7 @@
 // Decisions (D6): classification and scoring questions about an input, answered with probabilities. OpenAI
 // `/v1/decisions` and OpenRouter `/api/alpha/decisions`. A request is dispatched by
 // `runtime::Client::prepare(decisions::Request)`; the policy's endpoint facts name the origins and admitted members.
-#include "codecs/accumulator.h"
+#include "codecs/endpoint.h"
 #include "core/value.h"
 #include "descriptor/descriptor.h"
 #include <optional>
@@ -71,12 +71,12 @@ struct Encoded {
 };
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor&, const Request&);
 
-struct Close { bool normal = true; ErrorKind error = ErrorKind::Truncated; };
+using Close = endpoints::Close;
 // Decodes one buffered response into accumulator events: one assistant message with an Opaque part per answer.
-class Codec {
+class Codec final : public endpoints::Codec {
  public:
   Codec(const descriptor::ValidatedDescriptor&, Accumulator&, std::string requested, SemanticLimits = {});
-  bool buffered(std::string_view body, Close close);
+  bool buffered(std::string_view body, Close close) override;
  private:
   bool fail(ErrorKind, std::string);
   bool emit(const Event&);

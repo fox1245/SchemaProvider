@@ -920,6 +920,65 @@ constexpr Entry decisions_request_table[] = {
   {"decision options do not match the policy's schema", "request.decisions.options_schema_invalid"},
   {"decision request exceeds JSON limits", "request.decisions.json_limit"},
 };
+constexpr Entry embeddings_table[] = {
+  {"invalid response JSON", "embeddings.response.json_invalid"},
+  {"response must be object", "embeddings.response.not_object"},
+  {"remote error property", "embeddings.response.remote_error"},
+  {"embedding vectors required", "embeddings.vectors.required"},
+  {"an embedding is an array of numbers", "embeddings.vector.invalid"},
+};
+constexpr Entry embeddings_request_table[] = {
+  {"embedding endpoints are not admitted at this origin", "request.embeddings.endpoint_not_admitted"},
+  {"the embedding endpoint has no path", "request.embeddings.path_missing"},
+  {"embeddings need a model and inputs", "request.embeddings.model_and_inputs_required"},
+  {"a Google embedding model is a path segment", "request.embeddings.model_segment_invalid"},
+  {"embedding dimensions must be positive", "request.embeddings.dimensions_invalid"},
+  {"OpenAI embeddings take no task", "request.embeddings.task_unsupported"},
+  {"an embedding task is a token", "request.embeddings.task_invalid"},
+  {"an embedding input has text or media", "request.embeddings.input_empty"},
+  {"OpenAI embeddings take text only", "request.embeddings.media_unsupported"},
+  {"OpenRouter embeddings take images as media", "request.embeddings.media_kind_unsupported"},
+  {"Google embeddings take inline or uploaded media", "request.embeddings.media_source_unsupported"},
+  {"an embedding media file names its reference", "request.embeddings.media_reference_missing"},
+  {"the embedding endpoint admits no options", "request.embeddings.options_not_admitted"},
+  {"embedding options do not match the policy's schema", "request.embeddings.options_invalid"},
+  {"embedding request exceeds JSON limits", "request.embeddings.json_limit"},
+};
+constexpr Entry rerank_table[] = {
+  {"invalid response JSON", "rerank.response.json_invalid"},
+  {"response must be object", "rerank.response.not_object"},
+  {"remote error property", "rerank.response.remote_error"},
+  {"rerank results required", "rerank.results.required"},
+  {"a rerank result has an index and a score", "rerank.result.invalid"},
+};
+constexpr Entry rerank_request_table[] = {
+  {"rerank endpoints are not admitted at this origin", "request.rerank.endpoint_not_admitted"},
+  {"the rerank endpoint has no path", "request.rerank.path_missing"},
+  {"a rerank needs a model, a query and documents", "request.rerank.fields_required"},
+  {"a rerank top count must be positive", "request.rerank.top_invalid"},
+  {"the rerank endpoint admits no options", "request.rerank.options_not_admitted"},
+  {"rerank options do not match the policy's schema", "request.rerank.options_invalid"},
+  {"rerank request exceeds JSON limits", "request.rerank.json_limit"},
+};
+constexpr Entry moderation_table[] = {
+  {"invalid response JSON", "moderation.response.json_invalid"},
+  {"response must be object", "moderation.response.not_object"},
+  {"remote error property", "moderation.response.remote_error"},
+  {"moderation results required", "moderation.results.required"},
+  {"a moderation result says whether it is flagged", "moderation.result.flag_missing"},
+  {"moderation categories are booleans", "moderation.result.categories_invalid"},
+  {"moderation scores are numbers", "moderation.result.scores_invalid"},
+};
+constexpr Entry moderation_request_table[] = {
+  {"moderation endpoints are not admitted at this origin", "request.moderation.endpoint_not_admitted"},
+  {"the moderation endpoint has no path", "request.moderation.path_missing"},
+  {"a moderation needs a model and inputs", "request.moderation.model_and_inputs_required"},
+  {"a moderation input has text or media", "request.moderation.input_empty"},
+  {"moderation media are images inline or by URL", "request.moderation.media_unsupported"},
+  {"the moderation endpoint admits no options", "request.moderation.options_not_admitted"},
+  {"moderation options do not match the policy's schema", "request.moderation.options_invalid"},
+  {"moderation request exceeds JSON limits", "request.moderation.json_limit"},
+};
 constexpr Entry shared_request_table[] = {
   {"options are not admitted by the policy", "request.options.options_are_not_admitted_by_the_policy"},
   {"options do not match the policy's schema", "request.options.options_do_not_match_the_policy_s_schema"},
@@ -993,6 +1052,12 @@ std::span<const Entry> entries(Source source) noexcept {
     case Source::ImagesRequest: return images_request_table;
     case Source::Decisions: return decisions_table;
     case Source::DecisionsRequest: return decisions_request_table;
+    case Source::Embeddings: return embeddings_table;
+    case Source::EmbeddingsRequest: return embeddings_request_table;
+    case Source::Rerank: return rerank_table;
+    case Source::RerankRequest: return rerank_request_table;
+    case Source::Moderation: return moderation_table;
+    case Source::ModerationRequest: return moderation_request_table;
   }
   return {};
 }

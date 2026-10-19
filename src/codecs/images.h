@@ -2,7 +2,7 @@
 // Image generation and edits (D6): OpenAI `/v1/images/generations` and `/v1/images/edits`, and OpenRouter
 // `/api/v1/images`. A request is dispatched by `runtime::Client::prepare(images::Request)`; the policy's endpoint
 // facts name the origins, paths and admitted members.
-#include "codecs/accumulator.h"
+#include "codecs/endpoint.h"
 #include "core/value.h"
 #include "descriptor/descriptor.h"
 #include <cstdint>
@@ -46,13 +46,13 @@ struct Encoded {
 };
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor&, const Request&);
 
-struct Close { bool normal = true; ErrorKind error = ErrorKind::Truncated; };
+using Close = endpoints::Close;
 // Decodes one buffered response into accumulator events: one assistant message with a Media part per image.
-class Codec {
+class Codec final : public endpoints::Codec {
  public:
   // `requested` is the model the request named; the response does not report one.
   Codec(const descriptor::ValidatedDescriptor&, Accumulator&, std::string requested, SemanticLimits = {});
-  bool buffered(std::string_view body, Close close);
+  bool buffered(std::string_view body, Close close) override;
  private:
   bool fail(ErrorKind, std::string);
   bool emit(const Event&);
