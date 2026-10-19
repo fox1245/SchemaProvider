@@ -123,6 +123,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     case OutputEffort::Medium: effort = "medium"; break;
     case OutputEffort::High: effort = "high"; break;
     case OutputEffort::Max: effort = "max"; break;
+    case OutputEffort::XHigh: effort = "xhigh"; break;
     default: return bad("invalid output effort");
   }
   if (request.cache_control && request.cache_control->ttl) switch (*request.cache_control->ttl) {

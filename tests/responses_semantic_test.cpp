@@ -820,6 +820,19 @@ void computer_calls_and_mcp_approvals() {
   undeclared = request(); undeclared.messages.push_back(completed(*bare.outcome()).messages[0]);
   CHECK(refused(responses::encode(desc(), undeclared, false)) != ErrorKind::Unsupported);
 }
+// Include selections may be named beyond the typed ones.
+void named_includes() {
+  auto named = request(); named.include_names = {"message.output_text.logprobs"};
+  const auto included = parse(encoded_ok(desc(), named).body);
+  CHECK(included.root().get("include").size() == 2 && included.root().get("include").at(0).as_string() == "reasoning.encrypted_content" &&
+        included.root().get("include").at(1).as_string() == "message.output_text.logprobs");
+  named.include = std::vector<responses::Include>{};
+  const auto only_named = parse(encoded_ok(desc(), named).body);
+  CHECK(only_named.root().get("include").size() == 1 && only_named.root().get("include").at(0).as_string() == "message.output_text.logprobs");
+  named.include = std::vector<responses::Include>{responses::Include::MessageOutputTextLogprobs};
+  CHECK(refused(responses::encode(desc(), named, false)) == ErrorKind::InvalidRequest);
+  named.include.reset(); named.include_names = {"Not A Name"}; CHECK(refused(responses::encode(desc(), named, false)) == ErrorKind::InvalidRequest);
+}
 void unknown_wire_observation_boundary() {
   const auto unknown = event("response.future_semantic.delta",
       R"(,"delta":"not assistant text","status":"completed","metadata":{"nested":[{"value":"owned unknown payload"}]})");
@@ -1191,7 +1204,7 @@ void empty_text_delta_is_withheld() {
 } // namespace
 int main() {
   try { empty_text_delta_is_withheld(); failure_reasons(); provider_money_and_snapshot_aliases(); named_error_precedence(); named_error_raw_capacity(); completed_reasoning_ciphertext_authority(); reviewed_wire_boundaries(); typed_encode(); controls_and_cursor_boundaries(); openrouter_max_price(); strict_tool_schemas(); previous_response_ownership(); grouped_native_and_owned_outcomes(); normal_close_required(); cancellation_observation_boundary(); reasoning_stream_snapshots(); tools_interleaving_and_ownership(); incomplete_and_server_items(); unknown_hosted_item_ownership(); unknown_wire_observation_boundary(); usage_boundaries(); uncached_input_rule(); corruption_and_bounds();
-    hosted_tool_options(); openrouter_server_tools_and_images(); service_item_progress_events(); computer_calls_and_mcp_approvals(); plugins_and_citations();
+    named_includes(); hosted_tool_options(); openrouter_server_tools_and_images(); service_item_progress_events(); computer_calls_and_mcp_approvals(); plugins_and_citations();
     std::cout << "Responses semantic contracts passed\n"; return 0;
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

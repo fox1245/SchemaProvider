@@ -47,6 +47,26 @@ struct OpenRouterImageConfig {
 };
 
 namespace request_controls {
+// Shapes of values the providers name and extend: an aspect ratio W:H, and a size or resolution token such as 2K or
+// 1080p. The service decides which values a model accepts.
+inline bool aspect_ratio_syntax(std::string_view value) noexcept {
+  const auto colon = value.find(':');
+  const auto digits = [](std::string_view part) {
+    return !part.empty() && part.size() <= 4 && std::all_of(part.begin(), part.end(), [](char c) { return c >= '0' && c <= '9'; });
+  };
+  return colon != std::string_view::npos && digits(value.substr(0, colon)) && digits(value.substr(colon + 1));
+}
+inline bool size_token(std::string_view value) noexcept {
+  return !value.empty() && value.size() <= 16 && std::all_of(value.begin(), value.end(), [](char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+  });
+}
+// A BCP 47 language tag's characters, such as en-US or cmn-CN.
+inline bool language_tag(std::string_view value) noexcept {
+  return !value.empty() && value.size() <= 35 && std::all_of(value.begin(), value.end(), [](char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-';
+  });
+}
 inline bool bounded_text(std::string_view text, std::size_t maximum, bool empty = false) {
   if ((!empty && text.empty()) || text.size() > maximum) return false;
   for (unsigned char c : text) if (c < 32 || c == 127) return false;
@@ -170,7 +190,8 @@ inline bool schema_node(json::Value node) {
       if (!value.is_string()) return false;
     } else if (key == "examples") {
       if (!value.is_array()) return false;
-    } else if (key != "const" && key != "default") return false;
+    }
+    // Any other keyword (const, default, and the ones JSON Schema or a provider adds) is sent as given.
   }
   for (const auto& bounds : {std::pair{"minLength", "maxLength"}, std::pair{"minItems", "maxItems"},
                              std::pair{"minProperties", "maxProperties"}, std::pair{"minContains", "maxContains"}}) {

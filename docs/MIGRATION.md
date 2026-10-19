@@ -181,6 +181,19 @@ The catalogue prices a call:
 - **Fallback.** An estimate prices the served model's entry, else the requested model's, and says so.
 - **New enum value.** `CostRounding` gains `CeilingCatalogueProduct`, added last, for these estimates.
 
+Values the providers extend are checked by shape, not by compiled lists:
+- **Generate.** Speech language codes, image aspect ratios and image sizes are checked as a language tag, `W:H` and a short token. Function responses take any inline document the media policy admits.
+- **Interactions.** Output MIME types must be of the right kind, ratios are `W:H`, and image sizes and video resolutions are short tokens. A bit rate is no longer refused next to an uncompressed format.
+- **Chat.** Audio formats are lower-case tokens, and the reply's MIME is empty for a format the SDK cannot name.
+- **Response schemas.** Unknown schema keywords are sent; known ones keep their checks.
+- **Messages.** `OutputEffort` gains `XHigh` (`xhigh`), added last.
+  - A server tool's result block decodes for any `<tool>_tool_result` that answers a call to `<tool>` or `<tool>_<variant>`.
+  - A server caller is any server tool type the policy admits.
+  - A result shape the SDK does not know is kept and counted in the diagnostics. The fixed list and the refusal codes `messages.server_result.*_unknown` are gone.
+- **Responses.** `Request::include_names` adds include selections by name.
+- **Policy data.** The Chat reasoning efforts gain `minimal` and the Responses ones `max`. The policy's content digest changes.
+- **Reason codes.** The refusal reason codes of these checks are renamed after their shape rules.
+
 ## From interface 5 to 6
 
 Package 0.3.0 alpha adds `Usage::provider_cost` and the fixed-size `ProviderReportedCost`, `UsdAmount`, `CostSource`, `CostStatus` and `CostRounding` types. Existing field access remains source-compatible, but `Usage`, `UsageUpdate`, `Completion`, `PartialCompletion` and the containing `Event` layouts grow. Rebuild every consumer against the same headers and generation 6 libraries (`libsp_*.so.6`); interface 5 binaries must not load interface 6 libraries. CMake consumers select `SchemaProvider 0.3.0 EXACT`.

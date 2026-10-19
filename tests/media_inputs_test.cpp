@@ -997,9 +997,9 @@ void nested_tool_family_sources_and_limits() {
   const auto object=tool_history(Fam::Gemini,d,with_tool_results(Fam::Gemini,prefix,ToolResult{"call1",R"({"result":7})"}));
   CHECK(is_wire(object));
   CHECK(json_matches(first_tool_result(Fam::Gemini,wire_of(object).root()).get("response"),R"({"result":7})"));
-  // Plain text is the one text document admitted in a function response; other documents stay out.
+  // Any inline document the media policy admits goes in the function response's parts.
   ToolResult text_document{"call1",""};text_document.content_parts={inline_media("text/csv")};
-  expect_error(tool_history(Fam::Gemini,d,with_tool_results(Fam::Gemini,prefix,text_document)),ErrorKind::Unsupported);
+  CHECK(is_wire(tool_history(Fam::Gemini,d,with_tool_results(Fam::Gemini,prefix,text_document))));
 }
 void messages_decoded_document_cache_budget() {
   const auto policy=bounded_policy(900);
@@ -1083,11 +1083,13 @@ void gemini_function_response_live_verified_media() {
       CHECK(wire.get("parts").at(0).get("inlineData").get("mimeType").as_string() == mime);
       CHECK(wire.get("parts").at(0).get("inlineData").get("data").as_string() == *media.data);
     }
-  // Unverified documents, non-inline text and text metadata remain outside the function response.
+  // Inline documents the media policy admits are sent, and the service decides what a model reads; non-inline text
+  // and text metadata remain outside the function response.
   for (const auto mime : {"text/csv", "text/markdown", "text/html", "application/json"}) {
     ToolResult result{"call1", ""};
     result.content_parts = {inline_media(MediaKind::Document, mime, "{}")};
-    expect_error(tool_history(Fam::Gemini, d, with_tool_results(Fam::Gemini, prefix, result)), ErrorKind::Unsupported);
+    const auto encoded = tool_history(Fam::Gemini, d, with_tool_results(Fam::Gemini, prefix, result));
+    CHECK(is_wire(encoded) && first_tool_result(Fam::Gemini, wire_of(encoded).root()).get("parts").at(0).get("inlineData").get("mimeType").as_string() == mime);
   }
   for (const auto source : {MediaSource::Url, MediaSource::File}) {
     ToolResult result{"call1", ""};

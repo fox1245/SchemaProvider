@@ -110,6 +110,9 @@ struct Request {
   std::optional<Truncation> truncation;
   // Absent keeps reasoning.encrypted_content; an explicit empty vector sends [].
   std::optional<std::vector<Include>> include;
+  // Include selections by name beyond the typed ones (dotted tokens such as "message.output_text.logprobs"), sent
+  // after them.
+  std::vector<std::string> include_names;
   // Declared OpenRouter origins only.
   std::vector<OutputModality> modalities;
   std::optional<sp::OpenRouterImageConfig> image_config;

@@ -193,14 +193,13 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     if (speech.speaker_voice_configs.size() > resources.request_parts) return bad("speaker configuration count limit exceeded");
     for (const auto& speaker : speech.speaker_voice_configs)
       if (speaker.speaker.empty() || !voice_valid(speaker.voice_config)) return bad("speaker name and exclusive voice configuration required");
-    if (speech.language_code && !one_of(*speech.language_code, {"de-DE","en-AU","en-GB","en-IN","en-US","es-US","fr-FR","hi-IN","pt-BR","ar-XA","es-ES","fr-CA","id-ID","it-IT","ja-JP","tr-TR","vi-VN","bn-IN","gu-IN","kn-IN","ml-IN","mr-IN","ta-IN","te-IN","nl-NL","ko-KR","cmn-CN","pl-PL","ru-RU","th-TH"}))
-      return bad("unsupported speech language code");
+    if (speech.language_code && !request_controls::language_tag(*speech.language_code))
+      return bad("speech language code must be a language tag");
   }
   if (request.image_config) {
     const auto& image = *request.image_config;
-    if (image.aspect_ratio && !one_of(*image.aspect_ratio, {"1:1","1:4","4:1","1:8","8:1","2:3","3:2","3:4","4:3","4:5","5:4","9:16","16:9","21:9"}))
-      return bad("unsupported image aspect ratio");
-    if (image.image_size && !one_of(*image.image_size, {"512","1K","2K","4K"})) return bad("unsupported image size");
+    if (image.aspect_ratio && !request_controls::aspect_ratio_syntax(*image.aspect_ratio)) return bad("image aspect ratio must be W:H");
+    if (image.image_size && !request_controls::size_token(*image.image_size)) return bad("image size must be a short token");
   }
   if (request.audio_transcription_config) {
     const auto& transcription = *request.audio_transcription_config;
@@ -231,13 +230,10 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         tool_error = Error{ErrorKind::InvalidRequest, "tool result part count limit exceeded"};
       else for (const auto& nested : tool->content_parts) if (const auto* media = std::get_if<Media>(&nested)) {
         has_media = true;
-        // Inline only. Documents are limited to the PDF and plain-text forms Gemini 3 accepted
-        // and read inside functionResponse.parts when verified live; other documents stay out.
+        // Inline only, in any form the family's media policy admits; the service decides what a model reads.
         if (static_cast<unsigned>(media->kind) < media_kind_count && static_cast<unsigned>(media->source) <= 2 &&
-            (media->source != MediaSource::Inline ||
-             (media->kind == MediaKind::Document && !mime_equal(media->mime, "application/pdf") &&
-              !mime_equal(media->mime, "text/plain"))))
-          tool_error = Error{ErrorKind::Unsupported, "function response media requires inline image, audio, video, PDF or plain-text bytes"};
+            media->source != MediaSource::Inline)
+          tool_error = Error{ErrorKind::Unsupported, "function response media requires inline bytes"};
         else tool_error = media_input::admit(descriptor, *media);
         if (!tool_error && (media->detail != ImageDetail::Auto || !media->name.empty() ||
                             !media->id.empty() || !media->transcript.empty()))

@@ -113,7 +113,7 @@ void role_and_control_admission() {
     take<chat::EncodedRequest>(chat::encode(desc("chat"), chat_request(controlled), false));
     take<responses::EncodedRequest>(responses::encode(desc("responses"), responses_request(controlled), false));
   }
-  for (const std::string effort : {"", "minimal", "auto", "LOW", "none\""}) {
+  for (const std::string effort : {"", "auto", "LOW", "none\""}) {
     auto c = chat_request(image); c.reasoning_effort = effort;
     error(chat::encode(desc("chat"), c, false), ErrorKind::InvalidRequest);
   }
