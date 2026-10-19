@@ -93,9 +93,25 @@ void estimates() {
   e = pricing::estimate(*half, "openai.chat", "", ServedModel{"m", "m", ServedRelation::Exact}, usage(3, 1));
   CHECK(e.total->nano_usd == 2u);
 }
+
+// Products above 2^64 stay exact, and a total above 2^64 nano-USD is reported, not wrapped.
+void wide_products() {
+  const auto c = catalogue(R"({"version":1,"models":[{"id":"m","pricing":{"input":"1000","output":"0.000000000000001"}},
+    {"id":"huge","pricing":{"input":"18446744073709551615","output":"0"}}]})");
+  const ServedModel m{"m", "m", ServedRelation::Exact};
+  // 1e6 tokens at 1000 USD are 1e24 in nano-USD x 1e6, above 2^64; the total is 1e18 nano-USD. One output token at
+  // 1e-15 USD is 1e-6 nano-USD and rounds the total up once.
+  auto e = pricing::estimate(*c, "openai.chat", "", m, usage(1'000'000, 1));
+  CHECK(e.total && e.total->nano_usd == 1'000'000'000'000'000'001u);
+  // 2e7 tokens at 1000 USD are 2e19 nano-USD, above 2^64.
+  e = pricing::estimate(*c, "openai.chat", "", m, usage(20'000'000, 0));
+  CHECK(!e.total && e.unpriced.size() == 1 && e.unpriced.front() == "overflow");
+  // A price whose nano-USD per million units does not fit in 64 bits is not a price.
+  CHECK(!pricing::price_of(*c->entry("huge")).input);
+}
 } // namespace
 
 int main() {
-  try { prices_from_entries(); estimates(); std::cout << "pricing properties passed\n"; return 0; }
+  try { prices_from_entries(); estimates(); wide_products(); std::cout << "pricing properties passed\n"; return 0; }
   catch (const std::exception& error) { std::cerr << "pricing test failed: " << error.what() << '\n'; return 1; }
 }
