@@ -568,7 +568,7 @@ Citations are read from the wire the message keeps. They are not part of its nat
 - **`WebSearchTool`.** `allowed_domains` (sent as `filters.allowed_domains`), an approximate `user_location`, `search_context_size` and `external_web_access`.
 - **`ImageGenerationTool`.** `size`, `quality`, `output_format`, `model`, `action`, `background`, `moderation`, `input_fidelity`, `output_compression`, `partial_images`, and an `input_image_mask` given as `mask_file_id` or `mask_image_url`. Partial images stay in the raw events; the finished image is the `Media` part.
 - **`FileSearchTool`.** `vector_store_ids` and `max_num_results`.
-- **`CodeInterpreterTool`.** Either an existing `container_id`, or an automatic container with `file_ids`, `memory_limit` and a `network_policy`. The policy is `disabled`, or an allow-list of domains with optional `domain_secrets`.
+- **`CodeInterpreterTool`.** Either an existing `container_id`, or an automatic container with `file_ids`, `memory_limit` and a `network_policy`. The policy is `disabled`, or an allow-list of domains with optional `domain_secrets`. Native replay binds the tool, not its container, so a conversation can move to the container a response reported (the `container_id` of its `code_interpreter_call`).
 - **`McpTool`.**
   - Exactly one of an https `server_url`, a `connector_id` or a `tunnel_id`.
   - `authorization`, `headers`, `allowed_tools` (tool names or `read_only`), `server_description` and `defer_loading`.
