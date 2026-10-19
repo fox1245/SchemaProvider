@@ -43,6 +43,7 @@ std::string_view hosted_type(const HostedTool& tool) {
     if constexpr (std::is_same_v<T, ComputerTool>) return "computer";
     if constexpr (std::is_same_v<T, ComputerUsePreviewTool>) return "computer_use_preview";
     if constexpr (std::is_same_v<T, OpenRouterServerTool>) return value.type;
+    if constexpr (std::is_same_v<T, GenericHostedTool>) return value.type;
   }, tool);
 }
 // The service's enumerations are lower-case names; the SDK checks only their shape.
@@ -211,11 +212,18 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       if (!routed->type.starts_with("openrouter:") || routed->type.size() <= 11 || !request_controls::config_token(routed->type, 128) ||
           (routed->parameters && !routed->parameters->root().is_object()))
         return bad("OpenRouter server tools require an openrouter: type and object parameters");
+      // The policy admits the tool and the schema of its parameters (#32).
+      const auto& tools = descriptor.family_policy().openrouter_server_tools;
+      const auto fact = std::find_if(tools.begin(), tools.end(), [&](const auto& f) { return f.name == routed->type; });
+      if (fact == tools.end()) return Error{ErrorKind::Unsupported, "an OpenRouter server tool is not admitted by the policy"};
+      if (auto error = request_controls::validate_options(fact->options, routed->parameters)) return bad("OpenRouter server tool parameters do not match the policy's schema");
     } else {
-      bool admitted = false;
-      for (const auto& fact : descriptor.family_policy().server_tools)
-        if (fact.type == type) admitted = true;
-      if (!admitted) return Error{ErrorKind::Unsupported, "hosted Responses tool is not admitted by policy"};
+      // A typed tool needs a typed fact, and a generic one a generic fact whose schema its options match.
+      const auto& facts = descriptor.family_policy().server_tools;
+      const auto generic = std::get_if<GenericHostedTool>(&tool);
+      const auto fact = std::find_if(facts.begin(), facts.end(), [&](const auto& f) { return f.type == type && f.generic == (generic != nullptr); });
+      if (fact == facts.end()) return Error{ErrorKind::Unsupported, "hosted Responses tool is not admitted by policy"};
+      if (generic && request_controls::validate_options(fact->options, generic->options)) return bad("a generic hosted tool's options do not match the policy's schema");
     }
     if (const auto* mcp = std::get_if<McpTool>(&tool)) {
       if (!function_name(mcp->server_label) || !mcp_labels.insert(mcp->server_label).second) return bad("MCP tools require unique server labels");
@@ -298,7 +306,8 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   }
   if (!request.plugins.empty()) {
     if (!router) return Error{ErrorKind::Unsupported, "OpenRouter plugins require a declared OpenRouter origin"};
-    if (auto error = request_controls::validate_plugins(request.plugins, resources.request_tools)) return bad(std::move(*error));
+    if (auto refusal = request_controls::validate_plugins(descriptor.family_policy(), request.plugins, resources.request_tools))
+      return Error{refusal->admitted ? ErrorKind::InvalidRequest : ErrorKind::Unsupported, std::move(refusal->message)};
   }
   if (!request.modalities.empty() || request.image_config) {
     if (!router) return Error{ErrorKind::Unsupported, "output modalities and image_config require a declared OpenRouter origin"};
@@ -376,6 +385,8 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   // Preserve native-prefix mismatch precedence over payload errors in edited
   // captured history, but reject invalid ordinary input before hashing.
   if (media_error && !captured_history) return *media_error;
+  if (auto refusal = request_controls::validate_extensions(descriptor, request.extensions))
+    return Error{refusal->admitted ? ErrorKind::InvalidRequest : ErrorKind::Unsupported, std::move(refusal->message)};
   auto context = std::shared_ptr<const NativeContext>(new NativeContext(descriptor, request, effective, streaming));
   if (!context->history_valid_) return replay_bad();
   if (!context->valid_) return Error{ErrorKind::ResourceLimit, "native binding could not be captured"};
@@ -553,6 +564,8 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
                 .raw(",\"display_height\":").raw(std::to_string(value.display_height));
           } else if constexpr (std::is_same_v<T, OpenRouterServerTool>) {
             if (value.parameters) body.raw(",\"parameters\":").value(value.parameters->root(), 3);
+          } else if constexpr (std::is_same_v<T, GenericHostedTool>) {
+            if (value.options) for (auto member : value.options->root().members()) body.raw(",").quoted(member.key).raw(":").value(member.value, 3);
 
           } else if constexpr (std::is_same_v<T, ShellTool>) {
             body.raw(",\"environment\":{\"type\":\"container_auto\"");
@@ -726,7 +739,9 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       if (approval.reason) body.raw(",\"reason\":").quoted(*approval.reason);
       body.raw("}");
     }
-    body.raw("]}");
+    body.raw("]");
+    request_controls::write_extensions(body, request.extensions);
+    body.raw("}");
     if (!body.ok()) return Error{ErrorKind::ResourceLimit, "request exceeds JSON byte, depth or encoding limits"};
     return std::nullopt;
   };

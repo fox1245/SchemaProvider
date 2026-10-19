@@ -600,6 +600,16 @@ Descriptors are HTTPS-only with one exception: `http` is allowed when the host i
 
 An application can call `descriptor::load(source)` at runtime and construct a new immutable client without rebuilding the library. This admits only values within an existing compiled family's inventory. It does not qualify an endpoint automatically. A different terminal profile, tool correlation rule or stream lifecycle needs typed codec work and independent fixtures, not descriptor scripting. Historical “embedded-only descriptor” and generic option-slot proposals are superseded.
 
+### 5.7 Policy-admitted extension values (#32)
+
+A provider adds request members and tool options faster than the SDK releases. Neither a free-form map nor a typed member for every value fits, so extension values are admitted by data under these rules:
+- **Closed by default.** An untyped top-level member (`Request::extensions`) or a member of a typed container (an OpenRouter plugin's options, an OpenRouter server tool's `parameters`, a `GenericHostedTool`'s options) is refused before any I/O unless the active policy names it.
+- **Admitted by data.** The policy names each extension key for a family and a list of origins, each plugin id or tool type with the schema of its options, and each generic Responses tool type. Each comes with a closed value schema (boolean, null, bounded integer or number, bounded string or token, enum, bounded array, closed object, one_of). There are no references, patterns, defaults or code. The policy's content digest changes with what it admits.
+- **Owned members are never admitted.** `descriptor::request_key_owned` lists, per family, the members the encoder writes, their aliases (`functions`), and provider-held state the SDK does not model (`conversation`, `background`, `previous_response_id`, `store`). Matching ignores letter case. The policy loader refuses an extension that names one, and the encoders refuse it in a request. A test encodes every family with its typed controls set and checks that every member written is on the list, so the list cannot fall behind an encoder.
+- **Replay.** A replay-eligible extension's value joins the configuration digest. A replay-ineligible one leaves the answer without a native seal.
+- **Not an interpreter.** An admitted value is sent as given after the typed members. It never changes how the SDK encodes, decodes, streams or replays, so a value that needs such a change needs typed support instead (compaction, context management and MCP servers on Messages are typed for that reason).
+- **Not D5.** It admits values, not rules, and the D5 gate for descriptor rules is unchanged.
+
 ## 6. Reasoning carry
 
 Vendor reasoning state (signed thinking blocks, encrypted reasoning items, thought signatures) is opaque, origin-bound, and not portable across vendors.
@@ -818,7 +828,7 @@ Historical migration inventory based on the pre-cutover code measured in RESEARC
 | Separate SSE and WS usage/finalizer logic; positive-only usage merge; missing or non-numeric coerced to 0 | One accumulator; unknown is not zero |
 | Provider-name string checks in shared mapping code | Move to the family codec's wire rules |
 | Guessing foreign origin from a missing Gemini signature; direct replay of `reasoning_details`; prepending carry blocks | Replaced by the origin gate and original block order |
-| Public exposure of asio, graph cancellation types, raw yyjson, mutable schema lock, free-form `extra_fields` | Standalone contract, `std::stop_token`, descriptor-validated options |
+| Public exposure of asio, graph cancellation types, raw yyjson, mutable schema lock, free-form `extra_fields` | Standalone contract, `std::stop_token`, descriptor-validated options, policy-admitted extension values (section 5.7) |
 | Expectation that a cut stream without a callback is retry-safe; EOF treated as success | Replaced by RetrySafety and terminal evidence |
 | Multiple HTTP stacks in the new library | One private transport, D1 |
 

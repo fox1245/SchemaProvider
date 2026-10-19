@@ -71,9 +71,14 @@ struct ComputerUsePreviewTool { std::string environment; std::uint32_t display_w
 // A server tool OpenRouter runs (openrouter:web_search, openrouter:datetime, openrouter:image_generation, ...),
 // sent with its parameters object as given. Declared OpenRouter origins only.
 struct OpenRouterServerTool { std::string type; std::shared_ptr<const json::Document> parameters; };
+// A hosted tool the SDK has no struct for: its type and its other members. The policy must admit the type as a
+// generic server tool and declare the schema of those members (#32), so a new provider tool needs a data update, not
+// an SDK release, and nothing the policy does not name is sent.
+struct GenericHostedTool { std::string type; std::shared_ptr<const json::Document> options; };
 // New alternatives go at the end: the configuration digest binds the index.
 using HostedTool = std::variant<WebSearchTool, ImageGenerationTool, FileSearchTool, ToolSearchTool, ShellTool,
-                                CodeInterpreterTool, McpTool, ComputerTool, ComputerUsePreviewTool, OpenRouterServerTool>;
+                                CodeInterpreterTool, McpTool, ComputerTool, ComputerUsePreviewTool, OpenRouterServerTool,
+                                GenericHostedTool>;
 // The answer to an mcp_approval_request item of an earlier response.
 struct McpApproval { std::string request_id; bool approve = false; std::optional<std::string> reason; };
 // OpenRouter image output: Image in modalities, with Text when text is wanted too.
@@ -117,6 +122,8 @@ struct Request {
   std::vector<OutputModality> modalities;
   std::optional<sp::OpenRouterImageConfig> image_config;
   std::vector<sp::OpenRouterPlugin> plugins;
+  // Top-level members the policy admits for this origin (#32), sent as given after the typed ones.
+  std::shared_ptr<const json::Document> extensions;
   // Sent as mcp_approval_response input items after the messages. Each answers an mcp_approval_request in the
   // captured history, or of the response that previous_response_id continues.
   std::vector<McpApproval> mcp_approvals;

@@ -203,6 +203,8 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   // Invalid ordinary input never reaches hashing. For captured history, retain
   // lineage mismatch precedence even when the edited prefix is no longer valid.
   if (media_error && !captured_history) return *media_error;
+  if (auto refusal = request_controls::validate_extensions(descriptor, request.extensions))
+    return Error{refusal->admitted ? ErrorKind::InvalidRequest : ErrorKind::Unsupported, std::move(refusal->message)};
   auto context = std::shared_ptr<const NativeContext>(new NativeContext(descriptor, request, effective, streaming));
   if (!context->history_valid_) return replay_bad();
   if (!context->valid_) return Error{ErrorKind::ResourceLimit, "native binding could not be captured"};
@@ -430,7 +432,9 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     if (assistant && message.native && message.native->stop_ == StopKind::PauseTurn && !client_pending.empty()) return bad("pause continuation cannot await client tools");
   }
   if (!client_pending.empty()) return bad("client tool results are required before dispatch");
-  body.raw("]}");
+  body.raw("]");
+  request_controls::write_extensions(body, request.extensions);
+  body.raw("}");
   if (!body.ok()) return Error{has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest,
                               "request exceeds JSON limits or encoding"};
   return std::nullopt;

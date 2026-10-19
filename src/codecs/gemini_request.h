@@ -110,6 +110,8 @@ struct Request {
   // and a client function are both declared, which the service requires; MCP servers do not need it.
   std::optional<bool> server_tool_invocations;
   std::optional<RetrievalConfig> retrieval_config;
+  // Top-level members the policy admits for this origin (#32), sent as given after the typed ones.
+  std::shared_ptr<const json::Document> extensions;
 
   static Request simple(std::string model_name, std::string user_prompt,
                         std::optional<uint64_t> max_tokens = std::nullopt,

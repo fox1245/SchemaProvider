@@ -1,4 +1,5 @@
 #include "codecs/gemini_request.h"
+#include "core/request_controls.h"
 #include "codecs/media_input.h"
 #include "core/native.h"
 #include "json/json.h"
@@ -261,6 +262,8 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     }
   }
   if (tool_error && !captured_history) return *tool_error;
+  if (auto refusal = request_controls::validate_extensions(descriptor, request.extensions))
+    return Error{refusal->admitted ? ErrorKind::InvalidRequest : ErrorKind::Unsupported, std::move(refusal->message)};
   auto context = std::shared_ptr<const NativeContext>(new NativeContext(descriptor, request, effective, streaming));
   if (!context->history_valid_) return replay_bad();
   if (!context->valid_) return Error{ErrorKind::ResourceLimit, "native binding could not be captured"};
@@ -666,7 +669,9 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
                                "request exceeds JSON limits or encoding"};
     }
     if (!pending.empty()) return invalid("function results required before dispatch");
-    w.raw("]}");
+    w.raw("]");
+    request_controls::write_extensions(w, request.extensions);
+    w.raw("}");
     if (!w.ok()) return Error{has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest,
                              "request exceeds JSON limits or encoding"};
     return {};

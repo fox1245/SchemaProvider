@@ -1,5 +1,6 @@
 #pragma once
 
+#include "descriptor/owned_keys.h"
 #include "descriptor/policy.h"
 #include "json/json.h"
 #include <algorithm>
@@ -376,16 +377,6 @@ inline bool config_token(std::string_view text, std::size_t maximum = 64) noexce
           c == '_' || c == '-' || c == '/')) return false;
   return true;
 }
-inline std::optional<std::string> validate_plugins(const std::vector<OpenRouterPlugin>& plugins, std::size_t limit) {
-  if (plugins.size() > limit) return "OpenRouter plugin count limit exceeded";
-  std::set<std::string_view> ids;
-  for (const auto& plugin : plugins) {
-    if (!config_token(plugin.id) || !ids.insert(plugin.id).second) return "OpenRouter plugins require unique ids";
-    if (plugin.options && (!plugin.options->root().is_object() || plugin.options->root().get("id").valid()))
-      return "OpenRouter plugin options must be an object without id";
-  }
-  return std::nullopt;
-}
 inline void write_plugins(json::BoundedWriter& body, const std::vector<OpenRouterPlugin>& plugins) {
   body.raw("[");
   for (std::size_t i = 0; i < plugins.size(); ++i) {
@@ -426,6 +417,64 @@ inline void write_image_config(json::BoundedWriter& body, const OpenRouterImageC
   }
   text_field("moderation", config.moderation);
   body.raw("}");
+}
+// Policy-admitted top-level members (#32). Each one must be admitted by the family policy for the descriptor's
+// origin, never name a member the encoder owns, and conform to its declared schema. Nothing else is sent.
+struct ExtensionRefusal { bool admitted; std::string message; };
+// A value the policy admits but that does not conform, and one the policy does not admit at all.
+inline ExtensionRefusal invalid(std::string message) { return {true, std::move(message)}; }
+inline ExtensionRefusal unsupported(std::string message) { return {false, std::move(message)}; }
+inline std::optional<ExtensionRefusal> validate_extensions(const descriptor::ValidatedDescriptor& descriptor,
+                                                           const std::shared_ptr<const json::Document>& extensions) {
+  if (!extensions) return std::nullopt;
+  const auto root = extensions->root();
+  if (!root.is_object()) return invalid("extensions must be an object");
+  const auto& family = descriptor.family_policy();
+  for (auto member : root.members()) {
+    if (descriptor::request_key_owned(family.family, member.key)) return invalid("an extension cannot name a member the SDK writes");
+    const auto fact = std::find_if(family.extensions.begin(), family.extensions.end(), [&](const descriptor::ExtensionFact& f) {
+      return f.key == member.key && descriptor::contains(f.origins, descriptor.base_url());
+    });
+    if (fact == family.extensions.end()) return unsupported("an extension is not admitted by the policy for this origin");
+    if (descriptor::check_value(fact->value, member.value)) return invalid("an extension value does not match its declared schema");
+  }
+  return std::nullopt;
+}
+inline void write_extensions(json::BoundedWriter& body, const std::shared_ptr<const json::Document>& extensions) {
+  if (!extensions) return;
+  for (auto member : extensions->root().members()) body.raw(",").quoted(member.key).raw(":").value(member.value, 1);
+}
+// False when an extension the policy marks replay-ineligible is present: that turn's answer is not continuable natively.
+inline bool extensions_replay_eligible(const descriptor::ValidatedDescriptor& descriptor, const std::shared_ptr<const json::Document>& extensions) {
+  if (!extensions || !extensions->root().is_object()) return true;
+  const auto& family = descriptor.family_policy();
+  for (auto member : extensions->root().members())
+    for (const auto& fact : family.extensions)
+      if (fact.key == member.key && !fact.replay_eligible) return false;
+  return true;
+}
+// OpenRouter plugins: each id must be admitted by the family policy, and its options must match the declared schema
+// (#32). Admission says nothing about the origin; the encoder checks that it is a declared OpenRouter origin.
+inline std::optional<ExtensionRefusal> validate_plugins(const descriptor::FamilyPolicy& family, const std::vector<OpenRouterPlugin>& plugins, std::size_t limit) {
+  if (plugins.size() > limit) return invalid("OpenRouter plugin count limit exceeded");
+  std::set<std::string_view> ids;
+  for (const auto& plugin : plugins) {
+    if (!config_token(plugin.id) || !ids.insert(plugin.id).second) return invalid("OpenRouter plugins require unique ids");
+    const auto fact = std::find_if(family.openrouter_plugins.begin(), family.openrouter_plugins.end(), [&](const auto& f) { return f.name == plugin.id; });
+    if (fact == family.openrouter_plugins.end()) return unsupported("an OpenRouter plugin is not admitted by the policy");
+    if (plugin.options && (!fact->options || descriptor::check_value(*fact->options, plugin.options->root())))
+      return invalid("OpenRouter plugin options do not match the policy's schema");
+  }
+  return std::nullopt;
+}
+// A value admitted by the policy for a typed container (a tool's options, a plugin's members): every member must be
+// declared by `schema`. `what` names the container in the refusal.
+inline std::optional<std::string> validate_options(const std::optional<descriptor::ValueSchema>& schema,
+                                                   const std::shared_ptr<const json::Document>& options) {
+  if (!options) return std::nullopt;
+  if (!schema) return "options are not admitted by the policy";
+  if (descriptor::check_value(*schema, options->root())) return "options do not match the policy's schema";
+  return std::nullopt;
 }
 } // namespace request_controls
 } // namespace sp

@@ -311,7 +311,7 @@ What the declaration keeps: the served identity must still stay the same for the
 
 ## Request families and controls
 
-`sp::runtime::Request` is a variant of the five structs below. A request must match the client's descriptor family; a mismatch fails before network dispatch. Assign declared fields rather than using a generic `extra_fields` map.
+`sp::runtime::Request` is a variant of the five structs below. A request must match the client's descriptor family; a mismatch fails before network dispatch. Assign declared fields rather than using a generic `extra_fields` map. A member the SDK has no field for goes in `extensions`, and only when the policy admits it (see [policy-admitted extensions](#policy-admitted-extensions)).
 
 | Request type / header | Family-specific fields besides model, messages and tools |
 |---|---|
@@ -518,8 +518,8 @@ The immutable family policy's `temperature_forbidden_model_prefixes` supplies mo
 ## OpenRouter plugins and citations
 
 **Plugins.** `chat::Request::plugins` and `responses::Request::plugins` send OpenRouter plugins at a declared OpenRouter origin. Each `OpenRouterPlugin` is an `id` plus an optional `options` object, whose members are sent beside the id: `{"id": "web", "max_results": 2}`.
-- **Catalogue.** OpenRouter's catalogue (`web`, `file-parser`, `response-healing`, `context-compression`, and the beta `alignment` and `armor`) is not compiled in, so a new plugin needs no SDK release.
-- **Checks.** Ids must be unique short tokens, and the options must be an object without `id`.
+- **Catalogue.** OpenRouter's catalogue is policy data, not code. The policy's `openrouter_plugins` names each plugin id the SDK sends, with the schema of its options (see [policy-admitted extensions](#policy-admitted-extensions)). The built-in policy lists the documented plugins: `web`, `web-fetch`, `file-parser`, `response-healing`, `context-compression`, `moderation`, the beta `alignment` and `armor`, and the router plugins. An id the policy does not name is `Unsupported`, and options that do not match the schema are `InvalidRequest`, so a new plugin needs a policy update, not a release.
+- **Checks.** Ids must be unique, and the options must match the schema the policy declares for the plugin.
 - **Replay.** The plugins are bound in the configuration digest when present.
 
 **Citations.** `Text::citations` lists the sources an answer cites. Each `Citation` has:
@@ -560,7 +560,8 @@ Citations are read from the wire the message keeps. They are not part of its nat
   - `require_approval`: either a mode (`always`, `never`) or the `approval_always` and `approval_never` filters.
   - Several servers may be declared, each with its own `server_label`.
 - **`ComputerTool`** (`computer`) and **`ComputerUsePreviewTool`** (`computer_use_preview`, with an environment and a display size).
-- **`OpenRouterServerTool`.** Any `openrouter:` type with its `parameters` object, at a declared OpenRouter origin only: `openrouter:web_search`, `openrouter:datetime`, `openrouter:image_generation` and the rest of OpenRouter's catalogue.
+- **`OpenRouterServerTool`.** An `openrouter:` type that the policy's `openrouter_server_tools` admits, with `parameters` matching its schema, at a declared OpenRouter origin only. The built-in policy lists the documented tools that run on Responses, such as `openrouter:web_search`, `openrouter:datetime` and `openrouter:image_generation`.
+- **`GenericHostedTool`.** A type the SDK has no struct for, with its other members as `options`. The policy must list it in `server_tools` with `"generic": true` and an `options` schema. The built-in policy lists none.
 
 **Decoding.**
 - **Service items.** Code interpreter calls, MCP calls and tool listings, and OpenRouter's tool steps are `Opaque` parts holding the whole item, and they replay as received.
@@ -582,6 +583,26 @@ Citations are read from the wire the message keeps. They are not part of its nat
   - Web search with a domain filter and a location.
 - **`gpt-5.4-mini`.** The `computer` tool, then the screenshot answer.
 - **OpenRouter.** `openrouter:datetime`, and image output from `google/gemini-2.5-flash-image`, buffered and streamed.
+
+## Policy-admitted extensions
+
+A provider adds request members faster than the SDK releases. Every request struct has `extensions`, a JSON object of top-level members that are sent after the typed ones, but only members the active policy admits (DESIGN section 5.7).
+- **The policy fact.** A family's `extensions` lists `{"key", "origins", "value", "replay_eligible"}`. `value` is a closed schema:
+  - `boolean` and `null`;
+  - `integer` and `number`, with optional `minimum` and `maximum`;
+  - `string`, with a required `max_length` and an optional `token`;
+  - `enum`, with `values`;
+  - `array`, with `items` and `max_items`;
+  - `object`, with `properties` and `required`, closed to the listed properties;
+  - `one_of`.
+- **Refusals.**
+  - A key the policy does not admit for the descriptor's origin is `Unsupported`.
+  - A value that does not match its schema is `InvalidRequest`.
+  - A key the encoder owns is `InvalidRequest`, in any letter case: a typed control, an alias such as `functions`, or provider-held state such as `conversation`.
+- **Replay.** A replay-eligible value joins the configuration digest. A replay-ineligible one leaves the answer without a native seal.
+- **Default policy.** The built-in policy admits no extension. A host admits one in its own policy, for example `{"key": "inference_geo", "origins": ["https://api.anthropic.com"], "value": {"type": "string", "max_length": 32, "token": true}, "replay_eligible": true}` on `anthropic.messages`.
+
+The same schemas admit the options of typed containers: OpenRouter plugins (`openrouter_plugins`), OpenRouter server tools (`openrouter_server_tools`) and generic Responses tools (`server_tools` entries with `"generic": true`). `sp::capability::PolicyAdmittedExtensions` is part of `RequiredProvider`.
 
 ## Responses provider-held continuation
 

@@ -45,6 +45,8 @@ struct Request {
   std::optional<sp::OpenRouterRouting> provider{};
   // A code-execution container to reuse, by the id an earlier response reported.
   std::optional<std::string> container{};
+  // Top-level members the policy admits for this origin (#32), sent as given after the typed ones.
+  std::shared_ptr<const json::Document> extensions{};
 
   static Request simple(std::string model_name, std::string user_prompt,
                         std::optional<uint64_t> output_cap = std::nullopt,
