@@ -11,7 +11,8 @@ enum class Source {
   // Request encoders, and the checks they share (policy choices, request controls, media, native replay).
   ChatRequest, MessagesRequest, ResponsesRequest, GeminiRequest, InteractionsRequest, SharedRequest,
   // Non-chat endpoints (D6): each decoder, then its request encoder.
-  Images, ImagesRequest, Decisions, DecisionsRequest,
+  Images, ImagesRequest, Decisions, DecisionsRequest, Embeddings, EmbeddingsRequest, Rerank, RerankRequest,
+  Moderation, ModerationRequest,
 };
 struct Entry { std::string_view message, code; };
 std::span<const Entry> entries(Source) noexcept;

@@ -234,7 +234,8 @@ Non-chat endpoints (D6, #61):
 - **Images.** `<codecs/images.h>` adds `images::Request`, `images::Result` and `images::Outcome` (a Result or a `Failure`).
 - **Decisions.** `<codecs/decisions.h>` adds `decisions::Request`, `Question`, `Option`, `Answer`, `Result` and `Outcome`, with `prepare`, `complete` and `start` on `runtime::Client`. The built-in policy admits OpenAI `/v1/decisions` and OpenRouter `/api/alpha/decisions`.
 - **Policy facts.** The descriptor policy gains a top-level `endpoints` list. The built-in policy admits images at the OpenAI and OpenRouter origins. The content digest changes; the replay identity does not.
-- **Reason codes.** New sources `images`, `request.images`, `decisions` and `request.decisions`.
+- **Embeddings, rerank, moderation.** `<codecs/embeddings.h>`, `<codecs/rerank.h>` and `<codecs/moderation.h>` add their requests, results and outcomes, with `prepare`, `complete` and `start` on `runtime::Client`. `<codecs/endpoint.h>` declares the decoder interface they share; `images::Close` and `decisions::Close` are now `endpoints::Close`.
+- **Reason codes.** New sources: `images`, `decisions`, `embeddings`, `rerank` and `moderation`, each with its `request.` form.
 
 Messages input blocks and skills (#53):
 - **`ToolResult::content_parts`** is now `std::vector<std::variant<Text, Media, Opaque>>`. `Opaque` moved before `ToolResult` in `<core/value.h>`. Visitors and `std::get<Media>` on a part that is not text need a case for it. The archive stores such a part under a new nested tag, and the native digest hashes it.

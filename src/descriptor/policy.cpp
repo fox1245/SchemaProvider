@@ -488,14 +488,22 @@ class PolicyLoader {
         static constexpr std::string_view image_members[]{"model", "prompt", "n", "size", "quality", "background", "output_format",
                                                           "output_compression", "images", "input_references", "stream", "partial_images"};
         static constexpr std::string_view decision_members[]{"model", "input", "state", "questions"};
+        static constexpr std::string_view embedding_members[]{"model", "input", "dimensions", "encoding_format", "input_type", "requests"};
+        static constexpr std::string_view rerank_members[]{"model", "query", "documents", "top_n"};
+        static constexpr std::string_view moderation_members[]{"model", "input"};
         const auto owned_by = [](std::string_view endpoint, std::string_view name) {
           const auto in = [&](const auto& list) { return std::find(std::begin(list), std::end(list), name) != std::end(list); };
-          return (endpoint == "images" && in(image_members)) || (endpoint == "decisions" && in(decision_members));
+          return (endpoint == "images" && in(image_members)) || (endpoint == "decisions" && in(decision_members)) ||
+                 (endpoint == "embeddings" && in(embedding_members)) || (endpoint == "rerank" && in(rerank_members)) ||
+                 (endpoint == "moderation" && in(moderation_members));
         };
         const auto operations_of = [](std::string_view endpoint, std::string_view shape) -> std::vector<std::string_view> {
           if (endpoint == "images" && shape == "openai") return {"generate", "edit"};
           if (endpoint == "images" && shape == "openrouter") return {"generate"};
           if (endpoint == "decisions" && (shape == "openai" || shape == "openrouter")) return {"decide"};
+          if (endpoint == "embeddings" && (shape == "openai" || shape == "openrouter" || shape == "google")) return {"embed"};
+          if (endpoint == "rerank" && shape == "openrouter") return {"rank"};
+          if (endpoint == "moderation" && shape == "openai") return {"check"};
           return {};
         };
         for (auto e : endpoints.elements()) {

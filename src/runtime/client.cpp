@@ -1,6 +1,7 @@
 #include "runtime/client.h"
 #include "codecs/images.h"
 #include "codecs/decisions.h"
+#include "codecs/endpoint.h"
 #include "runtime/testing.h"
 #include "core/native.h"
 #include "codecs/messages.h"
@@ -377,8 +378,7 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
   std::unique_ptr<responses::Codec> responses_codec;
   std::unique_ptr<gemini::Codec> gemini_codec;
   std::unique_ptr<interactions::Codec> interactions_codec;
-  std::unique_ptr<images::Codec> images_codec;
-  std::unique_ptr<decisions::Codec> decisions_codec;
+  std::unique_ptr<endpoints::Codec> endpoint_codec;
   std::unique_ptr<transport::SseFramer> framer;
   std::optional<Head> response;
   ResponseInfo response_info;
@@ -544,13 +544,10 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
     responses_codec.reset();
     gemini_codec.reset();
     interactions_codec.reset();
-    images_codec.reset();
-    decisions_codec.reset();
+    endpoint_codec.reset();
     accumulator = std::make_unique<Accumulator>(client->options.limits.semantic,
         [this](const Event& event) { semantic(event); }, client->options.limits.max_response_bytes);
-    if (family == Family::Endpoint && endpoint == "images") images_codec = std::make_unique<images::Codec>(client->descriptor, *accumulator,
-        prepared_model, client->options.limits.semantic);
-    else if (family == Family::Endpoint) decisions_codec = std::make_unique<decisions::Codec>(client->descriptor, *accumulator,
+    if (family == Family::Endpoint) endpoint_codec = endpoints::make_codec(endpoint, client->descriptor, *accumulator,
         prepared_model, client->options.limits.semantic);
     else if (family == Family::Chat) chat_codec = std::make_unique<chat::Codec>(client->descriptor,
         options.streaming ? chat::Mode::Sse : chat::Mode::Buffered, *accumulator,
@@ -785,8 +782,7 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
         else if (gemini_codec) gemini_codec->finish({normal, close_error.kind});
         else interactions_codec->finish({normal, close_error.kind});
       } else {
-        if (images_codec) images_codec->buffered(buffered, {normal, close_error.kind});
-        else if (decisions_codec) decisions_codec->buffered(buffered, {normal, close_error.kind});
+        if (endpoint_codec) endpoint_codec->buffered(buffered, {normal, close_error.kind});
         else if (chat_codec) chat_codec->buffered(buffered, {normal, close_error.kind});
         else if (messages_codec) messages_codec->buffered(buffered, {normal, close_error.kind});
         else if (responses_codec) responses_codec->buffered(buffered, {normal, close_error.kind});
@@ -823,7 +819,7 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
         prior_usage_unknown = prior_usage_unknown || !prior_attempt_proves_no_usage(*failure);
         pending_failure = std::move(outcome);
         stage = Stage::Backoff;
-        chat_codec.reset(); messages_codec.reset(); responses_codec.reset(); gemini_codec.reset(); interactions_codec.reset(); images_codec.reset(); decisions_codec.reset(); accumulator.reset(); framer.reset();
+        chat_codec.reset(); messages_codec.reset(); responses_codec.reset(); gemini_codec.reset(); interactions_codec.reset(); endpoint_codec.reset(); accumulator.reset(); framer.reset();
         terminal_wire.reset();
         buffered.clear(); response.reset();
         retry_timer.arm(*executor, *at, [weak = weak_from_this()] { if (auto self = weak.lock()) self->timer(true); });
@@ -1472,6 +1468,21 @@ PreparedEndpoint<decisions::Outcome> Client::prepare(decisions::Request request,
   return PreparedEndpoint<decisions::Outcome>(prepare_endpoint<decisions::Encoded>(std::move(options), "decisions",
       static_cast<int>(reason::Source::DecisionsRequest), [&] { return decisions::encode(client->descriptor, request); }));
 }
+PreparedEndpoint<embeddings::Outcome> Client::prepare(embeddings::Request request, RunOptions options) {
+  auto client = state_;
+  return PreparedEndpoint<embeddings::Outcome>(prepare_endpoint<embeddings::Encoded>(std::move(options), "embeddings",
+      static_cast<int>(reason::Source::EmbeddingsRequest), [&] { return embeddings::encode(client->descriptor, request); }));
+}
+PreparedEndpoint<rerank::Outcome> Client::prepare(rerank::Request request, RunOptions options) {
+  auto client = state_;
+  return PreparedEndpoint<rerank::Outcome>(prepare_endpoint<rerank::Encoded>(std::move(options), "rerank",
+      static_cast<int>(reason::Source::RerankRequest), [&] { return rerank::encode(client->descriptor, request); }));
+}
+PreparedEndpoint<moderation::Outcome> Client::prepare(moderation::Request request, RunOptions options) {
+  auto client = state_;
+  return PreparedEndpoint<moderation::Outcome>(prepare_endpoint<moderation::Encoded>(std::move(options), "moderation",
+      static_cast<int>(reason::Source::ModerationRequest), [&] { return moderation::encode(client->descriptor, request); }));
+}
 images::Outcome Client::complete(images::Request request, RunOptions options) {
   return complete(prepare(std::move(request), std::move(options)));
 }
@@ -1497,6 +1508,45 @@ EndpointCall<decisions::Outcome> Client::start(PreparedEndpoint<decisions::Outco
   Callbacks callbacks;
   if (on_outcome) callbacks.on_outcome = [deliver = std::move(on_outcome)](Result result) { deliver(decisions::typed(*result)); };
   return EndpointCall<decisions::Outcome>(start(std::move(call.prepared_), std::move(callbacks)));
+}
+embeddings::Outcome Client::complete(embeddings::Request request, RunOptions options) {
+  return complete(prepare(std::move(request), std::move(options)));
+}
+embeddings::Outcome Client::complete(PreparedEndpoint<embeddings::Outcome> call) {
+  if (!state_ || state_->in_thread()) return embeddings::typed(*detail::misuse_result());
+  try { return start(std::move(call)).join(); }
+  catch (const AdmissionError& error) { return embeddings::typed(*error.outcome()); }
+}
+EndpointCall<embeddings::Outcome> Client::start(PreparedEndpoint<embeddings::Outcome> call, std::function<void(embeddings::Outcome)> on_outcome) {
+  Callbacks callbacks;
+  if (on_outcome) callbacks.on_outcome = [deliver = std::move(on_outcome)](Result result) { deliver(embeddings::typed(*result)); };
+  return EndpointCall<embeddings::Outcome>(start(std::move(call.prepared_), std::move(callbacks)));
+}
+rerank::Outcome Client::complete(rerank::Request request, RunOptions options) {
+  return complete(prepare(std::move(request), std::move(options)));
+}
+rerank::Outcome Client::complete(PreparedEndpoint<rerank::Outcome> call) {
+  if (!state_ || state_->in_thread()) return rerank::typed(*detail::misuse_result());
+  try { return start(std::move(call)).join(); }
+  catch (const AdmissionError& error) { return rerank::typed(*error.outcome()); }
+}
+EndpointCall<rerank::Outcome> Client::start(PreparedEndpoint<rerank::Outcome> call, std::function<void(rerank::Outcome)> on_outcome) {
+  Callbacks callbacks;
+  if (on_outcome) callbacks.on_outcome = [deliver = std::move(on_outcome)](Result result) { deliver(rerank::typed(*result)); };
+  return EndpointCall<rerank::Outcome>(start(std::move(call.prepared_), std::move(callbacks)));
+}
+moderation::Outcome Client::complete(moderation::Request request, RunOptions options) {
+  return complete(prepare(std::move(request), std::move(options)));
+}
+moderation::Outcome Client::complete(PreparedEndpoint<moderation::Outcome> call) {
+  if (!state_ || state_->in_thread()) return moderation::typed(*detail::misuse_result());
+  try { return start(std::move(call)).join(); }
+  catch (const AdmissionError& error) { return moderation::typed(*error.outcome()); }
+}
+EndpointCall<moderation::Outcome> Client::start(PreparedEndpoint<moderation::Outcome> call, std::function<void(moderation::Outcome)> on_outcome) {
+  Callbacks callbacks;
+  if (on_outcome) callbacks.on_outcome = [deliver = std::move(on_outcome)](Result result) { deliver(moderation::typed(*result)); };
+  return EndpointCall<moderation::Outcome>(start(std::move(call.prepared_), std::move(callbacks)));
 }
 Diagnostics Client::diagnostics() const noexcept {
   if (!state_) return {};

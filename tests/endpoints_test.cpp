@@ -1,0 +1,158 @@
+// Embeddings, rerank and moderation endpoints (D6): the request each provider shape takes and the typed result of a
+// response.
+#include "codecs/embeddings.h"
+#include "codecs/moderation.h"
+#include "codecs/rerank.h"
+#include "descriptor/descriptor.h"
+#include "json/json.h"
+#include <cmath>
+#include <iostream>
+#include <stdexcept>
+#include <string>
+#include <variant>
+
+namespace {
+using namespace sp;
+#define CHECK(condition) do { if (!(condition)) throw std::runtime_error("line " + std::to_string(__LINE__) + ": " #condition); } while (false)
+descriptor::ValidatedDescriptor at(std::string_view origin) {
+  const std::string family = origin == "https://generativelanguage.googleapis.com" ? "google.generate" : "openai.chat";
+  const std::string path = family == "google.generate" ? "/v1beta/models/{model}:generateContent"
+      : origin == "https://openrouter.ai" ? "/api/v1/chat/completions" : "/v1/chat/completions";
+  const std::string stream = family == "google.generate" ? "/v1beta/models/{model}:streamGenerateContent?alt=sse" : path;
+  auto loaded = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"endpoints-fixture","family":)" + json::quote(family) +
+                                 R"(,"connection":{"base_url":)" + json::quote(origin) + R"(,"paths":{"buffered":)" + json::quote(path) +
+                                 R"(,"streaming":)" + json::quote(stream) + "}}}");
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
+  return std::get<descriptor::ValidatedDescriptor>(std::move(loaded));
+}
+std::shared_ptr<const json::Document> document(std::string_view text) {
+  auto parsed = json::parse(text);
+  CHECK(std::holds_alternative<json::Document>(parsed));
+  return std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
+}
+template <class Encoded, class Request, class Encode> Encoded encoded(Encode encode, const descriptor::ValidatedDescriptor& d, const Request& r) {
+  auto result = encode(d, r);
+  if (const auto* error = std::get_if<Error>(&result)) throw std::runtime_error("encode refused: " + error->safe_message);
+  return std::get<Encoded>(std::move(result));
+}
+template <class Request, class Encode> ErrorKind refused(Encode encode, const descriptor::ValidatedDescriptor& d, const Request& r) {
+  auto result = encode(d, r);
+  CHECK(std::holds_alternative<Error>(result));
+  return std::get<Error>(result).kind;
+}
+template <class Codec, class Typed> auto decoded(Typed typed, const descriptor::ValidatedDescriptor& d, std::string_view body, std::string model) {
+  Accumulator accumulator;
+  Codec codec(d, accumulator, std::move(model));
+  codec.buffered(body, {});
+  CHECK(accumulator.outcome());
+  return typed(*accumulator.outcome());
+}
+const char png[] = "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEklEQVR4nGO4ckUEK2IYlRIBAPzqLqpk9vWsAAAAAElFTkSuQmCC";
+
+void embedding_endpoints() {
+  const auto openai = at("https://api.openai.com"), router = at("https://openrouter.ai"), google = at("https://generativelanguage.googleapis.com");
+  embeddings::Request request{"text-embedding-3-small", {{"a red fox"}, {"a blue whale"}}};
+  request.dimensions = 256;
+  const auto direct = encoded<embeddings::Encoded>(embeddings::encode, openai, request);
+  CHECK(direct.path == "/v1/embeddings" && direct.charge_on_accept);
+  {
+    const auto body = document(direct.body);
+    const auto root = body->root();
+    CHECK(root.get("input").size() == 2 && root.get("input").at(1).as_string() == "a blue whale" && root.get("dimensions").as_uint() == 256 &&
+          root.get("encoding_format").as_string() == "float");
+  }
+  // Google names the model in the path and embeds each input as its own request, media inline.
+  auto multimodal = request; multimodal.model = "gemini-embedding-2"; multimodal.task = "RETRIEVAL_DOCUMENT";
+  multimodal.inputs[1].media = {Media::image("image/png", std::make_shared<const std::string>(png))};
+  const auto via_google = encoded<embeddings::Encoded>(embeddings::encode, google, multimodal);
+  CHECK(via_google.path == "/v1beta/models/gemini-embedding-2:batchEmbedContents" && via_google.auth == "x-goog-api-key");
+  {
+    const auto body = document(via_google.body);
+    const auto requests = body->root().get("requests");
+    CHECK(requests.size() == 2 && requests.at(0).get("model").as_string() == "models/gemini-embedding-2" &&
+          requests.at(1).get("content").get("parts").size() == 2 && requests.at(1).get("content").get("parts").at(1).get("inline_data").get("mime_type").as_string() == "image/png" &&
+          requests.at(0).get("taskType").as_string() == "RETRIEVAL_DOCUMENT" && requests.at(0).get("outputDimensionality").as_uint() == 256);
+  }
+  // OpenRouter takes media as content lists, and the task as `input_type`.
+  auto routed = multimodal; routed.model = "openai/text-embedding-3-small"; routed.task = "query";
+  {
+    const auto body = document(encoded<embeddings::Encoded>(embeddings::encode, router, routed).body);
+    const auto input = body->root().get("input");
+    CHECK(input.at(0).get("content").at(0).get("type").as_string() == "text" && input.at(1).get("content").at(1).get("image_url").get("url").as_string().starts_with("data:image/png;base64,") &&
+          body->root().get("input_type").as_string() == "query");
+  }
+  CHECK(refused(embeddings::encode, openai, multimodal) == ErrorKind::Unsupported);
+  auto tasked = request; tasked.task = "query";
+  CHECK(refused(embeddings::encode, openai, tasked) == ErrorKind::Unsupported);
+  auto slashed = multimodal; slashed.model = "models/gemini-embedding-2";
+  CHECK(refused(embeddings::encode, google, slashed) == ErrorKind::InvalidRequest);
+  auto empty = request; empty.inputs.push_back({});
+  CHECK(refused(embeddings::encode, openai, empty) == ErrorKind::InvalidRequest);
+  CHECK(refused(embeddings::encode, at("http://127.0.0.1:18080"), request) == ErrorKind::Unsupported);
+  // Vectors come back in input order, whatever order the provider listed them in.
+  const auto result = decoded<embeddings::Codec>(embeddings::typed, openai,
+      R"({"object":"list","model":"text-embedding-3-small","data":[{"object":"embedding","index":1,"embedding":[0.5,-0.25]},{"object":"embedding","index":0,"embedding":[0.125,1]}],"usage":{"prompt_tokens":6,"total_tokens":6}})",
+      "text-embedding-3-small");
+  const auto& vectors = std::get<embeddings::Result>(result);
+  CHECK(vectors.vectors.size() == 2 && vectors.vectors[0] == (std::vector<float>{0.125f, 1.f}) && vectors.vectors[1][1] == -0.25f &&
+        vectors.usage.input_total->value == 6 && vectors.model.relation == ServedRelation::Exact);
+  const auto from_google = decoded<embeddings::Codec>(embeddings::typed, google, R"({"embeddings":[{"values":[1,2,3]},{"values":[4,5,6]}]})", "gemini-embedding-2");
+  CHECK(std::get<embeddings::Result>(from_google).vectors.size() == 2 && std::get<embeddings::Result>(from_google).vectors[1][2] == 6.f);
+  for (const auto* body : {R"({"data":[{"index":0,"embedding":"AAAA"}]})", R"({"data":[{"index":0,"embedding":[]}]})", R"({"model":"x"})"}) {
+    const auto failed = decoded<embeddings::Codec>(embeddings::typed, openai, body, "m");
+    CHECK(std::holds_alternative<Failure>(failed) && std::get<Failure>(failed).error.kind == ErrorKind::ProtocolCorrupt);
+  }
+}
+
+void rerank_endpoint() {
+  const auto router = at("https://openrouter.ai");
+  rerank::Request request{"cohere/rerank-v3.5", "Which animal lives in the sea?", {"A fox lives in the forest.", "A whale lives in the sea."}};
+  request.top = 1;
+  request.extensions = document(R"({"provider":{"order":["cohere"]}})");
+  const auto wire = encoded<rerank::Encoded>(rerank::encode, router, request);
+  CHECK(wire.path == "/api/v1/rerank");
+  {
+    const auto body = document(wire.body);
+    CHECK(body->root().get("documents").size() == 2 && body->root().get("top_n").as_uint() == 1 && body->root().get("provider").get("order").at(0).as_string() == "cohere");
+  }
+  CHECK(refused(rerank::encode, at("https://api.openai.com"), request) == ErrorKind::Unsupported);
+  auto none = request; none.documents.clear();
+  CHECK(refused(rerank::encode, router, none) == ErrorKind::InvalidRequest);
+  const auto result = decoded<rerank::Codec>(rerank::typed, router,
+      R"({"id":"gen-rr-1","model":"cohere/rerank-v3.5","provider":"Cohere","results":[{"index":1,"relevance_score":0.97,"document":{"text":"A whale lives in the sea."}}],"usage":{"cost":0.002,"search_units":1}})",
+      "cohere/rerank-v3.5");
+  const auto& ranked = std::get<rerank::Result>(result);
+  CHECK(ranked.ranked.size() == 1 && ranked.ranked[0].index == 1 && ranked.ranked[0].relevance == 0.97 && ranked.provider == "Cohere" &&
+        ranked.usage.extra.at("search_units").value == 1 && ranked.usage.provider_cost.total->nano_usd == 2'000'000u);
+  const auto failed = decoded<rerank::Codec>(rerank::typed, router, R"({"results":[{"index":"1"}]})", "m");
+  CHECK(std::holds_alternative<Failure>(failed));
+}
+
+void moderation_endpoint() {
+  const auto openai = at("https://api.openai.com");
+  moderation::Request request{"omni-moderation-latest", {{"I will hurt you."}, {"Nice weather today."}}};
+  const auto wire = encoded<moderation::Encoded>(moderation::encode, openai, request);
+  CHECK(wire.path == "/v1/moderations" && !wire.charge_on_accept);
+  CHECK(document(wire.body)->root().get("input").at(1).as_string() == "Nice weather today.");
+  auto pictured = request; pictured.inputs[1].media = {Media::image("image/png", std::make_shared<const std::string>(png))};
+  {
+    const auto body = document(encoded<moderation::Encoded>(moderation::encode, openai, pictured).body);
+    const auto input = body->root().get("input");
+    CHECK(input.size() == 3 && input.at(0).get("type").as_string() == "text" && input.at(2).get("type").as_string() == "image_url");
+  }
+  CHECK(refused(moderation::encode, at("https://openrouter.ai"), request) == ErrorKind::Unsupported);
+  const auto result = decoded<moderation::Codec>(moderation::typed, openai,
+      R"({"id":"modr-1","model":"omni-moderation-2024-09-26","results":[{"flagged":true,"categories":{"violence":true,"harassment":false},"category_scores":{"violence":0.91,"harassment":0.02}},{"flagged":false,"categories":{"violence":false},"category_scores":{"violence":0.001}}]})",
+      "omni-moderation-latest");
+  const auto& verdicts = std::get<moderation::Result>(result);
+  CHECK(verdicts.verdicts.size() == 2 && verdicts.verdicts[0].flagged && verdicts.verdicts[0].categories[0] == (std::pair<std::string, bool>{"violence", true}) &&
+        verdicts.verdicts[0].scores[0].second == 0.91 && !verdicts.verdicts[1].flagged && verdicts.id == "modr-1");
+  const auto failed = decoded<moderation::Codec>(moderation::typed, openai, R"({"results":[{"categories":{}}]})", "m");
+  CHECK(std::holds_alternative<Failure>(failed));
+}
+}  // namespace
+
+int main() {
+  try { embedding_endpoints(); rerank_endpoint(); moderation_endpoint(); std::cout << "endpoint properties passed\n"; return 0; }
+  catch (const std::exception& error) { std::cerr << "endpoint test failed: " << error.what() << '\n'; return 1; }
+}
