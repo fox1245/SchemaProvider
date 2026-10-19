@@ -232,7 +232,7 @@ class PolicyLoader {
         fail("", "configured policy depth limit");
       auto families=root.get("families"); if(!families.is_array() || families.size()!=5)fail("/families","all five typed families");
       for(auto v:families.elements()) {
-        closed(v,{"family","bindings","stop_reasons","defaults","required_output_cap","temperature_range","top_p_range","thinking_minimum","thinking_top_p_minimum","reasoning_efforts","reasoning_summaries","thinking_levels","service_tiers","header_versions","header_version","server_tools","openrouter_origins","temperature_forbidden_model_prefixes","media","openrouter_media"},"/families",{"temperature_forbidden_generations","max_completion_tokens_origins"});
+        closed(v,{"family","bindings","stop_reasons","defaults","required_output_cap","temperature_range","top_p_range","thinking_minimum","thinking_top_p_minimum","reasoning_efforts","reasoning_summaries","thinking_levels","service_tiers","header_versions","header_version","server_tools","openrouter_origins","temperature_forbidden_model_prefixes","media","openrouter_media"},"/families",{"temperature_forbidden_generations","max_completion_tokens_origins","unreplayable_parts"});
         FamilyPolicy f; f.family=text(v.get("family"),"/families");
         if(f.family!="openai.chat" && f.family!="anthropic.messages" && f.family!="openai.responses" && f.family!="google.generate" && f.family!="google.interactions")fail("/families","typed family");
         if(policy->family(f.family))fail("/families","unique families");
@@ -290,6 +290,24 @@ class PolicyLoader {
             if (!valid_origin(origin) || origin.ends_with('/') || contains(f.openrouter_origins, origin))
               fail("/max_completion_tokens_origins", "canonical admitted origin without path, apart from the OpenRouter origins");
             policy->completion_cap_origins_.emplace_back(f.family, origin);
+          }
+        }
+        // Optional: part shapes the service refuses to take back, observed live and lifted by removing the entry.
+        if (auto parts = v.get("unreplayable_parts"); parts.valid()) {
+          if (f.family != "google.generate") fail("/unreplayable_parts", "Generate part shapes only");
+          if (!parts.is_array() || parts.size() > 16) fail("/unreplayable_parts", "bounded array of part shapes");
+          auto member_name = [](std::string_view name) {
+            return !name.empty() && name.size() <= 64 && std::all_of(name.begin(), name.end(), [](unsigned char c) {
+              return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+            });
+          };
+          for (auto shape : parts.elements()) {
+            closed(shape, {"member", "missing"}, "/unreplayable_parts");
+            auto member = text(shape.get("member"), "/unreplayable_parts"), missing = text(shape.get("missing"), "/unreplayable_parts");
+            if (!member_name(member) || !member_name(missing)) fail("/unreplayable_parts", "part and field member names");
+            for (const auto& existing : f.unreplayable_parts)
+              if (existing.first == member && existing.second == missing) fail("/unreplayable_parts", "unique part shapes");
+            f.unreplayable_parts.emplace_back(std::move(member), std::move(missing));
           }
         }
         f.media = media_admission(v.get("media"), "/media", f.family);

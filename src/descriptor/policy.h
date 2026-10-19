@@ -50,6 +50,9 @@ struct FamilyPolicy {
   std::vector<std::string> openrouter_origins;
   std::vector<std::string> temperature_forbidden_model_prefixes;
   std::vector<ServerToolFact> server_tools;
+  // Captured response parts the service refuses when they are sent back: a part whose data member `member` lacks
+  // the member `missing`. Native replay of such a message is refused before dispatch. Generate only.
+  std::vector<std::pair<std::string, std::string>> unreplayable_parts;
   MediaPolicy media;
   // Replaces `media` for a base URL in openrouter_origins, whose gateway admits more content.
   std::optional<MediaPolicy> openrouter_media;

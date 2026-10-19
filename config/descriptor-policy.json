@@ -366,7 +366,10 @@
       "service_tiers": [],
       "header_versions": [],
       "header_version": null,
-      "server_tools": []
+      "server_tools": [],
+      "unreplayable_parts": [
+        {"member": "toolCall", "missing": "toolType"}
+      ]
     },
     {
       "family": "google.interactions",

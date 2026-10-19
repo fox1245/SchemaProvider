@@ -744,6 +744,7 @@ constexpr Entry gemini_request_table[] = {
   {"function result must be JSON object", "request.generate.function_result_must_be_json_object"},
   {"all function results must appear together", "request.generate.all_function_results_must_appear_together"},
   {"function results required before dispatch", "request.generate.function_results_required_before_dispatch"},
+  {"captured part is one the service refuses to take back", "request.generate.captured_part_refused_by_the_service"},
   {"native replay provenance, binding or content mismatch", "request.generate.native_replay_provenance_binding_or_content"},
   {"Gemini encoder requires generate descriptor", "request.generate.gemini_encoder_requires_generate_descriptor"},
   {"Gemini descriptor paths must target the same literal model", "request.generate.gemini_descriptor_paths_must_target_the_same"},

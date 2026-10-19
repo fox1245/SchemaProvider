@@ -6,7 +6,9 @@
 #include "codecs/responses.h"
 #include "codecs/responses_request.h"
 #include "core/native.h"
+#include "descriptor/policy.h"
 #include "json/json.h"
+#include "sp/config_defaults.h"
 #include <iostream>
 #include <stdexcept>
 
@@ -288,6 +290,58 @@ void gemini_service_tool_options() {
   plain_codec.buffered(R"({"modelVersion":"fixture-model","responseId":"g4","candidates":[{"index":0,"content":{"role":"model","parts":[{"functionCall":{"id":"c1","name":"navigate","args":{}}}]},"finishReason":"STOP"}]})", {});
   CHECK(plain.outcome() && std::holds_alternative<Failure>(*plain.outcome()) && std::get<Failure>(*plain.outcome()).error.kind == ErrorKind::Unsupported);
 }
+// The service refuses its own MCP toolCall (it has no toolType) when it comes back. The policy lists that shape, so
+// the SDK refuses the history before dispatch; removing the entry lifts the refusal, and the caller may project the
+// answer into portable history instead.
+void gemini_unreplayable_service_parts() {
+  const std::string source = R"({"descriptor_version":1,"revision":1,"id":"media-controls","family":"google.generate","connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":"/v1beta/models/fixture-model:generateContent","streaming":"/v1beta/models/fixture-model:streamGenerateContent?alt=sse"}}})";
+  auto with_policy = [&](descriptor::PolicySnapshot policy) {
+    auto loaded = policy ? descriptor::load(source, std::move(policy)) : descriptor::load(source);
+    CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
+    return std::get<descriptor::ValidatedDescriptor>(std::move(loaded));
+  };
+  const auto descriptor = with_policy({});
+  std::string text(config_defaults::descriptor_policy_json);
+  const std::string entry = R"("unreplayable_parts":[{"member":"toolCall","missing":"toolType"}])";
+  const auto at = text.find(entry); CHECK(at != std::string::npos);
+  text.replace(at, entry.size(), R"("unreplayable_parts":[])");
+  auto lifted_policy = descriptor::load_policy(text, config_defaults::codec_defaults_json);
+  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(lifted_policy));
+  const auto lifted = with_policy(std::get<descriptor::PolicySnapshot>(lifted_policy));
+
+  auto value = request<gemini::Request>();
+  gemini::McpServer server; server.name = "docs"; server.url = "https://mcp.example.test/mcp";
+  value.mcp_servers = {server}; value.server_tool_invocations = true;
+  auto answer = [&](const descriptor::ValidatedDescriptor& d, std::string_view call) {
+    Accumulator accumulator; gemini::Codec codec(d, gemini::Mode::Buffered, accumulator, encoded_ok(d, value).context);
+    codec.buffered(std::string(R"({"modelVersion":"fixture-model","responseId":"g5","candidates":[{"index":0,"content":{"role":"model","parts":[)") + std::string(call) +
+                   R"(,{"toolResponse":{"id":"m1","response":{"result":"y"}}},{"text":"found","thoughtSignature":"c2ln"}]},"finishReason":"STOP"}]})", {});
+    CHECK(accumulator.outcome() && std::holds_alternative<Completion>(*accumulator.outcome()));
+    return std::get<Completion>(*accumulator.outcome()).messages.front();
+  };
+  const std::string typeless = R"({"toolCall":{"id":"m1","toolName":"docs:search","args":{"q":"x"}},"thoughtSignature":"c2ln"})";
+  const std::string typed = R"({"toolCall":{"id":"m1","toolType":"GOOGLE_SEARCH_WEB","args":{"q":"x"}},"thoughtSignature":"c2ln"})";
+  auto turn = [&](const Message& reply) { auto next = value; next.messages.push_back(reply); next.messages.push_back(Message{"", Role::User, {Text{"again"}}}); return next; };
+  const auto refused = gemini::encode(descriptor, turn(answer(descriptor, typeless)), false);
+  CHECK(std::holds_alternative<Error>(refused) && std::get<Error>(refused).kind == ErrorKind::Unsupported &&
+        std::get<Error>(refused).safe_message == "captured part is one the service refuses to take back");
+  encoded_ok(descriptor, turn(answer(descriptor, typed)));
+  encoded_ok(lifted, turn(answer(lifted, typeless)));
+  // A client function call or code execution part never matches.
+  CHECK(descriptor.family_policy().unreplayable_parts.size() == 1);
+
+  // The projection keeps the text and the client calls; the caller sends it as portable history.
+  const auto reply = answer(descriptor, typeless);
+  const auto projected = gemini::project_portable(reply);
+  CHECK(projected.message.role == Role::Assistant && !projected.message.native && !projected.message.wire_output && projected.message.parts.size() == 1 &&
+        std::get<Text>(projected.message.parts[0]).value == "found" && projected.dropped == (std::vector<std::string>{"toolCall", "toolResponse"}));
+  auto portable = turn(projected.message); portable.history_mode = gemini::HistoryMode::PortableForeign;
+  const auto wire = parse(encoded_ok(descriptor, portable).body);
+  const auto parts = wire.root().get("contents").at(1).get("parts");
+  CHECK(parts.size() == 1 && parts.at(0).get("text").as_string() == "found" && !parts.at(0).get("thoughtSignature").valid());
+  // Without the portable mode the projected message is not native history.
+  CHECK(std::holds_alternative<Error>(gemini::encode(descriptor, turn(projected.message), false)));
+}
 void interaction_nonthinking_transcription_request() {
   const auto descriptor = descriptor_for("google.interactions");
   auto value = request<interactions::Request>();
@@ -365,6 +419,6 @@ void decode_only_audio_scope() {
 }
 }
 int main() {
-  try { gemini_nonthinking_media_request(); interaction_nonthinking_transcription_request(); gemini_boundaries_and_binding(); gemini_builtin_tools_and_audio_format(); gemini_service_tool_options(); interaction_boundaries_and_binding(); responses_format_binding(); decode_only_audio_scope(); }
+  try { gemini_nonthinking_media_request(); interaction_nonthinking_transcription_request(); gemini_boundaries_and_binding(); gemini_builtin_tools_and_audio_format(); gemini_service_tool_options(); gemini_unreplayable_service_parts(); interaction_boundaries_and_binding(); responses_format_binding(); decode_only_audio_scope(); }
   catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }
