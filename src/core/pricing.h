@@ -43,6 +43,8 @@ struct CostEstimate {
 //   input_uncached it is input_total less the cache counters.
 // - Output: with a `reasoning` price, reasoning tokens at it and the rest of output_total at `output`; otherwise
 //   all of output_total at `output`.
+// - Messages: the compaction iterations (Usage::extra `compaction.input_tokens`, `compaction.output_tokens` and
+//   the cache counters) at the same rates, since the top-level counters leave them out.
 // - `request` is charged once.
 // Server tool fees, images and other per-unit charges are not priced.
 CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_view family, std::string_view origin,

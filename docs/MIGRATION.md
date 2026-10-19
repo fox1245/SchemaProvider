@@ -216,6 +216,17 @@ Messages typed tools and beta headers (#53):
 - **Unbound extensions (#96).** An extension fact may set `"bound": false` (replay-eligible only). Its value never joins the configuration digest, so it may change between turns. The built-in Messages facts for `speed`, `inference_geo` and `diagnostics` are unbound. A request that sets only these keeps the digest it would have without extensions.
 - **Container (#98).** `messages::Request::container` no longer joins the configuration digest, so a conversation can reuse the container a response reported. A request that sets it now has the digest it would have without one.
 
+Messages compaction (#53):
+- **`StopKind::Compaction`.** A new value, added last. The answer is a summary in place of a reply, or the turn paused after writing one. Exhaustive switches over `StopKind` need a case. The Messages policy maps `compaction` to it. Stop reasons are part of the policy identity, so history sealed under an earlier snapshot is `ReplayIneligible`.
+- **Policy facts.**
+  - `response_blocks` entries gain `signed_beta` and `opens_history`.
+  - Extension facts gain `beta` (Messages only): the `anthropic-beta` value the encoder adds when the request sets that extension.
+  - The built-in policy admits `compaction` and `context_management` (compaction edits only) at the Anthropic origin, the betas `compact-2026-01-12` and `compact-2026-09-04`, and the `compaction` block.
+- **History.** A Messages request sends and binds its history from the last captured message that carries a `compaction` block. A context's `prefix_count` counts from it.
+- **Decoding.** A kept block takes its `<type>_delta` events. `context_management` metadata that reports no applied edit is accepted, also beside a streamed `message_delta`, where it used to be ignored.
+- **Usage and pricing.** `Usage::extra` gains the `compaction.*` sums. `pricing::estimate` charges them for Messages. After a compaction iteration, a streamed answer's input counters replace those of `message_start` instead of recording a conflict.
+- **Archive.** A v3 record of a native message also keeps its context's configuration digest, so the layout grows by one digest. Records written before this change are refused at load, as the policy identity change already makes them. Stop kinds are read up to `Compaction`.
+
 ## From interface 5 to 6
 
 Package 0.3.0 alpha adds `Usage::provider_cost` and the fixed-size `ProviderReportedCost`, `UsdAmount`, `CostSource`, `CostStatus` and `CostRounding` types. Existing field access remains source-compatible, but `Usage`, `UsageUpdate`, `Completion`, `PartialCompletion` and the containing `Event` layouts grow. Rebuild every consumer against the same headers and generation 6 libraries (`libsp_*.so.6`); interface 5 binaries must not load interface 6 libraries. CMake consumers select `SchemaProvider 0.3.0 EXACT`.

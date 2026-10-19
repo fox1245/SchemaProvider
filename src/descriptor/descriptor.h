@@ -13,7 +13,7 @@ namespace sp::descriptor {
 
 enum class StopKind {
     Unknown, EndTurn, MaxTokens, ToolUse, ContentFilter,
-    Refusal, PauseTurn, ContextLimit, StopSequence, MalformedCall
+    Refusal, PauseTurn, ContextLimit, StopSequence, MalformedCall, Compaction
 };
 struct Evidence {
     std::vector<std::string> urls;

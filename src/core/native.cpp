@@ -657,6 +657,7 @@ std::shared_ptr<const NativeContext> NativeContext::decoding_only() const {
   auto context = std::shared_ptr<NativeContext>(new NativeContext(family_, model_, route_, prefix_count_, policy_));
   context->origin_ = origin_;
   context->prefix_ = prefix_;
+  context->root_ = root_;
   context->valid_ = valid_;
   context->history_valid_ = history_valid_;
   context->pending_server_tools_ = pending_server_tools_;
@@ -690,11 +691,18 @@ std::string_view NativeContext::family_name(Family family) {
   }
   return {};
 }
+// The last captured Messages answer that carries a summary (`compaction`): the history is sent and bound from it.
+static size_t history_start(const descriptor::ValidatedDescriptor& descriptor, const std::vector<Message>& history) {
+  for (size_t i = history.size(); i-- > 0;) if (messages::opens_history(descriptor.family_policy(), history[i])) return i;
+  return 0;
+}
 NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, const messages::Request& request, const descriptor::EffectiveChoices& choices, bool streaming)
-    : family_(Family::Messages), model_(request.model), route_(descriptor.path(streaming)), prefix_count_(request.messages.size()), policy_(descriptor.policy()) {
+    : family_(Family::Messages), model_(request.model), route_(descriptor.path(streaming)),
+      prefix_count_(request.messages.size() - history_start(descriptor, request.messages)), policy_(descriptor.policy()) {
   valid_ = descriptor.family() == "anthropic.messages" && origin_digest(descriptor, origin_) && configuration_digest(descriptor, request, choices, prefix_);
   if (!request_controls::extensions_replay_eligible(descriptor, request.extensions)) replay_eligible_ = false;
-  if (valid_) bind_history(request.messages);
+  root_ = prefix_;
+  if (valid_) bind_history(request.messages, false, history_start(descriptor, request.messages));
 }
 NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, const responses::Request& request, const descriptor::EffectiveChoices& choices, bool streaming)
     : family_(Family::Responses), model_(request.model), route_(descriptor.path(streaming)), prefix_count_(request.messages.size()), policy_(descriptor.policy()) {
@@ -794,10 +802,11 @@ NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, 
     if (!hash.finish(content) || !append_prefix(prefix_, content, index, family_name(family_), policy_->resources())) { valid_ = false; return; }
   }
 }
-void NativeContext::bind_history(const std::vector<Message>& messages, bool portable_gemini) {
+void NativeContext::bind_history(const std::vector<Message>& messages, bool portable_gemini, size_t start) {
   std::map<std::string, std::string> pending;
-  for (size_t index = 0; index < messages.size(); ++index) {
-    const auto& message = messages[index];
+  for (size_t at = start; at < messages.size(); ++at) {
+    const auto& message = messages[at];
+    const size_t index = at - start;
     // A Messages block kept whole (`fallback`, `mcp_tool_listing`) is an Opaque part of a captured assistant message.
     if (family_ == Family::Messages && (message.wire_output || std::any_of(message.parts.begin(), message.parts.end(), [&](const Part& part) {
           return std::holds_alternative<Reasoning>(part) || std::holds_alternative<Thought>(part) ||
@@ -826,9 +835,15 @@ void NativeContext::bind_history(const std::vector<Message>& messages, bool port
     if (!content_digest(message, content, family_name(family_), policy_->resources())) { valid_ = false; return; }
     if (message.native) {
       const auto& seal = *message.native;
+      // A captured Messages answer that carries a summary (`compaction`) stands for the conversation before it: it
+      // begins the bound history wherever it is kept, under the configuration it was answered with. Later answers
+      // bind the history from it, so the messages before it may be dropped.
+      const auto* family = family_ == Family::Messages ? policy_->family(family_name(family_)) : nullptr;
+      const bool root = index == 0 && family && seal.context_ && seal.context_->family_ == Family::Messages &&
+          messages::opens_history(*family, message) && seal.context_->root_ == root_;
       if (!seal.complete_ || !seal.context_ || !seal.context_->valid_ || !seal.context_->replay_eligible_ ||
-          seal.context_->family_ != family_ || seal.context_->prefix_count_ != index || seal.context_->route_ != route_ ||
-          seal.context_->origin_ != origin_ || seal.context_->prefix_ != prefix_ ||
+          seal.context_->family_ != family_ || seal.context_->route_ != route_ || seal.context_->origin_ != origin_ ||
+          (!root && (seal.context_->prefix_count_ != index || seal.context_->prefix_ != prefix_)) ||
           seal.content_ != content) { history_valid_ = false; return; }
     }
     // One bounded content hash per history message, not one rehash per capsule.

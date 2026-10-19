@@ -93,7 +93,7 @@ CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_v
   else charge(*uncached, price.input, "input");
   auto fallback = [&](const std::optional<std::uint64_t>& specific, const std::optional<std::uint64_t>& general, std::string_view rule, std::uint64_t units) {
     if (specific || !units) return specific;
-    if (general) out.assumptions.emplace_back(rule);
+    if (general && std::find(out.assumptions.begin(), out.assumptions.end(), rule) == out.assumptions.end()) out.assumptions.emplace_back(rule);
     return general;
   };
   charge(cache_read, fallback(price.cache_read, price.input, "cache_read at input", cache_read), "cache_read");
@@ -106,6 +106,18 @@ CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_v
       charge(reasoning, price.reasoning, "reasoning");
       charge(output - reasoning, price.output, "output");
     } else charge(output, price.output, "output");
+  }
+  // A Messages compaction iteration is billed at the model's rates beside the top-level counters.
+  if (family == "anthropic.messages") {
+    const auto extra = [&](std::string_view counter) -> std::uint64_t {
+      const auto found = usage.extra.find("compaction." + std::string(counter));
+      return found == usage.extra.end() ? 0 : found->second.value;
+    };
+    const auto read = extra("cache_read_input_tokens"), write = extra("cache_creation_input_tokens");
+    charge(extra("input_tokens"), price.input, "input");
+    charge(read, fallback(price.cache_read, price.input, "cache_read at input", read), "cache_read");
+    charge(write, fallback(price.cache_write, price.input, "cache_write at input", write), "cache_write");
+    charge(extra("output_tokens"), price.output, "output");
   }
   if (price.request) sum += *price.request;
   if (!complete) return out;

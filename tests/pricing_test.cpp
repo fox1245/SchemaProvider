@@ -78,6 +78,16 @@ void estimates() {
   CHECK(e.total && e.total->nano_usd == 0u);
   e = pricing::estimate(*c, "openai.chat", "", exact, usage(std::nullopt, 5));
   CHECK(!e.total && e.unpriced == std::vector<std::string>{"input"});
+  // A Messages compaction iteration bills at the model's rates beside the top-level counters (#53):
+  // (251 + 112197) input at 2000 and (40 + 319) output at 3000 nano-USD per token. Other families keep no such count.
+  auto compacted = usage(251, 40);
+  compacted.extra["compaction.input_tokens"] = Count{112'197, Evidence::Derived};
+  compacted.extra["compaction.output_tokens"] = Count{319, Evidence::Derived};
+  const ServedModel requested{"vendor/requested", "", ServedRelation::NotReported};
+  e = pricing::estimate(*c, "anthropic.messages", "", requested, compacted);
+  CHECK(e.total && e.total->nano_usd == 224'896'000u + 1'077'000u);
+  e = pricing::estimate(*c, "openai.chat", "", requested, compacted);
+  CHECK(e.total && e.total->nano_usd == 502'000u + 120'000u);
   // Rounding happens once, upward: 3 tokens at 0.0000000005 USD are 1.5 nano-USD, billed as 2.
   const auto half = catalogue(R"({"version":1,"models":[{"id":"m","pricing":{"input":"0.0000000005","output":"0"}}]})");
   e = pricing::estimate(*half, "openai.chat", "", ServedModel{"m", "m", ServedRelation::Exact}, usage(3, 1));

@@ -127,7 +127,8 @@
         "stop_sequence": "StopSequence",
         "pause_turn": "PauseTurn",
         "refusal": "Refusal",
-        "model_context_window_exceeded": "ContextLimit"
+        "model_context_window_exceeded": "ContextLimit",
+        "compaction": "Compaction"
       },
       "defaults": {
         "max_output_tokens": 1024,
@@ -166,17 +167,22 @@
         {"value":"advisor-tool-2026-03-01","origins":["https://api.anthropic.com"]},
         {"value":"fast-mode-2026-02-01","origins":["https://api.anthropic.com"]},
         {"value":"mcp-client-2025-11-20","origins":["https://api.anthropic.com"]},
-        {"value":"mcp-client-2026-09-15","origins":["https://api.anthropic.com"]}
+        {"value":"mcp-client-2026-09-15","origins":["https://api.anthropic.com"]},
+        {"value":"compact-2026-01-12","origins":["https://api.anthropic.com"]},
+        {"value":"compact-2026-09-04","origins":["https://api.anthropic.com"]}
       ],
       "extensions": [
         {"key":"speed","origins":["https://api.anthropic.com"],"value":{"one_of":[{"type":"enum","values":["standard","fast"]},{"type":"null"}]},"replay_eligible":true,"bound":false},
         {"key":"inference_geo","origins":["https://api.anthropic.com"],"value":{"one_of":[{"type":"string","max_length":64,"token":true},{"type":"null"}]},"replay_eligible":true,"bound":false},
-        {"key":"diagnostics","origins":["https://api.anthropic.com"],"value":{"one_of":[{"type":"null"},{"type":"object","properties":{"previous_message_id":{"one_of":[{"type":"string","max_length":256,"token":true},{"type":"null"}]}}}]},"replay_eligible":true,"bound":false}
+        {"key":"diagnostics","origins":["https://api.anthropic.com"],"value":{"one_of":[{"type":"null"},{"type":"object","properties":{"previous_message_id":{"one_of":[{"type":"string","max_length":256,"token":true},{"type":"null"}]}}}]},"replay_eligible":true,"bound":false},
+        {"key":"compaction","origins":["https://api.anthropic.com"],"value":{"type":"object","properties":{"type":{"type":"enum","values":["summarize"]},"instructions":{"type":"string","max_length":16384}},"required":["type"]},"replay_eligible":true,"bound":false,"beta":"compact-2026-09-04"},
+        {"key":"context_management","origins":["https://api.anthropic.com"],"value":{"type":"object","properties":{"edits":{"type":"array","max_items":4,"items":{"type":"object","properties":{"type":{"type":"enum","values":["compact_20260112"]},"trigger":{"type":"object","properties":{"type":{"type":"enum","values":["input_tokens"]},"value":{"type":"integer","minimum":50000}},"required":["type","value"]},"pause_after_compaction":{"type":"boolean"},"instructions":{"one_of":[{"type":"string","max_length":16384},{"type":"null"}]}},"required":["type"]}}},"required":["edits"]},"replay_eligible":true,"bound":false,"beta":"compact-2026-01-12"}
       ],
       "response_blocks": [
         {"type":"fallback"},
         {"type":"mcp_tool_listing","beta":"mcp-client-2026-09-15"},
-        {"type":"container_upload"}
+        {"type":"container_upload"},
+        {"type":"compaction","beta":"compact-2026-01-12","signed_beta":"compact-2026-09-04","opens_history":true}
       ],
       "server_tools": [
         {

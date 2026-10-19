@@ -47,13 +47,15 @@ struct ServerToolFact {
 // An anthropic-beta value the policy admits at the listed origins. Messages only.
 struct BetaFact { std::string value; std::vector<std::string> origins; };
 // A Messages response block the SDK keeps whole and replays as captured (`fallback`, `mcp_tool_listing`), with the
-// anthropic-beta value a request that replays it needs.
-struct ResponseBlockFact { std::string type; std::string beta{}; };
+// anthropic-beta value a request that replays it needs: `signed_beta` in place of `beta` when the block carries a
+// `signature`. A block that `opens_history` (`compaction`) stands for the conversation before it: a request sends
+// the history from the last captured message that carries one, and such a message may begin a history.
+struct ResponseBlockFact { std::string type; std::string beta{}; std::string signed_beta{}; bool opens_history = false; };
 // A top-level request member the policy admits for the listed origins (#32). A replay-ineligible extension makes the
 // turn's answer not continuable natively; an eligible one joins the configuration digest unless it is unbound
 // (`bound` false): a per-request service control that does not change what the conversation means, which may change
-// from turn to turn (#96).
-struct ExtensionFact { std::string key; std::vector<std::string> origins; ValueSchema value; bool replay_eligible = false; bool bound = true; };
+// from turn to turn (#96). A Messages extension may name the anthropic-beta value a request that sets it needs.
+struct ExtensionFact { std::string key; std::vector<std::string> origins; ValueSchema value; bool replay_eligible = false; bool bound = true; std::string beta{}; };
 // An OpenRouter plugin id or server tool type the policy admits at its declared origins, with the schema of the
 // plugin's other members or of the tool's `parameters` (none: no options).
 struct GatewayFact { std::string name; std::optional<ValueSchema> options; };

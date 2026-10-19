@@ -167,14 +167,24 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   for (const auto& tool : request.tools)
     if (const auto* fact = tool.type.empty() ? nullptr : fact_of(tool.type); fact && !need_beta(*fact))
       return Error{ErrorKind::Unsupported, "a tool needs an anthropic-beta value this origin does not admit"};
-  // A replayed block the service only takes with a beta (`mcp_tool_listing`) sends that beta again.
-  for (const auto& message : request.messages)
-    for (const auto& part : message.parts)
+  // A block that stands for the conversation before it (`compaction`) is where the service reads the history from:
+  // it ignores what comes earlier, or refuses it in front of a signed block. Only the history from the last captured
+  // message that carries one is sent and bound to its seals; what comes earlier is neither.
+  std::size_t first = 0;
+  for (std::size_t i = request.messages.size(); i-- > 0;)
+    if (opens_history(family, request.messages[i])) { first = i; break; }
+  // A replayed block the service only takes with a beta (`mcp_tool_listing`) sends that beta again: a signed
+  // `compaction` block its `signed_beta`.
+  for (std::size_t i = first; i < request.messages.size(); ++i)
+    for (const auto& part : request.messages[i].parts)
       if (const auto* opaque = std::get_if<Opaque>(&part)) {
-        const auto fact = std::find_if(family.response_blocks.begin(), family.response_blocks.end(), [&](const auto& f) { return f.type == opaque->wire_type; });
-        if (fact == family.response_blocks.end() || fact->beta.empty()) continue;
-        if (!beta_admitted(fact->beta)) return Error{ErrorKind::Unsupported, "a replayed block needs an anthropic-beta value this origin does not admit"};
-        if (std::find(betas.begin(), betas.end(), fact->beta) == betas.end()) betas.push_back(fact->beta);
+        const auto* fact = kept_block(family, opaque->wire_type);
+        if (!fact) continue;
+        const bool signed_block = opaque->wire_metadata && opaque->wire_metadata->root().get("signature").valid();
+        const auto& beta = signed_block && !fact->signed_beta.empty() ? fact->signed_beta : fact->beta;
+        if (beta.empty()) continue;
+        if (!beta_admitted(beta)) return Error{ErrorKind::Unsupported, "a replayed block needs an anthropic-beta value this origin does not admit"};
+        if (std::find(betas.begin(), betas.end(), beta) == betas.end()) betas.push_back(beta);
       }
   // MCP servers: bounded, unique names and https URLs, each named by exactly one `mcp_toolset` entry.
   if (request.mcp_servers.size() > 20) return bad("MCP server count limit exceeded");
@@ -245,6 +255,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     if (message.parts.size() > resources.request_parts) return bad("request part count limit exceeded");
     if (!message.native) for (const auto& part : message.parts) if (native_part(part)) return replay_bad();
     captured_history = captured_history || static_cast<bool>(message.native);
+    if (i < first) continue;  // not sent
     for (const auto& part : message.parts) {
       if (const auto* media = std::get_if<Media>(&part); media && !media_error) {
         if (message.role != Role::User) media_error = Error{ErrorKind::InvalidRequest, "media inputs require user role"};
@@ -272,6 +283,13 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (media_error && !captured_history) return *media_error;
   if (auto refusal = request_controls::validate_extensions(descriptor, request.extensions))
     return Error{refusal->admitted ? ErrorKind::InvalidRequest : ErrorKind::Unsupported, std::move(refusal->message)};
+  // An extension the service only takes with a beta (`compaction`, `context_management`) sends it.
+  if (request.extensions) for (auto member : request.extensions->root().members())
+    for (const auto& fact : family.extensions)
+      if (fact.key == member.key && !fact.beta.empty() && descriptor::contains(fact.origins, descriptor.base_url())) {
+        if (!beta_admitted(fact.beta)) return Error{ErrorKind::Unsupported, "an extension needs an anthropic-beta value this origin does not admit"};
+        if (std::find(betas.begin(), betas.end(), fact.beta) == betas.end()) betas.push_back(fact.beta);
+      }
   auto context = std::shared_ptr<const NativeContext>(new NativeContext(descriptor, request, effective, streaming));
   if (!context->history_valid_) return replay_bad();
   if (!context->valid_) return Error{ErrorKind::ResourceLimit, "native binding could not be captured"};
@@ -427,7 +445,8 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   std::map<std::string_view, std::string_view> client_pending;  // call id -> toolset name of the call, if any
   std::map<std::string_view, std::string_view> server_pending;
   bool message_comma = false;
-  for (const auto& message : request.messages) {
+  for (std::size_t index = first; index < request.messages.size(); ++index) {
+    const auto& message = request.messages[index];
     const bool tool_role = message.role == Role::Tool;
     if (message.role != Role::User && message.role != Role::Assistant && !tool_role)
       return Error{ErrorKind::Unsupported, "Messages history supports only user and assistant roles"};
@@ -523,9 +542,8 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         if (!raw.is_object() || !raw.get("type").is_string() || raw.get("type").as_string() != server_result->wire_type || !raw.get("tool_use_id").is_string() || raw.get("tool_use_id").as_string() != server_result->tool_use_id) return bad("server result metadata mismatch");
         server_pending.erase(found);
         body.value(raw, 4);
-      } else if (const auto* opaque = std::get_if<Opaque>(&part); opaque && assistant && opaque->wire_metadata &&
-                 std::any_of(family.response_blocks.begin(), family.response_blocks.end(), [&](const auto& f) { return f.type == opaque->wire_type; })) {
-        // A block the policy keeps whole (`fallback`, `mcp_tool_listing`) goes back exactly as captured, in place.
+      } else if (const auto* opaque = std::get_if<Opaque>(&part); opaque && assistant && opaque->wire_metadata && kept_block(family, opaque->wire_type)) {
+        // A block the policy keeps whole (`fallback`, `mcp_tool_listing`, `compaction`) goes back exactly as captured, in place.
         const auto raw = opaque->wire_metadata->root();
         if (!raw.is_object() || !raw.get("type").is_string() || raw.get("type").as_string() != opaque->wire_type) return bad("captured block metadata mismatch");
         body.value(raw, 4);
