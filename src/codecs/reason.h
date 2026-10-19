@@ -23,6 +23,8 @@ enum class Source {
   Tokens, TokensRequest,
   // The webhook verifier.
   Webhooks,
+  // OpenRouter generation statistics.
+  Generations, GenerationsRequest,
 };
 struct Entry { std::string_view message, code; };
 std::span<const Entry> entries(Source) noexcept;

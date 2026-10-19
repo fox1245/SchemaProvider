@@ -23,8 +23,10 @@ void field(std::string& body, std::string_view boundary, std::string_view name, 
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
   const auto* fact = descriptor.policy()->endpoint("transcription", descriptor.base_url());
   if (!fact) return Error{ErrorKind::Unsupported, "transcription endpoints are not admitted at this origin"};
-  const auto path = descriptor::endpoint_path(*fact, "transcribe");
-  if (!path) return Error{ErrorKind::Unsupported, "the transcription endpoint has no path"};
+  const auto path = descriptor::endpoint_path(*fact, request.translate ? "translate" : "transcribe");
+  if (!path) return request.translate ? Error{ErrorKind::Unsupported, "this origin does not translate speech"}
+                                      : Error{ErrorKind::Unsupported, "the transcription endpoint has no path"};
+  if (request.translate && request.language) return bad("a translation takes no language");
   const bool openai = fact->shape == "openai";
   if (request.model.empty()) return bad("a transcription needs a model");
   const auto& audio = request.audio;

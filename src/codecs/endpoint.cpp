@@ -3,6 +3,7 @@
 #include "codecs/decisions.h"
 #include "codecs/embeddings.h"
 #include "codecs/files.h"
+#include "codecs/generations.h"
 #include "codecs/images.h"
 #include "codecs/jobs.h"
 #include "codecs/moderation.h"
@@ -66,6 +67,7 @@ std::unique_ptr<Codec> make_codec(std::string_view name, const descriptor::Valid
   if (name == "content") return std::make_unique<jobs::ContentCodec>(accumulator, limits);
   // Batch results are JSONL, whatever type the provider gives them.
   if (name == "content.document") return std::make_unique<jobs::ContentCodec>(accumulator, limits, true);
+  if (name == "generations") return std::make_unique<generations::Codec>(descriptor, accumulator, limits);
   if (name == "tokens") return std::make_unique<tokens::Codec>(descriptor, accumulator, limits);
   if (name == "batches") return std::make_unique<batches::Codec>(descriptor, accumulator, batches::Codec::Kind::Batch, std::move(requested), limits);
   if (name == "batches.delete") return std::make_unique<batches::Codec>(descriptor, accumulator, batches::Codec::Kind::Deleted, std::move(requested), limits);

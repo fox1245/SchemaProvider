@@ -153,6 +153,7 @@ add_library(sp_codecs src/codecs/accumulator.cpp src/codecs/reason.cpp src/codec
             src/codecs/transcription.cpp src/codecs/transcription_request.cpp src/codecs/jobs.cpp src/codecs/jobs_request.cpp
             src/codecs/videos_request.cpp src/codecs/files.cpp src/codecs/files_request.cpp
             src/codecs/batches.cpp src/codecs/batches_request.cpp src/codecs/tokens.cpp src/codecs/tokens_request.cpp src/codecs/webhooks.cpp src/codecs/interaction_jobs.cpp
+            src/codecs/generations.cpp src/codecs/generations_request.cpp
             src/codecs/endpoint.cpp)
 target_compile_options(sp_codecs PRIVATE ${SP_WARNING_OPTIONS})
 target_link_libraries(sp_codecs PUBLIC sp_core sp_json sp_descriptor)
