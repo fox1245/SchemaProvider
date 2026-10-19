@@ -169,9 +169,9 @@
         {"value":"mcp-client-2026-09-15","origins":["https://api.anthropic.com"]}
       ],
       "extensions": [
-        {"key":"speed","origins":["https://api.anthropic.com"],"value":{"one_of":[{"type":"enum","values":["standard","fast"]},{"type":"null"}]},"replay_eligible":true},
-        {"key":"inference_geo","origins":["https://api.anthropic.com"],"value":{"one_of":[{"type":"string","max_length":64,"token":true},{"type":"null"}]},"replay_eligible":true},
-        {"key":"diagnostics","origins":["https://api.anthropic.com"],"value":{"one_of":[{"type":"null"},{"type":"object","properties":{"previous_message_id":{"one_of":[{"type":"string","max_length":256,"token":true},{"type":"null"}]}}}]},"replay_eligible":true}
+        {"key":"speed","origins":["https://api.anthropic.com"],"value":{"one_of":[{"type":"enum","values":["standard","fast"]},{"type":"null"}]},"replay_eligible":true,"bound":false},
+        {"key":"inference_geo","origins":["https://api.anthropic.com"],"value":{"one_of":[{"type":"string","max_length":64,"token":true},{"type":"null"}]},"replay_eligible":true,"bound":false},
+        {"key":"diagnostics","origins":["https://api.anthropic.com"],"value":{"one_of":[{"type":"null"},{"type":"object","properties":{"previous_message_id":{"one_of":[{"type":"string","max_length":256,"token":true},{"type":"null"}]}}}]},"replay_eligible":true,"bound":false}
       ],
       "response_blocks": [
         {"type":"fallback"},

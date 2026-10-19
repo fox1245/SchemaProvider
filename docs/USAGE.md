@@ -609,7 +609,9 @@ A provider adds request members faster than the SDK releases. Every request stru
   - A value that does not match its schema is `InvalidRequest`.
   - A key the encoder owns is `InvalidRequest`, in any letter case: a typed control, an alias such as `functions`, or provider-held state such as `conversation`.
 - **Replay.** A replay-eligible value joins the configuration digest. A replay-ineligible one leaves the answer without a native seal.
-- **Default policy.** The built-in policy admits `speed`, `inference_geo` and `diagnostics` on `anthropic.messages` at `https://api.anthropic.com`, all replay-eligible. A host admits more in its own policy, for example `{"key": "service_hint", "origins": ["https://api.anthropic.com"], "value": {"type": "string", "max_length": 32, "token": true}, "replay_eligible": true}`.
+  - An unbound value (`"bound": false`, replay-eligible) never joins the digest. It is for a per-request service control that does not change what the conversation means and may change from turn to turn, such as `diagnostics.previous_message_id`, which names the previous answer.
+  - A request whose extensions are all unbound keeps the digest of one without extensions. With bound members beside them, only the bound members bind.
+- **Default policy.** The built-in policy admits `speed`, `inference_geo` and `diagnostics` on `anthropic.messages` at `https://api.anthropic.com`, all replay-eligible and unbound. A host admits more in its own policy, for example `{"key": "service_hint", "origins": ["https://api.anthropic.com"], "value": {"type": "string", "max_length": 32, "token": true}, "replay_eligible": true}`.
 
 The same schemas admit the options of typed containers: OpenRouter plugins (`openrouter_plugins`), OpenRouter server tools (`openrouter_server_tools`), generic Responses tools (`server_tools` entries with `"generic": true`) and typed Messages tools (`server_tools` entries with `options`). `sp::capability::PolicyAdmittedExtensions` is part of `RequiredProvider`.
 

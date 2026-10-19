@@ -408,9 +408,11 @@ class PolicyLoader {
         if (auto extensions = v.get("extensions"); extensions.valid()) {
           if (!extensions.is_array() || extensions.size() > 64) fail("/extensions", "bounded array of extension facts");
           for (auto e : extensions.elements()) {
-            closed(e, {"key","origins","value","replay_eligible"}, "/extensions");
+            closed(e, {"key","origins","value","replay_eligible"}, "/extensions", {"bound"});
             ExtensionFact fact{text(e.get("key"), "/extensions/key"), strings(e.get("origins"), "/extensions/origins"),
                                schema_of(e.get("value"), "/extensions/value"), boolean(e.get("replay_eligible"), "/extensions/replay_eligible")};
+            if (e.get("bound").valid()) fact.bound = boolean(e.get("bound"), "/extensions/bound");
+            if (!fact.bound && !fact.replay_eligible) fail("/extensions/bound", "an unbound value is replay-eligible");
             if (fact.key.empty() || fact.key.size() > 64 || !std::all_of(fact.key.begin(), fact.key.end(), [](unsigned char c) {
                   return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-'; }))
               fail("/extensions/key", "member name token");

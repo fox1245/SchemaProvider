@@ -248,9 +248,27 @@ void response_format_digest(Hash& hash, const std::optional<ResponseFormat>& for
   hash.number(format->strict.has_value()); if (format->strict) hash.number(*format->strict);
 }
 // Policy-admitted extensions join the configuration when present (#32), so a request without them keeps its digest.
-void extensions_digest(Hash& hash, const std::shared_ptr<const json::Document>& extensions) {
+// An unbound member (#96) never joins it: a request whose members are all unbound keeps the digest of one without
+// extensions, and one that mixes them binds only the bound members, in their order.
+void extensions_digest(Hash& hash, const descriptor::ValidatedDescriptor& descriptor, const std::shared_ptr<const json::Document>& extensions) {
   if (!extensions || !extensions->root().is_object() || !extensions->root().size()) return;
-  hash.text("sp.extensions.v1"); hash.document(extensions);
+  const auto& facts = descriptor.family_policy().extensions;
+  const auto bound = [&](std::string_view key) {
+    const auto fact = std::find_if(facts.begin(), facts.end(), [&](const auto& f) { return f.key == key; });
+    return fact == facts.end() || fact->bound;
+  };
+  bool all = true, any = false;
+  for (auto member : extensions->root().members()) {
+    if (bound(member.key)) any = true;
+    else all = false;
+  }
+  if (!any) return;
+  hash.text("sp.extensions.v1");
+  if (all) { hash.document(extensions); return; }
+  std::string members = "{";
+  for (auto member : extensions->root().members())
+    if (bound(member.key)) { if (members.size() > 1) members += ','; members += json::quote(member.key); members += ':'; members += member.value.dump(); }
+  hash.text("sp.extensions.bound.v1"); hash.text(members + "}");
 }
 bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, const chat::Request& request,
                           const descriptor::EffectiveChoices& choices, Digest& digest) {
@@ -293,7 +311,7 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
   for (const auto& tool : request.tools) {
     hash.text(tool.name); hash.text(tool.description); hash.document(tool.parameters);
   }
-  extensions_digest(hash, request.extensions);
+  extensions_digest(hash, descriptor, request.extensions);
   return hash.finish(digest);
 }
 bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, const messages::Request& request, const descriptor::EffectiveChoices& choices, Digest& digest) {
@@ -339,7 +357,7 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
     hash.text("sp.messages.mcp_servers.v1"); hash.number(request.mcp_servers.size());
     for (const auto& server : request.mcp_servers) { hash.text(server.name); hash.text(server.url); }
   }
-  extensions_digest(hash, request.extensions);
+  extensions_digest(hash, descriptor, request.extensions);
   return hash.finish(digest);
 }
 bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, const responses::Request& request, const descriptor::EffectiveChoices& choices, Digest& digest) {
@@ -459,7 +477,7 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
       optional_number(config.output_compression);
     }
   }
-  extensions_digest(hash, request.extensions);
+  extensions_digest(hash, descriptor, request.extensions);
   return hash.finish(digest);
 }
 bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, const gemini::Request& request, const descriptor::EffectiveChoices& choices, Digest& digest) {
@@ -545,7 +563,7 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
   }
   // server_tool_invocations and retrieval_config are per-turn choices like tool_choice: they change what one answer
   // shows or where it searches, not the lineage.
-  extensions_digest(hash, request.extensions);
+  extensions_digest(hash, descriptor, request.extensions);
   return hash.finish(digest);
 }
 bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, const interactions::Request& request, const descriptor::EffectiveChoices& choices, Digest& digest) {
@@ -615,7 +633,7 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
     hash.number(request.store.has_value()); if (request.store) hash.number(*request.store);
     hash.number(request.video_task.has_value()); if (request.video_task) hash.text(*request.video_task);
   }
-  extensions_digest(hash, request.extensions);
+  extensions_digest(hash, descriptor, request.extensions);
   return hash.finish(digest);
 }
 bool content_digest(const Message& message, Digest& digest, std::string_view family, const descriptor::CodecResources& resources) {

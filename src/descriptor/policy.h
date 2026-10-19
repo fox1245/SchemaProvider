@@ -50,8 +50,10 @@ struct BetaFact { std::string value; std::vector<std::string> origins; };
 // anthropic-beta value a request that replays it needs.
 struct ResponseBlockFact { std::string type; std::string beta{}; };
 // A top-level request member the policy admits for the listed origins (#32). A replay-ineligible extension makes the
-// turn's answer not continuable natively; an eligible one joins the configuration digest.
-struct ExtensionFact { std::string key; std::vector<std::string> origins; ValueSchema value; bool replay_eligible = false; };
+// turn's answer not continuable natively; an eligible one joins the configuration digest unless it is unbound
+// (`bound` false): a per-request service control that does not change what the conversation means, which may change
+// from turn to turn (#96).
+struct ExtensionFact { std::string key; std::vector<std::string> origins; ValueSchema value; bool replay_eligible = false; bool bound = true; };
 // An OpenRouter plugin id or server tool type the policy admits at its declared origins, with the schema of the
 // plugin's other members or of the tool's `parameters` (none: no options).
 struct GatewayFact { std::string name; std::optional<ValueSchema> options; };

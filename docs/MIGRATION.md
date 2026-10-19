@@ -213,6 +213,7 @@ Messages typed tools and beta headers (#53):
 - **MCP connector.** `messages::Request::mcp_servers` (`McpServer`) and the `mcp_toolset` fact. `mcp_tool_use` decodes as a server `ToolCall` with that `wire_type` and `mcp_tool_result` as a `ServerToolResult`; both replay as captured. An MCP call pairs as a call of `mcp`, also in a native context's pending server calls.
 - **Kept blocks.** The new `response_blocks` facts make a listed response block an `Opaque` part of the captured message, replayed in place. A Messages history may now hold `Opaque` parts in sealed assistant messages. The built-in policy lists `fallback`, `container_upload` and `mcp_tool_listing`; an unlisted block is still `Unsupported`.
 - **Value schemas** gain `map`.
+- **Unbound extensions (#96).** An extension fact may set `"bound": false` (replay-eligible only). Its value never joins the configuration digest, so it may change between turns. The built-in Messages facts for `speed`, `inference_geo` and `diagnostics` are unbound. A request that sets only these keeps the digest it would have without extensions.
 
 ## From interface 5 to 6
 
