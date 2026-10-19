@@ -17,6 +17,7 @@
 #include "codecs/files.h"
 #include "codecs/batches.h"
 #include "codecs/tokens.h"
+#include "codecs/generations.h"
 #include "descriptor/presets.h"
 #include "runtime/policy.h"
 #include "transport/sse_framer.h"
@@ -222,6 +223,7 @@ inline files::ProgressOutcome typed_outcome(const sp::Outcome& outcome, const fi
 inline batches::Outcome typed_outcome(const sp::Outcome& outcome, const batches::Outcome*) { return batches::typed(outcome); }
 inline batches::DeleteOutcome typed_outcome(const sp::Outcome& outcome, const batches::DeleteOutcome*) { return batches::typed_deleted(outcome); }
 inline tokens::Outcome typed_outcome(const sp::Outcome& outcome, const tokens::Outcome*) { return tokens::typed(outcome); }
+inline generations::Outcome typed_outcome(const sp::Outcome& outcome, const generations::Outcome*) { return generations::typed(outcome); }
 }  // namespace detail
 // A started non-chat endpoint call. Like an Operation, destruction requests cancellation and detach relinquishes it;
 // join waits for the typed outcome, the one the callback received.
@@ -359,6 +361,11 @@ class Client {
   tokens::Outcome complete(tokens::Count, RunOptions = {});
   tokens::Outcome complete(PreparedEndpoint<tokens::Outcome>);
   EndpointCall<tokens::Outcome> start(PreparedEndpoint<tokens::Outcome>, std::function<void(tokens::Outcome)> on_outcome = {});
+  // OpenRouter generation statistics, by generation id. A read: free, and retried as one.
+  PreparedEndpoint<generations::Outcome> prepare(generations::Get, RunOptions = {});
+  generations::Outcome complete(generations::Get, RunOptions = {});
+  generations::Outcome complete(PreparedEndpoint<generations::Outcome>);
+  EndpointCall<generations::Outcome> start(PreparedEndpoint<generations::Outcome>, std::function<void(generations::Outcome)> on_outcome = {});
   Diagnostics diagnostics() const noexcept;
  private:
   explicit Client(std::shared_ptr<detail::ClientState>);

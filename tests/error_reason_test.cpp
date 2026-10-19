@@ -39,9 +39,10 @@ const Source sources[]{{reason::Source::Chat, "chat"}, {reason::Source::Messages
                        {reason::Source::Files, "files"}, {reason::Source::FilesRequest, "request.files"},
                        {reason::Source::Batches, "batches"}, {reason::Source::BatchesRequest, "request.batches"},
                        {reason::Source::Tokens, "tokens"}, {reason::Source::TokensRequest, "request.tokens"},
-                       {reason::Source::Webhooks, "webhooks"}};
+                       {reason::Source::Webhooks, "webhooks"},
+                       {reason::Source::Generations, "generations"}, {reason::Source::GenerationsRequest, "request.generations"}};
 // Endpoint decoders (D6) are small: they parse one buffered document.
-const std::set<std::string> endpoint_decoders{"images", "decisions", "embeddings", "rerank", "moderation", "speech", "transcription", "jobs", "files", "batches", "tokens", "webhooks"};
+const std::set<std::string> endpoint_decoders{"images", "decisions", "embeddings", "rerank", "moderation", "speech", "transcription", "jobs", "files", "batches", "tokens", "webhooks", "generations"};
 // The sources each encoder table covers, relative to src/.
 struct EncoderSource { reason::Source source; std::vector<const char*> files; };
 const EncoderSource encoder_sources[]{
@@ -53,7 +54,7 @@ const EncoderSource encoder_sources[]{
     {reason::Source::TranscriptionRequest, {"codecs/transcription_request.cpp"}},
     {reason::Source::JobsRequest, {"codecs/jobs_request.cpp"}}, {reason::Source::VideosRequest, {"codecs/videos_request.cpp"}},
     {reason::Source::FilesRequest, {"codecs/files_request.cpp"}}, {reason::Source::BatchesRequest, {"codecs/batches_request.cpp"}},
-    {reason::Source::TokensRequest, {"codecs/tokens_request.cpp"}},
+    {reason::Source::TokensRequest, {"codecs/tokens_request.cpp"}}, {reason::Source::GenerationsRequest, {"codecs/generations_request.cpp"}},
     {reason::Source::SharedRequest, {"descriptor/policy.cpp", "core/request_controls.h", "codecs/media_input.cpp", "core/media.cpp", "core/native.cpp"}}};
 // The strings for an abnormal close belong to the transport: the close error's kind is the transport's, and so is its lack of a reason.
 const std::set<std::string> transport_strings{"abnormal response close", "abnormal Gemini response close", "abnormal interaction close"};

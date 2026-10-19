@@ -1112,6 +1112,16 @@ constexpr Entry webhooks_table[] = {
   {"the webhook signature does not match", "webhooks.signature.mismatch"},
   {"a webhook body is a JSON object", "webhooks.body.invalid"},
 };
+constexpr Entry generations_table[] = {
+  {"invalid response JSON", "generations.response.json_invalid"},
+  {"generation statistics name the generation", "generations.data.id_required"},
+  {"generation token counts are numbers", "generations.data.tokens_invalid"},
+};
+constexpr Entry generations_request_table[] = {
+  {"generation statistics are not admitted at this origin", "request.generations.endpoint_not_admitted"},
+  {"the generation endpoint has no path", "request.generations.path_missing"},
+  {"a generation id is a token", "request.generations.id_invalid"},
+};
 constexpr Entry speech_table[] = {
   {"speech response is not audio", "speech.response.not_audio"},
   {"speech response is empty", "speech.response.empty"},
@@ -1137,6 +1147,8 @@ constexpr Entry transcription_table[] = {
 };
 constexpr Entry transcription_request_table[] = {
   {"transcription endpoints are not admitted at this origin", "request.transcription.endpoint_not_admitted"},
+  {"this origin does not translate speech", "request.transcription.translate_unsupported"},
+  {"a translation takes no language", "request.transcription.translate_language"},
   {"the transcription endpoint has no path", "request.transcription.path_missing"},
   {"a transcription needs a model", "request.transcription.model_required"},
   {"a transcription takes audio", "request.transcription.audio_required"},
@@ -1243,6 +1255,8 @@ std::span<const Entry> entries(Source source) noexcept {
     case Source::Tokens: return tokens_table;
     case Source::TokensRequest: return tokens_request_table;
     case Source::Webhooks: return webhooks_table;
+    case Source::Generations: return generations_table;
+    case Source::GenerationsRequest: return generations_request_table;
   }
   return {};
 }

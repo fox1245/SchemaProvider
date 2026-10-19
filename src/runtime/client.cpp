@@ -1840,6 +1840,16 @@ tokens::Outcome Client::complete(PreparedEndpoint<tokens::Outcome> call) { retur
 EndpointCall<tokens::Outcome> Client::start(PreparedEndpoint<tokens::Outcome> call, std::function<void(tokens::Outcome)> on_outcome) {
   return start_endpoint(std::move(call), std::move(on_outcome));
 }
+PreparedEndpoint<generations::Outcome> Client::prepare(generations::Get get, RunOptions options) {
+  auto client = state_;
+  return PreparedEndpoint<generations::Outcome>(prepare_endpoint<generations::Encoded>(std::move(options), "generations",
+      static_cast<int>(reason::Source::GenerationsRequest), [&] { return generations::encode(client->descriptor, get); }));
+}
+generations::Outcome Client::complete(generations::Get get, RunOptions options) { return complete(prepare(std::move(get), std::move(options))); }
+generations::Outcome Client::complete(PreparedEndpoint<generations::Outcome> call) { return complete_endpoint(std::move(call)); }
+EndpointCall<generations::Outcome> Client::start(PreparedEndpoint<generations::Outcome> call, std::function<void(generations::Outcome)> on_outcome) {
+  return start_endpoint(std::move(call), std::move(on_outcome));
+}
 Diagnostics Client::diagnostics() const noexcept {
   if (!state_) return {};
   return {state_->slow_callbacks.load(), state_->callback_exceptions.load()};

@@ -1,6 +1,7 @@
 // Embeddings, rerank and moderation endpoints (D6): the request each provider shape takes and the typed result of a
 // response.
 #include "codecs/embeddings.h"
+#include "codecs/generations.h"
 #include "codecs/moderation.h"
 #include "codecs/rerank.h"
 #include "codecs/speech.h"
@@ -216,10 +217,37 @@ void transcription_endpoint() {
   CHECK(std::get<transcription::Result>(routed_result).seconds == 1.4 && std::get<transcription::Result>(routed_result).language == "en" &&
         std::get<transcription::Result>(routed_result).usage.provider_cost.total->nano_usd == 100'000u);
   CHECK(std::holds_alternative<Failure>(decoded<transcription::Codec>(transcription::typed, openai, R"({"segments":[]})", "m")));
+  // A translation into English: OpenAI only, and without a language.
+  auto translate = request; translate.model = "whisper-1"; translate.language.reset(); translate.extensions.reset(); translate.translate = true;
+  CHECK(encoded<transcription::Encoded>(transcription::encode, openai, translate).path == "/v1/audio/translations");
+  CHECK(refused(transcription::encode, openai, [&] { auto r = translate; r.language = "ko"; return r; }()) == ErrorKind::InvalidRequest);
+  CHECK(refused(transcription::encode, router, [&] { auto r = routed; r.translate = true; r.language.reset(); return r; }()) == ErrorKind::Unsupported);
+}
+
+void generation_endpoint() {
+  const auto router = at("https://openrouter.ai");
+  const auto wire = encoded<generations::Encoded>(generations::encode, router, generations::Get{"gen-1792420896-swTWG0mrnUerfipmnSCE"});
+  CHECK(wire.path == "/api/v1/generation?id=gen-1792420896-swTWG0mrnUerfipmnSCE" && wire.method == "GET" && wire.body.empty());
+  CHECK(refused(generations::encode, router, generations::Get{"gen-1&x=2"}) == ErrorKind::InvalidRequest);
+  CHECK(refused(generations::encode, at("https://api.openai.com"), generations::Get{"gen-1"}) == ErrorKind::Unsupported);
+  // The statistics of a live generation, 2026-10-19.
+  Accumulator accumulator;
+  generations::Codec codec(router, accumulator);
+  codec.buffered(R"({"data":{"created_at":"2026-10-19T14:41:35.908Z","model":"google/gemini-3.1-flash-lite-20260507","streamed":true,"cancelled":false,"latency":781,"generation_time":807,"tokens_prompt":2,"tokens_completion":1,"native_tokens_prompt":3,"native_tokens_completion":1,"native_tokens_reasoning":0,"native_tokens_cached":0,"is_byok":false,"finish_reason":"stop","native_finish_reason":"STOP","usage":2.25e-06,"id":"gen-1792420896-swTWG0mrnUerfipmnSCE","upstream_id":"ICzWavyyDJqYvdAPl_yHqQQ","total_cost":2.25e-06,"upstream_inference_cost":0,"provider_name":"Google"}})", {});
+  CHECK(accumulator.outcome());
+  const auto stats = std::get<generations::Result>(generations::typed(*accumulator.outcome()));
+  CHECK(stats.id == "gen-1792420896-swTWG0mrnUerfipmnSCE" && stats.model == "google/gemini-3.1-flash-lite-20260507" && stats.provider == "Google" &&
+        stats.usage.input_total->value == 3 && stats.usage.output_total->value == 1 && stats.tokens_prompt == 2u && stats.latency_ms == 781u &&
+        stats.generation_ms == 807u && stats.finish_reason == "stop" && stats.native_finish_reason == "STOP" && stats.streamed && !stats.cancelled &&
+        stats.usage.provider_cost.total->nano_usd == 2250u && stats.usage.provider_cost.is_byok == false && stats.created_at == 1792420895u && stats.raw);
+  Accumulator broken;
+  generations::Codec bad_codec(router, broken);
+  bad_codec.buffered(R"({"data":{"id":"gen-1","native_tokens_prompt":"3"}})", {});
+  CHECK(broken.outcome() && std::holds_alternative<Failure>(*broken.outcome()));
 }
 }  // namespace
 
 int main() {
-  try { embedding_endpoints(); rerank_endpoint(); moderation_endpoint(); speech_endpoint(); transcription_endpoint(); std::cout << "endpoint properties passed\n"; return 0; }
+  try { embedding_endpoints(); rerank_endpoint(); moderation_endpoint(); speech_endpoint(); transcription_endpoint(); generation_endpoint(); std::cout << "endpoint properties passed\n"; return 0; }
   catch (const std::exception& error) { std::cerr << "endpoint test failed: " << error.what() << '\n'; return 1; }
 }

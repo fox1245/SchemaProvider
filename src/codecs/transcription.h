@@ -18,6 +18,8 @@ struct Request {
   std::optional<std::string> language{};
   // Text that guides the transcript (OpenAI).
   std::optional<std::string> prompt{};
+  // Translate the speech into English text instead (OpenAI `/v1/audio/translations`, which takes no language).
+  bool translate = false;
   // Members the endpoint's policy fact admits, sent as given: JSON members on OpenRouter, form fields on OpenAI.
   std::shared_ptr<const json::Document> extensions{};
 };

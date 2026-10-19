@@ -542,7 +542,7 @@
     {"endpoint":"moderation","shape":"openai","origins":["https://api.openai.com"],"paths":{"check":"/v1/moderations"}},
     {"endpoint":"speech","shape":"openai","origins":["https://api.openai.com"],"paths":{"speak":"/v1/audio/speech"},"charge_on_accept":true},
     {"endpoint":"speech","shape":"openrouter","origins":["https://openrouter.ai"],"paths":{"speak":"/api/v1/audio/speech"},"charge_on_accept":true,"options":{"type":"object","properties":{"session_id":{"type":"string","max_length":256},"user":{"type":"string","max_length":256},"trace":{"type":"map","values":{"type":"string","max_length":256},"max_items":16}}}},
-    {"endpoint":"transcription","shape":"openai","origins":["https://api.openai.com"],"paths":{"transcribe":"/v1/audio/transcriptions"},"charge_on_accept":true,
+    {"endpoint":"transcription","shape":"openai","origins":["https://api.openai.com"],"paths":{"transcribe":"/v1/audio/transcriptions","translate":"/v1/audio/translations"},"charge_on_accept":true,
      "options":{"type":"object","properties":{"temperature":{"type":"number","minimum":0,"maximum":1},"timestamp_granularities":{"type":"array","items":{"type":"enum","values":["word","segment"]},"max_items":2}}}},
     {"endpoint":"transcription","shape":"openrouter","origins":["https://openrouter.ai"],"paths":{"transcribe":"/api/v1/audio/transcriptions"},"charge_on_accept":true,
      "options":{"type":"object","properties":{"session_id":{"type":"string","max_length":256},"user":{"type":"string","max_length":256},"temperature":{"type":"number","minimum":0,"maximum":1},"diarize":{"type":"boolean"},"keyterms":{"type":"array","items":{"type":"string","max_length":128},"max_items":100}}}},
@@ -559,6 +559,7 @@
      "keep":["model","input","instructions","tools","tool_choice","reasoning","text","truncation","parallel_tool_calls","conversation","previous_response_id"]},
     {"endpoint":"tokens","shape":"anthropic","origins":["https://api.anthropic.com"],"paths":{"count":"/v1/messages/count_tokens"},"auth":"x-api-key","headers":{"anthropic-version":"2023-06-01"},
      "keep":["model","messages","system","tools","tool_choice","thinking","output_config","cache_control","mcp_servers"]},
-    {"endpoint":"tokens","shape":"google","origins":["https://generativelanguage.googleapis.com"],"paths":{"count":"/v1beta/models/{model}:countTokens"},"auth":"x-goog-api-key"}
+    {"endpoint":"tokens","shape":"google","origins":["https://generativelanguage.googleapis.com"],"paths":{"count":"/v1beta/models/{model}:countTokens"},"auth":"x-goog-api-key"},
+    {"endpoint":"generations","shape":"openrouter","origins":["https://openrouter.ai"],"paths":{"get":"/api/v1/generation"}}
   ]
 }

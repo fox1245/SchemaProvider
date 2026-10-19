@@ -513,7 +513,8 @@ class PolicyLoader {
           if (endpoint == "rerank" && shape == "openrouter") return {"rank"};
           if (endpoint == "moderation" && shape == "openai") return {"check"};
           if (endpoint == "speech" && (shape == "openai" || shape == "openrouter")) return {"speak"};
-          if (endpoint == "transcription" && (shape == "openai" || shape == "openrouter")) return {"transcribe"};
+          if (endpoint == "transcription" && shape == "openai") return {"transcribe", "translate"};
+          if (endpoint == "transcription" && shape == "openrouter") return {"transcribe"};
           // A job: submit starts it, poll reads its state, download fetches one output.
           if (endpoint == "videos" && shape == "openrouter") return {"submit", "poll", "download"};
           // OpenAI and Google also upload a file in parts: OpenAI Uploads, and Google's resumable upload, whose later
@@ -526,6 +527,7 @@ class PolicyLoader {
           if (endpoint == "batches" && shape == "anthropic") return {"submit", "get", "cancel", "delete", "results"};
           if (endpoint == "batches" && shape == "google") return {"submit", "get", "cancel", "delete"};
           if (endpoint == "tokens" && (shape == "openai" || shape == "anthropic" || shape == "google")) return {"count"};
+          if (endpoint == "generations" && shape == "openrouter") return {"get"};
           return {};
         };
         for (auto e : endpoints.elements()) {
