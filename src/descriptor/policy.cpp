@@ -326,7 +326,9 @@ class PolicyLoader {
                               text(t.get("name"),"/server_tools"),
                               boolean(t.get("max_uses"),"/server_tools")};
           if (f.family == "openai.responses") {
-            constexpr std::string_view types[]{"web_search","image_generation","file_search","tool_search","shell"};
+            // The typed hosted tools the Responses encoder can write; OpenRouter's server tools need no fact.
+            constexpr std::string_view types[]{"web_search","image_generation","file_search","tool_search","shell",
+                                               "code_interpreter","mcp","computer","computer_use_preview"};
             if (fact.max_uses || fact.name != fact.type ||
                 std::find(std::begin(types), std::end(types), fact.type) == std::end(types))
               fail("/server_tools", "declared typed Responses tool fact");

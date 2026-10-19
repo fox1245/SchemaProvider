@@ -337,17 +337,64 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
     for (const auto value : *request.include) hash.number(static_cast<unsigned>(value));
   }
   hash.number(request.hosted_tools.size());
+  auto optional_text = [&](const std::optional<std::string>& value) { hash.number(value.has_value()); if (value) hash.text(*value); };
+  auto optional_number = [&](const auto& value) { hash.number(value.has_value()); if (value) hash.number(static_cast<uint64_t>(*value)); };
+  auto texts = [&](const std::vector<std::string>& values) { hash.number(values.size()); for (const auto& value : values) hash.text(value); };
+  auto filter = [&](const std::optional<responses::McpToolFilter>& value) {
+    hash.number(value.has_value());
+    if (value) { texts(value->tool_names); optional_number(value->read_only); }
+  };
   for (const auto& hosted : request.hosted_tools) {
     hash.number(hosted.index());
     std::visit([&](const auto& tool) {
       using T = std::decay_t<decltype(tool)>;
+      // Options added later are bound only when set, so earlier configurations keep their digest.
       if constexpr (std::is_same_v<T, responses::ImageGenerationTool>) {
         hash.number(tool.size.has_value()); if (tool.size) hash.text(*tool.size);
         hash.number(tool.quality.has_value()); if (tool.quality) hash.text(*tool.quality);
         if (tool.output_format) { hash.text("sp.responses.image.output_format.v1"); hash.text(*tool.output_format); }
+        if (tool.model || tool.action || tool.background || tool.moderation || tool.input_fidelity || tool.output_compression ||
+            tool.partial_images || tool.mask_file_id || tool.mask_image_url) {
+          hash.text("sp.responses.image.options.v1");
+          optional_text(tool.model); optional_text(tool.action); optional_text(tool.background); optional_text(tool.moderation);
+          optional_text(tool.input_fidelity); optional_number(tool.output_compression); optional_number(tool.partial_images);
+          optional_text(tool.mask_file_id); optional_text(tool.mask_image_url);
+        }
       } else if constexpr (std::is_same_v<T, responses::FileSearchTool>) {
         hash.number(tool.vector_store_ids.size());
         for (const auto& id : tool.vector_store_ids) hash.text(id);
+        if (tool.max_num_results) { hash.text("sp.responses.file_search.max_num_results.v1"); hash.number(*tool.max_num_results); }
+      } else if constexpr (std::is_same_v<T, responses::WebSearchTool>) {
+        if (!tool.allowed_domains.empty() || tool.user_location || tool.search_context_size || tool.external_web_access) {
+          hash.text("sp.responses.web_search.options.v1");
+          texts(tool.allowed_domains);
+          hash.number(tool.user_location.has_value());
+          if (tool.user_location) {
+            optional_text(tool.user_location->city); optional_text(tool.user_location->country);
+            optional_text(tool.user_location->region); optional_text(tool.user_location->timezone);
+          }
+          optional_text(tool.search_context_size); optional_number(tool.external_web_access);
+        }
+      } else if constexpr (std::is_same_v<T, responses::CodeInterpreterTool>) {
+        // Domain secret values are credentials: only their domains and names are bound.
+        optional_text(tool.container_id); texts(tool.file_ids); optional_text(tool.memory_limit);
+        hash.number(tool.network_policy.has_value());
+        if (tool.network_policy) {
+          hash.number(tool.network_policy->disabled); texts(tool.network_policy->allowed_domains);
+          hash.number(tool.network_policy->domain_secrets.size());
+          for (const auto& secret : tool.network_policy->domain_secrets) { hash.text(secret.domain); hash.text(secret.name); }
+        }
+      } else if constexpr (std::is_same_v<T, responses::McpTool>) {
+        // The authorization and header values are credentials: a rotated one keeps history replayable.
+        hash.text(tool.server_label); optional_text(tool.server_url); optional_text(tool.connector_id); optional_text(tool.tunnel_id);
+        hash.number(tool.authorization.has_value());
+        hash.number(tool.headers.size()); for (const auto& header : tool.headers) hash.text(header.first);
+        filter(tool.allowed_tools); optional_text(tool.require_approval); filter(tool.approval_always); filter(tool.approval_never);
+        optional_text(tool.server_description); optional_number(tool.defer_loading);
+      } else if constexpr (std::is_same_v<T, responses::ComputerUsePreviewTool>) {
+        hash.text(tool.environment); hash.number(tool.display_width); hash.number(tool.display_height);
+      } else if constexpr (std::is_same_v<T, responses::OpenRouterServerTool>) {
+        hash.text(tool.type); hash.document(tool.parameters);
       } else if constexpr (std::is_same_v<T, responses::ShellTool>) {
         hash.number(tool.environment.skills.size());
         for (const auto& skill : tool.environment.skills) hash.text(skill.skill_id);
@@ -365,6 +412,19 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
     const auto strict = tool.strict ? tool.strict : defaults.strict_tools;
     hash.number(strict.has_value()); if (strict) hash.number(*strict);
     hash.number(tool.defer_loading.value_or(false));
+  }
+  // Image output is configuration; MCP approvals answer one turn and are not bound.
+  if (!request.modalities.empty() || request.image_config) {
+    hash.text("sp.responses.output.v1");
+    hash.number(request.modalities.size());
+    for (const auto modality : request.modalities) hash.number(static_cast<unsigned>(modality));
+    hash.number(request.image_config.has_value());
+    if (request.image_config) {
+      const auto& config = *request.image_config;
+      for (const auto* field : {&config.aspect_ratio, &config.image_size, &config.size, &config.quality, &config.background, &config.output_format, &config.moderation})
+        optional_text(*field);
+      optional_number(config.output_compression);
+    }
   }
   return hash.finish(digest);
 }

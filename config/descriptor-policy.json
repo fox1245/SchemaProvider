@@ -295,7 +295,11 @@
         {"type": "image_generation", "name": "image_generation", "max_uses": false},
         {"type": "file_search", "name": "file_search", "max_uses": false},
         {"type": "tool_search", "name": "tool_search", "max_uses": false},
-        {"type": "shell", "name": "shell", "max_uses": false}
+        {"type": "shell", "name": "shell", "max_uses": false},
+        {"type": "code_interpreter", "name": "code_interpreter", "max_uses": false},
+        {"type": "mcp", "name": "mcp", "max_uses": false},
+        {"type": "computer", "name": "computer", "max_uses": false},
+        {"type": "computer_use_preview", "name": "computer_use_preview", "max_uses": false}
       ]
     },
     {

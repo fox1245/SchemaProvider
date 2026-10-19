@@ -29,10 +29,7 @@ enum class OutputModality { Text, Audio, Image };
 // is wav, aac, mp3, flac, opus or pcm16.
 struct AudioOutput { std::string voice, format; };
 // OpenRouter image_config. Every present field is sent as given.
-struct ImageOutput {
-  std::optional<std::string> aspect_ratio, image_size, size, quality, background, output_format, moderation;
-  std::optional<uint64_t> output_compression;
-};
+using ImageOutput = sp::OpenRouterImageConfig;
 struct Request {
   std::string model;
   std::vector<InputMessage> messages;

@@ -37,6 +37,11 @@ struct ResponseFormat {
   std::shared_ptr<const json::Document> schema;
   std::optional<bool> strict;
 };
+// OpenRouter image_config, for image output on Chat and Responses. Every present field is sent as given.
+struct OpenRouterImageConfig {
+  std::optional<std::string> aspect_ratio, image_size, size, quality, background, output_format, moderation;
+  std::optional<uint64_t> output_compression;
+};
 
 namespace request_controls {
 inline bool bounded_text(std::string_view text, std::size_t maximum, bool empty = false) {
@@ -337,6 +342,44 @@ inline void write_response_format(json::BoundedWriter& body, const ResponseForma
   body.raw(",\"schema\":").value(format.schema->root(), 4);
   if (format.strict) body.raw(*format.strict ? ",\"strict\":true" : ",\"strict\":false");
   if (!responses) body.raw("}");
+  body.raw("}");
+}
+// A short configuration token: letters, digits and ":._-/".
+inline bool config_token(std::string_view text, std::size_t maximum = 64) noexcept {
+  if (text.empty() || text.size() > maximum) return false;
+  for (const unsigned char c : text)
+    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == ':' || c == '.' ||
+          c == '_' || c == '-' || c == '/')) return false;
+  return true;
+}
+inline std::optional<std::string> validate_image_config(const OpenRouterImageConfig& config) {
+  for (const auto* field : {&config.aspect_ratio, &config.image_size, &config.size, &config.quality, &config.background,
+                            &config.output_format, &config.moderation})
+    if (*field && !config_token(**field)) return "image_config values must be short tokens";
+  if (config.output_compression && *config.output_compression > 100) return "image_config output_compression is 0 to 100";
+  return std::nullopt;
+}
+inline void write_image_config(json::BoundedWriter& body, const OpenRouterImageConfig& config) {
+  body.raw("{");
+  bool comma = false;
+  auto text_field = [&](std::string_view key, const std::optional<std::string>& value) {
+    if (!value) return;
+    if (comma) body.raw(",");
+    comma = true;
+    body.quoted(key).raw(":").quoted(*value);
+  };
+  text_field("aspect_ratio", config.aspect_ratio);
+  text_field("image_size", config.image_size);
+  text_field("size", config.size);
+  text_field("quality", config.quality);
+  text_field("background", config.background);
+  text_field("output_format", config.output_format);
+  if (config.output_compression) {
+    if (comma) body.raw(",");
+    comma = true;
+    body.raw("\"output_compression\":").raw(std::to_string(*config.output_compression));
+  }
+  text_field("moderation", config.moderation);
   body.raw("}");
 }
 } // namespace request_controls
