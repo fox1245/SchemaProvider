@@ -214,6 +214,7 @@ Messages typed tools and beta headers (#53):
 - **Kept blocks.** The new `response_blocks` facts make a listed response block an `Opaque` part of the captured message, replayed in place. A Messages history may now hold `Opaque` parts in sealed assistant messages. The built-in policy lists `fallback`, `container_upload` and `mcp_tool_listing`; an unlisted block is still `Unsupported`.
 - **Value schemas** gain `map`.
 - **Unbound extensions (#96).** An extension fact may set `"bound": false` (replay-eligible only). Its value never joins the configuration digest, so it may change between turns. The built-in Messages facts for `speed`, `inference_geo` and `diagnostics` are unbound. A request that sets only these keeps the digest it would have without extensions.
+- **Container (#98).** `messages::Request::container` no longer joins the configuration digest, so a conversation can reuse the container a response reported. A request that sets it now has the digest it would have without one.
 
 ## From interface 5 to 6
 

@@ -516,6 +516,13 @@ void server_tool_options() {
   refused([](auto& r) { r.tools[1].max_content_tokens = 0; });
   refused([](auto& r) { r.tools[0].user_location = messages::UserLocation{std::string(), std::nullopt, std::nullopt, std::nullopt}; });
   refused([](auto& r) { r.container = "bad id"; });
+  // A conversation started without a container reuses the one the service reported, or a renewed one (#98).
+  auto started = base_request(); started.max_tokens = 512; started.tools = {messages::ToolDefinition{"code_execution", {}, {}, "code_execution_20250825", std::nullopt}};
+  auto reuse = started; reuse.messages.push_back(capture(descriptor, started, R"([{"type":"text","text":"ran"}])")); reuse.messages.push_back(user("again"));
+  reuse.container = "container_011";
+  CHECK(document(encoded(descriptor, reuse).body)->root().get("container").as_string() == "container_011");
+  reuse.container = "container_012";
+  encoded(descriptor, reuse);
   refused([](auto& r) { r.tools.push_back({"client", "a client tool", document(R"({"type":"object"})"), {}, {}}); r.tools.back().allowed_callers = {"direct"}; });
 }
 void thinking_cache_tool_controls() {
