@@ -126,8 +126,8 @@ bool never_kind(ErrorKind k) {
 }  // namespace
 
 namespace {
-// Google's google.rpc reasons and status names are UPPER_SNAKE; Anthropic's error types and OpenAI's codes and
-// types are lower_snake. At most 64 characters, a letter first, then letters, digits and '_'.
+// Google's google.rpc reasons and status names are UPPER_SNAKE; the Interactions API's codes, Anthropic's error types
+// and OpenAI's codes and types are lower_snake. At most 64 characters, a letter first, then letters, digits and '_'.
 bool machine_code(std::string_view value, bool upper) noexcept {
   if (value.empty() || value.size() > 64) return false;
   const auto letter = [&](char c) { return upper ? (c >= 'A' && c <= 'Z') : (c >= 'a' && c <= 'z'); };
@@ -142,7 +142,9 @@ std::string_view vendor_reason(std::string_view family, json::Value error) {
     if (const auto details = error.get("details"); details.is_array())
       for (auto detail : details.elements())
         if (const auto reason = code(detail.get("reason"), true); !reason.empty()) return reason;
-    return code(error.get("status"), true);
+    if (const auto status = code(error.get("status"), true); !status.empty()) return status;
+    // The Interactions API answers {"error":{"code":"invalid_request","message":...}}: a lower_snake code.
+    return family == "google.interactions" ? code(error.get("code"), false) : std::string_view{};
   }
   if (family == "anthropic.messages") return code(error.get("type"), false);
   if (const auto found = code(error.get("code"), false); !found.empty()) return found;

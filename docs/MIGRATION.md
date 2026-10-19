@@ -124,6 +124,14 @@ Streamed Gemini audio is one part, and Gemini's empty closing text part is gone 
 - **Empty text.** Gemini ends most answers with a part whose text is `""`. Without a `thoughtSignature` it is no longer a typed part. The part opened and sealed as an empty `Text` before, which #37 already kept from `on_event`. With a signature it stays.
 - **Replay.** `wire_output` keeps every frame and the empty part as received, and native replay sends them unchanged.
 
+Interactions can continue a stored interaction and use the service's own tools:
+- **Continuation.** `interactions::Request` gains `previous_interaction_id`, `store` (the request used to send `"store":false` always) and `video_task`.
+- **Service tools.** It also gains `builtin_tools` (`GoogleSearchTool`, `UrlContextTool`, `CodeExecutionTool`).
+- **Decoding.** Steps of the service's tools (`<tool>_call`, `<tool>_result`) decode as `ServerExecuted` `ToolCall` and `ServerToolResult` parts. They used to fail the response as `Unsupported`.
+- **Results.** A continued interaction's result has no native seal.
+- **Configuration digest.** It binds the new fields only when they are set, so existing digests do not change.
+- **Error codes.** An Interactions HTTP error's lower_snake `code` (`invalid_request`) is now its `vendor_code`.
+
 ## From interface 5 to 6
 
 Package 0.3.0 alpha adds `Usage::provider_cost` and the fixed-size `ProviderReportedCost`, `UsdAmount`, `CostSource`, `CostStatus` and `CostRounding` types. Existing field access remains source-compatible, but `Usage`, `UsageUpdate`, `Completion`, `PartialCompletion` and the containing `Event` layouts grow. Rebuild every consumer against the same headers and generation 6 libraries (`libsp_*.so.6`); interface 5 binaries must not load interface 6 libraries. CMake consumers select `SchemaProvider 0.3.0 EXACT`.

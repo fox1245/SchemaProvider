@@ -182,11 +182,19 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
   unknown(root, {"event_type", "event_id", "index", "usage", "step_usage"});
   return usage(root.get("usage"), false) && stop(number(index));
 }
+namespace {
+// Steps of the service's own tools are <tool>_call and <tool>_result; function_call and function_result are the
+// client's. Any such type is admitted, so a tool the service adds needs no change here.
+bool server_call(std::string_view type) noexcept { return type != "function_call" && type.size() > 5 && type.ends_with("_call"); }
+bool server_result(std::string_view type) noexcept { return type != "function_result" && type.size() > 7 && type.ends_with("_result"); }
+bool server_step(std::string_view type) noexcept { return server_call(type) || server_result(type); }
+}  // namespace
 bool Codec::start(json::Value value, uint64_t index) {
   if (!value.is_object() || !value.get("type").is_string()) return fail(ErrorKind::ProtocolCorrupt, "step type required");
   if (index >= limits_.max_parts || steps_.contains(index)) return fail(index >= limits_.max_parts ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, "invalid or repeated step index");
   auto type = value.get("type").as_string();
-  if (type != "thought" && type != "function_call" && type != "model_output") return fail(ErrorKind::Unsupported, "unsupported critical interaction step");
+  if (type != "thought" && type != "function_call" && type != "model_output" && !server_step(type))
+    return fail(ErrorKind::Unsupported, "unsupported critical interaction step");
   if (value.get("error").valid() && !value.get("error").is_null()) return fail(ErrorKind::RemoteFailure, "remote step error");
   Step step; step.type = type; step.original = own(value); if (!step.original) return false;
   auto begin_part = [&](PartKind kind, PartHeader header, uint64_t offset) { return begin(step, index, kind, std::move(header), offset); };
@@ -198,6 +206,16 @@ bool Codec::start(json::Value value, uint64_t index) {
     if (!begin_part(PartKind::Thought, {}, 0)) return false;
     if (summary.valid()) for (auto content : summary.elements())
       if (!thought_content(step, content)) return false;
+  } else if (server_step(type)) {
+    const bool call = server_call(type);
+    const auto id = value.get(call ? "id" : "call_id");
+    if (!nonempty(id)) return fail(ErrorKind::ProtocolCorrupt, "invalid service tool step identity");
+    PartHeader header; header.wire_id = id.as_string(); header.wire_type = std::string(type);
+    if (call) {
+      header.name = std::string(type.substr(0, type.size() - 5));
+      header.tool_kind = ToolCallKind::ServerExecuted;
+    }
+    if (!begin_part(call ? PartKind::ToolCall : PartKind::ServerToolResult, std::move(header), 0)) return false;
   } else if (type == "function_call") {
     unknown(value, {"type", "id", "name", "arguments"});
     auto id = value.get("id"), name = value.get("name"), arguments = value.get("arguments");
@@ -372,6 +390,11 @@ bool Codec::delta(json::Value value, uint64_t index) {
     return annotate(step.content.back(), value.get("annotations"));
   }
   if (media_type(type) && step.type == "model_output") return media_item(step, index, value, true);
+  if (server_step(step.type) && type == step.type) {
+    if (step.server) return fail(ErrorKind::ProtocolCorrupt, "repeated service tool step delta");
+    step.server = own(value);
+    return static_cast<bool>(step.server);
+  }
   if (type == "arguments_delta" && step.type == "function_call") {
     unknown(value, {"type", "arguments"}); auto arguments = value.get("arguments");
     if (arguments.valid() && !arguments.is_string()) return fail(ErrorKind::ProtocolCorrupt, "invalid arguments delta");
@@ -389,6 +412,26 @@ bool Codec::stop(uint64_t index) {
   found->second.closed = true; return true;
 }
 std::shared_ptr<const json::Document> Codec::assembled(const Step& step) {
+  if (server_step(step.type)) {
+    // The start carries the identity (and an empty signature); the delta carries the content and replaces them.
+    if (!step.server) return step.original;
+    std::string bytes; json::BoundedWriter writer({limits_.max_content_bytes, limits_.max_json_depth}, &bytes);
+    writer.raw("{"); bool comma = false;
+    for (auto member : step.original->root().members()) {
+      if (step.server->root().get(member.key).valid()) continue;
+      if (comma) writer.raw(",");
+      comma = true; writer.quoted(member.key).raw(":").value(member.value, 1);
+    }
+    for (auto member : step.server->root().members()) {
+      if (comma) writer.raw(",");
+      comma = true; writer.quoted(member.key).raw(":").value(member.value, 1);
+    }
+    writer.raw("}");
+    if (!writer.ok()) { fail(ErrorKind::ResourceLimit, "assembled step limit"); return {}; }
+    auto parsed = json::parse(bytes, {limits_.max_content_bytes, limits_.max_json_depth});
+    if (auto doc = std::get_if<json::Document>(&parsed)) return std::make_shared<const json::Document>(std::move(*doc));
+    fail(ErrorKind::ProtocolCorrupt, "invalid assembled service tool step"); return {};
+  }
   std::string bytes; json::BoundedWriter writer({limits_.max_content_bytes, limits_.max_json_depth}, &bytes);
   auto original = step.original->root(); writer.raw("{"); bool comma = false;
   auto key = [&](std::string_view name) { if (comma) writer.raw(","); comma = true; writer.quoted(name).raw(":"); };
@@ -452,6 +495,14 @@ bool Codec::reconcile(Step& step, json::Value final) {
   if (!final.is_object() || !final.get("type").is_string() || final.get("type").as_string() != step.type)
     return fail(ErrorKind::ProtocolCorrupt, "final step type mismatch");
   if (final.get("error").valid() && !final.get("error").is_null()) return fail(ErrorKind::RemoteFailure, "final step error");
+  if (server_step(step.type)) {
+    const auto key = server_call(step.type) ? "id" : "call_id";
+    if (!nonempty(final.get(key)) || final.get(key).as_string() != step.original->root().get(key).as_string())
+      return fail(ErrorKind::ProtocolCorrupt, "final service tool step identity mismatch");
+    if (server_call(step.type) && final.get("arguments").valid() && !final.get("arguments").is_object())
+      return fail(ErrorKind::ProtocolCorrupt, "service tool arguments must be object");
+    return true;
+  }
   if (step.type == "thought") {
     auto summary = final.get("summary"), signature = final.get("signature");
     if ((summary.valid() && !summary.is_array()) || (signature.valid() && !signature.is_string())) return fail(ErrorKind::ProtocolCorrupt, "invalid final thought");
@@ -518,6 +569,17 @@ bool Codec::reconcile(Step& step, json::Value final) {
   return true;
 }
 bool Codec::seal(Step& step, json::Value final, uint64_t index) {
+  if (server_call(step.type)) {
+    // The call's input is its arguments; the whole step stays as the part's native metadata.
+    const auto arguments = final.get("arguments");
+    std::string bytes = arguments.is_object() ? arguments.dump() : "{}";
+    auto metadata = own(final);
+    return metadata && emit(PartSeal{step.parts[0], bytes, std::move(metadata)});
+  }
+  if (server_result(step.type)) {
+    std::string bytes = final.dump();
+    return emit(PartSeal{step.parts[0], bytes, {}});
+  }
   if (step.type == "thought") { auto metadata = own(final); return metadata && emit(PartSeal{step.parts[0], {}, std::move(metadata)}); }
   if (step.type == "function_call") {
     auto arguments = final.get("arguments");

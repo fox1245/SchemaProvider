@@ -363,6 +363,11 @@ constexpr Entry interactions_table[] = {
   {"agent or environment interaction unsupported", "interactions.resource.agent_unsupported"},
   {"remote interaction error", "interactions.remote.error"},
   {"interaction identity changed", "interactions.identity.changed"},
+  {"invalid service tool step identity", "interactions.service_step.identity_invalid"},
+  {"repeated service tool step delta", "interactions.service_step.delta_repeated"},
+  {"invalid assembled service tool step", "interactions.service_step.assembly_invalid"},
+  {"final service tool step identity mismatch", "interactions.service_step.final_mismatch"},
+  {"service tool arguments must be object", "interactions.service_step.arguments_invalid"},
   {"invalid interaction model", "interactions.model.invalid"},
   {"interaction model changed", "interactions.model.changed"},
   {"Interactions request context required", "interactions.context.required"},
@@ -776,6 +781,10 @@ constexpr Entry interactions_request_table[] = {
   {"video duration requires protobuf Duration syntax", "request.interactions.video_duration_requires_protobuf_duration"},
   {"unsupported text output MIME type", "request.interactions.unsupported_text_output_mime_type"},
   {"text schema requires application/json and an object schema", "request.interactions.text_schema_requires_application_json_and"},
+  {"video task must be a lower-case token", "request.interactions.video_task_must_be_a_lower_case_token"},
+  {"google_search search types must be bounded unique tokens", "request.interactions.google_search_search_types_must_be_bounded"},
+  {"invalid previous interaction id", "request.interactions.invalid_previous_interaction_id"},
+  {"previous interaction input must be new input only", "request.interactions.previous_interaction_input_not_new"},
 };
 constexpr Entry shared_request_table[] = {
   {"positive output cap required", "request.choice.positive_output_cap_required"},

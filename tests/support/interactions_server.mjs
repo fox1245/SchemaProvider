@@ -127,7 +127,7 @@ const server = http.createServer(async (req, res) => {
     if (c.scenario === 'failed') status = 'failed';
     if (c.scenario === 'cancelled') status = 'cancelled';
     if (c.scenario === 'nullable') counters = { total_input_tokens: 100, total_output_tokens: 25, total_thought_tokens: null, total_tokens: 125 };
-    if (c.scenario === 'unsupported') steps = [{ type: 'google_search_call', id: 'server_tool' }];
+    if (c.scenario === 'unsupported') steps = [{ type: 'future_step', id: 'server_tool' }];
     const data = body.stream ? frames(body.model, steps, status, counters) : JSON.stringify(resource(body.model, steps, status, counters));
     const headers = { 'Content-Type': body.stream ? 'text/event-stream' : 'application/json', Connection: 'close' };
     if (c.scenario === 'short-close') headers['Content-Length'] = Buffer.byteLength(data) + 17;

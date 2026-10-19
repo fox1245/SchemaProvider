@@ -329,7 +329,9 @@ Part Accumulator::seal_value(Cursor& c, bool partial) {
     auto parsed = json::parse(c.bytes, {limits_.max_content_bytes, limits_.max_json_depth});
     std::shared_ptr<const json::Document> content;
     if (auto* doc = std::get_if<json::Document>(&parsed); doc && doc->root().is_object()) {
-      const auto type = doc->root().get("type"), id = doc->root().get("tool_use_id");
+      // Messages names the call `tool_use_id`; Interactions names it `call_id`.
+      const auto type = doc->root().get("type");
+      const auto id = doc->root().get("tool_use_id").valid() ? doc->root().get("tool_use_id") : doc->root().get("call_id");
       if (type.is_string() && id.is_string() && type.as_string() == c.header.wire_type && id.as_string() == c.header.wire_id)
         content = std::make_shared<const json::Document>(std::move(*doc));
     }
