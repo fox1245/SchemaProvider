@@ -1830,6 +1830,16 @@ EndpointCall<batches::Outcome> Client::start(PreparedEndpoint<batches::Outcome> 
 EndpointCall<batches::DeleteOutcome> Client::start(PreparedEndpoint<batches::DeleteOutcome> call, std::function<void(batches::DeleteOutcome)> on_outcome) {
   return start_endpoint(std::move(call), std::move(on_outcome));
 }
+PreparedEndpoint<tokens::Outcome> Client::prepare(tokens::Count count, RunOptions options) {
+  auto client = state_;
+  return PreparedEndpoint<tokens::Outcome>(prepare_endpoint<tokens::Encoded>(std::move(options), "tokens",
+      static_cast<int>(reason::Source::TokensRequest), [&] { return tokens::encode(client->descriptor, count); }));
+}
+tokens::Outcome Client::complete(tokens::Count count, RunOptions options) { return complete(prepare(std::move(count), std::move(options))); }
+tokens::Outcome Client::complete(PreparedEndpoint<tokens::Outcome> call) { return complete_endpoint(std::move(call)); }
+EndpointCall<tokens::Outcome> Client::start(PreparedEndpoint<tokens::Outcome> call, std::function<void(tokens::Outcome)> on_outcome) {
+  return start_endpoint(std::move(call), std::move(on_outcome));
+}
 Diagnostics Client::diagnostics() const noexcept {
   if (!state_) return {};
   return {state_->slow_callbacks.load(), state_->callback_exceptions.load()};

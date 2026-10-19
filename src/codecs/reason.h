@@ -19,6 +19,8 @@ enum class Source {
   Files, FilesRequest,
   // Batches (D7).
   Batches, BatchesRequest,
+  // Token counting (D7).
+  Tokens, TokensRequest,
 };
 struct Entry { std::string_view message, code; };
 std::span<const Entry> entries(Source) noexcept;

@@ -1091,6 +1091,19 @@ constexpr Entry batches_request_table[] = {
   {"the batch has no results file yet", "request.batches.results_missing"},
   {"a batch results file is a file id", "request.batches.results_file_invalid"},
 };
+constexpr Entry tokens_table[] = {
+  {"invalid response JSON", "tokens.response.json_invalid"},
+  {"response must be object", "tokens.response.not_object"},
+  {"a token count is a number", "tokens.count.invalid"},
+};
+constexpr Entry tokens_request_table[] = {
+  {"token counting is not admitted at this origin", "request.tokens.endpoint_not_admitted"},
+  {"the token count endpoint has no path", "request.tokens.path_missing"},
+  {"this origin counts the tokens of another family's request", "request.tokens.family_mismatch"},
+  {"the request does not encode to a JSON object", "request.tokens.body_invalid"},
+  {"a Google model is a path segment", "request.tokens.model_invalid"},
+  {"the count request exceeds the request limit", "request.tokens.size_limit"},
+};
 constexpr Entry speech_table[] = {
   {"speech response is not audio", "speech.response.not_audio"},
   {"speech response is empty", "speech.response.empty"},
@@ -1219,6 +1232,8 @@ std::span<const Entry> entries(Source source) noexcept {
     case Source::FilesRequest: return files_request_table;
     case Source::Batches: return batches_table;
     case Source::BatchesRequest: return batches_request_table;
+    case Source::Tokens: return tokens_table;
+    case Source::TokensRequest: return tokens_request_table;
   }
   return {};
 }

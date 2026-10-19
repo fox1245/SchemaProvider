@@ -8,6 +8,7 @@
 #include "codecs/moderation.h"
 #include "codecs/rerank.h"
 #include "codecs/speech.h"
+#include "codecs/tokens.h"
 #include "codecs/transcription.h"
 
 namespace sp::endpoints {
@@ -65,6 +66,7 @@ std::unique_ptr<Codec> make_codec(std::string_view name, const descriptor::Valid
   if (name == "content") return std::make_unique<jobs::ContentCodec>(accumulator, limits);
   // Batch results are JSONL, whatever type the provider gives them.
   if (name == "content.document") return std::make_unique<jobs::ContentCodec>(accumulator, limits, true);
+  if (name == "tokens") return std::make_unique<tokens::Codec>(descriptor, accumulator, limits);
   if (name == "batches") return std::make_unique<batches::Codec>(descriptor, accumulator, batches::Codec::Kind::Batch, std::move(requested), limits);
   if (name == "batches.delete") return std::make_unique<batches::Codec>(descriptor, accumulator, batches::Codec::Kind::Deleted, std::move(requested), limits);
   // A file, a page of files, or a deletion; `requested` is the file id the call named.
