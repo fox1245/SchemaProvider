@@ -271,6 +271,10 @@ void google_api_key_errors() {
       CHECK(info.vendor_code.empty());
     }
     CHECK(inspect(400, R"({"error":{"status":")" + std::string(65, 'A') + R"("}})", {}, family).vendor_code.empty());
+    // The Interactions API's own lower_snake code (captured live on 2026-10-19); Generate never sends one.
+    const auto interactions_code = inspect(400, R"({"error":{"message":"Only user input is allowed when video task is set.","code":"invalid_request"}})", {}, family);
+    CHECK(interactions_code.kind == ErrorKind::InvalidRequest &&
+          interactions_code.vendor_code == (family == "google.interactions" ? "invalid_request" : ""));
     CHECK(inspect(400, {}, {}, family).kind == ErrorKind::InvalidRequest);
     CHECK(inspect(403, R"({"error":{"details":[{"reason":"API_KEY_SERVICE_BLOCKED"}]}})", {}, family).kind ==
           ErrorKind::Permission);

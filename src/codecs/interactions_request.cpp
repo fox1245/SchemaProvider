@@ -5,6 +5,7 @@
 #include "descriptor/policy.h"
 #include <limits>
 #include <map>
+#include <algorithm>
 #include <set>
 #include <type_traits>
 #include <initializer_list>
@@ -111,8 +112,30 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (request.thinking_summaries) effective.thinking_summaries = request.thinking_summaries;
   if (request.service_tier) effective.service_tier = *request.service_tier;
   if (auto error = descriptor::validate_choices(descriptor, request.model, effective)) return bad(std::move(*error));
-  if (request.model.empty() || request.messages.empty() || request.messages.size() > resources.request_messages || request.tools.size() > resources.request_tools)
+  if (request.model.empty() || request.messages.empty() || request.messages.size() > resources.request_messages ||
+      request.tools.size() + request.builtin_tools.size() > resources.request_tools)
     return bad("model and bounded messages/tools required");
+  // Values the service extends (tasks, search types) are tokens, not a fixed list; the service judges them.
+  const auto token = [](std::string_view value) {
+    return !value.empty() && value.size() <= 64 &&
+           std::all_of(value.begin(), value.end(), [](char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'; });
+  };
+  if (request.video_task && !token(*request.video_task)) return bad("video task must be a lower-case token");
+  for (const auto& tool : request.builtin_tools)
+    if (const auto* search = std::get_if<GoogleSearchTool>(&tool)) {
+      if (search->search_types.size() > 8) return bad("google_search search types must be bounded unique tokens");
+      std::set<std::string_view> seen;
+      for (const auto& type : search->search_types)
+        if (!token(type) || !seen.insert(type).second) return bad("google_search search types must be bounded unique tokens");
+    }
+  if (request.previous_interaction_id) {
+    const auto& id = *request.previous_interaction_id;
+    if (id.empty() || id.size() > 256 || std::any_of(id.begin(), id.end(), [](unsigned char c) { return c <= 0x20 || c >= 0x7f; }))
+      return bad("invalid previous interaction id");
+    for (const auto& message : request.messages)
+      if (message.native || message.role == Role::Assistant)
+        return bad("previous interaction input must be new input only");
+  }
   if (request.response_format.size() > resources.request_parts) return bad("response format count limit exceeded");
   for (const auto& format : request.response_format) {
     const char* error = nullptr;
@@ -212,7 +235,9 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   auto build = [&](json::BoundedWriter& body) -> std::optional<Error> {
     auto invalid = [](std::string label) { return Error{ErrorKind::InvalidRequest, std::move(label)}; };
     body.raw("{").quoted(descriptor.request_model_member()).raw(":").quoted(request.model)
-        .raw(",\"store\":false,").quoted(descriptor.request_stream_member()).raw(":").raw(streaming ? "true" : "false");
+        .raw(",\"store\":").raw(request.store.value_or(false) ? "true" : "false").raw(",")
+        .quoted(descriptor.request_stream_member()).raw(":").raw(streaming ? "true" : "false");
+    if (request.previous_interaction_id) body.raw(",\"previous_interaction_id\":").quoted(*request.previous_interaction_id);
     if (effective.service_tier) body.raw(",\"service_tier\":").quoted(*effective.service_tier);
     if (!request.system.empty()) body.raw(",\"system_instruction\":").quoted(request.system);
     if (!request.response_format.empty()) {
@@ -224,13 +249,26 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         body.raw("]");
       }
     }
-    if (!request.tools.empty()) {
+    if (!request.tools.empty() || !request.builtin_tools.empty()) {
       body.raw(",\"tools\":["); bool comma = false;
       for (const auto& tool : request.tools) {
         if (comma) body.raw(",");
         comma = true;
         body.raw("{\"type\":\"function\",\"name\":").quoted(tool.name).raw(",\"description\":").quoted(tool.description)
             .raw(",\"parameters\":").value(tool.parameters->root(), 3).raw("}");
+      }
+      for (const auto& tool : request.builtin_tools) {
+        if (comma) body.raw(",");
+        comma = true;
+        std::visit([&](const auto& value) {
+          using T = std::decay_t<decltype(value)>;
+          if constexpr (std::is_same_v<T, GoogleSearchTool>) {
+            body.raw("{\"type\":\"google_search\"");
+            if (!value.search_types.empty()) { body.raw(",\"search_types\":"); write_strings(body, value.search_types); }
+            body.raw("}");
+          } else if constexpr (std::is_same_v<T, UrlContextTool>) body.raw("{\"type\":\"url_context\"}");
+          else body.raw("{\"type\":\"code_execution\"}");
+        }, tool);
       }
       body.raw("]");
     }
@@ -277,6 +315,11 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       }
       body.raw("}"); generation_comma = true;
     }
+    if (request.video_task) {
+      if (generation_comma) body.raw(",");
+      body.raw("\"video_config\":{\"task\":").quoted(*request.video_task).raw("}");
+      generation_comma = true;
+    }
     if (request.required_tool) {
       if (!names.contains(*request.required_tool)) return invalid("required tool must name a declared function");
       if (generation_comma) body.raw(",");
@@ -291,6 +334,8 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         if (!pending.empty()) return invalid("client results must precede next assistant generation");
         std::map<std::string_view, const ToolCall*> calls;
         for (const auto& part : message.parts) {
+          if (const auto* call = std::get_if<ToolCall>(&part); call && call->kind == ToolCallKind::ServerExecuted) continue;
+          if (std::holds_alternative<ServerToolResult>(part)) continue;
           if (const auto* call = std::get_if<ToolCall>(&part)) {
             if (call->kind != ToolCallKind::ClientExecuted || call->wire_type != "function_call" ||
                 call->id.empty() || !names.contains(call->name) || !call->input || !call->input->root().is_object() ||
@@ -309,7 +354,9 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
             if (found == calls.end() || found->second->name != name.as_string() ||
                 !json::equal(arguments, found->second->input->root())) return invalid("captured function ownership mismatch");
             calls.erase(found);
-          } else if (type != "thought" && type != "model_output") return Error{ErrorKind::Unsupported, "unsupported captured interaction step"};
+          } else if (type != "thought" && type != "model_output" &&
+                     !(type != "function_result" && (type.ends_with("_call") || type.ends_with("_result"))))
+            return Error{ErrorKind::Unsupported, "unsupported captured interaction step"};
           separator(); body.value(step, 2);
         }
         if (!calls.empty()) return invalid("captured function step missing");

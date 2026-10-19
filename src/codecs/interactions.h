@@ -41,6 +41,9 @@ class Codec {
     std::optional<std::string> signature;
     std::vector<LocalId> parts;
     bool closed = false, signature_delta = false, argument_delta = false;
+    // A step the service ran itself (google_search_call, code_execution_result, ...): its single delta of the
+    // same type carries the whole content, which `server` keeps.
+    std::shared_ptr<const json::Document> server;
   };
   bool begin(Step&, uint64_t, PartKind, PartHeader, uint64_t);
   bool media_item(Step&, uint64_t, json::Value, bool);

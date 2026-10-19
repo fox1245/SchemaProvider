@@ -42,6 +42,12 @@ struct TranscriptionConfig {
   // Serialized within the verbatim mode object, never the deprecated top-level fields.
   bool speaker_diarization = false, word_timestamps = false;
 };
+// Tools the service runs itself. Their calls and results come back as ToolCall parts of kind ServerExecuted and
+// ServerToolResult parts, and stay in the native steps for replay.
+struct GoogleSearchTool { std::vector<std::string> search_types; };  // web_search, image_search, ...
+struct UrlContextTool {};
+struct CodeExecutionTool {};
+using BuiltinTool = std::variant<GoogleSearchTool, UrlContextTool, CodeExecutionTool>;
 struct Request {
   std::string model, account_scope, system;
   std::vector<Message> messages;
@@ -55,6 +61,14 @@ struct Request {
   std::vector<ResponseFormat> response_format;
   std::optional<SpeechConfiguration> speech_config;
   std::optional<TranscriptionConfig> transcription_config;
+  std::vector<BuiltinTool> builtin_tools;
+  // The service continues a stored interaction: `messages` holds the new input only, and the result is not
+  // replayable from the client (the service holds the history). The earlier turn must have set `store`.
+  std::optional<std::string> previous_interaction_id;
+  // Whether the service keeps this interaction (unset: false). A later previous_interaction_id needs it.
+  std::optional<bool> store;
+  // generation_config.video_config.task: text_to_video, image_to_video, reference_to_video, edit or extend.
+  std::optional<std::string> video_task;
 
   static Request simple(std::string model_name, std::string user_prompt,
                         std::optional<uint64_t> max_tokens = std::nullopt,

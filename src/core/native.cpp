@@ -454,6 +454,20 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
       hash.number(transcription.speaker_diarization); hash.number(transcription.word_timestamps);
     }
   }
+  // Bound only when set, so a request without them keeps the digest it had.
+  if (!request.builtin_tools.empty() || request.store || request.video_task) {
+    hash.text("sp.interactions.service.configuration.v1");
+    hash.number(request.builtin_tools.size());
+    for (const auto& tool : request.builtin_tools) {
+      hash.number(tool.index());
+      if (const auto* search = std::get_if<interactions::GoogleSearchTool>(&tool)) {
+        hash.number(search->search_types.size());
+        for (const auto& type : search->search_types) hash.text(type);
+      }
+    }
+    hash.number(request.store.has_value()); if (request.store) hash.number(*request.store);
+    hash.number(request.video_task.has_value()); if (request.video_task) hash.text(*request.video_task);
+  }
   return hash.finish(digest);
 }
 bool content_digest(const Message& message, Digest& digest, std::string_view family, const descriptor::CodecResources& resources) {
@@ -564,6 +578,8 @@ NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, 
 NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, const interactions::Request& request, const descriptor::EffectiveChoices& choices, bool streaming)
     : family_(Family::Interactions), model_(request.model), route_(descriptor.path(streaming)), prefix_count_(request.messages.size()), policy_(descriptor.policy()) {
   valid_ = descriptor.family() == family_name(family_) && origin_digest(descriptor, origin_) && configuration_digest(descriptor, request, choices, prefix_);
+  // A continued interaction's history is held by the service, so its output has no client-held replay authority.
+  if (request.previous_interaction_id) replay_eligible_ = false;
   if (valid_) {
     client_tools_.reserve(request.tools.size());
     for (const auto& tool : request.tools) client_tools_.push_back(tool.name);

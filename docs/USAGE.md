@@ -301,7 +301,7 @@ What the declaration keeps: the served identity must still stay the same for the
 | `sp::messages::Request`, `<codecs/messages_request.h>` | `system`, `account_scope`, **`max_tokens`**, `thinking_budget`, `thinking_mode`, `output_effort`, `cache_control`, `tool_choice`, `temperature`, `top_p`, `provider`. |
 | `sp::responses::Request`, `<codecs/responses_request.h>` | `instructions`, `account_scope`, `max_output_tokens`, `reasoning` (`effort`, `summary`), `required_tool`, `service_tier`, `temperature`, `top_p`, `store`, `response_format`, `provider`, `hosted_tools`, `max_tool_calls`, `previous_response_id`, `previous_response_history`, `parallel_tool_calls`, `verbosity`, `truncation`, `include`. |
 | `sp::gemini::Request`, `<codecs/gemini_request.h>` | `system`, `account_scope`, `max_output_tokens`, `thinking_budget`, typed `thinking_level`, `include_thoughts`, `temperature`, `safety_settings`, `tool_choice`, `required_tool`, `history_mode`, `response_modalities`, `speech_config`, `image_config`, `audio_transcription_config`. |
-| `sp::interactions::Request`, `<codecs/interactions_request.h>` | `system`, `account_scope`, `max_output_tokens`, `thinking_level`, `thinking_summaries`, `service_tier`, `required_tool`, typed `response_format`, `speech_config`, `transcription_config`. |
+| `sp::interactions::Request`, `<codecs/interactions_request.h>` | `system`, `account_scope`, `max_output_tokens`, `thinking_level`, `thinking_summaries`, `service_tier`, `required_tool`, typed `response_format`, `speech_config`, `transcription_config`, `builtin_tools`, `previous_interaction_id`, `store`, `video_task`. |
 
 This lists the C++ surface, not every field's availability on every model. Admitted enum/range/model facts and compiled family constraints still apply. Generate supports temperature; Interactions does not expose temperature/top-p. OpenRouter controls are admitted only at declared origins for the corresponding family, not arbitrary compatible URLs. Explicit model-prohibited temperature rejects before I/O. Messages enabled thinking has a separately documented omission rule, described below.
 
@@ -511,6 +511,21 @@ Plain server-held text state may use no `previous_response_history`. Client tool
 Cursor-generated messages retain a separate in-process terminal-ownership scope, not complete client-held native history: `NativeReplay::complete()` is false and archive/full-native replay is ineligible. No automatic retrieval, transcript backfill, cursor-not-found resend or fallback to full-input replay occurs. If the provider no longer has the referenced response, inspect the actual Failure and decide a new host operation explicitly; do not infer no billing from a missing cursor. Buffered/SSE terminal evidence, failure partials and deadline/cancel rules remain unchanged.
 
 [OpenAI's conversation-state guide](https://developers.openai.com/api/docs/guides/conversation-state) illustrates `previous_response_id` with new input and notes that earlier inputs in a chain still contribute to billing. Sending less history on the wire is not a zero-cost continuation claim.
+
+## Interactions continuation and service tools
+
+**Service tools.** `interactions::Request::builtin_tools` adds tools the service runs itself: `GoogleSearchTool` (with optional `search_types` such as `web_search` or `image_search`), `UrlContextTool` and `CodeExecutionTool`. Their steps decode as parts:
+- **Call.** A `<tool>_call` step is a `ToolCall` of kind `ServerExecuted`, named after the tool (`code_execution`), with `wire_type` the step type and the step's `arguments` as `input`.
+- **Result.** A `<tool>_result` step is a `ServerToolResult` whose `tool_use_id` is the step's `call_id` and whose `content` is the whole step.
+- **Unknown tools.** Any such pair is admitted, so a tool the service adds decodes without a change.
+- **Replay.** The steps stay in `wire_output` with their signatures and replay as received.
+
+**Continuation by id.** The service keeps an interaction only when it is stored: set `store = true` (unset sends `false`). A stored completion's `messages[0].id` is the interaction id.
+- **The next turn.** Set `previous_interaction_id` to that id and put only the new input in `messages`. A captured assistant or native message there is refused before dispatch.
+- **No client replay.** The service holds the history, so the result has no native seal.
+- **Chaining.** Store each turn that a later one continues.
+
+**Video task.** `video_task` writes `generation_config.video_config.task` (`text_to_video`, `image_to_video`, `reference_to_video`, `edit`, `extend`; any lower-case token is sent). The service admits only user input with a video task. To edit a generated video in a second turn, continue it by `previous_interaction_id` without a task. On 2026-10-19, `gemini-omni-1.1-flash` returned a `video/mp4` both for the first turn and for the continued edit.
 
 ## Explicit portable Gemini history
 

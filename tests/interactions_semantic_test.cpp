@@ -60,6 +60,82 @@ Outcome stream(const std::vector<Frame>& f, interactions::Close close = {}, Sema
 }
 const Completion& complete(const Outcome& o) { CHECK(std::holds_alternative<Completion>(o)); return std::get<Completion>(o); }
 const Failure& failure(const Outcome& o, ErrorKind kind) { CHECK(std::holds_alternative<Failure>(o)); CHECK(std::get<Failure>(o).error.kind == kind); return std::get<Failure>(o); }
+// The service's own tools, in the shapes captured live on 2026-10-19 (code_execution on gemini-3.1-flash-lite): the
+// call and its result are steps of their own. Buffered they are complete; streamed, the start carries the identity
+// and an empty signature, and one delta of the step's type carries the content.
+void service_tool_steps() {
+  const std::string tool_call = R"({"type":"code_execution_call","id":"call_9","signature":"CALL_SIG","arguments":{"language":"python","code":"print(17 * 23)\n"}})";
+  const std::string tool_result = R"({"type":"code_execution_result","call_id":"call_9","result":"391\n","is_error":false})";
+  const std::string answer = R"({"type":"model_output","content":[{"type":"text","text":"391"}]})";
+  const std::vector<Frame> streamed{created(),
+      start(0, R"({"type":"code_execution_call","id":"call_9","signature":""})"),
+      delta(0, R"({"type":"code_execution_call","signature":"CALL_SIG","arguments":{"language":"python","code":"print(17 * 23)\n"}})"), stop(0),
+      start(1, R"({"type":"code_execution_result","call_id":"call_9","signature":""})"),
+      delta(1, R"({"type":"code_execution_result","result":"391\n","is_error":false})"), stop(1),
+      start(2, R"({"type":"model_output"})"), delta(2, R"({"type":"text","text":"391"})"), stop(2),
+      frame("interaction.completed", R"(,"interaction":{"id":"i1","status":"completed","model":"fixture-model","usage":)" + counters + "}"),
+      {"done", "[DONE]"}};
+  const auto whole = buffered(resource("[" + tool_call + "," + tool_result + "," + answer + "]"));
+  const auto live = stream(streamed);
+  for (const auto* outcome : {&whole, &live}) {
+    const auto& c = complete(*outcome);
+    CHECK(c.stop.kind == StopKind::EndTurn && c.joined_text() == "391" && c.messages.size() == 1);
+    const auto& m = c.messages[0];
+    CHECK(m.parts.size() == 3 && m.native && m.native->complete());
+    const auto& run = std::get<ToolCall>(m.parts[0]);
+    CHECK(run.kind == ToolCallKind::ServerExecuted && run.id == "call_9" && run.name == "code_execution" && run.wire_type == "code_execution_call");
+    CHECK(run.input->root().get("code").as_string() == "print(17 * 23)\n");
+    const auto& result = std::get<ServerToolResult>(m.parts[1]);
+    CHECK(result.tool_use_id == "call_9" && result.wire_type == "code_execution_result" && result.content && result.content->root().get("result").as_string() == "391\n");
+    CHECK(m.wire_output->root().size() == 3 && m.wire_output->root().at(0).get("signature").as_string() == "CALL_SIG");
+    // The steps replay as received.
+    auto next = request(); next.messages.push_back(m); next.messages.push_back(Message{"", Role::User, {Text{"again"}}});
+    const auto encoded = interactions::encode(desc(), next, false);
+    CHECK(std::holds_alternative<interactions::EncodedRequest>(encoded));
+    const auto document = parse(std::get<interactions::EncodedRequest>(encoded).body);
+    const auto input = document.root().get("input");
+    CHECK(input.at(1).get("type").as_string() == "code_execution_call" && input.at(1).get("signature").as_string() == "CALL_SIG");
+    CHECK(input.at(2).get("type").as_string() == "code_execution_result");
+  }
+  // A streamed step with a second content delta, or a final step of another call, is corrupt.
+  auto twice = streamed; twice.insert(twice.begin() + 3, delta(0, R"({"type":"code_execution_call","arguments":{}})"));
+  failure(stream(twice), ErrorKind::ProtocolCorrupt);
+  failure(buffered(resource(R"([{"type":"code_execution_result"}])")), ErrorKind::ProtocolCorrupt);
+}
+// The request side: built-in tools, a stored interaction, a continued one and a video task.
+void service_request_controls() {
+  auto r = request();
+  r.builtin_tools = {interactions::GoogleSearchTool{{"web_search", "image_search"}}, interactions::UrlContextTool{}, interactions::CodeExecutionTool{}};
+  r.store = true; r.video_task = "edit";
+  const auto encoded = interactions::encode(desc(), r, false);
+  CHECK(std::holds_alternative<interactions::EncodedRequest>(encoded));
+  const auto body = parse(std::get<interactions::EncodedRequest>(encoded).body);
+  const auto root = body.root();
+  CHECK(root.get("store").as_bool() && !root.get("previous_interaction_id").valid());
+  CHECK(root.get("tools").size() == 4 && root.get("tools").at(1).get("type").as_string() == "google_search" &&
+        root.get("tools").at(1).get("search_types").at(1).as_string() == "image_search" &&
+        root.get("tools").at(2).get("type").as_string() == "url_context" && root.get("tools").at(3).get("type").as_string() == "code_execution");
+  CHECK(root.get("generation_config").get("video_config").get("task").as_string() == "edit");
+  CHECK(!parse(std::get<interactions::EncodedRequest>(interactions::encode(desc(), request(), false)).body).root().get("store").as_bool());
+  // A continuation sends the new input only; its result has no client-held replay authority.
+  auto next = request(); next.previous_interaction_id = "v1_ChdpaW50ZXJhY3Rpb24";
+  const auto continued = interactions::encode(desc(), next, false);
+  CHECK(std::holds_alternative<interactions::EncodedRequest>(continued));
+  const auto& wire = std::get<interactions::EncodedRequest>(continued);
+  CHECK(parse(wire.body).root().get("previous_interaction_id").as_string() == "v1_ChdpaW50ZXJhY3Rpb24" && !wire.context->replay_eligible());
+  Accumulator a; interactions::Codec c(desc(), interactions::Mode::Buffered, a, wire.context);
+  c.buffered(resource("[" + output + "]"), {});
+  CHECK(a.outcome() && complete(*a.outcome()).joined_text() == "answer" && !complete(*a.outcome()).messages[0].native &&
+        complete(*a.outcome()).messages[0].id == "i1");
+  auto with_history = next; with_history.messages.push_back(complete(buffered(resource("[" + output + "]"))).messages[0]);
+  CHECK(std::holds_alternative<Error>(interactions::encode(desc(), with_history, false)));
+  auto bad_id = next; bad_id.previous_interaction_id = "has space";
+  CHECK(std::get<Error>(interactions::encode(desc(), bad_id, false)).kind == ErrorKind::InvalidRequest);
+  auto bad_task = request(); bad_task.video_task = "Edit!";
+  CHECK(std::get<Error>(interactions::encode(desc(), bad_task, false)).kind == ErrorKind::InvalidRequest);
+  auto bad_search = request(); bad_search.builtin_tools = {interactions::GoogleSearchTool{{"web_search", "web_search"}}};
+  CHECK(std::get<Error>(interactions::encode(desc(), bad_search, false)).kind == ErrorKind::InvalidRequest);
+}
 void exact_steps_and_replay() {
   for (auto o : {buffered(resource("[" + thought + "," + call + "]", "requires_action")), stream(frames(true))}) {
     const auto& c = complete(o); CHECK(c.stop.kind == StopKind::ToolUse && c.messages.size() == 1);
@@ -118,7 +194,9 @@ void lifecycle_and_errors() {
   CHECK(complete(incomplete).stop.kind == StopKind::MaxTokens && !complete(incomplete).messages[0].native->complete());
   failure(stream({created(), frame("interaction.status_update", R"(,"interaction_id":"i1","status":"completed")")}), ErrorKind::Truncated);
   failure(stream({created(), frame("interaction.status_update", R"(,"interaction_id":"i1","status":"failed")")}), ErrorKind::RemoteFailure);
-  failure(buffered(resource("[{\"type\":\"google_search_call\"}]")), ErrorKind::Unsupported);
+  failure(buffered(resource("[{\"type\":\"future_step\"}]")), ErrorKind::Unsupported);
+  // A service tool step needs its identity.
+  failure(buffered(resource("[{\"type\":\"google_search_call\"}]")), ErrorKind::ProtocolCorrupt);
   failure(buffered(resource("[{\"type\":\"function_call\",\"id\":\"x\",\"name\":\"server\",\"arguments\":{}}]", "requires_action")), ErrorKind::Unsupported);
   failure(stream({created(), frame("future.event", "")}), ErrorKind::Unsupported);
   failure(stream({created(), delta(0, R"({"type":"text","text":"x"})")}), ErrorKind::ProtocolCorrupt);
@@ -372,7 +450,7 @@ void failure_reasons() {
   CHECK(failure(cut, ErrorKind::Transport).error.reason.empty());
 }
 int main() {
-  try { served_model_is_recorded(); failure_reasons(); creation_without_status_transcription(); raw_observation_ownership(); named_error_raw_ownership(); stateless_missing_resource_id(); missing_terminal_usage(); exact_steps_and_replay(); input_boundaries(); lifecycle_and_errors(); unknown_usage_and_signature(); modality_keyed_usage(); uncached_input_and_unmapped_counters();
+  try { served_model_is_recorded(); service_tool_steps(); service_request_controls(); failure_reasons(); creation_without_status_transcription(); raw_observation_ownership(); named_error_raw_ownership(); stateless_missing_resource_id(); missing_terminal_usage(); exact_steps_and_replay(); input_boundaries(); lifecycle_and_errors(); unknown_usage_and_signature(); modality_keyed_usage(); uncached_input_and_unmapped_counters();
     std::cout << "Interactions semantic contracts passed\n"; return 0;
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }
