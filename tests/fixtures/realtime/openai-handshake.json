@@ -1,0 +1,11 @@
+{
+ "headers": {
+  "authorization": "<redacted>",
+  "connection": "Upgrade",
+  "sec-websocket-extensions": "permessage-deflate; client_max_window_bits",
+  "sec-websocket-version": "13",
+  "upgrade": "websocket",
+  "user-agent": "AsyncOpenAI/Python 3.3.0"
+ },
+ "path": "/v1/realtime?model=gpt-realtime-2.1-mini"
+}

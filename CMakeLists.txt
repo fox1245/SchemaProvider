@@ -151,7 +151,7 @@ add_library(sp_codecs src/codecs/accumulator.cpp src/codecs/reason.cpp src/codec
             src/codecs/embeddings.cpp src/codecs/embeddings_request.cpp src/codecs/rerank.cpp src/codecs/rerank_request.cpp
             src/codecs/moderation.cpp src/codecs/moderation_request.cpp src/codecs/speech.cpp src/codecs/speech_request.cpp
             src/codecs/transcription.cpp src/codecs/transcription_request.cpp src/codecs/jobs.cpp src/codecs/jobs_request.cpp
-            src/codecs/videos_request.cpp src/codecs/files.cpp src/codecs/files_request.cpp
+            src/codecs/videos_request.cpp src/codecs/realtime.cpp src/codecs/files.cpp src/codecs/files_request.cpp
             src/codecs/batches.cpp src/codecs/batches_request.cpp src/codecs/tokens.cpp src/codecs/tokens_request.cpp src/codecs/webhooks.cpp src/codecs/interaction_jobs.cpp
             src/codecs/generations.cpp src/codecs/generations_request.cpp
             src/codecs/endpoint.cpp)
@@ -163,7 +163,8 @@ target_link_libraries(sp_codecs PUBLIC sp_core sp_json sp_descriptor)
 add_library(sp_wire src/transport/sse_framer.cpp src/transport/ws_frame.cpp src/transport/io_thread.cpp)
 target_compile_options(sp_wire PRIVATE ${SP_WARNING_OPTIONS})
 # The libcurl backend and the public Client constructor that uses it.
-add_library(sp_transport src/transport/http_transport.cpp src/transport/real_attempt_transport.cpp src/transport/catalogue_refresh.cpp)
+add_library(sp_transport src/transport/http_transport.cpp src/transport/real_attempt_transport.cpp src/transport/catalogue_refresh.cpp
+            src/transport/realtime_session.cpp)
 target_include_directories(sp_transport SYSTEM PRIVATE "${SP_ASIO_INCLUDE_DIR}")
 target_compile_definitions(sp_transport PRIVATE ASIO_STANDALONE ASIO_NO_DEPRECATED)
 target_compile_options(sp_transport PRIVATE ${SP_WARNING_OPTIONS})
@@ -347,6 +348,8 @@ if(SP_BUILD_TESTS)
   add_executable(sp_ws_frame_tests tests/ws_frame_test.cpp)
   target_link_libraries(sp_ws_frame_tests PRIVATE sp_wire)
   target_compile_options(sp_ws_frame_tests PRIVATE ${SP_WARNING_OPTIONS})
+  add_executable(sp_realtime_session_tests tests/realtime_session_test.cpp)
+  target_link_libraries(sp_realtime_session_tests PRIVATE sp_transport sp_codecs sp_descriptor sp_json)
   add_executable(sp_ws_transport_tests tests/ws_transport_test.cpp)
   target_link_libraries(sp_ws_transport_tests PRIVATE sp_transport sp_json)
   target_compile_options(sp_ws_transport_tests PRIVATE ${SP_WARNING_OPTIONS})
@@ -371,6 +374,8 @@ if(SP_BUILD_TESTS)
   target_link_libraries(sp_decisions_tests PRIVATE sp_codecs sp_descriptor sp_json)
   add_executable(sp_endpoints_tests tests/endpoints_test.cpp)
   target_link_libraries(sp_endpoints_tests PRIVATE sp_codecs sp_descriptor sp_json)
+  add_executable(sp_realtime_tests tests/realtime_test.cpp)
+  target_link_libraries(sp_realtime_tests PRIVATE sp_codecs sp_descriptor sp_json)
   add_executable(sp_jobs_tests tests/jobs_test.cpp)
   target_link_libraries(sp_jobs_tests PRIVATE sp_runtime sp_codecs sp_descriptor sp_json)
   add_executable(sp_files_tests tests/files_test.cpp)
@@ -481,6 +486,8 @@ if(SP_BUILD_TESTS)
     set_tests_properties(transport_properties PROPERTIES TIMEOUT 300 ENVIRONMENT "SP_NODE=${SP_NODE};SP_OPENSSL=${SP_OPENSSL}")
   add_test(NAME sse_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_sse_tests>)
   add_test(NAME ws_frame_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_ws_frame_tests>)
+  add_test(NAME realtime_session_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_realtime_session_tests>
+           ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/ws_server.mjs)
   add_test(NAME ws_transport_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_ws_transport_tests>
            ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/ws_server.mjs)
   set_tests_properties(ws_transport_properties PROPERTIES TIMEOUT 180 ENVIRONMENT "SP_OPENSSL=${SP_OPENSSL}")
@@ -490,6 +497,7 @@ if(SP_BUILD_TESTS)
   add_test(NAME images_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_images_tests>)
   add_test(NAME decisions_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_decisions_tests>)
   add_test(NAME endpoints_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_endpoints_tests>)
+  add_test(NAME realtime_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_realtime_tests> ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/realtime)
   add_test(NAME jobs_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_jobs_tests>)
   add_test(NAME files_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_files_tests>)
   add_test(NAME tokens_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_tokens_tests>)

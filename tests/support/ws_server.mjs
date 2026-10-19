@@ -13,7 +13,20 @@ import { tmpdir } from 'node:os';
 import { createInterface } from 'node:readline';
 
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
-const stats = { handshakes: 0, closes: [], pongs: [], unmasked: 0, messages: 0 };
+const stats = { handshakes: 0, closes: [], pongs: [], unmasked: 0, messages: 0, realtime: [] };
+// A realtime session in the shape of OpenAI Realtime (`/v1/realtime`): the types of the client events, in arrival
+// order, are in stats.realtime; `response.create` answers with a turn and its usage; a text item whose text is
+// `flood` answers with eight 64 KiB audio deltas.
+const PCM = Buffer.alloc(1024, 3).toString('base64');
+function realtimeAnswers(event) {
+  if (event.type === 'response.create') return [
+    { type: 'response.created', response: { id: 'resp-1', status: 'in_progress' } },
+    { type: 'response.output_audio.delta', response_id: 'resp-1', delta: PCM },
+    { type: 'response.done', response: { id: 'resp-1', status: 'completed', usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } } }];
+  if (event.type === 'conversation.item.create' && event.item?.content?.[0]?.text === 'flood')
+    return Array.from({ length: 8 }, () => ({ type: 'response.output_audio.delta', response_id: 'resp-2', delta: Buffer.alloc(65536, 5).toString('base64') }));
+  return [];
+}
 const sockets = new Set();
 let directory;
 
@@ -142,6 +155,12 @@ function upgrade(socket, target, headers, rest) {
     }
     if (opcode === 9) return;
     stats.messages += 1;
+    if (path === '/v1/realtime') {
+      const event = JSON.parse(payload.toString());
+      stats.realtime.push(event.type);
+      for (const answer of realtimeAnswers(event)) write(frame(1, JSON.stringify(answer)));
+      return;
+    }
     if (path === '/fragmented') {
       write(frame(1, 'Hel', { fin: false }));
       write(frame(9, 'p'));
@@ -158,7 +177,9 @@ function upgrade(socket, target, headers, rest) {
   socket.on('data', feed);
   if (rest.length) feed(rest);
 
-  if (path === '/headers') {
+  if (path === '/v1/realtime') {
+    write(frame(1, JSON.stringify({ type: 'session.created', session: { id: 'sess-local' } })));
+  } else if (path === '/headers') {
     write(frame(1, JSON.stringify({ target, authorization: headers.authorization || '', test: headers['x-test'] || '', host: headers.host || '' })));
   } else if (path === '/ping') {
     write(frame(9, 'probe'));

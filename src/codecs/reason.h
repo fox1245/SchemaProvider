@@ -15,6 +15,8 @@ enum class Source {
   Moderation, ModerationRequest, Speech, SpeechRequest, Transcription, TranscriptionRequest,
   // Provider jobs: the state and download decoder, poll and download requests, and the video submit.
   Jobs, JobsRequest, VideosRequest,
+  // Realtime sessions (D8): the session codecs, and the setup and command checks.
+  Realtime, RealtimeRequest,
   // Provider files (D7).
   Files, FilesRequest,
   // Batches (D7).

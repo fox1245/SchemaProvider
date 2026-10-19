@@ -1122,6 +1122,26 @@ constexpr Entry generations_request_table[] = {
   {"the generation endpoint has no path", "request.generations.path_missing"},
   {"a generation id is a token", "request.generations.id_invalid"},
 };
+constexpr Entry realtime_table[] = {
+  {"a turn did not assemble", "realtime.turn.unassembled"},
+  {"a realtime message is a JSON object", "realtime.message.invalid"},
+  {"realtime audio is base64", "realtime.audio.not_base64"},
+  {"the provider reported an error in the session", "realtime.session.provider_error"},
+};
+constexpr Entry realtime_request_table[] = {
+  {"realtime sessions are not admitted at this origin", "request.realtime.endpoint_not_admitted"},
+  {"the realtime endpoint has no path", "request.realtime.path_missing"},
+  {"a realtime model is a token", "request.realtime.model_invalid"},
+  {"a realtime session answers with audio or text", "request.realtime.output_required"},
+  {"realtime setup values are bounded", "request.realtime.setup_bounds"},
+  {"a realtime tool names itself and an object schema", "request.realtime.tool_invalid"},
+  {"the realtime endpoint admits no setup options", "request.realtime.options_not_admitted"},
+  {"realtime setup options do not match the policy's schema", "request.realtime.options_invalid"},
+  {"a tool result names its call and tool", "request.realtime.tool_result_invalid"},
+  {"Google Live has no cancel; speaking over the model interrupts it", "request.realtime.cancel_unsupported"},
+  {"OpenAI transcribes the input with a transcription model", "request.realtime.transcription_model_required"},
+  {"OpenAI Realtime sessions do not resume", "request.realtime.resume_unsupported"},
+};
 constexpr Entry speech_table[] = {
   {"speech response is not audio", "speech.response.not_audio"},
   {"speech response is empty", "speech.response.empty"},
@@ -1248,6 +1268,8 @@ std::span<const Entry> entries(Source source) noexcept {
     case Source::Jobs: return jobs_table;
     case Source::JobsRequest: return jobs_request_table;
     case Source::VideosRequest: return videos_request_table;
+    case Source::Realtime: return realtime_table;
+    case Source::RealtimeRequest: return realtime_request_table;
     case Source::Files: return files_table;
     case Source::FilesRequest: return files_request_table;
     case Source::Batches: return batches_table;

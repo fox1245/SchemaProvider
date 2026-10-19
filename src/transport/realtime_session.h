@@ -1,0 +1,81 @@
+#pragma once
+// A realtime session (D8): a provider codec (`<codecs/realtime.h>`) over a WebSocket session of the transport.
+//
+//  * Inbound is pulled: `next_event` returns the server's events in order, blocking up to a timeout. Queued model
+//    audio is bounded; past the bound the session ends (`realtime.inbound.overflow`) rather than drop the model's
+//    output.
+//  * Outbound has two lanes. Commands other than audio go at once. Audio waits in a bounded ring and reaches the
+//    socket at most `lead` ahead of real time, so a tool result or a cancel never waits behind seconds of audio.
+//    When the ring is full the oldest audio is dropped or `send` refuses the new audio, by `media_policy`. The end of
+//    the user's audio is a turn marker: it follows the audio queued before it, and a drop never crosses it.
+//    Queued audio moves on every call to `send` and `next_event`.
+//  * Money: after each committed turn the session calls `renew` with the turn's usage. When it returns false the
+//    session closes (`realtime.lease.refused`); the SDK prices nothing.
+//  * The session never reconnects. Resumption handles and drain notices are events for the host to journal; a new
+//    session is a new `open`.
+#include "codecs/realtime.h"
+#include "transport/ws_transport.h"
+#include <chrono>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <string>
+#include <variant>
+
+namespace sp::realtime {
+enum class MediaPolicy { DropOldest, Refuse };
+struct Options {
+  // The whole session, from the handshake to the close.
+  std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + std::chrono::minutes(15);
+  // The outbound audio ring, in bytes (about 2 s at 16 kHz), and how far ahead of real time audio reaches the socket.
+  std::size_t media_bytes = 64000;
+  MediaPolicy media_policy = MediaPolicy::DropOldest;
+  std::chrono::milliseconds lead{200};
+  // Queued inbound model audio, in bytes.
+  std::size_t inbound_media_bytes = std::size_t{32} << 20;
+  // Called after each committed turn with its usage; false ends the session. It runs on an I/O thread: no blocking.
+  std::function<bool(const Usage&)> renew{};
+  // An extra trust anchor (tests, private CAs).
+  std::string ca_file{};
+  SemanticLimits limits{};
+};
+struct Outcome {
+  // Why the session ended early: a refused setup, a lease refusal, an inbound overflow, a protocol or transport
+  // failure. Empty after a clean close.
+  std::optional<Error> error{};
+  std::uint16_t close_code = 0;
+  std::string close_reason{};
+  bool clean = false;
+  // Outbound audio the ring dropped, in bytes.
+  std::uint64_t media_dropped = 0;
+};
+
+struct SessionState;
+class Session {
+ public:
+  Session() = default;
+  Session(Session&&) noexcept;
+  Session& operator=(Session&&) noexcept;
+  ~Session();
+  bool valid() const noexcept { return state_ != nullptr; }
+  // Queues a command. False when the session has ended, the codec refused the command (`last_error`), or the
+  // audio ring is full under `MediaPolicy::Refuse`.
+  bool send(Command);
+  // The next event, waiting up to `timeout`; std::nullopt on a timeout or once the session ended (`ended`).
+  std::optional<Event> next_event(std::chrono::milliseconds timeout);
+  bool ended() const;
+  std::optional<Error> last_error() const;
+  // Closes with a closing handshake; `cancel` ends at once.
+  void close();
+  void cancel() noexcept;
+  // Waits for the end and returns how the session ended.
+  Outcome join();
+ private:
+  explicit Session(std::shared_ptr<SessionState> state) : state_(std::move(state)) {}
+  std::shared_ptr<SessionState> state_;
+  friend std::variant<Session, Error> open(transport::Transport&, const descriptor::ValidatedDescriptor&, std::string_view, Setup, Options);
+};
+// Checks the setup against the origin's realtime fact with no I/O, then connects and sends the setup.
+std::variant<Session, Error> open(transport::Transport&, const descriptor::ValidatedDescriptor&, std::string_view api_key, Setup, Options = {});
+}  // namespace sp::realtime
