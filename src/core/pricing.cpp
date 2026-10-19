@@ -169,7 +169,7 @@ ModelPrice dearest_price_of(const descriptor::CatalogueEntry& entry, std::string
 }
 
 CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_view family, std::string_view origin,
-                      const ServedModel& model, const Usage& usage, std::string_view service_tier) {
+                      const ServedModel& model, const Usage& usage, std::string_view service_tier, bool route_ceiling) {
   CostEstimate out;
   const descriptor::CatalogueEntry* entry = nullptr;
   ModelPrice price;
@@ -208,37 +208,96 @@ CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_v
     if (!rate) { out.unpriced.emplace_back(name); complete = false; return; }
     sum += Wide::product(units, *rate);
   };
-  if (!uncached) { out.unpriced.emplace_back("input"); complete = false; }
-  else charge(*uncached, price.input, "input");
-  auto fallback = [&](const std::optional<std::uint64_t>& specific, const std::optional<std::uint64_t>& general, std::string_view rule, std::uint64_t units) {
-    if (specific || !units) return specific;
-    if (general && std::find(out.assumptions.begin(), out.assumptions.end(), rule) == out.assumptions.end()) out.assumptions.emplace_back(rule);
-    return general;
+  auto assume = [&](std::string_view rule) {
+    if (std::find(out.assumptions.begin(), out.assumptions.end(), rule) == out.assumptions.end()) out.assumptions.emplace_back(rule);
   };
-  charge(cache_read, fallback(price.cache_read, price.input, "cache_read at input", cache_read), "cache_read");
-  charge(cache_write, fallback(price.cache_write, price.input, "cache_write at input", cache_write), "cache_write");
-  if (!usage.output_total) { out.unpriced.emplace_back("output"); complete = false; }
-  else {
-    const auto output = usage.output_total->value;
-    const auto reasoning = std::min(count(usage.reasoning).value_or(0), output);
-    if (price.reasoning && reasoning) {
-      charge(reasoning, price.reasoning, "reasoning");
-      charge(output - reasoning, price.output, "output");
-    } else charge(output, price.output, "output");
-  }
+  auto extra = [&](std::string_view counter) -> std::uint64_t {
+    const auto found = usage.extra.find(std::string(counter));
+    return found == usage.extra.end() ? 0 : found->second.value;
+  };
   // A Messages compaction iteration is billed at the model's rates beside the top-level counters.
-  if (family == "anthropic.messages") {
-    const auto extra = [&](std::string_view counter) -> std::uint64_t {
-      const auto found = usage.extra.find("compaction." + std::string(counter));
-      return found == usage.extra.end() ? 0 : found->second.value;
+  const bool compaction = family == "anthropic.messages";
+  if (route_ceiling) {
+    // The served endpoint is unknown: every input token at the ceiling's input rate, every output token at its
+    // output rate.
+    if (!price.ceiling_input || !price.ceiling_output) { out.unpriced.emplace_back("ceiling"); return out; }
+    assume("route ceiling");
+    if (!uncached) { out.unpriced.emplace_back("input"); complete = false; }
+    else charge(*uncached, price.ceiling_input, "ceiling");
+    charge(cache_read, price.ceiling_input, "ceiling");
+    charge(cache_write, price.ceiling_input, "ceiling");
+    if (!usage.output_total) { out.unpriced.emplace_back("output"); complete = false; }
+    else charge(usage.output_total->value, price.ceiling_output, "ceiling");
+    if (compaction) {
+      for (const auto counter : {"compaction.input_tokens", "compaction.cache_read_input_tokens", "compaction.cache_creation_input_tokens"})
+        charge(extra(counter), price.ceiling_input, "ceiling");
+      charge(extra("compaction.output_tokens"), price.ceiling_output, "ceiling");
+    }
+    const auto fee = std::max(price.request.value_or(0), price.ceiling_request.value_or(0));
+    if (!complete) return out;
+    sum += fee;
+  } else {
+    if (!uncached) { out.unpriced.emplace_back("input"); complete = false; }
+    else charge(*uncached, price.input, "input");
+    auto fallback = [&](const std::optional<std::uint64_t>& specific, const std::optional<std::uint64_t>& general, std::string_view rule, std::uint64_t units) {
+      if (specific || !units) return specific;
+      if (general) assume(rule);
+      return general;
     };
-    const auto read = extra("cache_read_input_tokens"), write = extra("cache_creation_input_tokens");
-    charge(extra("input_tokens"), price.input, "input");
-    charge(read, fallback(price.cache_read, price.input, "cache_read at input", read), "cache_read");
-    charge(write, fallback(price.cache_write, price.input, "cache_write at input", write), "cache_write");
-    charge(extra("output_tokens"), price.output, "output");
+    charge(cache_read, fallback(price.cache_read, price.input, "cache_read at input", cache_read), "cache_read");
+    // Messages splits cache writes into 5-minute and 1-hour writes; without the split, all of them bill at the
+    // dearer rate.
+    const auto write = fallback(price.cache_write, price.input, "cache_write at input", cache_write);
+    const auto five = usage.extra.find("cache_creation.ephemeral_5m_input_tokens");
+    const auto hour = usage.extra.find("cache_creation.ephemeral_1h_input_tokens");
+    if (price.cache_write_1h && cache_write && five != usage.extra.end() && hour != usage.extra.end() &&
+        five->second.value <= cache_write && hour->second.value == cache_write - five->second.value) {
+      charge(five->second.value, write, "cache_write");
+      charge(hour->second.value, price.cache_write_1h, "cache_write_1h");
+    } else if (price.cache_write_1h && cache_write && (!write || *price.cache_write_1h > *write)) {
+      assume("cache_write at cache_write_1h");
+      charge(cache_write, price.cache_write_1h, "cache_write_1h");
+    } else {
+      if (hour != usage.extra.end() && hour->second.value && !price.cache_write_1h) assume("cache_write_1h at cache_write");
+      charge(cache_write, write, "cache_write");
+    }
+    if (!usage.output_total) { out.unpriced.emplace_back("output"); complete = false; }
+    else {
+      const auto output = usage.output_total->value;
+      const auto reasoning = price.reasoning ? std::min(count(usage.reasoning).value_or(0), output) : 0;
+      charge(reasoning, price.reasoning, "reasoning");
+      // Gemini reports image output tokens by modality (Generate `candidatesTokensDetails.IMAGE`, Interactions
+      // `output_tokens_by_modality.image`). Without that breakdown, all output bills at the dearer rate.
+      std::optional<std::uint64_t> image;
+      if (price.output_image && output > reasoning && price.output_image != price.output) {
+        for (const std::string_view prefix : {"candidatesTokensDetails.", "output_tokens_by_modality."}) {
+          for (auto it = usage.extra.lower_bound(std::string(prefix)); it != usage.extra.end() && it->first.starts_with(prefix); ++it) {
+            const std::string_view modality = std::string_view(it->first).substr(prefix.size());
+            if (modality.find('.') != std::string_view::npos) continue;
+            if (!image) image = 0;
+            const bool is_image = modality.size() == 5 && std::equal(modality.begin(), modality.end(), "image",
+                [](char a, char b) { return (a >= 'A' && a <= 'Z' ? a + 32 : a) == b; });
+            if (is_image) *image += it->second.value;
+          }
+        }
+        if (!image && (!price.output || *price.output_image > *price.output)) {
+          assume("output at output_image");
+          image = output - reasoning;
+        }
+      }
+      const auto images = std::min(image.value_or(0), output - reasoning);
+      charge(images, price.output_image, "output_image");
+      charge(output - reasoning - images, price.output, "output");
+    }
+    if (compaction) {
+      const auto read = extra("compaction.cache_read_input_tokens"), written = extra("compaction.cache_creation_input_tokens");
+      charge(extra("compaction.input_tokens"), price.input, "input");
+      charge(read, fallback(price.cache_read, price.input, "cache_read at input", read), "cache_read");
+      charge(written, fallback(price.cache_write, price.input, "cache_write at input", written), "cache_write");
+      charge(extra("compaction.output_tokens"), price.output, "output");
+    }
+    if (price.request) sum += *price.request;
   }
-  if (price.request) sum += *price.request;
   if (!complete) return out;
   sum += 999'999;
   const auto nano = sum.divided(1'000'000);

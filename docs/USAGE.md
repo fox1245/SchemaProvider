@@ -266,9 +266,11 @@ sp_catalogue_refresh --out models.json --generated generated.json --builtin-over
 **Estimate.** `estimate(catalogue, family, origin, completion.model, completion.usage)` prices the call by the served model's priced entry. It falls back to the requested model's entry and then sets `requested_entry`.
 - **Input.** `input_uncached` bills at `input`, or else `input_total` less the cache counters. Cache reads bill at `cache_read` and cache writes at `cache_write`, or at `input` when the entry gives no cache price; `assumptions` names that rule.
 - **Output.** With a `reasoning` price, reasoning tokens bill at it and the rest of `output_total` at `output`. Otherwise all output bills at `output`. `request` is charged once.
+- **Dearer rates.** Messages' 1-hour cache writes bill at `cache_write_1h` and Gemini's image output tokens at `output_image`, from the usage's breakdown (`cache_creation.ephemeral_1h_input_tokens`, `candidatesTokensDetails.IMAGE` or `output_tokens_by_modality.image`). Without a breakdown, those tokens bill at the dearer rate and `assumptions` says so.
+- **Route ceiling.** `estimate(..., tier, true)` prices a routing gateway's call whose endpoint is unknown at the entry's route ceiling: every input token at `ceiling_input` and every output token at `ceiling_output`.
 - **Rounding.** The exact sum is rounded up once, to whole nano-USD, with `Evidence::Derived` and `CostRounding::CeilingCatalogueProduct`.
-- **No total.** There is no `total` when the model has no priced entry, or a billed counter has no price or no count; `unpriced` names which.
-- **Not priced.** Server tool fees, images and other per-unit charges are not priced.
+- **No total.** There is no `total` when the model has no priced entry, a billed counter has no price or no count, or a route ceiling is asked for and missing; `unpriced` names which.
+- **Not priced.** Server tool fees are not in an estimate; a host that reserves them settles them itself.
 
 **More units.** An entry's `pricing` may also list, in any catalogue layer a host merges:
 - `cache_write_1h` (a 1-hour cache write) and `output_image` (an image output token);

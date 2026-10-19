@@ -197,9 +197,55 @@ void bands() {
     "input+200000/flex":"1"}}]})");
   CHECK(pricing::price_of(*odd->entry("m"), {}, 300'000).input == 1'000'000'000u);
 }
+// The dearer rates a call bills: 1-hour cache writes, image output tokens and a route ceiling.
+void dearer_rates() {
+  const auto c = catalogue(R"({"version":1,"models":[
+    {"id":"direct","pricing":{"input":"0.000002","output":"0.000008","cache_write":"0.0000025","cache_write_1h":"0.000004",
+      "output_image":"0.00003","request":"0.001"}},
+    {"id":"plain","pricing":{"input":"0.000002","output":"0.000008","cache_write":"0.0000025"}},
+    {"id":"vendor/routed","pricing":{"prompt":"0.0000001","completion":"0.0000004","ceiling_input":"0.0000024","ceiling_output":"0.0000096"}},
+    {"id":"vendor/unbounded","pricing":{"prompt":"0.0000001","completion":"0.0000004"}}]})");
+  const ServedModel direct{"direct", "direct", ServedRelation::Exact};
+  // 700 uncached at 2e-6, 100 five-minute writes at 2.5e-6, 200 one-hour writes at 4e-6, 10 text output tokens at
+  // 8e-6 and the request fee: 1'400'000 + 250'000 + 800'000 + 80'000 + 1'000'000 nano-USD.
+  auto u = usage(1'000, 10, 0, 300);
+  u.extra["cache_creation.ephemeral_5m_input_tokens"] = Count{100, Evidence::Reported};
+  u.extra["cache_creation.ephemeral_1h_input_tokens"] = Count{200, Evidence::Reported};
+  u.extra["candidatesTokensDetails.TEXT"] = Count{10, Evidence::Reported};
+  auto e = pricing::estimate(*c, "anthropic.messages", "", direct, u);
+  CHECK(e.total && e.total->nano_usd == 3'530'000u && e.assumptions.empty());
+  // Without the split, every write bills at the 1-hour rate; without a modality breakdown, every output token at the
+  // image rate.
+  e = pricing::estimate(*c, "anthropic.messages", "", direct, usage(1'000, 10, 0, 300));
+  CHECK(e.total && e.total->nano_usd == 3'530'000u + 150'000u + 220'000u);
+  CHECK(e.assumptions == std::vector<std::string>({"cache_write at cache_write_1h", "output at output_image"}));
+  // Four image tokens of ten, by either Gemini wire.
+  for (const char* key : {"candidatesTokensDetails.IMAGE", "output_tokens_by_modality.image"}) {
+    auto images = usage(1'000, 10);
+    images.extra[key] = Count{4, Evidence::Reported};
+    e = pricing::estimate(*c, "google.generate", "", direct, images);
+    CHECK(e.total && e.total->nano_usd == 2'000'000u + 120'000u + 48'000u + 1'000'000u && e.assumptions.empty());
+  }
+  // One-hour writes on an entry with no 1-hour price bill at the cache-write rate, and say so.
+  auto hour = usage(1'000, 0, 0, 100);
+  hour.extra["cache_creation.ephemeral_5m_input_tokens"] = Count{0, Evidence::Reported};
+  hour.extra["cache_creation.ephemeral_1h_input_tokens"] = Count{100, Evidence::Reported};
+  e = pricing::estimate(*c, "anthropic.messages", "", ServedModel{"plain", "plain", ServedRelation::Exact}, hour);
+  CHECK(e.total && e.total->nano_usd == 1'800'000u + 250'000u && e.assumptions == std::vector<std::string>({"cache_write_1h at cache_write"}));
+  // A routing gateway's estimate is at its route ceiling: 1000 input at 2.4e-6 and 1000 output at 9.6e-6.
+  const ServedModel routed{"vendor/routed", "vendor/routed", ServedRelation::Exact};
+  e = pricing::estimate(*c, "openai.chat", "", routed, usage(1'000, 1'000, 200), {}, true);
+  CHECK(e.total && e.total->nano_usd == 12'000'000u && e.assumptions == std::vector<std::string>({"route ceiling"}));
+  e = pricing::estimate(*c, "openai.chat", "", ServedModel{"vendor/unbounded", "vendor/unbounded", ServedRelation::Exact},
+                        usage(1'000, 1'000), {}, true);
+  CHECK(!e.total && e.unpriced == std::vector<std::string>({"ceiling"}));
+  // The estimate at the ceiling stays within the bound at the ceiling.
+  const auto bound = pricing::upper_bound(pricing::price_of(*c->entry("vendor/routed")), {1'000, 1'000, true, {}});
+  CHECK(bound.total && bound.total->nano_usd >= 12'000'000u);
+}
 } // namespace
 
 int main() {
-  try { prices_from_entries(); estimates(); wide_products(); bounds(); bands(); std::cout << "pricing properties passed\n"; return 0; }
+  try { prices_from_entries(); estimates(); wide_products(); bounds(); bands(); dearer_rates(); std::cout << "pricing properties passed\n"; return 0; }
   catch (const std::exception& error) { std::cerr << "pricing test failed: " << error.what() << '\n'; return 1; }
 }
