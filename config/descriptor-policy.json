@@ -560,6 +560,10 @@
     {"endpoint":"tokens","shape":"anthropic","origins":["https://api.anthropic.com"],"paths":{"count":"/v1/messages/count_tokens"},"auth":"x-api-key","headers":{"anthropic-version":"2023-06-01"},
      "keep":["model","messages","system","tools","tool_choice","thinking","output_config","cache_control","mcp_servers"]},
     {"endpoint":"tokens","shape":"google","origins":["https://generativelanguage.googleapis.com"],"paths":{"count":"/v1beta/models/{model}:countTokens"},"auth":"x-goog-api-key"},
-    {"endpoint":"generations","shape":"openrouter","origins":["https://openrouter.ai"],"paths":{"get":"/api/v1/generation"}}
+    {"endpoint":"generations","shape":"openrouter","origins":["https://openrouter.ai"],"paths":{"get":"/api/v1/generation"}},
+    {"endpoint":"realtime","shape":"google","origins":["https://generativelanguage.googleapis.com"],"paths":{"connect":"/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"},"auth":"x-goog-api-key",
+     "options":{"type":"object","properties":{"realtimeInputConfig":{"type":"object","properties":{"automaticActivityDetection":{"type":"object","properties":{"disabled":{"type":"boolean"}}},"activityHandling":{"type":"string","max_length":64,"token":true}}},"contextWindowCompression":{"type":"object","properties":{"triggerTokens":{"type":"integer","minimum":0},"slidingWindow":{"type":"object","properties":{"targetTokens":{"type":"integer","minimum":0}}}}}}}},
+    {"endpoint":"realtime","shape":"openai","origins":["https://api.openai.com"],"paths":{"connect":"/v1/realtime"},
+     "options":{"type":"object","properties":{"max_output_tokens":{"one_of":[{"type":"integer","minimum":1},{"type":"enum","values":["inf"]}]},"tool_choice":{"type":"string","max_length":64,"token":true}}}}
   ]
 }

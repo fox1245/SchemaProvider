@@ -36,13 +36,14 @@ const Source sources[]{{reason::Source::Chat, "chat"}, {reason::Source::Messages
                        {reason::Source::Speech, "speech"}, {reason::Source::SpeechRequest, "request.speech"},
                        {reason::Source::Transcription, "transcription"}, {reason::Source::TranscriptionRequest, "request.transcription"},
                        {reason::Source::Jobs, "jobs"}, {reason::Source::JobsRequest, "request.jobs"}, {reason::Source::VideosRequest, "request.videos"},
+                       {reason::Source::Realtime, "realtime"}, {reason::Source::RealtimeRequest, "request.realtime"},
                        {reason::Source::Files, "files"}, {reason::Source::FilesRequest, "request.files"},
                        {reason::Source::Batches, "batches"}, {reason::Source::BatchesRequest, "request.batches"},
                        {reason::Source::Tokens, "tokens"}, {reason::Source::TokensRequest, "request.tokens"},
                        {reason::Source::Webhooks, "webhooks"},
                        {reason::Source::Generations, "generations"}, {reason::Source::GenerationsRequest, "request.generations"}};
 // Endpoint decoders (D6) are small: they parse one buffered document.
-const std::set<std::string> endpoint_decoders{"images", "decisions", "embeddings", "rerank", "moderation", "speech", "transcription", "jobs", "files", "batches", "tokens", "webhooks", "generations"};
+const std::set<std::string> endpoint_decoders{"images", "decisions", "embeddings", "rerank", "moderation", "speech", "transcription", "jobs", "files", "batches", "tokens", "webhooks", "generations", "realtime"};
 // The sources each encoder table covers, relative to src/.
 struct EncoderSource { reason::Source source; std::vector<const char*> files; };
 const EncoderSource encoder_sources[]{
@@ -52,7 +53,7 @@ const EncoderSource encoder_sources[]{
     {reason::Source::EmbeddingsRequest, {"codecs/embeddings_request.cpp"}}, {reason::Source::RerankRequest, {"codecs/rerank_request.cpp"}},
     {reason::Source::ModerationRequest, {"codecs/moderation_request.cpp"}}, {reason::Source::SpeechRequest, {"codecs/speech_request.cpp"}},
     {reason::Source::TranscriptionRequest, {"codecs/transcription_request.cpp"}},
-    {reason::Source::JobsRequest, {"codecs/jobs_request.cpp"}}, {reason::Source::VideosRequest, {"codecs/videos_request.cpp"}},
+    {reason::Source::JobsRequest, {"codecs/jobs_request.cpp"}}, {reason::Source::RealtimeRequest, {"codecs/realtime.cpp"}}, {reason::Source::VideosRequest, {"codecs/videos_request.cpp"}},
     {reason::Source::FilesRequest, {"codecs/files_request.cpp"}}, {reason::Source::BatchesRequest, {"codecs/batches_request.cpp"}},
     {reason::Source::TokensRequest, {"codecs/tokens_request.cpp"}}, {reason::Source::GenerationsRequest, {"codecs/generations_request.cpp"}},
     {reason::Source::SharedRequest, {"descriptor/policy.cpp", "core/request_controls.h", "codecs/media_input.cpp", "core/media.cpp", "core/native.cpp"}}};

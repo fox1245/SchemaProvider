@@ -1,0 +1,13 @@
+{
+ "headers": {
+  "connection": "Upgrade",
+  "content-type": "application/json",
+  "sec-websocket-extensions": "permessage-deflate; client_max_window_bits",
+  "sec-websocket-version": "13",
+  "upgrade": "websocket",
+  "user-agent": "google-genai-sdk/2.22.0 gl-python/3.12.3",
+  "x-goog-api-client": "google-genai-sdk/2.22.0 gl-python/3.12.3",
+  "x-goog-api-key": "<redacted>"
+ },
+ "path": "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
+}

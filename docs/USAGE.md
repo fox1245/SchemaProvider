@@ -770,6 +770,38 @@ if (auto* file = std::get_if<sp::files::File>(&uploaded)) {
 
 On 2026-10-19 OpenAI `gpt-image-2` (low quality) generated an image and then edited it from a data URL, and OpenRouter `google/gemini-3.1-flash-lite-image` did the same with a reference image and `aspect_ratio`, reporting its cost. The same day `gpt-6-luna` and OpenRouter `typesafe/jev-1.13` each answered a predicate, a choice and a score about a support ticket. OpenRouter served a dated snapshot of the model and reported the cost. Embeddings from `text-embedding-3-small` (OpenAI, and through OpenRouter) and `gemini-embedding-2` (with an image input) put two related sentences closest. OpenRouter `cohere/rerank-v3.5` ranked the relevant document first, and `omni-moderation-latest` flagged a threat and passed a harmless sentence. `gpt-4o-mini-tts` spoke a sentence that `gpt-4o-mini-transcribe` transcribed back word for word. Through OpenRouter, `mistralai/voxtral-mini-tts-2603` and `openai/whisper-large-v3` did the same. OpenRouter `x-ai/grok-imagine-video-1.5-lite` made a one-second 480p video for 2 cents. The job was pending for about half a minute. Its download went to a file with the SHA-256 the result reported, and the same output downloaded to memory matched it. A download past its limit and an output index the job does not have both failed and left no file. Each provider took a note from memory and a 300 KB slice of a local file, reported the slice's digest, and refused the slice when its stated SHA-256 was wrong. Gets, listings with a next page, and deletions answered, and each provider served a file it had made (an OpenAI batch output, an Anthropic spreadsheet, a Google video) while refusing the content of an upload. `claude-haiku-4-5` and `gemini-3.5-flash-lite` read the uploaded slice through `files::media` and answered with the code word in it. A 9 MiB file went up in two parts through OpenAI Uploads and through Google's resumable upload. Google reported the SHA-256 of the whole file, a query after the first chunk returned its offset, and a cancelled session at each provider reported itself cancelled. Two-item batches ran at each provider through the runtime: Anthropic (`claude-haiku-4-5`, inline, ended in about two minutes, results downloaded), Google (`gemini-3.5-flash-lite`, inline results, under a minute and a half) and OpenAI (`gpt-5-nano` from an uploaded JSONL file, twenty seconds, output file downloaded). Every result line decoded through its request's family codec to the expected answer; the ended batches were deleted where the provider allows it, and an Anthropic batch was cancelled. Token counts matched the input each provider then reported for the same request: 25 at Anthropic, 20 at OpenAI and 15 at Google. A background interaction (`gemini-3.5-flash-lite`) answered `in_progress`; polled by its job handle, it reached `completed` with its answer, and was deleted.
 
+## Realtime sessions
+
+A realtime session is a full-duplex WebSocket conversation (decision [D8](decisions/D8-realtime-sessions.md)): Google Live (`BidiGenerateContent`) and OpenAI Realtime (`/v1/realtime`). `<codecs/realtime.h>` holds the provider-neutral setup, commands and events and each provider's codec; `<transport/realtime_session.h>` runs a codec over the transport.
+
+```cpp
+sp::transport::Transport transport;
+sp::realtime::Setup setup;
+setup.model = model;                                    // a token; Google's goes in the setup, OpenAI's in the URL
+setup.instructions = "Answer in one short sentence.";
+setup.input_transcription = setup.output_transcription = true;
+sp::realtime::Options options;
+options.renew = [&](const sp::Usage& turn) { return budget.charge(turn); };   // false ends the session
+auto opened = sp::realtime::open(transport, sp::descriptor::presets::google_generate(), api_key, setup, options);
+auto& session = std::get<sp::realtime::Session>(opened);
+session.send(sp::realtime::Audio{pcm16k});              // microphone chunks
+while (auto event = session.next_event(std::chrono::milliseconds(200))) {
+  if (auto* turn = std::get_if<sp::realtime::TurnCommitted>(&*event)) use(turn->turn);   // a chat Completion
+}
+```
+
+- **Setup.** The model, the output modalities (audio or text), instructions, a voice, input and output transcription (OpenAI names a transcription model), tools, and at Google a resumable session (`resume`, empty or a handle). Members the origin's `realtime` fact admits go in `extensions` (Google `realtimeInputConfig`, `contextWindowCompression`; OpenAI `max_output_tokens`, `tool_choice`). `realtime::open` checks the setup with no I/O, then connects and sends it.
+- **Commands.** `Audio` (16-bit mono PCM at the provider's input rate: 16 kHz at Google, 24 kHz at OpenAI), `EndAudio` (Google `audioStreamEnd`, OpenAI `input_audio_buffer.commit`), `Text` (a user turn), `ToolResult`, `Respond` (OpenAI `response.create`; Google answers by itself) and `Cancel` (OpenAI only).
+- **Events.** `Ready`, `AudioDelta` (decoded PCM), `TextDelta`, `Transcript` (input or output), `ToolCallEvent`, `ToolCallsCancelled`, `SpeechStarted` and `SpeechStopped`, `TurnAborted` (the model was cut short), `TurnCommitted`, `ResumptionUpdate`, `DrainNotice`, `ProviderError`, and `Unmodelled` for a message the codec does not model, kept whole. Each finished or interrupted turn is also a `TurnCommitted` with the turn as a `Completion`: the model's text, its audio as one inline `Media` part with its transcript, its tool calls, the turn's usage, and a stop (`interrupted` when cut short, `ToolUse` when it ends in calls).
+- **Inbound.** `next_event` pulls the events in order, waiting up to a timeout. Model audio the host has not read is bounded (`inbound_media_bytes`); past the bound the session ends with `runtime.realtime.inbound_overflow` rather than drop the model's output.
+- **Outbound.** A tool result and a cancel go at once. Audio, the end of the audio, text and `Respond` keep their order in a ring of `media_bytes` (about 2 s at 16 kHz). Audio reaches the socket at most `lead` ahead of real time, so a tool result never waits behind seconds of audio. A full ring drops its oldest audio, never across a turn marker, or refuses new audio (`MediaPolicy::Refuse`). `Outcome::media_dropped` counts what was dropped. Queued audio moves on every `send` and `next_event`.
+- **Money.** After each turn the session calls `renew` with the turn's usage; when it returns false the session closes with `runtime.realtime.lease_refused`. The SDK prices nothing.
+- **Lifecycle.** The session never reconnects. A `ResumptionUpdate` carries the handle to journal; a new session with `resume` set to it continues the conversation. A `DrainNotice` says how long until the provider closes. `close` ends with a closing handshake, `cancel` at once, and `join` returns how the session ended.
+- **Turn ends.** With automatic activity detection, Google ends the user's turn on about a second of trailing silence; `audioStreamEnd` after a fraction of a second of silence did not end it on 2026-10-20.
+- **Conformance.** `tests/conformance/realtime` records one scripted scenario through google-genai Live and the OpenAI realtime client. `realtime_properties` checks that the codecs send the same frames, once canonicalized (sorted keys, Google's snake_case and camelCase taken as the same, base64 by its bytes), and decodes the recorded server frames into the expected events and turns.
+
+On 2026-10-20 `gemini-3.8-live` and `gpt-realtime-2.1-mini` each answered a text turn in audio with its transcript, then heard a spoken question ("What is the capital of France?", OpenAI TTS PCM) and answered "Paris", committing each turn with its usage. The Google session sent a resumption handle, and both closed cleanly.
+
 ## Responses provider-held continuation
 
 Responses supports both full client-held native replay and the distinct `previous_response_id` cursor path. A cursor asks the provider to retrieve its own prior conversation state. With a cursor, `messages` contains **new input only**; including captured assistant messages/native output there rejects before dispatch. `previous_response_history` is local validation evidence and is never emitted. A cursor string or raw response JSON is not `NativeReplay` or archive authority.
@@ -1005,7 +1037,7 @@ Retries are off by default. `RunOptions::retry` can replace the client's admitte
 
 ## WebSocket sessions
 
-Realtime APIs (Gemini Live, Lyria RealTime, OpenAI Realtime and the like) speak WebSocket. `transport/ws_transport.h` opens an RFC 6455 client session on a `sp::transport::Transport`. The session shares that transport's I/O threads, resolver and TLS settings and costs no thread of its own. The provider protocols themselves (setup messages, audio chunks, turn events) are not decoded here yet: a session moves whole text and binary messages.
+Realtime APIs (Gemini Live, Lyria RealTime, OpenAI Realtime and the like) speak WebSocket. `transport/ws_transport.h` opens an RFC 6455 client session on a `sp::transport::Transport`. The session shares that transport's I/O threads, resolver and TLS settings and costs no thread of its own. A `WsSession` moves whole text and binary messages; the provider protocols (setup messages, audio chunks, turn events) are decoded by [realtime sessions](#realtime-sessions), which run on it.
 
 ```cpp
 #include <chrono>
