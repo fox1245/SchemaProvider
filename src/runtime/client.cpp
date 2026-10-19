@@ -16,7 +16,9 @@
 #include <atomic>
 #include <cmath>
 #include <condition_variable>
+#include <cstdio>
 #include <deque>
+#include <filesystem>
 #include <limits>
 #include <map>
 #include <mutex>
@@ -339,7 +341,15 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
   Family family = Family::Chat;
   // A non-chat endpoint call (D6): which one, and whether the provider charges once it accepts it.
   std::string endpoint;
-  bool charge_on_accept = false;
+  bool charge_on_accept = false, read_only = false;
+  // A download written to a file as it arrives: the file, its byte limit, and the attempt's partial copy, which
+  // is renamed to the file once the body is whole and removed when the call fails.
+  std::string sink_path;
+  std::uint64_t sink_limit = 0;
+  std::FILE* sink_file = nullptr;
+  std::uint64_t sink_bytes = 0;
+  std::optional<crypto::Sha256> sink_hash;
+  bool sink_published = false;
   bool admitted = false;
   bool prepared = false;
   std::string prepared_model;
@@ -395,6 +405,42 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
   OperationState(std::shared_ptr<ClientState> c, RunOptions o, Callbacks cb, SteadyTime end)
       : client(std::move(c)), executor(client ? client->executor : nullptr), options(std::move(o)),
         callbacks(std::move(cb)), deadline(end) {}
+  ~OperationState() { if (sink_file) discard_sink(); }
+
+  std::string sink_part() const { return sink_path + ".part"; }
+  void discard_sink() {
+    if (sink_file) { std::fclose(sink_file); sink_file = nullptr; }
+    std::error_code ignored;
+    if (!sink_path.empty()) std::filesystem::remove(sink_part(), ignored);
+    if (std::exchange(sink_published, false)) std::filesystem::remove(sink_path, ignored);
+    sink_bytes = 0;
+    sink_hash.reset();
+  }
+  void sink(std::string_view bytes) {
+    if (bytes.size() > sink_limit - sink_bytes) { fail_semantic(ErrorKind::ResourceLimit, "runtime.sink.limit"); return; }
+    if (!sink_file) {
+      sink_file = std::fopen(sink_part().c_str(), "wb");
+      if (!sink_file) { fail_semantic(ErrorKind::InvalidRequest, "runtime.sink.open_failed"); return; }
+      sink_hash.emplace();
+    }
+    if (std::fwrite(bytes.data(), 1, bytes.size(), sink_file) != bytes.size()) { fail_semantic(ErrorKind::ResourceLimit, "runtime.sink.write_failed"); return; }
+    sink_hash->update(bytes);
+    sink_bytes += bytes.size();
+  }
+  // Closes the attempt's partial copy and moves it to the file; false when it could not be written whole.
+  bool publish_sink(endpoints::Sink& out) {
+    const bool written = std::fflush(sink_file) == 0 && !std::ferror(sink_file);
+    const bool closed = std::fclose(sink_file) == 0;
+    sink_file = nullptr;
+    std::error_code error;
+    if (written && closed) std::filesystem::rename(sink_part(), sink_path, error);
+    if (!written || !closed || error) { discard_sink(); return false; }
+    sink_published = true;
+    static constexpr char digits[] = "0123456789abcdef";
+    out = {sink_path, sink_bytes, {}};
+    for (const auto byte : sink_hash->finish()) { out.sha256 += digits[byte >> 4]; out.sha256 += digits[byte & 15]; }
+    return true;
+  }
 
   bool mark_scheduled_locked() {
     if (!ready || scheduled || finished) return false;
@@ -707,9 +753,11 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
   void body(std::string_view bytes) {
     const auto& limits = client->options.limits;
     if (!response) { fail_semantic(ErrorKind::ProtocolCorrupt, "transport.body.before_head"); return; }
+    const bool http_error = response->value.status < 200 || response->value.status >= 300;
+    // A download bound for a file is held to its own limit, not the response limit.
+    if (!http_error && !sink_path.empty()) { sink(bytes); return; }
     if (bytes.size() > limits.max_response_bytes - response_bytes) { fail_semantic(ErrorKind::ResourceLimit); return; }
     response_bytes += bytes.size();
-    const bool http_error = response->value.status < 200 || response->value.status >= 300;
     if (http_error || !options.streaming) {
       const auto limit = http_error ? limits.max_error_bytes : limits.max_response_bytes;
       if (bytes.size() > limit - buffered.size()) { fail_semantic(ErrorKind::ResourceLimit); return; }
@@ -785,7 +833,12 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
         if (endpoint_codec) {
           endpoints::Close ended{normal, close_error.kind, {}};
           if (response) for (const auto& header : response->value.headers) ended.headers.emplace_back(header.name, header.value);
-          endpoint_codec->buffered(buffered, std::move(ended));
+          if (!sink_path.empty() && normal) {
+            ended.sink.emplace();
+            if (!sink_file) ended.sink->path = sink_path;  // nothing arrived: the codec refuses an empty download
+            else if (!publish_sink(*ended.sink)) fail_semantic(ErrorKind::ResourceLimit, "runtime.sink.write_failed");
+          }
+          if (!accumulator->terminal()) endpoint_codec->buffered(buffered, std::move(ended));
         }
         else if (chat_codec) chat_codec->buffered(buffered, {normal, close_error.kind});
         else if (messages_codec) messages_codec->buffered(buffered, {normal, close_error.kind});
@@ -804,6 +857,7 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
     if (!accumulator->terminal()) accumulator->accept(Fail{error_for(ErrorKind::ProtocolCorrupt, "runtime.outcome.undecided")});
     auto outcome = accumulator->take_outcome();
     if (auto* failure = std::get_if<Failure>(&*outcome)) {
+      if (!sink_path.empty()) discard_sink();
       if (!semantic_failure_decided && !normal && failure->error.kind == close_error.kind)
         failure->error = close_error;
       failure->error = classify_failure(wire, response_info, failure->error, semantic_output, attempts, executor->now());
@@ -814,7 +868,10 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
         available = client->bucket.available(executor->now());
         random = available && options.retry->enabled ? client->random01() : 0;
       }
-      auto at = available ? retry_at(failure->error, *options.retry, attempts, executor->now(), deadline, random) : std::nullopt;
+      auto retry = *options.retry;
+      // A read (a job's poll or download) has no charge to duplicate.
+      if (read_only) retry.allow_duplicate_billing_risk = true;
+      auto at = available ? retry_at(failure->error, retry, attempts, executor->now(), deadline, random) : std::nullopt;
       // An endpoint call the provider charges for once it accepts it is retried only when it provably never
       // reached the provider, or when the provider refused it before accepting it (D6).
       if (at && charge_on_accept && failure->error.retry_safety != RetrySafety::NotSent &&
@@ -1445,15 +1502,18 @@ PreparedRequest Client::prepare_endpoint(RunOptions options, std::string_view en
     operation.endpoint = std::string(endpoint);
     operation.charge_on_accept = value.charge_on_accept;
     operation.prepared_model = std::move(value.model);
+    operation.sink_path = std::move(value.sink);
+    operation.sink_limit = value.sink_limit;
+    operation.read_only = value.method == "GET";
     auto& wire = operation.request;
-    wire.method = "POST";
+    wire.method = std::move(value.method);
     wire.url = std::string(client->descriptor.base_url()) + value.path;
     wire.body = std::move(value.body);
     // The descriptor's own headers go with every call to its origin; the codec owns the content headers.
     for (const auto& header : client->descriptor.headers())
       if (!detail::equal_ascii(header.first, "content-type") && !detail::equal_ascii(header.first, "accept"))
         wire.headers.push_back({header.first, header.second});
-    wire.headers.push_back({"Content-Type", value.content_type});
+    if (!value.content_type.empty()) wire.headers.push_back({"Content-Type", value.content_type});
     wire.headers.push_back({"Accept", value.accept});
     if (!client->options.api_key.empty()) {
       if (value.auth == "x-api-key") wire.headers.push_back({"x-api-key", client->options.api_key});
@@ -1587,6 +1647,51 @@ EndpointCall<transcription::Outcome> Client::start(PreparedEndpoint<transcriptio
   Callbacks callbacks;
   if (on_outcome) callbacks.on_outcome = [deliver = std::move(on_outcome)](Result result) { deliver(transcription::typed(*result)); };
   return EndpointCall<transcription::Outcome>(start(std::move(call.prepared_), std::move(callbacks)));
+}
+PreparedEndpoint<jobs::Outcome> Client::prepare(videos::Request request, RunOptions options) {
+  auto client = state_;
+  return PreparedEndpoint<jobs::Outcome>(prepare_endpoint<videos::Encoded>(std::move(options), "videos",
+      static_cast<int>(reason::Source::VideosRequest), [&] { return videos::encode(client->descriptor, request); }));
+}
+PreparedEndpoint<jobs::Outcome> Client::prepare(jobs::Poll poll, RunOptions options) {
+  auto client = state_;
+  // The poll answers with the job's state, which the codec of the endpoint that started it reads.
+  return PreparedEndpoint<jobs::Outcome>(prepare_endpoint<jobs::Encoded>(std::move(options), poll.handle.endpoint,
+      static_cast<int>(reason::Source::JobsRequest), [&] { return jobs::encode(client->descriptor, poll); }));
+}
+PreparedEndpoint<jobs::DownloadOutcome> Client::prepare(jobs::Download download, RunOptions options) {
+  auto client = state_;
+  return PreparedEndpoint<jobs::DownloadOutcome>(prepare_endpoint<jobs::Encoded>(std::move(options), "content",
+      static_cast<int>(reason::Source::JobsRequest), [&] { return jobs::encode(client->descriptor, download); }));
+}
+jobs::Outcome Client::complete(videos::Request request, RunOptions options) {
+  return complete(prepare(std::move(request), std::move(options)));
+}
+jobs::Outcome Client::complete(jobs::Poll poll, RunOptions options) {
+  return complete(prepare(std::move(poll), std::move(options)));
+}
+jobs::DownloadOutcome Client::complete(jobs::Download download, RunOptions options) {
+  return complete(prepare(std::move(download), std::move(options)));
+}
+jobs::Outcome Client::complete(PreparedEndpoint<jobs::Outcome> call) {
+  if (!state_ || state_->in_thread()) return jobs::typed(*detail::misuse_result());
+  try { return start(std::move(call)).join(); }
+  catch (const AdmissionError& error) { return jobs::typed(*error.outcome()); }
+}
+jobs::DownloadOutcome Client::complete(PreparedEndpoint<jobs::DownloadOutcome> call) {
+  if (!state_ || state_->in_thread()) return jobs::typed_content(*detail::misuse_result());
+  try { return start(std::move(call)).join(); }
+  catch (const AdmissionError& error) { return jobs::typed_content(*error.outcome()); }
+}
+EndpointCall<jobs::Outcome> Client::start(PreparedEndpoint<jobs::Outcome> call, std::function<void(jobs::Outcome)> on_outcome) {
+  Callbacks callbacks;
+  if (on_outcome) callbacks.on_outcome = [deliver = std::move(on_outcome)](Result result) { deliver(jobs::typed(*result)); };
+  return EndpointCall<jobs::Outcome>(start(std::move(call.prepared_), std::move(callbacks)));
+}
+EndpointCall<jobs::DownloadOutcome> Client::start(PreparedEndpoint<jobs::DownloadOutcome> call, std::function<void(jobs::DownloadOutcome)> on_outcome) {
+  Callbacks callbacks;
+  if (on_outcome) callbacks.on_outcome = [deliver = std::move(on_outcome)](Result result) { deliver(jobs::typed_content(*result)); };
+  return EndpointCall<jobs::DownloadOutcome>(start(std::move(call.prepared_), std::move(callbacks)));
 }
 Diagnostics Client::diagnostics() const noexcept {
   if (!state_) return {};

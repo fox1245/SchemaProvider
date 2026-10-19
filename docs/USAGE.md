@@ -628,7 +628,7 @@ The same schemas admit the options of typed containers: OpenRouter plugins (`ope
 
 ## Non-chat endpoints
 
-Endpoints outside the chat families run on the same `runtime::Client`, with request and result types of their own (decision [D6](decisions/D6-endpoints.md)). A call uses the client's origin, credential and descriptor headers, and shares its admission slots, retry budget, deadline handling and error classification. The chat `Request`, `Outcome` and `Completion` do not change. Image generation and edits, decisions, embeddings, rerank, moderation, speech and transcription are available; the other endpoints follow.
+Endpoints outside the chat families run on the same `runtime::Client`, with request and result types of their own (decision [D6](decisions/D6-endpoints.md)). A call uses the client's origin, credential and descriptor headers, and shares its admission slots, retry budget, deadline handling and error classification. The chat `Request`, `Outcome` and `Completion` do not change. Image generation and edits, decisions, embeddings, rerank, moderation, speech, transcription and OpenRouter video jobs are available; the other endpoints follow.
 
 ```cpp
 sp::runtime::Client openai(sp::descriptor::presets::openai_chat(), api_key);
@@ -665,10 +665,39 @@ if (auto* result = std::get_if<sp::images::Result>(&outcome))
 
   `transcription::Result` has the text, the language and the audio's length when the provider reports them, and usage with OpenRouter's cost.
 - **Moderation.** `moderation::Request` (OpenAI `/v1/moderations`) checks text and images. `moderation::Result` has one verdict per input: whether it is flagged, and each category with its score. It is free, so its fact does not set `charge_on_accept`.
+- **Video jobs.** `videos::Request` (OpenRouter `/api/v1/videos`) has the model, the prompt, reference images (inline or by URL), and optional `duration`, `aspect_ratio`, `resolution`, `size` and `audio`. The provider answers at once with a `jobs::State` and makes the video later. A state has:
+  - the job's `Handle`: the endpoint, the origin, the provider's id and the model;
+  - a `Status` (`Pending`, `Running`, `Completed`, `Failed`, `Cancelled`, `Expired`, or `Unknown` for a word the SDK does not know) and the provider's own word;
+  - once the job finishes, the number of outputs, when they expire, the generation id and the cost.
+
+  The handle is a plain value. Journal it; `jobs::Poll{handle}` reads the job's state again, also after a restart. A handle reaches only the origin that started its job.
+
+  `jobs::Download{handle, index, path, max_bytes}` fetches one output:
+  - With `path`, the runtime writes the body to `<path>.part` as it arrives, at most `max_bytes` (4 GiB by default), and renames it to `path` when the body is whole. A failed download leaves no file. The client's response limit does not apply. `jobs::Content` has the path, the size, the SHA-256 and the content type.
+  - Without `path`, the body is held in memory under the response limit (16 MiB by default), and `jobs::Content` holds it as inline `Media`.
+
+  A submit is charged once the provider accepts it. A poll and a download are never charged. They are reads, so the runtime retries their transient failures even when the retry policy accepts no duplicate billing risk.
+
+```cpp
+sp::runtime::Client router(sp::descriptor::presets::openrouter_chat(), api_key);
+sp::videos::Request video{model, "A red fox trots across fresh snow"};
+video.duration = 1;
+video.resolution = "480p";
+auto outcome = router.complete(video);
+while (auto* state = std::get_if<sp::jobs::State>(&outcome)) {    // journal state->handle
+  if (state->status == sp::jobs::Status::Completed) {
+    auto file = router.complete(sp::jobs::Download{state->handle, 0, "fox.mp4"});
+    break;
+  }
+  if (state->status != sp::jobs::Status::Pending && state->status != sp::jobs::Status::Running) break;
+  wait_a_little();
+  outcome = router.complete(sp::jobs::Poll{state->handle});
+}
+```
 - **Policy facts.** The descriptor policy's `endpoints` list admits each endpoint at its origins. A fact has these members:
   - `endpoint` (`images`);
   - `shape`, the codec's wire (`openai`, `openrouter`);
-  - `paths`, the path of each operation (`generate`, `edit`);
+  - `paths`, the path of each operation (`generate`, `edit`; a job's `submit`, `poll` and `download`);
   - an `options` schema for the members a request may add (OpenAI `moderation`, OpenRouter `aspect_ratio`, `seed`, `provider`), never a member the codec writes;
   - `auth` (`bearer`, `x-api-key`, `x-goog-api-key`);
   - `charge_on_accept`.
@@ -677,13 +706,14 @@ if (auto* result = std::get_if<sp::images::Result>(&outcome))
   - embeddings at `https://generativelanguage.googleapis.com`;
   - rerank at OpenRouter;
   - moderation at OpenAI;
-  - speech and transcription at OpenAI and OpenRouter.
+  - speech and transcription at OpenAI and OpenRouter;
+  - video jobs at OpenRouter.
 
-  A path may hold `{model}`, which the request's model fills. An origin without a fact is `Unsupported` at prepare, with no I/O.
+  A path may hold `{model}`, which the request's model fills, and a job's path `{id}`, which the handle's id fills. An origin without a fact is `Unsupported` at prepare, with no I/O.
 - **Money.** A call whose fact sets `charge_on_accept` is retried only when it provably never reached the provider, or when the provider refused it before accepting it (429, 503). A failure after the request may have arrived is reported after one attempt, even when the retry policy allows duplicate billing risk.
-- **Video.** Veo is not ported: its preview models end on 2026-10-22. Use Gemini Omni through Interactions (`video_config`, background jobs).
+- **Video.** OpenRouter's video models run as jobs (above). Veo is not ported: its preview models end on 2026-10-22. Use Gemini Omni through Interactions (`video_config`, background jobs).
 
-On 2026-10-19 OpenAI `gpt-image-2` (low quality) generated an image and then edited it from a data URL, and OpenRouter `google/gemini-3.1-flash-lite-image` did the same with a reference image and `aspect_ratio`, reporting its cost. The same day `gpt-6-luna` and OpenRouter `typesafe/jev-1.13` each answered a predicate, a choice and a score about a support ticket. OpenRouter served a dated snapshot of the model and reported the cost. Embeddings from `text-embedding-3-small` (OpenAI, and through OpenRouter) and `gemini-embedding-2` (with an image input) put two related sentences closest. OpenRouter `cohere/rerank-v3.5` ranked the relevant document first, and `omni-moderation-latest` flagged a threat and passed a harmless sentence. `gpt-4o-mini-tts` spoke a sentence that `gpt-4o-mini-transcribe` transcribed back word for word. Through OpenRouter, `mistralai/voxtral-mini-tts-2603` and `openai/whisper-large-v3` did the same.
+On 2026-10-19 OpenAI `gpt-image-2` (low quality) generated an image and then edited it from a data URL, and OpenRouter `google/gemini-3.1-flash-lite-image` did the same with a reference image and `aspect_ratio`, reporting its cost. The same day `gpt-6-luna` and OpenRouter `typesafe/jev-1.13` each answered a predicate, a choice and a score about a support ticket. OpenRouter served a dated snapshot of the model and reported the cost. Embeddings from `text-embedding-3-small` (OpenAI, and through OpenRouter) and `gemini-embedding-2` (with an image input) put two related sentences closest. OpenRouter `cohere/rerank-v3.5` ranked the relevant document first, and `omni-moderation-latest` flagged a threat and passed a harmless sentence. `gpt-4o-mini-tts` spoke a sentence that `gpt-4o-mini-transcribe` transcribed back word for word. Through OpenRouter, `mistralai/voxtral-mini-tts-2603` and `openai/whisper-large-v3` did the same. OpenRouter `x-ai/grok-imagine-video-1.5-lite` made a one-second 480p video for 2 cents. The job was pending for about half a minute. Its download went to a file with the SHA-256 the result reported, and the same output downloaded to memory matched it. A download past its limit and an output index the job does not have both failed and left no file.
 
 ## Responses provider-held continuation
 
