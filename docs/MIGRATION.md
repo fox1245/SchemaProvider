@@ -180,6 +180,9 @@ The catalogue prices a call:
 - **New module.** `<core/pricing.h>` adds `sp::pricing::price_of` and `sp::pricing::estimate`.
 - **Fallback.** An estimate prices the served model's entry, else the requested model's, and says so.
 - **New enum value.** `CostRounding` gains `CeilingCatalogueProduct`, added last, for these estimates.
+- **Reservation bounds (#121).** `ModelPrice` gains `cache_write_1h`, `output_image`, the route ceiling (`ceiling_input`, `ceiling_output`, `ceiling_request`) and `tool_fees` (`tool:<type>` units).
+  - `price_of` and `estimate` take an optional service tier, priced by `<unit>:<tier>` units.
+  - `upper_bound(price, BoundRequest)` bounds a call's cost before dispatch with the same arithmetic as `estimate`.
 
 Values the providers extend are checked by shape, not by compiled lists:
 - **Generate.** Speech language codes, image aspect ratios and image sizes are checked as a language tag, `W:H` and a short token. Function responses take any inline document the media policy admits.

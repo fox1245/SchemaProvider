@@ -270,6 +270,19 @@ sp_catalogue_refresh --out models.json --generated generated.json --builtin-over
 - **No total.** There is no `total` when the model has no priced entry, or a billed counter has no price or no count; `unpriced` names which.
 - **Not priced.** Server tool fees, images and other per-unit charges are not priced.
 
+**More units.** An entry's `pricing` may also list, in any catalogue layer a host merges:
+- `cache_write_1h` (a 1-hour cache write) and `output_image` (an image output token);
+- `ceiling_input`, `ceiling_output` and `ceiling_request`, a routing gateway's route ceiling: the dearest of the model's endpoints, which a host pins as OpenRouter's `provider.max_price`;
+- `<unit>:<tier>`, a service tier's prices (`input:flex`, `output:priority`). `price_of(entry, tier)` and `estimate(..., tier)` read only the tier's units, so a tier the entry does not price has no price;
+- `tool:<type>`, a fee per use of a server tool (`tool:web_search_20250305`). A listed `"0"` is a declared zero.
+
+**Reservation bound.** `upper_bound(price, BoundRequest{input_tokens, output_tokens, route_ceiling, tool_uses})` is the most a call within those bounds can bill.
+- **Rates.** It prices the input tokens at the dearest input rate (input, cache reads, cache writes, 1-hour writes) and the output tokens at the dearest output rate (output, reasoning, image output). With `route_ceiling`, the ceiling rates replace the listed ones.
+- **Fees.** It adds the request fee and each tool's fee times its uses.
+- **Rounding.** It rounds up once, as `estimate` does, so for usage within the bounds `estimate` never exceeds it.
+- **No total.** `unpriced` names what has no price (`input`, `output`, `ceiling`, `tool:<type>`), or `overflow`.
+- **Compaction.** Messages compaction iterations bill tokens outside the call's counters and are not bounded.
+
 **Compared with reported cost.** On 2026-10-19 the estimate from a refreshed OpenRouter catalogue equalled OpenRouter's reported `usage.cost` to the nano-USD for `openai/gpt-5-nano` (with reasoning tokens) and `google/gemini-2.5-flash-lite`, buffered and streamed. For `meta-llama/llama-3.1-8b-instruct` it was higher than the reported cost, because OpenRouter routed the call to a cheaper endpoint than the listed price. On an aggregator the listed price is not the price of the endpoint that served the call, so prefer `Usage::provider_cost` there and use the estimate when the provider reports none.
 
 ### Served model identity and routing gateways

@@ -83,13 +83,19 @@ std::optional<std::uint64_t> per_million(std::string_view text) {
 }
 } // namespace
 
-ModelPrice price_of(const descriptor::CatalogueEntry& entry) {
+ModelPrice price_of(const descriptor::CatalogueEntry& entry, std::string_view service_tier) {
   ModelPrice out;
+  // A unit's name for this tier: the plain name, or `<name>:<tier>`.
+  auto named = [&](std::string_view unit, std::string_view name) {
+    if (service_tier.empty()) return unit == name;
+    return unit.size() == name.size() + 1 + service_tier.size() && unit.substr(0, name.size()) == name &&
+           unit[name.size()] == ':' && unit.substr(name.size() + 1) == service_tier;
+  };
   auto read = [&](std::optional<std::uint64_t>& target, std::string_view plain, std::string_view listed) {
     std::optional<std::uint64_t> from_listed;
     for (const auto& [unit, text] : entry.pricing) {
-      if (unit == plain) { target = per_million(text); return; }
-      if (unit == listed) from_listed = per_million(text);
+      if (named(unit, plain)) { target = per_million(text); return; }
+      if (named(unit, listed)) from_listed = per_million(text);
     }
     target = from_listed;
   };
@@ -99,11 +105,30 @@ ModelPrice price_of(const descriptor::CatalogueEntry& entry) {
   read(out.cache_write, "cache_write", "input_cache_write");
   read(out.reasoning, "reasoning", "internal_reasoning");
   read(out.request, "request", "request");
+  read(out.cache_write_1h, "cache_write_1h", "cache_write_1h");
+  read(out.output_image, "output_image", "output_image");
+  read(out.ceiling_input, "ceiling_input", "ceiling_input");
+  read(out.ceiling_output, "ceiling_output", "ceiling_output");
+  read(out.ceiling_request, "ceiling_request", "ceiling_request");
+  constexpr std::string_view tool = "tool:";
+  for (const auto& [unit, text] : entry.pricing) {
+    if (!unit.starts_with(tool)) continue;
+    std::string_view type = std::string_view(unit).substr(tool.size());
+    if (!service_tier.empty()) {
+      const auto colon = type.rfind(':');
+      if (colon == std::string_view::npos || type.substr(colon + 1) != service_tier) continue;
+      type = type.substr(0, colon);
+    } else if (type.find(':') != std::string_view::npos) {
+      continue;
+    }
+    if (const auto fee = per_million(text); fee && !type.empty()) out.tool_fees.emplace_back(std::string(type), *fee);
+  }
+  std::sort(out.tool_fees.begin(), out.tool_fees.end());
   return out;
 }
 
 CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_view family, std::string_view origin,
-                      const ServedModel& model, const Usage& usage) {
+                      const ServedModel& model, const Usage& usage, std::string_view service_tier) {
   CostEstimate out;
   const descriptor::CatalogueEntry* entry = nullptr;
   ModelPrice price;
@@ -111,7 +136,7 @@ CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_v
     if (name.empty()) return false;
     const auto match = catalogue.find(family, origin, name);
     if (!match.entry) return false;
-    auto found = price_of(*match.entry);
+    auto found = price_of(*match.entry, service_tier);
     if (found.empty()) return false;
     entry = match.entry; price = found;
     return true;
@@ -170,6 +195,46 @@ CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_v
   }
   if (price.request) sum += *price.request;
   if (!complete) return out;
+  sum += 999'999;
+  const auto nano = sum.divided(1'000'000);
+  if (!nano.fits()) { out.unpriced.emplace_back("overflow"); return out; }
+  out.total = UsdAmount{nano.low, Evidence::Derived, CostRounding::CeilingCatalogueProduct};
+  return out;
+}
+
+Bound upper_bound(const ModelPrice& price, const BoundRequest& request) {
+  Bound out;
+  auto dearest = [](std::initializer_list<std::optional<std::uint64_t>> rates) {
+    std::optional<std::uint64_t> result;
+    for (const auto& rate : rates)
+      if (rate && (!result || *rate > *result)) result = rate;
+    return result;
+  };
+  std::optional<std::uint64_t> input, output, fee;
+  if (request.route_ceiling) {
+    input = price.ceiling_input;
+    output = price.ceiling_output;
+    fee = dearest({price.request, price.ceiling_request});
+    if (!input || !output) out.unpriced.emplace_back("ceiling");
+  } else {
+    input = price.input ? dearest({price.input, price.cache_read, price.cache_write, price.cache_write_1h}) : std::nullopt;
+    output = price.output ? dearest({price.output, price.reasoning, price.output_image}) : std::nullopt;
+    fee = price.request;
+    if (!input && request.input_tokens) out.unpriced.emplace_back("input");
+    if (!output && request.output_tokens) out.unpriced.emplace_back("output");
+  }
+  Wide sum;  // nano-USD x 1e6
+  if (input) sum += Wide::product(request.input_tokens, *input);
+  if (output) sum += Wide::product(request.output_tokens, *output);
+  if (fee) sum += *fee;
+  for (const auto& [type, uses] : request.tool_uses) {
+    if (!uses) continue;
+    const auto found = std::lower_bound(price.tool_fees.begin(), price.tool_fees.end(), type,
+                                        [](const auto& entry, const std::string& name) { return entry.first < name; });
+    if (found == price.tool_fees.end() || found->first != type) { out.unpriced.push_back("tool:" + type); continue; }
+    sum += Wide::product(uses, found->second);
+  }
+  if (!out.unpriced.empty()) return out;
   sum += 999'999;
   const auto nano = sum.divided(1'000'000);
   if (!nano.fits()) { out.unpriced.emplace_back("overflow"); return out; }
