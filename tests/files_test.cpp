@@ -175,6 +175,95 @@ void references() {
   CHECK(named.kind == MediaKind::Document && named.reference == "file_1");
 }
 
+// A chunked upload: each step's request, and the session it answers with.
+files::ProgressOutcome progress_of(std::string_view origin, files::SessionCodec::Step step, std::string_view body,
+                                   std::vector<std::pair<std::string, std::string>> headers, const files::Session& session, std::uint64_t part = 0) {
+  const auto d = at(origin);
+  Accumulator accumulator;
+  files::SessionCodec codec(d, accumulator, step, files::session_document(session, part));
+  endpoints::Close close;
+  close.headers = std::move(headers);
+  codec.buffered(body, std::move(close));
+  CHECK(accumulator.outcome());
+  return files::typed_progress(*accumulator.outcome());
+}
+void chunked() {
+  using Step = files::SessionCodec::Step;
+  constexpr std::uint64_t mib8 = 8388608, total = 9437184;
+  // OpenAI Uploads.
+  const auto start = encoded(at(openai), files::Start{"chunked.txt", "text/plain", total, "user_data", 3600});
+  CHECK(start.path == "/v1/uploads" && start.method == "POST" &&
+        start.body == R"({"filename":"chunked.txt","purpose":"user_data","bytes":9437184,"mime_type":"text/plain","expires_after":{"anchor":"created_at","seconds":3600}})");
+  const auto begun = std::get<files::Progress>(progress_of(openai, Step::Start,
+      R"({"id":"upload_6ad61989ee2c8191879c23751f41c77f","object":"upload","bytes":9437184,"created_at":1792416137,"filename":"chunked.txt","purpose":"user_data","status":"pending","expires_at":1792419737})",
+      {}, files::Session{std::string(openai), "openai", {}, {}, total}));
+  auto session = begun.session;
+  CHECK(session.id == "upload_6ad61989ee2c8191879c23751f41c77f" && session.size == total && session.sent == 0 && session.expires_at == 1792419737u &&
+        session.status == "pending" && !begun.file);
+  const auto part = encoded(at(openai), files::Part{session, {nullptr, {"/data/big.bin", 0, mib8}}});
+  CHECK(part.path == "/v1/uploads/upload_6ad61989ee2c8191879c23751f41c77f/parts" && part.file && part.file->size == mib8 &&
+        part.body.find("name=\"data\"") != std::string::npos && part.content_type.starts_with("multipart/form-data"));
+  session = std::get<files::Progress>(progress_of(openai, Step::Part, R"({"id":"part_1","object":"upload.part","upload_id":"upload_6ad61989ee2c8191879c23751f41c77f"})",
+                                                 {}, session, mib8)).session;
+  CHECK(session.sent == mib8 && session.parts == std::vector<std::string>{"part_1"});
+  CHECK(refused(at(openai), files::Complete{session}) == ErrorKind::InvalidRequest);          // a part is missing
+  CHECK(refused(at(openai), files::Part{session, {std::make_shared<const std::string>(std::size_t{2} << 20, 'x')}}) == ErrorKind::InvalidRequest);
+  session = std::get<files::Progress>(progress_of(openai, Step::Part, R"({"id":"part_2","object":"upload.part"})", {}, session, total - mib8)).session;
+  const auto complete = encoded(at(openai), files::Complete{session});
+  CHECK(complete.path == "/v1/uploads/upload_6ad61989ee2c8191879c23751f41c77f/complete" && complete.body == R"({"part_ids":["part_1","part_2"]})");
+  const auto done = std::get<files::Progress>(progress_of(openai, Step::Complete,
+      R"({"id":"upload_6ad61989ee2c8191879c23751f41c77f","object":"upload","bytes":9437184,"status":"completed","file":{"object":"file","id":"file-WabU99AgMEADp826Ga8M5U","purpose":"user_data","filename":"chunked.txt","bytes":9437184,"created_at":1792416137,"status":"processed"}})",
+      {}, session));
+  CHECK(done.file && done.file->id == "file-WabU99AgMEADp826Ga8M5U" && done.file->bytes == total && done.session.status == "completed");
+  CHECK(std::holds_alternative<Failure>(progress_of(openai, Step::Complete, R"({"id":"upload_x","status":"completed"})", {}, session)));
+  CHECK(encoded(at(openai), files::Cancel{session}).path == "/v1/uploads/upload_6ad61989ee2c8191879c23751f41c77f/cancel");
+  CHECK(std::get<files::Progress>(progress_of(openai, Step::Cancel, R"({"id":"upload_x","status":"cancelled"})", {}, session)).session.status == "cancelled");
+  CHECK(refused(at(openai), files::Query{session}) == ErrorKind::Unsupported);
+  CHECK(refused(at(anthropic), files::Start{"a.txt", "text/plain", 10}) == ErrorKind::Unsupported);
+
+  // Google's resumable upload.
+  const auto google_start = encoded(at(google), files::Start{"chunked.txt", "text/plain", total});
+  CHECK(google_start.path == "/upload/v1beta/files" && extra_header(google_start, "X-Goog-Upload-Protocol") == "resumable" &&
+        extra_header(google_start, "X-Goog-Upload-Command") == "start" && extra_header(google_start, "X-Goog-Upload-Header-Content-Length") == "9437184" &&
+        extra_header(google_start, "X-Goog-Upload-Header-Content-Type") == "text/plain" && google_start.body == R"({"file":{"display_name":"chunked.txt"}})");
+  const std::string url = "https://generativelanguage.googleapis.com/upload/v1beta/files?upload_id=AB-cd_12&upload_protocol=resumable";
+  auto upload = std::get<files::Progress>(progress_of(google, Step::Start, "",
+      {{"x-goog-upload-status", "active"}, {"x-goog-upload-url", url}, {"x-goog-upload-chunk-granularity", "8388608"}},
+      files::Session{std::string(google), "google", {}, {}, total})).session;
+  CHECK(upload.url == url && upload.granularity == mib8 && upload.status == "active");
+  CHECK(std::holds_alternative<Failure>(progress_of(google, Step::Start, "", {{"x-goog-upload-status", "active"}, {"x-goog-upload-url", "https://evil.example/upload"}},
+                                                    files::Session{std::string(google), "google", {}, {}, total})));
+  const auto chunk = encoded(at(google), files::Part{upload, {nullptr, {"/data/big.bin", 0, mib8}}});
+  CHECK(chunk.path == "/upload/v1beta/files?upload_id=AB-cd_12&upload_protocol=resumable" && extra_header(chunk, "X-Goog-Upload-Command") == "upload" &&
+        extra_header(chunk, "X-Goog-Upload-Offset") == "0" && chunk.body.empty() && chunk.file && chunk.content_type == "application/octet-stream");
+  CHECK(refused(at(google), files::Part{upload, {nullptr, {"/data/big.bin", 0, 1048576}}}) == ErrorKind::InvalidRequest);   // not a multiple, not last
+  upload = std::get<files::Progress>(progress_of(google, Step::Part, "", {{"x-goog-upload-status", "active"}}, upload, mib8)).session;
+  CHECK(upload.sent == mib8);
+  const auto last = encoded(at(google), files::Part{upload, {nullptr, {"/data/big.bin", mib8, total - mib8}}});
+  CHECK(extra_header(last, "X-Goog-Upload-Command") == "upload, finalize" && extra_header(last, "X-Goog-Upload-Offset") == "8388608");
+  const auto finished = std::get<files::Progress>(progress_of(google, Step::Part,
+      R"({"file":{"name":"files/abc","mimeType":"text/plain","sizeBytes":"9437184","state":"ACTIVE","uri":"https://generativelanguage.googleapis.com/v1beta/files/abc"}})",
+      {{"x-goog-upload-status", "final"}}, upload, total - mib8));
+  CHECK(finished.file && finished.file->id == "files/abc" && finished.session.sent == total && finished.session.status == "final");
+  CHECK(std::holds_alternative<Failure>(progress_of(google, Step::Part, "", {{"x-goog-upload-status", "final"}}, upload, total - mib8)));
+  CHECK(std::holds_alternative<Failure>(progress_of(google, Step::Part, "", {}, upload, mib8)));
+  // A lost answer: the query says how much arrived.
+  const auto query = encoded(at(google), files::Query{upload});
+  CHECK(extra_header(query, "X-Goog-Upload-Command") == "query" && query.body.empty() && query.content_type.empty());
+  auto lost = upload; lost.sent = 0;
+  CHECK(std::get<files::Progress>(progress_of(google, Step::Query, "", {{"x-goog-upload-status", "active"}, {"x-goog-upload-size-received", "8388608"}}, lost)).session.sent == mib8);
+  CHECK(extra_header(encoded(at(google), files::Cancel{upload}), "X-Goog-Upload-Command") == "cancel");
+  CHECK(std::holds_alternative<Failure>(progress_of(google, Step::Cancel, "", {{"x-goog-upload-status", "active"}}, upload)));
+  CHECK(refused(at(google), files::Complete{upload}) == ErrorKind::Unsupported);
+  // A session reaches only the origin that began it, and Google's only under the upload path.
+  auto elsewhere = upload; elsewhere.origin = std::string(openai);
+  CHECK(refused(at(google), files::Part{elsewhere, {std::make_shared<const std::string>("x")}}) == ErrorKind::InvalidRequest);
+  auto redirected = upload; redirected.url = "https://generativelanguage.googleapis.com/v1beta/models";
+  CHECK(refused(at(google), files::Query{redirected}) == ErrorKind::InvalidRequest);
+  auto spliced = upload; spliced.url += "\r\nx-goog-api-key: y";
+  CHECK(refused(at(google), files::Query{spliced}) == ErrorKind::InvalidRequest);
+}
+
 // The runtime sends a file slice as the wire's file body and reports the transport's digest on the file.
 void runtime_upload() {
   auto executor = std::make_shared<QueueExecutor>();
@@ -216,6 +305,6 @@ void runtime_upload() {
 }  // namespace
 
 int main() {
-  try { uploads(); reads(); decoded_files(); references(); runtime_upload(); std::cout << "file properties passed\n"; return 0; }
+  try { uploads(); reads(); decoded_files(); references(); chunked(); runtime_upload(); std::cout << "file properties passed\n"; return 0; }
   catch (const std::exception& error) { std::cerr << "file test failed: " << error.what() << '\n'; return 1; }
 }

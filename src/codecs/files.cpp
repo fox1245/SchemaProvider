@@ -147,7 +147,35 @@ std::optional<Context> context_of(const Completion& completion) {
   if (!seen) return std::nullopt;
   return context;
 }
+std::string_view header(const Close& close, std::string_view name) {
+  for (const auto& [key, value] : close.headers) if (key == name) return value;
+  return {};
+}
+bool digits(std::string_view text) {
+  return !text.empty() && text.size() <= 20 && std::all_of(text.begin(), text.end(), [](char c) { return c >= '0' && c <= '9'; });
+}
+std::optional<Session> session_of(json::Value value) {
+  if (!value.is_object()) return std::nullopt;
+  Session session{text_of(value.get("origin")), text_of(value.get("shape")), text_of(value.get("id")), text_of(value.get("url"))};
+  session.size = value.get("size").as_uint();
+  session.sent = value.get("sent").as_uint();
+  session.granularity = value.get("granularity").as_uint();
+  if (value.get("parts").is_array()) for (auto part : value.get("parts").elements()) session.parts.push_back(text_of(part));
+  if (value.get("expires_at").is_uint()) session.expires_at = value.get("expires_at").as_uint();
+  session.status = text_of(value.get("status"));
+  return session;
+}
 }  // namespace
+
+std::string session_document(const Session& session, std::uint64_t part) {
+  std::string out = "{\"origin\":" + json::quote(session.origin) + ",\"shape\":" + json::quote(session.shape) + ",\"id\":" + json::quote(session.id) +
+                    ",\"url\":" + json::quote(session.url) + ",\"size\":" + std::to_string(session.size) + ",\"sent\":" + std::to_string(session.sent) +
+                    ",\"granularity\":" + std::to_string(session.granularity) + ",\"parts\":[";
+  for (std::size_t i = 0; i < session.parts.size(); ++i) out.append(i ? "," : "").append(json::quote(session.parts[i]));
+  out += "]";
+  if (session.expires_at) out += ",\"expires_at\":" + std::to_string(*session.expires_at);
+  return out + ",\"status\":" + json::quote(session.status) + ",\"part\":" + std::to_string(part) + "}";
+}
 
 std::variant<Media, Error> media(const File& file, std::string_view origin, std::uint64_t now) {
   if (file.origin != origin) return Error{ErrorKind::InvalidRequest, "a file is named only at the origin that holds it"};
@@ -208,6 +236,108 @@ bool Codec::buffered(std::string_view body, Close close) {
   if (!emit(Begin{}) || !emit(MessageBegin{{0}, std::nullopt, Role::Assistant, nullptr})) return false;
   return emit(UsageUpdate{Usage{}}) && emit(Stop{StopReason{StopKind::EndTurn, "completed"}}) && emit(MessageSeal{{0}}) &&
          emit(Commit{"files.response+normal_close"});
+}
+
+SessionCodec::SessionCodec(const descriptor::ValidatedDescriptor& descriptor, Accumulator& accumulator, Step step, std::string subject, SemanticLimits limits)
+    : descriptor_(descriptor), accumulator_(accumulator), step_(step), subject_(std::move(subject)), limits_(limits) {}
+bool SessionCodec::emit(const Event& event) { return accumulator_.accept(event); }
+bool SessionCodec::fail(ErrorKind kind, std::string text) {
+  Error error{kind, std::move(text)};
+  error.reason = reason::code(reason::Source::Files, error.safe_message);
+  emit(Fail{std::move(error)});
+  return false;
+}
+bool SessionCodec::buffered(std::string_view body, Close close) {
+  if (!close.normal) return fail(close.error, "abnormal response close");
+  const auto* fact = descriptor_.policy()->endpoint("files", descriptor_.base_url());
+  if (!fact) return fail(ErrorKind::Unsupported, "file endpoints are not admitted at this origin");
+  const bool google = fact->shape == "google";
+  auto subject = json::parse(subject_);
+  if (!std::holds_alternative<json::Document>(subject) || !session_of(std::get<json::Document>(subject).root()))
+    return fail(ErrorKind::ProtocolCorrupt, "the upload session is not readable");
+  // Google answers most steps in headers alone; a body is JSON when there is one.
+  std::shared_ptr<const json::Document> wire;
+  if (!body.empty()) {
+    auto parsed = json::parse(body, {limits_.max_content_bytes, limits_.max_json_depth});
+    if (auto* error = std::get_if<json::ParseError>(&parsed))
+      return fail(error->code == json::ParseCode::SizeExceeded || error->code == json::ParseCode::DepthExceeded
+                      ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, "invalid response JSON");
+    wire = std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
+    if (!wire->root().is_object()) return fail(ErrorKind::ProtocolCorrupt, "response must be object");
+  }
+  const auto root = wire ? wire->root() : json::Value{};
+  const std::string status(google ? header(close, "x-goog-upload-status") : (wire ? std::string_view(text_of(root.get("status"))) : std::string_view{}));
+  const std::string url(header(close, "x-goog-upload-url")), granularity(header(close, "x-goog-upload-chunk-granularity")),
+      received(header(close, "x-goog-upload-size-received"));
+  File probe;
+  if (google) {
+    if (status.empty()) return fail(ErrorKind::ProtocolCorrupt, "a Google upload reports its status");
+    if (step_ == Step::Start && (status != "active" || !url.starts_with(std::string(descriptor_.base_url()) + "/upload/") ||
+                                 (!granularity.empty() && !digits(granularity))))
+      return fail(ErrorKind::ProtocolCorrupt, "a Google upload begins with its upload URL");
+    if (status == "final" && !(wire && file_of(file_object(root, "google"), "google", descriptor_.base_url(), probe)))
+      return fail(ErrorKind::ProtocolCorrupt, "a finished upload names its file");
+    if (!received.empty() && !digits(received)) return fail(ErrorKind::ProtocolCorrupt, "a Google upload reports its size as digits");
+    if (step_ == Step::Cancel && status != "cancelled") return fail(ErrorKind::ProtocolCorrupt, "the response does not confirm the cancellation");
+  } else {
+    if (!wire || !root.get("id").is_string() || root.get("id").as_string().empty()) return fail(ErrorKind::ProtocolCorrupt, "an upload step names its id");
+    if (step_ == Step::Complete && (status != "completed" || !file_of(root.get("file"), fact->shape, descriptor_.base_url(), probe)))
+      return fail(ErrorKind::ProtocolCorrupt, "a finished upload names its file");
+    if (step_ == Step::Cancel && status != "cancelled") return fail(ErrorKind::ProtocolCorrupt, "the response does not confirm the cancellation");
+    if (!optional_member(root.get("expires_at"), is_uint)) return fail(ErrorKind::ProtocolCorrupt, "an upload step names its id");
+  }
+  static constexpr const char* steps[]{"start", "part", "complete", "query", "cancel"};
+  auto context = json::parse("{\"step\":\"" + std::string(steps[static_cast<int>(step_)]) + "\",\"session\":" + subject_ +
+                             ",\"status\":" + json::quote(status) + ",\"url\":" + json::quote(url) + ",\"granularity\":" + json::quote(granularity) +
+                             ",\"received\":" + json::quote(received) + "}");
+  if (!emit(RawWire{"files.session", std::make_shared<const json::Document>(std::move(std::get<json::Document>(context)))})) return false;
+  if (wire && !emit(RawWire{"files.response", wire})) return false;
+  if (!emit(Begin{}) || !emit(MessageBegin{{0}, std::nullopt, Role::Assistant, nullptr})) return false;
+  return emit(UsageUpdate{Usage{}}) && emit(Stop{StopReason{StopKind::EndTurn, "completed"}}) && emit(MessageSeal{{0}}) &&
+         emit(Commit{"files.session+normal_close"});
+}
+
+ProgressOutcome typed_progress(const sp::Outcome& internal) {
+  if (const auto* failure = std::get_if<Failure>(&internal)) return *failure;
+  const auto& completion = std::get<Completion>(internal);
+  Progress progress;
+  json::Value context, response;
+  for (const auto& raw : completion.raw_events) {
+    if (!raw.payload) continue;
+    if (raw.type == "files.session") context = raw.payload->root();
+    else if (raw.type == "files.response") response = raw.payload->root();
+  }
+  if (auto session = session_of(context.get("session"))) progress.session = std::move(*session);
+  auto& session = progress.session;
+  const auto step = text_of(context.get("step"));
+  session.status = text_of(context.get("status"));
+  const bool google = session.shape == "google";
+  if (step == "start") {
+    if (google) {
+      session.url = text_of(context.get("url"));
+      if (digits(text_of(context.get("granularity")))) session.granularity = std::stoull(text_of(context.get("granularity")));
+    } else {
+      session.id = text_of(response.get("id"));
+      if (response.get("expires_at").is_uint()) session.expires_at = response.get("expires_at").as_uint();
+    }
+  } else if (step == "part") {
+    session.sent += context.get("session").get("part").as_uint();
+    if (!google) session.parts.push_back(text_of(response.get("id")));
+  } else if (step == "query" && digits(text_of(context.get("received")))) {
+    session.sent = std::stoull(text_of(context.get("received")));
+  }
+  // The file, once the upload finished it: Google's last chunk (or a query after it), OpenAI's completion.
+  const auto object = google ? file_object(response, "google") : response.get("file");
+  if (object.is_object()) {
+    File file;
+    if (file_of(object, session.shape, session.origin, file)) {
+      file.raw = copy(object);
+      progress.file = std::move(file);
+    }
+  }
+  progress.attempt = completion.attempt;
+  progress.raw_events = completion.raw_events;
+  return progress;
 }
 
 Outcome typed(const sp::Outcome& internal) {
