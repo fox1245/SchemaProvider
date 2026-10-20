@@ -109,7 +109,9 @@ std::string ws_accept_value(std::string_view key);
 // base64 of 16 bytes, the Sec-WebSocket-Key for a handshake.
 std::string ws_key_from(const std::array<unsigned char, 16>& nonce);
 
-// The GET request of the opening handshake (RFC 6455 4.1). `target` is the path and query.
+// The GET request of the opening handshake (RFC 6455 4.1). `target` is the path and query. The request sets `Host`,
+// `Upgrade`, `Connection` and the `Sec-WebSocket-` headers itself, and leaves out a header of `headers` with one of
+// those names.
 std::string ws_handshake_request(std::string_view host, std::string_view target, std::string_view key,
                                  const std::vector<std::pair<std::string, std::string>>& headers);
 

@@ -536,7 +536,7 @@ class PolicyLoader {
           return {};
         };
         for (auto e : endpoints.elements()) {
-          closed(e, {"endpoint","shape","origins","paths"}, "/endpoints", {"options","auth","charge_on_accept","headers","keep"});
+          closed(e, {"endpoint","shape","origins","paths"}, "/endpoints", {"options","auth","charge_on_accept","headers","keep","audio","close_codes"});
           EndpointFact fact{text(e.get("endpoint"), "/endpoints/endpoint"), text(e.get("shape"), "/endpoints/shape"),
                             strings(e.get("origins"), "/endpoints/origins")};
           const auto operations = operations_of(fact.endpoint, fact.shape);
@@ -581,8 +581,11 @@ class PolicyLoader {
             for (auto member : headers.members()) {
               std::string name(member.key);
               std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+              // The opening handshake of a WebSocket endpoint sets the last five itself.
               constexpr std::string_view reserved[]{"authorization", "x-api-key", "x-goog-api-key", "proxy-authorization", "cookie", "host",
-                                                    "connection", "content-type", "content-length", "accept", "transfer-encoding", "expect"};
+                                                    "connection", "content-type", "content-length", "accept", "transfer-encoding", "expect",
+                                                    "upgrade", "sec-websocket-key", "sec-websocket-version", "sec-websocket-extensions",
+                                                    "sec-websocket-protocol", "sec-websocket-accept"};
               if (name.empty() || name.size() > 64 || !std::all_of(name.begin(), name.end(), [](char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-'; }) ||
                   std::find(std::begin(reserved), std::end(reserved), name) != std::end(reserved))
                 fail("/endpoints/headers", "a non-reserved ASCII header name");
@@ -590,6 +593,56 @@ class PolicyLoader {
               if (value.empty() || value.size() > 256 || !std::all_of(value.begin(), value.end(), [](unsigned char c) { return c >= 0x20 && c < 0x7f; }))
                 fail("/endpoints/headers", "a printable header value");
               fact.headers.emplace_back(std::string(member.key), value);
+            }
+          }
+          // A realtime session (D8) pins the formats of its audio and names the close codes that report a failure.
+          if (fact.endpoint != "realtime" && (e.get("audio").valid() || e.get("close_codes").valid()))
+            fail("/endpoints", "audio formats and close codes on realtime endpoints only");
+          if (fact.endpoint == "realtime") {
+            const auto audio = e.get("audio");
+            if (!audio.valid()) fail("/endpoints/audio", "the audio formats of a realtime endpoint");
+            closed(audio, {"input", "output"}, "/endpoints/audio");
+            const auto formats = [&](Value list, std::string_view path) {
+              if (!list.is_array() || !list.size() || list.size() > 8) fail(path, "one to eight audio formats");
+              std::vector<AudioFormatFact> out;
+              for (auto item : list.elements()) {
+                closed(item, {"mime", "rate", "sample_bytes"}, path);
+                AudioFormatFact format{text(item.get("mime"), path)};
+                const auto rate = integer(item.get("rate"), path), width = integer(item.get("sample_bytes"), path);
+                if (!rate || rate > 192000 || !width || width > 4) fail(path, "a sample rate up to 192000 and 1 to 4 bytes per sample");
+                format.rate = static_cast<std::uint32_t>(rate);
+                format.sample_bytes = static_cast<std::uint32_t>(width);
+                // `audio/pcm;rate=24000`: a lower-case type/subtype, and when it has a parameter, the sample rate.
+                const auto semicolon = format.mime.find(';');
+                const auto essence = std::string_view(format.mime).substr(0, semicolon);
+                const auto slash = essence.find('/');
+                if (slash == std::string_view::npos || slash == 0 || slash + 1 == essence.size() || essence.find('/', slash + 1) != std::string_view::npos ||
+                    !std::all_of(essence.begin(), essence.end(), [](unsigned char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '/' || c == '.' || c == '+' || c == '-'; }) ||
+                    !essence.starts_with("audio/") ||
+                    (semicolon != std::string::npos && format.mime.substr(semicolon) != ";rate=" + std::to_string(rate)))
+                  fail(path, "an audio media type, with the sample rate as its only parameter");
+                for (const auto& existing : out) if (existing.mime == format.mime) fail(path, "unique audio formats");
+                out.push_back(std::move(format));
+              }
+              return out;
+            };
+            fact.audio_input = formats(audio.get("input"), "/endpoints/audio/input");
+            fact.audio_output = formats(audio.get("output"), "/endpoints/audio/output");
+            if (const auto closes = e.get("close_codes"); closes.valid()) {
+              if (!closes.is_array() || closes.size() > 32) fail("/endpoints/close_codes", "at most 32 close codes");
+              for (auto item : closes.elements()) {
+                closed(item, {"code", "status"}, "/endpoints/close_codes", {"reason"});
+                CloseCodeFact close;
+                const auto code = integer(item.get("code"), "/endpoints/close_codes/code");
+                const auto status = integer(item.get("status"), "/endpoints/close_codes/status");
+                // A close code is 1000 to 4999 (RFC 6455 7.4).
+                if (code < 1000 || code > 4999 || status < 100 || status > 599) fail("/endpoints/close_codes", "a close code and an HTTP status");
+                close.code = static_cast<std::uint16_t>(code);
+                close.status = static_cast<int>(status);
+                if (item.get("reason").valid()) close.reason = text(item.get("reason"), "/endpoints/close_codes/reason");
+                for (const auto& existing : fact.close_codes) if (existing.code == close.code && existing.reason == close.reason) fail("/endpoints/close_codes", "unique close codes");
+                fact.close_codes.push_back(std::move(close));
+              }
             }
           }
           for (const auto& existing : policy->endpoints_)

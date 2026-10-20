@@ -107,6 +107,13 @@ void handshake() {
   CHECK(request ==
         "GET /chat?x=1 HTTP/1.1\r\nHost: server.example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
         "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nAuthorization: Bearer t\r\n\r\n");
+  // The headers the handshake sets itself are not repeated, whatever their case; the caller's others follow.
+  CHECK(ws_handshake_request("server.example.com", "/chat", "dGhlIHNhbXBsZSBub25jZQ==",
+                             {{"upgrade", "h2c"}, {"SEC-WEBSOCKET-KEY", "other"}, {"Sec-WebSocket-Protocol", "chat"},
+                              {"sec-websocket-extensions", "permessage-deflate"}, {"Sec-WebSocket-Version", "8"}, {"CONNECTION", "close"},
+                              {"Host", "elsewhere"}, {"X-Kept", "1"}}) ==
+        "GET /chat HTTP/1.1\r\nHost: server.example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nX-Kept: 1\r\n\r\n");
   CHECK(ws_handshake_request("h", "/", "k", {{"X", "a\r\nInjected: 1"}}).empty());
   CHECK(ws_handshake_request("h", "relative", "k", {}).empty());
 

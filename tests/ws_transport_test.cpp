@@ -130,6 +130,11 @@ TEST(echo_text_and_binary_then_client_close) {
   CHECK(r.clean && !r.closed_by_peer && r.close_code == ws_close::Normal);
   CHECK(r.http_status == 101);
   CHECK(rec.done_calls == 1);
+  // on_close reports a Close the server sent first; the answer to the client's own is not reported.
+  {
+    std::lock_guard lock(rec.mu);
+    CHECK(rec.closes.empty());
+  }
   const auto seen = stats();
   CHECK(contains(seen, "closes", 1000));
   CHECK(seen.root().get("unmasked").as_uint() == 0);
@@ -154,6 +159,31 @@ TEST(handshake_sends_target_host_and_headers) {
   CHECK(text.find("\"host\":\"127.0.0.1:" + std::to_string(g_peer->port) + "\"") != std::string::npos);
   session.close();
   CHECK(session.join().clean);
+}
+
+// A header the handshake sets itself, given again in the request, is not sent: the server sees one of each, the key it
+// accepts is the client's, and a protocol or extension the client never offered is not asked for.
+TEST(handshake_owns_its_headers) {
+  Transport transport;
+  Recorder rec;
+  auto req = request("/headers");
+  req.headers.push_back(Header{"Upgrade", "h2c"});
+  req.headers.push_back(Header{"Sec-WebSocket-Key", "AAAAAAAAAAAAAAAAAAAAAA=="});
+  req.headers.push_back(Header{"Sec-WebSocket-Protocol", "chat"});
+  req.headers.push_back(Header{"Sec-WebSocket-Extensions", "permessage-deflate"});
+  req.headers.push_back(Header{"X-Test", "kept"});
+  auto session = open_websocket(transport, std::move(req), rec.callbacks());
+  CHECK(rec.wait_messages(1));
+  std::string text;
+  {
+    std::lock_guard lock(rec.mu);
+    if (!rec.messages.empty()) text = rec.messages[0].second;
+  }
+  CHECK(text.find("\"test\":\"kept\"") != std::string::npos);
+  CHECK(text.find("\"owned\":{\"upgrade\":1,\"connection\":1,\"sec-websocket-key\":1,\"sec-websocket-version\":1}") != std::string::npos);
+  session.close();
+  const auto r = session.join();
+  CHECK(r.clean && r.http_status == 101);
 }
 
 TEST(fragments_reassemble_and_interleaved_ping_is_answered) {

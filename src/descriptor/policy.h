@@ -59,6 +59,13 @@ struct InputBlockFact { std::string type; ValueSchema value; };
 // (`bound` false): a per-request service control that does not change what the conversation means, which may change
 // from turn to turn (#96). A Messages extension may name the anthropic-beta value a request that sets it needs.
 struct ExtensionFact { std::string key; std::vector<std::string> origins; ValueSchema value; bool replay_eligible = false; bool bound = true; std::string beta{}; };
+// An audio format a realtime endpoint takes or sends: its media type as the provider spells it (`audio/pcm;rate=24000`,
+// `audio/pcmu`), the samples per second and the bytes of one sample.
+struct AudioFormatFact { std::string mime; std::uint32_t rate = 0, sample_bytes = 0; };
+// A WebSocket close code a realtime provider ends a session with to report a failure, and the HTTP status that the
+// runtime error policy classifies it as (1007 with "API key not valid" is a 401). A `reason` must appear in the
+// close reason; an empty one matches any.
+struct CloseCodeFact { std::uint16_t code = 0; std::string reason{}; int status = 0; };
 // A non-chat endpoint the policy admits (D6): what it does (`images`), the wire shape a compiled codec speaks
 // (`openai`, `openrouter`), the origins that serve it, the path of each operation (`generate`, `edit`), the
 // schema of the members a request may add beside the typed ones, the authentication header, whether the
@@ -74,6 +81,10 @@ struct EndpointFact {
   bool charge_on_accept = false;
   std::vector<std::pair<std::string, std::string>> headers{};
   std::vector<std::string> keep{};
+  // Realtime: the formats of the audio sent and received, the first of each the default, and the close codes that
+  // report a failure.
+  std::vector<AudioFormatFact> audio_input{}, audio_output{};
+  std::vector<CloseCodeFact> close_codes{};
 };
 // The path of one operation of an endpoint fact, if it has one.
 std::optional<std::string_view> endpoint_path(const EndpointFact&, std::string_view operation) noexcept;
