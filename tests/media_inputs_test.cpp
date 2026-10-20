@@ -493,9 +493,10 @@ std::string replace_member(json::Value object, std::string_view key, std::string
   }
   return result + '}';
 }
-descriptor::PolicySnapshot bounded_policy(std::size_t request_bytes) {
+descriptor::PolicySnapshot bounded_policy(std::size_t request_bytes, std::size_t text_request_bytes = 0) {
   const auto defaults = parse_json(config_defaults::codec_defaults_json);
   auto resources = parse_json(replace_member(defaults->root().get("resources"), "request_bytes", std::to_string(request_bytes)));
+  if (text_request_bytes) resources = parse_json(replace_member(resources->root(), "chat_text_request_bytes", std::to_string(text_request_bytes)));
   for (const auto member : {"image_decoded_bytes", "audio_decoded_bytes", "video_decoded_bytes", "document_decoded_bytes"})
     resources = parse_json(replace_member(resources->root(), member, "192"));
   auto loaded = descriptor::load_policy(config_defaults::descriptor_policy_json,
@@ -554,6 +555,18 @@ void size_and_aggregate_error_contract() {
       auto raw = sample_bytes(mime); raw.resize(192, '\0');
       CHECK(is_wire(run_descriptor(family, d, {inline_media(kind_for(mime), mime, raw)}, false)));
       expect_error(run_descriptor(family, d, {inline_media(kind_for(mime), mime, raw + '\0')}, false), ErrorKind::ResourceLimit);
+    }
+  }
+  // Text alone over the request limit is an invalid request in every family; with media it is a resource limit.
+  const auto text_bound = bounded_policy(900, 900);
+  auto small_image = sample_bytes("image/png"); small_image.resize(192, '\0');
+  for (const auto family : all_families) {
+    const auto& d = load_descriptor(family, default_origin(family, Origin::Direct), text_bound);
+    for (const bool streaming : {false, true}) {
+      CHECK(is_wire(run_descriptor(family, d, {Text{"short"}}, streaming)));
+      expect_error(run_descriptor(family, d, {Text{std::string(1000, 'x')}}, streaming), ErrorKind::InvalidRequest);
+      expect_error(run_descriptor(family, d, {Text{std::string(1000, 'x')}, inline_media(MediaKind::Image, "image/png", small_image)}, streaming),
+                   ErrorKind::ResourceLimit);
     }
   }
 }

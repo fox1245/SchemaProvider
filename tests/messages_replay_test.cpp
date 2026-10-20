@@ -905,6 +905,13 @@ void input_blocks_and_skills() {
   rejected(anthropic, many, ErrorKind::InvalidRequest);
   auto twice = skills; twice.skills.push_back(twice.skills[0]); rejected(anthropic, twice, ErrorKind::InvalidRequest);
   auto spaced = skills; spaced.skills[0].skill_id = "has space"; rejected(anthropic, spaced, ErrorKind::InvalidRequest);
+  // Skills need a declared code-execution tool, whichever of its versions; another tool does not stand in for it.
+  auto bare = skills; bare.tools.clear(); rejected(anthropic, bare, ErrorKind::InvalidRequest);
+  auto other = skills; other.tools = {{"web_search", {}, {}, "web_search_20260318", 3}}; rejected(anthropic, other, ErrorKind::InvalidRequest);
+  for (const char* version : {"code_execution_20250522", "code_execution_20260120", "code_execution_20260521"}) {
+    auto versioned = skills; versioned.tools = {{"code_execution", {}, {}, version, std::nullopt}};
+    CHECK(document(encoded(anthropic, versioned).body)->root().get("container").get("skills").size() == 1);
+  }
 }
 int main() {
   try {

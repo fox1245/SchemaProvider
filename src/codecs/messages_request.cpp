@@ -348,6 +348,12 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     };
     std::set<std::pair<std::string_view, std::string_view>> skills;
     if (request.skills.size() > 20) return bad("container skills are limited to 20");
+    // Skills load into the code-execution container, which only a declared code-execution tool provides.
+    if (std::none_of(request.tools.begin(), request.tools.end(), [&](const auto& tool) {
+          const auto* fact = tool.type.empty() ? nullptr : fact_of(tool.type);
+          return fact && fact->container;
+        }))
+      return bad("container skills need the code execution tool");
     for (const auto& skill : request.skills)
       if (!token(skill.type) || !token(skill.skill_id) || (skill.version && !token(*skill.version)) || !skills.emplace(skill.type, skill.skill_id).second)
         return bad("container skills require unique token ids, types and versions");

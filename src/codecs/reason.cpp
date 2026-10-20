@@ -649,6 +649,7 @@ constexpr Entry messages_request_table[] = {
   {"input block metadata mismatch", "request.messages.input_block_metadata_mismatch"},
   {"an input block does not match its declared schema", "request.messages.input_block_invalid"},
   {"container skills are limited to 20", "request.messages.skills_count_limit"},
+  {"container skills need the code execution tool", "request.messages.skills_need_code_execution"},
   {"container skills require unique token ids, types and versions", "request.messages.skills_invalid"},
   {"MCP server count limit exceeded", "request.messages.mcp_server_count_limit"},
   {"MCP servers require unique bounded names", "request.messages.mcp_server_name_invalid"},

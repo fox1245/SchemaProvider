@@ -102,6 +102,16 @@ void uri_or_url(json::BoundedWriter& writer, const Media& media) {
   else writer.quoted(media.reference);
 }
 
+bool carries_media(const std::vector<Message>& messages) noexcept {
+  for (const auto& message : messages)
+    for (const auto& part : message.parts) {
+      if (std::holds_alternative<Media>(part)) return true;
+      if (const auto* result = std::get_if<ToolResult>(&part))
+        for (const auto& nested : result->content_parts)
+          if (std::holds_alternative<Media>(nested)) return true;
+    }
+  return false;
+}
 bool valid_utf8(std::string_view text) noexcept {
   std::size_t i = 0;
   while (i < text.size()) {

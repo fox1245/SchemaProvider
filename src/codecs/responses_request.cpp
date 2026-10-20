@@ -400,6 +400,11 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   }
   result.headers.emplace_back("Content-Type", "application/json");
   result.headers.emplace_back("Accept", streaming ? "text/event-stream" : "application/json");
+  // Over the size limit, a request with media is a resource limit; one of text alone is invalid.
+  const bool has_media = media_input::carries_media(request.messages);
+  const auto limit_error = [&] {
+    return Error{has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest, "request exceeds JSON byte, depth or encoding limits"};
+  };
   auto build = [&](json::BoundedWriter& body) -> std::optional<Error> {
     auto invalid = [](std::string message) { return Error{ErrorKind::InvalidRequest, std::move(message)}; };
     body.raw("{").quoted(descriptor.request_model_member()).raw(":").quoted(request.model);
@@ -707,7 +712,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
                 if (const auto* text = std::get_if<Text>(&nested))
                   body.raw("{\"type\":\"input_text\",\"text\":").quoted(text->value).raw("}");
                 else write_media(body, std::get<Media>(nested));
-                if (!body.ok()) return Error{ErrorKind::ResourceLimit, "request exceeds JSON byte, depth or encoding limits"};
+                if (!body.ok()) return limit_error();
               }
               body.raw("]");
             }
@@ -725,12 +730,12 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
             } else if (const auto* media = std::get_if<Media>(&part)) {
               write_media(body, *media);
             } else return Error{ErrorKind::Unsupported, "plain Responses input supports typed text and media only"};
-            if (!body.ok()) return Error{ErrorKind::ResourceLimit, "request exceeds JSON byte, depth or encoding limits"};
+            if (!body.ok()) return limit_error();
           }
           body.raw("]}");
         }
       }
-      if (!body.ok()) return Error{ErrorKind::ResourceLimit, "request exceeds JSON byte, depth or encoding limits"};
+      if (!body.ok()) return limit_error();
     }
     if (!pending.empty()) return invalid("all client function calls require results before dispatch");
     for (const auto& approval : request.mcp_approvals) {
@@ -744,7 +749,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     body.raw("]");
     request_controls::write_extensions(body, request.extensions);
     body.raw("}");
-    if (!body.ok()) return Error{ErrorKind::ResourceLimit, "request exceeds JSON byte, depth or encoding limits"};
+    if (!body.ok()) return limit_error();
     return std::nullopt;
   };
   json::BoundedWriter measured({resources.request_bytes, resources.json_depth});

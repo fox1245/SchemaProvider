@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 // Shared by the five request encoders: policy and structural admission of user media, plus the
 // few wire spellings that more than one family uses.
@@ -16,6 +17,9 @@ std::size_t decoded_limit(const descriptor::CodecResources&, MediaKind) noexcept
 // A kind or source form the family cannot express is Unsupported; a MIME type outside the admitted
 // list or a malformed payload is InvalidRequest. Roles and ordering are the encoder's concern.
 std::optional<Error> admit(const descriptor::ValidatedDescriptor&, const Media&);
+// Whether a message carries media, directly or in a tool result. A request over the size limit that carries none is
+// InvalidRequest; one that carries media is ResourceLimit.
+bool carries_media(const std::vector<Message>&) noexcept;
 // OpenAI-style `input_audio.format` short name for an admitted audio MIME type.
 std::optional<std::string_view> audio_format(std::string_view mime) noexcept;
 // The caller's name, or a MIME-derived one for providers that read a file extension.

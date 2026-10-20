@@ -387,7 +387,7 @@ class PolicyLoader {
         for (auto t : tools.elements()) {
           const bool messages = f.family == "anthropic.messages";
           // A Messages tool entry may carry no name (a toolset); every other fact names its tool.
-          if (messages) closed(t, {"type","max_uses"}, "/server_tools", {"name","options","client","beta"});
+          if (messages) closed(t, {"type","max_uses"}, "/server_tools", {"name","options","client","beta","container"});
           else closed(t, {"type","name","max_uses"}, "/server_tools", {"options","generic"});
           if (!messages && f.family != "openai.responses")
             fail("/server_tools", "typed Messages or Responses tool facts only");
@@ -396,6 +396,7 @@ class PolicyLoader {
                               boolean(t.get("max_uses"),"/server_tools")};
           if (t.get("generic").valid()) fact.generic = boolean(t.get("generic"), "/server_tools/generic");
           if (t.get("client").valid()) fact.client = boolean(t.get("client"), "/server_tools/client");
+          if (t.get("container").valid()) fact.container = boolean(t.get("container"), "/server_tools/container");
           if (t.get("beta").valid()) {
             fact.beta = text(t.get("beta"), "/server_tools/beta");
             if (std::none_of(f.betas.begin(), f.betas.end(), [&](const BetaFact& b) { return b.value == fact.beta; }))

@@ -261,6 +261,11 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     if (!function_name(tool.name) || !names.insert(tool.name).second || !tool.parameters ||
         !tool.parameters->root().is_object()) return bad("unique valid functions and object parameters required");
   }
+  // Over the size limit, a request with media is a resource limit; one of text alone is invalid.
+  const bool has_media = media_input::carries_media(request.messages);
+  const auto limit_error = [&] {
+    return Error{has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest, "request exceeds JSON limits"};
+  };
   auto build = [&](json::BoundedWriter& body) -> std::optional<Error> {
     auto invalid = [](std::string label) { return Error{ErrorKind::InvalidRequest, std::move(label)}; };
     if (request.agent) body.raw("{\"agent\":").quoted(*request.agent);
@@ -411,7 +416,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
                 if (const auto* text = std::get_if<Text>(&nested))
                   body.raw("{\"type\":\"text\",\"text\":").quoted(text->value).raw("}");
                 else write_media(body, std::get<Media>(nested));
-                if (!body.ok()) return Error{ErrorKind::ResourceLimit, "request exceeds JSON limits"};
+                if (!body.ok()) return limit_error();
               }
               body.raw("]");
             }
@@ -431,13 +436,13 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
           body.raw("]}");
         }
       }
-      if (!body.ok()) return Error{ErrorKind::ResourceLimit, "request exceeds JSON limits"};
+      if (!body.ok()) return limit_error();
     }
     if (!pending.empty()) return invalid("all pending functions require host results");
     body.raw("]");
     request_controls::write_extensions(body, request.extensions);
     body.raw("}");
-    if (!body.ok()) return Error{ErrorKind::ResourceLimit, "request exceeds JSON limits"};
+    if (!body.ok()) return limit_error();
     return std::nullopt;
   };
   json::BoundedWriter measured({resources.request_bytes, resources.json_depth}); if (auto error = build(measured)) return *error;
