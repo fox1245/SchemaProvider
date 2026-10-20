@@ -183,6 +183,11 @@ class PreparedRequest {
   std::optional<std::uint64_t> model_invocation_limit() const noexcept;
   // The non-chat endpoint a prepared call reaches (`images`, D6), empty for a chat request.
   std::string_view endpoint() const noexcept;
+  // The HTTP method and URL the call sends. With the body, they identify a call whose body is empty or read from a
+  // file (`GET .../files/{id}`, a part of an upload). Like encoded_body, the URL may be secret: a resumable upload's
+  // session URL is as sensitive as the API key, so hash it rather than store or log it.
+  std::string_view method() const noexcept;
+  std::string_view url() const noexcept;
  private:
   explicit PreparedRequest(std::shared_ptr<detail::OperationState>);
   void release() noexcept;
@@ -200,6 +205,10 @@ class PreparedEndpoint {
   const PreparedRequest& prepared() const noexcept { return prepared_; }
   bool valid() const noexcept { return prepared_.valid(); }
   const Error* error() const noexcept { return prepared_.error(); }
+  // The untyped call, with its slot and deadline, for a host that runs every call through one path:
+  // `Client::start(PreparedRequest, Callbacks)` runs it and delivers the untyped Result, and the endpoint's
+  // `typed()` (`images::typed`, ...) turns that Result, or one the host journaled and restored, into Outcome.
+  PreparedRequest release() && noexcept { return std::move(prepared_); }
  private:
   explicit PreparedEndpoint(PreparedRequest prepared) : prepared_(std::move(prepared)) {}
   PreparedRequest prepared_;

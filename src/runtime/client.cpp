@@ -1328,6 +1328,12 @@ std::optional<std::uint64_t> PreparedRequest::model_invocation_limit() const noe
 std::string_view PreparedRequest::endpoint() const noexcept {
   return state_ ? std::string_view(state_->endpoint) : std::string_view{};
 }
+std::string_view PreparedRequest::method() const noexcept {
+  return state_ ? std::string_view(state_->request.method) : std::string_view{};
+}
+std::string_view PreparedRequest::url() const noexcept {
+  return state_ ? std::string_view(state_->request.url) : std::string_view{};
+}
 Operation Client::start(Request request, RunOptions options, Callbacks callbacks) {
   return start(prepare(std::move(request), std::move(options)), std::move(callbacks));
 }

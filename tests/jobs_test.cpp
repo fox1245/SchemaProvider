@@ -235,6 +235,20 @@ void runtime_job() {
         header(submit, "Authorization") == "Bearer synthetic-key" && document(submit.body)->root().get("prompt").as_string() == "A fox.");
   CHECK(handle.id == "job-1" && handle.origin == "http://127.0.0.1:18080" && handle.endpoint == "videos" && std::get<jobs::State>(submitted).status == jobs::Status::Pending);
 
+  // Released, the same call runs as an untyped one, and the endpoint's typed() reads its Result.
+  wire->script = [](Exchange& e) { e.reply(200, "application/json", R"({"id":"job-1","status":"in_progress"})"); };
+  auto released = client.prepare(jobs::Poll{handle}, run_for());
+  auto untyped = std::move(released).release();
+  CHECK(!released.valid() && untyped.valid() && !untyped.error() && untyped.endpoint() == "videos");
+  CHECK(untyped.method() == "GET" && untyped.url() == "http://127.0.0.1:18080/api/v1/videos/job-1" && untyped.encoded_body().empty());
+  auto operation = client.start(std::move(untyped));
+  executor->drain();
+  const auto raw = operation.join();
+  CHECK(raw && std::holds_alternative<Completion>(*raw));
+  const auto typed = jobs::typed(*raw);
+  CHECK(std::holds_alternative<jobs::State>(typed) && std::get<jobs::State>(typed).status == jobs::Status::Running &&
+        std::get<jobs::State>(typed).handle.id == "job-1" && std::get<jobs::State>(typed).handle.endpoint == "videos");
+
   wire->script = [](Exchange& e) { e.reply(200, "application/json", R"({"id":"job-1","status":"completed","unsigned_urls":["u"],"usage":{"cost":0.02}})"); };
   const auto polled = complete(client.prepare(jobs::Poll{handle}, run_for()));
   const auto& poll = wire->exchanges.back()->request;
