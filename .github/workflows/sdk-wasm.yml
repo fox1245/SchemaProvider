@@ -1,0 +1,81 @@
+name: SDK WebAssembly
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'tools/embed_configuration.py'
+      - 'config/**'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - '.github/workflows/sdk-wasm.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sdk-wasm-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  emscripten-single-thread:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      EMSCRIPTEN_VERSION: 6.0.13
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out pinned parser sources
+        uses: actions/checkout@v4
+        with:
+          repository: fox1245/NeoGraph
+          ref: 7ec45b68474fd3ecf20a0a5b8516f45fef93f88f
+          path: dependencies
+          sparse-checkout: |
+            deps/yyjson
+      # The emsdk commit is the 6.0.13 release; `emsdk install` then fetches exactly that toolchain.
+      - name: Check out pinned emsdk
+        uses: actions/checkout@v4
+        with:
+          repository: emscripten-core/emsdk
+          ref: 35659964bc2762fffec0d257997fb61475f765b7
+          path: emsdk
+      - name: Install Emscripten
+        run: |
+          ./emsdk/emsdk install "$EMSCRIPTEN_VERSION"
+          ./emsdk/emsdk activate "$EMSCRIPTEN_VERSION"
+      - name: Record toolchain
+        run: |
+          source emsdk/emsdk_env.sh
+          emcc --version | head -n 1
+          node --version
+          cmake --version | head -n 1
+      - name: Configure the runtime without libcurl or threads
+        run: |
+          source emsdk/emsdk_env.sh
+          emcmake cmake -S . -B build-wasm -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DYYJSON_ROOT="$PWD/dependencies/deps/yyjson" \
+            -DSP_BUILD_TRANSPORT=OFF -DSP_THREADS=OFF \
+            -DSP_BUILD_TESTS=OFF -DSP_BUILD_CANARY=OFF -DSP_BUILD_RUNTIME_TESTS=ON
+      - name: Check that the configuration is curl-free and single-threaded
+        run: |
+          fail() { echo "configuration check failed: $1"; exit 1; }
+          if grep -q -e '-pthread' build-wasm/build.ninja; then fail "-pthread is on a command line"; fi
+          grep -q 'ASIO_DISABLE_THREADS' build-wasm/build.ninja || fail "ASIO_DISABLE_THREADS is not defined"
+          grep -q 'fexceptions' build-wasm/build.ninja || fail "-fexceptions is not set"
+          grep -Eq '^#define SP_BUILD_THREADS 0$' build-wasm/generated/sp/build_config.h || fail "build_config.h records threads"
+          if ninja -C build-wasm -t targets all | grep -q 'sp_transport'; then fail "sp_transport is configured"; fi
+      - name: Build sp_runtime and the host runtime test
+        run: |
+          source emsdk/emsdk_env.sh
+          cmake --build build-wasm --parallel
+      - name: Run the host runtime test under Node
+        run: |
+          source emsdk/emsdk_env.sh
+          ctest --test-dir build-wasm --output-on-failure --timeout 120
+      - name: Report artifact sizes
+        run: |
+          ls -l build-wasm/sp_host_runtime_tests.js build-wasm/sp_host_runtime_tests.wasm
+          gzip -c build-wasm/sp_host_runtime_tests.wasm | wc -c

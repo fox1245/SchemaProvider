@@ -18,7 +18,7 @@ Most C++ LLM wrappers treat vendor APIs as interchangeable JSON-over-HTTP endpoi
 
 ## Install and use the unstable C++ SDK
 
-Build prerequisites are CMake 3.20+, a C++20 compiler and standard library implementing `std::stop_token`, Python 3 for configuration generation, standalone Asio headers, libcurl 7.88+ and yyjson. Supply an installed yyjson library or its source tree; configuration does not download dependencies. The SDK libraries have no OpenSSL dependency: SHA-256, HMAC-SHA256, constant-time comparison and operating-system entropy are implemented in-tree (`src/crypto`). TLS comes from your libcurl's backend, and the test suite uses the `openssl` command-line tool only to generate throwaway certificates (its optional `crypto_openssl_differential` check also links OpenSSL's libcrypto into that one test when the development files are installed).
+Build prerequisites are CMake 3.20+, a C++20 compiler and standard library implementing `std::stop_token`, Python 3 for configuration generation, standalone Asio headers, libcurl 7.88+ and yyjson. Asio and libcurl belong to the transport only: a runtime-only or WebAssembly build needs neither (see [build options](#build-options-and-webassembly)). Supply an installed yyjson library or its source tree; configuration does not download dependencies. The SDK libraries have no OpenSSL dependency: SHA-256, HMAC-SHA256, constant-time comparison and operating-system entropy are implemented in-tree (`src/crypto`). TLS comes from your libcurl's backend, and the test suite uses the `openssl` command-line tool only to generate throwaway certificates (its optional `crypto_openssl_differential` check also links OpenSSL's libcrypto into that one test when the development files are installed).
 
 ```sh
 cmake -S . -B build-sdk -DSP_BUILD_TESTS=OFF -DSP_BUILD_CANARY=OFF \
@@ -39,7 +39,27 @@ target_link_libraries(first_request PRIVATE SchemaProvider::transport)
 target_compile_features(first_request PRIVATE cxx_std_20)
 ```
 
-For a reproducible deployment, pin the exact package version you built. The installed targets are `SchemaProvider::{core,json,descriptor,codecs,wire,transport,runtime}`. An application that constructs a `Client` links `SchemaProvider::transport`, the libcurl backend, which brings the runtime and everything below it. `SchemaProvider::runtime` alone is for code that only uses a `Client` somebody else constructed and must not load libcurl. Public headers use names such as `<runtime/client.h>` and `<core/value.h>`; the target exports the `include/SchemaProvider` include root.
+For a reproducible deployment, pin the exact package version you built. The installed targets are `SchemaProvider::{core,json,descriptor,codecs,wire,transport,runtime}`; `transport` exists only when the package was built with the libcurl transport. An application that constructs a `Client` links `SchemaProvider::transport`, the libcurl backend, which brings the runtime and everything below it. `SchemaProvider::runtime` alone is for code that only uses a `Client` somebody else constructed and must not load libcurl. Public headers use names such as `<runtime/client.h>` and `<core/value.h>`; the target exports the `include/SchemaProvider` include root.
+
+### Build options and WebAssembly
+
+| Option | Default | Effect |
+|---|---|---|
+| `SP_BUILD_TRANSPORT` | `ON`; `OFF` on WebAssembly | `ON` requires libcurl 7.88+ and Asio and builds `sp_transport`, the libcurl backend and the public `Client(descriptor, Options)` constructor. `AUTO` builds it only when libcurl is found. `OFF` never does, and then `sp_runtime` and everything below it configure and build without libcurl or Asio. |
+| `SP_THREADS` | `ON`; `OFF` on WebAssembly | `OFF` drops `-pthread` and `Threads::Threads`, defines `ASIO_DISABLE_THREADS` (exported to consumers by the CMake targets) and removes the default worker pool: a `Client` needs an executor the host supplies. The transport needs threads, so `SP_THREADS=OFF` cannot build it. |
+
+`-DSP_BUILD_TESTS=OFF -DSP_BUILD_CANARY=OFF` are required with a transport-free build (the complete suite exercises the transport); `-DSP_BUILD_RUNTIME_TESTS=ON` builds the tests that do not need it. An installed package built without the transport still answers `find_package(SchemaProvider CONFIG REQUIRED COMPONENTS runtime)`, and `COMPONENTS transport` then fails.
+
+A WebAssembly target is Emscripten, tested with 6.0.13; a WASI toolchain (`CMAKE_SYSTEM_NAME=WASI`) takes the same defaults but has not been built. The runtime builds and its test runs under Node. The CI job in [.github/workflows/sdk-wasm.yml](.github/workflows/sdk-wasm.yml) does exactly this:
+
+```sh
+emcmake cmake -S . -B build-wasm -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DYYJSON_ROOT="$YYJSON_ROOT" -DSP_BUILD_TESTS=OFF -DSP_BUILD_CANARY=OFF -DSP_BUILD_RUNTIME_TESTS=ON
+cmake --build build-wasm
+node build-wasm/sp_host_runtime_tests.js
+```
+
+Exceptions are required: the runtime returns its configuration errors by catching them. The Emscripten build adds `-fexceptions` (and exports it with the targets) unless `CMAKE_CXX_FLAGS` already names `-fexceptions` or `-fwasm-exceptions` (the runtime test also passes under Node with `-DCMAKE_CXX_FLAGS=-fwasm-exceptions`), and configuration stops if exceptions are disabled. What does not exist on WebAssembly yet: the HTTP transport (there is no way to build a `Client` there without the private test seam; a host transport is planned), realtime sessions, and native archive custody (it has no file backend, so `NativeArchive::provision` and `open` return an `ErrorKind::Unsupported` error and nothing is stored). See [single-thread and WebAssembly hosts](docs/USAGE.md#single-thread-and-webassembly-hosts).
 
 ## First request
 
