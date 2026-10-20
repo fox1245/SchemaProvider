@@ -190,6 +190,8 @@ void audio_formats_buffered() {
     CHECK(parts.size() == 1);  // null content never fabricates an empty text part
     Expect e{MediaKind::Audio, {}, MediaSource::Inline, payload, {}, {}, "audio_abc", "Hello there.", false};
     expect_media(parts[0], e);
+    // The reply's expiry is on the media, so a host knows when the id stops working.
+    CHECK(std::get<Media>(parts[0]).expires_at == std::optional<std::uint64_t>(1730000000));
     const auto& mime = std::get<Media>(parts[0]).mime;
     bool known = false;
     for (const auto* candidate : c.mimes) known = known || mime_equal(mime, candidate);
@@ -201,6 +203,7 @@ void audio_formats_buffered() {
     const auto& s = parts_of(completed(streamed));
     CHECK(s.size() == 1);
     expect_media(s[0], Expect{MediaKind::Audio, mime, MediaSource::Inline, payload, {}, {}, "audio_abc", "Hello there."});
+    CHECK(!std::get<Media>(s[0]).expires_at);  // this stream reported none
   }
   // The MIME follows the request format, not the payload: two formats, two MIME types.
   const auto wire = body("{\"role\":\"assistant\",\"content\":null,\"audio\":{\"id\":\"a\",\"data\":\"" + payload + "\"}}");
@@ -245,6 +248,7 @@ void audio_stream_chunks() {
   const auto& parts = parts_of(completed(outcome));
   CHECK(parts.size() == 1);
   expect_media(parts[0], Expect{MediaKind::Audio, "audio/wav", MediaSource::Inline, b64(all), {}, {}, "audio_s", "Hello world!"});
+  CHECK(std::get<Media>(parts[0]).expires_at == std::optional<std::uint64_t>(1730000123));
 
   // The final audio update after the finish reason carries only its expiry.
   auto tail_wires = deltas_then_stop({audio_delta("\"id\":\"audio_s\",\"data\":\"" + b64(runs[0]) + "\"", true)});
@@ -252,6 +256,8 @@ void audio_stream_chunks() {
   tail_wires.push_back(wrap("\"choices\":[{\"index\":0,\"delta\":{\"audio\":{\"expires_at\":1730000999}},\"finish_reason\":\"stop\"}]," + tail_usage, true));
   const auto tail = completed(stream(tail_wires, context(desc(), "wav", true)));
   CHECK(parts_of(tail).size() == 1 && *std::get<Media>(parts_of(tail)[0]).data == b64(runs[0]));
+  // The audio part was sealed at the finish reason, before this expiry arrived; it stays in the raw events.
+  CHECK(!std::get<Media>(parts_of(tail)[0]).expires_at);
   CHECK(tail.usage.total && tail.usage.total->value == 3);
   // Anything beyond the expiry after the finish reason is corruption, and it never alters the sealed payload.
   for (const char* late : {"\"data\":\"QUJD\"", "\"transcript\":\"late\"", "\"id\":\"audio_s\""}) {
@@ -350,6 +356,7 @@ void audio_usage_expiry_terminal() {
   CHECK(parts_of(result).size() == 1);
   expect_media(parts_of(result)[0], Expect{MediaKind::Audio, "audio/l16", MediaSource::Inline,
                                          b64(first_bytes + last_bytes), {}, {}, "audio_fixture", "Hello"});
+  CHECK(std::get<Media>(parts_of(result)[0]).expires_at == std::optional<std::uint64_t>(9));
   CHECK(result.stop.kind == StopKind::EndTurn && result.stop.raw == "derived:audio_usage+audio.expires_at+DONE");
   CHECK(result.usage.stage == UsageStage::Final && result.usage.total && result.usage.total->value == 8);
   CHECK(result.usage.extra.at("audio_tokens").value == 4);
@@ -439,7 +446,8 @@ void openrouter_audio_tail() {
   const auto& parts = parts_of(c);
   CHECK(std::any_of(parts.begin(), parts.end(), [&](const Part& p) {
     const auto* m = std::get_if<Media>(&p);
-    return m && m->kind == MediaKind::Audio && m->data && *m->data == payload && m->transcript == std::optional<std::string>("hi");
+    return m && m->kind == MediaKind::Audio && m->data && *m->data == payload && m->transcript == std::optional<std::string>("hi") &&
+           m->expires_at == std::optional<std::uint64_t>(1792370558);
   }));
   CHECK(c.usage.output_total && c.usage.output_total->value == 100);
   // The same order at an origin that is not a declared gateway still lacks its terminal evidence.

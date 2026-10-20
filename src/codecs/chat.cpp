@@ -765,6 +765,7 @@ bool Codec::finish_audio() {
   media.kind = MediaKind::Audio;
   media.id = std::move(audio_.id);
   media.transcript = std::move(audio_.transcript);
+  media.expires_at = audio_.expires_at;
   const bool ok = media_output::emit_part([this](const Event& event) { return emit(event); }, LocalId{0}, LocalId{next_part_++},
                                         audio_.order, std::move(media), audio_.payload);
   std::string{}.swap(audio_.payload);

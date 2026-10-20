@@ -226,22 +226,26 @@
         {
           "type": "code_execution_20250522",
           "name": "code_execution",
-          "max_uses": false
+          "max_uses": false,
+          "container": true
         },
         {
           "type": "code_execution_20250825",
           "name": "code_execution",
-          "max_uses": false
+          "max_uses": false,
+          "container": true
         },
         {
           "type": "code_execution_20260120",
           "name": "code_execution",
-          "max_uses": false
+          "max_uses": false,
+          "container": true
         },
         {
           "type": "code_execution_20260521",
           "name": "code_execution",
-          "max_uses": false
+          "max_uses": false,
+          "container": true
         },
         {
           "type": "tool_search_tool_regex_20251119",

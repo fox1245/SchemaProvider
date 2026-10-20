@@ -39,10 +39,11 @@ struct RequestDefaults {
 // `options`: the tool's other members the policy admits, with their value schema (#32). `generic`: a Responses tool
 // type the SDK has no struct for, sent through responses::GenericHostedTool. Messages only: `client`, a typed tool the
 // caller executes (memory, bash, a toolset); an empty `name`, a tool entry that carries none (a toolset); `beta`, the
-// anthropic-beta value a request needs while it declares the tool or replays its blocks.
+// anthropic-beta value a request needs while it declares the tool or replays its blocks; `container`, a tool that runs
+// in the container Agent Skills load into (code execution).
 struct ServerToolFact {
   std::string type, name; bool max_uses; std::optional<ValueSchema> options{}; bool generic = false;
-  bool client = false; std::string beta{};
+  bool client = false; std::string beta{}; bool container = false;
 };
 // An anthropic-beta value the policy admits at the listed origins. Messages only.
 struct BetaFact { std::string value; std::vector<std::string> origins; };

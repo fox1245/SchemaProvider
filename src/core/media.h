@@ -29,6 +29,9 @@ struct Media {
   ImageDetail detail = ImageDetail::Auto;   // image inputs only
   std::string id;                           // output: provider-held identity (audio id, call id)
   std::string transcript;                   // output audio: the spoken text, when reported
+  // Output audio: when the provider stops accepting `id` (Unix seconds), as reported with the reply. Not part of a
+  // message's native seal, and an archived message restores without it.
+  std::optional<std::uint64_t> expires_at;
 
   static Media inline_data(MediaKind kind, std::string mime, std::shared_ptr<const std::string> base64) {
     Media media; media.kind = kind; media.mime = std::move(mime); media.data = std::move(base64); return media;
