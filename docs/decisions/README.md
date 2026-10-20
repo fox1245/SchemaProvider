@@ -1,10 +1,10 @@
 # Decision records
 
-These records preserve decisions and historical evidence alongside current interface4 scope in SDK0.1.0 alpha. [Usage](../USAGE.md), [Migration](../MIGRATION.md) and [recorded interface3 provenance](../POC_PLAN.md#current-typed-c-cutover-provenance) separate installed controls/cursor/portable-history paths from old layouts/importers and future WebSocket/equivalence/rules. A FIRM decision is not proof every gate ran.
+These records preserve decisions and historical evidence alongside current interface4 scope in SDK0.1.0 alpha. [Usage](../USAGE.md), [Migration](../MIGRATION.md) and [recorded interface3 provenance](../POC_PLAN.md#current-typed-c-cutover-provenance) separate installed controls/cursor/portable-history paths from old layouts/importers and future equivalence/rules. A FIRM decision is not proof every gate ran.
 
 | ID | Title | Status | Date | Decision | Open item |
 |---|---|---|---|---|---|
-| [D1](D1-transport.md) | Transport | FIRM (revised) | 2026-10-01 | One libcurl stack; optional HTTP3 implemented and locally exercised plain/ASan+UBSan/TSan with release backend libraries; safe one-POST fallback and incapable-build rejection | Hosted-provider/platform matrix; WebSocket deferred/excluded |
+| [D1](D1-transport.md) | Transport | FIRM (revised) | 2026-10-01 | One libcurl stack; optional HTTP3 implemented and locally exercised plain/ASan+UBSan/TSan with release backend libraries; safe one-POST fallback and incapable-build rejection | Hosted-provider/platform matrix; Responses WebSocket excluded (the WebSocket client serves realtime sessions, D8) |
 | [D2](D2-non-chat-scope.md) | Non-chat scope | SUPERSEDED by D6 | 2026-10-01 | SDK chat/artifacts only; NeoGraph retains separate typed Images/Veo/Decisions clients and authority. Approved single-shot media observations are recorded, not universal endpoint qualification | Future SDK Endpoints scope/qualification; no additional paid authority |
 | [D3](D3-async-native.md) | Async-native core | FIRM | 2026-10-01 | Bounded I/O workers, blocking facade over the same operation; gated by cancel and admission properties | NeoGraph target concurrency for the scheduled benchmark |
 | [D4](D4-origin-and-binding.md) | Origin and binding facts | FIRM | 2026-10-01 | Implemented exact-origin/content/binding rejection and explicit archive custody; equivalence/Drop/Demote remain historical proposals | Separate cross-origin implementation/admission; direct credentials and gateway cause evidence |

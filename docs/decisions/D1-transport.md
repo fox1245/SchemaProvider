@@ -5,7 +5,7 @@
 - Evidence labels: `[read source]`, `[read docs]`, `[live observation]`, `[inference]`. Live observations are local loopback runs.
 
 ## Context
-The library needs HTTP/1.1, HTTP/2 and optional HTTP/3, SSE, and cancellation/deadlines without peer progress. The approved NeoGraph provider cutover uses typed HTTP/SSE and removes its old Responses WebSocket lane. Generic non-provider WebSocket transport is unaffected.
+The library needs HTTP/1.1, HTTP/2 and optional HTTP/3, SSE, and cancellation/deadlines without peer progress. The approved NeoGraph provider cutover uses typed HTTP/SSE and removes its old Responses WebSocket lane. Generic non-provider WebSocket transport is unaffected: the WebSocket client on this stack carries the realtime sessions of [D8](D8-realtime-sessions.md).
 
 ## Decision
 1. **One HTTP stack: libcurl, `multi_socket` interface**, private to the library. No httplib, no hand-written HTTP/1.1 client, no runtime backend flag, no `prefer_libcurl`.
@@ -88,5 +88,5 @@ Properties `OwnershipAndBounds`, `CancelWithoutPeerProgress`, `AdmissionIndepend
 
 ## Open items
 - C1 libcurl floor and feature requirements; C5 deployment (system libcurl baseline versus an isolated HTTP/3-capable dependency build, exact backend versions and packaging).
-- Responses WebSocket is excluded by the owner's typed HTTP/SSE cutover decision; any future new lane needs separate admission.
+- Responses WebSocket is excluded by the typed HTTP/SSE cutover decision; any future new lane needs separate admission. Realtime sessions (D8) are such a lane and were admitted by their own decision.
 - R3's broader HTTP/2 stream-count/TLS/peer/version matrix, R4's public trust stores and other TLS backends, and R5's non-Linux socket/platform support (POC_PLAN section 6). M1b closes only the measured scenarios, not universal compatibility.
