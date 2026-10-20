@@ -7,8 +7,9 @@
 namespace sp::files {
 namespace {
 Error bad(std::string message) { return Error{ErrorKind::InvalidRequest, std::move(message)}; }
+// A path segment the caller names. `.` and `..` are tokens by their characters but move the request elsewhere.
 bool token(std::string_view value, std::size_t limit = 128) {
-  return !value.empty() && value.size() <= limit && std::all_of(value.begin(), value.end(), [](char c) {
+  return !value.empty() && value.size() <= limit && value != "." && value != ".." && std::all_of(value.begin(), value.end(), [](char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
   });
 }
@@ -112,10 +113,7 @@ std::variant<Route, Error> session_route(const descriptor::ValidatedDescriptor& 
   if (!fact) return Error{ErrorKind::Unsupported, "file endpoints are not admitted at this origin"};
   if (session.origin != descriptor.base_url() || session.shape != fact->shape) return bad("an upload continues at the origin that began it");
   if (fact->shape == "google") {
-    const auto prefix = std::string(descriptor.base_url()) + "/upload/";
-    if (!session.url.starts_with(prefix) || session.url.size() > 2048 ||
-        std::any_of(session.url.begin(), session.url.end(), [](unsigned char c) { return c <= 0x20 || c >= 0x7f || c == '"' || c == '\\' || c == '#'; }))
-      return bad("a Google upload URL is under the origin's upload path");
+    if (!upload_url(descriptor.base_url(), session.url)) return bad("a Google upload URL is under the origin's upload path");
     return Route{fact, session.url.substr(descriptor.base_url().size())};
   }
   const auto path = descriptor::endpoint_path(*fact, operation);
@@ -126,6 +124,26 @@ std::variant<Route, Error> session_route(const descriptor::ValidatedDescriptor& 
   return Route{fact, std::move(resolved)};
 }
 }  // namespace
+
+bool upload_url(std::string_view origin, std::string_view url) {
+  if (url.size() > 2048 || !url.starts_with(origin) ||
+      std::any_of(url.begin(), url.end(), [](unsigned char c) { return c <= 0x20 || c >= 0x7f || c == '"' || c == '\\' || c == '#'; }))
+    return false;
+  const auto rest = url.substr(origin.size());
+  if (!rest.starts_with("/upload/")) return false;
+  const auto query = rest.find('?');
+  const auto path = rest.substr(1, (query == std::string_view::npos ? rest.size() : query) - 1);
+  // Every segment is a name: `upload/../` and `upload/%2e%2e/` leave the upload path while they start with it.
+  for (std::size_t at = 0; at <= path.size();) {
+    const auto end = std::min(path.find('/', at), path.size());
+    const auto segment = path.substr(at, end - at);
+    if (segment.empty() || segment == "." || segment == ".." ||
+        !std::all_of(segment.begin(), segment.end(), [](char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-'; }))
+      return false;
+    at = end + 1;
+  }
+  return true;
+}
 
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Start& begin) {
   auto found = route(descriptor, "start");

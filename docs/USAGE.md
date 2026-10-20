@@ -732,7 +732,7 @@ while (auto* state = std::get_if<sp::jobs::State>(&outcome)) {    // journal sta
     - Google's resumable upload: every chunk before the last is a multiple of the session's `granularity` (8 MiB), and the last one completes the file. If a chunk's answer is lost, `files::Query` reads how many bytes Google holds.
     - `files::Cancel` drops an unfinished upload.
 
-    The session is a plain value to journal between steps. Google's upload URL lets anyone write the file without the API key, so keep the session as private as a credential.
+    The session is a plain value to journal between steps. Google's upload URL lets anyone write the file without the API key, so keep the session as private as a credential. A URL is accepted only under the origin's `/upload/` path, by names (no `.`, `..`, empty or encoded segment): `files::upload_url` checks one the way the encoder does. A file, batch, upload or job id of `.` or `..` is refused, as it would move the request to another path.
   `files::media(file, origin, now)` makes the `Media::file` reference a chat request names: Google's URI, or the OpenAI or Anthropic id, with the MIME type. It refuses a file of another origin, one not yet active (Google processes video first), and one that has expired. None of these calls is charged. An upload is not sent again once it may have reached the provider, unless the retry policy accepts duplicate risk; a read is retried.
 
 ```cpp

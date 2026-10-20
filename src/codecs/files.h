@@ -179,6 +179,9 @@ class SessionCodec final : public endpoints::Codec {
 };
 // A session, and the size of the part a call sends, as the JSON a step's decoder reads back.
 std::string session_document(const Session&, std::uint64_t part = 0);
+// Whether `url` is a Google resumable upload URL at `origin`: under the origin's `/upload/` path, whose segments are
+// names (no `.`, `..`, empty or percent-encoded segment), without control characters, quotes or a fragment.
+bool upload_url(std::string_view origin, std::string_view url);
 Outcome typed(const sp::Outcome&);
 ProgressOutcome typed_progress(const sp::Outcome&);
 PageOutcome typed_page(const sp::Outcome&);

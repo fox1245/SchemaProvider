@@ -114,6 +114,18 @@ void requests() {
   CHECK(encoded(google(), batches::Get{"batches/007px40llh0dun3cnjhu2le17battr0ufiui"}).path == "/v1beta/batches/007px40llh0dun3cnjhu2le17battr0ufiui");
   CHECK(refused(openai_chat(), batches::Delete{"batch_1"}) == ErrorKind::Unsupported);
   CHECK(refused(google(), batches::Get{"operations/x"}) == ErrorKind::InvalidRequest);
+  // `.` and `..` are made of token characters, but a request for them leaves the batches path.
+  for (const char* id : {".", ".."}) {
+    CHECK(refused(openai_chat(), batches::Get{id}) == ErrorKind::InvalidRequest);
+    CHECK(refused(openai_chat(), batches::Cancel{id}) == ErrorKind::InvalidRequest);
+    CHECK(refused(anthropic(), batches::Get{id}) == ErrorKind::InvalidRequest);
+    CHECK(refused(anthropic(), batches::Cancel{id}) == ErrorKind::InvalidRequest);
+    CHECK(refused(anthropic(), batches::Delete{id}) == ErrorKind::InvalidRequest);
+    CHECK(refused(google(), batches::Get{std::string("batches/") + id}) == ErrorKind::InvalidRequest);
+    CHECK(refused(google(), batches::Cancel{std::string("batches/") + id}) == ErrorKind::InvalidRequest);
+    CHECK(refused(google(), batches::Delete{std::string("batches/") + id}) == ErrorKind::InvalidRequest);
+  }
+  CHECK(encoded(openai_chat(), batches::Get{"batch..1"}).path == "/v1/batches/batch..1");
 }
 
 batches::Outcome batch_of(const descriptor::ValidatedDescriptor& d, std::string_view body, batches::Codec::Kind kind = batches::Codec::Kind::Batch) {
@@ -149,6 +161,13 @@ void batch_objects() {
   CHECK(refused(google(), batches::Results{gemini}) == ErrorKind::InvalidRequest);   // its results are inline
   auto foreign = claude; foreign.origin = "https://api.openai.com";
   CHECK(refused(anthropic(), batches::Results{foreign}) == ErrorKind::InvalidRequest);
+  // The results file is a file id, not a dot segment.
+  auto dotted = openai; dotted.output_file = "..";
+  CHECK(refused(openai_chat(), batches::Results{dotted}) == ErrorKind::InvalidRequest);
+  auto dotted_file = gemini; dotted_file.output_file = "files/..";
+  CHECK(refused(google(), batches::Results{dotted_file}) == ErrorKind::InvalidRequest);
+  auto dotted_batch = claude; dotted_batch.id = "..";
+  CHECK(refused(anthropic(), batches::Results{dotted_batch}) == ErrorKind::InvalidRequest);
 }
 
 void result_lines() {

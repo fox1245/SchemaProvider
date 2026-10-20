@@ -6,8 +6,9 @@
 namespace sp::jobs {
 namespace {
 Error bad(std::string message) { return Error{ErrorKind::InvalidRequest, std::move(message)}; }
+// A path segment the handle names; `.` and `..` would move the request elsewhere.
 bool token(std::string_view value) {
-  return !value.empty() && value.size() <= 128 && std::all_of(value.begin(), value.end(), [](char c) {
+  return !value.empty() && value.size() <= 128 && value != "." && value != ".." && std::all_of(value.begin(), value.end(), [](char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == ':' || c == '.' || c == '_' || c == '-';
   });
 }
