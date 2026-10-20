@@ -3,8 +3,11 @@
 #include "descriptor/policy.h"
 #include "json/json.h"
 #include "sp/config_defaults.h"
+#include <algorithm>
 #include <chrono>
+#include <clocale>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <random>
@@ -163,6 +166,80 @@ void layers_merge_member_by_member() {
     CHECK(diff_catalogues(*c, *c).empty());
 }
 
+// The text and the digest of a catalogue follow its content, not the process locale.
+void canonical_text_ignores_the_locale() {
+    constexpr std::string_view models = R"([{"id":"m","defaults":{"openai.chat":{"temperature":0.7,"top_p":0.95},"google.generate":{"temperature":1e-7}}}])";
+    const auto reference = catalogue(models);
+    if (!reference) return;
+    const auto text = reference->to_json();
+    CHECK(text.find("\"temperature\":0.7") != std::string::npos && text.find("\"top_p\":0.95") != std::string::npos);
+    CHECK(text.find("\"temperature\":1e-07") != std::string::npos);
+
+    const char* saved_name = std::setlocale(LC_NUMERIC, nullptr);
+    const std::string saved = saved_name ? saved_name : "C";
+    bool comma = false;
+    for (const char* name : {"de_DE.UTF-8", "de_DE.utf8", "de_DE", "fr_FR.UTF-8", "fr_FR.utf8", "fr_FR", "nl_NL.UTF-8", "nl_NL.utf8"}) {
+        if (!std::setlocale(LC_NUMERIC, name)) continue;
+        char probe[16];
+        std::snprintf(probe, sizeof probe, "%.1f", 0.5);
+        if (std::strchr(probe, ',')) { comma = true; break; }
+    }
+    if (!comma) {
+        std::setlocale(LC_NUMERIC, saved.c_str());
+        std::puts("note: no decimal-comma locale is installed; the locale check was skipped");
+        return;
+    }
+    // Loading, writing, merging and rebuilding all give the text and digest the C locale gives.
+    const auto loaded = catalogue(models);
+    CHECK(loaded && loaded->to_json() == text && loaded->digest() == reference->digest());
+    const CatalogueSnapshot layers[]{reference, reference};
+    auto merged = merge_catalogues(layers);
+    CHECK(std::holds_alternative<CatalogueSnapshot>(merged) && std::get<CatalogueSnapshot>(merged)->digest() == reference->digest());
+    auto rebuilt = make_catalogue(reference->entries());
+    CHECK(std::holds_alternative<CatalogueSnapshot>(rebuilt) && std::get<CatalogueSnapshot>(rebuilt)->digest() == reference->digest());
+    CHECK(loaded && loaded->entry("m")->defaults.size() == 2 && loaded->entry("m")->defaults[1].temperature == std::optional<std::optional<double>>(0.7));
+    std::setlocale(LC_NUMERIC, saved.c_str());
+}
+
+// Each list member of an entry is a set: the order it is listed in changes nothing.
+void list_order_changes_nothing() {
+    const auto ordered = catalogue(R"([{"id":"m","families":["anthropic.messages","openai.chat"],"origins":["https://a.example.test","https://b.example.test"],
+        "aliases":["m-a","m-b"],"served_as":["m-x","m-y"],"input_modalities":["image","text"],"output_modalities":["audio","text"],
+        "methods":["countTokens","generateContent"],"parameters":["temperature","tools","top_p"]}])");
+    const auto reversed = catalogue(R"([{"id":"m","families":["openai.chat","anthropic.messages"],"origins":["https://b.example.test","https://a.example.test"],
+        "aliases":["m-b","m-a"],"served_as":["m-y","m-x"],"input_modalities":["text","image"],"output_modalities":["text","audio"],
+        "methods":["generateContent","countTokens"],"parameters":["top_p","tools","temperature"]}])");
+    if (!ordered || !reversed) return;
+    CHECK(ordered->digest() == reversed->digest() && ordered->to_json() == reversed->to_json());
+    CHECK(diff_catalogues(*ordered, *reversed).empty());
+    CHECK(reversed->entry("m")->parameters == std::vector<std::string>({"temperature", "tools", "top_p"}));
+    CHECK(reversed->find("openai.chat", "https://b.example.test", "m-b").relation == ModelRelation::Alias);
+
+    // Entries built in memory in any order give the same catalogue.
+    std::mt19937 random(7);
+    for (int round = 0; round < 24; ++round) {
+        auto entries = ordered->entries();
+        for (auto& entry : entries)
+            for (auto* values : {&entry.families, &entry.origins, &entry.aliases, &entry.served_as, &entry.input_modalities,
+                                 &entry.output_modalities, &entry.methods, &entry.parameters})
+                std::shuffle(values->begin(), values->end(), random);
+        auto built = make_catalogue(std::move(entries));
+        CHECK(std::holds_alternative<CatalogueSnapshot>(built) && std::get<CatalogueSnapshot>(built)->digest() == ordered->digest());
+    }
+
+    // A provider that reorders what it lists does not change the entry it gives.
+    auto page = [](std::string_view parameters) {
+        auto listed = parse_listing(Listing::OpenRouter, std::string(R"({"data":[{"id":"vendor/m","architecture":{"input_modalities":)") +
+                                    std::string(parameters) + "}}]}", "https://openrouter.ai");
+        return std::get<ListingPage>(std::move(listed));
+    };
+    auto first = make_catalogue(page(R"(["text","image","audio"],"output_modalities":["text"],"x":0)").entries);
+    auto second = make_catalogue(page(R"(["audio","text","image"],"output_modalities":["text"],"x":1)").entries);
+    CHECK(std::holds_alternative<CatalogueSnapshot>(first) && std::holds_alternative<CatalogueSnapshot>(second));
+    if (std::holds_alternative<CatalogueSnapshot>(first) && std::holds_alternative<CatalogueSnapshot>(second))
+        CHECK(std::get<CatalogueSnapshot>(first)->digest() == std::get<CatalogueSnapshot>(second)->digest());
+}
+
 void policy_reads_the_catalogue() {
     const auto policy = builtin_policy();
     CHECK(policy->catalogue() == builtin_catalogue());
@@ -279,6 +356,8 @@ int main() {
         lookup_ranks_names_then_profiles();
         loader_is_closed_and_bounded();
         layers_merge_member_by_member();
+        canonical_text_ignores_the_locale();
+        list_order_changes_nothing();
         policy_reads_the_catalogue();
         bundle_carries_the_catalogue();
         catalogue_files();

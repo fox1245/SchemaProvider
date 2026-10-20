@@ -3,9 +3,8 @@
 #include "json/json.h"
 #include "sp/config_defaults.h"
 #include <algorithm>
+#include <charconv>
 #include <cmath>
-#include <cstdio>
-#include <cstdlib>
 #include <fstream>
 #include <map>
 #include <stdexcept>
@@ -103,6 +102,8 @@ std::optional<std::string> optional_text(Value value, const std::string& pointer
   if (!present(value)) return std::nullopt;
   return text(value, pointer, check, expected);
 }
+// Every list member of an entry is a set. It is kept sorted, so the order a provider or a file
+// happens to list the items in changes neither the canonical text, the digest nor the diff.
 std::vector<std::string> list(Value value, const std::string& pointer, bool (*check)(std::string_view) noexcept,
                               std::string_view expected) {
   std::vector<std::string> out;
@@ -114,6 +115,7 @@ std::vector<std::string> list(Value value, const std::string& pointer, bool (*ch
     if (std::find(out.begin(), out.end(), item) != out.end()) fail(pointer, "unique items");
     out.push_back(std::move(item));
   }
+  std::sort(out.begin(), out.end());
   return out;
 }
 std::optional<std::uint64_t> positive(Value value, const std::string& pointer) {
@@ -244,13 +246,11 @@ void put_number(std::string& out, std::string_view key, const std::optional<std:
   if (value) out += ',' + json::quote(key) + ':' + std::to_string(*value);
 }
 std::string number_text(double value) {
-  // Shortest text that reads back as the same double.
+  // Shortest text that reads back as the same double. to_chars ignores the C locale, where
+  // printf would write a decimal comma that is not JSON.
   char buffer[64];
-  for (int precision = 1; precision <= 17; ++precision) {
-    std::snprintf(buffer, sizeof buffer, "%.*g", precision, value);
-    if (std::strtod(buffer, nullptr) == value) break;
-  }
-  return buffer;
+  const auto written = std::to_chars(buffer, buffer + sizeof buffer, value);
+  return std::string(buffer, written.ptr);
 }
 std::string overlay_json(const DefaultsOverlay& d) {
   std::string out;

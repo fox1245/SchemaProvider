@@ -201,7 +201,7 @@ To use your own catalogue:
 - **Load it.** `load_catalogue(json)` or `load_catalogue_file(path)`, or build one from entries in memory with `make_catalogue(entries)`.
 - **Layer it.** `merge_catalogues(layers)` applies layers in order. An entry with the same id and match is merged member by member, so a later layer replaces only what it sets (one price unit, one default) and adds new entries. Put the provider facts first, verified corrections next and your own file last.
 - **Attach it.** `policy->with_catalogue(catalogue)` returns a new snapshot, and descriptors built from it use the catalogue. A bundle may carry it as `model_catalogue`; without one, the embedded catalogue applies. Entry defaults are checked against the family rules, and a refusal points into the catalogue (`/model_catalogue/models/<id>/defaults/<family>`, with the entry id in place of an index).
-- **Compare it.** `diff_catalogues(before, after)` lists the added, removed and changed entries. `to_json()` is the canonical text, and `digest()` its SHA-256.
+- **Compare it.** `diff_catalogues(before, after)` lists the added, removed and changed entries. `to_json()` is the canonical text, and `digest()` its SHA-256. The text does not depend on the C locale (a number never gets a decimal comma) or on the order of the list members, which a catalogue keeps sorted, so the digest and the diff follow the content only.
 
 The catalogue is admission data: it changes the policy's content digest, not its replay identity, so a new catalogue keeps sealed history replayable.
 
