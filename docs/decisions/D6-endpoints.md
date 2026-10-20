@@ -14,7 +14,7 @@ The endpoints differ from the chat families in shape, not in what a host needs f
 - **Results.** Typed per endpoint, keeping the raw response document. A downloaded body can be written to a file as it arrives; the result then keeps its content type, size and SHA-256 instead of the bytes.
 - **Admission.** Closed policy facts per endpoint name the origins, the paths and the schema of the members a request may add beside the typed ones. Codecs are compiled per shape. Models come from the request and the host's catalogue; as for the chat families, the catalogue never refuses a model, and the provider judges one it does not know.
 - **Jobs.** An asynchronous job is a journalable `jobs::Handle` value, advanced by ordinary submit, poll, cancel, download and delete calls. The Interactions background lifecycle keeps its chat form; a handle can be projected from a pending interaction, so a host has one job vocabulary.
-- **Money.** An endpoint call that costs money when the provider accepts it is never retried once it may have reached the provider. It is retried only when it provably never did, or when the provider refused it before accepting it (429, 503). Polls, gets and downloads keep the ordinary budget. A dispatched call with no outcome is never resubmitted automatically.
+- **Money.** An endpoint call that costs money when the provider accepts it is never retried once it may have reached the provider. It is retried only when it provably never did, or when the provider refused it before accepting it with a complete 429 or 503 answer. The refusal is retried under an enabled retry policy without the duplicate-billing opt-in, and its `retry_safety` is `RejectedBeforeOutput`; the opt-in lets no other failure of such a call through. Polls, gets and downloads keep the ordinary budget. A dispatched call with no outcome is never resubmitted automatically.
 - **Streaming.** Buffered first. Results are shaped so a later stream (partial images, speech and transcript deltas) extends them without a new result type.
 - **Scope of 0.4.0.** Image generation and edits (OpenAI and OpenRouter) and decisions (OpenRouter and OpenAI), which is what NeoGraph's deleted clients covered. Veo is not ported: its preview models end on 2026-10-22, and Gemini Omni through Interactions replaces it. The other endpoints follow in 0.4.x.
 
@@ -42,5 +42,5 @@ A provider whose endpoint needs state the client cannot share (a separate creden
 - Tests:
   - the chat request and outcome layouts are unchanged by the endpoint types;
   - an endpoint call is refused at prepare, with no I/O, for an origin, path or member its fact does not admit;
-  - a charge-on-accept call that may have reached the provider is attempted once.
+  - a charge-on-accept call that may have reached the provider is attempted once, with the duplicate-billing opt-in on or off, unless the provider answered 429 or 503, which is retried with it off too.
 - The live e2e report carries one call per endpoint of the slice.

@@ -886,11 +886,15 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
       auto retry = *options.retry;
       // A read (a job's poll or download) has no charge to duplicate.
       if (read_only) retry.allow_duplicate_billing_risk = true;
-      auto at = available ? retry_at(failure->error, retry, attempts, executor->now(), deadline, random) : std::nullopt;
-      // An endpoint call the provider charges for once it accepts it is retried only when it provably never
-      // reached the provider, or when the provider refused it before accepting it (D6).
-      if (at && charge_on_accept && failure->error.retry_safety != RetrySafety::NotSent &&
-          failure->error.http_status != 429 && failure->error.http_status != 503) at.reset();
+      // An endpoint call the provider charges for once it accepts it is attempted again only when it never
+      // reached the provider, or when the provider refused it before accepting it: a complete 429 or 503 answer
+      // (D6). The refusal needs no duplicate-billing opt-in, and the opt-in lets no other failure through.
+      const bool refused = charge_on_accept && wire.status == transport::Status::Completed &&
+          (failure->error.http_status == 429 || failure->error.http_status == 503);
+      if (refused && failure->error.retry_safety == RetrySafety::PossiblyAccepted)
+        failure->error.retry_safety = RetrySafety::RejectedBeforeOutput;
+      const bool repeatable = !charge_on_accept || refused || failure->error.retry_safety == RetrySafety::NotSent;
+      auto at = available && repeatable ? retry_at(failure->error, retry, attempts, executor->now(), deadline, random) : std::nullopt;
       if (at) {
         prior_usage_unknown = prior_usage_unknown || !prior_attempt_proves_no_usage(*failure);
         pending_failure = std::move(outcome);
