@@ -49,6 +49,7 @@ const server = http.createServer((req, res) => {
   const [, scenario, ...rest] = url.pathname.split('/');
   const path = '/' + rest.join('/');
   const h = req.headers;
+  if (listingExtras(scenario, path, h, res)) return;
   if (scenario === 'broken') return send(res, 500, { error: { message: 'synthetic outage' } });
   if (scenario === 'notjson') return send(res, 200, 'not a listing');
   if (scenario.startsWith('openrouter')) {
@@ -81,3 +82,44 @@ const server = http.createServer((req, res) => {
 server.listen(0, '127.0.0.1', () => process.stdout.write(JSON.stringify({ port: server.address().port }) + '\n'));
 process.stdin.on('end', () => server.close(() => process.exit(0)));
 process.stdin.resume();
+
+// Listings a refresh has to fail on, or to take care with: empty, shrunk, with a page token that cannot
+// continue them, too large for a catalogue, listed by two sources, or slow. Each checks its credential.
+const ids = (prefix, count) => Array.from({ length: count }, (_, i) => ({ id: `${prefix}${i}` }));
+const openaiList = (data) => ({ object: 'list', data });
+const geminiList = (names, next) => ({
+  models: names.map((name) => ({ name: `models/${name}`, supportedGenerationMethods: ['generateContent'] })),
+  ...(next === undefined ? {} : { nextPageToken: next }),
+});
+const extras = {
+  'openai-empty': { kind: 'openai', body: () => openaiList([]) },
+  'openai-large': { kind: 'openai', body: () => openaiList(ids('large-', 6)) },
+  'openai-half': { kind: 'openai', body: () => openaiList(ids('large-', 3)) },
+  'openai-small': { kind: 'openai', body: () => openaiList(ids('large-', 2)) },
+  'openai-huge': { kind: 'openai', body: () => openaiList(ids('huge-', 16385)) },
+  'openai-wide-a': { kind: 'openai', body: () => openaiList(ids('a-', 10000)) },
+  'openai-wide-b': { kind: 'openai', body: () => openaiList(ids('b-', 10000)) },
+  'openai-stall': { kind: 'openai', delay: 3000, body: () => openaiList(ids('late-', 1)) },
+  'openai-shared': { kind: 'openai', body: () => openaiList([{ id: 'shared-model' }, { id: 'solo-openai' }]) },
+  'openai-shared-2': { kind: 'openai', body: () => openaiList([{ id: 'solo-openai' }]) },
+  'gemini-empty': { kind: 'gemini', body: () => ({}) },
+  'gemini-token-empty': { kind: 'gemini', body: () => geminiList(['gemini-partial'], '') },
+  'gemini-token-space': { kind: 'gemini', body: () => geminiList(['gemini-partial'], 'two words') },
+  'gemini-token-long': { kind: 'gemini', body: () => geminiList(['gemini-partial'], 'x'.repeat(2000)) },
+  'gemini-shared': { kind: 'gemini', body: () => geminiList(['shared-model']) },
+  'gemini-shared-2': { kind: 'gemini', body: () => geminiList(['gemini-other']) },
+  'anthropic-empty': { kind: 'anthropic', body: () => ({ data: [], has_more: false }) },
+};
+function listingExtras(scenario, path, h, res) {
+  const extra = extras[scenario];
+  if (!extra) return false;
+  const authorized = {
+    openai: path === '/v1/models' && h.authorization === `Bearer ${keys.openai}`,
+    gemini: path === '/v1beta/models' && h['x-goog-api-key'] === keys.gemini,
+    anthropic: path === '/v1/models' && h['x-api-key'] === keys.anthropic && h['anthropic-version'] === '2023-06-01',
+  }[extra.kind];
+  if (!authorized) send(res, 401, {});
+  else if (extra.delay) setTimeout(() => send(res, 200, extra.body()), extra.delay);
+  else send(res, 200, extra.body());
+  return true;
+}

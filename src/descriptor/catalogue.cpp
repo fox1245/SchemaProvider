@@ -614,8 +614,12 @@ ListingResult parse_listing(Listing listing, std::string_view body, std::string_
           e->methods = listed_tokens(model.get("supportedGenerationMethods"));
           if (contains(e->methods, "generateContent")) e->families = {"google.generate", "google.interactions"};
         }
-      if (const auto next = root.get("nextPageToken"); next.is_string() && page_token(next.as_string()))
+      // Gemini leaves the token out on the last page. One it sends that cannot be sent back would
+      // end the listing early with a partial catalogue, so it fails the listing.
+      if (const auto next = root.get("nextPageToken"); present(next)) {
+        if (!next.is_string() || !page_token(next.as_string())) fail("/nextPageToken", "the token that continues the listing");
         page.next = std::string(next.as_string());
+      }
     } else {
     const auto data = root.get("data");
     if (!data.is_array()) fail("/data", "a model array");

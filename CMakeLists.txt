@@ -523,8 +523,13 @@ if(SP_BUILD_TESTS)
   add_test(NAME media_outputs COMMAND ${sp_test_runner} $<TARGET_FILE:sp_media_outputs_tests>)
   add_test(NAME media_controls COMMAND ${sp_test_runner} $<TARGET_FILE:sp_media_controls_tests>)
   add_test(NAME gemini_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_gemini_tests>)
+  # The tool is run by the test on POSIX hosts only.
+  set(sp_refresh_tool "")
+  if(NOT WIN32)
+    set(sp_refresh_tool $<TARGET_FILE:sp_catalogue_refresh>)
+  endif()
   add_test(NAME catalogue_refresh COMMAND ${sp_test_runner} $<TARGET_FILE:sp_catalogue_refresh_tests>
-           ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/listing_server.mjs)
+           ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/listing_server.mjs ${sp_refresh_tool})
   set_tests_properties(catalogue_refresh PROPERTIES TIMEOUT 300)
   add_test(NAME gemini_runtime COMMAND ${sp_test_runner} $<TARGET_FILE:sp_gemini_runtime_tests>
            ${SP_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/support/gemini_server.mjs)

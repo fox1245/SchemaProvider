@@ -25,6 +25,10 @@ bool allowed_url(std::string_view url) {
     if (url.starts_with(host) && (url.size() == host.size() || url[host.size()] == ':' || url[host.size()] == '/')) return true;
   return false;
 }
+// The time `wait` after `now`; a wait too long to represent is cut to a day.
+std::chrono::steady_clock::time_point after(std::chrono::steady_clock::time_point now, std::chrono::milliseconds wait) {
+  return now + std::min(wait, std::chrono::milliseconds(std::chrono::hours(24)));
+}
 std::string encoded(std::string_view value) {
   static constexpr char hex[] = "0123456789ABCDEF";
   std::string out;
@@ -81,22 +85,49 @@ Page fetch(Transport& transport, HttpRequest request) {
   return std::move(*page);
 }
 
-// Entries that two sources both list (one id at two origins) keep every origin and family.
+// An entry that sources of different kinds both list (one id at two origins) keeps every origin and
+// family, and the name of every listing that gave it, joined with '+' in order ("gemini+openai").
+constexpr char source_separator = '+';
+std::vector<std::string_view> source_names(const CatalogueEntry& entry) {
+  std::vector<std::string_view> names;
+  if (!entry.source) return names;
+  std::string_view rest = *entry.source;
+  for (;;) {
+    const auto cut = rest.find(source_separator);
+    names.push_back(rest.substr(0, cut));
+    if (cut == std::string_view::npos) return names;
+    rest.remove_prefix(cut + 1);
+  }
+}
+bool listed_by(const CatalogueEntry& entry, std::string_view name) {
+  const auto names = source_names(entry);
+  return std::find(names.begin(), names.end(), name) != names.end();
+}
 CatalogueSnapshot combine(const std::vector<CatalogueSnapshot>& layers) {
-  std::map<std::pair<std::string, bool>, std::pair<std::set<std::string>, std::set<std::string>>> scope;
+  struct Scope { std::set<std::string> origins, families, sources; };
+  std::map<std::pair<std::string, bool>, Scope> scope;
   for (const auto& layer : layers)
     for (const auto& entry : layer->entries()) {
-      auto& [origins, families] = scope[{entry.id, entry.prefix}];
-      origins.insert(entry.origins.begin(), entry.origins.end());
-      families.insert(entry.families.begin(), entry.families.end());
+      auto& found = scope[{entry.id, entry.prefix}];
+      found.origins.insert(entry.origins.begin(), entry.origins.end());
+      found.families.insert(entry.families.begin(), entry.families.end());
+      for (const auto name : source_names(entry)) found.sources.emplace(name);
     }
   auto merged = descriptor::merge_catalogues(layers);
   if (auto* error = std::get_if<ConfigError>(&merged)) throw std::move(*error);
   auto entries = std::get<CatalogueSnapshot>(merged)->entries();
   for (auto& entry : entries) {
-    const auto& [origins, families] = scope[{entry.id, entry.prefix}];
+    const auto& [origins, families, sources] = scope[{entry.id, entry.prefix}];
     entry.origins.assign(origins.begin(), origins.end());
     entry.families.assign(families.begin(), families.end());
+    if (!sources.empty()) {
+      std::string joined;
+      for (const auto& name : sources) {
+        if (!joined.empty()) joined += source_separator;
+        joined += name;
+      }
+      entry.source = std::move(joined);
+    }
   }
   auto made = descriptor::make_catalogue(std::move(entries));
   if (auto* error = std::get_if<ConfigError>(&made)) throw std::move(*error);
@@ -106,6 +137,37 @@ CatalogueSnapshot catalogue_of(std::vector<CatalogueEntry> entries) {
   auto made = descriptor::make_catalogue(std::move(entries));
   if (auto* error = std::get_if<ConfigError>(&made)) throw std::move(*error);
   return std::get<CatalogueSnapshot>(std::move(made));
+}
+
+using Refreshed = std::vector<std::pair<std::string, std::string>>;  // (listing name, origin) that listed
+
+// A listed entry is owned by the sources that listed it: every origin it applies at is served by a source
+// that listed this time and is one of the entry's listings.
+bool owned(const CatalogueEntry& entry, const Refreshed& refreshed) {
+  return entry.source && !entry.origins.empty() &&
+         std::all_of(entry.origins.begin(), entry.origins.end(), [&](const std::string& origin) {
+           return std::any_of(refreshed.begin(), refreshed.end(),
+                              [&](const auto& item) { return item.second == origin && listed_by(entry, item.first); });
+         });
+}
+// The entries of the previous catalogue stay unless a source that listed this time owns them; the
+// listings come over them.
+CatalogueSnapshot generated_from(const CatalogueSnapshot& previous, const Refreshed& refreshed,
+                                 const std::vector<CatalogueSnapshot>& fresh) {
+  std::vector<CatalogueEntry> kept;
+  if (previous)
+    for (const auto& entry : previous->entries())
+      if (!owned(entry, refreshed)) kept.push_back(entry);
+  std::vector<CatalogueSnapshot> layers{catalogue_of(std::move(kept))};
+  layers.insert(layers.end(), fresh.begin(), fresh.end());
+  return combine(layers);
+}
+// How many entries of the previous catalogue the source at this origin listed.
+std::size_t listed_before(const CatalogueSnapshot& previous, std::string_view name, std::string_view origin) {
+  if (!previous) return 0;
+  return static_cast<std::size_t>(std::count_if(previous->entries().begin(), previous->entries().end(), [&](const CatalogueEntry& entry) {
+    return listed_by(entry, name) && std::find(entry.origins.begin(), entry.origins.end(), origin) != entry.origins.end();
+  }));
 }
 } // namespace
 
@@ -137,8 +199,10 @@ std::variant<RefreshResult, ConfigError> refresh_catalogue(Transport& transport,
     }
 
     RefreshResult out;
+    const auto deadline = after(std::chrono::steady_clock::now(), request.total_timeout);
     std::vector<CatalogueSnapshot> fresh;
-    std::vector<std::pair<std::string, std::string>> refreshed;  // (source name, origin) that listed
+    Refreshed refreshed;
+    out.generated = generated_from(request.previous, refreshed, fresh);
     for (const auto& [source, url, origin] : planned) {
       SourceReport report;
       report.listing = source.listing;
@@ -147,16 +211,21 @@ std::variant<RefreshResult, ConfigError> refresh_catalogue(Transport& transport,
       std::string next;
       for (;;) {
         if (report.pages == max_pages) { report.error = "listing has more than 64 pages"; break; }
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) { report.error = "refresh deadline passed"; break; }
         HttpRequest http;
         http.method = "GET";
         http.url = page_url(source.listing, url, next);
         http.headers = listing_headers(source.listing, source.api_key);
-        http.deadline = std::chrono::steady_clock::now() + request.page_timeout;
+        http.deadline = std::min(after(now, request.page_timeout), deadline);
         http.ca_file = request.ca_file;
         auto page = fetch(transport, std::move(http));
         ++report.pages;
         report.http_status = page.status;
-        if (page.result.status != Status::Completed) { report.error = "listing request did not complete"; break; }
+        if (page.result.status != Status::Completed) {
+          report.error = std::chrono::steady_clock::now() >= deadline ? "refresh deadline passed" : "listing request did not complete";
+          break;
+        }
         if (page.status != 200) { report.error = "listing answered HTTP " + std::to_string(page.status); break; }
         if (page.too_large) { report.error = "listing page exceeds 32 MiB"; break; }
         auto parsed = descriptor::parse_listing(source.listing, page.body, origin);
@@ -164,33 +233,39 @@ std::variant<RefreshResult, ConfigError> refresh_catalogue(Transport& transport,
         auto& listed = std::get<descriptor::ListingPage>(parsed);
         report.skipped += listed.skipped;
         report.skipped_prices += listed.skipped_prices;
-        pages.push_back(catalogue_of(std::move(listed.entries)));
+        try {
+          pages.push_back(catalogue_of(std::move(listed.entries)));
+        } catch (ConfigError&) { report.error = "listing exceeds the catalogue limits"; break; }
         if (listed.next.empty()) { report.ok = true; break; }
         if (listed.next == next) { report.error = "listing repeated its page token"; break; }
         next = std::move(listed.next);
       }
       if (report.ok) {
-        auto listed = combine(pages);
-        report.models = listed->entries().size();
-        fresh.push_back(std::move(listed));
-        refreshed.emplace_back(descriptor::listing_name(source.listing), origin);
+        const std::string name(descriptor::listing_name(source.listing));
+        try {
+          auto listed = combine(pages);
+          report.models = listed->entries().size();
+          // A listing with no models, or with far fewer than the source gave before, is not taken as
+          // the truth: a proxy, a captive portal or an outage can answer 200 with an empty list.
+          if (!request.allow_drop && report.models == 0) report.error = "listing named no models";
+          else if (!request.allow_drop && static_cast<std::uint64_t>(report.models) * 100 <
+                                              static_cast<std::uint64_t>(listed_before(request.previous, name, origin)) * request.min_kept_percent)
+            report.error = "listing named far fewer models than before";
+          else {
+            // The catalogue has to hold this listing next to the others; if it cannot, only this source fails.
+            auto with_refreshed = refreshed;
+            with_refreshed.emplace_back(name, origin);
+            auto with_fresh = fresh;
+            with_fresh.push_back(std::move(listed));
+            out.generated = generated_from(request.previous, with_refreshed, with_fresh);
+            refreshed = std::move(with_refreshed);
+            fresh = std::move(with_fresh);
+          }
+        } catch (ConfigError&) { report.error = "listing exceeds the catalogue limits"; }
+        report.ok = report.error.empty();
       }
       out.sources.push_back(std::move(report));
     }
-
-    // Entries of the previous catalogue stay unless a source that listed this time owns them.
-    std::vector<CatalogueEntry> kept;
-    if (request.previous)
-      for (const auto& entry : request.previous->entries()) {
-        const bool owned = entry.source && !entry.origins.empty() &&
-                           std::all_of(entry.origins.begin(), entry.origins.end(), [&](const std::string& origin) {
-                             return std::find(refreshed.begin(), refreshed.end(), std::pair{*entry.source, origin}) != refreshed.end();
-                           });
-        if (!owned) kept.push_back(entry);
-      }
-    std::vector<CatalogueSnapshot> layers{catalogue_of(std::move(kept))};
-    layers.insert(layers.end(), fresh.begin(), fresh.end());
-    out.generated = combine(layers);
 
     std::vector<CatalogueSnapshot> overlays{out.generated};
     for (const auto& overlay : request.overlays) if (overlay) overlays.push_back(overlay);
