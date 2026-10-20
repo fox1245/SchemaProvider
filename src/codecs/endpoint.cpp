@@ -54,11 +54,11 @@ std::optional<std::uint64_t> unix_seconds(std::string_view text) {
   return static_cast<std::uint64_t>(seconds);
 }
 std::unique_ptr<Codec> make_codec(std::string_view name, const descriptor::ValidatedDescriptor& descriptor, Accumulator& accumulator,
-                                  std::string requested, SemanticLimits limits) {
+                                  std::string requested, const Context& context, SemanticLimits limits) {
   if (name == "images") return std::make_unique<images::Codec>(descriptor, accumulator, std::move(requested), limits);
   if (name == "decisions") return std::make_unique<decisions::Codec>(descriptor, accumulator, std::move(requested), limits);
-  if (name == "embeddings") return std::make_unique<embeddings::Codec>(descriptor, accumulator, std::move(requested), limits);
-  if (name == "rerank") return std::make_unique<rerank::Codec>(descriptor, accumulator, std::move(requested), limits);
+  if (name == "embeddings") return std::make_unique<embeddings::Codec>(descriptor, accumulator, std::move(requested), limits, context.inputs);
+  if (name == "rerank") return std::make_unique<rerank::Codec>(descriptor, accumulator, std::move(requested), limits, context.inputs, context.results);
   if (name == "moderation") return std::make_unique<moderation::Codec>(descriptor, accumulator, std::move(requested), limits);
   if (name == "speech") return std::make_unique<speech::Codec>(descriptor, accumulator, std::move(requested), limits);
   if (name == "transcription") return std::make_unique<transcription::Codec>(descriptor, accumulator, std::move(requested), limits);

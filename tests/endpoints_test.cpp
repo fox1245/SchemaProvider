@@ -119,6 +119,42 @@ void embedding_endpoints() {
   }
 }
 
+// The results are checked against the call: one vector per input, each index once and in range.
+void embedding_counts() {
+  const auto openai = at("https://api.openai.com"), google = at("https://generativelanguage.googleapis.com");
+  embeddings::Request request{"text-embedding-3-small", {{"a red fox"}, {"a blue whale"}}};
+  const auto wire = encoded<embeddings::Encoded>(embeddings::encode, openai, request);
+  CHECK(wire.context.inputs == 2 && wire.context.results == 0 && wire.context.secret.empty());
+  const auto run = [&](const descriptor::ValidatedDescriptor& d, std::string_view body, std::uint64_t inputs) {
+    Accumulator accumulator;
+    embeddings::Codec codec(d, accumulator, "m", {}, inputs);
+    codec.buffered(body, {});
+    CHECK(accumulator.outcome());
+    return embeddings::typed(*accumulator.outcome());
+  };
+  const auto reason = [](const embeddings::Outcome& outcome) {
+    CHECK(std::holds_alternative<Failure>(outcome) && std::get<Failure>(outcome).error.kind == ErrorKind::ProtocolCorrupt);
+    return std::get<Failure>(outcome).error.reason;
+  };
+  CHECK(std::get<embeddings::Result>(run(openai, R"({"data":[{"index":1,"embedding":[2]},{"index":0,"embedding":[1]}]})", 2)).vectors ==
+        (std::vector<std::vector<float>>{{1.f}, {2.f}}));
+  CHECK(std::get<embeddings::Result>(run(openai, R"({"data":[{"embedding":[1]},{"embedding":[2]}]})", 2)).vectors.size() == 2);   // by position
+  // Fewer vectors than inputs, or more, is not a result.
+  CHECK(reason(run(openai, R"({"data":[{"index":0,"embedding":[1]}]})", 2)) == "embeddings.vectors.count_mismatch");
+  CHECK(reason(run(openai, R"({"data":[{"embedding":[1]},{"embedding":[2]},{"embedding":[3]}]})", 2)) == "embeddings.vectors.count_mismatch");
+  CHECK(reason(run(openai, R"({"data":[]})", 2)) == "embeddings.vectors.count_mismatch");
+  CHECK(reason(run(google, R"({"embeddings":[{"values":[1]}]})", 2)) == "embeddings.vectors.count_mismatch");
+  CHECK(std::get<embeddings::Result>(run(google, R"({"embeddings":[{"values":[1]},{"values":[2]}]})", 2)).vectors.size() == 2);
+  // A repeated index, one out of range, or only some items naming theirs.
+  CHECK(reason(run(openai, R"({"data":[{"index":0,"embedding":[1]},{"index":0,"embedding":[2]}]})", 2)) == "embeddings.vector.index_invalid");
+  CHECK(reason(run(openai, R"({"data":[{"index":0,"embedding":[1]},{"index":7,"embedding":[2]}]})", 2)) == "embeddings.vector.index_invalid");
+  CHECK(reason(run(openai, R"({"data":[{"index":2,"embedding":[1]},{"index":1,"embedding":[2]}]})", 2)) == "embeddings.vector.index_invalid");
+  CHECK(reason(run(openai, R"({"data":[{"index":7,"embedding":[1]},{"embedding":[2]}]})", 2)) == "embeddings.vector.index_invalid");
+  CHECK(reason(run(openai, R"({"data":[{"index":"1","embedding":[1]},{"index":0,"embedding":[2]}]})", 2)) == "embeddings.vector.index_invalid");
+  // A decoder run without the call's input count checks no count.
+  CHECK(std::get<embeddings::Result>(run(openai, R"({"data":[{"index":0,"embedding":[1]}]})", 0)).vectors.size() == 1);
+}
+
 void rerank_endpoint() {
   const auto router = at("https://openrouter.ai");
   rerank::Request request{"cohere/rerank-v3.5", "Which animal lives in the sea?", {"A fox lives in the forest.", "A whale lives in the sea."}};
@@ -141,6 +177,68 @@ void rerank_endpoint() {
         ranked.usage.extra.at("search_units").value == 1 && ranked.usage.provider_cost.total->nano_usd == 2'000'000u);
   const auto failed = decoded<rerank::Codec>(rerank::typed, router, R"({"results":[{"index":"1"}]})", "m");
   CHECK(std::holds_alternative<Failure>(failed));
+  CHECK(wire.context.inputs == 2 && wire.context.results == 1);
+}
+
+// The results are checked against the call, and listed most relevant first whatever order the provider sent them in.
+void rerank_results() {
+  const auto router = at("https://openrouter.ai");
+  rerank::Request request{"cohere/rerank-v3.5", "Which animal lives in the sea?", {"A fox.", "A whale.", "A crab."}};
+  const auto all = encoded<rerank::Encoded>(rerank::encode, router, request);
+  CHECK(all.context.inputs == 3 && all.context.results == 0);
+  const auto run = [&](std::string_view body, std::uint64_t documents, std::uint64_t top) {
+    Accumulator accumulator;
+    rerank::Codec codec(router, accumulator, "m", {}, documents, top);
+    codec.buffered(body, {});
+    CHECK(accumulator.outcome());
+    return rerank::typed(*accumulator.outcome());
+  };
+  const auto reason = [](const rerank::Outcome& outcome) {
+    CHECK(std::holds_alternative<Failure>(outcome) && std::get<Failure>(outcome).error.kind == ErrorKind::ProtocolCorrupt);
+    return std::get<Failure>(outcome).error.reason;
+  };
+  // Unordered scores are sorted; equal scores keep the provider's order; the raw document keeps the provider's order.
+  const auto sorted = std::get<rerank::Result>(run(R"({"results":[{"index":0,"relevance_score":0.1},{"index":2,"relevance_score":0.9},{"index":1,"relevance_score":0.9}]})", 3, 0));
+  CHECK(sorted.ranked.size() == 3 && sorted.ranked[0].index == 2 && sorted.ranked[1].index == 1 && sorted.ranked[2].index == 0);
+  CHECK(sorted.raw_events[0].payload->root().get("results").at(0).get("index").as_uint() == 0);
+  // The top results the call asked for (all of them when it asked for none, and no more than there are documents).
+  CHECK(std::get<rerank::Result>(run(R"({"results":[{"index":1,"relevance_score":0.9},{"index":0,"relevance_score":0.5}]})", 3, 2)).ranked.size() == 2);
+  CHECK(std::get<rerank::Result>(run(R"({"results":[{"index":1,"relevance_score":0.9},{"index":0,"relevance_score":0.5},{"index":2,"relevance_score":0.1}]})", 3, 10)).ranked.size() == 3);
+  CHECK(reason(run(R"({"results":[{"index":1,"relevance_score":0.9}]})", 3, 0)) == "rerank.results.count_mismatch");
+  CHECK(reason(run(R"({"results":[{"index":1,"relevance_score":0.9},{"index":0,"relevance_score":0.5},{"index":2,"relevance_score":0.1}]})", 3, 2)) == "rerank.results.count_mismatch");
+  CHECK(reason(run(R"({"results":[]})", 3, 0)) == "rerank.results.count_mismatch");
+  // A repeated index, or one that names no document.
+  CHECK(reason(run(R"({"results":[{"index":1,"relevance_score":0.9},{"index":1,"relevance_score":0.5},{"index":2,"relevance_score":0.1}]})", 3, 0)) == "rerank.result.index_invalid");
+  CHECK(reason(run(R"({"results":[{"index":1,"relevance_score":0.9},{"index":0,"relevance_score":0.5},{"index":3,"relevance_score":0.1}]})", 3, 0)) == "rerank.result.index_invalid");
+  CHECK(reason(run(R"({"results":[{"index":1,"relevance_score":0.9},{"index":1,"relevance_score":0.5}]})", 0, 0)) == "rerank.result.index_invalid");
+  // A decoder run without the call's counts checks only that an index is not repeated.
+  CHECK(std::get<rerank::Result>(run(R"({"results":[{"index":9,"relevance_score":0.9}]})", 0, 0)).ranked.size() == 1);
+}
+
+// Through the runtime: the counts of the call reach its decoder.
+void runtime_checks() {
+  auto executor = std::make_shared<QueueExecutor>();
+  auto wire = std::make_shared<ScriptTransport>();
+  runtime::Options options;
+  options.api_key = "synthetic-key";
+  auto client = runtime::detail::ClientAccess::make(at("https://openrouter.ai"), options, executor, wire);
+  runtime::RunOptions run;
+  run.retry = runtime::RetryPolicy{true, false, 3, 0ms, 0ms};
+  const auto run_for = [&] { auto value = run; value.deadline = executor->now() + 10s; return value; };
+  const auto complete = [&](auto request) { auto call = client.start(client.prepare(std::move(request), run_for())); executor->drain(); return call.join(); };
+  wire->script = [](Exchange& e) { e.reply(200, "application/json", R"({"data":[{"index":0,"embedding":[1]}]})"); };
+  auto vectors = complete(embeddings::Request{"openai/text-embedding-3-small", {{"a"}, {"b"}}});
+  CHECK(std::holds_alternative<Failure>(vectors) && std::get<Failure>(vectors).error.reason == "embeddings.vectors.count_mismatch");
+  wire->script = [](Exchange& e) { e.reply(200, "application/json", R"({"data":[{"index":1,"embedding":[2]},{"index":0,"embedding":[1]}]})"); };
+  vectors = complete(embeddings::Request{"openai/text-embedding-3-small", {{"a"}, {"b"}}});
+  CHECK(std::holds_alternative<embeddings::Result>(vectors) && std::get<embeddings::Result>(vectors).vectors.size() == 2);
+  wire->script = [](Exchange& e) { e.reply(200, "application/json", R"({"results":[{"index":0,"relevance_score":0.2},{"index":1,"relevance_score":0.8}]})"); };
+  rerank::Request ranking{"cohere/rerank-v3.5", "q", {"a", "b"}};
+  auto ranked = complete(ranking);
+  CHECK(std::holds_alternative<rerank::Result>(ranked) && std::get<rerank::Result>(ranked).ranked[0].index == 1);
+  ranking.top = 1;
+  ranked = complete(ranking);
+  CHECK(std::holds_alternative<Failure>(ranked) && std::get<Failure>(ranked).error.reason == "rerank.results.count_mismatch");
 }
 
 void moderation_endpoint() {
@@ -390,6 +488,6 @@ void mime_parameters_with_whitespace() {
 }
 
 int main() {
-  try { embedding_endpoints(); rerank_endpoint(); fact_headers(); moderation_endpoint(); speech_endpoint(); transcription_endpoint(); generation_endpoint(); mime_parameters_with_whitespace(); std::cout << "endpoint properties passed\n"; return 0; }
+  try { embedding_endpoints(); embedding_counts(); rerank_endpoint(); rerank_results(); runtime_checks(); fact_headers(); moderation_endpoint(); speech_endpoint(); transcription_endpoint(); generation_endpoint(); mime_parameters_with_whitespace(); std::cout << "endpoint properties passed\n"; return 0; }
   catch (const std::exception& error) { std::cerr << "endpoint test failed: " << error.what() << '\n'; return 1; }
 }

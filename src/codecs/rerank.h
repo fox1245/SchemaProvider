@@ -24,7 +24,8 @@ struct Ranked {
   double relevance = 0;
 };
 struct Result {
-  // Most relevant first, as the provider ranked them.
+  // Most relevant first; documents of equal relevance keep the provider's order. The response document in
+  // `raw_events` keeps the provider's own order.
   std::vector<Ranked> ranked;
   std::string id, provider;
   Usage usage;
@@ -38,9 +39,12 @@ using Encoded = endpoints::Encoded;
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor&, const Request&);
 
 using Close = endpoints::Close;
+// Checks one buffered response against the call: every result names a document of the request once, and there are as
+// many as the call asked for (`top`, or every document; zero `documents`: unchecked).
 class Codec final : public endpoints::Codec {
  public:
-  Codec(const descriptor::ValidatedDescriptor&, Accumulator&, std::string requested, SemanticLimits = {});
+  Codec(const descriptor::ValidatedDescriptor&, Accumulator&, std::string requested, SemanticLimits = {}, std::uint64_t documents = 0,
+        std::uint64_t top = 0);
   bool buffered(std::string_view body, Close close) override;
  private:
   bool fail(ErrorKind, std::string);
@@ -49,6 +53,7 @@ class Codec final : public endpoints::Codec {
   Accumulator& accumulator_;
   std::string requested_;
   SemanticLimits limits_;
+  std::uint64_t documents_, top_;
 };
 Outcome typed(const sp::Outcome&);
 }  // namespace sp::rerank

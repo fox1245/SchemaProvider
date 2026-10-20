@@ -20,6 +20,13 @@ struct FileSlice {
   std::uint64_t offset = 0, size = 0;
   std::string sha256{};
 };
+// What the runtime hands a call's decoder beside the model, and no accessor of the prepared call shows: how many
+// inputs the call sent and how many results it asked for (zero when it states none), and a value that must not reach
+// a journal (a chunked upload's session URL).
+struct Context {
+  std::uint64_t inputs = 0, results = 0;
+  std::string secret{};
+};
 // An encoded endpoint call: the path at the origin, the body and its media type, what the call accepts back, the
 // model it names, the authentication header, and whether the provider charges once it accepts it.
 struct Encoded {
@@ -36,6 +43,7 @@ struct Encoded {
   // An upload read from a file as it is sent: `body`, then the slice, then `body_suffix`.
   std::optional<FileSlice> file{};
   std::string body_suffix{};
+  Context context{};
 };
 // A download the runtime wrote to a file: where, how many bytes, and their SHA-256 (hex).
 struct Sink { std::string path; std::uint64_t bytes = 0; std::string sha256; };
@@ -61,5 +69,5 @@ class Codec {
 };
 // The decoder of the endpoint `name` (`images`, `decisions`, ...), or null for a name without one.
 std::unique_ptr<Codec> make_codec(std::string_view name, const descriptor::ValidatedDescriptor&, Accumulator&,
-                                  std::string requested, SemanticLimits);
+                                  std::string requested, const Context&, SemanticLimits);
 }  // namespace sp::endpoints
