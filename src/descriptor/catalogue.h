@@ -28,7 +28,10 @@ struct DefaultsOverlay {
   std::optional<std::optional<double>> temperature, top_p;
 };
 
-// One model, or with `prefix` a profile for every id that starts with `id`.
+// One model, or with `prefix` a profile for every id that starts with `id`. The list members
+// (families, origins, aliases, served_as and the provider-reported tokens) are sets: a catalogue
+// keeps each one sorted, so the order of a listing or a file never shows in `to_json()`, the
+// digest or a diff.
 struct CatalogueEntry {
   std::string id;
   bool prefix = false;
@@ -41,8 +44,8 @@ struct CatalogueEntry {
   std::optional<std::string> alias_of;
   std::optional<std::string> name, lifecycle, retires_at, source;
   std::optional<std::uint64_t> context_window, input_limit, output_limit;
-  // Provider-reported tokens, kept as listed: modalities, methods (Gemini
-  // supportedGenerationMethods) and supported request parameters.
+  // Provider-reported tokens: modalities, methods (Gemini supportedGenerationMethods) and
+  // supported request parameters.
   std::vector<std::string> input_modalities, output_modalities, methods, parameters;
   // Whether the model accepts `temperature`. Unset defers to the family's sampling rules.
   std::optional<bool> temperature;

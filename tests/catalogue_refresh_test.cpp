@@ -68,7 +68,7 @@ void all_four_listings(transport::Transport& transport, Peer& peer, descriptor::
   require(c.entry("veo-test") && c.entry("veo-test")->families.empty() && has(c.entry("veo-test")->methods, "predictLongRunning"),
           "a Gemini model without generateContent lists no chat family");
   const auto* claude = c.entry("claude-test-a");
-  require(claude && claude->input_limit == 200000u && claude->input_modalities == std::vector<std::string>{"text", "image"},
+  require(claude && claude->input_limit == 200000u && claude->input_modalities == std::vector<std::string>{"image", "text"},
           "Anthropic limits and capabilities");
   require(c.entry("claude-test-b")->retires_at == std::optional<std::string>("2026-12-01T00:00:00Z") &&
           c.entry("claude-test-b")->lifecycle == std::optional<std::string>("deprecated"), "Anthropic lifecycle");
