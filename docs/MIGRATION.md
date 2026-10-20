@@ -235,7 +235,7 @@ Messages compaction (#53):
 
 Realtime sessions (D8, #60):
 - **Sessions.** `<codecs/realtime.h>` adds `realtime::Setup`, the commands, the events, `realtime::Codec` and `realtime::connect`; `<transport/realtime_session.h>` adds `realtime::Session`, `realtime::Options`, `realtime::Outcome` and `realtime::open`. The built-in policy admits Google Live and OpenAI Realtime.
-- **Reason codes.** New sources `realtime` and `request.realtime`; the session adds `runtime.realtime.inbound_overflow`, `runtime.realtime.lease_refused`, `runtime.realtime.audio_too_large` and `runtime.realtime.closed`.
+- **Reason codes.** New sources `realtime` and `request.realtime`; the session adds `runtime.realtime.inbound_overflow`, `runtime.realtime.lease_refused`, `runtime.realtime.audio_too_large`, `runtime.realtime.closed`, `runtime.realtime.cancelled` and `runtime.realtime.refused`.
 
 Non-chat endpoints (D6, #61):
 - **Decision.** [D6](decisions/D6-endpoints.md) supersedes D2: non-chat endpoints run on `runtime::Client` with request and result types of their own.

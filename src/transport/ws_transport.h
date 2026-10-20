@@ -11,6 +11,8 @@
 //  * on_open runs once the server switched protocols. Messages sent before it are queued and
 //    written after the handshake.
 //  * A Ping is answered with a Pong of the same payload. A Pong is not delivered.
+//  * Frames are written in the order they were queued. A write the connection could not take yet is retried as it
+//    was, and frames queued meanwhile follow it.
 //  * The session completes (Status::Completed) only through a closing handshake, started by
 //    either side; WsResult::clean tells whether both Close frames were exchanged. Losing the
 //    connection without a Close frame is Status::Failed with close_code 1006 (Abnormal).

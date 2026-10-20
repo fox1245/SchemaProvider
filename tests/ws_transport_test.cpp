@@ -427,6 +427,59 @@ TEST(tls_session_with_a_private_ca) {
   CHECK(!rec.messages.empty() && rec.messages[0].second == "over tls");
 }
 
+// A peer that stops reading leaves a TLS write unfinished (CURLE_AGAIN), and OpenSSL refuses to retry it with another
+// buffer. Messages queued meanwhile, and the Pong and the Close after them, wait behind the pending write and arrive
+// in order.
+TEST(tls_send_backpressure_keeps_the_pending_write) {
+  if (g_tls_port == 0) {
+    std::fprintf(stderr, "note: TLS peer unavailable (no openssl); skipped\n");
+    return;
+  }
+  Transport transport;
+  Recorder rec;
+  WsRequest req;
+  req.url = "wss://localhost:" + std::to_string(g_tls_port) + "/hold-reading";
+  req.ca_file = g_ca;
+  req.deadline = Clock::now() + 30s;
+  auto session = open_websocket(transport, std::move(req), rec.callbacks());
+  CHECK(rec.wait_open());
+  std::vector<std::string> expected;
+  // 32 MiB: more than the connection holds while the peer reads nothing.
+  for (int i = 0; i < 64; ++i) {
+    CHECK(session.send_text(std::string(512 * 1024, 'a')));
+    expected.push_back("text:" + std::to_string(512 * 1024));
+  }
+  std::this_thread::sleep_for(300ms);
+  for (int i = 0; i < 8; ++i) {
+    CHECK(session.send_text(std::string(100 + i, 'b')));
+    expected.push_back("text:" + std::to_string(100 + i));
+  }
+  std::this_thread::sleep_for(100ms);
+  CHECK(g_peer->command("{\"release\":true}").root().get("released").as_uint() == 1);
+  expected.push_back("pong:held");
+  const auto held = [] {
+    const auto seen = stats();
+    std::vector<std::string> out;
+    for (const auto& item : seen.root().get("held").elements()) out.emplace_back(item.as_string());
+    return out;
+  };
+  const auto finished = [&] {
+    std::lock_guard lock(rec.mu);
+    return rec.done_calls > 0;
+  };
+  // The Pong is the last frame before the Close; a failed session ends the wait.
+  for (const auto until = Clock::now() + 20s; Clock::now() < until && !finished();) {
+    const auto seen = held();
+    if (!seen.empty() && seen.back() == "pong:held") break;
+    std::this_thread::sleep_for(50ms);
+  }
+  session.close();
+  const auto r = session.join();
+  expected.push_back("close:1000");
+  CHECK(r.transport.status == Status::Completed && r.clean);
+  CHECK(held() == expected);
+}
+
 TEST(untrusted_certificate_fails_tls) {
   if (g_tls_port == 0) return;
   Transport transport;

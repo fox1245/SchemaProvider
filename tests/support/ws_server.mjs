@@ -2,6 +2,7 @@
 // scripted behaviour per request path, over TCP and over TLS with an ephemeral test CA.
 // stdout line 1: {"port":P,"tls_port":T,"ca":"<path>"}; then one JSON reply per stdin command:
 //   {"stats":true} -> what the server observed from clients (close codes, pongs, unmasked frames);
+//   {"release":true} -> the sessions on /hold-reading get a Ping and are read from again.
 //   {"info":true}  -> {"tls_port":T,"ca":"<path>"} (tls_port 0 when openssl is unavailable).
 import net from 'node:net';
 import tls from 'node:tls';
@@ -13,7 +14,10 @@ import { tmpdir } from 'node:os';
 import { createInterface } from 'node:readline';
 
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
-const stats = { handshakes: 0, closes: [], pongs: [], unmasked: 0, messages: 0, realtime: [] };
+const stats = { handshakes: 0, closes: [], pongs: [], unmasked: 0, messages: 0, realtime: [], held: [] };
+// /hold-reading reads nothing after the handshake until {"release":true}, then records the frames it receives, in
+// arrival order, in stats.held (`text:<bytes>`, `binary:<bytes>`, `pong:<payload>`, `close:<code>`).
+const holding = new Set();
 // A realtime session in the shape of OpenAI Realtime (`/v1/realtime`): the types of the client events, in arrival
 // order, are in stats.realtime; `response.create` answers with a turn and its usage; a text item whose text is
 // `flood` answers with eight 64 KiB audio deltas.
@@ -123,6 +127,12 @@ function upgrade(socket, target, headers, rest) {
     socket.end('HTTP/1.1 401 Unauthorized\r\nContent-Type: text/plain\r\nContent-Length: 6\r\nConnection: close\r\n\r\ndenied');
     return;
   }
+  // /reject/<status> refuses the handshake with that status.
+  const refusal = /^\/reject\/(\d{3})$/.exec(path);
+  if (refusal) {
+    socket.end(`HTTP/1.1 ${refusal[1]} Refused\r\nContent-Type: text/plain\r\nContent-Length: 6\r\nConnection: close\r\n\r\ndenied`);
+    return;
+  }
   const key = headers['sec-websocket-key'] || '';
   const accept = path === '/bad-accept' ? 'AAAAAAAAAAAAAAAAAAAAAAAAAAA=' : createHash('sha1').update(key + GUID).digest('base64');
   stats.handshakes += 1;
@@ -139,6 +149,9 @@ function upgrade(socket, target, headers, rest) {
     write(closeFrame(code, reason));
   };
   const onFrame = (opcode, fin, payload) => {
+    if (path === '/hold-reading')
+      stats.held.push(opcode === 8 ? `close:${payload.length >= 2 ? payload.readUInt16BE(0) : 0}`
+        : opcode === 10 ? `pong:${payload}` : opcode === 9 ? 'ping' : `${opcode === 1 ? 'text' : 'binary'}:${payload.length}`);
     if (opcode === 8) {
       const code = payload.length >= 2 ? payload.readUInt16BE(0) : 0;
       stats.closes.push(code);
@@ -155,6 +168,7 @@ function upgrade(socket, target, headers, rest) {
     }
     if (opcode === 9) return;
     stats.messages += 1;
+    if (path === '/hold-reading') return;
     if (path === '/v1/realtime') {
       const event = JSON.parse(payload.toString());
       stats.realtime.push(event.type);
@@ -176,6 +190,11 @@ function upgrade(socket, target, headers, rest) {
   const feed = reader(onFrame);
   socket.on('data', feed);
   if (rest.length) feed(rest);
+  if (path === '/hold-reading') {
+    socket.pause();
+    holding.add(socket);
+    socket.once('close', () => holding.delete(socket));
+  }
 
   if (path === '/v1/realtime') {
     write(frame(1, JSON.stringify({ type: 'session.created', session: { id: 'sess-local' } })));
@@ -240,6 +259,16 @@ async function start() {
     try { command = JSON.parse(line); } catch { process.stdout.write('{"error":"bad command"}\n'); return; }
     if (command.stats) process.stdout.write(JSON.stringify(stats) + '\n');
     else if (command.info) process.stdout.write(JSON.stringify({ tls_port: tlsPort, ca }) + '\n');
+    else if (command.release) {
+      const released = holding.size;
+      for (const socket of holding) {
+        // The Ping is answered behind whatever the client still has queued.
+        if (!socket.destroyed) socket.write(frame(9, 'held'));
+        socket.resume();
+      }
+      holding.clear();
+      process.stdout.write(JSON.stringify({ released }) + '\n');
+    }
     else process.stdout.write('{"error":"unknown command"}\n');
   });
   input.on('close', () => {

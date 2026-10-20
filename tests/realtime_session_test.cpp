@@ -19,7 +19,7 @@ using namespace std::chrono_literals;
 #define CHECK(condition) do { if (!(condition)) throw std::runtime_error("line " + std::to_string(__LINE__) + ": " #condition); } while (false)
 runtime_test::Peer* g_peer = nullptr;
 
-descriptor::ValidatedDescriptor local() {
+descriptor::ValidatedDescriptor local(const std::string& connect = "/v1/realtime") {
   const std::string origin = "http://127.0.0.1:" + std::to_string(g_peer->port);
   auto parsed = json::parse(config_defaults::descriptor_policy_json);
   CHECK(std::holds_alternative<json::Document>(parsed));
@@ -27,7 +27,7 @@ descriptor::ValidatedDescriptor local() {
   for (auto member : std::get<json::Document>(parsed).root().members()) {
     if (text.size() > 1) text += ',';
     text += json::quote(member.key) + ":" + (member.key == "endpoints"
-        ? R"([{"endpoint":"realtime","shape":"openai","origins":[)" + json::quote(origin) + R"(],"paths":{"connect":"/v1/realtime"}}])"
+        ? R"([{"endpoint":"realtime","shape":"openai","origins":[)" + json::quote(origin) + R"(],"paths":{"connect":)" + json::quote(connect) + "}}]"
         : member.value.dump());
   }
   auto policy = descriptor::load_policy(text + "}", config_defaults::codec_defaults_json);
@@ -137,6 +137,77 @@ void media_ring(transport::Transport& transport, const descriptor::ValidatedDesc
   CHECK(strict.join().media_dropped == 0);
 }
 
+// The audio and turn markers the server received since `before`, in order: 'a' for audio, 'c' for the end of it. Pulling
+// events moves queued audio, so the wait keeps the session going.
+std::string audio_order(realtime::Session& session, std::size_t before, std::size_t count) {
+  std::string order;
+  for (const auto until = std::chrono::steady_clock::now() + 5s; std::chrono::steady_clock::now() < until && order.size() < count;) {
+    session.next_event(25ms);
+    order.clear();
+    const auto all = received();
+    for (auto i = before; i < all.size(); ++i) {
+      if (all[i] == "input_audio_buffer.append") order += 'a';
+      else if (all[i] == "input_audio_buffer.commit") order += 'c';
+    }
+  }
+  return order;
+}
+
+// Audio ahead of a turn marker still in the ring is never dropped: when the ring holds nothing else, the new audio is
+// refused. Audio after the last marker goes first.
+void media_ring_fence(transport::Transport& transport, const descriptor::ValidatedDescriptor& d) {
+  realtime::Options options;
+  options.lead = 0ms;
+  options.media_bytes = 24000;
+  // The first chunk leaves at once and holds the rest back for 0.25 s at 24 kHz.
+  const auto chunk = [] { return realtime::Audio{pcm(12000)}; };
+  {
+    const auto before = received().size();
+    auto session = opened(transport, d, options);
+    CHECK(await<realtime::Ready>(session));
+    for (int i = 0; i < 3; ++i) CHECK(session.send(chunk()));
+    CHECK(session.send(realtime::EndAudio{}));
+    CHECK(!session.send(chunk()));  // the two chunks in the ring are fenced by the marker
+    CHECK(audio_order(session, before, 4) == "aaac");
+    session.close();
+    const auto outcome = session.join();
+    CHECK(!outcome.error && outcome.media_dropped == 0);
+  }
+  {
+    const auto before = received().size();
+    auto session = opened(transport, d, options);
+    CHECK(await<realtime::Ready>(session));
+    CHECK(session.send(chunk()));
+    CHECK(session.send(chunk()));
+    CHECK(session.send(realtime::EndAudio{}));
+    CHECK(session.send(chunk()));
+    CHECK(session.send(chunk()));  // the audio after the marker makes room; the one before it stays
+    CHECK(audio_order(session, before, 4) == "aaca");
+    session.close();
+    const auto outcome = session.join();
+    CHECK(!outcome.error && outcome.media_dropped == 12000);
+  }
+}
+
+// A session that does not close cleanly says why: a cancel is `Cancelled`, a refused handshake carries the server's
+// answer, and neither is a transport fault.
+void ends_by_cause(transport::Transport& transport, const descriptor::ValidatedDescriptor& d) {
+  auto session = opened(transport, d, {});
+  CHECK(await<realtime::Ready>(session));
+  session.cancel();
+  const auto cancelled = session.join();
+  CHECK(cancelled.error && cancelled.error->kind == ErrorKind::Cancelled && cancelled.error->reason == "runtime.realtime.cancelled");
+  CHECK(!cancelled.clean);
+  const std::pair<int, ErrorKind> refusals[]{{401, ErrorKind::Authentication}, {403, ErrorKind::Permission}, {429, ErrorKind::RateLimited}, {503, ErrorKind::Transport}};
+  for (const auto& [status, kind] : refusals) {
+    const auto refusing = local("/reject/" + std::to_string(status));
+    auto refused = opened(transport, refusing, {});
+    const auto outcome = refused.join();
+    CHECK(outcome.error && outcome.error->kind == kind && outcome.error->http_status == status && outcome.error->reason == "runtime.realtime.refused");
+    CHECK(!outcome.clean);
+  }
+}
+
 // A setup outside the fact is refused before any connection.
 void refused_setup(transport::Transport& transport, const descriptor::ValidatedDescriptor& d) {
   const auto handshakes = g_peer->command("{\"stats\":true}").root().get("handshakes").as_uint();
@@ -160,6 +231,8 @@ int main(int argc, char** argv) {
     lease_refused(transport, d);
     inbound_overflow(transport, d);
     media_ring(transport, d);
+    media_ring_fence(transport, d);
+    ends_by_cause(transport, d);
     refused_setup(transport, d);
     g_peer = nullptr;
     std::cout << "realtime session properties passed\n";

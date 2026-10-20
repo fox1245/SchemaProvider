@@ -7,7 +7,9 @@
 //  * Outbound has two lanes. Commands other than audio go at once. Audio waits in a bounded ring and reaches the
 //    socket at most `lead` ahead of real time, so a tool result or a cancel never waits behind seconds of audio.
 //    When the ring is full the oldest audio is dropped or `send` refuses the new audio, by `media_policy`. The end of
-//    the user's audio is a turn marker: it follows the audio queued before it, and a drop never crosses it.
+//    the user's audio is a turn marker: it follows the audio queued before it, and a drop never crosses it. Audio
+//    ahead of a marker still queued is never dropped, so when only such audio would be left to drop, `send` refuses
+//    the new audio under either policy.
 //    Queued audio moves on every call to `send` and `next_event`.
 //  * Money: after each committed turn the session calls `renew` with the turn's usage. When it returns false the
 //    session closes (`realtime.lease.refused`); the SDK prices nothing.
@@ -42,7 +44,8 @@ struct Options {
 };
 struct Outcome {
   // Why the session ended early: a refused setup, a lease refusal, an inbound overflow, a protocol or transport
-  // failure. Empty after a clean close.
+  // failure, a `cancel` (`Cancelled`) or a refused handshake (`Authentication` for 401, `Permission` for 403,
+  // `RateLimited` for 429, with `http_status`). Empty after a clean close.
   std::optional<Error> error{};
   std::uint16_t close_code = 0;
   std::string close_reason{};
@@ -60,7 +63,8 @@ class Session {
   ~Session();
   bool valid() const noexcept { return state_ != nullptr; }
   // Queues a command. False when the session has ended, the codec refused the command (`last_error`), or the
-  // audio ring is full under `MediaPolicy::Refuse`.
+  // audio ring has no room for the audio: it is full under `MediaPolicy::Refuse`, or what it holds is fenced by a
+  // turn marker.
   bool send(Command);
   // The next event, waiting up to `timeout`; std::nullopt on a timeout or once the session ended (`ended`).
   std::optional<Event> next_event(std::chrono::milliseconds timeout);
