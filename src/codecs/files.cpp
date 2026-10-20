@@ -1,5 +1,6 @@
 #include "codecs/files.h"
 #include "codecs/reason.h"
+#include "crypto/crypto.h"
 #include "descriptor/policy.h"
 #include "json/json.h"
 #include <algorithm>
@@ -122,7 +123,7 @@ std::string_view header(const Close& close, std::string_view name) {
 bool digits(std::string_view text) { return to_uint(text).has_value(); }
 std::optional<Session> session_of(json::Value value) {
   if (!value.is_object()) return std::nullopt;
-  Session session{text_of(value.get("origin")), text_of(value.get("shape")), text_of(value.get("id")), text_of(value.get("url"))};
+  Session session{text_of(value.get("origin")), text_of(value.get("shape")), text_of(value.get("id"))};
   session.size = value.get("size").as_uint();
   session.sent = value.get("sent").as_uint();
   session.granularity = value.get("granularity").as_uint();
@@ -131,11 +132,18 @@ std::optional<Session> session_of(json::Value value) {
   session.status = text_of(value.get("status"));
   return session;
 }
+std::string sha256_hex(std::string_view text) {
+  std::string hex;
+  for (const auto byte : crypto::sha256(text)) { hex += "0123456789abcdef"[byte >> 4]; hex += "0123456789abcdef"[byte & 15]; }
+  return hex;
+}
 }  // namespace
 
 std::string session_document(const Session& session, std::uint64_t part) {
+  // The upload URL lets anyone write the file: the document names it by its digest, which tells two sessions apart.
   std::string out = "{\"origin\":" + json::quote(session.origin) + ",\"shape\":" + json::quote(session.shape) + ",\"id\":" + json::quote(session.id) +
-                    ",\"url\":" + json::quote(session.url) + ",\"size\":" + std::to_string(session.size) + ",\"sent\":" + std::to_string(session.sent) +
+                    ",\"url_sha256\":" + json::quote(session.url.empty() ? std::string() : sha256_hex(session.url)) +
+                    ",\"size\":" + std::to_string(session.size) + ",\"sent\":" + std::to_string(session.sent) +
                     ",\"granularity\":" + std::to_string(session.granularity) + ",\"parts\":[";
   for (std::size_t i = 0; i < session.parts.size(); ++i) out.append(i ? "," : "").append(json::quote(session.parts[i]));
   out += "]";
@@ -204,8 +212,9 @@ bool Codec::buffered(std::string_view body, Close close) {
          emit(Commit{"files.response+normal_close"});
 }
 
-SessionCodec::SessionCodec(const descriptor::ValidatedDescriptor& descriptor, Accumulator& accumulator, Step step, std::string subject, SemanticLimits limits)
-    : descriptor_(descriptor), accumulator_(accumulator), step_(step), subject_(std::move(subject)), limits_(limits) {}
+SessionCodec::SessionCodec(const descriptor::ValidatedDescriptor& descriptor, Accumulator& accumulator, Step step, std::string subject,
+                           SemanticLimits limits, std::string url)
+    : descriptor_(descriptor), accumulator_(accumulator), step_(step), subject_(std::move(subject)), url_(std::move(url)), limits_(limits) {}
 bool SessionCodec::emit(const Event& event) { return accumulator_.accept(event); }
 bool SessionCodec::fail(ErrorKind kind, std::string text) {
   Error error{kind, std::move(text)};
@@ -252,10 +261,13 @@ bool SessionCodec::buffered(std::string_view body, Close close) {
     if (step_ == Step::Cancel && status != "cancelled") return fail(ErrorKind::ProtocolCorrupt, "the response does not confirm the cancellation");
     if (!optional_member(root.get("expires_at"), is_uint)) return fail(ErrorKind::ProtocolCorrupt, "an upload step names its id");
   }
+  // The session's URL goes to the completion's secret, not to a raw event: a Start answers with the new one.
+  const auto& session_url = step_ == Step::Start ? url : url_;
+  if (google) accumulator_.secret(session_url);
   static constexpr const char* steps[]{"start", "part", "complete", "query", "cancel"};
   auto context = json::parse("{\"step\":\"" + std::string(steps[static_cast<int>(step_)]) + "\",\"session\":" + subject_ +
-                             ",\"status\":" + json::quote(status) + ",\"url\":" + json::quote(url) + ",\"granularity\":" + json::quote(granularity) +
-                             ",\"received\":" + json::quote(received) + "}");
+                             ",\"status\":" + json::quote(status) + ",\"url_sha256\":" + json::quote(session_url.empty() ? std::string() : sha256_hex(session_url)) +
+                             ",\"granularity\":" + json::quote(granularity) + ",\"received\":" + json::quote(received) + "}");
   if (!emit(RawWire{"files.session", std::make_shared<const json::Document>(std::move(std::get<json::Document>(context)))})) return false;
   if (wire && !emit(RawWire{"files.response", wire})) return false;
   if (!emit(Begin{}) || !emit(MessageBegin{{0}, std::nullopt, Role::Assistant, nullptr})) return false;
@@ -278,9 +290,9 @@ ProgressOutcome typed_progress(const sp::Outcome& internal) {
   const auto step = text_of(context.get("step"));
   session.status = text_of(context.get("status"));
   const bool google = session.shape == "google";
+  if (google) session.url = completion.secret;
   if (step == "start") {
     if (google) {
-      session.url = text_of(context.get("url"));
       if (const auto granularity = to_uint(text_of(context.get("granularity")))) session.granularity = *granularity;
     } else {
       session.id = text_of(response.get("id"));

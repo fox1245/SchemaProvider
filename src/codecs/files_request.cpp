@@ -187,6 +187,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   if (session.sent >= session.size || size > session.size - session.sent) return bad("a part fits in what remains of the upload");
   Encoded encoded{std::move(path), {}, session_document(session, size), false, fact->auth};
   endpoints::add_fact_headers(encoded, *fact);
+  encoded.context.secret = session.url;
   std::string suffix;
   if (fact->shape == "google") {
     const bool last = session.sent + size == session.size;
@@ -228,6 +229,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   if (fact->shape != "google") return Error{ErrorKind::Unsupported, "only a Google upload says how much it holds"};
   Encoded encoded{std::move(path), {}, session_document(query.session), false, fact->auth};
   endpoints::add_fact_headers(encoded, *fact);
+  encoded.context.secret = query.session.url;
   encoded.headers.emplace_back("X-Goog-Upload-Command", "query");
   encoded.content_type.clear();
   return encoded;
@@ -238,6 +240,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   auto& [fact, path] = std::get<Route>(found);
   Encoded encoded{std::move(path), {}, session_document(cancel.session), false, fact->auth};
   endpoints::add_fact_headers(encoded, *fact);
+  encoded.context.secret = cancel.session.url;
   if (fact->shape == "google") encoded.headers.emplace_back("X-Goog-Upload-Command", "cancel");
   encoded.content_type.clear();
   return encoded;

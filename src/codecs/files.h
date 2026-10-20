@@ -162,11 +162,12 @@ class Codec final : public endpoints::Codec {
   std::string subject_;
   SemanticLimits limits_;
 };
-// A step of a chunked upload. `subject` is the session the call advanced, as `session_document` writes it.
+// A step of a chunked upload. `subject` is the session the call advanced, as `session_document` writes it, and `url`
+// the upload URL it used (Google), which the completion carries as its `secret` and no raw event repeats.
 class SessionCodec final : public endpoints::Codec {
  public:
   enum class Step { Start, Part, Complete, Query, Cancel };
-  SessionCodec(const descriptor::ValidatedDescriptor&, Accumulator&, Step, std::string subject, SemanticLimits = {});
+  SessionCodec(const descriptor::ValidatedDescriptor&, Accumulator&, Step, std::string subject, SemanticLimits = {}, std::string url = {});
   bool buffered(std::string_view body, Close close) override;
  private:
   bool fail(ErrorKind, std::string);
@@ -174,10 +175,12 @@ class SessionCodec final : public endpoints::Codec {
   const descriptor::ValidatedDescriptor& descriptor_;
   Accumulator& accumulator_;
   Step step_;
-  std::string subject_;
+  std::string subject_, url_;
   SemanticLimits limits_;
 };
-// A session, and the size of the part a call sends, as the JSON a step's decoder reads back.
+// A session, and the size of the part a call sends, as the JSON a step's decoder reads back. It names the upload URL
+// by its SHA-256 (`url_sha256`) and never holds it, so it can identify a call in a journal: it is the prepared call's
+// `model()`.
 std::string session_document(const Session&, std::uint64_t part = 0);
 // Whether `url` is a Google resumable upload URL at `origin`: under the origin's `/upload/` path, whose segments are
 // names (no `.`, `..`, empty or percent-encoded segment), without control characters, quotes or a fragment.
