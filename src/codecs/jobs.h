@@ -77,7 +77,7 @@ class StateCodec final : public endpoints::Codec {
 // A downloaded output: its body in memory, or the file the runtime wrote it to.
 class ContentCodec final : public endpoints::Codec {
  public:
-  // With `documents`, a JSON or text body is the content (batch results), not an error the status hid.
+  // With `documents`, a JSON or text body is the content (a file's, or batch results), not an answer about a job.
   ContentCodec(Accumulator&, SemanticLimits = {}, bool documents = false);
   bool buffered(std::string_view body, Close close) override;
  private:

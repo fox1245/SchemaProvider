@@ -988,6 +988,7 @@ constexpr Entry jobs_table[] = {
   {"a job names its id and status", "jobs.state.id_and_status_required"},
   {"job outputs are a list", "jobs.state.outputs_invalid"},
   {"a download is not a document", "jobs.download.is_document"},
+  {"a download is the body of a 200 response", "jobs.download.status"},
   {"a download is empty", "jobs.download.empty"},
   {"a download exceeds the content limit", "jobs.download.limit"},
 };

@@ -65,7 +65,7 @@ std::unique_ptr<Codec> make_codec(std::string_view name, const descriptor::Valid
   // A job's state, from a submit or a poll, and one output it made.
   if (name == "videos") return std::make_unique<jobs::StateCodec>(descriptor, accumulator, std::move(requested), std::string(name), limits);
   if (name == "content") return std::make_unique<jobs::ContentCodec>(accumulator, limits);
-  // Batch results are JSONL, whatever type the provider gives them.
+  // A file's content and batch results are documents: a text or JSON body is the content, whatever type the provider gives it.
   if (name == "content.document") return std::make_unique<jobs::ContentCodec>(accumulator, limits, true);
   if (name == "generations") return std::make_unique<generations::Codec>(descriptor, accumulator, limits);
   if (name == "tokens") return std::make_unique<tokens::Codec>(descriptor, accumulator, limits);

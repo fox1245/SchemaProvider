@@ -55,6 +55,8 @@ struct Close {
   std::optional<Sink> sink{};
   // The SHA-256 of an uploaded file slice, as the transport read it.
   std::string upload_sha256{};
+  // The HTTP status of the response; zero when the decoder is run without a response.
+  int status = 0;
 };
 // An RFC 3339 time (`2026-10-19T13:02:22.150902Z`, or with an offset) as Unix seconds.
 std::optional<std::uint64_t> unix_seconds(std::string_view);
