@@ -1,4 +1,5 @@
 #include "transport/realtime_session.h"
+#include "runtime/policy.h"
 #include <condition_variable>
 #include <deque>
 #include <mutex>
@@ -6,9 +7,26 @@
 namespace sp::realtime {
 namespace {
 Error session_error(ErrorKind kind, std::string reason) {
-  Error error{kind, kind == ErrorKind::ResourceLimit ? "runtime resource limit exceeded" : "operation failed"};
+  Error error{kind, std::string(runtime::detail::safe_message(kind))};
   error.reason = std::move(reason);
   return error;
+}
+// Why a session that did not close cleanly ended, by cause: a cancellation and a refused handshake are not network
+// faults, and a host must not retry them as such.
+Error ended_early(const transport::WsResult& result) {
+  if (result.transport.status == transport::Status::Cancelled) return session_error(ErrorKind::Cancelled, "runtime.realtime.cancelled");
+  if (result.transport.status == transport::Status::DeadlineExceeded) return session_error(ErrorKind::DeadlineExceeded, "runtime.realtime.closed");
+  // The server answered the handshake with something other than 101.
+  if (result.http_status != 0 && result.http_status != 101) {
+    auto error = session_error(result.http_status == 401 ? ErrorKind::Authentication
+                               : result.http_status == 403 ? ErrorKind::Permission
+                               : result.http_status == 429 ? ErrorKind::RateLimited
+                                                           : ErrorKind::Transport,
+                               "runtime.realtime.refused");
+    error.http_status = result.http_status;
+    return error;
+  }
+  return session_error(ErrorKind::Transport, "runtime.realtime.closed");
 }
 }  // namespace
 
@@ -80,15 +98,20 @@ bool Session::send(Command command) {
   if (const auto* audio = std::get_if<Audio>(&command)) {
     const auto bytes = audio->pcm.size();
     if (bytes > s.options.media_bytes) { s.last_error = session_error(ErrorKind::InvalidRequest, "runtime.realtime.audio_too_large"); return false; }
-    while (s.ring_bytes + bytes > s.options.media_bytes) {
+    if (s.ring_bytes + bytes > s.options.media_bytes) {
       if (s.options.media_policy == MediaPolicy::Refuse) return false;
-      // The oldest audio of the current turn goes; a turn marker and the audio before it stay.
-      auto oldest = std::find_if(s.ring.begin(), s.ring.end(), [](const SessionState::Queued& q) { return std::holds_alternative<Audio>(q.command); });
-      const auto marker = std::find_if(s.ring.begin(), s.ring.end(), [](const SessionState::Queued& q) { return turn_marker(q.command); });
-      if (oldest == s.ring.end() || (marker != s.ring.end() && marker < oldest)) return false;
-      s.ring_bytes -= oldest->bytes;
-      s.dropped += oldest->bytes;
-      s.ring.erase(oldest);
+      // Only the audio queued after the last turn marker, the current turn's, can go: the audio before a marker is
+      // what the marker commits. When dropping all of it would still leave no room, the new audio is refused.
+      const auto fence = std::find_if(s.ring.rbegin(), s.ring.rend(), [](const SessionState::Queued& q) { return turn_marker(q.command); }).base() - s.ring.begin();
+      std::size_t fenced = 0;
+      for (auto it = s.ring.begin(); it != s.ring.begin() + fence; ++it) fenced += it->bytes;
+      if (fenced + bytes > s.options.media_bytes) return false;
+      while (s.ring_bytes + bytes > s.options.media_bytes) {
+        const auto oldest = std::find_if(s.ring.begin() + fence, s.ring.end(), [](const SessionState::Queued& q) { return std::holds_alternative<Audio>(q.command); });
+        s.ring_bytes -= oldest->bytes;
+        s.dropped += oldest->bytes;
+        s.ring.erase(oldest);
+      }
     }
     s.ring.push_back({std::move(command), bytes});
     s.ring_bytes += bytes;
@@ -217,9 +240,7 @@ std::variant<Session, Error> open(transport::Transport& transport, const descrip
       std::lock_guard lock(s->mutex);
       s->done = true;
       s->result = result;
-      if (!s->error && !result.clean && !s->closing)
-        s->error = session_error(result.transport.status == transport::Status::DeadlineExceeded ? ErrorKind::DeadlineExceeded : ErrorKind::Transport,
-                                 "runtime.realtime.closed");
+      if (!s->error && !result.clean && !s->closing) s->error = ended_early(result);
     }
     s->changed.notify_all();
   };

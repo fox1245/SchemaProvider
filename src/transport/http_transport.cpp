@@ -305,8 +305,12 @@ struct WsState {
   std::string head;  // handshake response bytes until the blank line
   // Messages sent before the handshake completed: RFC 6455 4.1 forbids writing them earlier.
   std::vector<std::pair<WsOpcode, std::string>> pending;
-  std::string out;  // encoded bytes not yet written
+  // Encoded bytes being written, from out_offset on. A send that answered CURLE_AGAIN is retried with the same
+  // pointer and length (OpenSSL refuses a moved or shortened buffer), so `out` is not touched until it is written
+  // whole; frames queued meanwhile wait in `next` and become `out` after it.
+  std::string out;
   std::size_t out_offset = 0;
+  std::string next;
   std::random_device entropy;  // masking keys and the handshake nonce (RFC 6455 4.1, 5.3)
   bool sent_close = false;
   bool received_close = false;
@@ -323,13 +327,8 @@ struct WsState {
     return {static_cast<unsigned char>(r), static_cast<unsigned char>(r >> 8), static_cast<unsigned char>(r >> 16),
             static_cast<unsigned char>(r >> 24)};
   }
-  void queue(WsOpcode opcode, std::string_view payload) {
-    if (out_offset > 65536 && out_offset * 2 > out.size()) {
-      out.erase(0, out_offset);
-      out_offset = 0;
-    }
-    out += ws_encode_frame(opcode, payload, mask());
-  }
+  void queue(WsOpcode opcode, std::string_view payload) { next += ws_encode_frame(opcode, payload, mask()); }
+  bool has_output() const noexcept { return out_offset < out.size() || !next.empty(); }
 };
 
 struct OperationState {
@@ -1940,13 +1939,19 @@ void TransportCore::ws_interest(const std::shared_ptr<OperationState>& op) {
   const auto it = socks.find(ws.fd);
   if (it == socks.end()) return;
   it->second->want_read = true;  // until the end: a Close, the server's TCP close or an error
-  it->second->want_write = ws.out_offset < ws.out.size();
+  it->second->want_write = ws.has_output();
   arm(it->second);
 }
 
 void TransportCore::ws_flush(const std::shared_ptr<OperationState>& op) {
   auto& ws = *op->ws;
-  while (ws.out_offset < ws.out.size()) {
+  for (;;) {
+    if (ws.out_offset == ws.out.size()) {
+      ws.out.clear();
+      ws.out_offset = 0;
+      if (ws.next.empty()) return;
+      ws.out.swap(ws.next);
+    }
     std::size_t sent = 0;
     const CURLcode rc = curl_easy_send(op->easy, ws.out.data() + ws.out_offset, ws.out.size() - ws.out_offset, &sent);
     if (rc == CURLE_AGAIN || (rc == CURLE_OK && sent == 0)) return;  // wait for write readiness
@@ -1957,8 +1962,6 @@ void TransportCore::ws_flush(const std::shared_ptr<OperationState>& op) {
     ws.out_offset += sent;
     op->note_activity();
   }
-  ws.out.clear();
-  ws.out_offset = 0;
 }
 
 void TransportCore::ws_read(const std::shared_ptr<OperationState>& op) {
