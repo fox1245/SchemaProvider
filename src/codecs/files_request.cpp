@@ -185,6 +185,9 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   const auto& session = part.session;
   const auto size = std::get<std::uint64_t>(length);
   if (session.sent >= session.size || size > session.size - session.sent) return bad("a part fits in what remains of the upload");
+  if (fact->max_part_bytes && size > fact->max_part_bytes) return bad("a part is within the endpoint's part size limit");
+  // The part is the file's next bytes: a slice of a local file starts where the upload stands.
+  if (!part.source.file.path.empty() && part.source.file.offset != session.sent) return bad("a file part starts where the upload stands");
   Encoded encoded{std::move(path), {}, session_document(session, size), false, fact->auth};
   endpoints::add_fact_headers(encoded, *fact);
   encoded.context.secret = session.url;

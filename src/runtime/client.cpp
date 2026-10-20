@@ -342,6 +342,8 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
   // A non-chat endpoint call (D6): which one, and whether the provider charges once it accepts it.
   std::string endpoint;
   bool charge_on_accept = false, read_only = false;
+  // The endpoint fact's bound for a buffered response, used where it is above the client's; zero for none.
+  std::uint64_t endpoint_response_bytes = 0;
   // What the decoder checks the answer against, and a value no journal may store; the prepared call shows neither.
   endpoints::Context codec_context;
   // A download written to a file as it arrives: the file, its byte limit, and the attempt's partial copy, which
@@ -410,6 +412,13 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
         callbacks(std::move(cb)), deadline(end) {}
   ~OperationState() { if (sink_file) discard_sink(); }
 
+  // What a response may total: the client's bound, or the endpoint fact's where that is higher (never above the
+  // runtime policy's admission ceiling).
+  std::size_t response_limit() const {
+    const auto base = client->options.limits.max_response_bytes;
+    if (endpoint_response_bytes <= base) return base;
+    return static_cast<std::size_t>(std::min<std::uint64_t>(endpoint_response_bytes, client->options.policy->admission().max_response_bytes));
+  }
   std::string sink_part() const { return sink_path + ".part"; }
   void discard_sink() {
     if (sink_file) { std::fclose(sink_file); sink_file = nullptr; }
@@ -602,7 +611,7 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
     interactions_codec.reset();
     endpoint_codec.reset();
     accumulator = std::make_unique<Accumulator>(client->options.limits.semantic,
-        [this](const Event& event) { semantic(event); }, client->options.limits.max_response_bytes);
+        [this](const Event& event) { semantic(event); }, response_limit());
     if (family == Family::Endpoint) endpoint_codec = endpoints::make_codec(endpoint, client->descriptor, *accumulator,
         prepared_model, codec_context, client->options.limits.semantic);
     else if (family == Family::Chat) chat_codec = std::make_unique<chat::Codec>(client->descriptor,
@@ -766,11 +775,15 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
     const bool http_error = response->value.status < 200 || response->value.status >= 300;
     // A download bound for a file is held to its own limit, not the response limit.
     if (!http_error && !sink_path.empty()) { sink(bytes); return; }
-    if (bytes.size() > limits.max_response_bytes - response_bytes) { fail_semantic(ErrorKind::ResourceLimit); return; }
+    const auto response_bound = response_limit();
+    if (bytes.size() > response_bound - response_bytes) { fail_semantic(ErrorKind::ResourceLimit, "runtime.response.limit"); return; }
     response_bytes += bytes.size();
     if (http_error || !options.streaming) {
-      const auto limit = http_error ? limits.max_error_bytes : limits.max_response_bytes;
-      if (bytes.size() > limit - buffered.size()) { fail_semantic(ErrorKind::ResourceLimit); return; }
+      const auto limit = http_error ? limits.max_error_bytes : response_bound;
+      if (bytes.size() > limit - buffered.size()) {
+        fail_semantic(ErrorKind::ResourceLimit, http_error ? "runtime.error_body.limit" : "runtime.response.limit");
+        return;
+      }
       buffered.append(bytes);
       return;
     }
@@ -1526,6 +1539,7 @@ PreparedRequest Client::prepare_endpoint(RunOptions options, std::string_view en
     operation.family = detail::OperationState::Family::Endpoint;
     operation.endpoint = std::string(endpoint);
     operation.charge_on_accept = value.charge_on_accept;
+    operation.endpoint_response_bytes = value.max_response_bytes;
     operation.prepared_model = std::move(value.model);
     operation.codec_context = std::move(value.context);
     operation.sink_path = std::move(value.sink);

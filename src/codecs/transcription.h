@@ -20,12 +20,13 @@ struct Request {
   std::optional<std::string> prompt{};
   // Translate the speech into English text instead (OpenAI `/v1/audio/translations`, which takes no language).
   bool translate = false;
-  // Members the endpoint's policy fact admits, sent as given: JSON members on OpenRouter, form fields on OpenAI.
+  // Members the endpoint's policy fact admits, sent as given: JSON members on OpenRouter, form fields on OpenAI. At
+  // OpenAI `response_format` is `json` unless this names `verbose_json`, as `timestamp_granularities` does.
   std::shared_ptr<const json::Document> extensions{};
 };
 struct Result {
   std::string text;
-  // The language and the audio's length in seconds, when the provider reports them.
+  // The language and the audio's length in seconds, when the provider reports them (OpenAI does in `verbose_json`).
   std::string language;
   std::optional<double> seconds{};
   Usage usage;

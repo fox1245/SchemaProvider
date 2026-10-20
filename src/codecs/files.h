@@ -119,8 +119,9 @@ struct Start {
   std::string purpose{};
   std::optional<std::uint64_t> expires_after{};
 };
-// The file's next bytes, from `session.sent`, in memory or as a file slice. An OpenAI part is at most 64 MB. At
-// Google every chunk but the last is a multiple of the session's granularity, and the last one completes the file.
+// The file's next bytes, from `session.sent`, in memory or as a file slice, which starts at `session.sent` in its file.
+// A part is at most the policy fact's `max_part_bytes` (64 MiB at OpenAI). At Google every chunk but the last is a
+// multiple of the session's granularity, and the last one completes the file.
 struct Part { Session session; Source source; };
 // OpenAI: assemble the parts, in order, into the file.
 struct Complete { Session session; };
