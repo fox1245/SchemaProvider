@@ -241,7 +241,7 @@ The rules of a refresh:
 - **Source URL and origin.** A source's `url` is where the listing is served (https, or http on a loopback host). Its `origin` is the descriptor origin the entries are scoped to. Both default to the provider's API.
 - **What a source owns.** Each source owns the entries whose `source` is the listing's name (`openrouter`, `gemini`, `anthropic`, `openai`) and whose origins are its origin.
 - **Failures keep old entries.** A source that fails keeps its entries from `previous`, so an outage never drops models. `RefreshResult::sources` reports the failure as fixed text: never a URL, header, credential or body.
-- **Listings are provider data.** Unknown members are ignored. A value the catalogue cannot hold is left out, and an id that is not a model name is counted in `skipped`. A body that is not a listing fails that source.
+- **Listings are provider data.** Unknown members are ignored. A value the catalogue cannot hold is left out. An id that is not a model name is counted in `skipped`, and a price that is not plain decimal text (a number, or text such as `1e-7`) or that is past the 64 units an entry keeps in `skipped_prices`. A body that is not a listing fails that source.
 - **Bounds.** Each page waits at most `page_timeout` and may be at most 32 MiB. A source stops after 64 pages, or when it repeats its page token.
 - **Result.** `generated` is the provider facts alone, `catalogue` is `generated` with the overlays merged over it, and `diff` runs from `previous` to `generated`.
 - **Blocking.** The call waits for each page, so it must not run on one of the transport's I/O threads.
@@ -258,8 +258,10 @@ sp_catalogue_refresh --out models.json --generated generated.json --builtin-over
 
 `sp::pricing` (`<core/pricing.h>`) turns a catalogue entry's prices into exact amounts and estimates a call's cost from its usage. It never fetches: refresh the catalogue first when prices may have changed.
 
-**Prices.** `price_of(entry)` reads the entry's decimal USD per unit as exact nano-USD per million units: `input`, `output`, `cache_read`, `cache_write`, `reasoning`, and `request`, which is per request.
-- **Unit names.** OpenRouter's names (`prompt`, `completion`, `input_cache_read`, `input_cache_write`, `internal_reasoning`) are the same units, and a plain name wins over them.
+**Prices.** `price_of(entry)` reads the entry's decimal USD per unit as exact nano-USD per million units: `input`, `output`, `cache_read`, `cache_write`, `reasoning`, `input_audio`, `output_audio`, and `request`, which is per request.
+- **Unit names.** OpenRouter's names (`prompt`, `completion`, `input_cache_read`, `input_cache_write`, `internal_reasoning`, `audio`, `audio_output`) are the same units, and a plain name wins over them.
+- **Units not read.** Other listed units, such as OpenRouter's `image` and `web_search`, stay in the entry but are not applied: no usage counter counts them. A server tool's fee is a `tool:<type>` unit that a reservation reads (`BoundRequest::tool_uses`).
+- **Input length.** `price_of(entry)` takes the input length 0, which is above no band, so it gives the base rates. Reserve with `dearest_price_of` or `upper_bound(entry, tier, request)`.
 - **Variable prices.** A negative listed price, OpenRouter's `-1` for a variable price, is no price.
 - **Precision.** A price finer than 1e-15 USD rounds up.
 
@@ -267,10 +269,14 @@ sp_catalogue_refresh --out models.json --generated generated.json --builtin-over
 - **Input.** `input_uncached` bills at `input`, or else `input_total` less the cache counters. Cache reads bill at `cache_read` and cache writes at `cache_write`, or at `input` when the entry gives no cache price; `assumptions` names that rule.
 - **Output.** With a `reasoning` price, reasoning tokens bill at it and the rest of `output_total` at `output`. Otherwise all output bills at `output`. `request` is charged once.
 - **Dearer rates.** Messages' 1-hour cache writes bill at `cache_write_1h` and Gemini's image output tokens at `output_image`, from the usage's breakdown (`cache_creation.ephemeral_1h_input_tokens`, `candidatesTokensDetails.IMAGE` or `output_tokens_by_modality.image`). Without a breakdown, those tokens bill at the dearer rate and `assumptions` says so.
+- **Audio.** The audio part of the input (Chat `prompt_tokens_details.audio_tokens`, Generate `promptTokensDetails.AUDIO`, Interactions `input_tokens_by_modality.audio`) bills at `input_audio`, out of the uncached input, and the audio part of the output (Chat `completion_tokens_details.audio_tokens`, `candidatesTokensDetails.AUDIO`, `output_tokens_by_modality.audio`) at `output_audio`. Audio tokens with no such price, and more audio input than uncached input (the rest is in the cache counters, which have no audio rate), leave no total. A reported zero count is no audio.
+- **Zero rates.** A unit listed at `"0"` bills at zero. When the unit it refines has a price (`input` for cache and audio input, `output` for reasoning, image and audio output), `assumptions` names it, as `reasoning at zero`.
+- **Lower bound.** `lower_bound` is set when the usage is `Partial` (still arriving) or `Inconsistent` (its counters contradict each other): the provider may bill more than `total`.
 - **Route ceiling.** `estimate(..., tier, true)` prices a routing gateway's call whose endpoint is unknown at the entry's route ceiling: every input token at `ceiling_input` and every output token at `ceiling_output`.
 - **Rounding.** The exact sum is rounded up once, to whole nano-USD, with `Evidence::Derived` and `CostRounding::CeilingCatalogueProduct`.
-- **No total.** There is no `total` when the model has no priced entry, a billed counter has no price or no count, or a route ceiling is asked for and missing; `unpriced` names which.
-- **Not priced.** Server tool fees are not in an estimate; a host that reserves them settles them itself.
+- **No total.** There is no `total` when the model has no priced entry, a billed counter has no price or no count, a usage counter is not priced, or a route ceiling is asked for and missing; `unpriced` names which: `model`, `tier`, `ceiling`, `input`, `output`, `input_audio`, `output_audio`, `output_image` or `toolUsePromptTokenCount`.
+- **Not priced.** Server tool fees are not in an estimate; a host that reserves them settles them itself. Gemini's `toolUsePromptTokenCount` bills beyond the prompt count and has no price either, so a usage that reports it has no total.
+- **Service tier.** `estimate(..., tier)` matches the tier exactly. The usage does not say which tier billed the call, so pass the tier the request asked for. A name the entry has no rows for, such as a response's `default` or `auto`, selects none: the reason is `tier` when the entry is priced in other tiers, and `model` when it is priced in none. List the name's rows in a catalogue layer to price it.
 
 **More units.** An entry's `pricing` may also list, in any catalogue layer a host merges:
 - `cache_write_1h` (a 1-hour cache write) and `output_image` (an image output token);
@@ -283,12 +289,12 @@ Any unit may carry a service tier and an input band, in that order: `<unit>[/<ti
 - **Malformed.** A unit whose band is not a decimal count is no unit.
 
 **Reservation bound.** `upper_bound(price, BoundRequest{input_tokens, output_tokens, route_ceiling, tool_uses})` is the most a call within those bounds can bill.
-- **Prices.** Pass `dearest_price_of(entry, tier, input_tokens)`: each unit at its dearest over every band a call of at most `input_tokens` may fall in.
-- **Rates.** It prices the input tokens at the dearest input rate (input, cache reads, cache writes, 1-hour writes) and the output tokens at the dearest output rate (output, reasoning, image output). With `route_ceiling`, the ceiling rates replace the listed ones.
+- **Prices.** Pass `dearest_price_of(entry, tier, input_tokens)`: each unit at its dearest over every band a call of at most `input_tokens` may fall in. `upper_bound(entry, tier, request)` does that with the request's input limit. A `price_of(entry)` price has no bands.
+- **Rates.** It prices the input tokens at the dearest input rate (input, cache reads, cache writes, 1-hour writes, audio input) and the output tokens at the dearest output rate (output, reasoning, image output, audio output). With `route_ceiling`, the ceiling rates replace the listed ones.
 - **Fees.** It adds the request fee and each tool's fee times its uses.
 - **Rounding.** It rounds up once, as `estimate` does, so for usage within the bounds `estimate` never exceeds it.
 - **No total.** `unpriced` names what has no price (`input`, `output`, `ceiling`, `tool:<type>`), or `overflow`.
-- **Compaction.** Messages compaction iterations bill tokens outside the call's counters and are not bounded.
+- **Compaction.** Messages compaction iterations and Gemini's tool-use prompt tokens bill outside the call's counters and are not bounded.
 
 **Compared with reported cost.** On 2026-10-19 the estimate from a refreshed OpenRouter catalogue equalled OpenRouter's reported `usage.cost` to the nano-USD for `openai/gpt-5-nano` (with reasoning tokens) and `google/gemini-2.5-flash-lite`, buffered and streamed. For `meta-llama/llama-3.1-8b-instruct` it was higher than the reported cost, because OpenRouter routed the call to a cheaper endpoint than the listed price. On an aggregator the listed price is not the price of the endpoint that served the call, so prefer `Usage::provider_cost` there and use the estimate when the provider reports none.
 

@@ -243,9 +243,161 @@ void dearer_rates() {
   const auto bound = pricing::upper_bound(pricing::price_of(*c->entry("vendor/routed")), {1'000, 1'000, true, {}});
   CHECK(bound.total && bound.total->nano_usd >= 12'000'000u);
 }
+// A usage count the estimate cannot price is named in `unpriced`, not left out of a complete-looking total.
+void unpriced_usage() {
+  const auto c = catalogue(R"({"version":1,"models":[
+    {"id":"vendor/audio","pricing":{"prompt":"0.0000025","completion":"0.00001","audio":"0.000032","audio_output":"0.000064"}},
+    {"id":"vendor/plain","pricing":{"prompt":"0.0000025","completion":"0.00001"}}]})");
+  const ServedModel audio{"vendor/audio", "vendor/audio", ServedRelation::Exact}, plain{"vendor/plain", "vendor/plain", ServedRelation::Exact};
+  const auto rates = pricing::price_of(*c->entry("vendor/audio"));
+  CHECK(rates.input_audio == 32'000'000'000u && rates.output_audio == 64'000'000'000u);
+  // 800 text and 200 audio tokens in, 200 text and 100 audio tokens out: 800 x 2.5e-6 + 200 x 3.2e-5 + 200 x 1e-5 +
+  // 100 x 6.4e-5 USD. Chat counts them in `input_audio` and `audio_tokens`; Generate and Interactions in a breakdown.
+  auto chat = usage(1'000, 300);
+  chat.extra["input_audio"] = Count{200, Evidence::Reported};
+  chat.extra["audio_tokens"] = Count{100, Evidence::Reported};
+  auto e = pricing::estimate(*c, "openai.chat", "", audio, chat);
+  CHECK(e.total && e.total->nano_usd == 16'800'000u && e.unpriced.empty() && e.assumptions.empty());
+  auto generate = usage(1'000, 300);
+  generate.extra["promptTokensDetails.TEXT"] = Count{800, Evidence::Reported};
+  generate.extra["promptTokensDetails.AUDIO"] = Count{200, Evidence::Reported};
+  generate.extra["candidatesTokensDetails.TEXT"] = Count{200, Evidence::Reported};
+  generate.extra["candidatesTokensDetails.AUDIO"] = Count{100, Evidence::Reported};
+  e = pricing::estimate(*c, "google.generate", "", audio, generate);
+  CHECK(e.total && e.total->nano_usd == 16'800'000u);
+  auto interactions = usage(1'000, 300);
+  interactions.extra["input_tokens_by_modality.audio"] = Count{200, Evidence::Reported};
+  interactions.extra["output_tokens_by_modality.audio"] = Count{100, Evidence::Reported};
+  e = pricing::estimate(*c, "google.interactions", "", audio, interactions);
+  CHECK(e.total && e.total->nano_usd == 16'800'000u);
+  // Without an audio rate the audio tokens are not priced at the text rate.
+  e = pricing::estimate(*c, "openai.chat", "", plain, chat);
+  CHECK(!e.total && e.unpriced == std::vector<std::string>({"input_audio", "output_audio"}));
+  // A reported zero is no audio.
+  auto none = usage(1'000, 300);
+  none.extra["input_audio"] = Count{0, Evidence::Reported};
+  none.extra["audio_tokens"] = Count{0, Evidence::Reported};
+  e = pricing::estimate(*c, "openai.chat", "", plain, none);
+  CHECK(e.total && e.total->nano_usd == 5'500'000u);
+  // More audio input than uncached input: the rest sits in the cache counters, which have no audio rate.
+  auto cached = usage(1'000, 10, 900);
+  cached.extra["input_audio"] = Count{200, Evidence::Reported};
+  e = pricing::estimate(*c, "openai.chat", "", audio, cached);
+  CHECK(!e.total && e.unpriced == std::vector<std::string>({"input_audio"}));
+  // The bound prices every input token at the audio rate and every output token at the audio output rate.
+  const auto bound = pricing::upper_bound(rates, {1'000, 300, false, {}});
+  CHECK(bound.total && bound.total->nano_usd == 32'000'000u + 19'200'000u);
+  CHECK(bound.total->nano_usd >= pricing::estimate(*c, "openai.chat", "", audio, chat).total->nano_usd);
+
+  // Gemini bills the tool-use prompt beyond the prompt count.
+  auto tool = usage(100, 10);
+  tool.extra["toolUsePromptTokenCount"] = Count{50, Evidence::Reported};
+  e = pricing::estimate(*c, "google.generate", "", plain, tool);
+  CHECK(!e.total && e.unpriced == std::vector<std::string>({"toolUsePromptTokenCount"}));
+  tool.extra["toolUsePromptTokenCount"] = Count{0, Evidence::Reported};
+  e = pricing::estimate(*c, "google.generate", "", plain, tool);
+  CHECK(e.total && e.unpriced.empty());
+  // Image output tokens with no image rate are not priced at the text rate either.
+  auto image = usage(100, 10);
+  image.extra["candidatesTokensDetails.IMAGE"] = Count{4, Evidence::Reported};
+  e = pricing::estimate(*c, "google.generate", "", plain, image);
+  CHECK(!e.total && e.unpriced == std::vector<std::string>({"output_image"}));
+}
+
+// A zero rate under a priced base unit is applied and named.
+void zero_rates() {
+  const auto c = catalogue(R"({"version":1,"models":[
+    {"id":"vendor/zero","pricing":{"prompt":"0.000001","completion":"0.000002","internal_reasoning":"0","input_cache_read":"0"}},
+    {"id":"vendor/free","pricing":{"prompt":"0","completion":"0"}}]})");
+  const ServedModel zero{"vendor/zero", "vendor/zero", ServedRelation::Exact}, free{"vendor/free", "vendor/free", ServedRelation::Exact};
+  // 900 uncached at 1e-6 and 200 text output at 2e-6; 100 cache reads and 100 reasoning tokens are free.
+  auto e = pricing::estimate(*c, "openai.chat", "", zero, usage(1'000, 300, 100, 0, 100));
+  CHECK(e.total && e.total->nano_usd == 1'300'000u &&
+        e.assumptions == std::vector<std::string>({"cache_read at zero", "reasoning at zero"}));
+  // No such tokens, no such assumption.
+  e = pricing::estimate(*c, "openai.chat", "", zero, usage(1'000, 300));
+  CHECK(e.total && e.total->nano_usd == 1'600'000u && e.assumptions.empty());
+  // A model priced at zero throughout is declared free, not assumed.
+  e = pricing::estimate(*c, "openai.chat", "", free, usage(1'000, 300));
+  CHECK(e.total && e.total->nano_usd == 0u && e.assumptions.empty());
+}
+
+// An entry priced outside the asked service tier says "tier", not "model".
+void tier_reasons() {
+  const auto c = catalogue(R"({"version":1,"models":[
+    {"id":"vendor/tiered","pricing":{"input":"0.000001","output":"0.000002","input/flex":"0.0000005","output/flex":"0.000001"}},
+    {"id":"vendor/flex-only","pricing":{"input/flex":"0.0000005","output/flex":"0.000001"}}]})");
+  const ServedModel tiered{"vendor/tiered", "vendor/tiered", ServedRelation::Exact};
+  const auto u = usage(1'000, 1'000);
+  auto e = pricing::estimate(*c, "openai.chat", "", tiered, u);
+  CHECK(e.total && e.total->nano_usd == 3'000'000u);
+  e = pricing::estimate(*c, "openai.chat", "", tiered, u, "flex");
+  CHECK(e.total && e.total->nano_usd == 1'500'000u);
+  // The tier is matched exactly: a response's `default` or `auto` selects no rows.
+  for (const char* name : {"default", "auto", "priority"}) {
+    e = pricing::estimate(*c, "openai.chat", "", tiered, u, name);
+    CHECK(!e.total && e.unpriced == std::vector<std::string>({"tier"}));
+  }
+  e = pricing::estimate(*c, "openai.chat", "", ServedModel{"vendor/flex-only", "vendor/flex-only", ServedRelation::Exact}, u);
+  CHECK(!e.total && e.unpriced == std::vector<std::string>({"tier"}));
+  e = pricing::estimate(*c, "openai.chat", "", ServedModel{"vendor/none", "vendor/none", ServedRelation::Exact}, u, "flex");
+  CHECK(!e.total && e.unpriced == std::vector<std::string>({"model"}));
+}
+
+// A partial or contradictory usage is marked as a lower bound.
+void usage_stage() {
+  const auto c = catalogue(R"({"version":1,"models":[{"id":"m","pricing":{"input":"0.000001","output":"0.000002"}}]})");
+  const ServedModel m{"m", "m", ServedRelation::Exact};
+  auto u = usage(1'000, 1'000);
+  auto e = pricing::estimate(*c, "openai.chat", "", m, u);
+  CHECK(e.total && !e.lower_bound);
+  u.stage = UsageStage::Final;
+  CHECK(!pricing::estimate(*c, "openai.chat", "", m, u).lower_bound);
+  u.stage = UsageStage::Partial;
+  e = pricing::estimate(*c, "openai.chat", "", m, u);
+  CHECK(e.total && e.lower_bound);
+  u.stage = UsageStage::Final;
+  u.quality = UsageQuality::Inconsistent;
+  e = pricing::estimate(*c, "openai.chat", "", m, u);
+  CHECK(e.total && e.lower_bound);
+}
+
+// A reservation built from `price_of` skips the input bands; the bound that takes the entry does not.
+void reservation_from_entry() {
+  const auto c = catalogue(R"({"version":1,"models":[{"id":"long","pricing":{"input":"0.000001","output":"0.000004",
+    "input+200000":"0.000002","output+200000":"0.000006"}}]})");
+  const auto& entry = *c->entry("long");
+  const pricing::BoundRequest request{250'000, 1'000, false, {}};
+  const auto actual = pricing::estimate(*c, "openai.chat", "", ServedModel{"long", "long", ServedRelation::Exact}, usage(250'000, 1'000));
+  const auto base = pricing::upper_bound(pricing::price_of(entry), request);
+  const auto bound = pricing::upper_bound(entry, {}, request);
+  CHECK(actual.total && base.total && bound.total);
+  CHECK(base.total->nano_usd < actual.total->nano_usd && bound.total->nano_usd >= actual.total->nano_usd);
+  CHECK(bound.total->nano_usd == pricing::upper_bound(pricing::dearest_price_of(entry, {}, 250'000), request).total->nano_usd);
+  CHECK(!pricing::upper_bound(entry, "flex", request).total);
+}
+
+// A listed price the catalogue cannot hold is counted, not dropped without a trace.
+void skipped_prices() {
+  std::string members;
+  for (int i = 0; i < 70; ++i) members += ",\"unit" + std::to_string(i) + "\":\"0.5\"";
+  const auto body = R"({"data":[{"id":"vendor/m","pricing":{"prompt":"1e-7","completion":"0.0000004","web_search":0.01,)"
+                    R"("overrides":[{"prompt":"0.1"}],"bad unit":"1","audio":"-1")" + members + R"(}}]})";
+  const auto parsed = descriptor::parse_listing(descriptor::Listing::OpenRouter, body, "https://openrouter.ai");
+  const auto* page = std::get_if<descriptor::ListingPage>(&parsed);
+  CHECK(page && page->entries.size() == 1);
+  // Kept: completion, audio and 62 of the units (64 in all). Left out: "1e-7", the number, the unit named "bad unit"
+  // and the 8 units past 64; the structured override is no price.
+  CHECK(page->entries[0].pricing.size() == 64);
+  CHECK(page->skipped_prices == 3 + 8 && page->skipped == 0);
+}
 } // namespace
 
 int main() {
-  try { prices_from_entries(); estimates(); wide_products(); bounds(); bands(); dearer_rates(); std::cout << "pricing properties passed\n"; return 0; }
+  try {
+    prices_from_entries(); estimates(); wide_products(); bounds(); bands(); dearer_rates();
+    unpriced_usage(); zero_rates(); tier_reasons(); usage_stage(); reservation_from_entry(); skipped_prices();
+    std::cout << "pricing properties passed\n"; return 0;
+  }
   catch (const std::exception& error) { std::cerr << "pricing test failed: " << error.what() << '\n'; return 1; }
 }

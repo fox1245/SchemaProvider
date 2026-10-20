@@ -84,7 +84,8 @@ int main(int argc, char** argv) {
   for (const auto& report : refreshed.sources) {
     std::cout << sp::descriptor::listing_name(report.listing) << ": "
               << (report.ok ? "ok" : "failed (" + report.error + ")") << ", " << report.pages << " page(s), "
-              << report.models << " model(s), " << report.skipped << " skipped\n";
+              << report.models << " model(s), " << report.skipped << " skipped, " << report.skipped_prices
+              << " price(s) skipped\n";
     all_ok = all_ok && report.ok;
   }
   std::cout << "diff: " << refreshed.diff.added.size() << " added, " << refreshed.diff.removed.size() << " removed, "

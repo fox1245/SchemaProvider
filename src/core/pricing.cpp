@@ -1,7 +1,9 @@
 #include "core/pricing.h"
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <limits>
+#include <span>
 #include <utility>
 
 namespace sp::pricing {
@@ -116,6 +118,8 @@ std::string_view canonical(std::string_view name) {
   if (name == "input_cache_read") return "cache_read";
   if (name == "input_cache_write") return "cache_write";
   if (name == "internal_reasoning") return "reasoning";
+  if (name == "audio") return "input_audio";
+  if (name == "audio_output") return "output_audio";
   return name;
 }
 // The entry's prices for a request in `service_tier` with `input_tokens` input tokens. Exact: each unit's price from
@@ -150,6 +154,8 @@ ModelPrice select(const descriptor::CatalogueEntry& entry, std::string_view serv
     else if (name == "request") out.request = pick.rate;
     else if (name == "cache_write_1h") out.cache_write_1h = pick.rate;
     else if (name == "output_image") out.output_image = pick.rate;
+    else if (name == "input_audio") out.input_audio = pick.rate;
+    else if (name == "output_audio") out.output_audio = pick.rate;
     else if (name == "ceiling_input") out.ceiling_input = pick.rate;
     else if (name == "ceiling_output") out.ceiling_output = pick.rate;
     else if (name == "ceiling_request") out.ceiling_request = pick.rate;
@@ -163,33 +169,73 @@ ModelPrice select(const descriptor::CatalogueEntry& entry, std::string_view serv
 ModelPrice price_of(const descriptor::CatalogueEntry& entry, std::string_view service_tier, std::uint64_t input_tokens) {
   return select(entry, service_tier, input_tokens, false);
 }
+namespace {
+// Whether the entry has prices in a service tier other than `service_tier`.
+bool priced_in_other_tier(const descriptor::CatalogueEntry& entry, std::string_view service_tier, std::uint64_t input_tokens) {
+  for (const auto& [text_unit, text] : entry.pricing) {
+    const auto unit = parse_unit(text_unit);
+    if (unit && unit->tier != service_tier && per_million(text) && !select(entry, unit->tier, input_tokens, false).empty()) return true;
+  }
+  return false;
+}
+}  // namespace
 ModelPrice dearest_price_of(const descriptor::CatalogueEntry& entry, std::string_view service_tier,
                             std::uint64_t input_tokens) {
   return select(entry, service_tier, input_tokens, true);
 }
 
+namespace {
+// The Usage::extra keys of a modality breakdown: Generate `<group>Details.<MODALITY>` and Interactions
+// `<group>_by_modality.<modality>`.
+constexpr std::array<std::string_view, 2> input_breakdown{"promptTokensDetails.", "input_tokens_by_modality."};
+constexpr std::array<std::string_view, 2> output_breakdown{"candidatesTokensDetails.", "output_tokens_by_modality."};
+// The tokens of one modality in a breakdown, matched without regard to case. Empty when the usage has none.
+std::optional<std::uint64_t> modality_tokens(const Usage& usage, std::span<const std::string_view> prefixes,
+                                             std::string_view modality) {
+  std::optional<std::uint64_t> tokens;
+  for (const std::string_view prefix : prefixes) {
+    for (auto it = usage.extra.lower_bound(std::string(prefix)); it != usage.extra.end() && it->first.starts_with(prefix); ++it) {
+      const std::string_view name = std::string_view(it->first).substr(prefix.size());
+      if (name.find('.') != std::string_view::npos) continue;
+      if (!tokens) tokens = 0;
+      const bool match = name.size() == modality.size() && std::equal(name.begin(), name.end(), modality.begin(),
+          [](char a, char b) { return (a >= 'A' && a <= 'Z' ? a + 32 : a) == b; });
+      if (match) *tokens = it->second.value > std::numeric_limits<std::uint64_t>::max() - *tokens
+                               ? std::numeric_limits<std::uint64_t>::max() : *tokens + it->second.value;
+    }
+  }
+  return tokens;
+}
+}  // namespace
+
 CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_view family, std::string_view origin,
                       const ServedModel& model, const Usage& usage, std::string_view service_tier, bool route_ceiling) {
   CostEstimate out;
+  out.lower_bound = usage.stage == UsageStage::Partial || usage.quality == UsageQuality::Inconsistent;
   const descriptor::CatalogueEntry* entry = nullptr;
   ModelPrice price;
   auto count_of = [](const std::optional<Count>& c) -> std::uint64_t { return c ? c->value : 0; };
   // The input length that picks the entry's band: every input token, cache reads and writes included.
   const auto input_length = usage.input_total ? usage.input_total->value
       : count_of(usage.input_uncached) + count_of(usage.cache_read) + count_of(usage.cache_write);
+  bool other_tier = false;
   auto priced = [&](std::string_view name) {
     if (name.empty()) return false;
     const auto match = catalogue.find(family, origin, name);
     if (!match.entry) return false;
     auto found = price_of(*match.entry, service_tier, input_length);
-    if (found.empty()) return false;
+    if (found.empty()) {
+      // The entry prices the model, but not in this service tier.
+      other_tier = other_tier || priced_in_other_tier(*match.entry, service_tier, input_length);
+      return false;
+    }
     entry = match.entry; price = found;
     return true;
   };
   const bool served = model.relation != ServedRelation::NotReported && !model.served.empty() && model.served != model.requested;
   const bool by_served = served && priced(model.served);
   if (!by_served && !priced(model.requested)) {
-    out.unpriced.push_back("model");
+    out.unpriced.push_back(other_tier ? "tier" : "model");
     return out;
   }
   out.entry = entry->id;
@@ -203,18 +249,28 @@ CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_v
   }
   Wide sum;  // nano-USD x 1e6
   bool complete = true;
-  auto charge = [&](std::uint64_t units, const std::optional<std::uint64_t>& rate, std::string_view name) {
-    if (!units) return;
-    if (!rate) { out.unpriced.emplace_back(name); complete = false; return; }
-    sum += Wide::product(units, *rate);
-  };
   auto assume = [&](std::string_view rule) {
     if (std::find(out.assumptions.begin(), out.assumptions.end(), rule) == out.assumptions.end()) out.assumptions.emplace_back(rule);
+  };
+  // `base` is the rate of the unit this one refines. A zero rate under a priced base bills those tokens as free.
+  auto charge = [&](std::uint64_t units, const std::optional<std::uint64_t>& rate, std::string_view name,
+                    const std::optional<std::uint64_t>& base = std::nullopt) {
+    if (!units) return;
+    if (!rate) { out.unpriced.emplace_back(name); complete = false; return; }
+    if (!*rate && base && *base) assume(std::string(name) + " at zero");
+    sum += Wide::product(units, *rate);
   };
   auto extra = [&](std::string_view counter) -> std::uint64_t {
     const auto found = usage.extra.find(std::string(counter));
     return found == usage.extra.end() ? 0 : found->second.value;
   };
+  // The audio tokens of the input or the output: a modality breakdown, else Chat's own audio counter.
+  auto audio_of = [&](std::string_view chat_counter, std::span<const std::string_view> prefixes) {
+    const auto breakdown = modality_tokens(usage, prefixes, "audio");
+    return breakdown ? *breakdown : extra(chat_counter);
+  };
+  // Gemini bills the tool-use prompt beyond the prompt count; no price here covers it.
+  if (extra("toolUsePromptTokenCount")) { out.unpriced.emplace_back("toolUsePromptTokenCount"); complete = false; }
   // A Messages compaction iteration is billed at the model's rates beside the top-level counters.
   const bool compaction = family == "anthropic.messages";
   if (route_ceiling) {
@@ -237,14 +293,23 @@ CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_v
     if (!complete) return out;
     sum += fee;
   } else {
+    // Audio input bills at its own rate, out of the uncached input. Audio the cache counters hold has no split.
+    std::uint64_t audio_in = 0;
+    if (const auto audio = audio_of("input_audio", input_breakdown); audio && uncached) {
+      if (price.input_audio && audio <= *uncached) audio_in = audio;
+      else { out.unpriced.emplace_back("input_audio"); complete = false; }
+    }
     if (!uncached) { out.unpriced.emplace_back("input"); complete = false; }
-    else charge(*uncached, price.input, "input");
+    else {
+      charge(*uncached - audio_in, price.input, "input");
+      charge(audio_in, price.input_audio, "input_audio", price.input);
+    }
     auto fallback = [&](const std::optional<std::uint64_t>& specific, const std::optional<std::uint64_t>& general, std::string_view rule, std::uint64_t units) {
       if (specific || !units) return specific;
       if (general) assume(rule);
       return general;
     };
-    charge(cache_read, fallback(price.cache_read, price.input, "cache_read at input", cache_read), "cache_read");
+    charge(cache_read, fallback(price.cache_read, price.input, "cache_read at input", cache_read), "cache_read", price.input);
     // Messages splits cache writes into 5-minute and 1-hour writes; without the split, all of them bill at the
     // dearer rate.
     const auto write = fallback(price.cache_write, price.input, "cache_write at input", cache_write);
@@ -252,48 +317,48 @@ CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_v
     const auto hour = usage.extra.find("cache_creation.ephemeral_1h_input_tokens");
     if (price.cache_write_1h && cache_write && five != usage.extra.end() && hour != usage.extra.end() &&
         five->second.value <= cache_write && hour->second.value == cache_write - five->second.value) {
-      charge(five->second.value, write, "cache_write");
-      charge(hour->second.value, price.cache_write_1h, "cache_write_1h");
+      charge(five->second.value, write, "cache_write", price.input);
+      charge(hour->second.value, price.cache_write_1h, "cache_write_1h", write);
     } else if (price.cache_write_1h && cache_write && (!write || *price.cache_write_1h > *write)) {
       assume("cache_write at cache_write_1h");
-      charge(cache_write, price.cache_write_1h, "cache_write_1h");
+      charge(cache_write, price.cache_write_1h, "cache_write_1h", write);
     } else {
       if (hour != usage.extra.end() && hour->second.value && !price.cache_write_1h) assume("cache_write_1h at cache_write");
-      charge(cache_write, write, "cache_write");
+      charge(cache_write, write, "cache_write", price.input);
     }
     if (!usage.output_total) { out.unpriced.emplace_back("output"); complete = false; }
     else {
       const auto output = usage.output_total->value;
       const auto reasoning = price.reasoning ? std::min(count(usage.reasoning).value_or(0), output) : 0;
-      charge(reasoning, price.reasoning, "reasoning");
+      charge(reasoning, price.reasoning, "reasoning", price.output);
       // Gemini reports image output tokens by modality (Generate `candidatesTokensDetails.IMAGE`, Interactions
       // `output_tokens_by_modality.image`). Without that breakdown, all output bills at the dearer rate.
-      std::optional<std::uint64_t> image;
-      if (price.output_image && output > reasoning && price.output_image != price.output) {
-        for (const std::string_view prefix : {"candidatesTokensDetails.", "output_tokens_by_modality."}) {
-          for (auto it = usage.extra.lower_bound(std::string(prefix)); it != usage.extra.end() && it->first.starts_with(prefix); ++it) {
-            const std::string_view modality = std::string_view(it->first).substr(prefix.size());
-            if (modality.find('.') != std::string_view::npos) continue;
-            if (!image) image = 0;
-            const bool is_image = modality.size() == 5 && std::equal(modality.begin(), modality.end(), "image",
-                [](char a, char b) { return (a >= 'A' && a <= 'Z' ? a + 32 : a) == b; });
-            if (is_image) *image += it->second.value;
-          }
-        }
-        if (!image && (!price.output || *price.output_image > *price.output)) {
-          assume("output at output_image");
-          image = output - reasoning;
-        }
+      auto image = modality_tokens(usage, output_breakdown, "image");
+      if (!price.output_image) {
+        if (image && *image) { out.unpriced.emplace_back("output_image"); complete = false; }
+        image.reset();
+      } else if (!(output > reasoning && price.output_image != price.output)) {
+        image.reset();
+      } else if (!image && (!price.output || *price.output_image > *price.output)) {
+        assume("output at output_image");
+        image = output - reasoning;
       }
       const auto images = std::min(image.value_or(0), output - reasoning);
-      charge(images, price.output_image, "output_image");
-      charge(output - reasoning - images, price.output, "output");
+      charge(images, price.output_image, "output_image", price.output);
+      // Audio output bills at its own rate, out of what is left.
+      std::uint64_t audio_out = 0;
+      if (const auto audio = audio_of("audio_tokens", output_breakdown)) {
+        if (price.output_audio) audio_out = std::min(audio, output - reasoning - images);
+        else { out.unpriced.emplace_back("output_audio"); complete = false; }
+      }
+      charge(audio_out, price.output_audio, "output_audio", price.output);
+      charge(output - reasoning - images - audio_out, price.output, "output");
     }
     if (compaction) {
       const auto read = extra("compaction.cache_read_input_tokens"), written = extra("compaction.cache_creation_input_tokens");
       charge(extra("compaction.input_tokens"), price.input, "input");
-      charge(read, fallback(price.cache_read, price.input, "cache_read at input", read), "cache_read");
-      charge(written, fallback(price.cache_write, price.input, "cache_write at input", written), "cache_write");
+      charge(read, fallback(price.cache_read, price.input, "cache_read at input", read), "cache_read", price.input);
+      charge(written, fallback(price.cache_write, price.input, "cache_write at input", written), "cache_write", price.input);
       charge(extra("compaction.output_tokens"), price.output, "output");
     }
     if (price.request) sum += *price.request;
@@ -321,8 +386,8 @@ Bound upper_bound(const ModelPrice& price, const BoundRequest& request) {
     fee = dearest({price.request, price.ceiling_request});
     if (!input || !output) out.unpriced.emplace_back("ceiling");
   } else {
-    input = price.input ? dearest({price.input, price.cache_read, price.cache_write, price.cache_write_1h}) : std::nullopt;
-    output = price.output ? dearest({price.output, price.reasoning, price.output_image}) : std::nullopt;
+    input = price.input ? dearest({price.input, price.cache_read, price.cache_write, price.cache_write_1h, price.input_audio}) : std::nullopt;
+    output = price.output ? dearest({price.output, price.reasoning, price.output_image, price.output_audio}) : std::nullopt;
     fee = price.request;
     if (!input && request.input_tokens) out.unpriced.emplace_back("input");
     if (!output && request.output_tokens) out.unpriced.emplace_back("output");
@@ -344,6 +409,10 @@ Bound upper_bound(const ModelPrice& price, const BoundRequest& request) {
   if (!nano.fits()) { out.unpriced.emplace_back("overflow"); return out; }
   out.total = UsdAmount{nano.low, Evidence::Derived, CostRounding::CeilingCatalogueProduct};
   return out;
+}
+
+Bound upper_bound(const descriptor::CatalogueEntry& entry, std::string_view service_tier, const BoundRequest& request) {
+  return upper_bound(dearest_price_of(entry, service_tier, request.input_tokens), request);
 }
 
 } // namespace sp::pricing

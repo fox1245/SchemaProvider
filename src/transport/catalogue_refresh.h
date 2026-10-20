@@ -43,6 +43,8 @@ struct SourceReport {
   bool ok = false;
   int http_status = 0;  // of the last page requested
   std::size_t pages = 0, models = 0, skipped = 0;
+  // Listed prices the catalogue could not hold and left out (ListingPage::skipped_prices).
+  std::size_t skipped_prices = 0;
   // Why the source failed, as fixed text: never a URL, header, credential or response body.
   std::string error;
 };

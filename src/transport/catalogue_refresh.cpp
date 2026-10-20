@@ -163,6 +163,7 @@ std::variant<RefreshResult, ConfigError> refresh_catalogue(Transport& transport,
         if (std::holds_alternative<ConfigError>(parsed)) { report.error = "listing page is not a model listing"; break; }
         auto& listed = std::get<descriptor::ListingPage>(parsed);
         report.skipped += listed.skipped;
+        report.skipped_prices += listed.skipped_prices;
         pages.push_back(catalogue_of(std::move(listed.entries)));
         if (listed.next.empty()) { report.ok = true; break; }
         if (listed.next == next) { report.error = "listing repeated its page token"; break; }
