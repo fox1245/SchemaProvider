@@ -342,6 +342,8 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
   // A non-chat endpoint call (D6): which one, and whether the provider charges once it accepts it.
   std::string endpoint;
   bool charge_on_accept = false, read_only = false;
+  // What the decoder checks the answer against, and a value no journal may store; the prepared call shows neither.
+  endpoints::Context codec_context;
   // A download written to a file as it arrives: the file, its byte limit, and the attempt's partial copy, which
   // is renamed to the file once the body is whole and removed when the call fails.
   std::string sink_path;
@@ -595,7 +597,7 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
     accumulator = std::make_unique<Accumulator>(client->options.limits.semantic,
         [this](const Event& event) { semantic(event); }, client->options.limits.max_response_bytes);
     if (family == Family::Endpoint) endpoint_codec = endpoints::make_codec(endpoint, client->descriptor, *accumulator,
-        prepared_model, client->options.limits.semantic);
+        prepared_model, codec_context, client->options.limits.semantic);
     else if (family == Family::Chat) chat_codec = std::make_unique<chat::Codec>(client->descriptor,
         options.streaming ? chat::Mode::Sse : chat::Mode::Buffered, *accumulator,
         client->options.limits.semantic, native_context);
@@ -1510,6 +1512,7 @@ PreparedRequest Client::prepare_endpoint(RunOptions options, std::string_view en
     operation.endpoint = std::string(endpoint);
     operation.charge_on_accept = value.charge_on_accept;
     operation.prepared_model = std::move(value.model);
+    operation.codec_context = std::move(value.context);
     operation.sink_path = std::move(value.sink);
     operation.sink_limit = value.sink_limit;
     operation.read_only = value.method == "GET";

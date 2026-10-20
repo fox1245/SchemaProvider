@@ -13,13 +13,20 @@ std::optional<Count> counter(json::Value value) {
   if (!value.is_uint()) return std::nullopt;
   return Count{value.as_uint(), Evidence::Reported};
 }
-// The vectors of a response: OpenAI and OpenRouter `data[].embedding` (by `index`), Google `embeddings[].values`.
-std::vector<json::Value> vectors_of(json::Value root) {
-  std::vector<std::pair<std::uint64_t, json::Value>> indexed;
+// The vectors of a response in input order: OpenAI and OpenRouter `data[].embedding` by `index` (by position when no
+// item has one), Google `embeddings[].values`. Empty when the indexes are not distinct, when only some items have one,
+// or when one is not below `inputs` (zero: unchecked).
+std::optional<std::vector<json::Value>> vectors_of(json::Value root, std::uint64_t inputs) {
   std::vector<json::Value> out;
   if (const auto data = root.get("data"); data.is_array()) {
-    for (auto item : data.elements()) indexed.emplace_back(item.get("index").is_uint() ? item.get("index").as_uint() : indexed.size(), item.get("embedding"));
+    std::size_t named = 0;
+    for (auto item : data.elements()) named += item.get("index").is_uint();
+    if (named && named != data.size()) return std::nullopt;
+    std::vector<std::pair<std::uint64_t, json::Value>> indexed;
+    for (auto item : data.elements()) indexed.emplace_back(named ? item.get("index").as_uint() : indexed.size(), item.get("embedding"));
     std::stable_sort(indexed.begin(), indexed.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (std::size_t i = 0; i < indexed.size(); ++i)
+      if ((i && indexed[i].first == indexed[i - 1].first) || (inputs && indexed[i].first >= inputs)) return std::nullopt;
     for (auto& [index, vector] : indexed) out.push_back(vector);
   } else if (const auto embeddings = root.get("embeddings"); embeddings.is_array()) {
     for (auto item : embeddings.elements()) out.push_back(item.get("values"));
@@ -28,8 +35,9 @@ std::vector<json::Value> vectors_of(json::Value root) {
 }
 }  // namespace
 
-Codec::Codec(const descriptor::ValidatedDescriptor& descriptor, Accumulator& accumulator, std::string requested, SemanticLimits limits)
-    : descriptor_(descriptor), accumulator_(accumulator), requested_(std::move(requested)), limits_(limits) {}
+Codec::Codec(const descriptor::ValidatedDescriptor& descriptor, Accumulator& accumulator, std::string requested, SemanticLimits limits,
+             std::uint64_t inputs)
+    : descriptor_(descriptor), accumulator_(accumulator), requested_(std::move(requested)), limits_(limits), inputs_(inputs) {}
 bool Codec::emit(const Event& event) { return accumulator_.accept(event); }
 bool Codec::fail(ErrorKind kind, std::string text) {
   Error error{kind, std::move(text)};
@@ -49,7 +57,11 @@ bool Codec::buffered(std::string_view body, Close close) {
   if (!emit(RawWire{"embeddings.response", wire})) return false;
   if (root.get("error").valid() && !root.get("error").is_null()) return fail(ErrorKind::RemoteFailure, "remote error property");
   if (!root.get("data").is_array() && !root.get("embeddings").is_array()) return fail(ErrorKind::ProtocolCorrupt, "embedding vectors required");
-  for (auto vector : vectors_of(root)) {
+  if (inputs_ && (root.get("data").is_array() ? root.get("data") : root.get("embeddings")).size() != inputs_)
+    return fail(ErrorKind::ProtocolCorrupt, "the response holds one embedding per input");
+  const auto vectors = vectors_of(root, inputs_);
+  if (!vectors) return fail(ErrorKind::ProtocolCorrupt, "an embedding names its input once");
+  for (auto vector : *vectors) {
     if (!vector.is_array() || !vector.size()) return fail(ErrorKind::ProtocolCorrupt, "an embedding is an array of numbers");
     for (auto value : vector.elements())
       if (!value.is_number() || !std::isfinite(value.as_double())) return fail(ErrorKind::ProtocolCorrupt, "an embedding is an array of numbers");
@@ -82,11 +94,12 @@ Outcome typed(const sp::Outcome& internal) {
   Result result;
   for (const auto& raw : completion.raw_events) {
     if (raw.type != "embeddings.response" || !raw.payload) continue;
-    for (auto vector : vectors_of(raw.payload->root())) {
-      auto& out = result.vectors.emplace_back();
-      out.reserve(vector.size());
-      for (auto value : vector.elements()) out.push_back(static_cast<float>(value.as_double()));
-    }
+    if (const auto vectors = vectors_of(raw.payload->root(), 0))
+      for (auto vector : *vectors) {
+        auto& out = result.vectors.emplace_back();
+        out.reserve(vector.size());
+        for (auto value : vector.elements()) out.push_back(static_cast<float>(value.as_double()));
+      }
   }
   result.usage = completion.usage;
   result.model = completion.model;

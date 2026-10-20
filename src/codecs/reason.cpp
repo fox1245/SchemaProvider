@@ -925,6 +925,8 @@ constexpr Entry embeddings_table[] = {
   {"remote error property", "embeddings.response.remote_error"},
   {"embedding vectors required", "embeddings.vectors.required"},
   {"an embedding is an array of numbers", "embeddings.vector.invalid"},
+  {"an embedding names its input once", "embeddings.vector.index_invalid"},
+  {"the response holds one embedding per input", "embeddings.vectors.count_mismatch"},
 };
 constexpr Entry embeddings_request_table[] = {
   {"embedding endpoints are not admitted at this origin", "request.embeddings.endpoint_not_admitted"},
@@ -949,6 +951,8 @@ constexpr Entry rerank_table[] = {
   {"remote error property", "rerank.response.remote_error"},
   {"rerank results required", "rerank.results.required"},
   {"a rerank result has an index and a score", "rerank.result.invalid"},
+  {"a rerank result names a document of the request once", "rerank.result.index_invalid"},
+  {"the response holds the rerank results the call asked for", "rerank.results.count_mismatch"},
 };
 constexpr Entry rerank_request_table[] = {
   {"rerank endpoints are not admitted at this origin", "request.rerank.endpoint_not_admitted"},

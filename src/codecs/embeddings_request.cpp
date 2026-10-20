@@ -96,6 +96,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   if (const auto at = resolved.find("{model}"); at != std::string::npos) resolved.replace(at, 7, request.model);
   Encoded encoded{std::move(resolved), std::move(body), request.model, fact->charge_on_accept, fact->auth};
   endpoints::add_fact_headers(encoded, *fact);
+  encoded.context.inputs = request.inputs.size();
   return encoded;
 }
 }  // namespace sp::embeddings

@@ -4,7 +4,9 @@
 #include "codecs/served_model.h"
 #include "descriptor/policy.h"
 #include "json/json.h"
+#include <algorithm>
 #include <cmath>
+#include <set>
 
 namespace sp::rerank {
 namespace {
@@ -14,8 +16,9 @@ std::optional<Count> counter(json::Value value) {
 }
 }  // namespace
 
-Codec::Codec(const descriptor::ValidatedDescriptor& descriptor, Accumulator& accumulator, std::string requested, SemanticLimits limits)
-    : descriptor_(descriptor), accumulator_(accumulator), requested_(std::move(requested)), limits_(limits) {}
+Codec::Codec(const descriptor::ValidatedDescriptor& descriptor, Accumulator& accumulator, std::string requested, SemanticLimits limits,
+             std::uint64_t documents, std::uint64_t top)
+    : descriptor_(descriptor), accumulator_(accumulator), requested_(std::move(requested)), limits_(limits), documents_(documents), top_(top) {}
 bool Codec::emit(const Event& event) { return accumulator_.accept(event); }
 bool Codec::fail(ErrorKind kind, std::string text) {
   Error error{kind, std::move(text)};
@@ -36,9 +39,15 @@ bool Codec::buffered(std::string_view body, Close close) {
   if (root.get("error").valid() && !root.get("error").is_null()) return fail(ErrorKind::RemoteFailure, "remote error property");
   const auto results = root.get("results");
   if (!results.is_array()) return fail(ErrorKind::ProtocolCorrupt, "rerank results required");
-  for (auto item : results.elements())
+  std::set<std::uint64_t> seen;
+  for (auto item : results.elements()) {
     if (!item.is_object() || !item.get("index").is_uint() || !item.get("relevance_score").is_number() || !std::isfinite(item.get("relevance_score").as_double()))
       return fail(ErrorKind::ProtocolCorrupt, "a rerank result has an index and a score");
+    const auto index = item.get("index").as_uint();
+    if ((documents_ && index >= documents_) || !seen.insert(index).second) return fail(ErrorKind::ProtocolCorrupt, "a rerank result names a document of the request once");
+  }
+  if (documents_ && results.size() != (top_ ? std::min(top_, documents_) : documents_))
+    return fail(ErrorKind::ProtocolCorrupt, "the response holds the rerank results the call asked for");
   const auto served = root.get("model");
   const std::string_view name = served.is_string() ? served.as_string() : std::string_view{};
   accumulator_.served_model({requested_, std::string(name), served::relation(descriptor_, requested_, name)});
@@ -67,6 +76,8 @@ Outcome typed(const sp::Outcome& internal) {
     if (root.get("id").is_string()) result.id = std::string(root.get("id").as_string());
     if (root.get("provider").is_string()) result.provider = std::string(root.get("provider").as_string());
   }
+  // Providers rank most relevant first, but nothing in the response promises it.
+  std::stable_sort(result.ranked.begin(), result.ranked.end(), [](const Ranked& a, const Ranked& b) { return a.relevance > b.relevance; });
   result.usage = completion.usage;
   result.model = completion.model;
   result.attempt = completion.attempt;

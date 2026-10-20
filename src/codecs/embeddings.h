@@ -42,9 +42,11 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor&, cons
 
 using Close = endpoints::Close;
 // Checks one buffered response: one vector per input, numbers only. The vectors stay in the response document.
+// `inputs` is how many inputs the call sent; the response fails unless it holds a vector for each, once (zero:
+// unchecked).
 class Codec final : public endpoints::Codec {
  public:
-  Codec(const descriptor::ValidatedDescriptor&, Accumulator&, std::string requested, SemanticLimits = {});
+  Codec(const descriptor::ValidatedDescriptor&, Accumulator&, std::string requested, SemanticLimits = {}, std::uint64_t inputs = 0);
   bool buffered(std::string_view body, Close close) override;
  private:
   bool fail(ErrorKind, std::string);
@@ -53,6 +55,7 @@ class Codec final : public endpoints::Codec {
   Accumulator& accumulator_;
   std::string requested_;
   SemanticLimits limits_;
+  std::uint64_t inputs_;
 };
 Outcome typed(const sp::Outcome&);
 }  // namespace sp::embeddings
