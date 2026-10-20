@@ -685,7 +685,7 @@ Tested by `NativeRetentionForeignGate` (with `OriginBindingFacts` and `CanaryNeg
 
 **Retry condition.** All must hold: `RetryClass` is Transient or AfterReset; `RetrySafety` is `NotSent` or `RejectedBeforeOutput` (or `PossiblyAccepted` only when the endpoint documents idempotency-key semantics and the same key is reused, or the caller sets an explicit duplicate-billing-risk policy); never `OutputObserved`; budget and deadline remain. A new attempt is never appended to a previous attempt's partial output. Absence of a stream callback is not a safety argument (`RetrySafetyBudgetDeadline`).
 
-**Retry-safety table by family** (defaults; the HTTP 4xx grant is the only `RejectedBeforeOutput` case, and any further grant needs a citation and fixture before it is added):
+**Retry-safety table by family** (defaults; the HTTP 4xx grant and the charged endpoint calls' 429 and 503 below are the only `RejectedBeforeOutput` cases, and any further grant needs a citation and fixture before it is added):
 
 | Situation | Safety |
 |---|---|
@@ -694,6 +694,7 @@ Tested by `NativeRetentionForeignGate` (with `OriginBindingFacts` and `CanaryNeg
 | Reused connection reset before any response byte | `PossiblyAccepted` (the resend is an attempt, see above) |
 | HTTP 4xx other than 408, 425 and 429 (a bad key, a malformed request, an unsatisfiable `max_price` pin), all families | `RejectedBeforeOutput`: the server declined the request, nothing ran |
 | 408 / 425 / 429 / 503 / 529 (Anthropic overloaded) / Gemini 429 or 503, all families | `PossiblyAccepted` by default: the body was already sent; only a family table entry can change this |
+| A complete 429 or 503 answer to a non-chat endpoint call whose policy fact sets `charge_on_accept` (D6) | `RejectedBeforeOutput`: the provider refused the call before accepting it (RFC 6585 section 4, RFC 9110 section 15.6.4), and the runtime retries it without the duplicate-billing opt-in; the fixture is `endpoint_money_guard` in `tests/runtime_scheduler_test.cpp` |
 | OpenRouter error delivered as HTTP 200 with an in-band error before any output | `PossiblyAccepted`, class from the error code; after output, `OutputObserved` |
 | Any nonterminal semantic event after `Begin` observed by the accumulator, even without a consumer callback | `OutputObserved` (heartbeat bytes, SSE comments and terminal `Fail`/`Commit` events do not count) |
 | Cancelled locally after send | `PossiblyAccepted` (the vendor may keep generating and billing) |
