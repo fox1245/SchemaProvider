@@ -27,6 +27,11 @@ descriptor::ValidatedDescriptor at(std::string_view origin) {
   CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
   return std::get<descriptor::ValidatedDescriptor>(std::move(loaded));
 }
+std::shared_ptr<const json::Document> document(std::string_view text) {
+  auto parsed = json::parse(text);
+  CHECK(std::holds_alternative<json::Document>(parsed));
+  return std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
+}
 template <class Request> endpoints::Encoded encoded(const descriptor::ValidatedDescriptor& d, const Request& r) {
   auto result = files::encode(d, r);
   if (const auto* error = std::get_if<Error>(&result)) throw std::runtime_error("encode refused: " + error->safe_message);
@@ -311,6 +316,56 @@ void upload_urls() {
   }
 }
 
+// Digits a server sends are parsed within 64 bits: a longer number fails the call with a reason, and no parse throws
+// out of `join()` or keeps `on_outcome` from running.
+void digits_fit() {
+  using Kind = files::Codec::Kind;
+  using Step = files::SessionCodec::Step;
+  for (const char* size : {"99999999999999999999", "18446744073709551616", "000000000000000000001"}) {
+    const auto body = std::string(R"({"name":"files/x","sizeBytes":")") + size + R"("})";
+    const auto outcome = decoded(google, Kind::File, body);
+    if (std::string_view(size) == "000000000000000000001") CHECK(std::holds_alternative<Completion>(outcome));
+    else CHECK(std::holds_alternative<Failure>(outcome) && std::get<Failure>(outcome).error.kind == ErrorKind::ProtocolCorrupt &&
+               std::get<Failure>(outcome).error.reason == "files.file.id_required");
+  }
+  CHECK(std::get<files::File>(files::typed(decoded(google, Kind::File, R"({"name":"files/x","sizeBytes":"18446744073709551615"})"))).bytes == 18446744073709551615ull);
+  const std::string url = "https://generativelanguage.googleapis.com/upload/v1beta/files?upload_id=AB-cd_12&upload_protocol=resumable";
+  const files::Session fresh{std::string(google), "google", {}, {}, 100};
+  files::Session session{std::string(google), "google", {}, url, 100};
+  const auto granularity = progress_of(google, Step::Start, "", {{"x-goog-upload-status", "active"}, {"x-goog-upload-url", url}, {"x-goog-upload-chunk-granularity", "99999999999999999999"}}, fresh);
+  CHECK(std::holds_alternative<Failure>(granularity) && std::get<Failure>(granularity).error.reason == "files.session.url_required");
+  const auto received = progress_of(google, Step::Query, "", {{"x-goog-upload-status", "active"}, {"x-goog-upload-size-received", "99999999999999999999"}}, session);
+  CHECK(std::holds_alternative<Failure>(received) && std::get<Failure>(received).error.reason == "files.session.size_invalid");
+  // A result a journal restored is typed without a throw, whatever its records say.
+  auto context = document(R"({"step":"query","session":{"origin":"https://generativelanguage.googleapis.com","shape":"google","size":100,"sent":0,"granularity":0,"parts":[],"status":"","part":0},"status":"active","granularity":"99999999999999999999","received":"99999999999999999999"})");
+  Completion forged;
+  forged.raw_events.push_back(RawWire{"files.session", context});
+  const auto typed = std::get<files::Progress>(files::typed_progress(sp::Outcome{forged}));
+  CHECK(typed.session.sent == 0 && typed.session.granularity == 0);
+
+  // Through the runtime, the failure is the call's outcome and the callback runs.
+  auto executor = std::make_shared<QueueExecutor>();
+  auto wire = std::make_shared<ScriptTransport>();
+  runtime::Options options;
+  options.api_key = "synthetic-key";
+  auto client = runtime::detail::ClientAccess::make(at(google), options, executor, wire);
+  runtime::RunOptions run;
+  run.retry = runtime::RetryPolicy{true, false, 3, 0ms, 0ms};
+  run.deadline = executor->now() + 10s;
+  wire->script = [](Exchange& e) { e.head(200, {{"x-goog-upload-status", "active"}, {"x-goog-upload-size-received", "99999999999999999999"}}); e.ending = true; e.flush(); };
+  bool called = false;
+  auto call = client.start(client.prepare(files::Query{session}, run), [&](files::ProgressOutcome) { called = true; });
+  executor->drain();
+  const auto outcome = call.join();
+  CHECK(called && std::holds_alternative<Failure>(outcome) && std::get<Failure>(outcome).error.reason == "files.session.size_invalid");
+  wire->script = [](Exchange& e) { e.reply(200, "application/json", R"({"file":{"name":"files/x","sizeBytes":"99999999999999999999"}})"); };
+  called = false;
+  auto listed = client.start(client.prepare(files::Get{"files/x"}, run), [&](files::Outcome) { called = true; });
+  executor->drain();
+  const auto got = listed.join();
+  CHECK(called && std::holds_alternative<Failure>(got) && std::get<Failure>(got).error.reason == "files.file.id_required");
+}
+
 // The runtime sends a file slice as the wire's file body and reports the transport's digest on the file.
 void runtime_upload() {
   auto executor = std::make_shared<QueueExecutor>();
@@ -352,6 +407,6 @@ void runtime_upload() {
 }  // namespace
 
 int main() {
-  try { uploads(); reads(); decoded_files(); references(); chunked(); upload_urls(); runtime_upload(); std::cout << "file properties passed\n"; return 0; }
+  try { uploads(); reads(); decoded_files(); references(); chunked(); upload_urls(); digits_fit(); runtime_upload(); std::cout << "file properties passed\n"; return 0; }
   catch (const std::exception& error) { std::cerr << "file test failed: " << error.what() << '\n'; return 1; }
 }
