@@ -6,6 +6,7 @@ on:
       - 'src/**'
       - 'tests/**'
       - 'tools/embed_configuration.py'
+      - 'examples/js-host/**'
       - 'config/**'
       - 'CMakeLists.txt'
       - 'cmake/**'
@@ -52,12 +53,12 @@ jobs:
           emcc --version | head -n 1
           node --version
           cmake --version | head -n 1
-      - name: Configure the runtime without libcurl or threads
+      - name: Configure the runtime without libcurl or threads, with the JavaScript host
         run: |
           source emsdk/emsdk_env.sh
           emcmake cmake -S . -B build-wasm -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DYYJSON_ROOT="$PWD/dependencies/deps/yyjson" \
-            -DSP_BUILD_TRANSPORT=OFF -DSP_THREADS=OFF \
+            -DSP_BUILD_TRANSPORT=OFF -DSP_THREADS=OFF -DSP_BUILD_JS_HOST=ON \
             -DSP_BUILD_TESTS=OFF -DSP_BUILD_CANARY=OFF -DSP_BUILD_RUNTIME_TESTS=ON
       - name: Check that the configuration is curl-free and single-threaded
         run: |
@@ -67,15 +68,22 @@ jobs:
           grep -q 'fexceptions' build-wasm/build.ninja || fail "-fexceptions is not set"
           grep -Eq '^#define SP_BUILD_THREADS 0$' build-wasm/generated/sp/build_config.h || fail "build_config.h records threads"
           if ninja -C build-wasm -t targets all | grep -q 'sp_transport'; then fail "sp_transport is configured"; fi
-      - name: Build sp_runtime and the host runtime test
+          # The JavaScript host reaches fetch through EM_JS callbacks: nothing may suspend the WebAssembly stack.
+          if grep -q -E -e '-sASYNCIFY|-sJSPI|-sFETCH' build-wasm/build.ninja; then fail "Asyncify, JSPI or emscripten fetch is linked"; fi
+      - name: Build sp_runtime, the JavaScript host and the tests
         run: |
           source emsdk/emsdk_env.sh
           cmake --build build-wasm --parallel
-      - name: Run the host runtime test under Node
+      - name: Run the host runtime test and the JavaScript host test under Node
         run: |
           source emsdk/emsdk_env.sh
-          ctest --test-dir build-wasm --output-on-failure --timeout 120
+          node --version
+          # host_runtime: the public seam, chunk cuts, the blocking refusals. js_host: a buffered and an SSE chat
+          # through globalThis.fetch against an HTTP server the test starts, no network and no keys.
+          ctest --test-dir build-wasm --output-on-failure --timeout 180
       - name: Report artifact sizes
         run: |
-          ls -l build-wasm/sp_host_runtime_tests.js build-wasm/sp_host_runtime_tests.wasm
+          ls -l build-wasm/sp_host_runtime_tests.js build-wasm/sp_host_runtime_tests.wasm \
+                build-wasm/sp_js_host_tests.js build-wasm/sp_js_host_tests.wasm
           gzip -c build-wasm/sp_host_runtime_tests.wasm | wc -c
+          gzip -c build-wasm/sp_js_host_tests.wasm | wc -c
