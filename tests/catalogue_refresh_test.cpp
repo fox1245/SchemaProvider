@@ -132,6 +132,30 @@ void invalid_requests(transport::Transport& transport) {
   refused_at(source(Listing::OpenAI, {}, "line\nbreak"), "/sources/0/api_key");
   require(transport::default_listing_url(Listing::Gemini) == "https://generativelanguage.googleapis.com", "default listing URL");
 }
+
+void embedded_facts_apply_at_every_origin(transport::Transport& transport, Peer& peer) {
+  transport::RefreshRequest request;
+  request.sources = {source(Listing::OpenAI, base(peer, "openai-builtin"), "openai-test-key")};
+  request.overlays = {descriptor::builtin_catalogue()};
+  const auto result = refreshed(transport, request);
+  require(result.sources[0].ok && result.sources[0].origin == "https://api.openai.com", "the listing is scoped to the provider origin");
+  require(result.generated->entry("gpt-6-luna")->origins == std::vector<std::string>{"https://api.openai.com"}, "the listing scopes its entry");
+
+  // The embedded entry applies wherever it applied before the refresh: at the listing's origin and at a gateway.
+  const auto& c = *result.catalogue;
+  require(c.entry("gpt-6-luna")->origins.empty() && c.entry("gpt-6-luna")->source == std::optional<std::string>("verified"), "the embedded entry is unscoped");
+  for (const std::string_view origin : {"https://api.openai.com", "https://gateway.example.test"}) {
+    const auto match = c.find("openai.chat", origin, "gpt-6-luna");
+    require(match.entry && match.entry->output_limit == 128000u && match.family_listed, "an embedded model matches at every origin");
+  }
+  // A model only the listing names stays at the listing's origin.
+  require(c.find("openai.chat", "https://api.openai.com", "gpt-test-1").entry &&
+          !c.find("openai.chat", "https://gateway.example.test", "gpt-test-1").entry, "a listed model keeps the listing's origin");
+  auto policy = descriptor::builtin_policy()->with_catalogue(result.catalogue);
+  require(std::holds_alternative<descriptor::PolicySnapshot>(policy), "refreshed catalogue attaches");
+  require(std::get<descriptor::PolicySnapshot>(policy)->output_limit("openai.chat", "https://gateway.example.test", "gpt-6-luna") == 128000u,
+          "the embedded limit applies at a gateway");
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -143,6 +167,7 @@ int main(int argc, char** argv) {
     all_four_listings(transport, peer, generated);
     failures_keep_previous_entries(transport, peer, generated);
     invalid_requests(transport);
+    embedded_facts_apply_at_every_origin(transport, peer);
     std::cout << "catalogue refresh properties passed\n";
     return 0;
   } catch (const std::exception& error) {

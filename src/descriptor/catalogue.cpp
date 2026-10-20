@@ -461,7 +461,9 @@ template <class T> void take(T& into, const T& from) { if (from) into = from; }
 void take_list(std::vector<std::string>& into, const std::vector<std::string>& from) { if (!from.empty()) into = from; }
 void merge_entry(CatalogueEntry& into, const CatalogueEntry& from) {
   take_list(into.families, from.families);
-  take_list(into.origins, from.origins);
+  // The origins scope the whole entry, not one member. The later entry's replace the earlier
+  // ones, and an entry without origins applies at every origin, so the merged one does too.
+  into.origins = from.origins;
   take_list(into.aliases, from.aliases);
   take_list(into.served_as, from.served_as);
   take(into.alias_of, from.alias_of);
