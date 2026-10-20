@@ -75,6 +75,17 @@ std::vector<std::string> formats() {
   for (auto item : stats.root().get("formats").elements()) out.emplace_back(item.as_string());
   return out;
 }
+// The mock server records a client event when it reads it, which can be after the client has seen the next answer (or
+// `Ready`), so a read of its record waits until `done` holds of it. After `limit` the last read is returned, and the
+// check that follows fails.
+template <class Read, class Done> auto recorded(Read read, Done done, std::chrono::seconds limit = 10s) {
+  const auto until = std::chrono::steady_clock::now() + limit;
+  for (;;) {
+    auto value = read();
+    if (done(value) || std::chrono::steady_clock::now() >= until) return value;
+    std::this_thread::sleep_for(5ms);
+  }
+}
 // The outcome of a session that must end by itself: a session that does not is cancelled and the test fails.
 realtime::Outcome ended_within(realtime::Session& session, std::chrono::seconds limit = 10s) {
   auto outcome = std::async(std::launch::async, [&] { return session.join(); });
@@ -111,7 +122,7 @@ void lanes_and_fences(transport::Transport& transport, const descriptor::Validat
   CHECK(session.send(realtime::Respond{}));
   const auto turn = await<realtime::TurnCommitted>(session);
   CHECK(turn && turn->turn.usage.input_total->value == 10 && turn->turn.usage.output_total->value == 5);
-  const auto all = received();
+  const auto all = recorded(received, [](const auto& seen) { return std::count(seen.begin(), seen.end(), "response.create") > 0; });
   const std::vector<std::string> mine(all.begin() + static_cast<std::ptrdiff_t>(before), all.end());
   const auto first = [&](std::string_view type) { return std::find(mine.begin(), mine.end(), type) - mine.begin(); };
   const auto last = [&](std::string_view type) { return std::find(mine.rbegin(), mine.rend(), type).base() - mine.begin() - 1; };
@@ -154,16 +165,19 @@ void inbound_overflow(transport::Transport& transport, const descriptor::Validat
   CHECK(talkative.send(realtime::Text{"flood-text"}));
   const auto text_outcome = ended_within(talkative);
   CHECK(text_outcome.error && text_outcome.error->reason == "runtime.realtime.inbound_overflow" && text_outcome.error->kind == ErrorKind::ResourceLimit);
-  // Events the host reads leave the bound: a host that keeps up is not cut off.
+  // Events the host reads leave the bound: a host that keeps up is not cut off. Each flood is four 64 KiB deltas, within
+  // the bound, and the next is asked for only after the host has read the one before; together they are not.
   realtime::Options generous;
   generous.inbound_event_bytes = 300000;
   auto reading = opened(transport, d, generous);
-  CHECK(reading.send(realtime::Text{"flood-text"}));
-  int deltas = 0;
-  while (deltas < 8) {
-    auto event = reading.next_event(5s);
-    CHECK(event);
-    deltas += std::holds_alternative<realtime::TextDelta>(*event) ? 1 : 0;
+  for (int flood = 0; flood < 2; ++flood) {
+    CHECK(reading.send(realtime::Text{"flood-text:4"}));
+    int deltas = 0;
+    while (deltas < 4) {
+      auto event = reading.next_event(5s);
+      CHECK(event);
+      deltas += std::holds_alternative<realtime::TextDelta>(*event) ? 1 : 0;
+    }
   }
   reading.close();
   CHECK(!reading.join().error);
@@ -261,13 +275,8 @@ void control_preempts_full_ring(transport::Transport& transport, const descripto
   CHECK(!session.send(realtime::Audio{pcm(4800)}));
   CHECK(session.send(realtime::ToolResult{"call-1", "get_weather", nullptr}));
   // Queued audio moves only when the host calls the session, so what has arrived is what overtook it.
-  std::vector<std::string> mine;
-  for (const auto until = std::chrono::steady_clock::now() + 5s; std::chrono::steady_clock::now() < until;) {
-    const auto all = received();
-    mine.assign(all.begin() + static_cast<std::ptrdiff_t>(before), all.end());
-    if (std::count(mine.begin(), mine.end(), "conversation.item.create")) break;
-    std::this_thread::sleep_for(10ms);
-  }
+  const auto all = recorded(received, [&](const auto& seen) { return std::count(seen.begin() + static_cast<std::ptrdiff_t>(before), seen.end(), "conversation.item.create") > 0; });
+  const std::vector<std::string> mine(all.begin() + static_cast<std::ptrdiff_t>(before), all.end());
   CHECK(std::count(mine.begin(), mine.end(), "conversation.item.create") == 1);
   CHECK(std::count(mine.begin(), mine.end(), "input_audio_buffer.append") == 1);
   session.cancel();
@@ -285,7 +294,7 @@ void audio_formats(transport::Transport& transport, const descriptor::ValidatedD
   const auto begun = received().size();
   auto session = opened(transport, d, options, chosen);
   CHECK(await<realtime::Ready>(session));
-  const auto seen = formats();
+  const auto seen = recorded(formats, [&](const auto& list) { return list.size() >= before + 2; });
   CHECK(seen.size() == before + 2 && seen[before] == "input:audio/pcmu" && seen[before + 1] == "output:audio/pcma");
   // 8000 bytes of G.711 are a second (a sixth of a second at the 24 kHz PCM rate): the second chunk waits for the first.
   CHECK(session.send(realtime::Audio{pcm(8000)}));
@@ -294,9 +303,14 @@ void audio_formats(transport::Transport& transport, const descriptor::ValidatedD
     const auto all = received();
     return std::count(all.begin() + static_cast<std::ptrdiff_t>(begun), all.end(), "input_audio_buffer.append");
   };
-  for (const auto until = std::chrono::steady_clock::now() + 400ms; std::chrono::steady_clock::now() < until;) session.next_event(25ms);
+  // Pulling events moves queued audio, so the waits keep the session going.
+  const auto pulled = [&](std::chrono::steady_clock::duration limit, auto done) {
+    for (const auto until = std::chrono::steady_clock::now() + limit; std::chrono::steady_clock::now() < until && !done();) session.next_event(25ms);
+  };
+  pulled(5s, [&] { return appended() >= 1; });
+  pulled(400ms, [] { return false; });
   CHECK(appended() == 1);
-  for (const auto until = std::chrono::steady_clock::now() + 5s; std::chrono::steady_clock::now() < until && appended() < 2;) session.next_event(25ms);
+  pulled(5s, [&] { return appended() >= 2; });
   CHECK(appended() == 2);
   session.close();
   CHECK(!session.join().error);
