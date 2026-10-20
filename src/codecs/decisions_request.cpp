@@ -44,9 +44,13 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
     const bool listed = question.kind == Kind::Choice || question.kind == Kind::Score;
     if (listed != (question.options.size() >= 2) || (!listed && !question.options.empty()))
       return bad("choice and score questions list at least two options; others list none");
-    for (const auto& option : question.options)
+    std::set<std::string_view> values;
+    for (const auto& option : question.options) {
       if (option.value.empty() || (option.guidance && !guidance(option.guidance, !openai)))
         return bad("decision options have a value and string or (OpenRouter) structured guidance");
+      // An answer names its option by value, and OpenRouter keys a choice's criteria by it.
+      if (!values.insert(option.value).second) return bad("decision options need unique values");
+    }
     if (bool(question.when_true) != bool(question.when_false) || (question.when_true && question.kind != Kind::Predicate))
       return bad("predicate guidance gives both a true and a false answer");
     if (question.when_true && openai) return Error{ErrorKind::Unsupported, "predicate guidance is OpenRouter only"};

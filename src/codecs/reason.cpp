@@ -878,6 +878,8 @@ constexpr Entry images_table[] = {
   {"image count limit", "images.data.count_limit"},
   {"image item must be object", "images.item.not_object"},
   {"image item has no data", "images.item.no_data"},
+  {"image URL is not an https location", "images.item.url_invalid"},
+  {"image item has no media type", "images.item.no_media_type"},
 };
 constexpr Entry images_request_table[] = {
   {"image endpoints are not admitted at this origin", "request.images.endpoint_not_admitted"},
@@ -914,6 +916,7 @@ constexpr Entry decisions_request_table[] = {
   {"box questions are OpenRouter only", "request.decisions.box_unsupported"},
   {"choice and score questions list at least two options; others list none", "request.decisions.options_count_invalid"},
   {"decision options have a value and string or (OpenRouter) structured guidance", "request.decisions.option_invalid"},
+  {"decision options need unique values", "request.decisions.option_values_duplicate"},
   {"predicate guidance gives both a true and a false answer", "request.decisions.predicate_guidance_invalid"},
   {"predicate guidance is OpenRouter only", "request.decisions.predicate_guidance_unsupported"},
   {"the decision endpoint admits no options", "request.decisions.options_not_admitted"},
@@ -987,6 +990,7 @@ constexpr Entry jobs_table[] = {
   {"invalid response JSON", "jobs.response.json_invalid"},
   {"response must be object", "jobs.response.not_object"},
   {"a job names its id and status", "jobs.state.id_and_status_required"},
+  {"a poll answers for the job it names", "jobs.state.id_mismatch"},
   {"job outputs are a list", "jobs.state.outputs_invalid"},
   {"a download is not a document", "jobs.download.is_document"},
   {"a download is the body of a 200 response", "jobs.download.status"},

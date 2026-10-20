@@ -25,9 +25,14 @@ std::optional<std::uint64_t> unix_seconds(std::string_view text) {
     return value;
   };
   const auto year = number(0, 4), month = number(5, 2), day = number(8, 2), hour = number(11, 2), minute = number(14, 2), second = number(17, 2);
+  // The days of the month, February by the Gregorian leap rule.
+  const auto month_days = [](int y, int m) {
+    const bool leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    return m == 2 ? (leap ? 29 : 28) : (m == 4 || m == 6 || m == 9 || m == 11) ? 30 : 31;
+  };
   if (!year || !month || !day || !hour || !minute || !second || text.size() < 20 || text[4] != '-' || text[7] != '-' ||
       (text[10] != 'T' && text[10] != 't') || text[13] != ':' || text[16] != ':' || *month < 1 || *month > 12 || *day < 1 ||
-      *day > 31 || *hour > 23 || *minute > 59 || *second > 60 || *year < 1970)
+      *day > month_days(*year, *month) || *hour > 23 || *minute > 59 || *second > 60 || *year < 1970)
     return std::nullopt;
   std::size_t at = 19;
   if (text[at] == '.') {
@@ -63,7 +68,7 @@ std::unique_ptr<Codec> make_codec(std::string_view name, const descriptor::Valid
   if (name == "speech") return std::make_unique<speech::Codec>(descriptor, accumulator, std::move(requested), limits);
   if (name == "transcription") return std::make_unique<transcription::Codec>(descriptor, accumulator, std::move(requested), limits);
   // A job's state, from a submit or a poll, and one output it made.
-  if (name == "videos") return std::make_unique<jobs::StateCodec>(descriptor, accumulator, std::move(requested), std::string(name), limits);
+  if (name == "videos") return std::make_unique<jobs::StateCodec>(descriptor, accumulator, std::move(requested), std::string(name), limits, context.job);
   if (name == "content") return std::make_unique<jobs::ContentCodec>(accumulator, limits);
   // A file's content and batch results are documents: a text or JSON body is the content, whatever type the provider gives it.
   if (name == "content.document") return std::make_unique<jobs::ContentCodec>(accumulator, limits, true);

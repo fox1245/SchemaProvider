@@ -95,6 +95,12 @@ void requests() {
   change(openai, [](auto& r) { r.questions[0].instructions = document(R"({"structured":true})"); }, ErrorKind::InvalidRequest);
   change(openai, [](auto& r) { r.questions[0].kind = decisions::Kind::Box; }, ErrorKind::Unsupported);
   change(openai, [](auto& r) { r.questions[0].when_true = text("x"); r.questions[0].when_false = text("y"); }, ErrorKind::Unsupported);
+  // An answer names its option by value, and OpenRouter keys a choice's criteria by it: a value listed twice would
+  // write one JSON key twice.
+  for (const auto* d : {&openai, &router}) {
+    change(*d, [](auto& r) { r.questions[1].options[1].value = "payments"; }, ErrorKind::InvalidRequest);
+    change(*d, [](auto& r) { r.questions[2].options[2].value = "low"; }, ErrorKind::InvalidRequest);
+  }
   change(router, [](auto& r) { r.questions[0].name.clear(); }, ErrorKind::InvalidRequest);
   change(router, [](auto& r) { r.questions[0].when_true = text("only one"); }, ErrorKind::InvalidRequest);
   change(router, [](auto& r) { r.extensions = document(R"({"questions":{}})"); }, ErrorKind::InvalidRequest);

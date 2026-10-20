@@ -144,6 +144,24 @@ void decoded_responses() {
   const auto& via = std::get<images::Result>(routed);
   CHECK(via.images.size() == 1 && via.images[0].mime == "image/png" && via.usage.output_total->value == 1290 &&
         via.usage.provider_cost.total && via.usage.provider_cost.total->nano_usd == 39'000'000u);
+  // A result is reused as a reference, which admits https locations and inline images of a known type only.
+  for (const char* url : {"javascript:alert(1)", "http://example.test/a.png", "data:image/png;base64,AAAA", "//example.test/a.png"}) {
+    const auto failed = decoded(openai, std::string(R"({"created":1,"data":[{"url":")") + url + R"("}]})");
+    CHECK(std::holds_alternative<Failure>(failed) && std::get<Failure>(failed).error.kind == ErrorKind::ProtocolCorrupt &&
+          std::get<Failure>(failed).error.reason == "images.item.url_invalid");
+  }
+  // An inline image the provider did not name (no `output_format`, no `media_type`) takes its type from its bytes.
+  {
+    const auto unnamed = decoded(openai, std::string(R"({"created":1,"data":[{"b64_json":")") + png + R"("}]})");
+    CHECK(std::holds_alternative<images::Result>(unnamed));
+    const auto& image = std::get<images::Result>(unnamed).images.at(0);
+    CHECK(image.mime == "image/png" && check_media(image, 1u << 20) == MediaFault::None);
+    const auto unknown = decoded(openai, R"({"created":1,"data":[{"b64_json":"aGVsbG8="}]})");
+    CHECK(std::holds_alternative<Failure>(unknown) && std::get<Failure>(unknown).error.reason == "images.item.no_media_type");
+    // A type the provider names is kept as it is named.
+    const auto named = decoded(openai, std::string(R"({"created":1,"output_format":"png","data":[{"b64_json":"aGVsbG8="}]})"));
+    CHECK(std::holds_alternative<images::Result>(named) && std::get<images::Result>(named).images.at(0).mime == "image/png");
+  }
   // A response without images, with an error, or with an item that holds nothing.
   for (const auto& [body, kind] : std::initializer_list<std::pair<std::string, ErrorKind>>{
            {R"({"created":1})", ErrorKind::ProtocolCorrupt}, {R"({"error":{"message":"x"}})", ErrorKind::RemoteFailure},
