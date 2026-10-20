@@ -5,6 +5,8 @@ on:
     paths:
       - 'src/**'
       - 'tests/**'
+      - 'benchmarks/**'
+      - 'tools/benchmark_peer.mjs'
       - 'tools/embed_configuration.py'
       - 'config/**'
       - 'CMakeLists.txt'
@@ -65,7 +67,7 @@ jobs:
             -DYYJSON_ROOT="$PWD/dependencies/deps/yyjson" \
             -DSP_NODE="$(command -v node)" \
             -DSP_OPENSSL="$(command -v openssl)" \
-            -DSP_BUILD_TESTS=ON -DSP_BUILD_CANARY=ON -DSP_BUILD_RUNTIME_TESTS=ON
+            -DSP_BUILD_TESTS=ON -DSP_BUILD_CANARY=ON -DSP_BUILD_RUNTIME_TESTS=ON -DSP_BUILD_BENCHMARKS=ON
       - name: Build SDK and consumers
         run: cmake --build build --parallel 3
       - name: Prepare distinct-address loopback fixture

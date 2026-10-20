@@ -3,6 +3,7 @@
 #include "runtime/testing.h"
 #include "codecs/gemini.h"
 #include "core/native.h"
+#include "descriptor/catalogue.h"
 #include "json/json.h"
 #include "posix_owner.h"
 #include <algorithm>
@@ -131,23 +132,18 @@ sp::descriptor::ValidatedDescriptor descriptor(const Config& c,const Peer& p) {
     }
     policy_json+="]";
   }
-  policy_json+=",\"models\":[";
+  policy_json+="}";
   bool found=false;
-  for(const auto family:root.get("families").elements())if(family.get("family").as_string()==c.family) {
-    policy_json += "{\"family\":" + sp::json::quote(c.family) + ",\"model\":\"bench-model\",\"defaults\":{";
-    bool first_default = true;
-    for (const auto field : family.get("defaults").members()) {
-      if (!first_default) policy_json += ',';
-      first_default = false;
-      policy_json += sp::json::quote(field.key) + ':';
-      policy_json += field.key == "max_output_tokens" ? "null" : field.value.dump();
-    }
-    policy_json += "},\"input_limit\":" + std::to_string(c.model_input_limit) +
-        ",\"output_limit\":" + std::to_string(c.model_output_limit) + '}';
-    found=true;
-  }
-  require(found,"benchmark family policy missing"); policy_json+="]}";
-  auto loaded_policy=sp::descriptor::load_policy(policy_json,file(c.codec_policy));
+  for(const auto family:root.get("families").elements())found=found || family.get("family").as_string()==c.family;
+  require(found,"benchmark family policy missing");
+  // The model's limits are catalogue data. The family's default output cap is left unset, since every
+  // request states its own; the other defaults are the family's.
+  const auto family_name=sp::json::quote(c.family);
+  auto catalogue=sp::descriptor::load_catalogue("{\"version\":1,\"models\":[{\"id\":\"bench-model\",\"families\":["+family_name+
+      "],\"input_limit\":"+std::to_string(c.model_input_limit)+",\"output_limit\":"+std::to_string(c.model_output_limit)+
+      ",\"defaults\":{"+family_name+":{\"max_output_tokens\":null}}}]}");
+  require(std::holds_alternative<sp::descriptor::CatalogueSnapshot>(catalogue),"benchmark model catalogue rejected");
+  auto loaded_policy=sp::descriptor::load_policy(policy_json,file(c.codec_policy),std::get<sp::descriptor::CatalogueSnapshot>(std::move(catalogue)));
   require(std::holds_alternative<sp::descriptor::PolicySnapshot>(loaded_policy),"benchmark model policy rejected");
   auto policy=std::get<sp::descriptor::PolicySnapshot>(std::move(loaded_policy));
   std::string route=c.family; std::replace(route.begin(),route.end(),'.','/'); route="/"+route+"/"+c.scenario;
