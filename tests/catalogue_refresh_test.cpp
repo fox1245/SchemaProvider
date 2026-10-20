@@ -43,6 +43,7 @@ void all_four_listings(transport::Transport& transport, Peer& peer, descriptor::
     require(report.pages == pages[i] && report.models == models[i], "pages followed and models counted");
   }
   require(result.sources[0].skipped == 1 && result.sources[1].skipped == 1, "ids that are not model names are skipped");
+  require(result.sources[0].skipped_prices == 1 && result.sources[1].skipped_prices == 0, "a price written 1e-2 is counted, a structured override is not");
   require(result.sources[0].origin == "https://openrouter.ai" && result.sources[2].origin == "https://api.anthropic.com",
           "entries are scoped to the provider origin, not the listing URL");
 

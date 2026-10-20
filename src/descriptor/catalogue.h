@@ -136,6 +136,9 @@ struct ListingPage {
   std::string next;
   // Listed models left out because their id is not a model name the catalogue can hold.
   std::size_t skipped = 0;
+  // Listed prices left out because the catalogue cannot hold them: a unit that is a number or text that is not a
+  // plain decimal ("1e-7"), or one past the 64 a model keeps.
+  std::size_t skipped_prices = 0;
 };
 using ListingResult = std::variant<ListingPage, ConfigError>;
 // Reads one page of a listing. Every entry gets the listing's `source` and `origins = {origin}`.

@@ -634,9 +634,11 @@ ListingResult parse_listing(Listing listing, std::string_view body, std::string_
           e->retires_at = listed_text(model.get("expiration_date"), date);
           if (const auto pricing = model.get("pricing"); pricing.is_object())
             for (auto member : pricing.members()) {
-              if (e->pricing.size() == 64) break;
-              if (token(member.key) && member.value.is_string() && decimal(member.value.as_string()))
+              // A member that is neither text nor a number (a structured override) is no price.
+              if (!member.value.is_string() && !member.value.is_number()) continue;
+              if (e->pricing.size() < 64 && token(member.key) && member.value.is_string() && decimal(member.value.as_string()))
                 e->pricing.emplace_back(std::string(member.key), std::string(member.value.as_string()));
+              else ++page.skipped_prices;
             }
           std::sort(e->pricing.begin(), e->pricing.end());
           // OpenRouter serves its text models on all three of its API families.

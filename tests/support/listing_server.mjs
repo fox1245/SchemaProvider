@@ -14,7 +14,7 @@ const openrouter = (version) => ({
       supported_parameters: ['temperature', 'tools', 'bad token!'],
       benchmarks: { nested: { deeper: [1, 2, 3] } },
     },
-    { id: 'vendor/image-model', architecture: { input_modalities: ['text'], output_modalities: ['image'] }, pricing: { image: '0.04' } },
+    { id: 'vendor/image-model', architecture: { input_modalities: ['text'], output_modalities: ['image'] }, pricing: { image: '0.04', web_search: '1e-2' } },
     ...(version === 1 ? [{ id: 'vendor/retiring', expiration_date: '2026-11-01', architecture: { output_modalities: ['text'] } }] : []),
     { id: '~vendor/text-latest', alias_target: { name: 'Vendor: Text Model', slug: 'vendor/text-model' }, architecture: { output_modalities: ['text'] } },
     { id: 'has space' },
