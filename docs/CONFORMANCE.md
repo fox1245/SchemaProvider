@@ -10,7 +10,7 @@ Current source scope is five typed buffered/SSE families, bounded prepare/start/
 
 ## 0.4.0 release record
 
-**Source.** The 0.4.0 release tree: interface revision 7, shared-library generation 7. It was run on Linux x86_64 (WSL2) with GCC 13.3, CMake 3.28 and libcurl 8.5.0, on 2026-10-20.
+**Source.** The 0.4.0 release tree, including the fixes from the release review (#130 to #133): interface revision 7, shared-library generation 7. It was run on Linux x86_64 (WSL2) with GCC 13.3, CMake 3.28 and libcurl 8.5.0, on 2026-10-20.
 
 | Build | Result |
 |---|---|
@@ -19,7 +19,7 @@ Current source scope is five typed buffered/SSE families, bounded prepare/start/
 | TSan, RelWithDebInfo | 69 passed, none failed; `native_archive_key_residue` skipped |
 
 - **CI.** The project's CI runs the native tests on macOS 15 and CodeQL. NeoGraph's CI builds this source on Linux, macOS and Windows, but does not run these tests there.
-- **Live.** Each feature of the cycle had its own live checks with real keys, recorded in its pull request. The realtime sessions are #115 and #126, and the transcription sessions are #126.
+- **Live.** Each feature of the cycle had its own live checks with real keys, recorded in its pull request. The realtime sessions are #115 and #126, and the transcription sessions are #126. The review fixes were checked the same way: an OpenRouter Chat reasoning stream of about 24,000 chunks completes and replays (#130), and both transcription sessions commit their turn again (#133).
 - **NeoGraph's gate.** NeoGraph 0.16.0 is released only once its live end-to-end report over this release passes (fox1245/NeoGraph#512). The report covers the chat families buffered and streamed, media, the endpoints and speech.
 - **Not run here.** aarch64, Windows and HTTP/3 were not run for this record.
 
