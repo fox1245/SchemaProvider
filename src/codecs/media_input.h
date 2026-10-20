@@ -20,7 +20,8 @@ std::optional<Error> admit(const descriptor::ValidatedDescriptor&, const Media&)
 std::optional<std::string_view> audio_format(std::string_view mime) noexcept;
 // The caller's name, or a MIME-derived one for providers that read a file extension.
 std::string document_filename(const Media&);
-// Writes `"data:<mime>;base64,<payload>"` including quotes; MIME and payload are validated ASCII.
+// Writes `"data:<mime>;base64,<payload>"` including quotes; MIME and payload are validated ASCII. The MIME type
+// is written compactly (mime_compact): a data URI cannot carry whitespace around its parameters.
 void data_uri(json::BoundedWriter&, const Media&);
 // A data URI for inline media, otherwise the quoted https URL (for `url` sources).
 void uri_or_url(json::BoundedWriter&, const Media&);

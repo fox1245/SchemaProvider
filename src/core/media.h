@@ -59,11 +59,16 @@ std::string_view image_detail_name(ImageDetail) noexcept;
 std::string_view media_kind_name(MediaKind) noexcept;
 std::string_view media_source_name(MediaSource) noexcept;
 
-// MIME text is `type/subtype` followed by optional `;name=value` token parameters. The only
-// multi-slash exceptions are generateContent's documented video/audio/{s16le,wav} and
-// video/text/timestamp aliases; family policy must explicitly admit them. Neither a quote,
-// backslash, comma nor whitespace is admitted, so valid values are safe in JSON and `data:` URIs.
+// MIME text is `type/subtype` followed by optional `;name=value` token parameters, with optional
+// whitespace around each `;` as services send it ("audio/l16; rate=24000"). The only multi-slash
+// exceptions are generateContent's documented video/audio/{s16le,wav} and video/text/timestamp
+// aliases; family policy must explicitly admit them. No quote, backslash, comma or control
+// character is admitted, so a valid value is safe inside a JSON string. A `data:` URI cannot carry
+// the whitespace: write a MIME type there through mime_compact. check_media also refuses `#` and `%`
+// in a request MIME type, which a URI reads as a fragment and an escape.
 bool mime_syntax(std::string_view mime) noexcept;
+// A valid MIME type without the whitespace around its parameters; the same type, spelled compactly.
+std::string mime_compact(std::string_view mime);
 // The `type/subtype` part before any parameter.
 std::string_view mime_essence(std::string_view mime) noexcept;
 // ASCII case-insensitive comparison of the essences only.

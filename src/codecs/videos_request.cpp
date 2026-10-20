@@ -46,7 +46,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
     for (std::size_t i = 0; i < request.references.size(); ++i) {
       const auto& media = request.references[i];
       out.raw(i ? ",{\"type\":\"image_url\",\"image_url\":{\"url\":" : "{\"type\":\"image_url\",\"image_url\":{\"url\":");
-      if (media.source == MediaSource::Inline) out.raw("\"data:").raw(media.mime).raw(";base64,").raw(*media.data).raw("\"");
+      if (media.source == MediaSource::Inline) media_input::data_uri(out, media);
       else out.quoted(media.reference);
       out.raw("}}");
     }

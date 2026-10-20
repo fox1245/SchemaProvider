@@ -195,6 +195,17 @@ bool mime_syntax(std::string_view mime) noexcept {
   }
   return true;
 }
+std::string mime_compact(std::string_view mime) {
+  std::string out;
+  out.reserve(mime.size());
+  for (std::size_t at = 0;;) {
+    const auto next = mime.find(';', at);
+    out.append(trim_ows(mime.substr(at, next == std::string_view::npos ? next : next - at)));
+    if (next == std::string_view::npos) return out;
+    out.push_back(';');
+    at = next + 1;
+  }
+}
 bool mime_equal(std::string_view a, std::string_view b) noexcept { return lower_equal(mime_essence(a), mime_essence(b)); }
 std::optional<MediaKind> mime_kind(std::string_view mime) noexcept {
   if (!mime_syntax(mime)) return std::nullopt;
@@ -304,7 +315,7 @@ MediaFault check_media(const Media& media, std::size_t decoded_limit) noexcept {
   if (!text_safe(media.name, 512) || !text_safe(media.id, 512)) return MediaFault::Text;
   const bool has_mime = !media.mime.empty();
   if (has_mime) {
-    if (!mime_syntax(media.mime)) return MediaFault::Mime;
+    if (!mime_syntax(media.mime) || media.mime.find_first_of("#%") != std::string::npos) return MediaFault::Mime;
     const auto kind = mime_kind(media.mime);
     if (!kind || *kind != media.kind) return MediaFault::Kind;
   }

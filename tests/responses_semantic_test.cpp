@@ -789,6 +789,11 @@ void computer_calls_and_mcp_approvals() {
           answer.get("acknowledged_safety_checks").at(0).get("id").as_string() == "sc_1");
     auto plain = shot; plain.content.clear(); next.messages.back() = Message{"", Role::Tool, {plain}};
     CHECK(!parse(encoded_ok(desc(), next).body).root().get("input").at(2).get("acknowledged_safety_checks").valid());
+    // The screenshot's data URL carries no whitespace from a MIME type that has some around its parameters.
+    for (const char* mime : {"image/png; q=1", "image/png;\tq=1"}) {
+      auto spaced = plain; spaced.content_parts = {Media::image(mime, png)}; next.messages.back() = Message{"", Role::Tool, {spaced}};
+      CHECK(parse(encoded_ok(desc(), next).body).root().get("input").at(2).get("output").get("image_url").as_string().starts_with("data:image/png;q=1;base64,iVBOR"));
+    }
     auto worded = shot; worded.content_parts.push_back(Text{"note"}); next.messages.back() = Message{"", Role::Tool, {worded}};
     CHECK(refused(responses::encode(desc(), next, false)) == ErrorKind::InvalidRequest);
     auto extra = shot; extra.content = R"({"note":"x"})"; next.messages.back() = Message{"", Role::Tool, {extra}};
