@@ -2,6 +2,7 @@
 // download; the one `files::File` every response becomes; its `Media::file` reference; and the runtime's file
 // slice upload.
 #include "codecs/files.h"
+#include "crypto/crypto.h"
 #include "descriptor/descriptor.h"
 #include "json/json.h"
 #include "support/endpoint_fakes.h"
@@ -204,7 +205,7 @@ files::ProgressOutcome progress_of(std::string_view origin, files::SessionCodec:
                                    std::vector<std::pair<std::string, std::string>> headers, const files::Session& session, std::uint64_t part = 0) {
   const auto d = at(origin);
   Accumulator accumulator;
-  files::SessionCodec codec(d, accumulator, step, files::session_document(session, part));
+  files::SessionCodec codec(d, accumulator, step, files::session_document(session, part), {}, session.url);
   endpoints::Close close;
   close.headers = std::move(headers);
   codec.buffered(body, std::move(close));
@@ -366,6 +367,103 @@ void digits_fit() {
   CHECK(called && std::holds_alternative<Failure>(got) && std::get<Failure>(got).error.reason == "files.file.id_required");
 }
 
+// Google's upload URL lets anyone write the file: it is in the session and in the call's URL, and nowhere a host
+// journals a prepared call (its model) or a result (its raw events).
+void upload_url_stays_private() {
+  using Step = files::SessionCodec::Step;
+  constexpr std::uint64_t total = 100, mib8 = 8388608;
+  const std::string url = "https://generativelanguage.googleapis.com/upload/v1beta/files?upload_id=SECRET-session_1&upload_protocol=resumable";
+  const std::string other_url = "https://generativelanguage.googleapis.com/upload/v1beta/files?upload_id=SECRET-session_2&upload_protocol=resumable";
+  const auto hex = [](std::string_view text) {
+    std::string out;
+    for (const auto byte : crypto::sha256(text)) { out += "0123456789abcdef"[byte >> 4]; out += "0123456789abcdef"[byte & 15]; }
+    return out;
+  };
+  files::Session session{std::string(google), "google", {}, url, total, 0, mib8};
+  session.status = "active";
+  const auto leaks = [&](std::string_view text) { return text.find("SECRET") != std::string_view::npos || text.find("upload_id") != std::string_view::npos; };
+  // The model of every step names the session by the digest of its URL: steady for a session, different between two.
+  const auto part = encoded(at(google), files::Part{session, {std::make_shared<const std::string>(std::string(total, 'x'))}});
+  CHECK(!leaks(part.model) && part.context.secret == url && part.path.find("SECRET") != std::string::npos);
+  const auto model = document(part.model);
+  CHECK(model->root().get("url_sha256").as_string() == hex(url) && model->root().get("size").as_uint() == total && model->root().get("part").as_uint() == total);
+  CHECK(encoded(at(google), files::Part{session, {std::make_shared<const std::string>(std::string(total, 'y'))}}).model == part.model);
+  auto other = session; other.url = other_url;
+  CHECK(encoded(at(google), files::Part{other, {std::make_shared<const std::string>(std::string(total, 'x'))}}).model != part.model);
+  for (const auto& step : {encoded(at(google), files::Query{session}), encoded(at(google), files::Cancel{session})})
+    CHECK(!leaks(step.model) && step.context.secret == url);
+  CHECK(!leaks(files::session_document(session)) && files::session_document(files::Session{std::string(google), "google", {}, {}, total}).find("\"url_sha256\":\"\"") != std::string::npos);
+
+  // Every step's answer carries the URL in the typed session, in no raw event.
+  const auto clean = [&](const files::Progress& progress) {
+    for (const auto& raw : progress.raw_events) CHECK(!raw.payload || !leaks(raw.payload->root().dump()));
+  };
+  const auto begun = std::get<files::Progress>(progress_of(google, Step::Start, "",
+      {{"x-goog-upload-status", "active"}, {"x-goog-upload-url", url}, {"x-goog-upload-chunk-granularity", "8388608"}}, files::Session{std::string(google), "google", {}, {}, total}));
+  CHECK(begun.session.url == url && begun.session.granularity == mib8);
+  clean(begun);
+  bool recorded = false;
+  for (const auto& raw : begun.raw_events) if (raw.type == "files.session") recorded = raw.payload->root().get("url_sha256").as_string() == hex(url);
+  CHECK(recorded);
+  const auto chunk = std::get<files::Progress>(progress_of(google, Step::Part, "", {{"x-goog-upload-status", "active"}}, begun.session, total));
+  CHECK(chunk.session.url == url && chunk.session.sent == total);
+  clean(chunk);
+  const auto asked = std::get<files::Progress>(progress_of(google, Step::Query, "", {{"x-goog-upload-status", "active"}, {"x-goog-upload-size-received", "50"}}, begun.session));
+  CHECK(asked.session.url == url && asked.session.sent == 50);
+  clean(asked);
+  const auto cancelled = std::get<files::Progress>(progress_of(google, Step::Cancel, "", {{"x-goog-upload-status", "cancelled"}}, begun.session));
+  CHECK(cancelled.session.url == url);
+  clean(cancelled);
+  // A failed step has no raw event of the session at all.
+  const auto failed = progress_of(google, Step::Part, "", {}, begun.session, total);
+  CHECK(std::holds_alternative<Failure>(failed));
+  for (const auto& raw : std::get<Failure>(failed).partial.raw_events) CHECK(!raw.payload || !leaks(raw.payload->root().dump()));
+
+  // Through the runtime: the prepared call shows the URL only as its URL, and a result restored without the
+  // completion's secret (a journal keeps the raw events) still types, with no URL.
+  auto executor = std::make_shared<QueueExecutor>();
+  auto wire = std::make_shared<ScriptTransport>();
+  runtime::Options options;
+  options.api_key = "synthetic-key";
+  auto client = runtime::detail::ClientAccess::make(at(google), options, executor, wire);
+  runtime::RunOptions run;
+  run.retry = runtime::RetryPolicy{true, false, 3, 0ms, 0ms};
+  run.deadline = executor->now() + 10s;
+  wire->script = [&](Exchange& e) { e.head(200, {{"x-goog-upload-status", "active"}, {"x-goog-upload-url", url}, {"x-goog-upload-chunk-granularity", "8388608"}}); e.ending = true; e.flush(); };
+  auto started = client.prepare(files::Start{"chunked.txt", "text/plain", total}, run);
+  CHECK(!leaks(started.prepared().model()) && !leaks(started.prepared().url()));
+  auto first = client.start(std::move(started));
+  executor->drain();
+  const auto opened = std::get<files::Progress>(first.join());
+  CHECK(opened.session.url == url);
+  clean(opened);
+  wire->script = [](Exchange& e) { e.head(200, {{"x-goog-upload-status", "active"}}); e.ending = true; e.flush(); };
+  auto prepared = client.prepare(files::Part{opened.session, {std::make_shared<const std::string>(std::string(total, 'x'))}}, run);
+  CHECK(!leaks(prepared.prepared().model()) && prepared.prepared().url() == url && prepared.prepared().endpoint() == "files.part");
+  std::optional<files::ProgressOutcome> delivered;
+  auto second = client.start(std::move(prepared), [&](files::ProgressOutcome outcome) { delivered = std::move(outcome); });
+  executor->drain();
+  const auto advanced = std::get<files::Progress>(second.join());
+  CHECK(delivered && std::get<files::Progress>(*delivered).session.url == url && advanced.session.url == url && advanced.session.sent == total);
+  clean(advanced);
+  // The untyped path: the result a host journals holds no URL in its wire records.
+  auto untyped = client.prepare(files::Query{opened.session}, run);
+  wire->script = [](Exchange& e) { e.head(200, {{"x-goog-upload-status", "active"}, {"x-goog-upload-size-received", "50"}}); e.ending = true; e.flush(); };
+  std::optional<runtime::Result> result;
+  runtime::Callbacks callbacks;
+  callbacks.on_outcome = [&](runtime::Result value) { result = std::move(value); };
+  auto third = client.start(std::move(untyped).release(), std::move(callbacks));
+  executor->drain();
+  third.join();
+  CHECK(result);
+  const auto& completion = std::get<Completion>(**result);
+  for (const auto& raw : completion.raw_events) CHECK(!raw.payload || !leaks(raw.payload->root().dump()));
+  Completion restored = completion;
+  restored.secret.clear();
+  const auto retyped = std::get<files::Progress>(files::typed_progress(sp::Outcome{restored}));
+  CHECK(retyped.session.sent == 50 && retyped.session.url.empty());
+}
+
 // The runtime sends a file slice as the wire's file body and reports the transport's digest on the file.
 void runtime_upload() {
   auto executor = std::make_shared<QueueExecutor>();
@@ -407,6 +505,6 @@ void runtime_upload() {
 }  // namespace
 
 int main() {
-  try { uploads(); reads(); decoded_files(); references(); chunked(); upload_urls(); digits_fit(); runtime_upload(); std::cout << "file properties passed\n"; return 0; }
+  try { uploads(); reads(); decoded_files(); references(); chunked(); upload_urls(); digits_fit(); upload_url_stays_private(); runtime_upload(); std::cout << "file properties passed\n"; return 0; }
   catch (const std::exception& error) { std::cerr << "file test failed: " << error.what() << '\n'; return 1; }
 }

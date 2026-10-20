@@ -78,7 +78,7 @@ std::unique_ptr<Codec> make_codec(std::string_view name, const descriptor::Valid
   using Step = files::SessionCodec::Step;
   for (const auto& [step_name, step] : {std::pair{"files.start", Step::Start}, std::pair{"files.part", Step::Part},
                                         std::pair{"files.complete", Step::Complete}, std::pair{"files.query", Step::Query}, std::pair{"files.cancel", Step::Cancel}})
-    if (name == step_name) return std::make_unique<files::SessionCodec>(descriptor, accumulator, step, std::move(requested), limits);
+    if (name == step_name) return std::make_unique<files::SessionCodec>(descriptor, accumulator, step, std::move(requested), limits, context.secret);
   if (name == "files.delete") return std::make_unique<files::Codec>(descriptor, accumulator, files::Codec::Kind::Deleted, std::move(requested), limits);
   return nullptr;
 }

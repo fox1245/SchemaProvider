@@ -18,7 +18,7 @@ The transport sent only an in-memory body, bounded by a policy limit (16 MiB by 
   - It hashes the slice as it sends it. With a digest, it hands over the slice's last bytes only once the digest matches, so a file changed after `prepare` never reaches the provider whole.
   - A body that must be sent again starts over from its first byte, and only when the attempt never reached the provider, as for any call.
 - **Files.** One `files::File` across providers: the origin and id, Google's URI, name, MIME type, size, creation and expiry times, a state, OpenAI's purpose, Anthropic's `downloadable`, Google's SHA-256, the digest of the bytes this call uploaded, and the provider's object. `files::media` turns it into the `Media::file` reference a chat request names. It refuses a file of another origin, one not yet active, and one that has expired.
-- **Multi-step operations.** Each step is an ordinary call. A journalable handle carries upload URLs, offsets, part ids and job ids between steps, as `jobs::Handle` does.
+- **Multi-step operations.** Each step is an ordinary call. A journalable handle carries upload URLs, offsets, part ids and job ids between steps, as `jobs::Handle` does. The upload URL is a credential, so it stays in the `Session` and in the call's URL: a prepared call's model and the raw events name it by its SHA-256.
 - **Batches.** A submit is charge-on-accept. Results come both as a JSONL download to a file and as a pure decoder of one line through the family codecs, into `{custom_id, Outcome}`.
 - **Resources.**
   - Typed where the SDK gives the result meaning: token counting, models, generation statistics, translations.

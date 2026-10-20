@@ -68,13 +68,16 @@ void interface_contract_capabilities() {
   using namespace sp::capability;
   static_assert((RequiredProvider & OpenRouterRoutingMaxPrice) == OpenRouterRoutingMaxPrice);
   static_assert((RequiredProvider & ErrorReason) == ErrorReason);
+  static_assert((RequiredProvider & CompletionSecret) == CompletionSecret);
   const auto linked = sp::runtime::interface_contract();
   require(linked.revision == sp::EXPECTED_INTERFACE_REVISION, "linked interface revision differs");
   require((linked.capabilities & RequiredProvider) == RequiredProvider, "required capabilities are not advertised");
   require((sp::core_interface_contract().capabilities & OpenRouterRoutingMaxPrice) != 0, "core omits max_price support");
   require((sp::core_interface_contract().capabilities & ErrorReason) != 0, "core omits Error::reason");
+  require((sp::core_interface_contract().capabilities & CompletionSecret) != 0, "core omits Completion::secret");
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, OpenRouterRoutingMaxPrice);
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, ErrorReason);
+  sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, CompletionSecret);
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, RequiredProvider);
   constexpr std::uint64_t ungranted = 1ULL << 63;
   require((linked.capabilities & ungranted) == 0, "test capability bit is granted");

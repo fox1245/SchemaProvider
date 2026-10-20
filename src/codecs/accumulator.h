@@ -24,6 +24,8 @@ class Accumulator {
   bool terminal() const { return outcome_.has_value(); }
   // The model the response reported, recorded by the decoder when it first sees one.
   void served_model(ServedModel model) { if (!terminal()) served_ = std::move(model); }
+  // A value for the completion's `secret`, which the typed outcome reads and no raw event repeats.
+  void secret(std::string value) { if (!terminal()) secret_ = std::move(value); }
   // Messages already begun are sealed without replay authority (an unexplained served model).
   void withhold_replay();
  private:
@@ -73,5 +75,6 @@ class Accumulator {
   const Error* failure_override_ = nullptr;
   std::optional<Outcome> outcome_;
   ServedModel served_;
+  std::string secret_;
 };
 } // namespace sp

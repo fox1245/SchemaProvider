@@ -324,6 +324,9 @@ struct Completion {
   std::vector<RawWire> raw_events{};
   // The requested and the reported model, and how they relate.
   ServedModel model{};
+  // A value the endpoint's typed outcome needs that is no wire evidence and must reach no journal (a resumable
+  // upload's session URL). It is not in `raw_events`, and a restored Completion does not have it.
+  std::string secret{};
 
   std::string joined_text() const {
     std::string out;

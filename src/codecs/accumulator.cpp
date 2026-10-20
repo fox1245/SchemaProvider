@@ -470,7 +470,7 @@ bool Accumulator::apply(const Commit& e) {
   // A job still running (Pending) has the usage it accrued so far, not its final count.
   if (usage_.stage != UsageStage::Missing) usage_.stage = stop_->kind == StopKind::Pending ? UsageStage::Partial : UsageStage::Final;
   outcome_ = Completion{std::move(messages), std::move(*stop_), std::move(usage_),
-      std::move(wire_envelope_), {}, std::move(raw_events_), std::move(served_)};
+      std::move(wire_envelope_), {}, std::move(raw_events_), std::move(served_), std::move(secret_)};
   state_ = State::Terminal; return true;
 }
 bool Accumulator::apply(const Fail& e) {
