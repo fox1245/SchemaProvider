@@ -1,0 +1,7 @@
+{"setupComplete":{}}
+{"serverContent":{},"voiceActivity":{"type":"ACTIVITY_START","audioOffset":"0.560s"}}
+{"serverContent":{"interimInputTranscription":{"text":"What is the"}}}
+{"serverContent":{"interimInputTranscription":{"text":"What is the capital of France?"}}}
+{"serverContent":{"inputTranscription":{"text":"What is the capital of France?"}}}
+{"serverContent":{"generationComplete":true}}
+{"serverContent":{},"voiceActivity":{"type":"ACTIVITY_END","audioOffset":"3.240s"}}

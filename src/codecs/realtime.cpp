@@ -7,6 +7,7 @@
 #include "json/json.h"
 #include <algorithm>
 #include <cmath>
+#include <map>
 
 namespace sp::realtime {
 namespace {
@@ -66,13 +67,15 @@ class Turn {
   void set_transcript(std::string value) { transcript_ = std::move(value); active_ = true; }
   void tool_call(std::string id, std::string name, std::string arguments) { calls_.push_back({std::move(id), std::move(name), std::move(arguments)}); active_ = true; }
   void usage(Usage usage) { usage_ = std::move(usage); }
+  // A transcription session's turn is the user's utterance.
+  void user_text(std::string_view value) { text_.append(value); role_ = Role::User; active_ = true; }
   bool active() const { return active_; }
   // The turn as a Completion, through the accumulator so it keeps the chat invariants; then a fresh turn.
   std::variant<Completion, Error> commit(std::string id, StopReason stop, SemanticLimits limits) {
     Accumulator accumulator(limits);
     std::uint32_t local = 0;
     std::uint64_t order = 0;
-    bool ok = accumulator.accept(Begin{id}) && accumulator.accept(MessageBegin{{0}, id.empty() ? std::nullopt : std::optional<std::string>(id), Role::Assistant, nullptr});
+    bool ok = accumulator.accept(Begin{id}) && accumulator.accept(MessageBegin{{0}, id.empty() ? std::nullopt : std::optional<std::string>(id), role_, nullptr});
     const auto part = [&](PartKind kind, PartHeader header, std::string_view bytes) {
       const LocalId at{++local};
       ok = ok && accumulator.accept(PartBegin{{0}, at, kind, std::move(header), order++}) &&
@@ -109,6 +112,7 @@ class Turn {
   std::string pcm_, mime_, text_, transcript_;
   std::vector<Call> calls_;
   Usage usage_;
+  Role role_ = Role::Assistant;
   bool active_ = false;
 };
 
@@ -119,13 +123,16 @@ class GoogleCodec final : public Codec {
   GoogleCodec(const descriptor::EndpointFact& fact, SemanticLimits limits) : fact_(fact), limits_(limits) {}
   std::uint32_t input_rate() const noexcept override { return 16000; }
   std::variant<std::vector<Frame>, Error> open(const Setup& setup) override {
+    // A transcription model answers in text only; it refuses AUDIO.
+    transcribing_ = setup.output.empty();
     std::string out = "{\"setup\":{\"model\":" + json::quote("models/" + setup.model) + ",\"generationConfig\":{\"responseModalities\":[";
     for (std::size_t i = 0; i < setup.output.size(); ++i) out.append(i ? "," : "").append(setup.output[i] == Modality::Audio ? "\"AUDIO\"" : "\"TEXT\"");
+    if (transcribing_) out += "\"TEXT\"";
     out += "]";
     if (!setup.voice.empty()) out += ",\"speechConfig\":{\"voiceConfig\":{\"prebuiltVoiceConfig\":{\"voiceName\":" + json::quote(setup.voice) + "}}}";
     out += "}";
     if (!setup.instructions.empty()) out += ",\"systemInstruction\":{\"parts\":[{\"text\":" + json::quote(setup.instructions) + "}],\"role\":\"user\"}";
-    if (setup.input_transcription) out += ",\"inputAudioTranscription\":{}";
+    if (setup.input_transcription || transcribing_) out += ",\"inputAudioTranscription\":{}";
     if (setup.output_transcription) out += ",\"outputAudioTranscription\":{}";
     if (setup.resume) out += setup.resume->empty() ? ",\"sessionResumption\":{}" : ",\"sessionResumption\":{\"handle\":" + json::quote(*setup.resume) + "}";
     if (!setup.tools.empty()) {
@@ -196,8 +203,15 @@ class GoogleCodec final : public Codec {
           }
         }
       }
-      if (const auto input = content.get("inputTranscription").get("text"); input.is_string())
+      if (const auto interim = content.get("interimInputTranscription").get("text"); interim.is_string())
+        events.push_back(Transcript{true, std::string(interim.as_string()), true});
+      if (const auto input = content.get("inputTranscription").get("text"); input.is_string()) {
         events.push_back(Transcript{true, std::string(input.as_string())});
+        if (transcribing_) {
+          turn_.user_text(input.as_string());
+          if (auto error = commit(events, StopReason{StopKind::EndTurn, "transcribed"})) return *error;
+        }
+      }
       if (const auto output = content.get("outputTranscription").get("text"); output.is_string()) {
         turn_.transcript(output.as_string());
         events.push_back(Transcript{false, std::string(output.as_string())});
@@ -250,6 +264,7 @@ class GoogleCodec final : public Codec {
   const descriptor::EndpointFact& fact_;
   SemanticLimits limits_;
   Turn turn_;
+  bool transcribing_ = false;
 };
 
 // OpenAI Realtime (`/v1/realtime`): typed JSON events, either way.
@@ -258,6 +273,14 @@ class OpenAICodec final : public Codec {
   OpenAICodec(const descriptor::EndpointFact& fact, SemanticLimits limits) : fact_(fact), limits_(limits) {}
   std::uint32_t input_rate() const noexcept override { return 24000; }
   std::variant<std::vector<Frame>, Error> open(const Setup& setup) override {
+    transcribing_ = setup.output.empty();
+    if (transcribing_) {
+      // The transcription model takes no turn detection: the host ends each utterance with EndAudio.
+      std::string session = "{\"type\":\"transcription\",\"audio\":{\"input\":{\"format\":{\"type\":\"audio/pcm\",\"rate\":24000},"
+                            "\"transcription\":{\"model\":" + json::quote(setup.model) + "},\"turn_detection\":null}}";
+      if (setup.extensions) for (auto member : setup.extensions->root().members()) session += "," + json::quote(member.key) + ":" + member.value.dump();
+      return std::vector<Frame>{{false, "{\"type\":\"session.update\",\"session\":" + session + "}}"}};
+    }
     std::string session = "{\"type\":\"realtime\"";
     if (!setup.instructions.empty()) session += ",\"instructions\":" + json::quote(setup.instructions);
     session += ",\"output_modalities\":[";
@@ -314,7 +337,22 @@ class OpenAICodec final : public Codec {
       events.push_back(ProviderError{std::move(value)});
     } else if (type == "input_audio_buffer.speech_started") events.push_back(SpeechStarted{});
     else if (type == "input_audio_buffer.speech_stopped") events.push_back(SpeechStopped{});
-    else if (type == "conversation.item.input_audio_transcription.completed") events.push_back(Transcript{true, text_of(root.get("transcript"))});
+    else if (type == "conversation.item.input_audio_transcription.delta") {
+      auto& so_far = partial_[text_of(root.get("item_id"))];
+      so_far += text_of(root.get("delta"));
+      events.push_back(Transcript{true, so_far, true});
+    } else if (type == "conversation.item.input_audio_transcription.completed") {
+      partial_.erase(text_of(root.get("item_id")));
+      const auto transcript = text_of(root.get("transcript"));
+      events.push_back(Transcript{true, transcript});
+      if (transcribing_) {
+        turn_.user_text(transcript);
+        if (const auto usage = root.get("usage"); usage.is_object()) turn_.usage(transcription_usage(usage));
+        auto turn = turn_.commit(text_of(root.get("item_id")), StopReason{StopKind::EndTurn, "transcribed"}, limits_);
+        if (auto* error = std::get_if<Error>(&turn)) return *error;
+        events.push_back(TurnCommitted{std::move(std::get<Completion>(turn))});
+      }
+    }
     else if (type == "response.created") response_ = text_of(root.get("response").get("id"));
     else if (type == "response.output_audio.delta") {
       std::string pcm;
@@ -362,10 +400,23 @@ class OpenAICodec final : public Codec {
     return events;
   }
  private:
+  // A transcription's usage: seconds of audio (`{"type":"duration","seconds":4}`), or tokens.
+  static Usage transcription_usage(json::Value usage) {
+    Usage value;
+    if (const auto seconds = counter(usage.get("seconds"))) value.extra["seconds"] = *seconds;
+    value.input_total = counter(usage.get("input_tokens"));
+    value.output_total = counter(usage.get("output_tokens"));
+    value.total = counter(usage.get("total_tokens"));
+    value.stage = UsageStage::Final;
+    return value;
+  }
   const descriptor::EndpointFact& fact_;
   SemanticLimits limits_;
   Turn turn_;
   std::string response_;
+  bool transcribing_ = false;
+  // Each utterance's transcript so far, by item, while OpenAI streams it.
+  std::map<std::string, std::string> partial_;
 };
 }  // namespace
 
@@ -376,7 +427,9 @@ std::variant<Connection, Error> connect(const descriptor::ValidatedDescriptor& d
   if (!path) return unsupported("the realtime endpoint has no path");
   // The model is a path segment at Google (`models/<model>`) and a query parameter at OpenAI.
   if (!token(setup.model)) return bad("a realtime model is a token");
-  if (setup.output.empty()) return bad("a realtime session answers with audio or text");
+  if (setup.output.empty() && (!setup.voice.empty() || !setup.instructions.empty() || !setup.tools.empty() || setup.output_transcription ||
+                               !setup.transcription_model.empty() || setup.resume))
+    return bad("a transcription session takes no voice, instructions, tools, output transcription or resumption");
   if (setup.voice.size() > 128 || setup.instructions.size() > descriptor.policy()->resources().request_bytes)
     return bad("realtime setup values are bounded");
   for (const auto& tool : setup.tools)
@@ -390,7 +443,8 @@ std::variant<Connection, Error> connect(const descriptor::ValidatedDescriptor& d
   if (origin.starts_with("https://")) origin.replace(0, 5, "wss");
   else if (origin.starts_with("http://")) origin.replace(0, 4, "ws");
   Connection connection{origin + std::string(*path)};
-  if (fact->shape == "openai") connection.url += "?model=" + setup.model;
+  // An OpenAI transcription session names its model in the session update.
+  if (fact->shape == "openai") connection.url += setup.output.empty() ? std::string("?intent=transcription") : "?model=" + setup.model;
   if (!api_key.empty()) {
     if (fact->auth == "x-goog-api-key") connection.headers.emplace_back("x-goog-api-key", std::string(api_key));
     else if (fact->auth == "x-api-key") connection.headers.emplace_back("x-api-key", std::string(api_key));

@@ -9,6 +9,7 @@
 #include "json/json.h"
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <iterator>
 #include <map>
@@ -97,9 +98,11 @@ void outbound(const descriptor::ValidatedDescriptor& d, bool google, const realt
     if (canonical(sent[i], google) != canonical(expected[i], google))
       throw std::runtime_error(golden + " frame " + std::to_string(i) + " differs:\n  sdk:      " + canonical(sent[i], google) + "\n  official: " + canonical(expected[i], google));
 }
-// The server side: the recorded frames, decoded in order.
-std::vector<realtime::Event> inbound(const descriptor::ValidatedDescriptor& d, const std::string& recording) {
-  auto codec = realtime::make_codec(d);
+// The server side: the recorded frames, decoded in order by `codec`, or by a fresh codec of the descriptor.
+std::vector<realtime::Event> inbound(const descriptor::ValidatedDescriptor& d, const std::string& recording,
+                                     realtime::Codec* opened = nullptr) {
+  auto fresh = opened ? nullptr : realtime::make_codec(d);
+  auto* codec = opened ? opened : fresh.get();
   std::vector<realtime::Event> events;
   for (const auto& line : lines(recording)) {
     auto decoded = codec->decode(false, line);
@@ -203,11 +206,62 @@ void openai_realtime() {
 }
 }  // namespace
 
+// Transcription sessions (no output modalities). The server frames were recorded live on 2026-10-20, ids shortened.
+void transcription() {
+  realtime::Setup setup;
+  setup.output = {};
+  {
+    const auto d = descriptor::presets::google_generate();
+    setup.model = "gemini-3.5-transcribe-live";
+    auto codec = realtime::make_codec(d);
+    const auto opened = frames_of(codec->open(setup));
+    CHECK(opened.size() == 1 && canonical(opened[0], true) ==
+          canonical(R"({"setup":{"model":"models/gemini-3.5-transcribe-live","generationConfig":{"responseModalities":["TEXT"]},"inputAudioTranscription":{}}})", true));
+    const auto events = inbound(d, "google-transcription-server.jsonl", codec.get());
+    const auto transcripts = all<realtime::Transcript>(events);
+    CHECK(transcripts.size() == 3 && transcripts[0]->partial && transcripts[0]->text == "What is the" && transcripts[1]->partial &&
+          !transcripts[2]->partial && transcripts[2]->input && transcripts[2]->text == "What is the capital of France?");
+    const auto turns = all<realtime::TurnCommitted>(events);
+    CHECK(turns.size() == 1 && turns[0]->turn.messages.size() == 1 && turns[0]->turn.messages[0].role == Role::User &&
+          std::get<Text>(turns[0]->turn.messages[0].parts.at(0)).value == "What is the capital of France?" && turns[0]->turn.stop.raw == "transcribed");
+    CHECK(std::holds_alternative<realtime::Connection>(realtime::connect(d, setup, "key")));
+  }
+  {
+    const auto d = descriptor::presets::openai_chat();
+    setup.model = "gpt-live-transcribe";
+    const auto connection = std::get<realtime::Connection>(realtime::connect(d, setup, "key"));
+    CHECK(connection.url == "wss://api.openai.com/v1/realtime?intent=transcription");
+    auto codec = realtime::make_codec(d);
+    const auto opened = frames_of(codec->open(setup));
+    CHECK(opened.size() == 1 && canonical(opened[0], false) ==
+          canonical(R"({"type":"session.update","session":{"type":"transcription","audio":{"input":{"format":{"type":"audio/pcm","rate":24000},"transcription":{"model":"gpt-live-transcribe"},"turn_detection":null}}}})", false));
+    // The host ends the utterance.
+    CHECK(frames_of(codec->encode(realtime::EndAudio{})) == std::vector<std::string>{R"({"type":"input_audio_buffer.commit"})"});
+    const auto events = inbound(d, "openai-transcription-server.jsonl", codec.get());
+    const auto transcripts = all<realtime::Transcript>(events);
+    CHECK(transcripts.size() == 4 && transcripts[0]->partial && transcripts[0]->text == " What" && transcripts[1]->text == " What is the" &&
+          transcripts[2]->text == " What is the capital of France?" && !transcripts[3]->partial && transcripts[3]->text == "What is the capital of France?");
+    const auto turns = all<realtime::TurnCommitted>(events);
+    CHECK(turns.size() == 1 && turns[0]->turn.messages.at(0).role == Role::User && turns[0]->turn.usage.extra.at("seconds").value == 4 &&
+          turns[0]->turn.usage.stage == UsageStage::Final);
+  }
+  // A transcription session answers nothing, so it takes none of what shapes an answer.
+  for (const auto& change : std::vector<std::function<void(realtime::Setup&)>>{
+           [](realtime::Setup& s) { s.voice = "alloy"; }, [](realtime::Setup& s) { s.instructions = "Be brief."; },
+           [](realtime::Setup& s) { s.output_transcription = true; }, [](realtime::Setup& s) { s.tools.push_back(weather("{}")); },
+           [](realtime::Setup& s) { s.transcription_model = "x"; }}) {
+    auto refused = setup;
+    change(refused);
+    const auto result = realtime::connect(descriptor::presets::openai_chat(), refused, "key");
+    CHECK(std::holds_alternative<Error>(result) && std::get<Error>(result).reason == "request.realtime.transcription_setup_invalid");
+  }
+}
+
 int main(int argc, char** argv) {
   try {
     if (argc != 2) throw std::runtime_error("usage: sp_realtime_tests <fixture directory>");
     fixtures = argv[1];
-    google_live(); openai_realtime();
+    google_live(); openai_realtime(); transcription();
     std::cout << "realtime properties passed\n";
     return 0;
   } catch (const std::exception& error) { std::cerr << "realtime test failed: " << error.what() << '\n'; return 1; }

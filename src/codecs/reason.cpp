@@ -1132,7 +1132,7 @@ constexpr Entry realtime_request_table[] = {
   {"realtime sessions are not admitted at this origin", "request.realtime.endpoint_not_admitted"},
   {"the realtime endpoint has no path", "request.realtime.path_missing"},
   {"a realtime model is a token", "request.realtime.model_invalid"},
-  {"a realtime session answers with audio or text", "request.realtime.output_required"},
+  {"a transcription session takes no voice, instructions, tools, output transcription or resumption", "request.realtime.transcription_setup_invalid"},
   {"realtime setup values are bounded", "request.realtime.setup_bounds"},
   {"a realtime tool names itself and an object schema", "request.realtime.tool_invalid"},
   {"the realtime endpoint admits no setup options", "request.realtime.options_not_admitted"},
