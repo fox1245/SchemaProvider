@@ -82,6 +82,16 @@ The examples were built and run on Linux x86_64/WSL with Python 3.12 and LangGra
 
 Windows and macOS shared-library build/run are **not yet verified for these examples**; platform filenames and build instructions are recipes, not execution evidence. Local runs do not establish vendor media acceptance or a speedup over other clients.
 
+## JavaScript host (WebAssembly)
+
+`examples/js-host` wires the [host seam](../docs/USAGE.md#the-host-seam) for a JavaScript environment: a module that creates `sp::runtime::js::make_executor()` and `make_fetch_transport()` and passes them to `Client(descriptor, options, executor, transport)`, and a Node script that loads it. The module has no thread to block on, so it starts the call, returns to the event loop, and reports the outcome through a JavaScript callback. It is built with the rest of the Emscripten job (`-DSP_BUILD_JS_HOST=ON`, see the [README](../README.md#build-options-and-webassembly)) as `sp_js_host_example.js`.
+
+```sh
+OPENROUTER_API_KEY=... node examples/js-host/run.mjs build-wasm/sp_js_host_example.js <model> "Say hello." stream
+```
+
+Without `stream` the call is buffered. A fifth argument replaces the preset's base URL (a local peer, for one). The key comes from the environment and is never printed; in a browser it would be visible to the page's user, so keep it on a server you control.
+
 ## Other C++ agent frameworks
 
 [`RunEdgeAI/agents.cpp`](https://github.com/RunEdgeAI/agents.cpp) documents hosted-provider integrations, tools and workflow patterns. [`mozilla-ai/agent.cpp`](https://github.com/mozilla-ai/agent.cpp) documents local agents tightly coupled to llama.cpp and explicitly says it is not intended for external LLM APIs. These are primary-source discoveries, not built SchemaProvider integrations or performance comparisons. SchemaProvider is a protocol client; it does not require an agent framework at all.

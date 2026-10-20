@@ -764,6 +764,11 @@ void callback_ownership_and_misuse(Peer& peer) {
   { std::lock_guard lock(gate); op = client.start(request(model), run(), std::move(cb)); }
   failure(finish(op, capture), sp::ErrorKind::Cancelled);
   require(checked, "misuse callback never ran"); failure(self, sp::ErrorKind::Misuse); failure(complete, sp::ErrorKind::Misuse); peer.count(nested, 0); peer.count(model, 1);
+  // A blocking call from a callback is refused with its own reason, and nothing was sent for it.
+  for (const auto& refused : {self, complete}) {
+    const auto& error = failure(refused, sp::ErrorKind::Misuse).error;
+    require(error.reason == "runtime.blocking.in_thread" && error.retry_safety == sp::RetrySafety::NotSent, "callback join/complete reason");
+  }
 }
 void raw_io_misuse(Peer& peer) {
   Client client(descriptor(peer, false), options());
@@ -785,6 +790,8 @@ void raw_io_misuse(Peer& peer) {
   });
   require(transfer.join().status == sp::transport::Status::Completed, "unrelated raw transfer failed");
   failure(joined, sp::ErrorKind::Misuse); failure(completed, sp::ErrorKind::Misuse);
+  for (const auto& refused : {joined, completed})
+    require(failure(refused).error.reason == "runtime.blocking.in_thread", "I/O-thread join/complete reason");
   operation.cancel(); failure(operation.join(), sp::ErrorKind::Cancelled);
   peer.count(held, 1); peer.count(nested, 0); peer.count(raw_model, 1);
 }

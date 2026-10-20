@@ -409,6 +409,94 @@ void refused_setup(transport::Transport& transport, const descriptor::ValidatedD
   CHECK(std::holds_alternative<Error>(session) && std::get<Error>(session).reason == "request.realtime.options_not_admitted");
   CHECK(g_peer->command("{\"stats\":true}").root().get("handshakes").as_uint() == handshakes);
 }
+
+// The executor of a host that calls the session: it runs nothing, and says whether the host pumps it on the calling
+// thread (`pumped`) and whether a task of it is running (`running`).
+class TestHost final : public runtime::Executor {
+ public:
+  void post(Task) override {}
+  Timer schedule(runtime::SteadyTime, Task) override { return 0; }
+  void cancel(Timer) noexcept override {}
+  runtime::SteadyTime now() const noexcept override { return std::chrono::steady_clock::now(); }
+  runtime::WallTime wall_now() const noexcept override { return std::chrono::system_clock::now(); }
+  bool in_thread() const noexcept override { return running; }
+  void shutdown() noexcept override {}
+  bool host_pumped() const noexcept override { return pumped; }
+  bool pumped = false, running = false;
+};
+void expect_blocking_refusal(const std::optional<Error>& error, std::string_view reason) {
+  CHECK(error && error->kind == ErrorKind::Misuse && error->reason == reason);
+}
+
+// A wait for events needs another thread. It is refused at once, without waiting, when the host's executor is pumped by
+// the calling thread, when called from a task of that executor, and from an I/O thread; the session is untouched, and
+// waits again once the call is allowed.
+void blocking_calls_refuse(transport::Transport& transport, const descriptor::ValidatedDescriptor& d) {
+  const auto quick = [](auto&& call) {
+    const auto begun = std::chrono::steady_clock::now();
+    auto result = call();
+    CHECK(std::chrono::steady_clock::now() - begun < 2s);
+    return result;
+  };
+  const auto before = received().size();
+  auto host = std::make_shared<TestHost>();
+  realtime::Options options;
+  options.executor = host;
+  auto session = opened(transport, d, options);
+  // The host is pumped by the calling thread: the pull API cannot be used, whatever the timeout.
+  host->pumped = true;
+  CHECK(!quick([&] { return session.next_event(10s); }));
+  expect_blocking_refusal(session.last_error(), runtime::blocking_host_pumped_reason);
+  const auto joined = quick([&] { return session.join(); });
+  expect_blocking_refusal(joined.error, runtime::blocking_host_pumped_reason);
+  CHECK(!joined.clean && !session.ended());
+  // The session itself is alive: it connected and what is sent reaches the server.
+  CHECK(session.send(realtime::Text{"still here"}));
+  std::vector<std::string> seen;
+  for (const auto until = std::chrono::steady_clock::now() + 10s; std::chrono::steady_clock::now() < until;) {
+    seen = received();
+    if (std::count(seen.begin() + static_cast<std::ptrdiff_t>(before), seen.end(), "conversation.item.create")) break;
+    std::this_thread::sleep_for(5ms);
+  }
+  CHECK(std::count(seen.begin() + static_cast<std::ptrdiff_t>(before), seen.end(), "session.update") == 1);
+  CHECK(std::count(seen.begin() + static_cast<std::ptrdiff_t>(before), seen.end(), "conversation.item.create") == 1);
+  host->pumped = false;
+  // A task of the host's executor is running on this thread.
+  host->running = true;
+  CHECK(!quick([&] { return session.next_event(10s); }));
+  expect_blocking_refusal(session.last_error(), runtime::blocking_in_thread_reason);
+  expect_blocking_refusal(quick([&] { return session.join(); }).error, runtime::blocking_in_thread_reason);
+  host->running = false;
+  // Allowed again, the waits are the waits they were.
+  CHECK(await<realtime::Ready>(session));
+  session.cancel();
+  const auto outcome = session.join();
+  CHECK(outcome.error && outcome.error->kind == ErrorKind::Cancelled);
+
+  // From an I/O thread, with no executor at all: the callback that renews the lease runs there.
+  realtime::Options callback;
+  realtime::Session* self = nullptr;
+  bool pulled = true;
+  std::optional<Error> pull_error, join_error;
+  std::atomic<bool> called{false};
+  callback.renew = [&](const Usage&) {
+    pulled = self->next_event(10s).has_value();
+    pull_error = self->last_error();
+    join_error = self->join().error;
+    called = true;
+    return true;
+  };
+  auto inside = opened(transport, d, callback);
+  self = &inside;
+  CHECK(inside.send(realtime::Respond{}));
+  CHECK(await<realtime::TurnCommitted>(inside));
+  for (const auto until = std::chrono::steady_clock::now() + 5s; !called && std::chrono::steady_clock::now() < until;) std::this_thread::sleep_for(5ms);
+  CHECK(called && !pulled);
+  expect_blocking_refusal(pull_error, runtime::blocking_in_thread_reason);
+  expect_blocking_refusal(join_error, runtime::blocking_in_thread_reason);
+  inside.close();
+  CHECK(!inside.join().error);
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -425,6 +513,7 @@ int main(int argc, char** argv) {
     provider_close(transport);
     tool_turn_settles_at_the_end(transport);
     control_preempts_full_ring(transport, d);
+    blocking_calls_refuse(transport, d);
     audio_formats(transport, d);
     media_ring(transport, d);
     media_ring_fence(transport, d);

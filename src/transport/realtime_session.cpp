@@ -12,6 +12,14 @@ Error session_error(ErrorKind kind, std::string reason) {
   error.reason = std::move(reason);
   return error;
 }
+// A wait for events needs a thread other than the one that delivers them: from an I/O thread, or a task of the host's
+// executor, it would wait for itself, and when the host pumps its executor on the calling thread nothing else does.
+std::optional<Error> blocking_refusal(const Options& options) {
+  if (options.executor && options.executor->host_pumped()) return session_error(ErrorKind::Misuse, std::string(runtime::blocking_host_pumped_reason));
+  if (transport::on_io_thread() || (options.executor && options.executor->in_thread()))
+    return session_error(ErrorKind::Misuse, std::string(runtime::blocking_in_thread_reason));
+  return std::nullopt;
+}
 // The kind and retry class the runtime error policy gives an HTTP status, as for a call.
 Error classified(int status, const configuration::RuntimePolicy& policy) {
   transport::Result answer;
@@ -190,6 +198,10 @@ std::optional<Event> Session::next_event(std::chrono::milliseconds timeout) {
   auto& s = *state_;
   const auto until = std::chrono::steady_clock::now() + timeout;
   std::unique_lock lock(s.mutex);
+  if (auto refusal = blocking_refusal(s.options)) {
+    s.last_error = std::move(refusal);
+    return std::nullopt;
+  }
   for (;;) {
     s.pump_locked();
     if (!s.events.empty()) {
@@ -231,6 +243,13 @@ void Session::cancel() noexcept {
 }
 Outcome Session::join() {
   if (!state_) return {session_error(ErrorKind::Misuse, "runtime.realtime.invalid")};
+  if (auto refusal = blocking_refusal(state_->options)) {
+    {
+      std::lock_guard lock(state_->mutex);
+      state_->last_error = refusal;
+    }
+    return {std::move(refusal)};
+  }
   state_->socket.join();
   std::unique_lock lock(state_->mutex);
   state_->changed.wait(lock, [&] { return state_->done; });
