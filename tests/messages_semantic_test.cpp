@@ -940,13 +940,32 @@ void compaction_blocks_and_usage() {
   failed(buffered(body("[]", "\"end_turn\"", initial_usage, R"(,"context_management":{"applied_edits":{}})")), ErrorKind::ProtocolCorrupt);
   failed(stream({start(), block(0, R"({"type":"fallback","from":{"model":"a"}})"), delta(0, R"({"type":"compaction_delta","content":"x"})")}), ErrorKind::Unsupported);
 }
+// A block is one part however many deltas make it: thousands of chunks give the part a buffered reply of the same content has.
+void long_streams_are_one_part_per_block() {
+  constexpr size_t chunks = 3000;
+  std::vector<Frame> frames{start(), block(0, R"({"type":"thinking","thinking":"","signature":""})")};
+  for (size_t i = 0; i < chunks; ++i) frames.push_back(delta(0, R"({"type":"thinking_delta","thinking":"t"})"));
+  frames.push_back(delta(0, R"({"type":"signature_delta","signature":"sig"})"));
+  frames.push_back(end(0));
+  frames.push_back(block(1, R"({"type":"text","text":""})"));
+  for (size_t i = 0; i < chunks; ++i) frames.push_back(delta(1, R"({"type":"text_delta","text":"x"})"));
+  frames.push_back(end(1)); frames.push_back(stop()); frames.push_back(done);
+  const auto live = stream(frames);
+  const auto whole = buffered(body("[{\"type\":\"thinking\",\"thinking\":" + json::quote(std::string(chunks, 't')) + ",\"signature\":\"sig\"},{\"type\":\"text\",\"text\":" +
+                                   json::quote(std::string(chunks, 'x')) + "}]"));
+  for (const auto* outcome : {&live, &whole}) {
+    const auto& parts = completed(*outcome).messages[0].parts;
+    CHECK(parts.size() == 2 && std::get<Thinking>(parts[0]).text == std::string(chunks, 't') && std::get<Thinking>(parts[0]).signature == "sig");
+    CHECK(std::get<Text>(parts[1]).value == std::string(chunks, 'x'));
+  }
+}
 int main() {
   try {
     routed_gateway_model(); openrouter_sentinel_and_cost(); direct_dated_snapshot_alias(); served_model_is_recorded();
     owned_raw_observations(); raw_failure_evidence(); typeless_buffered_error();
     usage_binding_precedence();
     usage_detail_forward_compatibility(); toolset_metadata_shapes();
-    terminal_matrix(); text_thinking_and_order(); tool_fragments(); server_semantics(); server_result_shapes();
+    terminal_matrix(); text_thinking_and_order(); long_streams_are_one_part_per_block(); tool_fragments(); server_semantics(); server_result_shapes();
     stop_classes(); corruption_matrix(); usage_knowledge(); cut_stream_usage_has_no_placeholder_output(); uncached_input_rule(); limits_and_close_priority(); empty_text_delta_is_withheld(); failure_reasons(); response_metadata_is_kept();
     advisor_result_and_iterations(); mcp_and_kept_blocks(); compaction_blocks_and_usage();
     std::cout << "messages semantic tests passed\n";

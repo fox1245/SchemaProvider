@@ -521,8 +521,33 @@ void failure_reasons() {
   const auto cut = stream(truncated, {false, ErrorKind::Transport});
   CHECK(failure(cut, ErrorKind::Transport).error.reason.empty());
 }
+// A step's text, its thought summary and its audio are one part each however many deltas make them, as in the buffered reply.
+void long_streams_are_one_part_per_step() {
+  constexpr size_t chunks = 3000;
+  const std::string answer(chunks, 'x');
+  std::string summary;
+  for (size_t i = 0; i < chunks; ++i) summary += std::string(i ? "," : "") + R"({"type":"text","text":"s"})";
+  const std::string whole_thought = R"({"type":"thought","signature":"SIG","summary":[)" + summary + "]}";
+  const std::string whole_output = R"({"type":"model_output","content":[{"type":"text","text":")" + answer + R"("}]})";
+  std::vector<Frame> f{created(), start(0, R"({"type":"thought","signature":"","summary":[]})"), start(1, R"({"type":"model_output","content":[]})")};
+  for (size_t i = 0; i < chunks; ++i) f.push_back(delta(0, R"({"type":"thought_summary","content":{"type":"text","text":"s"}})"));
+  f.push_back(delta(0, R"({"type":"thought_signature","signature":"SIG"})"));
+  f.push_back(stop(0));
+  for (size_t i = 0; i < chunks; ++i) f.push_back(delta(1, R"({"type":"text","text":"x"})"));
+  f.push_back(stop(1));
+  f.push_back(end("[" + whole_thought + "," + whole_output + "]", "completed"));
+  f.push_back({"done", "[DONE]"});
+  const auto live = stream(f);
+  const auto whole = buffered(resource("[" + whole_thought + "," + whole_output + "]"));
+  for (const auto* outcome : {&live, &whole}) {
+    const auto& parts = complete(*outcome).messages[0].parts;
+    CHECK(parts.size() == 2 && std::get<Thought>(parts[0]).summary.size() == chunks && std::get<Thought>(parts[0]).signature == "SIG");
+    CHECK(std::get<Text>(parts[1]).value == answer);
+  }
+  CHECK(json::equal(complete(live).messages[0].wire_output->root(), complete(whole).messages[0].wire_output->root()));
+}
 int main() {
-  try { served_model_is_recorded(); service_tool_steps(); service_request_controls(); background_and_lifecycle(); failure_reasons(); creation_without_status_transcription(); raw_observation_ownership(); named_error_raw_ownership(); stateless_missing_resource_id(); missing_terminal_usage(); exact_steps_and_replay(); input_boundaries(); lifecycle_and_errors(); unknown_usage_and_signature(); modality_keyed_usage(); uncached_input_and_unmapped_counters();
+  try { served_model_is_recorded(); long_streams_are_one_part_per_step(); service_tool_steps(); service_request_controls(); background_and_lifecycle(); failure_reasons(); creation_without_status_transcription(); raw_observation_ownership(); named_error_raw_ownership(); stateless_missing_resource_id(); missing_terminal_usage(); exact_steps_and_replay(); input_boundaries(); lifecycle_and_errors(); unknown_usage_and_signature(); modality_keyed_usage(); uncached_input_and_unmapped_counters();
     std::cout << "Interactions semantic contracts passed\n"; return 0;
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

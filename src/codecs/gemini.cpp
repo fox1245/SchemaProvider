@@ -52,6 +52,18 @@ bool concatenable_audio(std::string_view mime) noexcept {
   }
   return false;
 }
+// Whether `next` has the members of `head` and the same values for all of them but `data`, which both carry.
+bool same_apart_from(json::Value head, json::Value next, std::string_view data) {
+  if (!head.is_object() || !next.is_object() || head.size() != next.size() || !next.get(data).valid()) return false;
+  for (auto member : head.members())
+    if (member.key != data && !json::equal(member.value, next.get(member.key))) return false;
+  return true;
+}
+// A wire part continues the one before it when the two differ only in their streamed data: the text, or the base64 of an
+// inline blob. `inner` names that member inside the `outer` object, or is empty when `outer` holds the data itself.
+bool continues_wire(json::Value head, json::Value next, std::string_view outer, std::string_view inner) {
+  return same_apart_from(head, next, outer) && (inner.empty() || same_apart_from(head.get(outer), next.get(outer), inner));
+}
 }  // namespace
 Codec::Codec(const descriptor::ValidatedDescriptor& d, Mode mode, Accumulator& a,
              std::shared_ptr<const NativeContext> context, SemanticLimits limits)
@@ -197,15 +209,51 @@ bool Codec::candidate(json::Value c) {
   }
   return true;
 }
+// Seals the open run and fills the wire slot reserved for it: the first chunk as received when it was alone, else a part
+// with the first chunk's members and all the data.
 bool Codec::close_run() {
-  run_.open = false;
-  const auto tail = media_output::finish_stream(run_.carry);
-  if (!tail.empty() && !emit(PartDelta{run_.part, {PartKind::Media, tail}})) return false;
-  return emit(PartSeal{run_.part, {}, {}});
+  Run run = std::move(run_);
+  run_ = Run{};
+  if (run.kind == PartKind::Media) {
+    const auto tail = media_output::finish_stream(run.carry);
+    if (!tail.empty()) {
+      run.data += tail;
+      if (!emit(PartDelta{run.part, {PartKind::Media, tail}})) return false;
+    }
+  }
+  if (!emit(PartSeal{run.part, {}, {}})) return false;
+  if (run.chunks == 1) { wire_parts_[run.slot] = std::move(run.head); return true; }
+  const auto head = run.head->root();
+  std::string bytes;
+  json::BoundedWriter writer({limits_.max_content_bytes, limits_.max_json_depth}, &bytes);
+  writer.raw("{");
+  bool comma = false;
+  for (auto member : head.members()) {
+    if (comma) writer.raw(",");
+    comma = true;
+    writer.quoted(member.key).raw(":");
+    if (member.key != run.outer) { writer.value(member.value, 1); continue; }
+    if (run.inner.empty()) { writer.quoted(run.data); continue; }
+    writer.raw("{");
+    bool inner_comma = false;
+    for (auto field : member.value.members()) {
+      if (inner_comma) writer.raw(",");
+      inner_comma = true;
+      writer.quoted(field.key).raw(":");
+      if (field.key == run.inner) writer.quoted(run.data); else writer.value(field.value, 2);
+    }
+    writer.raw("}");
+  }
+  writer.raw("}");
+  if (!writer.ok()) return fail(ErrorKind::ResourceLimit, "Gemini native array limit");
+  auto parsed = json::parse(bytes, {limits_.max_content_bytes, limits_.max_json_depth});
+  auto* document = std::get_if<json::Document>(&parsed);
+  if (!document) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini native array");
+  wire_parts_[run.slot] = std::make_shared<const json::Document>(std::move(*document));
+  return true;
 }
 bool Codec::part(json::Value p) {
   if (!p.is_object()) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini part");
-  if (wire_parts_.size() >= limits_.max_parts) return fail(ErrorKind::ResourceLimit, "Gemini part limit");
   auto thought = p.get("thought"), signature = p.get("thoughtSignature");
   if ((thought.valid() && !thought.is_bool()) || (signature.valid() && !signature.is_string())) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini thought metadata");
   unsigned data_fields = 0;
@@ -313,27 +361,51 @@ bool Codec::part(json::Value p) {
     if (inline_data) payload = data.as_string();
     if (mime.is_string()) media_mime = mime.as_string();
   } else if (!data_key.empty() && !p.get(data_key).is_object()) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini opaque part payload");
+  // Consecutive chunks of one answer, thought or transcript arrive as parts of the same shape, and so do the frames of one
+  // audio stream. A chunk with a signature, a call, another member or another value of one is a part of its own.
+  const bool text_run = mode_ == Mode::Sse && (kind == PartKind::Text || kind == PartKind::Thinking) && !signature.valid() &&
+      (data_key == "text" || header.wire_type == "audioTranscription");
+  const bool audio_run = kind == PartKind::Media && payload && !signature.valid() && concatenable_audio(media_mime);
+  const std::string_view outer = audio_run ? "inlineData" : header.wire_type == "audioTranscription" ? "audioTranscription" : "text";
+  const std::string_view inner = audio_run ? "data" : header.wire_type == "audioTranscription" ? "text" : "";
+  if (run_.open) {
+    if ((text_run || audio_run) && run_.kind == kind && run_.outer == outer && continues_wire(run_.head->root(), p, outer, inner)) {
+      ++run_.chunks;
+      if (audio_run) {
+        if (!canonical_base64(*payload)) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini media part");
+        const auto encoded = media_output::stream_chunk(run_.carry, *payload);
+        run_.data += encoded;
+        return encoded.empty() || emit(PartDelta{run_.part, {PartKind::Media, encoded}});
+      }
+      run_.data += fragment;
+      return fragment.empty() || emit(PartDelta{run_.part, {kind, fragment}});
+    }
+    if (!close_run()) return false;
+  }
+  // A new wire part: the limit bounds the parts of the answer, not the chunks they arrive in.
+  if (wire_parts_.size() >= limits_.max_parts) return fail(ErrorKind::ResourceLimit, "Gemini part limit");
   // An empty text part without a signature (Gemini ends most streams with one) says nothing: it stays in the
   // retained wire for native replay and is not a typed part.
   if (kind == PartKind::Text && fragment.empty() && !signature.valid()) {
     wire_parts_.push_back(std::move(retained));
     return true;
   }
-  const bool frame = kind == PartKind::Media && payload && !signature.valid() && concatenable_audio(media_mime);
-  if (run_.open && !(frame && run_.mime == media_mime) && !close_run()) return false;
-  if (frame) {
-    if (!canonical_base64(*payload)) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini media part");
-    if (!run_.open) {
-      if (!emit(PartBegin{{0}, local, kind, std::move(header), wire_parts_.size()})) return false;
-      run_.part = local; run_.mime = std::string(media_mime); run_.carry.clear(); run_.open = true;
-    }
-    const auto encoded = media_output::stream_chunk(run_.carry, *payload);
-    if (!encoded.empty() && !emit(PartDelta{run_.part, {PartKind::Media, encoded}})) return false;
-    wire_parts_.push_back(std::move(retained));
-    return true;
-  }
+  if (audio_run && !canonical_base64(*payload)) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini media part");
   const auto header_kind = header.tool_kind;
   if (!emit(PartBegin{{0}, local, kind, std::move(header), wire_parts_.size()})) return false;
+  if (text_run || audio_run) {
+    run_ = Run{};
+    run_.open = true; run_.kind = kind; run_.part = local; run_.slot = wire_parts_.size(); run_.chunks = 1;
+    run_.head = retained; run_.outer = std::string(outer); run_.inner = std::string(inner);
+    wire_parts_.push_back(nullptr);
+    if (audio_run) {
+      const auto encoded = media_output::stream_chunk(run_.carry, *payload);
+      run_.data = encoded;
+      return encoded.empty() || emit(PartDelta{local, {PartKind::Media, encoded}});
+    }
+    run_.data = std::string(fragment);
+    return emit(PartDelta{local, {kind, fragment}});
+  }
   if (kind == PartKind::Text || kind == PartKind::Thinking || kind == PartKind::ToolCall)
     if (!emit(PartDelta{local, {kind, fragment}})) return false;
   if (kind == PartKind::Thinking && signature.valid()) if (!emit(PartDelta{local, {kind, signature.as_string(), DeltaChannel::Signature}})) return false;
@@ -419,6 +491,7 @@ void Codec::finish(Close close) {
   closed_ = true;
   if (!close.normal) { fail(close.error, "abnormal Gemini response close"); return; }
   if (!begun_ || !stopped_) { fail(ErrorKind::Truncated, "missing Gemini finish reason"); return; }
+  if (run_.open && !close_run()) return;
   std::string array;
   auto build = [&](json::BoundedWriter& w) {
     w.raw("["); bool comma = false;

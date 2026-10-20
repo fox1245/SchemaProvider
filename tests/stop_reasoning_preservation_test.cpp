@@ -212,25 +212,30 @@ void reasoning_fragments_and_native_replay() {
   CHECK(native.native && native.native->complete());
   CHECK(std::get<Thinking>(native.parts.front()).text == "Hello world");
   const auto expected = parse(R"([{"type":"reasoning.summary","summary":"AC","format":"fmt-v1","index":0},{"type":"reasoning.text","text":"B","format":"fmt-v1","index":1},{"type":"reasoning.text","text":"Check route","id":"text-2","signature":"SIG","format":"fmt-v1","index":2},{"type":"reasoning.text","text":"Distinct","id":"text-3","format":"fmt-v1","index":3},{"type":"reasoning.encrypted","data":"AB","id":"encrypted-1","format":"fmt-v1","index":4},{"type":"reasoning.encrypted","data":"CD","id":"encrypted-1","format":"fmt-v1","index":4}])");
-  size_t frame_index = 0, snapshot_index = 0;
+  // The frames merge into the entries a buffered response carries, held by one part.
+  size_t snapshots = 0, snapshot_index = 0;
   for (size_t index = 0; index < native.parts.size(); ++index) {
     if (const auto* opaque = std::get_if<Opaque>(&native.parts[index])) {
-      if (opaque->wire_type == "reasoning_details.frame") {
-        CHECK(frame_index < details.size());
-        CHECK(json::equal(opaque->wire_metadata->root().get("details"), parse(details[frame_index]).root()));
-        ++frame_index;
-      } else {
-        CHECK(opaque->wire_type == "reasoning_details");
-        snapshot_index = index;
-        CHECK(json::equal(opaque->wire_metadata->root().get("details"), expected.root()));
-        const auto retained = opaque->wire_metadata->root().get("frames");
-        CHECK(retained.size() == details.size());
-        for (size_t frame = 0; frame < details.size(); ++frame)
-          CHECK(json::equal(retained.at(frame), parse(details[frame]).root()));
-      }
+      CHECK(opaque->wire_type == "reasoning_details");
+      snapshot_index = index;
+      ++snapshots;
+      CHECK(opaque->wire_metadata->root().size() == 2);
+      CHECK(json::equal(opaque->wire_metadata->root().get("details"), expected.root()));
     }
   }
-  CHECK(frame_index == details.size() && snapshot_index != 0);
+  CHECK(snapshots == 1 && snapshot_index == 1);
+  chat::Request whole = request;
+  const auto buffered_encoded = chat::encode(descriptor, whole, false);
+  CHECK(std::holds_alternative<chat::EncodedRequest>(buffered_encoded));
+  const auto buffered = decode_chat(descriptor, false,
+      {body("{\"role\":\"assistant\",\"content\":\"answer\",\"reasoning_content\":\"Hello world\",\"reasoning_details\":" + expected.root().dump() +
+            ",\"tool_calls\":[" + call(R"({"x":1})", false) + "]}", "\"stop\"")},
+      std::get<chat::EncodedRequest>(buffered_encoded).context);
+  const auto& buffered_message = completed(buffered).messages.at(0);
+  CHECK(buffered_message.parts.size() == native.parts.size());
+  for (size_t index = 0; index < native.parts.size(); ++index) CHECK(buffered_message.parts[index].index() == native.parts[index].index());
+  CHECK(json::equal(std::get<Opaque>(buffered_message.parts[snapshot_index]).wire_metadata->root(),
+                    std::get<Opaque>(native.parts[snapshot_index]).wire_metadata->root()));
   auto follow = request;
   follow.canonical_messages.push_back(native);
   follow.canonical_messages.push_back({"", Role::Tool, {ToolResult{"call-1", "found"}}});
@@ -253,11 +258,7 @@ void reasoning_fragments_and_native_replay() {
   rejected(changed, descriptor);
   changed = follow;
   std::get<Opaque>(changed.canonical_messages[1].parts[snapshot_index]).wire_metadata =
-      owned(R"({"type":"reasoning_details","details":[{"type":"reasoning.encrypted","data":"ABCD","index":3}],"frames":[]})");
-  rejected(changed, descriptor);
-  changed = follow;
-  std::get<Opaque>(changed.canonical_messages[1].parts[1]).wire_metadata =
-      owned(R"({"type":"reasoning_details.frame","details":[{"type":"reasoning.summary","summary":"edited","index":0}]})");
+      owned(R"({"type":"reasoning_details","details":[{"type":"reasoning.encrypted","data":"ABCD","index":3}]})");
   rejected(changed, descriptor);
   changed = follow;
   std::swap(changed.canonical_messages[1].parts[1], changed.canonical_messages[1].parts[2]);
@@ -272,12 +273,89 @@ void reasoning_fragments_and_native_replay() {
   changed.canonical_messages.push_back(failure.partial.messages.at(0));
   rejected(changed, descriptor);
 }
+// OpenRouter streams each entry of reasoning_details as fragments, one or more per chunk. A long reasoning turn is thousands of
+// chunks, and its replay must carry what a buffered response would: one entry per index, signatures and encrypted blobs intact.
+void reasoning_details_merge_across_thousands_of_frames() {
+  const auto descriptor = desc("openai.chat");
+  chat::Request request;
+  request.model = "fixture-model";
+  request.max_output_tokens = 128;
+  request.canonical_messages.push_back({"", Role::User, {Text{"Hello"}}});
+  const auto streamed_context = std::get<chat::EncodedRequest>(chat::encode(descriptor, request, true)).context;
+  const auto buffered_context = std::get<chat::EncodedRequest>(chat::encode(descriptor, request, false)).context;
+  constexpr size_t rounds = 1500;
+  std::vector<std::string> frames;
+  for (size_t round = 0; round < rounds; ++round) {
+    frames.push_back(chunk(R"({"reasoning":"r","reasoning_details":[{"type":"reasoning.summary","summary":"s","format":"fmt","index":0}]})"));
+    frames.push_back(chunk(R"({"reasoning":"r","reasoning_details":[{"type":"reasoning.text","text":"t","format":"fmt","index":1}]})"));
+  }
+  frames.push_back(chunk(R"({"reasoning_details":[{"type":"reasoning.text","text":"","signature":"SIG","format":"fmt","index":1}]})"));
+  frames.push_back(chunk(R"({"reasoning_details":[{"type":"reasoning.encrypted","data":"E1","id":"enc-1","format":"fmt","index":2}]})"));
+  frames.push_back(chunk(R"({"reasoning_details":[{"type":"reasoning.encrypted","data":"E2","id":"enc-2","format":"fmt","index":3}]})"));
+  for (const auto* piece : {"ans", "wer"}) frames.push_back(chunk("{\"content\":" + json::quote(piece) + "}"));
+  frames.push_back(chunk("{}", "\"stop\""));
+  frames.push_back("[DONE]");
+  const auto streamed = decode_chat(descriptor, true, frames, streamed_context);
+  CHECK(streamed.text == "answer");
+  const auto expected = "[{\"type\":\"reasoning.summary\",\"summary\":" + json::quote(std::string(rounds, 's')) + ",\"format\":\"fmt\",\"index\":0}," +
+      "{\"type\":\"reasoning.text\",\"text\":" + json::quote(std::string(rounds, 't')) + ",\"signature\":\"SIG\",\"format\":\"fmt\",\"index\":1}," +
+      R"({"type":"reasoning.encrypted","data":"E1","id":"enc-1","format":"fmt","index":2},)" +
+      R"({"type":"reasoning.encrypted","data":"E2","id":"enc-2","format":"fmt","index":3}])";
+  const auto buffered = decode_chat(descriptor, false,
+      {body("{\"role\":\"assistant\",\"content\":\"answer\",\"reasoning\":" + json::quote(std::string(2 * rounds, 'r')) + ",\"reasoning_details\":" + expected + "}", "\"stop\"")},
+      buffered_context);
+  const auto& live = completed(streamed).messages.at(0);
+  const auto& whole = completed(buffered).messages.at(0);
+  // The same parts in the same order: the reasoning text, the one reasoning_details part, the answer.
+  CHECK(live.parts.size() == 3 && whole.parts.size() == 3);
+  for (size_t index = 0; index < live.parts.size(); ++index) CHECK(live.parts[index].index() == whole.parts[index].index());
+  CHECK(std::get<Thinking>(live.parts[0]).text == std::get<Thinking>(whole.parts[0]).text);
+  const auto& live_details = std::get<Opaque>(live.parts[1]);
+  CHECK(live_details.wire_type == "reasoning_details" && live_details.wire_metadata->root().size() == 2);
+  CHECK(json::equal(live_details.wire_metadata->root(), std::get<Opaque>(whole.parts[1]).wire_metadata->root()));
+  CHECK(live.native && live.native->complete());
+  // Replay sends the merged entries, as it does after a buffered response.
+  std::string replayed[2];
+  size_t at = 0;
+  for (const auto* message : {&live, &whole}) {
+    auto follow = request;
+    follow.canonical_messages.push_back(*message);
+    follow.canonical_messages.push_back({"", Role::User, {Text{"Continue"}}});
+    const auto encoded = chat::encode(descriptor, follow, false);
+    CHECK(std::holds_alternative<chat::EncodedRequest>(encoded));
+    const auto wire = parse(std::get<chat::EncodedRequest>(encoded).body);
+    replayed[at++] = wire.root().get("messages").at(1).get("reasoning_details").dump();
+  }
+  CHECK(json::equal(parse(replayed[0]).root(), parse(expected).root()) && json::equal(parse(replayed[1]).root(), parse(expected).root()));
+
+  // The part limit bounds the parts of the answer, so a tight one still lets the long turn through, and the entries
+  // stay bounded by it: more distinct entries than the limit allows are refused.
+  SemanticLimits tight;
+  tight.max_parts = 8;
+  auto run = [&](const std::vector<std::string>& source) {
+    Accumulator accumulator(tight);
+    chat::Codec codec(descriptor, chat::Mode::Sse, accumulator, tight, streamed_context);
+    for (const auto& frame : source) if (!codec.frame({}, frame)) break;
+    codec.finish();
+    CHECK(accumulator.outcome());
+    return *accumulator.outcome();
+  };
+  CHECK(std::holds_alternative<Completion>(run(frames)));
+  std::vector<std::string> blobs;
+  for (size_t index = 0; index < 9; ++index)
+    blobs.push_back(chunk("{\"reasoning_details\":[{\"type\":\"reasoning.encrypted\",\"data\":\"E\",\"id\":\"enc-" + std::to_string(index) + "\",\"index\":" + std::to_string(index) + "}]}"));
+  blobs.push_back(chunk("{}", "\"stop\""));
+  blobs.push_back("[DONE]");
+  const auto refused = run(blobs);
+  CHECK(std::holds_alternative<Failure>(refused) && std::get<Failure>(refused).error.kind == ErrorKind::ResourceLimit);
+}
 } // namespace
 int main() {
   try {
     client_call_stops();
     hosted_call_stops();
     reasoning_fragments_and_native_replay();
+    reasoning_details_merge_across_thousands_of_frames();
     std::cout << "Stop and streamed reasoning preservation contracts passed\n";
     return 0;
   } catch (const std::exception& error) {

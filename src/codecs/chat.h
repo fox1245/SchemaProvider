@@ -120,11 +120,15 @@ class Codec {
   void unknown(json::Value, std::initializer_list<std::string_view>);
   bool text(json::Value, PartKind, bool streaming);
   bool content(json::Value, bool streaming);
+  bool structured_text(std::string_view, bool streaming);
+  bool end_structured_text();
   bool annotations(json::Value);
   // URL citations of the answer's text, attached when the text part is sealed.
   std::vector<Citation> citations_;
   std::size_t citation_bytes_ = 0;
   bool reasoning_details(json::Value, bool streaming);
+  bool emit_reasoning_details(json::Value);
+  bool emit_reasoning_part(std::shared_ptr<const json::Document>);
   bool finish_reasoning_details();
   bool audio(json::Value, bool streaming);
   bool audio_chunk(std::string_view, bool streaming);
@@ -147,8 +151,10 @@ class Codec {
   uint32_t next_part_ = 1;
   std::optional<LocalId> text_, refusal_, thinking_;
   bool structured_content_ = false;
-  std::size_t reasoning_details_count_ = 0;
-  std::vector<std::shared_ptr<const json::Document>> reasoning_frames_;
+  // The open Text part of a streamed content array: consecutive text elements continue it.
+  std::optional<LocalId> structured_run_;
+  // A streamed reply's reasoning_details merge into these entries; their values alias the raw frames the accumulator keeps.
+  bool reasoning_streamed_ = false;
   std::vector<ReasoningBinding> reasoning_bindings_;
   std::map<uint64_t, size_t> reasoning_indices_;
   std::map<uint64_t, size_t> indices_;
