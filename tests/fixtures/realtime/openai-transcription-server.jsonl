@@ -1,0 +1,9 @@
+{"type":"session.created","event_id":"event_1","session":{"type":"transcription","object":"realtime.transcription_session","id":"sess_1","expires_at":1792471297,"audio":{"input":{"format":{"type":"audio/pcm","rate":24000},"transcription":null,"noise_reduction":null,"turn_detection":{"type":"server_vad","threshold":0.5,"prefix_padding_ms":300,"silence_duration_ms":200}}},"include":null}}
+{"type":"session.updated","event_id":"event_2","session":{"type":"transcription","object":"realtime.transcription_session","id":"sess_1","expires_at":1792471297,"audio":{"input":{"format":{"type":"audio/pcm","rate":24000},"transcription":{"model":"gpt-live-transcribe","language":null,"languages":null,"prompt":null},"noise_reduction":null,"turn_detection":null}},"include":null}}
+{"type":"conversation.item.input_audio_transcription.delta","event_id":"event_3","item_id":"item_1","content_index":0,"delta":" What","obfuscation":"a"}
+{"type":"conversation.item.input_audio_transcription.delta","event_id":"event_4","item_id":"item_1","content_index":0,"delta":" is the","obfuscation":"b"}
+{"type":"input_audio_buffer.committed","event_id":"event_5","previous_item_id":null,"item_id":"item_1"}
+{"type":"conversation.item.added","event_id":"event_6","previous_item_id":null,"item":{"id":"item_1","type":"message","status":"completed","role":"user","content":[{"type":"input_audio","transcript":null}]}}
+{"type":"conversation.item.done","event_id":"event_7","previous_item_id":null,"item":{"id":"item_1","type":"message","status":"completed","role":"user","content":[{"type":"input_audio","transcript":null}]}}
+{"type":"conversation.item.input_audio_transcription.delta","event_id":"event_8","item_id":"item_1","content_index":0,"delta":" capital of France?","obfuscation":"c"}
+{"type":"conversation.item.input_audio_transcription.completed","event_id":"event_9","item_id":"item_1","content_index":0,"transcript":"What is the capital of France?","usage":{"type":"duration","seconds":4}}

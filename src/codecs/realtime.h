@@ -24,7 +24,10 @@ struct Tool {
 };
 struct Setup {
   std::string model;
-  // What the model answers with.
+  // What the model answers with. Empty: a transcription session. The model answers nothing, and the user's audio
+  // comes back as transcripts, a turn per utterance. The model is a transcription model (Google
+  // `gemini-3.5-transcribe-live`, OpenAI `gpt-live-transcribe`); a session takes no voice, instructions, tools or
+  // output transcription. At OpenAI the host ends each utterance with `EndAudio`.
   std::vector<Modality> output{Modality::Audio};
   std::string instructions{};
   // A voice the provider names (`Puck`, `alloy`).
@@ -73,6 +76,8 @@ struct Transcript {
   // Of what the user said (input) or of what the model said.
   bool input = false;
   std::string text;
+  // An input transcript so far, which later ones replace until a final one (partial false) ends the utterance.
+  bool partial = false;
 };
 struct ToolCallEvent {
   std::string id, name;
@@ -86,6 +91,8 @@ struct SpeechStopped {};
 struct TurnAborted {};
 // A finished or interrupted turn, as the chat outcome a consumer already reads: the model's text, its audio as one
 // inline Media part, its transcript, its tool calls, the turn's usage, and a stop (`interrupted` when cut short).
+// In a transcription session a turn is one utterance: a user message with its final transcript, and its usage
+// (OpenAI reports seconds of audio, `Usage::extra["seconds"]`; Google reports none).
 struct TurnCommitted { Completion turn; };
 // Google: the handle that resumes this session, for the host to journal.
 struct ResumptionUpdate {
