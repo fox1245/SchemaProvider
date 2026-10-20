@@ -9,8 +9,9 @@
 namespace sp::batches {
 namespace {
 Error bad(std::string message) { return Error{ErrorKind::InvalidRequest, std::move(message)}; }
+// A path segment the caller names; `.` and `..` would move the request elsewhere.
 bool token(std::string_view value, std::size_t limit = 128) {
-  return !value.empty() && value.size() <= limit && std::all_of(value.begin(), value.end(), [](char c) {
+  return !value.empty() && value.size() <= limit && value != "." && value != ".." && std::all_of(value.begin(), value.end(), [](char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
   });
 }

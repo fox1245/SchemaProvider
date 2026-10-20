@@ -98,6 +98,19 @@ void reads() {
   CHECK(refused(at(google), files::Get{"ji5y1o0uxvgc"}) == ErrorKind::InvalidRequest);
   CHECK(refused(at(openai), files::Delete{"../v1/batches"}) == ErrorKind::InvalidRequest);
   CHECK(refused(at(google), files::Get{"files/../models"}) == ErrorKind::InvalidRequest);
+  // `.` and `..` are made of token characters but are not names: they move the request to another path.
+  for (const auto origin : {openai, anthropic})
+    for (const char* id : {".", ".."}) {
+      CHECK(refused(at(origin), files::Get{id}) == ErrorKind::InvalidRequest);
+      CHECK(refused(at(origin), files::Delete{id}) == ErrorKind::InvalidRequest);
+      CHECK(refused(at(origin), files::Download{id, "/tmp/out"}) == ErrorKind::InvalidRequest);
+    }
+  for (const char* id : {"files/.", "files/.."}) {
+    CHECK(refused(at(google), files::Get{id}) == ErrorKind::InvalidRequest);
+    CHECK(refused(at(google), files::Delete{id}) == ErrorKind::InvalidRequest);
+    CHECK(refused(at(google), files::Download{id, "/tmp/out"}) == ErrorKind::InvalidRequest);
+  }
+  CHECK(encoded(at(openai), files::Get{"file-a..b"}).path == "/v1/files/file-a..b");
   CHECK(encoded(at(openai), files::List{20, "file-abc", "batch"}).path == "/v1/files?limit=20&after=file-abc&purpose=batch");
   CHECK(encoded(at(anthropic), files::List{5, "page_eyJh+/="}).path == "/v1/files?limit=5&page=page_eyJh%2B%2F%3D");
   CHECK(encoded(at(google), files::List{10, "tok"}).path == "/v1beta/files?pageSize=10&pageToken=tok");
@@ -270,6 +283,34 @@ void chunked() {
   CHECK(refused(at(google), files::Query{spliced}) == ErrorKind::InvalidRequest);
 }
 
+// A session reaches only the upload path of its origin, by names: no dot, empty or encoded segment.
+void upload_urls() {
+  using Step = files::SessionCodec::Step;
+  const std::string base = "https://generativelanguage.googleapis.com";
+  CHECK(files::upload_url(base, base + "/upload/v1beta/files?upload_id=AB-cd_12&upload_protocol=resumable"));
+  CHECK(files::upload_url(base, base + "/upload/v1beta/files"));
+  for (const char* tail : {"/upload/../v1beta/models/x:generateContent", "/upload/./v1beta/files", "/upload/v1beta/../files", "/upload//v1beta/files",
+                           "/upload/%2e%2e/v1beta/files", "/upload/%2E/v1beta/files", "/upload/", "/upload/v1beta/files/", "/upload/v1beta/files/..", "/upload/v1beta;x/files",
+                           "/upload", "/upload/v1beta/files#x", "/v1beta/files", "/uploads/v1beta/files"})
+    CHECK(!files::upload_url(base, base + tail));
+  CHECK(!files::upload_url(base, "https://generativelanguage.googleapis.com.example/upload/v1beta/files"));
+  CHECK(!files::upload_url(base, "https://example.com/upload/v1beta/files"));
+  CHECK(!files::upload_url(base, base + "/upload/v1beta/files?x=\"y"));
+  for (const char* tail : {"/upload/../v1beta/models/x:generateContent", "/upload/%2e%2e/v1beta/files", "/upload/v1beta/files/.."}) {
+    files::Session session{std::string(google), "google", {}, base + tail, 100, 0, 0};
+    CHECK(refused(at(google), files::Query{session}) == ErrorKind::InvalidRequest);
+    CHECK(refused(at(google), files::Cancel{session}) == ErrorKind::InvalidRequest);
+    CHECK(refused(at(google), files::Part{session, {std::make_shared<const std::string>("x")}}) == ErrorKind::InvalidRequest);
+    // The URL a Start answers with passes the same check.
+    const auto begun = progress_of(google, Step::Start, "", {{"x-goog-upload-status", "active"}, {"x-goog-upload-url", base + tail}}, files::Session{std::string(google), "google", {}, {}, 100});
+    CHECK(std::holds_alternative<Failure>(begun) && std::get<Failure>(begun).error.reason == "files.session.url_required");
+  }
+  for (const char* id : {".", ".."}) {
+    files::Session session{std::string(openai), "openai", id, {}, 100};
+    CHECK(refused(at(openai), files::Cancel{session}) == ErrorKind::InvalidRequest);
+  }
+}
+
 // The runtime sends a file slice as the wire's file body and reports the transport's digest on the file.
 void runtime_upload() {
   auto executor = std::make_shared<QueueExecutor>();
@@ -311,6 +352,6 @@ void runtime_upload() {
 }  // namespace
 
 int main() {
-  try { uploads(); reads(); decoded_files(); references(); chunked(); runtime_upload(); std::cout << "file properties passed\n"; return 0; }
+  try { uploads(); reads(); decoded_files(); references(); chunked(); upload_urls(); runtime_upload(); std::cout << "file properties passed\n"; return 0; }
   catch (const std::exception& error) { std::cerr << "file test failed: " << error.what() << '\n'; return 1; }
 }

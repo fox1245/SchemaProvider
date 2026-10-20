@@ -233,7 +233,7 @@ bool SessionCodec::buffered(std::string_view body, Close close) {
   File probe;
   if (google) {
     if (status.empty()) return fail(ErrorKind::ProtocolCorrupt, "a Google upload reports its status");
-    if (step_ == Step::Start && (status != "active" || !url.starts_with(std::string(descriptor_.base_url()) + "/upload/") ||
+    if (step_ == Step::Start && (status != "active" || !upload_url(descriptor_.base_url(), url) ||
                                  (!granularity.empty() && !digits(granularity))))
       return fail(ErrorKind::ProtocolCorrupt, "a Google upload begins with its upload URL");
     if (status == "final" && !(wire && file_of(file_object(root, "google"), "google", descriptor_.base_url(), probe)))

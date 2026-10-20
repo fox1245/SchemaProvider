@@ -126,6 +126,15 @@ void job_requests() {
   CHECK(refused(static_cast<DownloadEncode>(jobs::encode), router, elsewhere) == ErrorKind::InvalidRequest);
   auto traversal = download; traversal.handle.id = "../keys";
   CHECK(refused(static_cast<DownloadEncode>(jobs::encode), router, traversal) == ErrorKind::InvalidRequest);
+  // `.` and `..` are made of token characters, but a request for them leaves the job's path.
+  for (const char* id : {".", ".."}) {
+    auto dotted = download; dotted.handle.id = id;
+    CHECK(refused(static_cast<DownloadEncode>(jobs::encode), router, dotted) == ErrorKind::InvalidRequest);
+    using PollEncode = std::variant<jobs::Encoded, Error> (*)(const descriptor::ValidatedDescriptor&, const jobs::Poll&);
+    CHECK(refused(static_cast<PollEncode>(jobs::encode), router, jobs::Poll{dotted.handle}) == ErrorKind::InvalidRequest);
+  }
+  auto dotted_name = download; dotted_name.handle.id = "job..7";
+  CHECK(encoded(static_cast<DownloadEncode>(jobs::encode), router, dotted_name).path == "/api/v1/videos/job..7/content?index=2");
   auto unknown = download; unknown.handle.endpoint = "images";
   CHECK(refused(static_cast<DownloadEncode>(jobs::encode), router, unknown) == ErrorKind::Unsupported);
   auto unbounded = download; unbounded.max_bytes = 0;
