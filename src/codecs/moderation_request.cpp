@@ -43,7 +43,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
     for (const auto& item : input.media) {
       if (std::exchange(comma, true)) out.raw(",");
       out.raw("{\"type\":\"image_url\",\"image_url\":{\"url\":");
-      if (item.source == MediaSource::Inline) out.raw("\"data:").raw(item.mime).raw(";base64,").raw(*item.data).raw("\"");
+      if (item.source == MediaSource::Inline) media_input::data_uri(out, item);
       else out.quoted(item.reference);
       out.raw("}}");
     }

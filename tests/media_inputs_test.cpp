@@ -1118,6 +1118,48 @@ void gemini_function_response_live_verified_media() {
                ErrorKind::Unsupported);
 }
 
+// Optional whitespace around a MIME parameter is valid, but a data URL cannot carry it and a raw tab is not valid
+// JSON. A data URL is written without the whitespace, a JSON member keeps the spelling (escaped), and run1 fails on a
+// body that is not JSON. A '#' or '%' would be read as a fragment or an escape in a data URL and is refused.
+void mime_parameter_whitespace_is_written_safely() {
+  const auto image = inline_media("image/png");
+  const std::array<std::pair<const char*, const char*>, 4> spellings{{
+      {"image/png; q=1", "image/png;q=1"}, {"image/png ;q=1", "image/png;q=1"}, {"image/png;\tq=1", "image/png;q=1"},
+      {"image/png \t;\t q=1;\tr=2", "image/png;q=1;r=2"}}};
+  for (const auto& [spelling, compact] : spellings) {
+    auto spaced = image; spaced.mime = spelling;
+    const auto url = "data:" + std::string(compact) + ";base64," + *image.data;
+    for (const auto family : all_families) {
+      for (const bool streaming : {false, true}) {
+        const auto result = run1(family, Origin::Direct, spaced, streaming);
+        CHECK_AT(is_wire(result), fam_name(family));
+        const auto part = content_of(family, wire_of(result).root()).at(0);
+        switch (family) {
+          case Fam::Messages: CHECK_AT(part.get("source").get("media_type").as_string() == "image/png", spelling); break;
+          case Fam::Gemini: CHECK_AT(part.get("inlineData").get("mimeType").as_string() == spelling, spelling); break;
+          case Fam::Interactions: CHECK_AT(part.get("mime_type").as_string() == "image/png", spelling); break;
+          case Fam::Responses: CHECK_AT(part.get("image_url").as_string() == url, spelling); break;
+          default: CHECK_AT(part.get("image_url").get("url").as_string() == url, spelling);
+        }
+      }
+    }
+    const auto file = Media::file(MediaKind::Image, "https://generativelanguage.googleapis.com/v1beta/files/abc", spelling);
+    for (const auto family : {Fam::Gemini, Fam::Interactions}) expect_part(family, Origin::Direct, file, google_part(family, file));
+    ToolResult result{"call1", ""};
+    result.content_parts = {spaced};
+    for (const auto family : {Fam::Responses, Fam::Messages, Fam::Gemini, Fam::Interactions}) {
+      const auto& d = desc(family);
+      const auto encoded = tool_history(family, d, with_tool_results(family, tool_prefix(family, d), result));
+      CHECK_AT(is_wire(encoded), fam_name(family));
+      if (family == Fam::Responses) CHECK_AT(first_tool_result(family, wire_of(encoded).root()).get("output").at(0).get("image_url").as_string() == url, spelling);
+    }
+  }
+  for (const auto mime : {"image/png;q=#", "image/png;q=%41", "image/png;q=a#b"}) {
+    auto marked = image; marked.mime = mime;
+    for (const auto family : all_families) expect_error(run1(family, Origin::Direct, marked, false), ErrorKind::InvalidRequest);
+  }
+}
+
 int main() {
   try {
     heif_admission_and_brand_boundaries();
@@ -1125,6 +1167,7 @@ int main() {
     url_and_provider_file_forms();
     declared_origin_and_unsupported_precedence();
     mime_and_malformed_payloads();
+    mime_parameter_whitespace_is_written_safely();
     size_and_aggregate_error_contract();
     policy_cannot_create_unrepresentable_sources();
     generate_alias_inputs_and_safety();

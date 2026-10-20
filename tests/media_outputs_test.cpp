@@ -929,6 +929,13 @@ void gemini_tts_and_transcripts() {
     CHECK(mime_syntax(mime) && mime_kind(mime) == MediaKind::Audio && mime_essence(mime) == "audio/l16" && mime_equal(mime, "audio/L16"));
   for (const auto* mime : {"audio/l16; rate = 24000", "audio/l16; rate= 24000", "audio/ l16", " audio/l16", "audio/l16;", "audio/l16; ;rate=1", "audio /l16;rate=1"})
     CHECK(!mime_syntax(mime));
+  // A data URI cannot carry that whitespace: mime_compact drops it and keeps the same type.
+  for (const auto& [spelled, compact] : {std::pair<std::string, std::string>{"audio/l16; rate=24000; channels=1", "audio/l16;rate=24000;channels=1"},
+                                          {"audio/l16 ;rate=24000", "audio/l16;rate=24000"}, {"audio/l16;\trate=24000\t;\tchannels=1", "audio/l16;rate=24000;channels=1"},
+                                          {"audio/l16", "audio/l16"}, {"audio/l16;rate=24000", "audio/l16;rate=24000"}, {"video/audio/wav; x=1", "video/audio/wav;x=1"}}) {
+    CHECK(mime_syntax(spelled) && mime_compact(spelled) == compact && mime_syntax(compact) && mime_equal(spelled, compact));
+    CHECK(mime_compact(spelled).find_first_of(" \t") == std::string::npos);
+  }
   const std::string tts = R"([{"inlineData":{"mimeType":"audio/l16; rate=24000; channels=1","data":"AAAAAA=="}}])";
   for (const bool streamed : {false, true}) {
     const auto outcome = gemini_decode(gemini_body(tts), streamed);

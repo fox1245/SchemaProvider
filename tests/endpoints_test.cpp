@@ -247,7 +247,43 @@ void generation_endpoint() {
 }
 }  // namespace
 
+// A MIME type may have whitespace around its parameters. A data URL is written without it, a JSON member keeps it as
+// given (escaped), and a multipart part header keeps it as the header syntax allows.
+void mime_parameters_with_whitespace() {
+  const auto openai = at("https://api.openai.com"), router = at("https://openrouter.ai"), google = at("https://generativelanguage.googleapis.com");
+  const std::string compact = std::string("data:image/png;q=1;base64,") + png;
+  for (const char* mime : {"image/png; q=1", "image/png ;q=1", "image/png;\tq=1", "image/png \t;\t q=1"}) {
+    const auto image = Media::image(mime, std::make_shared<const std::string>(png));
+    embeddings::Request routed{"openai/text-embedding-3-small", {{"a red fox"}, {"a blue whale"}}};
+    routed.inputs[1].media = {image};
+    CHECK(document(encoded<embeddings::Encoded>(embeddings::encode, router, routed).body)->root().get("input").at(1).get("content").at(1).get("image_url").get("url").as_string() == compact);
+    embeddings::Request multimodal{"gemini-embedding-2", {{"a red fox"}, {"a blue whale"}}};
+    multimodal.inputs[1].media = {image, Media::file(MediaKind::Image, "files/abc", mime)};
+    {
+      const auto body = document(encoded<embeddings::Encoded>(embeddings::encode, google, multimodal).body);
+      const auto parts = body->root().get("requests").at(1).get("content").get("parts");
+      CHECK(parts.at(1).get("inline_data").get("mime_type").as_string() == mime && parts.at(2).get("file_data").get("mime_type").as_string() == mime);
+    }
+    moderation::Request pictured{"omni-moderation-latest", {{"Nice weather today."}}};
+    pictured.inputs[0].media = {image};
+    CHECK(document(encoded<moderation::Encoded>(moderation::encode, openai, pictured).body)->root().get("input").at(1).get("image_url").get("url").as_string() == compact);
+  }
+  for (const char* mime : {"image/png;q=#", "image/png;q=%41"}) {
+    embeddings::Request routed{"openai/text-embedding-3-small", {{"a red fox"}}};
+    routed.inputs[0].media = {Media::image(mime, std::make_shared<const std::string>(png))};
+    CHECK(refused(embeddings::encode, router, routed) == ErrorKind::InvalidRequest);
+    moderation::Request pictured{"omni-moderation-latest", {{"Nice weather today."}}};
+    pictured.inputs[0].media = routed.inputs[0].media;
+    CHECK(refused(moderation::encode, openai, pictured) == ErrorKind::InvalidRequest);
+  }
+  const auto wav = std::make_shared<const std::string>(base64_encode(std::string("RIFF\x24\x00\x00\x00WAVEfmt synthetic", 24)));
+  for (const char* mime : {"audio/wav; rate=16000", "audio/wav;\trate=16000"}) {
+    const auto wire = encoded<transcription::Encoded>(transcription::encode, openai, transcription::Request{"gpt-4o-mini-transcribe", Media::audio(mime, wav)});
+    CHECK(wire.body.find(std::string("filename=\"audio.wav\"\r\nContent-Type: ") + mime + "\r\n\r\nRIFF") != std::string::npos);
+  }
+}
+
 int main() {
-  try { embedding_endpoints(); rerank_endpoint(); moderation_endpoint(); speech_endpoint(); transcription_endpoint(); generation_endpoint(); std::cout << "endpoint properties passed\n"; return 0; }
+  try { embedding_endpoints(); rerank_endpoint(); moderation_endpoint(); speech_endpoint(); transcription_endpoint(); generation_endpoint(); mime_parameters_with_whitespace(); std::cout << "endpoint properties passed\n"; return 0; }
   catch (const std::exception& error) { std::cerr << "endpoint test failed: " << error.what() << '\n'; return 1; }
 }

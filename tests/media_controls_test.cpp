@@ -374,6 +374,12 @@ void interaction_boundaries_and_binding() {
   // The service names the encodings: a bit rate beside WAV is sent, and only a MIME type of another kind is refused.
   auto wav = value; std::get<interactions::AudioResponseFormat>(wav.response_format[0]).mime_type = "audio/wav";
   CHECK(std::holds_alternative<interactions::EncodedRequest>(interactions::encode(descriptor, wav, false)));
+  // Whitespace around a MIME parameter is valid; it reaches the wire as a JSON string, escaped.
+  for (const char* spelled : {"audio/l16; rate=24000", "audio/l16;\trate=24000"}) {
+    std::get<interactions::AudioResponseFormat>(wav.response_format[0]).mime_type = spelled;
+    auto sent = interactions::encode(descriptor, wav, false); CHECK(std::holds_alternative<interactions::EncodedRequest>(sent));
+    CHECK(parse(std::get<interactions::EncodedRequest>(sent).body).root().get("response_format").get("mime_type").as_string() == spelled);
+  }
   auto bad = value; std::get<interactions::AudioResponseFormat>(bad.response_format[0]).mime_type = "image/png"; invalid(interactions::encode(descriptor, bad, false));
   value = request<interactions::Request>();
   value.response_format = {interactions::TextResponseFormat{}, interactions::ImageResponseFormat{{}, std::string("1:8"), std::string("4K"), {}}};

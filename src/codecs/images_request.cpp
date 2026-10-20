@@ -57,9 +57,9 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
       const auto& media = request.references[i];
       if (i) out.raw(",");
       if (media.source == MediaSource::File) { out.raw("{\"file_id\":").quoted(media.reference).raw("}"); continue; }
-      // An admitted inline image has a MIME type and canonical base64, which need no escaping in a data URL.
+      // An admitted inline image has a MIME type and canonical base64; data_uri writes them with no escaping and no whitespace.
       out.raw(openai ? "{\"image_url\":" : "{\"type\":\"image_url\",\"image_url\":{\"url\":");
-      if (media.source == MediaSource::Inline) out.raw("\"data:").raw(media.mime).raw(";base64,").raw(*media.data).raw("\"");
+      if (media.source == MediaSource::Inline) media_input::data_uri(out, media);
       else out.quoted(media.reference);
       out.raw(openai ? "}" : "}}");
     }

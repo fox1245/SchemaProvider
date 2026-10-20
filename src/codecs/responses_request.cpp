@@ -689,7 +689,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
                   .raw(",\"output\":{\"type\":\"computer_screenshot\",");
               if (shot.source == MediaSource::File) body.raw("\"file_id\":").quoted(shot.reference);
               else if (shot.source == MediaSource::Url) body.raw("\"image_url\":").quoted(shot.reference);
-              else body.raw("\"image_url\":\"data:").raw(shot.mime).raw(";base64,").raw(*shot.data).raw("\"");
+              else { body.raw("\"image_url\":"); media_input::data_uri(body, shot); }
               body.raw("}");
               if (extra) body.raw(",\"acknowledged_safety_checks\":").value(extra->root().get("acknowledged_safety_checks"), 3);
               body.raw("}");

@@ -95,7 +95,7 @@ std::string document_filename(const Media& media) {
 }
 
 void data_uri(json::BoundedWriter& writer, const Media& media) {
-  writer.raw("\"data:").raw(media.mime).raw(";base64,").raw(*media.data).raw("\"");
+  writer.raw("\"data:").raw(mime_compact(media.mime)).raw(";base64,").raw(*media.data).raw("\"");
 }
 void uri_or_url(json::BoundedWriter& writer, const Media& media) {
   if (media.source == MediaSource::Inline) data_uri(writer, media);

@@ -89,6 +89,14 @@ void video_submit() {
           root.get("input_references").at(0).get("image_url").get("url").as_string().starts_with("data:image/png;base64,") &&
           root.get("seed").as_uint() == 7 && root.get("provider").get("order").at(0).as_string() == "xai" && !root.get("size").valid());
   }
+  // A data URL cannot carry the whitespace a MIME type may have around its parameters.
+  for (const char* mime : {"image/png; q=1", "image/png ;q=1", "image/png;\tq=1", "image/png \t;\t q=1"}) {
+    auto parameterized = request; parameterized.references = {Media::image(mime, std::make_shared<const std::string>(png))};
+    const auto body = document(encoded(videos::encode, router, parameterized).body);
+    CHECK(body->root().get("input_references").at(0).get("image_url").get("url").as_string() == std::string("data:image/png;q=1;base64,") + png);
+  }
+  auto marked = request; marked.references = {Media::image("image/png;q=#", std::make_shared<const std::string>(png))};
+  CHECK(refused(videos::encode, router, marked) == ErrorKind::InvalidRequest);
   auto none = request; none.prompt.clear();
   CHECK(refused(videos::encode, router, none) == ErrorKind::InvalidRequest);
   auto spaced = request; spaced.resolution = "480 p";

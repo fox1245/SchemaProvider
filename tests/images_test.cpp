@@ -96,6 +96,21 @@ void requests() {
   }
   auto file_ref = routed; file_ref.references = {Media::file(MediaKind::Image, "file-abc123", "image/png")};
   CHECK(refused(router, file_ref) == ErrorKind::Unsupported);
+  // A data URL cannot carry the whitespace a MIME type may have around its parameters; a '#' or '%' would be read as a
+  // fragment or an escape.
+  for (const char* mime : {"image/png; q=1", "image/png ;q=1", "image/png;\tq=1", "image/png \t;\t q=1"}) {
+    for (const auto* target : {&openai, &router}) {
+      auto spaced = target == &openai ? edit : routed;
+      spaced.references = {Media::image(mime, std::make_shared<const std::string>(png))};
+      const auto body = document(encoded(*target, spaced).body);
+      const auto url = target == &openai ? body->root().get("images").at(0).get("image_url") : body->root().get("input_references").at(0).get("image_url").get("url");
+      CHECK(url.as_string() == std::string("data:image/png;q=1;base64,") + png);
+    }
+  }
+  for (const char* mime : {"image/png;q=#", "image/png;q=%41"}) {
+    auto marked = edit; marked.references = {Media::image(mime, std::make_shared<const std::string>(png))};
+    CHECK(refused(openai, marked) == ErrorKind::InvalidRequest);
+  }
   // Refusals before any I/O: an origin without a fact, controls outside their shape, options outside the schema.
   CHECK(refused(at("http://127.0.0.1:18080"), request) == ErrorKind::Unsupported);
   auto change = [&](auto edit_request, ErrorKind kind) { auto r = request; edit_request(r); CHECK(refused(openai, r) == kind); };
