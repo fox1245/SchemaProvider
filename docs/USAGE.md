@@ -693,8 +693,9 @@ if (auto* result = std::get_if<sp::images::Result>(&outcome))
   The handle is a plain value. Journal it; `jobs::Poll{handle}` reads the job's state again, also after a restart. A handle reaches only the origin that started its job.
 
   `jobs::Download{handle, index, path, max_bytes}` fetches one output:
-  - With `path`, the runtime writes the body to `<path>.part` as it arrives, at most `max_bytes` (4 GiB by default), and renames it to `path` when the body is whole. A failed download leaves no file. The client's response limit does not apply. `jobs::Content` has the path, the size, the SHA-256 and the content type.
+  - With `path`, the runtime writes the body to `<path>.part` as it arrives, at most `max_bytes` (4 GiB by default), and renames it to `path` once the body is whole and the decoder has accepted it. Nothing touches `path` before then: a failed or refused download removes its partial copy and leaves the file that was at `path`. The client's response limit does not apply. `jobs::Content` has the path, the size, the SHA-256 and the content type.
   - Without `path`, the body is held in memory under the response limit (16 MiB by default), and `jobs::Content` holds it as inline `Media`.
+  - A job's output is media, and only a 200 carries it. A JSON or text body in its place is the provider's answer about the job, and is refused (`jobs.download.is_document`); so is any other status (`jobs.download.status`: a 202 says the output is not ready).
 
   A submit is charged once the provider accepts it. A poll and a download are never charged. They are reads, so the runtime retries their transient failures even when the retry policy accepts no duplicate billing risk.
 
@@ -725,7 +726,7 @@ while (auto* state = std::get_if<sp::jobs::State>(&outcome)) {    // journal sta
   The calls are these:
   - `files::Upload` sends a whole file in one request: multipart form data at OpenAI and Anthropic, Google's multipart upload. Its `Source` is bytes in memory, held to the request limit (16 MiB by default), or a slice of a local file: a path, an offset, a size and an optional SHA-256. The transport reads a slice while it sends it. It checks the file's length first and hashes the slice on the way. With a SHA-256, it holds back the slice's last bytes until the digest matches, so a file changed since it was hashed never reaches the provider whole. Such a failure is `InvalidRequest` with the reason `transport.upload.source`. OpenAI needs a `purpose` and takes `expires_after` seconds; the others take neither.
   - `files::Get` and `files::Delete` take the id. At Google the id may also be the file's URI at the origin, as a result delivered by URI names it (`…/v1beta/files/<id>:download?alt=media`); a URI at another origin is refused. `files::List` returns a `files::Page`; pass its `next` as the following request's `after` (OpenAI can filter by purpose).
-  - `files::Download` fetches content like `jobs::Download`, to a file or to memory. Providers serve only the content of files they made: OpenAI batch output, Anthropic files a tool wrote, Google generated media.
+  - `files::Download` fetches content like `jobs::Download`, to a file or to memory. Providers serve only the content of files they made: OpenAI batch output, Anthropic files a tool wrote, Google generated media. A file's content is a document of any type, text, CSV, JSON and Markdown included, so compare `Content::content_type` with `File::mime` when a wrong type matters. Only a 200 carries the content; an error status is an error and any other status is refused (`jobs.download.status`).
 
   - A large file goes in parts, one call per step: `files::Start`, then `files::Part`s, each answering with a `files::Progress` (the advanced `Session`, and the `File` once it is whole).
     - OpenAI Uploads: parts of at most 64 MB, then `files::Complete`.

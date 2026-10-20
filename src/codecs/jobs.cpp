@@ -82,6 +82,10 @@ bool ContentCodec::fail(ErrorKind kind, std::string text) {
 }
 bool ContentCodec::buffered(std::string_view body, Close close) {
   if (!close.normal) return fail(close.error, "abnormal response close");
+  // Only a 200 carries the content: 202 says it is not ready, 206 gives part of it.
+  if (close.status && close.status != 200) return fail(ErrorKind::ProtocolCorrupt, "a download is the body of a 200 response");
+  // A job's output is media. A document in its place is the provider's answer about the job, not the output; a
+  // file's content or a batch's results may be any type.
   const auto type = essence(header(close, "content-type"));
   if (!documents_ && (type.starts_with("application/json") || type.starts_with("text/"))) return fail(ErrorKind::ProtocolCorrupt, "a download is not a document");
   std::string record = "{\"content_type\":" + json::quote(type);

@@ -345,13 +345,14 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
   // What the decoder checks the answer against, and a value no journal may store; the prepared call shows neither.
   endpoints::Context codec_context;
   // A download written to a file as it arrives: the file, its byte limit, and the attempt's partial copy, which
-  // is renamed to the file once the body is whole and removed when the call fails.
+  // is renamed to the file once the body is whole and the decoder accepted it, and removed when the call fails.
+  // The file is never touched before then, so a failed download leaves what was there.
   std::string sink_path;
   std::uint64_t sink_limit = 0;
   std::FILE* sink_file = nullptr;
   std::uint64_t sink_bytes = 0;
   std::optional<crypto::Sha256> sink_hash;
-  bool sink_published = false;
+  bool sink_whole = false;
   bool admitted = false;
   bool prepared = false;
   std::string prepared_model;
@@ -414,7 +415,7 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
     if (sink_file) { std::fclose(sink_file); sink_file = nullptr; }
     std::error_code ignored;
     if (!sink_path.empty()) std::filesystem::remove(sink_part(), ignored);
-    if (std::exchange(sink_published, false)) std::filesystem::remove(sink_path, ignored);
+    sink_whole = false;
     sink_bytes = 0;
     sink_hash.reset();
   }
@@ -429,18 +430,24 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
     sink_hash->update(bytes);
     sink_bytes += bytes.size();
   }
-  // Closes the attempt's partial copy and moves it to the file; false when it could not be written whole.
-  bool publish_sink(endpoints::Sink& out) {
+  // Closes the attempt's partial copy for the decoder to check; false when it could not be written whole.
+  bool close_sink(endpoints::Sink& out) {
     const bool written = std::fflush(sink_file) == 0 && !std::ferror(sink_file);
     const bool closed = std::fclose(sink_file) == 0;
     sink_file = nullptr;
-    std::error_code error;
-    if (written && closed) std::filesystem::rename(sink_part(), sink_path, error);
-    if (!written || !closed || error) { discard_sink(); return false; }
-    sink_published = true;
+    if (!written || !closed) { discard_sink(); return false; }
+    sink_whole = true;
     static constexpr char digits[] = "0123456789abcdef";
     out = {sink_path, sink_bytes, {}};
     for (const auto byte : sink_hash->finish()) { out.sha256 += digits[byte >> 4]; out.sha256 += digits[byte & 15]; }
+    return true;
+  }
+  // Moves the checked copy to the file, replacing what was there; false when it could not.
+  bool commit_sink() {
+    std::error_code error;
+    std::filesystem::rename(sink_part(), sink_path, error);
+    if (error) { discard_sink(); return false; }
+    sink_whole = false;
     return true;
   }
 
@@ -836,11 +843,12 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
         if (endpoint_codec) {
           endpoints::Close ended{normal, close_error.kind, {}};
           ended.upload_sha256 = wire.upload_sha256;
+          ended.status = response ? response->value.status : 0;
           if (response) for (const auto& header : response->value.headers) ended.headers.emplace_back(header.name, header.value);
           if (!sink_path.empty() && normal) {
             ended.sink.emplace();
             if (!sink_file) ended.sink->path = sink_path;  // nothing arrived: the codec refuses an empty download
-            else if (!publish_sink(*ended.sink)) fail_semantic(ErrorKind::ResourceLimit, "runtime.sink.write_failed");
+            else if (!close_sink(*ended.sink)) fail_semantic(ErrorKind::ResourceLimit, "runtime.sink.write_failed");
           }
           if (!accumulator->terminal()) endpoint_codec->buffered(buffered, std::move(ended));
         }
@@ -860,6 +868,9 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
     }
     if (!accumulator->terminal()) accumulator->accept(Fail{error_for(ErrorKind::ProtocolCorrupt, "runtime.outcome.undecided")});
     auto outcome = accumulator->take_outcome();
+    // The decoder accepted the download: only now does it replace the file the caller named.
+    if (sink_whole && std::holds_alternative<Completion>(*outcome) && !commit_sink())
+      outcome = Outcome{Failure{error_for(ErrorKind::ResourceLimit, "runtime.sink.write_failed"), {}}};
     if (auto* failure = std::get_if<Failure>(&*outcome)) {
       if (!sink_path.empty()) discard_sink();
       if (!semantic_failure_decided && !normal && failure->error.kind == close_error.kind)
@@ -1747,7 +1758,7 @@ PreparedEndpoint<files::DeleteOutcome> Client::prepare(files::Delete del, RunOpt
 }
 PreparedEndpoint<jobs::DownloadOutcome> Client::prepare(files::Download download, RunOptions options) {
   auto client = state_;
-  return PreparedEndpoint<jobs::DownloadOutcome>(prepare_endpoint<files::Encoded>(std::move(options), "content",
+  return PreparedEndpoint<jobs::DownloadOutcome>(prepare_endpoint<files::Encoded>(std::move(options), "content.document",
       static_cast<int>(reason::Source::FilesRequest), [&] { return files::encode(client->descriptor, download); }));
 }
 files::Outcome Client::complete(files::Upload upload, RunOptions options) { return complete(prepare(std::move(upload), std::move(options))); }

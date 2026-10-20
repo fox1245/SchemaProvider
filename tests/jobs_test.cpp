@@ -294,6 +294,19 @@ void runtime_job() {
   wire->script = [](Exchange& e) { e.reply(200, "application/json", R"({"error":"not ready"})"); };
   const auto mislabeled = complete(client.prepare(jobs::Download{handle, 0, target.string()}, run_for()));
   CHECK(std::holds_alternative<Failure>(mislabeled) && !std::filesystem::exists(target) && !std::filesystem::exists(target.string() + ".part"));
+  // A file already at the path survives a download that was refused, and is replaced by one that was accepted.
+  { std::ofstream(target, std::ios::binary) << "previous video"; }
+  const auto refused_again = complete(client.prepare(jobs::Download{handle, 0, target.string()}, run_for()));
+  CHECK(std::holds_alternative<Failure>(refused_again) && std::get<Failure>(refused_again).error.reason == "jobs.download.is_document" &&
+        read_file(target) == "previous video" && !std::filesystem::exists(target.string() + ".part"));
+  wire->script = [](Exchange& e) { e.reply(202, "video/mp4", "not yet"); };
+  const auto not_ready = complete(client.prepare(jobs::Download{handle, 0, target.string()}, run_for()));
+  CHECK(std::holds_alternative<Failure>(not_ready) && std::get<Failure>(not_ready).error.reason == "jobs.download.status" &&
+        read_file(target) == "previous video" && !std::filesystem::exists(target.string() + ".part"));
+  wire->script = [&](Exchange& e) { e.reply(200, "video/mp4", video.substr(0, 3000)); };
+  CHECK(std::holds_alternative<jobs::Content>(complete(client.prepare(jobs::Download{handle, 0, target.string()}, run_for()))) &&
+        read_file(target) == video.substr(0, 3000) && !std::filesystem::exists(target.string() + ".part"));
+  std::filesystem::remove(target);
   // A failed status is no file either: the error body is read as an error.
   wire->script = [](Exchange& e) { e.reply(404, "application/json", R"({"error":{"code":404,"message":"not found"}})"); };
   const auto missing = complete(client.prepare(jobs::Download{handle, 0, target.string()}, run_for()));

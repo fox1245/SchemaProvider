@@ -6,6 +6,8 @@
 #include "descriptor/descriptor.h"
 #include "json/json.h"
 #include "support/endpoint_fakes.h"
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -502,9 +504,88 @@ void runtime_upload() {
   const auto unreadable = complete(client.prepare(files::Upload{{nullptr, {"/data/gone.bin", 0, 10}}, "gone.bin", "application/octet-stream"}, run_for()));
   CHECK(std::get<Failure>(unreadable).error.kind == ErrorKind::InvalidRequest && std::get<Failure>(unreadable).error.reason == "transport.upload.source");
 }
+// A file's content is a document whatever its type; the file the caller named changes only when the download was
+// accepted, and a download that was not leaves what was there.
+void runtime_download() {
+  auto executor = std::make_shared<QueueExecutor>();
+  auto wire = std::make_shared<ScriptTransport>();
+  runtime::Options options;
+  options.api_key = "synthetic-key";
+  auto client = runtime::detail::ClientAccess::make(at(anthropic), options, executor, wire);
+  runtime::RunOptions run;
+  run.retry = runtime::RetryPolicy{true, false, 3, 0ms, 0ms};
+  const auto run_for = [&] { auto value = run; value.deadline = executor->now() + 10s; return value; };
+  const auto complete = [&](auto prepared) { auto call = client.start(std::move(prepared)); executor->drain(); return call.join(); };
+  const auto directory = std::filesystem::temp_directory_path() / ("sp-files-test-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()));
+  std::filesystem::create_directories(directory);
+  const auto target = directory / "out.bin";
+  const auto part = target.string() + ".part";
+  const auto read = [](const std::filesystem::path& path) { std::ifstream in(path, std::ios::binary); return std::string(std::istreambuf_iterator<char>(in), {}); };
+  const auto write = [](const std::filesystem::path& path, std::string_view text) { std::ofstream(path, std::ios::binary) << text; };
+  const auto hex = [](std::string_view text) {
+    std::string out;
+    for (const auto byte : crypto::sha256(text)) { out += "0123456789abcdef"[byte >> 4]; out += "0123456789abcdef"[byte & 15]; }
+    return out;
+  };
+  const auto fetch = [&] { return complete(client.prepare(files::Download{"file_1", target.string()}, run_for())); };
+
+  // Documents of every type are the content.
+  for (const auto& [type, body] : std::initializer_list<std::pair<const char*, const char*>>{
+           {"text/csv", "a,b\n1,2\n"}, {"application/json", R"({"a":1})"}, {"text/markdown; charset=utf-8", "# title\n"}, {"text/plain", "hello\n"},
+           {"text/html", "<p>report</p>"}, {"application/pdf", "%PDF-1.4"}, {"application/octet-stream", "{\"custom_id\":\"1\"}\n"}}) {
+    std::filesystem::remove(target);
+    wire->script = [&, type = type, body = body](Exchange& e) { e.reply(200, type, body); };
+    const auto fetched = fetch();
+    CHECK(std::holds_alternative<jobs::Content>(fetched));
+    const auto& content = std::get<jobs::Content>(fetched);
+    CHECK(content.path == target.string() && content.bytes == std::string_view(body).size() && content.sha256 == hex(body) && read(target) == body &&
+          !std::filesystem::exists(part));
+    CHECK(content.content_type == std::string(type).substr(0, std::string(type).find(';')));
+  }
+  CHECK(wire->exchanges.back()->request.url == "https://api.anthropic.com/v1/files/file_1/content");
+
+  // A download that is accepted replaces the file.
+  write(target, "previous content");
+  wire->script = [](Exchange& e) { e.reply(200, "text/csv", "a,b\n"); };
+  CHECK(std::holds_alternative<jobs::Content>(fetch()) && read(target) == "a,b\n" && !std::filesystem::exists(part));
+
+  // One that is refused leaves it, and its partial copy is gone: an empty body, a status that is not the content,
+  // a body past the limit, an error status, a connection lost for good.
+  const auto untouched = [&] { CHECK(read(target) == "previous content" && !std::filesystem::exists(part)); };
+  write(target, "previous content");
+  wire->script = [](Exchange& e) { e.reply(200, "application/pdf", ""); };
+  const auto empty = fetch();
+  CHECK(std::holds_alternative<Failure>(empty) && std::get<Failure>(empty).error.reason == "jobs.download.empty");
+  untouched();
+  wire->script = [](Exchange& e) { e.reply(202, "application/json", R"({"status":"pending"})"); };
+  const auto pending = fetch();
+  CHECK(std::holds_alternative<Failure>(pending) && std::get<Failure>(pending).error.kind == ErrorKind::ProtocolCorrupt &&
+        std::get<Failure>(pending).error.reason == "jobs.download.status");
+  untouched();
+  wire->script = [](Exchange& e) { e.reply(206, "text/csv", "a,b\n"); };
+  const auto partial = fetch();
+  CHECK(std::holds_alternative<Failure>(partial) && std::get<Failure>(partial).error.reason == "jobs.download.status");
+  untouched();
+  wire->script = [](Exchange& e) { e.reply(404, "application/json", R"({"type":"error","error":{"type":"not_found_error","message":"missing"}})"); };
+  const auto missing = fetch();
+  CHECK(std::holds_alternative<Failure>(missing) && std::get<Failure>(missing).error.http_status == 404);
+  untouched();
+  wire->script = [](Exchange& e) {
+    e.head(200, {{"content-type", "text/csv"}});
+    e.callbacks.on_body("a,b\n");
+    e.finish(transport::Status::Failed, transport::FailureKind::Receive);
+  };
+  CHECK(std::holds_alternative<Failure>(fetch()));
+  untouched();
+  wire->script = [](Exchange& e) { e.reply(200, "text/csv", "a,b\n1,2\n"); };
+  const auto bounded = complete(client.prepare(files::Download{"file_1", target.string(), 3}, run_for()));
+  CHECK(std::holds_alternative<Failure>(bounded) && std::get<Failure>(bounded).error.reason == "runtime.sink.limit");
+  untouched();
+  std::filesystem::remove_all(directory);
+}
 }  // namespace
 
 int main() {
-  try { uploads(); reads(); decoded_files(); references(); chunked(); upload_urls(); digits_fit(); upload_url_stays_private(); runtime_upload(); std::cout << "file properties passed\n"; return 0; }
+  try { uploads(); reads(); decoded_files(); references(); chunked(); upload_urls(); digits_fit(); upload_url_stays_private(); runtime_upload(); runtime_download(); std::cout << "file properties passed\n"; return 0; }
   catch (const std::exception& error) { std::cerr << "file test failed: " << error.what() << '\n'; return 1; }
 }
