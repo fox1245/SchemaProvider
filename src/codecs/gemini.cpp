@@ -3,22 +3,14 @@
 #include "codecs/media_output.h"
 #include "codecs/reason.h"
 #include "core/native.h"
+#include "crypto/crypto.h"
 #include "descriptor/descriptor.h"
 #include "json/json.h"
 #include <algorithm>
-#include <atomic>
 #include <limits>
 
 namespace sp::gemini {
 namespace {
-uint64_t next_ownership_generation() {
-  static std::atomic<uint64_t> next{1};
-  auto value = next.load(std::memory_order_relaxed);
-  while (value != std::numeric_limits<uint64_t>::max()) {
-    if (next.compare_exchange_weak(value, value + 1, std::memory_order_relaxed)) return value;
-  }
-  return 0;
-}
 bool count(json::Value v) { return v.is_uint() || (v.is_int() && v.as_int() >= 0); }
 uint64_t number(json::Value v) { return v.is_uint() ? v.as_uint() : static_cast<uint64_t>(v.as_int()); }
 bool nonempty(json::Value v) { return v.is_string() && !v.as_string().empty(); }
@@ -75,6 +67,15 @@ bool Codec::fail(ErrorKind kind, std::string label, std::string_view vendor_code
       std::all_of(vendor_code.begin(), vendor_code.end(), [](char c) { return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; });
   if (machine) error.vendor_code = std::string(vendor_code);
   emit(Fail{std::move(error)}); return false;
+}
+bool Codec::local_id(std::string& id, LocalId part) {
+  if (ownership_token_.empty()) {
+    unsigned char random[8];
+    if (!crypto::random_bytes(random, sizeof random)) return fail(ErrorKind::ResourceLimit, "Gemini local ownership id exhausted");
+    for (const auto byte : random) { ownership_token_ += "0123456789abcdef"[byte >> 4]; ownership_token_ += "0123456789abcdef"[byte & 15]; }
+  }
+  id = "gemini-local-" + ownership_token_ + '-' + std::to_string(part.value);
+  return true;
 }
 void Codec::unknown(json::Value v, std::initializer_list<std::string_view> keys) {
   for (auto m : v.members()) if (std::find(keys.begin(), keys.end(), m.key) == keys.end()) ++diagnostics_.unknown_properties;
@@ -246,11 +247,7 @@ bool Codec::part(json::Value p) {
     if (call.get("partialArgs").valid() || call.get("willContinue").valid()) return fail(ErrorKind::Unsupported, "streamed partial function arguments unsupported");
     header.name = call.get("name").as_string();
     if (id.valid()) header.wire_id = id.as_string();
-    else {
-      if (!ownership_generation_) ownership_generation_ = next_ownership_generation();
-      if (!ownership_generation_) return fail(ErrorKind::ResourceLimit, "Gemini local ownership id exhausted");
-      header.wire_id = "gemini-local-" + std::to_string(ownership_generation_) + '-' + std::to_string(local.value);
-    }
+    else if (!local_id(header.wire_id, local)) return false;
     if (!calls_.insert(header.wire_id).second) return fail(ErrorKind::ProtocolCorrupt, "duplicate Gemini function call id");
     auto args = call.get("args");
     content = args.valid() ? args.dump() : "{}";
@@ -274,11 +271,7 @@ bool Codec::part(json::Value p) {
       for (auto& c : header.name) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + ('a' - 'A'));
     } else return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini server tool call");
     if (id.valid()) header.wire_id = id.as_string();
-    else {
-      if (!ownership_generation_) ownership_generation_ = next_ownership_generation();
-      if (!ownership_generation_) return fail(ErrorKind::ResourceLimit, "Gemini local ownership id exhausted");
-      header.wire_id = "gemini-local-" + std::to_string(ownership_generation_) + '-' + std::to_string(local.value);
-    }
+    else if (!local_id(header.wire_id, local)) return false;
     if (!calls_.insert(header.wire_id).second) return fail(ErrorKind::ProtocolCorrupt, "duplicate Gemini function call id");
     open_server_calls_.emplace_back(data_key == "executableCode" ? "codeExecutionResult" : "toolResponse", header.wire_id);
     header.tool_kind = ToolCallKind::ServerExecuted;
@@ -296,11 +289,7 @@ bool Codec::part(json::Value p) {
     });
     if (open != open_server_calls_.end()) { header.wire_id = open->second; open_server_calls_.erase(open); }
     else if (id.valid()) header.wire_id = id.as_string();
-    else {
-      if (!ownership_generation_) ownership_generation_ = next_ownership_generation();
-      if (!ownership_generation_) return fail(ErrorKind::ResourceLimit, "Gemini local ownership id exhausted");
-      header.wire_id = "gemini-local-" + std::to_string(ownership_generation_) + '-' + std::to_string(local.value);
-    }
+    else if (!local_id(header.wire_id, local)) return false;
     header.wire_metadata.reset();
     content = p.dump();
     payload = content;

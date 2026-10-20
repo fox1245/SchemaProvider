@@ -6,6 +6,7 @@
 #include "json/json.h"
 #include <algorithm>
 #include <iostream>
+#include <set>
 #include <stdexcept>
 
 namespace {
@@ -58,6 +59,30 @@ void group(const Completion& c) {
   CHECK(c.usage.stage == UsageStage::Final && c.usage.input_total->value == 10 && c.usage.input_uncached->value == 6);
   CHECK(c.usage.output_total->value == 10 && c.usage.reasoning->value == 3 && c.usage.total->value == 20);
   CHECK(c.usage.provider_reported_total->value == 20 && c.usage.extra.at("toolUsePromptTokenCount").value == 2);
+}
+// A call or result the service sent without an id is named "gemini-local-<token>-<part>". The token is random and
+// drawn per response, so a conversation saved by one process and resumed by another cannot hold one id twice
+// (native_archive_test resumes across processes). The ids of one response share a token.
+void local_ids_carry_a_random_token_per_response() {
+  const auto wire = body(R"re([{"functionCall":{"name":"lookup","args":{"x":1}}},{"executableCode":{"language":"PYTHON","code":"print(1)"}},)re"
+                         R"re({"codeExecutionResult":{"outcome":"OUTCOME_OK","output":"1"}},{"codeExecutionResult":{"outcome":"OUTCOME_OK","output":"2"}}])re");
+  const auto token_of = [](const std::string& id, std::string_view part) {
+    constexpr std::string_view prefix = "gemini-local-";
+    CHECK(id.starts_with(prefix) && id.size() == prefix.size() + 16 + 1 + part.size() && id.ends_with("-" + std::string(part)));
+    const auto token = id.substr(prefix.size(), 16);
+    CHECK(std::all_of(token.begin(), token.end(), [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); }));
+    return token;
+  };
+  std::set<std::string> tokens;
+  for (int response = 0; response < 8; ++response) {
+    const auto outcome = buffered(wire);
+    const auto& p = complete(outcome).messages[0].parts;
+    CHECK(p.size() == 4);
+    const auto token = token_of(std::get<ToolCall>(p[0]).id, "0");
+    CHECK(token_of(std::get<ToolCall>(p[1]).id, "1") == token && token_of(std::get<ServerToolResult>(p[3]).tool_use_id, "3") == token);
+    tokens.insert(token);
+  }
+  CHECK(tokens.size() == 8);
 }
 void native_group_and_replay() {
   auto b = buffered(body(parts)); auto s = stream({body(parts)}); group(complete(b)); group(complete(s));
@@ -757,6 +782,6 @@ void empty_text_delta_is_withheld() {
 }
 }
 int main() {
-  try { http_error_envelope_in_an_array_is_retained(); output_total_without_thoughts(); total_proves_zero_thoughts(); total_without_candidates_bounds_the_output(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); tool_result_helper_needs_a_json_object(); successive_unidentified_calls(); native_group_and_replay(); nullable_usage(); uncached_input_rule(); stop_kinds_match_policy_table(); invalid_model_calls(); errors_and_terminals(); loaded_routes_encode_for_their_model(); empty_text_delta_is_withheld(); one_descriptor_serves_every_model(); served_model_is_recorded(); failure_reasons(); std::cout << "Gemini semantic invariants passed\n"; }
+  try { http_error_envelope_in_an_array_is_retained(); output_total_without_thoughts(); total_proves_zero_thoughts(); total_without_candidates_bounds_the_output(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); tool_result_helper_needs_a_json_object(); successive_unidentified_calls(); local_ids_carry_a_random_token_per_response(); native_group_and_replay(); nullable_usage(); uncached_input_rule(); stop_kinds_match_policy_table(); invalid_model_calls(); errors_and_terminals(); loaded_routes_encode_for_their_model(); empty_text_delta_is_withheld(); one_descriptor_serves_every_model(); served_model_is_recorded(); failure_reasons(); std::cout << "Gemini semantic invariants passed\n"; }
   catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }
