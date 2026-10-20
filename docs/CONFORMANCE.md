@@ -4,9 +4,24 @@ This is a behavioral acceptance catalogue, not a blanket pass report. The curren
 
 Earlier interface 3 Linux cohorts exercised optional HTTP/3 under plain, ASan+UBSan and TSan; [D1's historical evidence](decisions/D1-transport.md#evidence) records those backends and instrumentation limits. The standalone interface 4 SDK cohort below did not exercise HTTP/3, ASan/TSan or Windows/macOS/ARM64. Integrated NeoGraph diagnostics and release-matrix checks have separate scopes. WebSocket properties below remain deferred future specifications, outside current SDK/release gates and never counted as passes.
 
-Scope (decision D2): chat completion APIs and the artifacts that arrive inside chat responses. Long-running operations, standalone image endpoints and the OpenRouter decisions endpoint have no cell, no property and no fixture here, and none may be advertised as supported. The earlier operation-lifecycle property is dropped for that reason.
+Scope: the cells and properties below cover the chat families and the artifacts that arrive inside chat responses. D2 kept the SDK chat-only; D6, D7 and D8 (2026-10-18, #58) supersede it with the non-chat endpoints and realtime sessions. Those have no cell here. Their offline coverage is their own test programs: endpoints, images, decisions, jobs, files, batches, the realtime codecs and sessions, and the realtime conformance scenario recorded through the official SDKs (`tests/conformance/realtime`). The WebSocket transport has the Autobahn|Testsuite record in `tests/autobahn`. The 0.4.0 release record below lists what ran for the release.
 
-Current source scope is five typed buffered/SSE families, bounded prepare/start/complete lifecycle, owned nullable/raw outcomes, exact native binding and archive v3 custody, plus interface 4 controls, Responses cursor ownership and explicit Generate portable history. General sidecar fixture schema, constraints engine, generated support tables, SDK journal projection/kit, cross-origin equivalence and general Drop/Demote remain historical proposals. Generate's explicit imported-call sentinel is a narrow current path, not those historical treatments. WebSocket has no current cell; NeoGraph owns its outcome/checkpoint serializers.
+Current source scope is five typed buffered/SSE families, bounded prepare/start/complete lifecycle, owned nullable/raw outcomes, exact native binding and archive v3 custody, plus interface 4 controls, Responses cursor ownership and explicit Generate portable history. General sidecar fixture schema, constraints engine, generated support tables, SDK journal projection/kit, cross-origin equivalence and general Drop/Demote remain historical proposals. Generate's explicit imported-call sentinel is a narrow current path, not those historical treatments. WebSocket sessions have no chat cell; NeoGraph owns its outcome/checkpoint serializers.
+
+## 0.4.0 release record
+
+**Source.** The 0.4.0 release tree: interface revision 7, shared-library generation 7. It was run on Linux x86_64 (WSL2) with GCC 13.3, CMake 3.28 and libcurl 8.5.0, on 2026-10-20.
+
+| Build | Result |
+|---|---|
+| Release | 70 of 70 registered entries passed |
+| ASan+UBSan, RelWithDebInfo | 69 passed, none failed; `native_archive_key_residue` skipped, as in the earlier sanitizer cohorts |
+| TSan, RelWithDebInfo | 69 passed, none failed; `native_archive_key_residue` skipped |
+
+- **CI.** The project's CI runs the native tests on macOS 15 and CodeQL. NeoGraph's CI builds this source on Linux, macOS and Windows, but does not run these tests there.
+- **Live.** Each feature of the cycle had its own live checks with real keys, recorded in its pull request. The realtime sessions are #115 and #126, and the transcription sessions are #126.
+- **NeoGraph's gate.** NeoGraph 0.16.0 is released only once its live end-to-end report over this release passes (fox1245/NeoGraph#512). The report covers the chat families buffered and streamed, media, the endpoints and speech.
+- **Not run here.** aarch64, Windows and HTTP/3 were not run for this record.
 
 ## Interface 7 typed-media execution record
 

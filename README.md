@@ -2,7 +2,7 @@
 
 SchemaProvider is a C++20 client for five LLM API families: Chat Completions, Responses, Messages, Gemini generate and Interactions. A **family** is a wire protocol, not a model or endpoint operator. Each family has a typed request encoder and response codec; the runtime supplies HTTP/SSE transport, deadlines, cancellation and owned results.
 
-The current source package is **0.3.0 alpha**, with interface revision **7** and shared-library generation **7**. Rebuild and reinstall consumers with matching headers and libraries: typed `Media` replaces `Image`, request controls grow, and generated media joins owned outcomes/events. See [media inputs and outputs](docs/USAGE.md#media-inputs-and-generated-outputs) and the [interface 6-to-7 migration](docs/MIGRATION.md#from-interface-6-to-7). Provider-reported monetary metadata remains separate from token counts, estimates and invoices. Native archive storage remains v3 and portable history remains v2; policy/native binding compatibility is checked independently. Neither the linked-interface check nor shared-library version promises source or cross-toolchain ABI compatibility. Earlier interface 3–6 execution records retain their original scope.
+The current package is **0.4.0 alpha**, with interface revision **7** and shared-library generation **7**. Rebuild and reinstall consumers with matching headers and libraries: typed `Media` replaces `Image`, request controls grow, generated media joins owned outcomes/events, and the client gains the non-chat endpoints (images, decisions, embeddings, rerank, moderation, speech, transcription, video jobs, files, batches, token counts) and realtime WebSocket sessions. See [media inputs and outputs](docs/USAGE.md#media-inputs-and-generated-outputs) and the [interface 6-to-7 migration](docs/MIGRATION.md#from-interface-6-to-7). Provider-reported monetary metadata remains separate from token counts, estimates and invoices. Native archive storage remains v3 and portable history remains v2; policy/native binding compatibility is checked independently. Neither the linked-interface check nor shared-library version promises source or cross-toolchain ABI compatibility. Earlier interface 3–6 execution records retain their original scope.
 
 ## Why SchemaProvider exists
 
@@ -33,7 +33,7 @@ Use a separate build directory and `-DBUILD_SHARED_LIBS=ON` for shared libraries
 ```cmake
 cmake_minimum_required(VERSION 3.20)
 project(first_request LANGUAGES CXX)
-find_package(SchemaProvider 0.3.0 EXACT CONFIG REQUIRED)
+find_package(SchemaProvider 0.4.0 EXACT CONFIG REQUIRED)
 add_executable(first_request main.cpp)
 target_link_libraries(first_request PRIVATE SchemaProvider::transport)
 target_compile_features(first_request PRIVATE cxx_std_20)
