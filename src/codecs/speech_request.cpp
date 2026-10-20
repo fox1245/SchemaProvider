@@ -45,6 +45,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   out.raw("}");
   if (!out.ok()) return Error{ErrorKind::ResourceLimit, "speech request exceeds JSON limits"};
   Encoded encoded{std::string(*path), std::move(body), request.model, fact->charge_on_accept, fact->auth};
+  endpoints::add_fact_headers(encoded, *fact);
   encoded.accept = "audio/*";
   return encoded;
 }

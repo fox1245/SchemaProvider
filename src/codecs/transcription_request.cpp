@@ -45,6 +45,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   }
   const auto& resources = descriptor.policy()->resources();
   Encoded encoded{std::string(*path), {}, request.model, fact->charge_on_accept, fact->auth};
+  endpoints::add_fact_headers(encoded, *fact);
   if (openai) {
     // A multipart upload: the audio's bytes, the model and the controls as form fields.
     std::string bytes;

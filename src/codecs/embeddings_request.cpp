@@ -94,6 +94,8 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   if (!out.ok()) return Error{ErrorKind::ResourceLimit, "embedding request exceeds JSON limits"};
   std::string resolved(*path);
   if (const auto at = resolved.find("{model}"); at != std::string::npos) resolved.replace(at, 7, request.model);
-  return Encoded{std::move(resolved), std::move(body), request.model, fact->charge_on_accept, fact->auth};
+  Encoded encoded{std::move(resolved), std::move(body), request.model, fact->charge_on_accept, fact->auth};
+  endpoints::add_fact_headers(encoded, *fact);
+  return encoded;
 }
 }  // namespace sp::embeddings
