@@ -18,6 +18,7 @@
 //    session is a new `open`.
 #include "codecs/realtime.h"
 #include "configuration/runtime_policy.h"
+#include "runtime/host.h"
 #include "transport/ws_transport.h"
 #include <chrono>
 #include <cstdint>
@@ -49,6 +50,11 @@ struct Options {
   // Classifies the answer to a refused handshake, as it classifies the answer to a call: by its status table.
   configuration::PolicySnapshot runtime_policy = configuration::builtin_runtime_policy();
   SemanticLimits limits{};
+  // The executor of the host that calls this session, when it has one that is pumped by the thread making the call
+  // (`Executor::host_pumped`, runtime/host.h). `next_event` and `join` wait, so with such an executor, and when called
+  // from an I/O thread or from a task of it, they refuse at once instead (see Session). Empty: only the I/O-thread
+  // check applies.
+  std::shared_ptr<runtime::Executor> executor{};
 };
 struct Outcome {
   // Why the session ended early: a refused setup, a lease refusal, an inbound overflow, a protocol or transport
@@ -78,13 +84,18 @@ class Session {
   // turn marker.
   bool send(Command);
   // The next event, waiting up to `timeout`; std::nullopt on a timeout or once the session ended (`ended`).
+  // A caller that must not wait gets std::nullopt at once, without waiting, and `last_error` holds the refusal: kind
+  // `Misuse`, reason `runtime.blocking.host_pumped` when `Options::executor` is host-pumped, or
+  // `runtime.blocking.in_thread` when called from an I/O thread (a `renew` callback, for one) or a task of that
+  // executor. The session is untouched: the host reads events from a thread it may block, or not at all.
   std::optional<Event> next_event(std::chrono::milliseconds timeout);
   bool ended() const;
   std::optional<Error> last_error() const;
   // Closes with a closing handshake; `cancel` ends at once.
   void close();
   void cancel() noexcept;
-  // Waits for the end and returns how the session ended.
+  // Waits for the end and returns how the session ended. A caller that must not wait (see `next_event`) gets an
+  // Outcome at once whose `error` is the refusal and whose `clean` is false; the session goes on.
   Outcome join();
  private:
   explicit Session(std::shared_ptr<SessionState> state) : state_(std::move(state)) {}

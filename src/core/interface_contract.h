@@ -40,6 +40,11 @@ inline constexpr std::uint64_t PolicyAdmittedExtensions = 1ULL << 11;
 // consumer built with this header would read past, so it lacks this bit and a require_interface_contract call
 // with RequiredProvider refuses it.
 inline constexpr std::uint64_t CompletionSecret = 1ULL << 12;
+// The runtime has the public host seam (runtime/host.h): Executor with `host_pumped`, HostTransport and
+// Client(descriptor, options, executor, transport). A library built before it has no such constructor and an
+// Executor without the virtual, so a host that supplies its own executor requires this bit itself; the bit is not
+// part of RequiredProvider, which a consumer that never uses the seam keeps meeting.
+inline constexpr std::uint64_t HostSeam = 1ULL << 13;
 inline constexpr std::uint64_t RequiredProvider = TypedRuntime | PreparedAdmission |
     NullableUsage | All5Native | TrustedArchive | OrderedWireEvents | NativeSocketRuntime |
     RetainedJsonSize | CompleteAttemptEvidence | OpenRouterRoutingMaxPrice | ErrorReason | PolicyAdmittedExtensions |

@@ -39,13 +39,14 @@ target_link_libraries(first_request PRIVATE SchemaProvider::transport)
 target_compile_features(first_request PRIVATE cxx_std_20)
 ```
 
-For a reproducible deployment, pin the exact package version you built. The installed targets are `SchemaProvider::{core,json,descriptor,codecs,wire,transport,runtime}`; `transport` exists only when the package was built with the libcurl transport. An application that constructs a `Client` links `SchemaProvider::transport`, the libcurl backend, which brings the runtime and everything below it. `SchemaProvider::runtime` alone is for code that only uses a `Client` somebody else constructed and must not load libcurl. Public headers use names such as `<runtime/client.h>` and `<core/value.h>`; the target exports the `include/SchemaProvider` include root.
+For a reproducible deployment, pin the exact package version you built. The installed targets are `SchemaProvider::{core,json,descriptor,codecs,wire,transport,runtime,js_host}`; `transport` exists only when the package was built with the libcurl transport and `js_host` only with `SP_BUILD_JS_HOST`. An application that constructs a `Client` with `Client(descriptor, Options)` links `SchemaProvider::transport`, the libcurl backend, which brings the runtime and everything below it. `SchemaProvider::runtime` alone is for code that only uses a `Client` somebody else constructed, or that constructs one over its own executor and HTTP transport with `Client(descriptor, Options, executor, transport)` ([the host seam](docs/USAGE.md#the-host-seam)), and must not load libcurl. Public headers use names such as `<runtime/client.h>` and `<core/value.h>`; the target exports the `include/SchemaProvider` include root.
 
 ### Build options and WebAssembly
 
 | Option | Default | Effect |
 |---|---|---|
 | `SP_BUILD_TRANSPORT` | `ON`; `OFF` on WebAssembly | `ON` requires libcurl 7.88+ and Asio and builds `sp_transport`, the libcurl backend and the public `Client(descriptor, Options)` constructor. `AUTO` builds it only when libcurl is found. `OFF` never does, and then `sp_runtime` and everything below it configure and build without libcurl or Asio. |
+| `SP_BUILD_JS_HOST` | `OFF` | Emscripten with `SP_THREADS=OFF` only. Builds `sp_js_host`, the reference host for a JavaScript environment: an executor over `queueMicrotask` and `setTimeout`, and an HTTP transport over `globalThis.fetch`, `ReadableStream` and `AbortController`. It uses neither Asyncify nor JSPI nor `<emscripten/fetch.h>`. With `SP_BUILD_RUNTIME_TESTS=ON` it also builds its Node test and the example. |
 | `SP_THREADS` | `ON`; `OFF` on WebAssembly | `OFF` drops `-pthread` and `Threads::Threads`, defines `ASIO_DISABLE_THREADS` (exported to consumers by the CMake targets) and removes the default worker pool: a `Client` needs an executor the host supplies. The transport needs threads, so `SP_THREADS=OFF` cannot build it. |
 
 `-DSP_BUILD_TESTS=OFF -DSP_BUILD_CANARY=OFF` are required with a transport-free build (the complete suite exercises the transport); `-DSP_BUILD_RUNTIME_TESTS=ON` builds the tests that do not need it. An installed package built without the transport still answers `find_package(SchemaProvider CONFIG REQUIRED COMPONENTS runtime)`, and `COMPONENTS transport` then fails.
@@ -54,12 +55,16 @@ A WebAssembly target is Emscripten, tested with 6.0.13; a WASI toolchain (`CMAKE
 
 ```sh
 emcmake cmake -S . -B build-wasm -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DYYJSON_ROOT="$YYJSON_ROOT" -DSP_BUILD_TESTS=OFF -DSP_BUILD_CANARY=OFF -DSP_BUILD_RUNTIME_TESTS=ON
+  -DYYJSON_ROOT="$YYJSON_ROOT" -DSP_BUILD_TESTS=OFF -DSP_BUILD_CANARY=OFF -DSP_BUILD_RUNTIME_TESTS=ON \
+  -DSP_BUILD_JS_HOST=ON
 cmake --build build-wasm
 node build-wasm/sp_host_runtime_tests.js
+node tests/js_host_test.mjs build-wasm/sp_js_host_tests.js build-wasm/sp_js_host_example.js
 ```
 
-Exceptions are required: the runtime returns its configuration errors by catching them. The Emscripten build adds `-fexceptions` (and exports it with the targets) unless `CMAKE_CXX_FLAGS` already names `-fexceptions` or `-fwasm-exceptions` (the runtime test also passes under Node with `-DCMAKE_CXX_FLAGS=-fwasm-exceptions`), and configuration stops if exceptions are disabled. What does not exist on WebAssembly yet: the HTTP transport (there is no way to build a `Client` there without the private test seam; a host transport is planned), realtime sessions, and native archive custody (it has no file backend, so `NativeArchive::provision` and `open` return an `ErrorKind::Unsupported` error and nothing is stored). See [single-thread and WebAssembly hosts](docs/USAGE.md#single-thread-and-webassembly-hosts).
+The second test runs a buffered and an SSE chat through the JavaScript host, and the [example](examples/README.md#javascript-host-webassembly), against an HTTP server that the test starts in the same Node process. `ctest` runs both.
+
+Exceptions are required: the runtime returns its configuration errors by catching them. The Emscripten build adds `-fexceptions` (and exports it with the targets) unless `CMAKE_CXX_FLAGS` already names `-fexceptions` or `-fwasm-exceptions` (the runtime test also passes under Node with `-DCMAKE_CXX_FLAGS=-fwasm-exceptions`), and configuration stops if exceptions are disabled. A host supplies the executor and the HTTP transport through [the host seam](docs/USAGE.md#the-host-seam), and `SP_BUILD_JS_HOST` builds one for JavaScript environments. What does not exist on WebAssembly yet: realtime sessions (the seam reserves a byte-stream hook for WebSocket and nothing implements it) and native archive custody (it has no file backend, so `NativeArchive::provision` and `open` return an `ErrorKind::Unsupported` error and nothing is stored). See [single-thread and WebAssembly hosts](docs/USAGE.md#single-thread-and-webassembly-hosts).
 
 ## First request
 

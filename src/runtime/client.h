@@ -19,6 +19,7 @@
 #include "codecs/tokens.h"
 #include "codecs/generations.h"
 #include "descriptor/presets.h"
+#include "runtime/host.h"
 #include "runtime/policy.h"
 #include "transport/sse_framer.h"
 
@@ -147,7 +148,9 @@ class Operation {
   void cancel() noexcept;
   void detach() noexcept;
   bool valid() const noexcept;
-  // Fences callback return and admission-slot release. Library I/O workers get Misuse.
+  // Fences callback return and admission-slot release. Library I/O workers get Misuse, and so does a caller
+  // whose Client has a host-pumped executor (runtime/host.h): a Failure of kind Misuse with the reason
+  // `runtime.blocking.in_thread` or `runtime.blocking.host_pumped`, returned at once without waiting.
   Result join() const;
  private:
   explicit Operation(std::shared_ptr<detail::OperationState>);
@@ -235,7 +238,8 @@ inline tokens::Outcome typed_outcome(const sp::Outcome& outcome, const tokens::O
 inline generations::Outcome typed_outcome(const sp::Outcome& outcome, const generations::Outcome*) { return generations::typed(outcome); }
 }  // namespace detail
 // A started non-chat endpoint call. Like an Operation, destruction requests cancellation and detach relinquishes it;
-// join waits for the typed outcome, the one the callback received.
+// join waits for the typed outcome, the one the callback received; like Operation::join it is refused at once, as a
+// `Misuse` failure, where it could not be waited for (a library thread, or a host-pumped executor).
 template <class Outcome>
 class EndpointCall {
  public:
@@ -254,9 +258,15 @@ class Client {
  public:
   // One immutable descriptor/credential-origin and one shared retry budget.
   // Invalid options throw ConfigError with fixed, non-sensitive diagnostics.
+  // This constructor runs the call on the default worker pool over libcurl, and is defined by sp_transport.
   explicit Client(descriptor::ValidatedDescriptor, Options = {});
   Client(descriptor::ValidatedDescriptor descriptor, std::string api_key)
       : Client(std::move(descriptor), Options::with_api_key(std::move(api_key))) {}
+  // The host seam (runtime/host.h), defined by sp_runtime and independent of libcurl: the Client runs its work on
+  // `executor` and sends every HTTP attempt through `transport`. A null `executor` selects the default worker pool,
+  // which a build without threads (SP_THREADS=OFF) does not have; a null `transport` has no default. The constructor
+  // throws descriptor::ConfigError, at `/executor` or `/transport`, and builds nothing.
+  Client(descriptor::ValidatedDescriptor, Options, std::shared_ptr<Executor> executor, std::shared_ptr<HostTransport> transport);
   ~Client();
   Client(const Client&) = delete;
   Client& operator=(const Client&) = delete;
@@ -271,6 +281,11 @@ class Client {
   // Capacity/shutdown/moved-client rejection throws AdmissionError; no callback runs.
   Operation start(Request, RunOptions = {}, Callbacks = {});
   // AdmissionError is translated to the same owned Failure result.
+  // `complete`, in all its forms below, waits for the call to finish, so it needs a thread that is not the one the
+  // call's work runs on. It never runs a loop of its own: from an I/O or executor thread, or when the executor is
+  // host-pumped (`Executor::host_pumped`), it returns a Failure of kind Misuse at once, with the reason
+  // `runtime.blocking.in_thread` or `runtime.blocking.host_pumped`, and sends nothing. A host-pumped host calls
+  // `start` and takes the outcome in `Callbacks::on_outcome`. The destructor does not wait in that case either.
   Result complete(Request, RunOptions = {});
   Result complete(PreparedRequest);
   // Non-chat endpoints (D6). A call uses this client's origin, credential and descriptor headers, and shares its

@@ -78,6 +78,17 @@ Result misuse_result() {
   static const Result result = std::make_shared<const Outcome>(Failure{error_for(ErrorKind::Misuse), {}});
   return result;
 }
+// The refusal of a blocking call, shared by every caller. Nothing was sent for the call.
+Result blocked_result(bool host_pumped) {
+  const auto make = [](std::string_view reason) {
+    auto error = error_for(ErrorKind::Misuse, reason);
+    error.retry_safety = RetrySafety::NotSent;
+    return std::make_shared<const Outcome>(Failure{std::move(error), {}});
+  };
+  static const Result pumped = make(blocking_host_pumped_reason);
+  static const Result in_thread = make(blocking_in_thread_reason);
+  return host_pumped ? pumped : in_thread;
+}
 
 #if SP_BUILD_THREADS
 // Workers own only Core, not the executor containing their thread handles. Thus a
@@ -295,6 +306,15 @@ void validate(const descriptor::ValidatedDescriptor& descriptor, const Options& 
 struct CallbackAbort {};
 struct StopObserved {};
 }  // namespace
+
+// The Failure a blocking call returns at once instead of waiting, or null when the caller may wait. A wait needs work
+// that another thread finishes: a thread of the runtime, or the one the executor runs a task on, would wait for itself,
+// and a host-pumped executor runs only when the host's own loop does, which the waiting caller is blocking.
+Result blocking_refused(const Executor* executor) {
+  if (executor && executor->host_pumped()) return blocked_result(true);
+  if (runtime_depth || pool_thread || sp::transport::on_io_thread() || (executor && executor->in_thread())) return blocked_result(false);
+  return nullptr;
+}
 
 struct ClientState : std::enable_shared_from_this<ClientState> {
   const descriptor::ValidatedDescriptor descriptor;
@@ -1130,12 +1150,15 @@ void ClientState::release(OperationState* operation) {
 }
 void ClientState::shutdown() noexcept {
   const bool asynchronous = in_thread();
+  const bool pumped = executor->host_pumped();
   std::vector<std::shared_ptr<OperationState>> operations;
   bool empty;
   {
     std::lock_guard lock(mutex);
     stopping = true;
-    asynchronous_shutdown = asynchronous_shutdown || asynchronous;
+    // The cancelled operations of a host-pumped executor finish when the host runs it again, so the destructor cannot
+    // wait for them: the last one to finish closes the resources.
+    asynchronous_shutdown = asynchronous_shutdown || asynchronous || (pumped && !active.empty());
     operations.reserve(active.size());
     for (const auto& entry : active) operations.push_back(entry.second);
     empty = active.empty();
@@ -1145,6 +1168,7 @@ void ClientState::shutdown() noexcept {
     if (empty) executor->post([self = shared_from_this()] { self->close_resources(); });
     return;
   }
+  if (pumped && !empty) return;
   {
     std::unique_lock lock(mutex);
     drained.wait(lock, [this] { return active.empty(); });
@@ -1276,9 +1300,8 @@ void Operation::detach() noexcept { state_.reset(); }
 bool Operation::valid() const noexcept { return bool(state_); }
 Result Operation::join() const {
   auto state = state_;
-  if (!state || detail::runtime_depth || detail::pool_thread || transport::on_io_thread() ||
-      (state->executor && state->executor->in_thread()))
-    return detail::misuse_result();
+  if (!state) return detail::misuse_result();
+  if (auto refused = detail::blocking_refused(state->executor.get())) return refused;
   std::unique_lock lock(state->mutex);
   state->joined.wait(lock, [&] { return state->finished; });
   return state->result;
@@ -1289,7 +1312,7 @@ InterfaceContract interface_contract() noexcept {
   // Literal implementation revision is independent of the consumer's headers.
   if (core.revision != 7 || codec_interface_revision() != 7 || descriptor::interface_revision() != 7) return {0, 0};
   return {7, core.capabilities | capability::TypedRuntime | capability::PreparedAdmission |
-      capability::CompleteAttemptEvidence};
+      capability::CompleteAttemptEvidence | capability::HostSeam};
 }
 const char* InterfaceContractError::what() const noexcept {
   return "SchemaProvider loaded interface contract is unsupported";
@@ -1300,6 +1323,10 @@ void require_interface_contract(std::uint32_t expected_revision, std::uint64_t r
       (actual.capabilities & required_capabilities) != required_capabilities)
     throw InterfaceContractError();
 }
+Client::Client(descriptor::ValidatedDescriptor descriptor, Options options, std::shared_ptr<Executor> executor,
+               std::shared_ptr<HostTransport> transport)
+    : Client((require_interface_contract(EXPECTED_INTERFACE_REVISION, capability::RequiredProvider),
+              detail::ClientAccess::make(std::move(descriptor), std::move(options), std::move(executor), std::move(transport)))) {}
 Client::Client(std::shared_ptr<detail::ClientState> state) : state_(std::move(state)) {}
 Client::~Client() { if (state_) state_->shutdown(); }
 Client::Client(Client&& other) noexcept : state_(std::move(other.state_)) {}
@@ -1523,14 +1550,16 @@ PreparedRequest Client::prepare(Request request, RunOptions options) {
   });
 }
 Result Client::complete(Request request, RunOptions options) {
-  if (!state_ || state_->in_thread()) return detail::misuse_result();
+  if (!state_) return detail::misuse_result();
+  if (auto refused = detail::blocking_refused(state_->executor.get())) return refused;
   try {
     auto operation = start(std::move(request), std::move(options));
     return operation.join();
   } catch (const AdmissionError& error) { return error.outcome(); }
 }
 Result Client::complete(PreparedRequest preparation) {
-  if (!state_ || state_->in_thread()) return detail::misuse_result();
+  if (!state_) return detail::misuse_result();
+  if (auto refused = detail::blocking_refused(state_->executor.get())) return refused;
   try {
     auto operation = start(std::move(preparation));
     return operation.join();
@@ -1623,7 +1652,8 @@ images::Outcome Client::complete(images::Request request, RunOptions options) {
   return complete(prepare(std::move(request), std::move(options)));
 }
 images::Outcome Client::complete(PreparedEndpoint<images::Outcome> call) {
-  if (!state_ || state_->in_thread()) return images::typed(*detail::misuse_result());
+  if (!state_) return images::typed(*detail::misuse_result());
+  if (auto refused = detail::blocking_refused(state_->executor.get())) return images::typed(*refused);
   try { return start(std::move(call)).join(); }
   catch (const AdmissionError& error) { return images::typed(*error.outcome()); }
 }
@@ -1636,7 +1666,8 @@ decisions::Outcome Client::complete(decisions::Request request, RunOptions optio
   return complete(prepare(std::move(request), std::move(options)));
 }
 decisions::Outcome Client::complete(PreparedEndpoint<decisions::Outcome> call) {
-  if (!state_ || state_->in_thread()) return decisions::typed(*detail::misuse_result());
+  if (!state_) return decisions::typed(*detail::misuse_result());
+  if (auto refused = detail::blocking_refused(state_->executor.get())) return decisions::typed(*refused);
   try { return start(std::move(call)).join(); }
   catch (const AdmissionError& error) { return decisions::typed(*error.outcome()); }
 }
@@ -1649,7 +1680,8 @@ embeddings::Outcome Client::complete(embeddings::Request request, RunOptions opt
   return complete(prepare(std::move(request), std::move(options)));
 }
 embeddings::Outcome Client::complete(PreparedEndpoint<embeddings::Outcome> call) {
-  if (!state_ || state_->in_thread()) return embeddings::typed(*detail::misuse_result());
+  if (!state_) return embeddings::typed(*detail::misuse_result());
+  if (auto refused = detail::blocking_refused(state_->executor.get())) return embeddings::typed(*refused);
   try { return start(std::move(call)).join(); }
   catch (const AdmissionError& error) { return embeddings::typed(*error.outcome()); }
 }
@@ -1662,7 +1694,8 @@ rerank::Outcome Client::complete(rerank::Request request, RunOptions options) {
   return complete(prepare(std::move(request), std::move(options)));
 }
 rerank::Outcome Client::complete(PreparedEndpoint<rerank::Outcome> call) {
-  if (!state_ || state_->in_thread()) return rerank::typed(*detail::misuse_result());
+  if (!state_) return rerank::typed(*detail::misuse_result());
+  if (auto refused = detail::blocking_refused(state_->executor.get())) return rerank::typed(*refused);
   try { return start(std::move(call)).join(); }
   catch (const AdmissionError& error) { return rerank::typed(*error.outcome()); }
 }
@@ -1675,7 +1708,8 @@ moderation::Outcome Client::complete(moderation::Request request, RunOptions opt
   return complete(prepare(std::move(request), std::move(options)));
 }
 moderation::Outcome Client::complete(PreparedEndpoint<moderation::Outcome> call) {
-  if (!state_ || state_->in_thread()) return moderation::typed(*detail::misuse_result());
+  if (!state_) return moderation::typed(*detail::misuse_result());
+  if (auto refused = detail::blocking_refused(state_->executor.get())) return moderation::typed(*refused);
   try { return start(std::move(call)).join(); }
   catch (const AdmissionError& error) { return moderation::typed(*error.outcome()); }
 }
@@ -1688,7 +1722,8 @@ speech::Outcome Client::complete(speech::Request request, RunOptions options) {
   return complete(prepare(std::move(request), std::move(options)));
 }
 speech::Outcome Client::complete(PreparedEndpoint<speech::Outcome> call) {
-  if (!state_ || state_->in_thread()) return speech::typed(*detail::misuse_result());
+  if (!state_) return speech::typed(*detail::misuse_result());
+  if (auto refused = detail::blocking_refused(state_->executor.get())) return speech::typed(*refused);
   try { return start(std::move(call)).join(); }
   catch (const AdmissionError& error) { return speech::typed(*error.outcome()); }
 }
@@ -1701,7 +1736,8 @@ transcription::Outcome Client::complete(transcription::Request request, RunOptio
   return complete(prepare(std::move(request), std::move(options)));
 }
 transcription::Outcome Client::complete(PreparedEndpoint<transcription::Outcome> call) {
-  if (!state_ || state_->in_thread()) return transcription::typed(*detail::misuse_result());
+  if (!state_) return transcription::typed(*detail::misuse_result());
+  if (auto refused = detail::blocking_refused(state_->executor.get())) return transcription::typed(*refused);
   try { return start(std::move(call)).join(); }
   catch (const AdmissionError& error) { return transcription::typed(*error.outcome()); }
 }
@@ -1736,12 +1772,14 @@ jobs::DownloadOutcome Client::complete(jobs::Download download, RunOptions optio
   return complete(prepare(std::move(download), std::move(options)));
 }
 jobs::Outcome Client::complete(PreparedEndpoint<jobs::Outcome> call) {
-  if (!state_ || state_->in_thread()) return jobs::typed(*detail::misuse_result());
+  if (!state_) return jobs::typed(*detail::misuse_result());
+  if (auto refused = detail::blocking_refused(state_->executor.get())) return jobs::typed(*refused);
   try { return start(std::move(call)).join(); }
   catch (const AdmissionError& error) { return jobs::typed(*error.outcome()); }
 }
 jobs::DownloadOutcome Client::complete(PreparedEndpoint<jobs::DownloadOutcome> call) {
-  if (!state_ || state_->in_thread()) return jobs::typed_content(*detail::misuse_result());
+  if (!state_) return jobs::typed_content(*detail::misuse_result());
+  if (auto refused = detail::blocking_refused(state_->executor.get())) return jobs::typed_content(*refused);
   try { return start(std::move(call)).join(); }
   catch (const AdmissionError& error) { return jobs::typed_content(*error.outcome()); }
 }
@@ -1757,7 +1795,8 @@ EndpointCall<jobs::DownloadOutcome> Client::start(PreparedEndpoint<jobs::Downloa
 }
 template <class Outcome> Outcome Client::complete_endpoint(PreparedEndpoint<Outcome> call) {
   constexpr const Outcome* typed = nullptr;
-  if (!state_ || state_->in_thread()) return detail::typed_outcome(*detail::misuse_result(), typed);
+  if (!state_) return detail::typed_outcome(*detail::misuse_result(), typed);
+  if (auto refused = detail::blocking_refused(state_->executor.get())) return detail::typed_outcome(*refused, typed);
   try { return start_endpoint(std::move(call), {}).join(); }
   catch (const AdmissionError& error) { return detail::typed_outcome(*error.outcome(), typed); }
 }

@@ -1,44 +1,23 @@
 #pragma once
 
-// Private scheduling/transport seam. Not part of an installed interface.
+// Private test hooks around the host seam. Not part of an installed interface.
+//
+// The executor and the HTTP port are the public host seam (runtime/host.h); the names below are the ones this
+// header had before the seam was published, and every test that implements them still compiles. What stays private
+// is ClientAccess: the injectable RNG, the real-transport factory and the stat and control hooks of the tests.
 #include "runtime/client.h"
+#include "runtime/host.h"
 
 namespace sp::runtime::detail {
 
-class Executor {
- public:
-  using Task = std::function<void()>;
-  using Timer = std::uint64_t;
-  virtual ~Executor() = default;
-  // Never invoke inline. Throwing means the task was not enqueued.
-  virtual void post(Task) = 0;
-  virtual Timer schedule(SteadyTime, Task) = 0;
-  virtual void cancel(Timer) noexcept = 0;
-  virtual SteadyTime now() const noexcept = 0;
-  virtual WallTime wall_now() const noexcept = 0;
-  virtual bool in_thread() const noexcept = 0;
-  // Quiescent shutdown; production implementation must handle its own worker.
-  virtual void shutdown() noexcept = 0;
-};
+using Executor = runtime::Executor;
+using Attempt = runtime::HostAttempt;
+using AttemptTransport = runtime::HostTransport;
 
 // Production pool, exposed only to private behavioral scheduling tests. A build without threads
 // (SP_THREADS=OFF) has no pool: this throws descriptor::ConfigError at "/executor", as does a Client made
 // without an executor, so the host must supply one.
 std::shared_ptr<Executor> make_pool_executor(std::size_t workers);
-
-class Attempt {
- public:
-  virtual ~Attempt() = default;
-  virtual void cancel() noexcept = 0;
-  virtual void resume() noexcept = 0;
-};
-
-class AttemptTransport {
- public:
-  virtual ~AttemptTransport() = default;
-  virtual std::unique_ptr<Attempt> start(transport::HttpRequest, transport::Callbacks) = 0;
-  virtual void shutdown() noexcept = 0;
-};
 
 using RealTransportFactory = std::shared_ptr<AttemptTransport> (*)(transport::TransportOptions);
 // The libcurl backend. Defined by sp_transport, which sp_runtime does not link, so a program that

@@ -4,6 +4,9 @@ set(SP_INSTALL_TARGETS sp_core sp_json sp_descriptor sp_codecs sp_wire sp_runtim
 if(SP_TRANSPORT)
   list(APPEND SP_INSTALL_TARGETS sp_transport)
 endif()
+if(SP_BUILD_JS_HOST)
+  list(APPEND SP_INSTALL_TARGETS sp_js_host)
+endif()
 install(TARGETS ${SP_INSTALL_TARGETS}
   EXPORT SchemaProviderTargets
   ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
@@ -28,8 +31,13 @@ install(DIRECTORY
   PATTERN "served_model.h" EXCLUDE)
 install(FILES
   "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/client.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/host.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/policy.h"
   DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/SchemaProvider/runtime")
+if(SP_BUILD_JS_HOST)
+  install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/js_host.h"
+    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/SchemaProvider/runtime")
+endif()
 install(FILES "${SP_GENERATED_INCLUDE_DIR}/sp/config_defaults.h" "${SP_GENERATED_INCLUDE_DIR}/sp/build_config.h"
   DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/SchemaProvider/sp")
 
