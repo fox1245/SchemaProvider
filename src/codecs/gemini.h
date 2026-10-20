@@ -27,6 +27,9 @@ class Codec {
   // `vendor_code` is kept only when it has the shape of Google's UPPER_SNAKE reasons.
   bool fail(ErrorKind, std::string, std::string_view vendor_code = {});
   void unknown(json::Value, std::initializer_list<std::string_view>);
+  // The id of a call or result the service sent without one: "gemini-local-<token>-<part>". The token is random and
+  // drawn per response, so an id saved by one process is not minted again by another, nor by a forked worker.
+  bool local_id(std::string&, LocalId);
   std::shared_ptr<const json::Document> own(json::Value);
   const descriptor::ValidatedDescriptor& descriptor_;
   Mode mode_;
@@ -51,6 +54,7 @@ class Codec {
   std::vector<std::pair<std::string, std::string>> open_server_calls_;
   Usage usage_;
   size_t input_bytes_ = 0;
-  uint64_t ownership_generation_ = 0;
+  // The random part of this response's local call ids, drawn on first use.
+  std::string ownership_token_;
 };
 } // namespace sp::gemini

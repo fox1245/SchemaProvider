@@ -314,6 +314,51 @@ void process_restart(const char* executable) {
   Fixture f;auto d=desc();auto r=request();r.messages.push_back(genuine(d,r));r.messages.push_back(user("next"));auto a=admitted(NativeArchive::provision(f.directory(),f.key(),"restart-owner",d));const auto ref=saved(a->save(r.messages,"restart-call"));const auto expected=digest(encoded(d,r).body);a.reset();
   const auto child=::fork();CHECK(child>=0);if(child==0){::execl(executable,executable,"--restart",f.root.c_str(),ref.c_str(),expected.c_str(),static_cast<char*>(nullptr));::_exit(127);}int status=0;CHECK(::waitpid(child,&status,0)==child && WIFEXITED(status) && WEXITSTATUS(status)==0);
 }
+// Gemini names a function call that arrives without an id locally. Ids saved by one process must not be minted
+// again by the process that resumes the conversation, so each step below runs in a process of its own.
+descriptor::ValidatedDescriptor gemini_descriptor() {
+  auto loaded=descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"archive-gemini-local","family":"google.generate","connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":"/v1beta/models/fixture-model:generateContent","streaming":"/v1beta/models/fixture-model:streamGenerateContent?alt=sse"}}})");
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));return std::get<descriptor::ValidatedDescriptor>(std::move(loaded));
+}
+gemini::Request gemini_conversation() {
+  gemini::Request r;r.model="fixture-model";r.account_scope="fixture-account";r.max_output_tokens=2048;r.messages.push_back(user("question"));
+  r.tools.push_back({"lookup","Find value",document(R"({"type":"object","properties":{"x":{"type":"integer"}}})")});return r;
+}
+void gemini_reply_and_tool_result(const descriptor::ValidatedDescriptor& d, gemini::Request& r) {
+  auto sent=gemini::encode(d,r,false);CHECK(std::holds_alternative<gemini::EncodedRequest>(sent));
+  Accumulator acc;gemini::Codec codec(d,gemini::Mode::Buffered,acc,std::get<gemini::EncodedRequest>(sent).context);
+  codec.buffered(R"({"modelVersion":"fixture-model","responseId":"generation","candidates":[{"index":0,"content":{"role":"model","parts":[{"functionCall":{"name":"lookup","args":{"x":1}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}})",{});
+  CHECK(acc.outcome() && std::holds_alternative<Completion>(*acc.outcome()));
+  r.messages.push_back(std::get<Completion>(*acc.outcome()).messages.at(0));
+  r.messages.push_back(Message{"",Role::Tool,{ToolResult{std::get<ToolCall>(r.messages.back().parts.at(0)).id,R"({"result":1})"}}});
+}
+void gemini_save_history(const std::string& root) {
+  auto d=gemini_descriptor();auto r=gemini_conversation();gemini_reply_and_tool_result(d,r);
+  CHECK(std::holds_alternative<gemini::EncodedRequest>(gemini::encode(d,r,false)));
+  auto a=admitted(NativeArchive::provision(root+"/records",root+"/activation","gemini-owner",d));
+  std::ofstream(root+"/reference")<<saved(a->save(r.messages,"gemini-local-call"));
+}
+void gemini_resume_history(const std::string& root) {
+  auto d=gemini_descriptor();auto r=gemini_conversation();
+  auto a=admitted(NativeArchive::open(root+"/records",root+"/activation","gemini-owner",d));
+  std::string reference;std::ifstream(root+"/reference")>>reference;CHECK(!reference.empty());
+  r.messages=loaded(a->load(reference,"gemini-local-call"));
+  const auto saved_id=std::get<ToolCall>(r.messages.at(1).parts.at(0)).id;
+  CHECK(saved_id.starts_with("gemini-local-") && std::holds_alternative<gemini::EncodedRequest>(gemini::encode(d,r,false)));
+  gemini_reply_and_tool_result(d,r);
+  CHECK(std::get<ToolCall>(r.messages.at(3).parts.at(0)).id!=saved_id);
+  CHECK(std::holds_alternative<gemini::EncodedRequest>(gemini::encode(d,r,false)));
+}
+void run_gemini_step(const char* executable, const char* step, const std::string& root) {
+  const auto child=::fork();CHECK(child>=0);
+  if(child==0){::execl(executable,executable,step,root.c_str(),static_cast<char*>(nullptr));::_exit(127);}
+  int status=0;CHECK(::waitpid(child,&status,0)==child && WIFEXITED(status) && WEXITSTATUS(status)==0);
+}
+void gemini_local_call_ids_across_processes(const char* executable) {
+  Fixture f;
+  run_gemini_step(executable,"--gemini-save",f.root);
+  run_gemini_step(executable,"--gemini-resume",f.root);
+}
 void identity_tamper_permissions_and_bounds() {
   Fixture f;auto d=desc();auto a=admitted(NativeArchive::provision(f.directory(),f.key(),"owner-a",d));const auto ref=saved(a->save({user("first")},"call-one"));const auto path=f.directory()+"/"+ref.substr(6);
   CHECK(a->matches_descriptor(d));CHECK(!a->matches_descriptor(desc("anthropic.messages","http://127.0.0.1:18081")));
@@ -356,10 +401,12 @@ void compaction_root_restart() {
 }
 int main(int argc,char** argv) {
   try {
+    if(argc==3 && std::string_view(argv[1])=="--gemini-save") {gemini_save_history(argv[2]);return 0;}
+    if(argc==3 && std::string_view(argv[1])=="--gemini-resume") {gemini_resume_history(argv[2]);return 0;}
     if(argc==5 && std::string_view(argv[1])=="--restart") {const std::string root=argv[2];auto d=desc();auto a=admitted(NativeArchive::open(root+"/records",root+"/activation","restart-owner",d));auto r=request();r.messages=loaded(a->load(argv[3],"restart-call"));CHECK(digest(encoded(d,r).body)==argv[4]);return 0;}
     extended_tool_result_archive_bounds();
     compaction_root_restart();
     input_block_restart();
-    full_portable_and_native_roundtrip();responses_ordered_restart();chat_encrypted_legacy_to_canonical_restart();google_tool_loop_restart();deprivileged_decode_preserves_result_without_issuing_seals();diagnostic_documents_roundtrip_without_executable_upgrade();descriptor_semantics_are_archive_authority();admission_policy_edit_keeps_archive_replayable();process_restart(argv[0]);identity_tamper_permissions_and_bounds();std::cout<<"native archive behavioral tests passed\n";return 0;
+    full_portable_and_native_roundtrip();responses_ordered_restart();chat_encrypted_legacy_to_canonical_restart();google_tool_loop_restart();deprivileged_decode_preserves_result_without_issuing_seals();diagnostic_documents_roundtrip_without_executable_upgrade();descriptor_semantics_are_archive_authority();admission_policy_edit_keeps_archive_replayable();process_restart(argv[0]);gemini_local_call_ids_across_processes(argv[0]);identity_tamper_permissions_and_bounds();std::cout<<"native archive behavioral tests passed\n";return 0;
   }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }
