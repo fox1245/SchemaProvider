@@ -74,7 +74,8 @@ struct WsCallbacks {
   std::function<void(const ResponseHead&)> on_open;
   // One whole message, valid only during the call. Text is valid UTF-8.
   std::function<void(WsMessageKind, std::string_view)> on_message;
-  // The server's Close frame arrived; the session still answers it before on_done.
+  // The server sent the first Close frame; the session still answers it before on_done. The Close frame that answers
+  // one the client sent is not reported here; `WsResult` carries the outcome of both.
   std::function<void(std::uint16_t code, std::string_view reason)> on_close;
   // Exactly once. Required.
   std::function<void(const WsResult&)> on_done;

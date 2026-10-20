@@ -9,9 +9,11 @@
 #include "support/runtime_peer.h"
 #include <algorithm>
 #include <atomic>
+#include <future>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 namespace {
 using namespace sp;
@@ -19,7 +21,16 @@ using namespace std::chrono_literals;
 #define CHECK(condition) do { if (!(condition)) throw std::runtime_error("line " + std::to_string(__LINE__) + ": " #condition); } while (false)
 runtime_test::Peer* g_peer = nullptr;
 
-descriptor::ValidatedDescriptor local(const std::string& connect = "/v1/realtime") {
+// The audio formats of OpenAI Realtime: 24 kHz PCM and G.711.
+const char* openai_audio = R"("audio":{"input":[{"mime":"audio/pcm;rate=24000","rate":24000,"sample_bytes":2},{"mime":"audio/pcmu","rate":8000,"sample_bytes":1}],)"
+                           R"("output":[{"mime":"audio/pcm;rate=24000","rate":24000,"sample_bytes":2},{"mime":"audio/pcma","rate":8000,"sample_bytes":1}]})";
+
+const char* google_audio = R"("audio":{"input":[{"mime":"audio/pcm;rate=16000","rate":16000,"sample_bytes":2}],)"
+                           R"("output":[{"mime":"audio/pcm;rate=24000","rate":24000,"sample_bytes":2}]})";
+
+// A policy whose realtime fact is `connect` on the test peer, with `more` members (each led by a comma) after the
+// audio formats. The shape is OpenAI Realtime's, or Google Live's when `google` is set.
+descriptor::ValidatedDescriptor local(const std::string& connect = "/v1/realtime", const std::string& more = {}, bool google = false) {
   const std::string origin = "http://127.0.0.1:" + std::to_string(g_peer->port);
   auto parsed = json::parse(config_defaults::descriptor_policy_json);
   CHECK(std::holds_alternative<json::Document>(parsed));
@@ -27,7 +38,8 @@ descriptor::ValidatedDescriptor local(const std::string& connect = "/v1/realtime
   for (auto member : std::get<json::Document>(parsed).root().members()) {
     if (text.size() > 1) text += ',';
     text += json::quote(member.key) + ":" + (member.key == "endpoints"
-        ? R"([{"endpoint":"realtime","shape":"openai","origins":[)" + json::quote(origin) + R"(],"paths":{"connect":)" + json::quote(connect) + "}}]"
+        ? std::string(R"([{"endpoint":"realtime","shape":")") + (google ? "google" : "openai") + R"(","origins":[)" + json::quote(origin) +
+              R"(],"paths":{"connect":)" + json::quote(connect) + "}," + (google ? google_audio : openai_audio) + more + "}]"
         : member.value.dump());
   }
   auto policy = descriptor::load_policy(text + "}", config_defaults::codec_defaults_json);
@@ -50,10 +62,28 @@ realtime::Setup setup() {
   value.instructions = "Answer briefly.";
   return value;
 }
-realtime::Session opened(transport::Transport& transport, const descriptor::ValidatedDescriptor& d, realtime::Options options) {
-  auto session = realtime::open(transport, d, "test-key", setup(), std::move(options));
+realtime::Session opened(transport::Transport& transport, const descriptor::ValidatedDescriptor& d, realtime::Options options,
+                         realtime::Setup with = setup()) {
+  auto session = realtime::open(transport, d, "test-key", std::move(with), std::move(options));
   if (auto* error = std::get_if<Error>(&session)) throw std::runtime_error("open refused: " + error->reason);
   return std::get<realtime::Session>(std::move(session));
+}
+// The audio format types the peer received in session updates, in order (`input:audio/pcmu`).
+std::vector<std::string> formats() {
+  const auto stats = g_peer->command("{\"stats\":true}");
+  std::vector<std::string> out;
+  for (auto item : stats.root().get("formats").elements()) out.emplace_back(item.as_string());
+  return out;
+}
+// The outcome of a session that must end by itself: a session that does not is cancelled and the test fails.
+realtime::Outcome ended_within(realtime::Session& session, std::chrono::seconds limit = 10s) {
+  auto outcome = std::async(std::launch::async, [&] { return session.join(); });
+  if (outcome.wait_for(limit) != std::future_status::ready) {
+    session.cancel();
+    outcome.wait();
+    throw std::runtime_error("the session did not end by itself");
+  }
+  return outcome.get();
 }
 // Pulls events until one of type T arrives or the session ends.
 template <class T> std::optional<T> await(realtime::Session& session, std::chrono::seconds limit = 10s) {
@@ -109,14 +139,91 @@ void lease_refused(transport::Transport& transport, const descriptor::ValidatedD
   CHECK(!session.send(realtime::Respond{}));
 }
 
-// Model audio the host does not read is bounded: past the bound the session ends rather than drop it.
+// Model audio the host does not read is bounded: past the bound the session ends rather than drop it. So is every other
+// event: a session that answers in text only is bounded too.
 void inbound_overflow(transport::Transport& transport, const descriptor::ValidatedDescriptor& d) {
   realtime::Options options;
   options.inbound_media_bytes = 200000;
   auto session = opened(transport, d, options);
   CHECK(session.send(realtime::Text{"flood"}));
-  const auto outcome = session.join();
+  const auto outcome = ended_within(session);
   CHECK(outcome.error && outcome.error->reason == "runtime.realtime.inbound_overflow" && outcome.error->kind == ErrorKind::ResourceLimit);
+  realtime::Options text;
+  text.inbound_event_bytes = 200000;
+  auto talkative = opened(transport, d, text);
+  CHECK(talkative.send(realtime::Text{"flood-text"}));
+  const auto text_outcome = ended_within(talkative);
+  CHECK(text_outcome.error && text_outcome.error->reason == "runtime.realtime.inbound_overflow" && text_outcome.error->kind == ErrorKind::ResourceLimit);
+  // Events the host reads leave the bound: a host that keeps up is not cut off.
+  realtime::Options generous;
+  generous.inbound_event_bytes = 300000;
+  auto reading = opened(transport, d, generous);
+  CHECK(reading.send(realtime::Text{"flood-text"}));
+  int deltas = 0;
+  while (deltas < 8) {
+    auto event = reading.next_event(5s);
+    CHECK(event);
+    deltas += std::holds_alternative<realtime::TextDelta>(*event) ? 1 : 0;
+  }
+  reading.close();
+  CHECK(!reading.join().error);
+}
+
+// The session's end is `max_duration` after `open`, not after the `Options` were made, and an explicit deadline wins.
+void deadline_counts_from_open(transport::Transport& transport, const descriptor::ValidatedDescriptor& d) {
+  realtime::Options options;
+  options.max_duration = 600ms;
+  std::this_thread::sleep_for(700ms);
+  const auto begun = std::chrono::steady_clock::now();
+  auto session = opened(transport, d, options);
+  CHECK(await<realtime::Ready>(session));
+  const auto outcome = ended_within(session);
+  CHECK(outcome.error && outcome.error->kind == ErrorKind::DeadlineExceeded);
+  CHECK(std::chrono::steady_clock::now() - begun >= 500ms);
+  options.max_duration = 1h;
+  options.deadline = std::chrono::steady_clock::now() + 300ms;
+  auto bounded = opened(transport, d, options);
+  const auto early = ended_within(bounded);
+  CHECK(early.error && early.error->kind == ErrorKind::DeadlineExceeded);
+}
+
+// A tool-call turn waits for the message that ends it and carries its usage. When the session ends first, the turn
+// settles at the end, and the host's budget sees it.
+void tool_turn_settles_at_the_end(transport::Transport& transport) {
+  realtime::Options options;
+  std::atomic<int> renewals{0};
+  options.renew = [&](const Usage&) { ++renewals; return true; };
+  auto settled = setup();
+  settled.model = "tool-then-close";
+  auto session = opened(transport, local("/realtime/google", {}, true), options, settled);
+  const auto call = await<realtime::ToolCallEvent>(session);
+  CHECK(call && call->name == "get_weather");
+  const auto turn = await<realtime::TurnCommitted>(session);
+  CHECK(turn && turn->turn.stop.kind == StopKind::ToolUse);
+  const auto outcome = session.join();
+  CHECK(!outcome.error && renewals == 1);
+}
+
+// A provider that ends the session itself over a failure says so with a close code of its own. The fact names the codes
+// that are failures and the status each stands for, and the runtime error policy classifies that status.
+void provider_close(transport::Transport& transport) {
+  const std::string codes = R"(,"close_codes":[{"code":3000,"status":401},{"code":1007,"reason":"API key not valid","status":401},{"code":4003,"status":503}])";
+  const auto closed_with = [&](int code, const std::string& reason) {
+    auto session = opened(transport, local("/realtime/close/" + std::to_string(code) + "/" + reason, codes), {});
+    return ended_within(session);
+  };
+  const auto wrong_key = closed_with(3000, "invalid_request_error.invalid_api_key");
+  CHECK(wrong_key.clean && wrong_key.close_code == 3000 && wrong_key.error);
+  CHECK(wrong_key.error->kind == ErrorKind::Authentication && wrong_key.error->retry_class == RetryClass::Never);
+  CHECK(wrong_key.error->reason == "runtime.realtime.provider_closed" && wrong_key.error->vendor_code == "3000" && wrong_key.error->http_status == 0);
+  const auto google_key = closed_with(1007, "API%20key%20not%20valid.%20Please%20pass%20a%20valid%20API%20key.");
+  CHECK(google_key.error && google_key.error->kind == ErrorKind::Authentication && google_key.close_reason.starts_with("API key not valid"));
+  // The same code with another reason is not a wrong key, and a code the fact does not list is an ordinary close.
+  CHECK(!closed_with(1007, "bad%20payload").error);
+  CHECK(!closed_with(4001, "bye").error);
+  // The status is the policy's to classify.
+  const auto busy = closed_with(4003, "busy");
+  CHECK(busy.error && busy.error->kind == ErrorKind::Overloaded && busy.error->retry_class == RetryClass::Transient);
 }
 
 // A full audio ring drops its oldest audio, or refuses new audio, by policy.
@@ -135,6 +242,71 @@ void media_ring(transport::Transport& transport, const descriptor::ValidatedDesc
   CHECK(refused >= 1);
   strict.close();
   CHECK(strict.join().media_dropped == 0);
+}
+
+// Control goes ahead of audio even when the ring is full: a tool result reaches the socket while the ring still holds
+// the audio queued before it.
+void control_preempts_full_ring(transport::Transport& transport, const descriptor::ValidatedDescriptor& d) {
+  const auto before = received().size();
+  realtime::Options options;
+  options.lead = 0ms;
+  options.media_bytes = 9600;
+  options.media_policy = realtime::MediaPolicy::Refuse;
+  auto session = opened(transport, d, options);
+  CHECK(await<realtime::Ready>(session));
+  // The first chunk leaves at once and holds the rest back for 0.1 s; the ring takes two more and refuses the fourth.
+  CHECK(session.send(realtime::Audio{pcm(4800)}));
+  CHECK(session.send(realtime::Audio{pcm(4800)}));
+  CHECK(session.send(realtime::Audio{pcm(4800)}));
+  CHECK(!session.send(realtime::Audio{pcm(4800)}));
+  CHECK(session.send(realtime::ToolResult{"call-1", "get_weather", nullptr}));
+  // Queued audio moves only when the host calls the session, so what has arrived is what overtook it.
+  std::vector<std::string> mine;
+  for (const auto until = std::chrono::steady_clock::now() + 5s; std::chrono::steady_clock::now() < until;) {
+    const auto all = received();
+    mine.assign(all.begin() + static_cast<std::ptrdiff_t>(before), all.end());
+    if (std::count(mine.begin(), mine.end(), "conversation.item.create")) break;
+    std::this_thread::sleep_for(10ms);
+  }
+  CHECK(std::count(mine.begin(), mine.end(), "conversation.item.create") == 1);
+  CHECK(std::count(mine.begin(), mine.end(), "input_audio_buffer.append") == 1);
+  session.cancel();
+  session.join();
+}
+
+// A session may choose another audio format of the fact's: G.711 is sent as such, and the input paces at its rate.
+void audio_formats(transport::Transport& transport, const descriptor::ValidatedDescriptor& d) {
+  const auto before = formats().size();
+  auto chosen = setup();
+  chosen.input_audio = "audio/pcmu";
+  chosen.output_audio = "audio/pcma";
+  realtime::Options options;
+  options.lead = 0ms;
+  const auto begun = received().size();
+  auto session = opened(transport, d, options, chosen);
+  CHECK(await<realtime::Ready>(session));
+  const auto seen = formats();
+  CHECK(seen.size() == before + 2 && seen[before] == "input:audio/pcmu" && seen[before + 1] == "output:audio/pcma");
+  // 8000 bytes of G.711 are a second (a sixth of a second at the 24 kHz PCM rate): the second chunk waits for the first.
+  CHECK(session.send(realtime::Audio{pcm(8000)}));
+  CHECK(session.send(realtime::Audio{pcm(8000)}));
+  const auto appended = [&] {
+    const auto all = received();
+    return std::count(all.begin() + static_cast<std::ptrdiff_t>(begun), all.end(), "input_audio_buffer.append");
+  };
+  for (const auto until = std::chrono::steady_clock::now() + 400ms; std::chrono::steady_clock::now() < until;) session.next_event(25ms);
+  CHECK(appended() == 1);
+  for (const auto until = std::chrono::steady_clock::now() + 5s; std::chrono::steady_clock::now() < until && appended() < 2;) session.next_event(25ms);
+  CHECK(appended() == 2);
+  session.close();
+  CHECK(!session.join().error);
+  // A format the fact does not list is refused before any connection.
+  const auto handshakes = g_peer->command("{\"stats\":true}").root().get("handshakes").as_uint();
+  auto foreign = setup();
+  foreign.input_audio = "audio/pcm;rate=16000";
+  const auto refused = realtime::open(transport, d, "test-key", foreign, {});
+  CHECK(std::holds_alternative<Error>(refused) && std::get<Error>(refused).reason == "request.realtime.audio_format_invalid");
+  CHECK(g_peer->command("{\"stats\":true}").root().get("handshakes").as_uint() == handshakes);
 }
 
 // The audio and turn markers the server received since `before`, in order: 'a' for audio, 'c' for the end of it. Pulling
@@ -249,6 +421,11 @@ int main(int argc, char** argv) {
     lanes_and_fences(transport, d);
     lease_refused(transport, d);
     inbound_overflow(transport, d);
+    deadline_counts_from_open(transport, d);
+    provider_close(transport);
+    tool_turn_settles_at_the_end(transport);
+    control_preempts_full_ring(transport, d);
+    audio_formats(transport, d);
     media_ring(transport, d);
     media_ring_fence(transport, d);
     ends_by_cause(transport, d);

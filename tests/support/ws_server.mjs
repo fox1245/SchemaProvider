@@ -14,13 +14,17 @@ import { tmpdir } from 'node:os';
 import { createInterface } from 'node:readline';
 
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
-const stats = { handshakes: 0, closes: [], pongs: [], unmasked: 0, messages: 0, realtime: [], held: [] };
+const stats = { handshakes: 0, closes: [], pongs: [], unmasked: 0, messages: 0, realtime: [], formats: [], held: [] };
 // /hold-reading reads nothing after the handshake until {"release":true}, then records the frames it receives, in
 // arrival order, in stats.held (`text:<bytes>`, `binary:<bytes>`, `pong:<payload>`, `close:<code>`).
 const holding = new Set();
-// A realtime session in the shape of OpenAI Realtime (`/v1/realtime`): the types of the client events, in arrival
-// order, are in stats.realtime; `response.create` answers with a turn and its usage; a text item whose text is
-// `flood` answers with eight 64 KiB audio deltas.
+// A realtime session in the shape of OpenAI Realtime (`/v1/realtime`, and every path under `/realtime/`): the types of
+// the client events, in arrival order, are in stats.realtime, and the audio format types of a `session.update` in
+// stats.formats (`input:<type>`, `output:<type>`); `response.create` answers with a turn and its usage; a text item
+// whose text is `flood` answers with eight 64 KiB audio deltas, and `flood-text` with eight 64 KiB text deltas.
+// `/realtime/close/<code>/<reason>` closes the session with that code and reason after `session.created`.
+// `/realtime/google` speaks the shape of Google Live instead: a `setup` is answered with `setupComplete`, and when the
+// model is `tool-then-close` also with a tool call, before the session is closed.
 const PCM = Buffer.alloc(1024, 3).toString('base64');
 function realtimeAnswers(event) {
   if (event.type === 'response.create') return [
@@ -29,8 +33,11 @@ function realtimeAnswers(event) {
     { type: 'response.done', response: { id: 'resp-1', status: 'completed', usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } } }];
   if (event.type === 'conversation.item.create' && event.item?.content?.[0]?.text === 'flood')
     return Array.from({ length: 8 }, () => ({ type: 'response.output_audio.delta', response_id: 'resp-2', delta: Buffer.alloc(65536, 5).toString('base64') }));
+  if (event.type === 'conversation.item.create' && event.item?.content?.[0]?.text === 'flood-text')
+    return Array.from({ length: 8 }, () => ({ type: 'response.output_text.delta', response_id: 'resp-3', delta: 'x'.repeat(65536) }));
   return [];
 }
+const isRealtime = path => path === '/v1/realtime' || path.startsWith('/realtime/');
 const sockets = new Set();
 let directory;
 
@@ -111,16 +118,21 @@ function handle(socket) {
     const lines = head.subarray(0, end).toString('latin1').split('\r\n');
     const target = lines[0].split(' ')[1] || '/';
     const headers = {};
+    // How many times the handshake names each header the client owns.
+    const owned = {};
     for (const line of lines.slice(1)) {
       const colon = line.indexOf(':');
-      if (colon > 0) headers[line.slice(0, colon).trim().toLowerCase()] = line.slice(colon + 1).trim();
+      if (colon <= 0) continue;
+      const name = line.slice(0, colon).trim().toLowerCase();
+      headers[name] = line.slice(colon + 1).trim();
+      if (name === 'upgrade' || name === 'connection' || name.startsWith('sec-websocket-')) owned[name] = (owned[name] || 0) + 1;
     }
-    upgrade(socket, target, headers, rest);
+    upgrade(socket, target, headers, rest, owned);
   };
   socket.on('data', onHead);
 }
 
-function upgrade(socket, target, headers, rest) {
+function upgrade(socket, target, headers, rest, owned) {
   const path = target.split('?')[0];
   if (path === '/hold-handshake') return;
   if (path === '/reject') {
@@ -169,9 +181,19 @@ function upgrade(socket, target, headers, rest) {
     if (opcode === 9) return;
     stats.messages += 1;
     if (path === '/hold-reading') return;
-    if (path === '/v1/realtime') {
+    if (isRealtime(path)) {
       const event = JSON.parse(payload.toString());
-      stats.realtime.push(event.type);
+      stats.realtime.push(event.type ?? (event.setup ? 'setup' : 'unknown'));
+      const audio = event.session?.audio;
+      if (audio?.input?.format) stats.formats.push(`input:${audio.input.format.type}`);
+      if (audio?.output?.format) stats.formats.push(`output:${audio.output.format.type}`);
+      if (event.setup) {
+        write(frame(1, JSON.stringify({ setupComplete: {} })));
+        if (event.setup.model === 'models/tool-then-close') {
+          write(frame(1, JSON.stringify({ toolCall: { functionCalls: [{ id: 'call-g', name: 'get_weather', args: { city: 'Seoul' } }] } })));
+          sendClose(1000, 'done');
+        }
+      }
       for (const answer of realtimeAnswers(event)) write(frame(1, JSON.stringify(answer)));
       return;
     }
@@ -196,10 +218,12 @@ function upgrade(socket, target, headers, rest) {
     socket.once('close', () => holding.delete(socket));
   }
 
-  if (path === '/v1/realtime') {
-    write(frame(1, JSON.stringify({ type: 'session.created', session: { id: 'sess-local' } })));
+  const closing = /^\/realtime\/close\/(\d+)\/(.*)$/.exec(path);
+  if (isRealtime(path)) {
+    if (!path.startsWith('/realtime/google')) write(frame(1, JSON.stringify({ type: 'session.created', session: { id: 'sess-local' } })));
+    if (closing) sendClose(Number(closing[1]), decodeURIComponent(closing[2]));
   } else if (path === '/headers') {
-    write(frame(1, JSON.stringify({ target, authorization: headers.authorization || '', test: headers['x-test'] || '', host: headers.host || '' })));
+    write(frame(1, JSON.stringify({ target, authorization: headers.authorization || '', test: headers['x-test'] || '', host: headers.host || '', owned })));
   } else if (path === '/ping') {
     write(frame(9, 'probe'));
   } else if (path === '/server-close') {

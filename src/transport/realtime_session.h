@@ -2,8 +2,9 @@
 // A realtime session (D8): a provider codec (`<codecs/realtime.h>`) over a WebSocket session of the transport.
 //
 //  * Inbound is pulled: `next_event` returns the server's events in order, blocking up to a timeout. Queued model
-//    audio is bounded; past the bound the session ends (`realtime.inbound.overflow`) rather than drop the model's
-//    output.
+//    audio is bounded, and so are the other queued events (text, transcripts, tool calls, finished turns, messages
+//    the codec does not model); past either bound the session ends (`runtime.realtime.inbound_overflow`) rather than
+//    drop the model's output.
 //  * Outbound has two lanes. Commands other than audio go at once. Audio waits in a bounded ring and reaches the
 //    socket at most `lead` ahead of real time, so a tool result or a cancel never waits behind seconds of audio.
 //    When the ring is full the oldest audio is dropped or `send` refuses the new audio, by `media_policy`. The end of
@@ -29,14 +30,18 @@
 namespace sp::realtime {
 enum class MediaPolicy { DropOldest, Refuse };
 struct Options {
-  // The whole session, from the handshake to the close.
-  std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + std::chrono::minutes(15);
+  // The end of the whole session, from the handshake to the close. Unset: `max_duration` after the call to `open`.
+  std::optional<std::chrono::steady_clock::time_point> deadline{};
+  std::chrono::steady_clock::duration max_duration = std::chrono::minutes(15);
   // The outbound audio ring, in bytes (about 2 s at 16 kHz), and how far ahead of real time audio reaches the socket.
   std::size_t media_bytes = 64000;
   MediaPolicy media_policy = MediaPolicy::DropOldest;
   std::chrono::milliseconds lead{200};
   // Queued inbound model audio, in bytes.
   std::size_t inbound_media_bytes = std::size_t{32} << 20;
+  // Queued inbound events other than model audio, in bytes of what they hold (a finished turn holds its audio again, in
+  // base64, which is why the default is twice the audio bound).
+  std::size_t inbound_event_bytes = std::size_t{64} << 20;
   // Called after each committed turn with its usage; false ends the session. It runs on an I/O thread: no blocking.
   std::function<bool(const Usage&)> renew{};
   // An extra trust anchor (tests, private CAs).
@@ -47,8 +52,11 @@ struct Options {
 };
 struct Outcome {
   // Why the session ended early: a refused setup, a lease refusal, an inbound overflow, a protocol or transport
-  // failure, a `cancel` (`Cancelled`) or a refused handshake (the kind and retry class `runtime_policy` gives its
-  // status, with `http_status`). Empty after a clean close.
+  // failure, a `cancel` (`Cancelled`), a refused handshake (the kind and retry class `runtime_policy` gives its
+  // status, with `http_status`), or a close the provider started with a code its fact reports as a failure, such as a
+  // wrong key (`runtime.realtime.provider_closed`, the kind and retry class `runtime_policy` gives the fact's status,
+  // `vendor_code` the close code). `clean` is true for such a close, as both Close frames were exchanged. Empty after
+  // any other clean close.
   std::optional<Error> error{};
   std::uint16_t close_code = 0;
   std::string close_reason{};

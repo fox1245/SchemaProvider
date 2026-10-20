@@ -239,7 +239,9 @@ Messages compaction (#53):
 
 Realtime sessions (D8, #60):
 - **Sessions.** `<codecs/realtime.h>` adds `realtime::Setup`, the commands, the events, `realtime::Codec` and `realtime::connect`; `<transport/realtime_session.h>` adds `realtime::Session`, `realtime::Options`, `realtime::Outcome` and `realtime::open`. The built-in policy admits Google Live and OpenAI Realtime.
-- **Reason codes.** New sources `realtime` and `request.realtime`; the session adds `runtime.realtime.inbound_overflow`, `runtime.realtime.lease_refused`, `runtime.realtime.audio_too_large`, `runtime.realtime.closed`, `runtime.realtime.cancelled` and `runtime.realtime.refused`.
+- **Reason codes.** New sources `realtime` and `request.realtime`; the session adds `runtime.realtime.inbound_overflow`, `runtime.realtime.lease_refused`, `runtime.realtime.audio_too_large`, `runtime.realtime.closed`, `runtime.realtime.cancelled`, `runtime.realtime.refused` and `runtime.realtime.provider_closed`.
+- **Policy facts.** A `realtime` fact requires `audio` (the `input` and `output` formats, each `mime`, `rate` and `sample_bytes`) and may list `close_codes` (`code`, an optional `reason`, and the HTTP `status` it stands for). A fact's `headers` cannot name `Upgrade` or a `Sec-WebSocket-` header. A custom policy with a `realtime` fact adds `audio`.
+- **Options.** `realtime::Options::deadline` is an optional absolute time; unset, the session ends `max_duration` (15 minutes) after `open`. `inbound_event_bytes` bounds the queued events other than audio. `realtime::Setup` gains `input_audio` and `output_audio`, and `Codec` gains `input_bytes_per_second()`.
 
 Non-chat endpoints (D6, #61):
 - **Decision.** [D6](decisions/D6-endpoints.md) supersedes D2: non-chat endpoints run on `runtime::Client` with request and result types of their own.

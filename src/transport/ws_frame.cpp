@@ -294,6 +294,11 @@ std::string ws_handshake_request(std::string_view host, std::string_view target,
   out.append("\r\nSec-WebSocket-Version: 13\r\n");
   for (const auto& [name, value] : headers) {
     if (name.empty() || !header_safe(name) || !header_safe(value) || name.find(':') != std::string::npos) return {};
+    // The handshake above is the client's: it offers no extension or subprotocol, so a caller's header of these names
+    // would repeat the key or make every server answer fail the check.
+    constexpr std::string_view owned[]{"Host", "Upgrade", "Connection", "Sec-WebSocket-Key", "Sec-WebSocket-Version", "Sec-WebSocket-Extensions",
+                                       "Sec-WebSocket-Protocol", "Sec-WebSocket-Accept"};
+    if (std::any_of(std::begin(owned), std::end(owned), [&](std::string_view own) { return iequals(name, own); })) continue;
     out.append(name).append(": ").append(value).append("\r\n");
   }
   out.append("\r\n");

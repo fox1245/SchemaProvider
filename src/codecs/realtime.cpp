@@ -32,6 +32,55 @@ std::optional<Count> counter(json::Value value) {
 const descriptor::EndpointFact* fact_of(const descriptor::ValidatedDescriptor& descriptor) {
   return descriptor.policy()->endpoint("realtime", descriptor.base_url());
 }
+// The format of `formats` a setup names; the first when it names none.
+const descriptor::AudioFormatFact* format_of(const std::vector<descriptor::AudioFormatFact>& formats, std::string_view mime) {
+  if (mime.empty()) return formats.empty() ? nullptr : &formats.front();
+  const auto found = std::find_if(formats.begin(), formats.end(), [&](const descriptor::AudioFormatFact& format) { return format.mime == mime; });
+  return found == formats.end() ? nullptr : &*found;
+}
+// A turn's usage keeps what the provider reports beside the totals: the tokens of each modality, and the counts that
+// have no typed place. The same key as the chat codecs use where there is one.
+void modality_counts(json::Value usage, std::string_view key, Usage& value) {
+  const auto details = usage.get(key);
+  if (!details.is_array()) return;
+  for (auto item : details.elements())
+    if (const auto modality = item.get("modality"); modality.is_string())
+      if (const auto count = counter(item.get("tokenCount"))) value.extra[std::string(key) + "." + std::string(modality.as_string())] = *count;
+}
+Usage google_usage(json::Value usage) {
+  Usage value;
+  value.input_total = counter(usage.get("promptTokenCount"));
+  value.output_total = counter(usage.get("responseTokenCount"));
+  value.total = counter(usage.get("totalTokenCount"));
+  value.cache_read = counter(usage.get("cachedContentTokenCount"));
+  // Live's total leaves the thoughts out, so they are not a share of the output as they are in a chat usage.
+  for (const auto key : {"thoughtsTokenCount", "toolUsePromptTokenCount"})
+    if (const auto count = counter(usage.get(key))) value.extra[key] = *count;
+  for (const auto key : {"promptTokensDetails", "cacheTokensDetails", "responseTokensDetails", "toolUsePromptTokensDetails"}) modality_counts(usage, key, value);
+  value.stage = UsageStage::Final;
+  return value;
+}
+// Every unsigned integer below `node` that has no typed place, by its dotted path (`input_token_details.audio_tokens`).
+void leaves(json::Value node, const std::string& path, Usage& value) {
+  if (node.is_object()) {
+    for (auto member : node.members()) leaves(member.value, path.empty() ? std::string(member.key) : path + "." + std::string(member.key), value);
+    return;
+  }
+  constexpr std::string_view typed[]{"input_tokens", "output_tokens", "total_tokens", "input_token_details.cached_tokens", "output_token_details.reasoning_tokens"};
+  if (std::find(std::begin(typed), std::end(typed), path) != std::end(typed)) return;
+  if (const auto count = counter(node)) value.extra[path] = *count;
+}
+Usage openai_usage(json::Value usage) {
+  Usage value;
+  value.input_total = counter(usage.get("input_tokens"));
+  value.output_total = counter(usage.get("output_tokens"));
+  value.total = counter(usage.get("total_tokens"));
+  value.cache_read = counter(usage.get("input_token_details").get("cached_tokens"));
+  value.reasoning = counter(usage.get("output_token_details").get("reasoning_tokens"));
+  leaves(usage, {}, value);
+  value.stage = UsageStage::Final;
+  return value;
+}
 // A Google duration (`10s`, `1.5s`).
 std::optional<std::chrono::milliseconds> duration_of(std::string_view text) {
   if (text.size() < 2 || text.back() != 's') return std::nullopt;
@@ -117,12 +166,40 @@ class Turn {
 };
 
 
-// Google Live (`BidiGenerateContent`): one JSON object per message, either way.
-class GoogleCodec final : public Codec {
+// A codec and the audio formats of its endpoint's fact: the ones a session may choose, and the ones it chose.
+class FormatCodec : public Codec {
  public:
-  GoogleCodec(const descriptor::EndpointFact& fact, SemanticLimits limits) : fact_(fact), limits_(limits) {}
-  std::uint32_t input_rate() const noexcept override { return 16000; }
+  std::uint32_t input_rate() const noexcept override { return input_.rate; }
+  std::uint32_t input_bytes_per_second() const noexcept override { return input_.rate * input_.sample_bytes; }
+ protected:
+  FormatCodec(const descriptor::EndpointFact& fact, SemanticLimits limits)
+      : inputs_(fact.audio_input), outputs_(fact.audio_output), input_(inputs_.front()), output_(outputs_.front()), limits_(limits) {}
+  std::optional<Error> choose(const Setup& setup) {
+    const auto* in = format_of(inputs_, setup.input_audio);
+    const auto* out = format_of(outputs_, setup.output_audio);
+    if (!in || !out) return bad("a realtime audio format is one the endpoint's fact lists");
+    input_ = *in;
+    output_ = *out;
+    return std::nullopt;
+  }
+  // The `format` member of an OpenAI session: the media type, and the sample rate when the type names one.
+  static std::string wire_format(const descriptor::AudioFormatFact& format) {
+    const auto semicolon = format.mime.find(';');
+    std::string out = "{\"type\":" + json::quote(format.mime.substr(0, semicolon));
+    if (semicolon != std::string::npos) out += ",\"rate\":" + std::to_string(format.rate);
+    return out + "}";
+  }
+  std::vector<descriptor::AudioFormatFact> inputs_, outputs_;
+  descriptor::AudioFormatFact input_, output_;
+  SemanticLimits limits_;
+};
+
+// Google Live (`BidiGenerateContent`): one JSON object per message, either way.
+class GoogleCodec final : public FormatCodec {
+ public:
+  GoogleCodec(const descriptor::EndpointFact& fact, SemanticLimits limits) : FormatCodec(fact, limits) {}
   std::variant<std::vector<Frame>, Error> open(const Setup& setup) override {
+    if (auto error = choose(setup)) return *error;
     // A transcription model answers in text only; it refuses AUDIO.
     transcribing_ = setup.output.empty();
     std::string out = "{\"setup\":{\"model\":" + json::quote("models/" + setup.model) + ",\"generationConfig\":{\"responseModalities\":[";
@@ -150,7 +227,7 @@ class GoogleCodec final : public Codec {
   }
   std::variant<std::vector<Frame>, Error> encode(const Command& command) override {
     if (const auto* audio = std::get_if<Audio>(&command))
-      return std::vector<Frame>{{false, "{\"realtimeInput\":{\"audio\":{\"data\":\"" + base64_encode(audio->pcm) + "\",\"mimeType\":\"audio/pcm;rate=16000\"}}}"}};
+      return std::vector<Frame>{{false, "{\"realtimeInput\":{\"audio\":{\"data\":\"" + base64_encode(audio->pcm) + "\",\"mimeType\":" + json::quote(input_.mime) + "}}}"}};
     if (std::holds_alternative<EndAudio>(command)) return std::vector<Frame>{{false, "{\"realtimeInput\":{\"audioStreamEnd\":true}}"}};
     if (const auto* text = std::get_if<Text>(&command))
       return std::vector<Frame>{{false, "{\"clientContent\":{\"turns\":[{\"role\":\"user\",\"parts\":[{\"text\":" + json::quote(text->text) + "}]}],\"turnComplete\":true}}"}};
@@ -168,6 +245,10 @@ class GoogleCodec final : public Codec {
     if (!wire || !wire->root().is_object()) return reject(ErrorKind::ProtocolCorrupt, "a realtime message is a JSON object");
     const auto root = wire->root();
     std::vector<Event> events;
+    // A tool-call turn is committed by the message that ends it, which carries its usage; content of another turn
+    // closes it first.
+    if (held_ && starts_turn(root))
+      if (auto error = commit(events, StopReason{StopKind::ToolUse, "tool_call"})) return *error;
     // Google also sends empty messages while a session idles.
     bool modelled = root.size() == 0;
     if (root.get("setupComplete").valid()) { events.push_back(Ready{}); modelled = true; }
@@ -176,17 +257,12 @@ class GoogleCodec final : public Codec {
       if (activity.as_string() == "ACTIVITY_START") events.push_back(SpeechStarted{});
       else if (activity.as_string() == "ACTIVITY_END") events.push_back(SpeechStopped{});
     }
-    // Usage comes with content messages; the turn keeps the latest.
+    // Usage comes with the message that ends a turn; the turn keeps the latest.
     if (const auto usage = root.get("usageMetadata"); usage.is_object()) {
-      Usage value;
-      value.input_total = counter(usage.get("promptTokenCount"));
-      value.output_total = counter(usage.get("responseTokenCount"));
-      value.total = counter(usage.get("totalTokenCount"));
-      value.cache_read = counter(usage.get("cachedContentTokenCount"));
-      value.stage = UsageStage::Final;
-      turn_.usage(std::move(value));
+      turn_.usage(google_usage(usage));
       modelled = true;
     }
+    bool interrupted = false, complete = false;
     if (const auto content = root.get("serverContent"); content.is_object()) {
       modelled = true;
       if (const auto parts = content.get("modelTurn").get("parts"); parts.is_array()) {
@@ -216,14 +292,8 @@ class GoogleCodec final : public Codec {
         turn_.transcript(output.as_string());
         events.push_back(Transcript{false, std::string(output.as_string())});
       }
-      const bool interrupted = content.get("interrupted").is_bool() && content.get("interrupted").as_bool();
-      const bool complete = content.get("turnComplete").is_bool() && content.get("turnComplete").as_bool();
-      if (interrupted) {
-        events.push_back(TurnAborted{});
-        if (auto error = commit(events, StopReason{StopKind::Unknown, "interrupted"})) return *error;
-      } else if (complete) {
-        if (auto error = commit(events, StopReason{StopKind::EndTurn, "turn_complete"})) return *error;
-      }
+      interrupted = content.get("interrupted").is_bool() && content.get("interrupted").as_bool();
+      complete = content.get("turnComplete").is_bool() && content.get("turnComplete").as_bool();
     }
     if (const auto call = root.get("toolCall").get("functionCalls"); call.is_array()) {
       modelled = true;
@@ -233,8 +303,16 @@ class GoogleCodec final : public Codec {
         turn_.tool_call(text_of(item.get("id")), text_of(item.get("name")), args.valid() ? args.dump() : "{}");
         events.push_back(ToolCallEvent{text_of(item.get("id")), text_of(item.get("name")), std::move(arguments)});
       }
-      // The model waits for the results: its turn ends with the calls.
-      if (auto error = commit(events, StopReason{StopKind::ToolUse, "tool_call"})) return *error;
+      // The model waits for the results: its turn ends with the calls, and Google ends it with `turnComplete` and the
+      // turn's usage in a message of its own, a moment later.
+      held_ = true;
+    }
+    if (interrupted) {
+      events.push_back(TurnAborted{});
+      if (auto error = commit(events, StopReason{StopKind::Unknown, "interrupted"})) return *error;
+    } else if (complete) {
+      const bool calls = held_;
+      if (auto error = commit(events, calls ? StopReason{StopKind::ToolUse, "tool_call"} : StopReason{StopKind::EndTurn, "turn_complete"})) return *error;
     }
     if (const auto cancelled = root.get("toolCallCancellation").get("ids"); cancelled.is_array()) {
       modelled = true;
@@ -253,30 +331,44 @@ class GoogleCodec final : public Codec {
     if (!modelled) events.push_back(Unmodelled{wire});
     return events;
   }
+  std::variant<std::vector<Event>, Error> finish() override {
+    std::vector<Event> events;
+    if (held_)
+      if (auto error = commit(events, StopReason{StopKind::ToolUse, "tool_call"})) return *error;
+    return events;
+  }
  private:
+  // Whether a server message carries the content of a turn, as opposed to ending one or reporting on the session.
+  static bool starts_turn(json::Value root) {
+    if (root.get("toolCall").valid()) return true;
+    const auto content = root.get("serverContent");
+    return content.is_object() && (content.get("modelTurn").valid() || content.get("inputTranscription").valid() || content.get("outputTranscription").valid() ||
+                                   content.get("interimInputTranscription").valid() || (content.get("interrupted").is_bool() && content.get("interrupted").as_bool()));
+  }
   std::optional<Error> commit(std::vector<Event>& events, StopReason stop) {
+    held_ = false;
     if (!turn_.active()) return std::nullopt;
     auto turn = turn_.commit({}, std::move(stop), limits_);
     if (auto* error = std::get_if<Error>(&turn)) return *error;
     events.push_back(TurnCommitted{std::move(std::get<Completion>(turn))});
     return std::nullopt;
   }
-  const descriptor::EndpointFact& fact_;
-  SemanticLimits limits_;
   Turn turn_;
   bool transcribing_ = false;
+  // The turn holds tool calls and waits for the message that ends it.
+  bool held_ = false;
 };
 
 // OpenAI Realtime (`/v1/realtime`): typed JSON events, either way.
-class OpenAICodec final : public Codec {
+class OpenAICodec final : public FormatCodec {
  public:
-  OpenAICodec(const descriptor::EndpointFact& fact, SemanticLimits limits) : fact_(fact), limits_(limits) {}
-  std::uint32_t input_rate() const noexcept override { return 24000; }
+  OpenAICodec(const descriptor::EndpointFact& fact, SemanticLimits limits) : FormatCodec(fact, limits) {}
   std::variant<std::vector<Frame>, Error> open(const Setup& setup) override {
+    if (auto error = choose(setup)) return *error;
     transcribing_ = setup.output.empty();
     if (transcribing_) {
       // The transcription model takes no turn detection: the host ends each utterance with EndAudio.
-      std::string session = "{\"type\":\"transcription\",\"audio\":{\"input\":{\"format\":{\"type\":\"audio/pcm\",\"rate\":24000},"
+      std::string session = "{\"type\":\"transcription\",\"audio\":{\"input\":{\"format\":" + wire_format(input_) + ","
                             "\"transcription\":{\"model\":" + json::quote(setup.model) + "},\"turn_detection\":null}}";
       if (setup.extensions) for (auto member : setup.extensions->root().members()) session += "," + json::quote(member.key) + ":" + member.value.dump();
       return std::vector<Frame>{{false, "{\"type\":\"session.update\",\"session\":" + session + "}}"}};
@@ -285,12 +377,12 @@ class OpenAICodec final : public Codec {
     if (!setup.instructions.empty()) session += ",\"instructions\":" + json::quote(setup.instructions);
     session += ",\"output_modalities\":[";
     for (std::size_t i = 0; i < setup.output.size(); ++i) session.append(i ? "," : "").append(setup.output[i] == Modality::Audio ? "\"audio\"" : "\"text\"");
-    session += "],\"audio\":{\"input\":{\"format\":{\"type\":\"audio/pcm\",\"rate\":24000}";
+    session += "],\"audio\":{\"input\":{\"format\":" + wire_format(input_);
     if (setup.input_transcription) {
       if (setup.transcription_model.empty()) return bad("OpenAI transcribes the input with a transcription model");
       session += ",\"transcription\":{\"model\":" + json::quote(setup.transcription_model) + "}";
     }
-    session += "},\"output\":{\"format\":{\"type\":\"audio/pcm\",\"rate\":24000}";
+    session += "},\"output\":{\"format\":" + wire_format(output_);
     if (!setup.voice.empty()) session += ",\"voice\":" + json::quote(setup.voice);
     session += "}}";
     if (!setup.tools.empty()) {
@@ -347,7 +439,7 @@ class OpenAICodec final : public Codec {
       events.push_back(Transcript{true, transcript});
       if (transcribing_) {
         turn_.user_text(transcript);
-        if (const auto usage = root.get("usage"); usage.is_object()) turn_.usage(transcription_usage(usage));
+        if (const auto usage = root.get("usage"); usage.is_object()) turn_.usage(openai_usage(usage));
         auto turn = turn_.commit(text_of(root.get("item_id")), StopReason{StopKind::EndTurn, "transcribed"}, limits_);
         if (auto* error = std::get_if<Error>(&turn)) return *error;
         events.push_back(TurnCommitted{std::move(std::get<Completion>(turn))});
@@ -357,8 +449,8 @@ class OpenAICodec final : public Codec {
     else if (type == "response.output_audio.delta") {
       std::string pcm;
       if (!base64_decode(text_of(root.get("delta")), pcm)) return reject(ErrorKind::ProtocolCorrupt, "realtime audio is base64");
-      turn_.audio(pcm, "audio/pcm;rate=24000");
-      events.push_back(AudioDelta{std::move(pcm), "audio/pcm;rate=24000"});
+      turn_.audio(pcm, output_.mime);
+      events.push_back(AudioDelta{std::move(pcm), output_.mime});
     } else if (type == "response.output_text.delta") {
       turn_.text(text_of(root.get("delta")));
       events.push_back(TextDelta{text_of(root.get("delta"))});
@@ -374,15 +466,7 @@ class OpenAICodec final : public Codec {
     } else if (type == "response.done") {
       const auto response = root.get("response");
       const auto status = text_of(response.get("status"));
-      if (const auto usage = response.get("usage"); usage.is_object()) {
-        Usage value;
-        value.input_total = counter(usage.get("input_tokens"));
-        value.output_total = counter(usage.get("output_tokens"));
-        value.total = counter(usage.get("total_tokens"));
-        value.cache_read = counter(usage.get("input_token_details").get("cached_tokens"));
-        value.stage = UsageStage::Final;
-        turn_.usage(std::move(value));
-      }
+      if (const auto usage = response.get("usage"); usage.is_object()) turn_.usage(openai_usage(usage));
       if (status == "cancelled") events.push_back(TurnAborted{});
       if (status == "failed") events.push_back(ProviderError{reject(ErrorKind::RemoteFailure, "the provider reported an error in the session")});
       const auto kind = status == "cancelled" ? StopKind::Unknown : status == "incomplete" ? StopKind::MaxTokens : StopKind::EndTurn;
@@ -400,18 +484,6 @@ class OpenAICodec final : public Codec {
     return events;
   }
  private:
-  // A transcription's usage: seconds of audio (`{"type":"duration","seconds":4}`), or tokens.
-  static Usage transcription_usage(json::Value usage) {
-    Usage value;
-    if (const auto seconds = counter(usage.get("seconds"))) value.extra["seconds"] = *seconds;
-    value.input_total = counter(usage.get("input_tokens"));
-    value.output_total = counter(usage.get("output_tokens"));
-    value.total = counter(usage.get("total_tokens"));
-    value.stage = UsageStage::Final;
-    return value;
-  }
-  const descriptor::EndpointFact& fact_;
-  SemanticLimits limits_;
   Turn turn_;
   std::string response_;
   bool transcribing_ = false;
@@ -428,8 +500,10 @@ std::variant<Connection, Error> connect(const descriptor::ValidatedDescriptor& d
   // The model is a path segment at Google (`models/<model>`) and a query parameter at OpenAI.
   if (!token(setup.model)) return bad("a realtime model is a token");
   if (setup.output.empty() && (!setup.voice.empty() || !setup.instructions.empty() || !setup.tools.empty() || setup.output_transcription ||
-                               !setup.transcription_model.empty() || setup.resume))
-    return bad("a transcription session takes no voice, instructions, tools, output transcription or resumption");
+                               !setup.transcription_model.empty() || setup.resume || !setup.output_audio.empty()))
+    return bad("a transcription session takes no voice, instructions, tools, output transcription, output audio format or resumption");
+  if (!format_of(fact->audio_input, setup.input_audio) || !format_of(fact->audio_output, setup.output_audio))
+    return bad("a realtime audio format is one the endpoint's fact lists");
   if (setup.voice.size() > 128 || setup.instructions.size() > descriptor.policy()->resources().request_bytes)
     return bad("realtime setup values are bounded");
   for (const auto& tool : setup.tools)

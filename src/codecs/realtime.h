@@ -41,10 +41,14 @@ struct Setup {
   std::optional<std::string> resume{};
   // Setup members the endpoint's policy fact admits, sent as given.
   std::shared_ptr<const json::Document> extensions{};
+  // The formats of the audio the session takes and answers with, each the `mime` of a format in the endpoint's fact
+  // (`audio/pcm;rate=24000`, `audio/pcmu`). Empty: the first the fact lists. A transcription session answers no audio.
+  std::string input_audio{}, output_audio{};
 };
 
 // Client commands.
-// PCM at the provider's input rate (Google 16 kHz, OpenAI 24 kHz), mono, 16-bit little-endian.
+// Audio in the session's input format (`Setup::input_audio`). By default PCM at the provider's input rate (Google
+// 16 kHz, OpenAI 24 kHz), mono, 16-bit little-endian.
 struct Audio { std::string pcm; };
 // The end of the user's audio: Google `audioStreamEnd`, OpenAI `input_audio_buffer.commit`.
 struct EndAudio {};
@@ -69,7 +73,7 @@ struct Frame {
 
 // Server events.
 struct Ready { std::string session_id; };
-// The model's audio, decoded: PCM at the provider's output rate.
+// The model's audio, decoded, in the format `mime` names: by default PCM at the provider's output rate.
 struct AudioDelta { std::string pcm, mime; };
 struct TextDelta { std::string text; };
 struct Transcript {
@@ -129,8 +133,12 @@ class Codec {
   virtual std::variant<std::vector<Frame>, Error> encode(const Command&) = 0;
   // The events of one server message. An error ends the session.
   virtual std::variant<std::vector<Event>, Error> decode(bool binary, std::string_view data) = 0;
-  // The sample rate of the PCM the provider takes, which paces outbound audio.
+  // The events that settle when the session ends: a turn that waited for a message that did not come.
+  virtual std::variant<std::vector<Event>, Error> finish() { return std::vector<Event>{}; }
+  // The samples per second of the input audio the session sends, which paces it, and its bytes per second. The
+  // format is the one the setup chose, once `open` has run.
   virtual std::uint32_t input_rate() const noexcept = 0;
+  virtual std::uint32_t input_bytes_per_second() const noexcept { return 2 * input_rate(); }
 };
 // The codec of the origin's realtime shape, or null when the origin has no realtime fact.
 std::unique_ptr<Codec> make_codec(const descriptor::ValidatedDescriptor&, SemanticLimits = {});
