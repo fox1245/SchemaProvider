@@ -189,8 +189,8 @@ void media_ring_fence(transport::Transport& transport, const descriptor::Validat
   }
 }
 
-// A session that does not close cleanly says why: a cancel is `Cancelled`, a refused handshake carries the server's
-// answer, and neither is a transport fault.
+// A session that does not close cleanly says why: a cancel is `Cancelled`, and a refused handshake is classified by the
+// runtime error policy as an HTTP answer is, with the server's status. Neither is a transport fault.
 void ends_by_cause(transport::Transport& transport, const descriptor::ValidatedDescriptor& d) {
   auto session = opened(transport, d, {});
   CHECK(await<realtime::Ready>(session));
@@ -198,14 +198,33 @@ void ends_by_cause(transport::Transport& transport, const descriptor::ValidatedD
   const auto cancelled = session.join();
   CHECK(cancelled.error && cancelled.error->kind == ErrorKind::Cancelled && cancelled.error->reason == "runtime.realtime.cancelled");
   CHECK(!cancelled.clean);
-  const std::pair<int, ErrorKind> refusals[]{{401, ErrorKind::Authentication}, {403, ErrorKind::Permission}, {429, ErrorKind::RateLimited}, {503, ErrorKind::Transport}};
-  for (const auto& [status, kind] : refusals) {
-    const auto refusing = local("/reject/" + std::to_string(status));
-    auto refused = opened(transport, refusing, {});
+  struct Refusal { int status; ErrorKind kind; RetryClass retry; };
+  const Refusal refusals[]{{401, ErrorKind::Authentication, RetryClass::Never}, {403, ErrorKind::Permission, RetryClass::Never},
+                           {429, ErrorKind::LimitUnknown, RetryClass::Unknown}, {503, ErrorKind::Overloaded, RetryClass::Transient},
+                           {418, ErrorKind::RemoteFailure, RetryClass::Unknown}};
+  const auto refused_by = [&](const Refusal& refusal, realtime::Options options) {
+    const auto refusing = local("/reject/" + std::to_string(refusal.status));
+    auto refused = opened(transport, refusing, std::move(options));
     const auto outcome = refused.join();
-    CHECK(outcome.error && outcome.error->kind == kind && outcome.error->http_status == status && outcome.error->reason == "runtime.realtime.refused");
-    CHECK(!outcome.clean);
+    CHECK(!outcome.clean && outcome.error && outcome.error->reason == "runtime.realtime.refused" && outcome.error->http_status == refusal.status);
+    return outcome.error;
+  };
+  for (const auto& refusal : refusals) {
+    const auto error = refused_by(refusal, {});
+    CHECK(error->kind == refusal.kind && error->retry_class == refusal.retry);
   }
+  // The policy is the host's to choose: here it rates 429 as a rate limit.
+  std::string text(config_defaults::error_policy_json);
+  const std::string listed = R"({"kind":"LimitUnknown","retry":"Unknown","status":429})";
+  const auto at = text.find(listed);
+  CHECK(at != std::string::npos);
+  text.replace(at, listed.size(), R"({"kind":"RateLimited","retry":"Transient","status":429})");
+  auto policy = configuration::load_runtime_policy(config_defaults::runtime_defaults_json, text);
+  CHECK(std::holds_alternative<configuration::PolicySnapshot>(policy));
+  realtime::Options options;
+  options.runtime_policy = std::get<configuration::PolicySnapshot>(policy);
+  const auto limited = refused_by({429, ErrorKind::RateLimited, RetryClass::Transient}, options);
+  CHECK(limited->kind == ErrorKind::RateLimited && limited->retry_class == RetryClass::Transient);
 }
 
 // A setup outside the fact is refused before any connection.

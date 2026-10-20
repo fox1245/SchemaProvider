@@ -40,6 +40,6 @@ A provider protocol whose turns cannot be delimited (no turn markers in either d
   - recorded server frames decode to the expected events and per-turn completions, interruption included;
   - control preempts a full media ring, and a turn marker waits for the media before it;
   - a full ring never drops audio ahead of a pending turn marker;
-  - a cancel and a refused handshake end the session as `Cancelled` and as `Authentication`, `Permission` or `RateLimited` with the handshake status, not as a transport failure;
+  - a cancel ends the session as `Cancelled`, and a refused handshake as the kind the runtime error policy gives its status, with that status, not as a transport failure;
   - a setup outside the facts is refused at prepare with no I/O;
   - a failed lease renewal ends the session with its reason.

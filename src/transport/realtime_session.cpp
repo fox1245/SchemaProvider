@@ -13,17 +13,20 @@ Error session_error(ErrorKind kind, std::string reason) {
 }
 // Why a session that did not close cleanly ended, by cause: a cancellation and a refused handshake are not network
 // faults, and a host must not retry them as such.
-Error ended_early(const transport::WsResult& result) {
+Error ended_early(const transport::WsResult& result, const configuration::RuntimePolicy& policy) {
   if (result.transport.status == transport::Status::Cancelled) return session_error(ErrorKind::Cancelled, "runtime.realtime.cancelled");
   if (result.transport.status == transport::Status::DeadlineExceeded) return session_error(ErrorKind::DeadlineExceeded, "runtime.realtime.closed");
-  // The server answered the handshake with something other than 101.
+  // The server answered the handshake with something other than 101: an HTTP answer, classified by the runtime error
+  // policy as for a call.
   if (result.http_status != 0 && result.http_status != 101) {
-    auto error = session_error(result.http_status == 401 ? ErrorKind::Authentication
-                               : result.http_status == 403 ? ErrorKind::Permission
-                               : result.http_status == 429 ? ErrorKind::RateLimited
-                                                           : ErrorKind::Transport,
-                               "runtime.realtime.refused");
-    error.http_status = result.http_status;
+    transport::Result answer;
+    answer.status = transport::Status::Completed;
+    answer.http_status = result.http_status;
+    answer.attempt.response_head_seen = true;
+    const auto now = std::chrono::steady_clock::now();
+    const auto info = runtime::detail::inspect_response(policy, {}, result.http_status, {}, {}, now, std::chrono::system_clock::now());
+    auto error = runtime::detail::classify_failure(answer, info, std::nullopt, false, 1, now);
+    error.reason = "runtime.realtime.refused";
     return error;
   }
   return session_error(ErrorKind::Transport, "runtime.realtime.closed");
@@ -186,6 +189,7 @@ std::variant<Session, Error> open(transport::Transport& transport, const descrip
   auto state = std::make_shared<SessionState>();
   state->codec = make_codec(descriptor, options.limits);
   state->options = std::move(options);
+  if (!state->options.runtime_policy) state->options.runtime_policy = configuration::builtin_runtime_policy();
   auto opening = state->codec->open(setup);
   if (auto* error = std::get_if<Error>(&opening)) return *error;
   transport::WsRequest request;
@@ -240,7 +244,7 @@ std::variant<Session, Error> open(transport::Transport& transport, const descrip
       std::lock_guard lock(s->mutex);
       s->done = true;
       s->result = result;
-      if (!s->error && !result.clean && !s->closing) s->error = ended_early(result);
+      if (!s->error && !result.clean && !s->closing) s->error = ended_early(result, *s->options.runtime_policy);
     }
     s->changed.notify_all();
   };

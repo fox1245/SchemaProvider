@@ -16,6 +16,7 @@
 //  * The session never reconnects. Resumption handles and drain notices are events for the host to journal; a new
 //    session is a new `open`.
 #include "codecs/realtime.h"
+#include "configuration/runtime_policy.h"
 #include "transport/ws_transport.h"
 #include <chrono>
 #include <cstdint>
@@ -40,12 +41,14 @@ struct Options {
   std::function<bool(const Usage&)> renew{};
   // An extra trust anchor (tests, private CAs).
   std::string ca_file{};
+  // Classifies the answer to a refused handshake, as it classifies the answer to a call: by its status table.
+  configuration::PolicySnapshot runtime_policy = configuration::builtin_runtime_policy();
   SemanticLimits limits{};
 };
 struct Outcome {
   // Why the session ended early: a refused setup, a lease refusal, an inbound overflow, a protocol or transport
-  // failure, a `cancel` (`Cancelled`) or a refused handshake (`Authentication` for 401, `Permission` for 403,
-  // `RateLimited` for 429, with `http_status`). Empty after a clean close.
+  // failure, a `cancel` (`Cancelled`) or a refused handshake (the kind and retry class `runtime_policy` gives its
+  // status, with `http_status`). Empty after a clean close.
   std::optional<Error> error{};
   std::uint16_t close_code = 0;
   std::string close_reason{};
