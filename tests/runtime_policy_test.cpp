@@ -235,6 +235,56 @@ void shipped_ceilings_fit_the_narrowest_long() {
   CHECK(policy->admission().max_host_connections <= 0x7fffffffULL);
 }
 
+// std::size_t is 32 bits on wasm32, and the shipped "no bound" ceilings are INT64_MAX. A ceiling above the target's
+// largest size is admitted as that size and reported; a default above it is still refused. The 32-bit target is
+// simulated here by naming its largest size to the loader.
+void ceilings_above_the_target_size_are_clamped() {
+  const std::string runtime(config_defaults::runtime_defaults_json);
+  const std::string errors(config_defaults::error_policy_json);
+  constexpr std::uint64_t narrow = 0xffffffffULL;
+  const auto snapshot = [](configuration::PolicyResult loaded) {
+    CHECK(std::holds_alternative<configuration::PolicySnapshot>(loaded));
+    return std::get<configuration::PolicySnapshot>(std::move(loaded));
+  };
+
+  // A 64-bit target holds every shipped ceiling: nothing is clamped.
+  const auto wide = snapshot(configuration::load_runtime_policy(runtime, errors));
+  CHECK(wide->clamps().empty());
+  CHECK(wide->admission().max_response_bytes == static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()));
+
+  // The same document for a 32-bit target is admitted, and each ceiling it cannot hold is listed.
+  const auto clamped = snapshot(configuration::detail::load_runtime_policy_for_size(runtime, errors, narrow));
+  CHECK(!clamped->clamps().empty());
+  bool listed_response_bytes = false;
+  for (const auto& clamp : clamped->clamps()) {
+    CHECK(clamp.pointer.rfind("/admission/", 0) == 0);
+    CHECK(clamp.configured > narrow && clamp.admitted == narrow);
+    listed_response_bytes = listed_response_bytes || clamp.pointer == "/admission/max_response_bytes";
+  }
+  CHECK(listed_response_bytes);
+  CHECK(clamped->admission().max_response_bytes == narrow && clamped->admission().max_operations == narrow);
+  CHECK(clamped->admission().default_timeout_ms == narrow);
+  // A ceiling that fits is left alone and not listed, and no default changes.
+  CHECK(clamped->admission().workers == wide->admission().workers);
+  CHECK(clamped->admission().api_key_bytes == wide->admission().api_key_bytes);
+  CHECK(clamped->admission().max_host_connections == wide->admission().max_host_connections);
+  CHECK(clamped->admission().retry_max_attempts == wide->admission().retry_max_attempts);
+  CHECK(clamped->defaults().max_response_bytes == wide->defaults().max_response_bytes);
+  CHECK(clamped->defaults().default_timeout_ms == wide->defaults().default_timeout_ms);
+  for (const auto& clamp : clamped->clamps()) CHECK(clamp.pointer != "/admission/workers" && clamp.pointer != "/admission/api_key_bytes");
+
+  // A default the target cannot hold is not clamped: its ceiling is now the largest size and the default exceeds it.
+  std::string oversized = runtime;
+  const std::string default_response = "\"max_response_bytes\":16777216";
+  const auto at = oversized.find(default_response);
+  CHECK(at != std::string::npos);
+  oversized.replace(at, default_response.size(), "\"max_response_bytes\":4294967296");
+  CHECK(std::holds_alternative<configuration::PolicySnapshot>(configuration::load_runtime_policy(oversized, errors)));
+  const auto refused = configuration::detail::load_runtime_policy_for_size(oversized, errors, narrow);
+  CHECK(std::holds_alternative<descriptor::ConfigError>(refused));
+  CHECK(std::get<descriptor::ConfigError>(refused).pointer == "/defaults/max_response_bytes");
+}
+
 // A bad Google API key arrives as HTTP 400 INVALID_ARGUMENT; only the ErrorInfo
 // reason tells it from a malformed request. Interactions wraps the envelope in an array.
 void google_api_key_errors() {
@@ -327,7 +377,7 @@ void unsupported_parameter_is_named() {
 }
 }  // namespace
 int main() {
-  classification(); google_api_key_errors(); unsupported_parameter_is_named(); safety_and_budget(); http_4xx_is_a_definitive_rejection(); hints(); arithmetic_and_bucket(); shipped_ceilings_fit_the_narrowest_long();
+  classification(); google_api_key_errors(); unsupported_parameter_is_named(); safety_and_budget(); http_4xx_is_a_definitive_rejection(); hints(); arithmetic_and_bucket(); shipped_ceilings_fit_the_narrowest_long(); ceilings_above_the_target_size_are_clamped();
   if (failures) return 1;
   std::puts("runtime policy: classification, safety, hints, arithmetic and bucket passed");
 }

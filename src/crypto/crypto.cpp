@@ -13,10 +13,14 @@
 #if defined(_MSC_VER)
 #pragma comment(lib, "bcrypt.lib")
 #endif
+#elif defined(__EMSCRIPTEN__) || defined(__wasi__)
+#include <unistd.h>
 #elif defined(__linux__)
 #include <sys/random.h>
 #elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
 #include <stdlib.h>
+#else
+#error "sp::crypto::random_bytes has no operating-system entropy source for this platform"
 #endif
 
 // x86 SHA extensions are used only where the compiler can emit them per function (GCC/Clang) and the
@@ -289,6 +293,15 @@ bool random_bytes(void* data, std::size_t size) noexcept {
     p += chunk; size -= chunk;
   }
   return true;
+#elif defined(__EMSCRIPTEN__) || defined(__wasi__)
+  // getentropy takes at most 256 bytes per call. The host supplies the entropy (Web Crypto or Node's
+  // crypto on Emscripten, random_get on WASI); a failure is reported, never replaced by another generator.
+  while (size) {
+    const auto chunk = std::min<std::size_t>(size, 256);
+    if (::getentropy(p, chunk) != 0) return false;
+    p += chunk; size -= chunk;
+  }
+  return true;
 #elif defined(__linux__)
   while (size) {
     const auto got = ::getrandom(p, size, 0);
@@ -300,9 +313,6 @@ bool random_bytes(void* data, std::size_t size) noexcept {
 #elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
   if (size) ::arc4random_buf(p, size);
   return true;
-#else
-  (void)p;
-  return size == 0;  // no supported OS entropy source: fail closed
 #endif
 }
 

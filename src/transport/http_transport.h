@@ -20,6 +20,7 @@
 //    idle_timeout. Each ends the attempt as Status::Failed with its own FailureKind; the earliest
 //    bound wins, and the deadline (Status::DeadlineExceeded) wins when it is the earliest.
 #pragma once
+#include "sp/build_config.h"
 #include "sp/config_defaults.h"
 
 #include <chrono>

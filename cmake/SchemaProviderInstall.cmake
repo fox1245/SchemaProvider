@@ -1,6 +1,10 @@
 set(SP_INSTALL_CMAKE_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/SchemaProvider")
 
-install(TARGETS sp_core sp_json sp_descriptor sp_codecs sp_wire sp_transport sp_runtime
+set(SP_INSTALL_TARGETS sp_core sp_json sp_descriptor sp_codecs sp_wire sp_runtime)
+if(SP_TRANSPORT)
+  list(APPEND SP_INSTALL_TARGETS sp_transport)
+endif()
+install(TARGETS ${SP_INSTALL_TARGETS}
   EXPORT SchemaProviderTargets
   ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
   LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
@@ -26,7 +30,7 @@ install(FILES
   "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/client.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/policy.h"
   DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/SchemaProvider/runtime")
-install(FILES "${SP_GENERATED_INCLUDE_DIR}/sp/config_defaults.h"
+install(FILES "${SP_GENERATED_INCLUDE_DIR}/sp/config_defaults.h" "${SP_GENERATED_INCLUDE_DIR}/sp/build_config.h"
   DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/SchemaProvider/sp")
 
 configure_package_config_file(
