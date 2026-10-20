@@ -111,6 +111,10 @@ std::string builtin_catalogue_json();
 
 // Layers in order, each over the ones before: an entry with the same id and kind is merged member
 // by member (a member the later entry sets replaces the earlier one), and a new entry is added.
+// `origins` scope the whole entry, so they are the exception: the later entry's origins replace
+// the earlier ones, and an entry without origins applies at every origin, as the merged one then
+// does. A layer of unscoped facts, such as the embedded catalogue, put over a refreshed one keeps
+// applying at every origin.
 CatalogueResult merge_catalogues(std::span<const CatalogueSnapshot> layers);
 
 struct CatalogueDiff {

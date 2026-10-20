@@ -37,6 +37,8 @@ const anthropic = {
   second: { data: [{ type: 'model', id: 'claude-test-b', lifecycle: 'deprecated', retires_at: '2026-12-01T00:00:00Z' }], has_more: false },
 };
 const openai = { object: 'list', data: [{ id: 'gpt-test-1', object: 'model', owned_by: 'openai' }, { id: 'tts-test', shutdown_date: '2027-01-06' }] };
+// A listing that names a model the embedded catalogue has verified facts for.
+const openaiBuiltin = { object: 'list', data: [{ id: 'gpt-6-luna', object: 'model' }, { id: 'gpt-test-1', object: 'model' }] };
 
 const send = (res, status, body) => {
   res.writeHead(status, { 'content-type': 'application/json' });
@@ -69,10 +71,10 @@ const server = http.createServer((req, res) => {
     if (after === null) return send(res, 200, anthropic.first);
     return after === 'claude-test-a' ? send(res, 200, anthropic.second) : send(res, 400, {});
   }
-  if (scenario === 'openai') {
+  if (scenario === 'openai' || scenario === 'openai-builtin') {
     if (path !== '/v1/models') return send(res, 404, {});
     if (h.authorization !== `Bearer ${keys.openai}`) return send(res, 401, {});
-    return send(res, 200, openai);
+    return send(res, 200, scenario === 'openai' ? openai : openaiBuiltin);
   }
   send(res, 404, {});
 });

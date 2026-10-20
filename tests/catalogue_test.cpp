@@ -222,6 +222,45 @@ void policy_reads_the_catalogue() {
     CHECK(std::holds_alternative<PolicySnapshot>(overload) && std::get<PolicySnapshot>(overload)->content_digest() == custom->content_digest());
 }
 
+// A layer's origins scope the whole entry. A layer without origins applies at every origin, so over
+// a listing's entry it widens the scope instead of inheriting it.
+void origins_scope_the_whole_entry() {
+    const std::string_view listing_origin = "https://api.example.test", gateway = "https://gateway.example.test";
+    const auto listed = catalogue(R"([
+        {"id":"m","origins":["https://api.example.test"],"name":"Listed M","input_limit":1000,"source":"openai"},
+        {"id":"only-listed","origins":["https://api.example.test"],"source":"openai"}])");
+    const auto verified = catalogue(R"([{"id":"m","served_as":["m-2026"],"output_limit":64,"source":"verified"}])");
+    const auto scoped = catalogue(R"([{"id":"m","origins":["https://other.example.test"],"output_limit":32}])");
+    if (!listed || !verified || !scoped) return;
+
+    const CatalogueSnapshot widening[]{listed, verified};
+    auto widened = merge_catalogues(widening);
+    CHECK(std::holds_alternative<CatalogueSnapshot>(widened));
+    if (std::holds_alternative<CatalogueSnapshot>(widened)) {
+        const auto& c = std::get<CatalogueSnapshot>(widened);
+        const auto* m = c->entry("m");
+        CHECK(m && m->origins.empty() && m->name == std::optional<std::string>("Listed M") && m->output_limit == 64u);
+        // The verified facts match at the listing's origin and at a gateway.
+        for (const auto origin : {listing_origin, gateway}) {
+            const auto exact = c->find("openai.chat", origin, "m");
+            CHECK(exact.entry && exact.relation == ModelRelation::Exact && exact.entry->served_as == std::vector<std::string>{"m-2026"});
+        }
+        // An entry only the listing names keeps the listing's origin.
+        CHECK(c->entry("only-listed")->origins == std::vector<std::string>{"https://api.example.test"});
+        CHECK(!c->find("openai.chat", gateway, "only-listed").entry);
+    }
+
+    // Origins in the later layer replace the earlier ones; an unscoped earlier layer takes them on.
+    const CatalogueSnapshot replacing[]{listed, scoped};
+    auto replaced = merge_catalogues(replacing);
+    CHECK(std::holds_alternative<CatalogueSnapshot>(replaced) &&
+          std::get<CatalogueSnapshot>(replaced)->entry("m")->origins == std::vector<std::string>{"https://other.example.test"});
+    const CatalogueSnapshot narrowing[]{verified, scoped};
+    auto narrowed = merge_catalogues(narrowing);
+    CHECK(std::holds_alternative<CatalogueSnapshot>(narrowed) &&
+          std::get<CatalogueSnapshot>(narrowed)->entry("m")->origins == std::vector<std::string>{"https://other.example.test"});
+}
+
 void bundle_carries_the_catalogue() {
     const auto policy = builtin_policy();
     const auto bundle = builtin_policy_bundle_json();
@@ -280,6 +319,7 @@ int main() {
         loader_is_closed_and_bounded();
         layers_merge_member_by_member();
         policy_reads_the_catalogue();
+        origins_scope_the_whole_entry();
         bundle_carries_the_catalogue();
         catalogue_files();
     } catch (const std::exception& error) {
