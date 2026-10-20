@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/media.h"
+#include "sp/build_config.h"
 #include "sp/config_defaults.h"
 #include <array>
 #include <chrono>

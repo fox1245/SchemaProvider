@@ -16,6 +16,8 @@ namespace {
 using Digest = std::array<unsigned char, 32>;
 using namespace archive_fs;
 Error error() { Error e; e.kind = ErrorKind::Permission; e.safe_message = "Trusted local native archive admission failed"; e.retry_safety = RetrySafety::NotSent; return e; }
+// This build has no file custody backend: the archive cannot be activated, and nothing is stored.
+Error unavailable() { Error e; e.kind = ErrorKind::Unsupported; e.safe_message = "Trusted local native archive custody is unavailable on this platform"; e.retry_safety = RetrySafety::NotSent; return e; }
 using Fd = archive_fs::Handle;
 Digest mac(const Digest& key, std::string_view bytes) {
   return crypto::hmac_sha256(key.data(), key.size(), bytes.data(), bytes.size());
@@ -215,6 +217,7 @@ bool NativeArchive::matches_descriptor(const descriptor::ValidatedDescriptor& de
 NativeArchive::Activation NativeArchive::provision(std::string d,std::string k,std::string o,descriptor::ValidatedDescriptor v,NativeArchiveLimits l) {return activate(std::move(d),std::move(k),std::move(o),std::move(v),l,true);}
 NativeArchive::Activation NativeArchive::open(std::string d,std::string k,std::string o,descriptor::ValidatedDescriptor v,NativeArchiveLimits l) {return activate(std::move(d),std::move(k),std::move(o),std::move(v),l,false);}
 NativeArchive::Activation NativeArchive::activate(std::string d,std::string k,std::string o,descriptor::ValidatedDescriptor v,NativeArchiveLimits l,bool create) {
+  if(!archive_fs::available())return unavailable();
   try {
     require(v.policy()!=nullptr);
     const auto& resources=v.policy()->resources();

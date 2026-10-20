@@ -7,9 +7,15 @@
 #include <vector>
 
 // Private filesystem custody; no serialization or exported SDK interface.
+//
+// This header is the custody-backend seam of the native archive. A target provides exactly one backend:
+// native_archive_fs.cpp (POSIX and Windows file custody), or native_archive_fs_unavailable.cpp for a target that has
+// neither the atomic no-replace rename nor file ownership checks it needs (WebAssembly). NativeArchive asks
+// available() before it touches anything and answers an unavailable backend with a typed refusal.
 namespace sp::archive_fs {
 struct Rejected {};
 inline void require(bool value) { if (!value) throw Rejected{}; }
+bool available() noexcept;
 #ifdef _WIN32
 using NativeHandle = void*;
 #else

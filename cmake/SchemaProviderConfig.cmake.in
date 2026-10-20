@@ -1,8 +1,14 @@
 @PACKAGE_INIT@
 
 include(CMakeFindDependencyMacro)
-find_dependency(Threads)
-find_dependency(CURL 7.88)
+if(@SP_THREADS@)
+  find_dependency(Threads)
+endif()
+# libcurl is a dependency of the transport component only. A consumer that asks for other components (runtime, for
+# one) needs no libcurl, and a package built without the transport has none to find.
+if(@SP_TRANSPORT@ AND (NOT SchemaProvider_FIND_COMPONENTS OR "transport" IN_LIST SchemaProvider_FIND_COMPONENTS))
+  find_dependency(CURL 7.88)
+endif()
 if(@SP_EXTERNAL_YYJSON@ AND NOT TARGET yyjson::yyjson)
   # Restore module lookup even when find_dependency returns from its caller.
   function(_SchemaProvider_find_yyjson)
@@ -19,7 +25,7 @@ if(@SP_EXTERNAL_YYJSON@ AND NOT TARGET yyjson::yyjson)
 endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/SchemaProviderTargets.cmake")
-foreach(_SchemaProvider_component core json descriptor codecs wire transport runtime)
+foreach(_SchemaProvider_component @SP_COMPONENTS@)
   set(SchemaProvider_${_SchemaProvider_component}_FOUND TRUE)
 endforeach()
 check_required_components(SchemaProvider)

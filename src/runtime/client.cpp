@@ -10,6 +10,7 @@
 #include "codecs/interactions.h"
 #include "codecs/reason.h"
 #include "crypto/crypto.h"
+#include "sp/build_config.h"
 
 #include <array>
 #include <algorithm>
@@ -24,7 +25,9 @@
 #include <mutex>
 #include <random>
 #include <stdexcept>
+#if SP_BUILD_THREADS
 #include <thread>
+#endif
 #include <type_traits>
 #include <unordered_map>
 #include <iterator>
@@ -76,6 +79,7 @@ Result misuse_result() {
   return result;
 }
 
+#if SP_BUILD_THREADS
 // Workers own only Core, not the executor containing their thread handles. Thus a
 // shutdown on a worker can detach those existing handles without a reaper thread.
 class PoolExecutor final : public Executor {
@@ -213,6 +217,8 @@ class PoolExecutor final : public Executor {
     }
   }
 };
+
+#endif  // SP_BUILD_THREADS
 
 class ScopedTimer {
  public:
@@ -1148,9 +1154,16 @@ void ClientState::shutdown() noexcept {
   drained.wait(lock, [this] { return closed; });
 }
 
+#if SP_BUILD_THREADS
 std::shared_ptr<Executor> make_pool_executor(std::size_t workers) {
   return std::make_shared<PoolExecutor>(workers);
 }
+#else
+// A single-thread build has no worker threads to make: the host supplies the executor.
+std::shared_ptr<Executor> make_pool_executor(std::size_t) {
+  throw descriptor::ConfigError{"/executor", "a host-supplied executor (this build has no threads)", 1, "runtime options rejected"};
+}
+#endif
 
 Client ClientAccess::make(descriptor::ValidatedDescriptor descriptor, Options options,
                           std::shared_ptr<Executor> executor, std::shared_ptr<AttemptTransport> transport,

@@ -81,8 +81,9 @@ inline bool constant_time_equal(std::string_view a, std::string_view b) noexcept
 void cleanse(void* data, std::size_t size) noexcept;
 
 // Fill the buffer from the operating system's cryptographic random source (getrandom, arc4random_buf,
-// BCryptGenRandom). Returns false, with the buffer contents unspecified, when the source fails; there
-// is no fallback to any other generator.
+// BCryptGenRandom, getentropy on WebAssembly hosts). Returns false, with the buffer contents unspecified,
+// when the source fails; there is no fallback to any other generator. A platform without a source does
+// not compile.
 // Nonempty output must be writable for size bytes; a zero-byte request always succeeds.
 [[nodiscard]] bool random_bytes(void* data, std::size_t size) noexcept;
 

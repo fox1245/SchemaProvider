@@ -33,7 +33,7 @@
 #elif defined(__APPLE__)
 #include <stdio.h>
 #else
-#error Native archive custody requires a supported atomic no-replace filesystem backend
+#error Native archive custody requires a supported atomic no-replace filesystem backend; a target without one builds native_archive_fs_unavailable.cpp instead
 #endif
 #endif
 
@@ -211,6 +211,7 @@ Status convert(const struct stat& value) {
 }
 #endif
 } // namespace
+bool available() noexcept { return true; }
 
 Handle::Handle() noexcept : value_(invalid_handle) {}
 Handle::Handle(NativeHandle value) noexcept : value_(value) {}

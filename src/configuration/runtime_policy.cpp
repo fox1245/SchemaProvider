@@ -152,8 +152,42 @@ std::string file(const std::string& path) {
   if (!input.eof()) fail("", "readable configuration file");
   return result;
 }
+// The admission ceilings that become a std::size_t, a thread count or a duration in a Client's options. A ceiling the
+// document states above the target's largest std::size_t is admitted as that value (see CeilingClamp).
+struct SizedCeiling { const char* pointer; std::uint64_t AdmissionValues::* member; };
+constexpr SizedCeiling sized_ceilings[] = {
+  {"/admission/workers", &AdmissionValues::workers}, {"/admission/io_threads", &AdmissionValues::io_threads},
+  {"/admission/resolver_threads", &AdmissionValues::resolver_threads},
+  {"/admission/max_host_connections", &AdmissionValues::max_host_connections},
+  {"/admission/max_head_bytes", &AdmissionValues::max_head_bytes},
+  {"/admission/dns_ttl_seconds", &AdmissionValues::dns_ttl_seconds},
+  {"/admission/max_operations", &AdmissionValues::max_operations},
+  {"/admission/queued_body_chunks", &AdmissionValues::queued_body_chunks},
+  {"/admission/queued_body_bytes", &AdmissionValues::queued_body_bytes},
+  {"/admission/max_response_bytes", &AdmissionValues::max_response_bytes},
+  {"/admission/max_error_bytes", &AdmissionValues::max_error_bytes},
+  {"/admission/semantic_max_parts", &AdmissionValues::semantic_max_parts},
+  {"/admission/semantic_max_content_bytes", &AdmissionValues::semantic_max_content_bytes},
+  {"/admission/semantic_max_tool_bytes", &AdmissionValues::semantic_max_tool_bytes},
+  {"/admission/semantic_max_json_depth", &AdmissionValues::semantic_max_json_depth},
+  {"/admission/sse_max_line_bytes", &AdmissionValues::sse_max_line_bytes},
+  {"/admission/sse_max_event_bytes", &AdmissionValues::sse_max_event_bytes},
+  {"/admission/sse_max_total_bytes", &AdmissionValues::sse_max_total_bytes},
+  {"/admission/default_timeout_ms", &AdmissionValues::default_timeout_ms},
+  {"/admission/slow_callback_threshold_ms", &AdmissionValues::slow_callback_threshold_ms},
+  {"/admission/retry_tokens", &AdmissionValues::retry_tokens},
+  {"/admission/retry_max_attempts", &AdmissionValues::retry_max_attempts},
+  {"/admission/retry_base_delay_ms", &AdmissionValues::retry_base_delay_ms},
+  {"/admission/retry_max_delay_ms", &AdmissionValues::retry_max_delay_ms},
+  {"/admission/total_threads", &AdmissionValues::total_threads},
+  {"/admission/api_key_bytes", &AdmissionValues::api_key_bytes},
+  {"/admission/configuration_bytes", &AdmissionValues::configuration_bytes},
+  {"/admission/configuration_depth", &AdmissionValues::configuration_depth},
+  {"/admission/error_json_depth", &AdmissionValues::error_json_depth},
+};
 } // namespace
-PolicyResult load_runtime_policy(std::string_view runtime_json, std::string_view error_json) {
+namespace detail {
+PolicyResult load_runtime_policy_for_size(std::string_view runtime_json, std::string_view error_json, std::uint64_t size_max) {
   try {
     auto runtime = document(runtime_json);
     auto errors = document(error_json);
@@ -222,6 +256,13 @@ PolicyResult load_runtime_policy(std::string_view runtime_json, std::string_view
     policy->admission_.configuration_bytes = integer(a.get("configuration_bytes"), "/admission/configuration_bytes");
     policy->admission_.configuration_depth = integer(a.get("configuration_depth"), "/admission/configuration_depth");
     policy->admission_.error_json_depth = integer(a.get("error_json_depth"), "/admission/error_json_depth");
+    for (const auto& ceiling : sized_ceilings) {
+      auto& value = policy->admission_.*ceiling.member;
+      if (value > size_max) {
+        policy->clamps_.push_back({ceiling.pointer, value, size_max});
+        value = size_max;
+      }
+    }
     const auto& values = policy->defaults_;
     const auto& limits = policy->admission_;
     if (limits.workers <= 0) fail("/admission/workers", "positive admission ceiling");
@@ -292,35 +333,6 @@ PolicyResult load_runtime_policy(std::string_view runtime_json, std::string_view
     if (values.retry_max_delay_ms > limits.retry_max_delay_ms) fail("/defaults/retry_max_delay_ms", "value within admission ceiling");
     if (limits.io_threads > std::numeric_limits<unsigned>::max() || limits.resolver_threads > std::numeric_limits<unsigned>::max() ||
         limits.retry_max_attempts > std::numeric_limits<std::uint32_t>::max()) fail("/admission", "representable typed ceiling");
-    if (limits.workers > std::numeric_limits<std::size_t>::max()) fail("/admission/workers", "representable size ceiling");
-    if (limits.io_threads > std::numeric_limits<std::size_t>::max()) fail("/admission/io_threads", "representable size ceiling");
-    if (limits.resolver_threads > std::numeric_limits<std::size_t>::max()) fail("/admission/resolver_threads", "representable size ceiling");
-    if (limits.max_host_connections > std::numeric_limits<std::size_t>::max()) fail("/admission/max_host_connections", "representable size ceiling");
-    if (limits.max_head_bytes > std::numeric_limits<std::size_t>::max()) fail("/admission/max_head_bytes", "representable size ceiling");
-    if (limits.dns_ttl_seconds > std::numeric_limits<std::size_t>::max()) fail("/admission/dns_ttl_seconds", "representable size ceiling");
-    if (limits.max_operations > std::numeric_limits<std::size_t>::max()) fail("/admission/max_operations", "representable size ceiling");
-    if (limits.queued_body_chunks > std::numeric_limits<std::size_t>::max()) fail("/admission/queued_body_chunks", "representable size ceiling");
-    if (limits.queued_body_bytes > std::numeric_limits<std::size_t>::max()) fail("/admission/queued_body_bytes", "representable size ceiling");
-    if (limits.max_response_bytes > std::numeric_limits<std::size_t>::max()) fail("/admission/max_response_bytes", "representable size ceiling");
-    if (limits.max_error_bytes > std::numeric_limits<std::size_t>::max()) fail("/admission/max_error_bytes", "representable size ceiling");
-    if (limits.semantic_max_parts > std::numeric_limits<std::size_t>::max()) fail("/admission/semantic_max_parts", "representable size ceiling");
-    if (limits.semantic_max_content_bytes > std::numeric_limits<std::size_t>::max()) fail("/admission/semantic_max_content_bytes", "representable size ceiling");
-    if (limits.semantic_max_tool_bytes > std::numeric_limits<std::size_t>::max()) fail("/admission/semantic_max_tool_bytes", "representable size ceiling");
-    if (limits.semantic_max_json_depth > std::numeric_limits<std::size_t>::max()) fail("/admission/semantic_max_json_depth", "representable size ceiling");
-    if (limits.sse_max_line_bytes > std::numeric_limits<std::size_t>::max()) fail("/admission/sse_max_line_bytes", "representable size ceiling");
-    if (limits.sse_max_event_bytes > std::numeric_limits<std::size_t>::max()) fail("/admission/sse_max_event_bytes", "representable size ceiling");
-    if (limits.sse_max_total_bytes > std::numeric_limits<std::size_t>::max()) fail("/admission/sse_max_total_bytes", "representable size ceiling");
-    if (limits.default_timeout_ms > std::numeric_limits<std::size_t>::max()) fail("/admission/default_timeout_ms", "representable size ceiling");
-    if (limits.slow_callback_threshold_ms > std::numeric_limits<std::size_t>::max()) fail("/admission/slow_callback_threshold_ms", "representable size ceiling");
-    if (limits.retry_tokens > std::numeric_limits<std::size_t>::max()) fail("/admission/retry_tokens", "representable size ceiling");
-    if (limits.retry_max_attempts > std::numeric_limits<std::size_t>::max()) fail("/admission/retry_max_attempts", "representable size ceiling");
-    if (limits.retry_base_delay_ms > std::numeric_limits<std::size_t>::max()) fail("/admission/retry_base_delay_ms", "representable size ceiling");
-    if (limits.retry_max_delay_ms > std::numeric_limits<std::size_t>::max()) fail("/admission/retry_max_delay_ms", "representable size ceiling");
-    if (limits.total_threads > std::numeric_limits<std::size_t>::max()) fail("/admission/total_threads", "representable size ceiling");
-    if (limits.api_key_bytes > std::numeric_limits<std::size_t>::max()) fail("/admission/api_key_bytes", "representable size ceiling");
-    if (limits.configuration_bytes > std::numeric_limits<std::size_t>::max()) fail("/admission/configuration_bytes", "representable size ceiling");
-    if (limits.configuration_depth > std::numeric_limits<std::size_t>::max()) fail("/admission/configuration_depth", "representable size ceiling");
-    if (limits.error_json_depth > std::numeric_limits<std::size_t>::max()) fail("/admission/error_json_depth", "representable size ceiling");
     if (values.workers > limits.total_threads || values.io_threads > limits.total_threads - values.workers ||
         values.resolver_threads > limits.total_threads - values.workers - values.io_threads) fail("/defaults", "thread total within admission");
     if (values.retry_base_delay_ms > values.retry_max_delay_ms) fail("/defaults", "ordered retry delays");
@@ -338,6 +350,10 @@ PolicyResult load_runtime_policy(std::string_view runtime_json, std::string_view
     policy->errors_ = error_policy(errors.root());
     return PolicySnapshot(std::move(policy));
   } catch (descriptor::ConfigError& error) { return std::move(error); }
+}
+} // namespace detail
+PolicyResult load_runtime_policy(std::string_view runtime_json, std::string_view error_json) {
+  return detail::load_runtime_policy_for_size(runtime_json, error_json, std::numeric_limits<std::size_t>::max());
 }
 PolicyResult load_runtime_policy_files(const std::string& runtime_path, const std::string& error_path) {
   try { return load_runtime_policy(file(runtime_path), file(error_path)); }

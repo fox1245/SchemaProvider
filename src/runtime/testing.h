@@ -21,7 +21,9 @@ class Executor {
   virtual void shutdown() noexcept = 0;
 };
 
-// Production pool, exposed only to private behavioral scheduling tests.
+// Production pool, exposed only to private behavioral scheduling tests. A build without threads
+// (SP_THREADS=OFF) has no pool: this throws descriptor::ConfigError at "/executor", as does a Client made
+// without an executor, so the host must supply one.
 std::shared_ptr<Executor> make_pool_executor(std::size_t workers);
 
 class Attempt {
