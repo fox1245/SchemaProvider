@@ -21,7 +21,8 @@ const holding = new Set();
 // A realtime session in the shape of OpenAI Realtime (`/v1/realtime`, and every path under `/realtime/`): the types of
 // the client events, in arrival order, are in stats.realtime, and the audio format types of a `session.update` in
 // stats.formats (`input:<type>`, `output:<type>`); `response.create` answers with a turn and its usage; a text item
-// whose text is `flood` answers with eight 64 KiB audio deltas, and `flood-text` with eight 64 KiB text deltas.
+// whose text is `flood` answers with eight 64 KiB audio deltas, and `flood-text` with eight 64 KiB text deltas
+// (`flood-text:<n>` with n of them).
 // `/realtime/close/<code>/<reason>` closes the session with that code and reason after `session.created`.
 // `/realtime/google` speaks the shape of Google Live instead: a `setup` is answered with `setupComplete`, and when the
 // model is `tool-then-close` also with a tool call, before the session is closed.
@@ -33,8 +34,10 @@ function realtimeAnswers(event) {
     { type: 'response.done', response: { id: 'resp-1', status: 'completed', usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } } }];
   if (event.type === 'conversation.item.create' && event.item?.content?.[0]?.text === 'flood')
     return Array.from({ length: 8 }, () => ({ type: 'response.output_audio.delta', response_id: 'resp-2', delta: Buffer.alloc(65536, 5).toString('base64') }));
-  if (event.type === 'conversation.item.create' && event.item?.content?.[0]?.text === 'flood-text')
-    return Array.from({ length: 8 }, () => ({ type: 'response.output_text.delta', response_id: 'resp-3', delta: 'x'.repeat(65536) }));
+  const text = event.type === 'conversation.item.create' ? event.item?.content?.[0]?.text : undefined;
+  const flooding = typeof text === 'string' ? /^flood-text(?::(\d+))?$/.exec(text) : null;
+  if (flooding)
+    return Array.from({ length: flooding[1] === undefined ? 8 : Number(flooding[1]) }, () => ({ type: 'response.output_text.delta', response_id: 'resp-3', delta: 'x'.repeat(65536) }));
   return [];
 }
 const isRealtime = path => path === '/v1/realtime' || path.startsWith('/realtime/');
