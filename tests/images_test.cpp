@@ -174,6 +174,33 @@ void policy_facts() {
   refused_at(R"([{"endpoint":"images","shape":"openai","origins":["https://api.openai.com"],"paths":{"generate":"/v1/images"},"headers":{"Authorization":"Bearer x"}}])", "/endpoints/headers");
   refused_at(R"([{"endpoint":"images","shape":"openai","origins":["https://api.openai.com"],"paths":{"generate":"/v1/images"},"headers":{"x-note":"a\nb"}}])", "/endpoints/headers");
   CHECK(std::holds_alternative<descriptor::PolicySnapshot>(policy_with(R"([{"endpoint":"images","shape":"openai","origins":["https://api.openai.com"],"paths":{"generate":"/v1/images"},"headers":{"OpenAI-Beta":"x"}}])")));
+  // A fact's response bound, the audio a transcription fact takes, and a files fact's part size.
+  const auto base = std::string(R"({"endpoint":"images","shape":"openai","origins":["https://api.openai.com"],"paths":{"generate":"/v1/images"})");
+  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(policy_with("[" + base + R"(,"max_response_bytes":1048576}])")));
+  for (const char* bound : {"0", "-1", "\"big\"", "1.5"}) refused_at("[" + base + R"(,"max_response_bytes":)" + bound + "}]", "/endpoints/max_response_bytes");
+  const auto transcription = [](std::string_view member) {
+    return R"([{"endpoint":"transcription","shape":"openai","origins":["https://api.openai.com"],"paths":{"transcribe":"/v1/audio/transcriptions"},)" + std::string(member) + "}]";
+  };
+  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(policy_with(transcription(R"("accepted_audio":{"types":{"audio/webm":"webm","audio/x-m4a":"m4a"},"max_bytes":26214400})"))));
+  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(policy_with(transcription(R"("accepted_audio":{"types":{"audio/wav":"wav"}})"))));
+  refused_at("[" + base + R"(,"accepted_audio":{"types":{"audio/wav":"wav"}}}])", "/endpoints/accepted_audio");
+  for (const auto& [audio, pointer] : std::initializer_list<std::pair<const char*, const char*>>{
+           {R"({"types":{}})", "/endpoints/accepted_audio/types"}, {R"({"types":{"video/mp4":"mp4"}})", "/endpoints/accepted_audio/types"},
+           {R"({"types":{"Audio/WAV":"wav"}})", "/endpoints/accepted_audio/types"}, {R"({"types":{"audio/wav":"WAV"}})", "/endpoints/accepted_audio/types"},
+           {R"({"types":{"audio/wav":"a.b"}})", "/endpoints/accepted_audio/types"}, {R"({"types":["audio/wav"]})", "/endpoints/accepted_audio/types"},
+           {R"({"max_bytes":1})", "/endpoints/accepted_audio"}})
+    refused_at(transcription(std::string(R"("accepted_audio":)") + audio), pointer);
+  for (const char* limit : {"0", "50331649", "\"1\""})
+    refused_at(transcription(std::string(R"("accepted_audio":{"types":{"audio/wav":"wav"},"max_bytes":)") + limit + "}"), "/endpoints/accepted_audio/max_bytes");
+  // `response_format` is an option of the transcription fact, not a member the SDK owns.
+  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(policy_with(transcription(R"("options":{"type":"object","properties":{"response_format":{"type":"enum","values":["json"]}}})"))));
+  const auto files_fact = [](std::string_view member) {
+    return R"([{"endpoint":"files","shape":"openai","origins":["https://api.openai.com"],"paths":{"upload":"/v1/files","start":"/v1/uploads","part":"/v1/uploads/{id}/parts"})" +
+           std::string(member) + "}]";
+  };
+  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(policy_with(files_fact(R"(,"max_part_bytes":67108864)"))));
+  refused_at(files_fact(R"(,"max_part_bytes":0)"), "/endpoints/max_part_bytes");
+  refused_at("[" + base + R"(,"max_part_bytes":1024}])", "/endpoints/max_part_bytes");
   const auto* built_in = descriptor::builtin_policy()->endpoint("images", "https://openrouter.ai");
   CHECK(built_in && built_in->shape == "openrouter" && built_in->charge_on_accept && descriptor::endpoint_path(*built_in, "generate") == "/api/v1/images" &&
         !descriptor::endpoint_path(*built_in, "edit"));

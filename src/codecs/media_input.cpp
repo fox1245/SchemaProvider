@@ -64,6 +64,23 @@ std::optional<Error> admit(const descriptor::ValidatedDescriptor& descriptor, co
   return std::nullopt;
 }
 
+std::optional<std::string_view> audio_format(const descriptor::AcceptedAudioFact& fact, std::string_view mime) noexcept {
+  const auto essence = mime_essence(mime);
+  for (const auto& [type, name] : fact.types) if (lower_equal(type, essence)) return std::string_view(name);
+  return std::nullopt;
+}
+
+std::optional<Error> admit_audio(const descriptor::ValidatedDescriptor& descriptor, const Media& media, const descriptor::AcceptedAudioFact& fact) {
+  if (media.kind != MediaKind::Audio || media.source != MediaSource::Inline) return rejection(ErrorKind::InvalidRequest, "invalid media kind or source");
+  if (!media.mime.empty() && !audio_format(fact, media.mime))
+    return rejection(ErrorKind::InvalidRequest, "media MIME type is not admitted for this family");
+  const auto limit = fact.max_bytes ? static_cast<std::size_t>(fact.max_bytes) : decoded_limit(descriptor.policy()->resources(), MediaKind::Audio);
+  const auto fault = check_media(media, limit);
+  if (fault != MediaFault::None)
+    return rejection(fault == MediaFault::Size ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest, media_fault_name(fault));
+  return std::nullopt;
+}
+
 std::optional<std::string_view> audio_format(std::string_view mime) noexcept {
   struct Format { std::string_view mime, name; };
   static constexpr Format formats[]{

@@ -493,7 +493,7 @@ class PolicyLoader {
         static constexpr std::string_view rerank_members[]{"model", "query", "documents", "top_n"};
         static constexpr std::string_view moderation_members[]{"model", "input"};
         static constexpr std::string_view speech_members[]{"model", "input", "voice", "instructions", "response_format", "speed", "stream_format"};
-        static constexpr std::string_view transcription_members[]{"model", "file", "input_audio", "language", "prompt", "response_format", "stream"};
+        static constexpr std::string_view transcription_members[]{"model", "file", "input_audio", "language", "prompt", "stream"};
         static constexpr std::string_view video_members[]{"model", "prompt", "input_references", "frame_images", "duration", "aspect_ratio",
                                                           "resolution", "size", "generate_audio"};
         static constexpr std::string_view file_members[]{"file", "purpose", "expires_after"};
@@ -537,7 +537,7 @@ class PolicyLoader {
           return {};
         };
         for (auto e : endpoints.elements()) {
-          closed(e, {"endpoint","shape","origins","paths"}, "/endpoints", {"options","auth","charge_on_accept","headers","keep","audio","close_codes"});
+          closed(e, {"endpoint","shape","origins","paths"}, "/endpoints", {"options","auth","charge_on_accept","headers","keep","audio","close_codes","max_response_bytes","accepted_audio","max_part_bytes"});
           EndpointFact fact{text(e.get("endpoint"), "/endpoints/endpoint"), text(e.get("shape"), "/endpoints/shape"),
                             strings(e.get("origins"), "/endpoints/origins")};
           const auto operations = operations_of(fact.endpoint, fact.shape);
@@ -570,6 +570,41 @@ class PolicyLoader {
               fail("/endpoints/auth", "bearer, x-api-key or x-goog-api-key");
           }
           if (e.get("charge_on_accept").valid()) fact.charge_on_accept = boolean(e.get("charge_on_accept"), "/endpoints/charge_on_accept");
+          if (e.get("max_response_bytes").valid()) {
+            fact.max_response_bytes = integer(e.get("max_response_bytes"), "/endpoints/max_response_bytes");
+            if (!fact.max_response_bytes || fact.max_response_bytes > std::numeric_limits<std::size_t>::max())
+              fail("/endpoints/max_response_bytes", "a positive size in bytes");
+          }
+          if (e.get("max_part_bytes").valid()) {
+            fact.max_part_bytes = integer(e.get("max_part_bytes"), "/endpoints/max_part_bytes");
+            if (fact.endpoint != "files" || !fact.max_part_bytes || fact.max_part_bytes > std::numeric_limits<std::size_t>::max())
+              fail("/endpoints/max_part_bytes", "a positive size in bytes on a files fact");
+          }
+          if (const auto audio = e.get("accepted_audio"); audio.valid()) {
+            if (fact.endpoint != "transcription") fail("/endpoints/accepted_audio", "a transcription fact");
+            closed(audio, {"types"}, "/endpoints/accepted_audio", {"max_bytes"});
+            const auto types = audio.get("types");
+            if (!types.is_object() || !types.size() || types.size() > 32) fail("/endpoints/accepted_audio/types", "one to 32 audio MIME types");
+            AcceptedAudioFact input;
+            for (auto member : types.members()) {
+              std::string mime(member.key);
+              auto name = text(member.value, "/endpoints/accepted_audio/types");
+              const auto subtype = std::string_view(mime).substr(std::min<std::size_t>(mime.size(), 6));
+              const auto word = [](char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'); };
+              if (!mime.starts_with("audio/") || subtype.empty() || subtype.size() > 64 ||
+                  !std::all_of(subtype.begin(), subtype.end(), [&](char c) { return word(c) || c == '-' || c == '.' || c == '+' || c == '_'; }))
+                fail("/endpoints/accepted_audio/types", "lowercase audio MIME essences");
+              if (name.size() > 16 || !std::all_of(name.begin(), name.end(), word))
+                fail("/endpoints/accepted_audio/types", "format names of lowercase letters and digits");
+              input.types.emplace_back(std::move(mime), std::move(name));
+            }
+            if (audio.get("max_bytes").valid()) {
+              input.max_bytes = integer(audio.get("max_bytes"), "/endpoints/accepted_audio/max_bytes");
+              if (!input.max_bytes || input.max_bytes > config_defaults::codec_admission_audio_decoded_bytes)
+                fail("/endpoints/accepted_audio/max_bytes", "a positive size within the audio admission ceiling");
+            }
+            fact.accepted_audio = std::move(input);
+          }
           if (e.get("keep").valid()) {
             fact.keep = strings(e.get("keep"), "/endpoints/keep");
             if (fact.keep.size() > 64 || std::any_of(fact.keep.begin(), fact.keep.end(), [](const std::string& name) {

@@ -44,6 +44,8 @@ struct Encoded {
   std::optional<FileSlice> file{};
   std::string body_suffix{};
   Context context{};
+  // The fact's bound for a buffered response of this endpoint, where it is above the client's; zero for none.
+  std::uint64_t max_response_bytes = 0;
 };
 // A download the runtime wrote to a file: where, how many bytes, and their SHA-256 (hex).
 struct Sink { std::string path; std::uint64_t bytes = 0; std::string sha256; };
@@ -60,9 +62,10 @@ struct Close {
 };
 // An RFC 3339 time (`2026-10-19T13:02:22.150902Z`, or with an offset) as Unix seconds.
 std::optional<std::uint64_t> unix_seconds(std::string_view);
-// The literal headers of the endpoint's fact, added to an encoded call.
+// The literal headers and the response bound of the endpoint's fact, added to an encoded call.
 inline void add_fact_headers(Encoded& encoded, const descriptor::EndpointFact& fact) {
   for (const auto& header : fact.headers) encoded.headers.push_back(header);
+  encoded.max_response_bytes = fact.max_response_bytes;
 }
 class Codec {
  public:

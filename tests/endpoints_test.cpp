@@ -449,6 +449,154 @@ void fact_headers() {
   CHECK(std::holds_alternative<rerank::Result>(call.join()));
   CHECK(header(wire->exchanges.back()->request, "x-sp-test") == "1");
 }
+
+// The built-in policy with the `max_response_bytes` of its images facts set to `bound`, or left out (zero).
+descriptor::PolicySnapshot policy_with_image_bound(std::uint64_t bound) {
+  auto parsed = json::parse(config_defaults::descriptor_policy_json);
+  CHECK(std::holds_alternative<json::Document>(parsed));
+  std::string text = "{";
+  for (auto member : std::get<json::Document>(parsed).root().members()) {
+    if (text.size() > 1) text += ',';
+    if (member.key != "endpoints") { text += json::quote(member.key) + ":" + member.value.dump(); continue; }
+    text += "\"endpoints\":[";
+    bool first = true;
+    for (auto fact : member.value.elements()) {
+      if (!std::exchange(first, false)) text += ',';
+      if (fact.get("endpoint").as_string() != "images") { text += fact.dump(); continue; }
+      text += "{\"endpoint\":\"images\"";
+      for (auto field : fact.members()) if (field.key != "endpoint" && field.key != "max_response_bytes") text += "," + json::quote(field.key) + ":" + field.value.dump();
+      if (bound) text += ",\"max_response_bytes\":" + std::to_string(bound);
+      text += "}";
+    }
+    text += "]";
+  }
+  auto policy = descriptor::load_policy(text + "}", config_defaults::codec_defaults_json);
+  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(policy));
+  return std::get<descriptor::PolicySnapshot>(std::move(policy));
+}
+// A charged result over the response bound fails with a reason, and an endpoint fact raises the bound for its own calls.
+void response_bounds() {
+  std::string bytes;
+  CHECK(base64_decode(png, bytes));
+  bytes.append(6000, '\0');
+  const auto body = std::string(R"({"created":1,"output_format":"png","data":[{"b64_json":")") + base64_encode(bytes) + R"("}]})";
+  CHECK(body.size() > 8000 && body.size() < 9000);
+  const auto image = [&](std::uint64_t fact_bound, std::size_t client_bound) {
+    const auto policy = policy_with_image_bound(fact_bound);
+    auto executor = std::make_shared<QueueExecutor>();
+    auto wire = std::make_shared<ScriptTransport>();
+    runtime::Options options;
+    options.api_key = "synthetic-key";
+    options.limits.max_response_bytes = client_bound;
+    auto client = runtime::detail::ClientAccess::make(at_with("https://api.openai.com", policy), options, executor, wire);
+    wire->script = [&](Exchange& e) { e.reply(200, "application/json", body); };
+    runtime::RunOptions run;
+    run.deadline = executor->now() + 10s;
+    auto call = client.start(client.prepare(images::Request{"gpt-image-2", "a fox"}, run));
+    executor->drain();
+    return call.join();
+  };
+  const auto over = [](const images::Outcome& outcome) {
+    CHECK(std::holds_alternative<Failure>(outcome));
+    const auto& error = std::get<Failure>(outcome).error;
+    return error.kind == ErrorKind::ResourceLimit && error.reason == "runtime.response.limit";
+  };
+  CHECK(over(image(0, 4096)));                                          // no fact bound: the client's
+  CHECK(over(image(6000, 4096)));                                       // the fact's bound is still below the response
+  CHECK(std::holds_alternative<images::Result>(image(16384, 4096)));    // the fact's bound is above the client's
+  CHECK(std::holds_alternative<images::Result>(image(4096, 32768)));    // a fact never lowers the client's bound
+  // The bound of a response that is an error is the error bound.
+  {
+    auto executor = std::make_shared<QueueExecutor>();
+    auto wire = std::make_shared<ScriptTransport>();
+    runtime::Options options;
+    options.api_key = "synthetic-key";
+    auto client = runtime::detail::ClientAccess::make(at("https://api.openai.com"), options, executor, wire);
+    wire->script = [](Exchange& e) { e.reply(500, "text/plain", std::string(config_defaults::defaults_max_error_bytes + 1, 'x')); };
+    runtime::RunOptions run;
+    run.deadline = executor->now() + 10s;
+    auto call = client.start(client.prepare(images::Request{"gpt-image-2", "a fox"}, run));
+    executor->drain();
+    const auto outcome = call.join();
+    CHECK(std::holds_alternative<Failure>(outcome) && std::get<Failure>(outcome).error.reason == "runtime.error_body.limit");
+  }
+}
+
+// A transcription asks for the response form its options name; timestamps come only in `verbose_json`.
+void transcription_forms() {
+  const auto openai = at("https://api.openai.com");
+  const auto wav = std::make_shared<const std::string>(base64_encode(std::string("RIFF\x24\x00\x00\x00WAVEfmt synthetic", 24)));
+  transcription::Request request{"whisper-1", Media::audio("audio/wav", wav)};
+  const auto form = [&](std::string_view options) {
+    auto r = request;
+    if (!options.empty()) r.extensions = document(options);
+    return encoded<transcription::Encoded>(transcription::encode, openai, r).body;
+  };
+  const auto fields = [](const std::string& body, std::string_view name) {
+    std::size_t count = 0, at = 0;
+    const std::string needle = "name=\"" + std::string(name) + "\"\r\n\r\n";
+    while ((at = body.find(needle, at)) != std::string::npos) { ++count; at += needle.size(); }
+    return count;
+  };
+  const auto format = [](const std::string& body) {
+    const std::string needle = "name=\"response_format\"\r\n\r\n";
+    const auto at = body.find(needle) + needle.size();
+    return body.substr(at, body.find("\r\n", at) - at);
+  };
+  CHECK(format(form("")) == "json" && fields(form(""), "response_format") == 1);
+  CHECK(format(form(R"({"temperature":0})")) == "json");
+  // Timestamps ask for the verbose form, which the request may also name itself.
+  CHECK(format(form(R"({"timestamp_granularities":["word","segment"]})")) == "verbose_json");
+  CHECK(format(form(R"({"response_format":"verbose_json"})")) == "verbose_json" && fields(form(R"({"response_format":"verbose_json"})"), "response_format") == 1);
+  const auto verbose = form(R"({"response_format":"verbose_json","timestamp_granularities":["word"]})");
+  CHECK(format(verbose) == "verbose_json" && fields(verbose, "response_format") == 1 && fields(verbose, "timestamp_granularities[]") == 1);
+  CHECK(format(form(R"({"response_format":"json"})")) == "json");
+  // Timestamps cannot come in the plain form, and the policy admits no other form.
+  auto plain = request; plain.extensions = document(R"({"response_format":"json","timestamp_granularities":["word"]})");
+  CHECK(refused(transcription::encode, openai, plain) == ErrorKind::InvalidRequest);
+  auto other = request; other.extensions = document(R"({"response_format":"srt"})");
+  CHECK(refused(transcription::encode, openai, other) == ErrorKind::InvalidRequest);
+  // The verbose form reports the language and the audio's length, which the result carries.
+  const auto spoken = decoded<transcription::Codec>(transcription::typed, openai,
+      R"({"task":"transcribe","language":"english","duration":1.4,"text":"Hello there.","words":[{"word":"Hello","start":0.0,"end":0.4}]})", "whisper-1");
+  const auto& result = std::get<transcription::Result>(spoken);
+  CHECK(result.text == "Hello there." && result.language == "english" && result.seconds == 1.4);
+  CHECK(result.raw_events[0].payload->root().get("words").size() == 1);
+}
+
+// A transcription fact lists the audio it takes: OpenAI's types and 25 MiB, beside the family's chat audio.
+void transcription_audio() {
+  const auto openai = at("https://api.openai.com"), router = at("https://openrouter.ai");
+  const auto clip = [](std::size_t size) { return std::make_shared<const std::string>(base64_encode(std::string(size, 'a'))); };
+  const auto tiny = clip(24);
+  for (const auto& [mime, extension] : std::initializer_list<std::pair<const char*, const char*>>{
+           {"audio/webm", "webm"}, {"audio/flac", "flac"}, {"audio/x-flac", "flac"}, {"audio/mp4", "mp4"}, {"audio/ogg", "ogg"}, {"audio/m4a", "m4a"},
+           {"audio/x-m4a", "m4a"}, {"audio/mpeg", "mp3"}, {"audio/mp3", "mp3"}, {"audio/mpga", "mpga"}, {"audio/wav", "wav"}, {"audio/x-wav", "wav"},
+           {"AUDIO/WEBM; codecs=opus", "webm"}}) {
+    const auto wire = encoded<transcription::Encoded>(transcription::encode, openai, transcription::Request{"gpt-4o-mini-transcribe", Media::audio(mime, tiny)});
+    CHECK(wire.body.find(std::string("filename=\"audio.") + extension + "\"\r\nContent-Type: " + mime + "\r\n\r\n") != std::string::npos);
+  }
+  // A type the fact does not list, or one that is not audio.
+  CHECK(refused(transcription::encode, openai, transcription::Request{"m", Media::audio("audio/aac", tiny)}) == ErrorKind::InvalidRequest);
+  CHECK(refused(transcription::encode, openai, transcription::Request{"m", Media::audio("audio/opus", tiny)}) == ErrorKind::InvalidRequest);
+  // The fact's size limit, not the chat family's 10 MiB, and not the request limit of 16 MiB around the audio.
+  constexpr std::size_t limit = 26214400;
+  CHECK(encoded<transcription::Encoded>(transcription::encode, openai, transcription::Request{"m", Media::audio("audio/mpeg", clip(12u << 20))}).body.size() > (12u << 20));
+  const auto largest = encoded<transcription::Encoded>(transcription::encode, openai, transcription::Request{"m", Media::audio("audio/mpeg", clip(limit))});
+  CHECK(largest.body.size() > limit && largest.body.size() < limit + 4096);
+  CHECK(refused(transcription::encode, openai, transcription::Request{"m", Media::audio("audio/mpeg", clip(limit + 1))}) == ErrorKind::ResourceLimit);
+  // What surrounds the audio is still held to the request limit.
+  auto prompted = transcription::Request{"m", Media::audio("audio/mpeg", clip(12u << 20))};
+  prompted.prompt = std::string(17u << 20, 'p');
+  CHECK(refused(transcription::encode, openai, prompted) == ErrorKind::ResourceLimit);
+  // OpenRouter lists its own types and states no size, so the descriptor's audio limit applies.
+  const auto routed = encoded<transcription::Encoded>(transcription::encode, router, transcription::Request{"m", Media::audio("audio/flac", tiny)});
+  CHECK(document(routed.body)->root().get("input_audio").get("format").as_string() == "flac");
+  CHECK(document(encoded<transcription::Encoded>(transcription::encode, router, transcription::Request{"m", Media::audio("audio/l16; rate=16000", tiny)}).body)->root().get("input_audio").get("format").as_string() == "pcm16");
+  CHECK(refused(transcription::encode, router, transcription::Request{"m", Media::audio("audio/webm", tiny)}) == ErrorKind::InvalidRequest);
+  CHECK(refused(transcription::encode, router, transcription::Request{"m", Media::audio("audio/wav", clip(12u << 20))}) == ErrorKind::ResourceLimit);
+}
+
 }  // namespace
 
 // A MIME type may have whitespace around its parameters. A data URL is written without it, a JSON member keeps it as
@@ -488,6 +636,6 @@ void mime_parameters_with_whitespace() {
 }
 
 int main() {
-  try { embedding_endpoints(); embedding_counts(); rerank_endpoint(); rerank_results(); runtime_checks(); fact_headers(); moderation_endpoint(); speech_endpoint(); transcription_endpoint(); generation_endpoint(); mime_parameters_with_whitespace(); std::cout << "endpoint properties passed\n"; return 0; }
+  try { embedding_endpoints(); embedding_counts(); rerank_endpoint(); rerank_results(); runtime_checks(); fact_headers(); moderation_endpoint(); speech_endpoint(); transcription_endpoint(); generation_endpoint(); mime_parameters_with_whitespace(); response_bounds(); transcription_forms(); transcription_audio(); std::cout << "endpoint properties passed\n"; return 0; }
   catch (const std::exception& error) { std::cerr << "endpoint test failed: " << error.what() << '\n'; return 1; }
 }

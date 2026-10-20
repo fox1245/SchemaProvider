@@ -230,10 +230,22 @@ void chunked() {
   const auto part = encoded(at(openai), files::Part{session, {nullptr, {"/data/big.bin", 0, mib8}}});
   CHECK(part.path == "/v1/uploads/upload_6ad61989ee2c8191879c23751f41c77f/parts" && part.file && part.file->size == mib8 &&
         part.body.find("name=\"data\"") != std::string::npos && part.content_type.starts_with("multipart/form-data"));
+  // The first part starts at the file's start. A slice that starts elsewhere would put other bytes at the upload's offset.
+  CHECK(refused(at(openai), files::Part{session, {nullptr, {"/data/big.bin", 4096, mib8}}}) == ErrorKind::InvalidRequest);
+  // The part cap is the fact's (64 MiB at OpenAI): a part of the cap is sent, one byte more is refused.
+  {
+    constexpr std::uint64_t mib64 = std::uint64_t{64} << 20;
+    auto large = session; large.size = std::uint64_t{200} << 20;
+    CHECK(encoded(at(openai), files::Part{large, {nullptr, {"/data/big.bin", 0, mib64}}}).file->size == mib64);
+    CHECK(refused(at(openai), files::Part{large, {nullptr, {"/data/big.bin", 0, mib64 + 1}}}) == ErrorKind::InvalidRequest);
+    CHECK(refused(at(openai), files::Part{large, {std::make_shared<const std::string>(mib64 + 1, 'x')}}) == ErrorKind::InvalidRequest);
+  }
   session = std::get<files::Progress>(progress_of(openai, Step::Part, R"({"id":"part_1","object":"upload.part","upload_id":"upload_6ad61989ee2c8191879c23751f41c77f"})",
                                                  {}, session, mib8)).session;
   CHECK(session.sent == mib8 && session.parts == std::vector<std::string>{"part_1"});
   CHECK(refused(at(openai), files::Complete{session}) == ErrorKind::InvalidRequest);          // a part is missing
+  CHECK(refused(at(openai), files::Part{session, {nullptr, {"/data/big.bin", 0, total - mib8}}}) == ErrorKind::InvalidRequest);   // the first slice again
+  CHECK(encoded(at(openai), files::Part{session, {nullptr, {"/data/big.bin", mib8, total - mib8}}}).file->offset == mib8);
   CHECK(refused(at(openai), files::Part{session, {std::make_shared<const std::string>(std::size_t{2} << 20, 'x')}}) == ErrorKind::InvalidRequest);
   session = std::get<files::Progress>(progress_of(openai, Step::Part, R"({"id":"part_2","object":"upload.part"})", {}, session, total - mib8)).session;
   const auto complete = encoded(at(openai), files::Complete{session});
@@ -264,8 +276,14 @@ void chunked() {
   CHECK(chunk.path == "/upload/v1beta/files?upload_id=AB-cd_12&upload_protocol=resumable" && extra_header(chunk, "X-Goog-Upload-Command") == "upload" &&
         extra_header(chunk, "X-Goog-Upload-Offset") == "0" && chunk.body.empty() && chunk.file && chunk.content_type == "application/octet-stream");
   CHECK(refused(at(google), files::Part{upload, {nullptr, {"/data/big.bin", 0, 1048576}}}) == ErrorKind::InvalidRequest);   // not a multiple, not last
+  // Google states no part cap: a chunk of any multiple of the granularity goes.
+  {
+    auto large = upload; large.size = std::uint64_t{512} << 20;
+    CHECK(encoded(at(google), files::Part{large, {nullptr, {"/data/big.bin", 0, std::uint64_t{128} << 20}}}).file->size == std::uint64_t{128} << 20);
+  }
   upload = std::get<files::Progress>(progress_of(google, Step::Part, "", {{"x-goog-upload-status", "active"}}, upload, mib8)).session;
   CHECK(upload.sent == mib8);
+  CHECK(refused(at(google), files::Part{upload, {nullptr, {"/data/big.bin", 0, total - mib8}}}) == ErrorKind::InvalidRequest);   // not where the upload stands
   const auto last = encoded(at(google), files::Part{upload, {nullptr, {"/data/big.bin", mib8, total - mib8}}});
   CHECK(extra_header(last, "X-Goog-Upload-Command") == "upload, finalize" && extra_header(last, "X-Goog-Upload-Offset") == "8388608");
   const auto finished = std::get<files::Progress>(progress_of(google, Step::Part,

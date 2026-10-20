@@ -67,6 +67,12 @@ struct AudioFormatFact { std::string mime; std::uint32_t rate = 0, sample_bytes 
 // runtime error policy classifies it as (1007 with "API key not valid" is a 401). A `reason` must appear in the
 // close reason; an empty one matches any.
 struct CloseCodeFact { std::uint16_t code = 0; std::string reason{}; int status = 0; };
+// The audio a transcription endpoint takes: each MIME type with the name the provider reads for it (the upload's
+// file extension, or `input_audio.format`), and the largest decoded size, zero to leave the descriptor's audio limit.
+struct AcceptedAudioFact {
+  std::vector<std::pair<std::string, std::string>> types;
+  std::uint64_t max_bytes = 0;
+};
 // A non-chat endpoint the policy admits (D6): what it does (`images`), the wire shape a compiled codec speaks
 // (`openai`, `openrouter`), the origins that serve it, the path of each operation (`generate`, `edit`), the
 // schema of the members a request may add beside the typed ones, the authentication header, whether the
@@ -86,6 +92,13 @@ struct EndpointFact {
   // report a failure.
   std::vector<AudioFormatFact> audio_input{}, audio_output{};
   std::vector<CloseCodeFact> close_codes{};
+  // The size a buffered response of the endpoint may reach where that exceeds the client's own bound (a base64
+  // image, a spoken reply); zero leaves the client's bound.
+  std::uint64_t max_response_bytes = 0;
+  // A transcription endpoint: the audio it takes. Zero for none; otherwise the descriptor's media policy applies.
+  std::optional<AcceptedAudioFact> accepted_audio{};
+  // A files endpoint: the largest part of a chunked upload, zero for none.
+  std::uint64_t max_part_bytes = 0;
 };
 // The path of one operation of an endpoint fact, if it has one.
 std::optional<std::string_view> endpoint_path(const EndpointFact&, std::string_view operation) noexcept;
