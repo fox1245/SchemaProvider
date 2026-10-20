@@ -55,6 +55,8 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   if (request.extensions) for (auto member : request.extensions->root().members()) out.raw(",").quoted(member.key).raw(":").value(member.value, 1);
   out.raw("}");
   if (!out.ok()) return Error{ErrorKind::ResourceLimit, "video request exceeds JSON limits"};
-  return Encoded{std::string(*path), std::move(body), request.model, fact->charge_on_accept, fact->auth};
+  Encoded encoded{std::string(*path), std::move(body), request.model, fact->charge_on_accept, fact->auth};
+  endpoints::add_fact_headers(encoded, *fact);
+  return encoded;
 }
 }  // namespace sp::videos

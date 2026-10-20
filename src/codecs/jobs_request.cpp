@@ -32,6 +32,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   if (auto* error = std::get_if<Error>(&found)) return *error;
   auto& [fact, path] = std::get<0>(found);
   Encoded encoded{std::move(path), {}, poll.handle.model, false, fact->auth};
+  endpoints::add_fact_headers(encoded, *fact);
   encoded.method = "GET";
   encoded.content_type.clear();
   return encoded;
@@ -42,6 +43,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   auto& [fact, path] = std::get<0>(found);
   if (!download.max_bytes) return bad("a download needs a positive byte limit");
   Encoded encoded{std::move(path) + "?index=" + std::to_string(download.index), {}, download.handle.model, false, fact->auth};
+  endpoints::add_fact_headers(encoded, *fact);
   encoded.method = "GET";
   encoded.content_type.clear();
   encoded.accept = "*/*";

@@ -1,13 +1,23 @@
 // Embeddings, rerank and moderation endpoints (D6): the request each provider shape takes and the typed result of a
 // response.
+#include "codecs/batches.h"
+#include "codecs/decisions.h"
 #include "codecs/embeddings.h"
+#include "codecs/files.h"
 #include "codecs/generations.h"
+#include "codecs/images.h"
+#include "codecs/jobs.h"
 #include "codecs/moderation.h"
 #include "codecs/rerank.h"
 #include "codecs/speech.h"
 #include "codecs/transcription.h"
+#include "codecs/videos.h"
 #include "descriptor/descriptor.h"
+#include "descriptor/policy.h"
 #include "json/json.h"
+#include "sp/config_defaults.h"
+#include "support/endpoint_fakes.h"
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
@@ -16,6 +26,8 @@
 
 namespace {
 using namespace sp;
+using namespace sp::test;
+using namespace std::chrono_literals;
 #define CHECK(condition) do { if (!(condition)) throw std::runtime_error("line " + std::to_string(__LINE__) + ": " #condition); } while (false)
 descriptor::ValidatedDescriptor at(std::string_view origin) {
   const std::string family = origin == "https://generativelanguage.googleapis.com" ? "google.generate" : "openai.chat";
@@ -245,6 +257,100 @@ void generation_endpoint() {
   bad_codec.buffered(R"({"data":{"id":"gen-1","native_tokens_prompt":"3"}})", {});
   CHECK(broken.outcome() && std::holds_alternative<Failure>(*broken.outcome()));
 }
+
+// The policy's `headers` of an endpoint fact go with every call to it.
+descriptor::PolicySnapshot policy_with_headers() {
+  auto parsed = json::parse(config_defaults::descriptor_policy_json);
+  CHECK(std::holds_alternative<json::Document>(parsed));
+  std::string text = "{";
+  for (auto member : std::get<json::Document>(parsed).root().members()) {
+    if (text.size() > 1) text += ',';
+    if (member.key != "endpoints") { text += json::quote(member.key) + ":" + member.value.dump(); continue; }
+    text += "\"endpoints\":[";
+    bool first = true;
+    for (auto fact : member.value.elements()) {
+      if (!std::exchange(first, false)) text += ',';
+      // Every fact gets a header of its own, beside the ones it carries (Anthropic's version).
+      text += R"({"headers":{"x-sp-test":"1")";
+      for (auto header : fact.get("headers").members()) text += "," + json::quote(header.key) + ":" + header.value.dump();
+      text += "}";
+      for (auto field : fact.members()) if (field.key != "headers") text += "," + json::quote(field.key) + ":" + field.value.dump();
+      text += "}";
+    }
+    text += "]";
+  }
+  auto policy = descriptor::load_policy(text + "}", config_defaults::codec_defaults_json);
+  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(policy));
+  return std::get<descriptor::PolicySnapshot>(std::move(policy));
+}
+descriptor::ValidatedDescriptor at_with(std::string_view origin, const descriptor::PolicySnapshot& policy) {
+  const std::string family = origin == "https://generativelanguage.googleapis.com" ? "google.generate" : origin == "https://api.anthropic.com" ? "anthropic.messages" : "openai.chat";
+  const std::string path = family == "google.generate" ? "/v1beta/models/{model}:generateContent" : family == "anthropic.messages" ? "/v1/messages"
+      : origin == "https://openrouter.ai" ? "/api/v1/chat/completions" : "/v1/chat/completions";
+  const std::string stream = family == "google.generate" ? "/v1beta/models/{model}:streamGenerateContent?alt=sse" : path;
+  auto loaded = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"headers-fixture","family":)" + json::quote(family) +
+                                 R"(,"connection":{"base_url":)" + json::quote(origin) + R"(,"paths":{"buffered":)" + json::quote(path) +
+                                 R"(,"streaming":)" + json::quote(stream) + "}}}", policy);
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
+  return std::get<descriptor::ValidatedDescriptor>(std::move(loaded));
+}
+void fact_headers() {
+  const auto policy = policy_with_headers();
+  const auto openai = at_with("https://api.openai.com", policy), router = at_with("https://openrouter.ai", policy),
+             google = at_with("https://generativelanguage.googleapis.com", policy), anthropic = at_with("https://api.anthropic.com", policy);
+  const auto sends = [](const endpoints::Encoded& wire) {
+    return std::count(wire.headers.begin(), wire.headers.end(), std::pair<std::string, std::string>{"x-sp-test", "1"}) == 1;
+  };
+  const auto png_image = Media::image("image/png", std::make_shared<const std::string>(png));
+  images::Request image{"m", "a fox"};
+  CHECK(sends(encoded<images::Encoded>(images::encode, openai, image)));
+  image.references = {png_image};
+  CHECK(sends(encoded<images::Encoded>(images::encode, openai, image)));
+  CHECK(sends(encoded<images::Encoded>(images::encode, router, image)));
+  decisions::Request question;
+  question.model = "m";
+  question.input = document(R"("a ticket")");
+  question.questions.push_back({"urgent", decisions::Kind::Predicate, document(R"("is it urgent?")")});
+  CHECK(sends(encoded<decisions::Encoded>(decisions::encode, openai, question)));
+  CHECK(sends(encoded<decisions::Encoded>(decisions::encode, router, question)));
+  embeddings::Request vectors{"m", {{"a"}}};
+  CHECK(sends(encoded<embeddings::Encoded>(embeddings::encode, openai, vectors)));
+  CHECK(sends(encoded<embeddings::Encoded>(embeddings::encode, google, vectors)));
+  CHECK(sends(encoded<rerank::Encoded>(rerank::encode, router, rerank::Request{"m", "q", {"a", "b"}})));
+  CHECK(sends(encoded<moderation::Encoded>(moderation::encode, openai, moderation::Request{"m", {{"a"}}})));
+  CHECK(sends(encoded<speech::Encoded>(speech::encode, openai, speech::Request{"m", "hello", "alloy"})));
+  CHECK(sends(encoded<speech::Encoded>(speech::encode, router, speech::Request{"m", "hello", "alloy"})));
+  const auto wav = std::make_shared<const std::string>(base64_encode(std::string("RIFF\x24\x00\x00\x00WAVEfmt synthetic", 24)));
+  transcription::Request heard{"m", Media::audio("audio/wav", wav)};
+  CHECK(sends(encoded<transcription::Encoded>(transcription::encode, openai, heard)));
+  CHECK(sends(encoded<transcription::Encoded>(transcription::encode, router, heard)));
+  CHECK(sends(encoded<videos::Encoded>(videos::encode, router, videos::Request{"m", "a fox"})));
+  const jobs::Handle handle{"videos", "https://openrouter.ai", "job-1", "m"};
+  using PollEncode = std::variant<jobs::Encoded, Error> (*)(const descriptor::ValidatedDescriptor&, const jobs::Poll&);
+  using DownloadEncode = std::variant<jobs::Encoded, Error> (*)(const descriptor::ValidatedDescriptor&, const jobs::Download&);
+  CHECK(sends(encoded<jobs::Encoded>(static_cast<PollEncode>(jobs::encode), router, jobs::Poll{handle})));
+  CHECK(sends(encoded<jobs::Encoded>(static_cast<DownloadEncode>(jobs::encode), router, jobs::Download{handle, 0})));
+  // The endpoints that already did, and a fact's own headers beside the added one.
+  CHECK(sends(encoded<files::Encoded>(static_cast<std::variant<files::Encoded, Error> (*)(const descriptor::ValidatedDescriptor&, const files::Get&)>(files::encode), openai, files::Get{"file-a"})));
+  const auto version = encoded<files::Encoded>(static_cast<std::variant<files::Encoded, Error> (*)(const descriptor::ValidatedDescriptor&, const files::Get&)>(files::encode), anthropic, files::Get{"file_a"});
+  CHECK(sends(version) && std::count(version.headers.begin(), version.headers.end(), std::pair<std::string, std::string>{"anthropic-version", "2023-06-01"}) == 1);
+  CHECK(sends(encoded<batches::Encoded>(static_cast<std::variant<batches::Encoded, Error> (*)(const descriptor::ValidatedDescriptor&, const batches::Get&)>(batches::encode), openai, batches::Get{"batch_1"})));
+  CHECK(sends(encoded<generations::Encoded>(generations::encode, router, generations::Get{"gen-1"})));
+
+  // Through the runtime the header is on the wire.
+  auto executor = std::make_shared<QueueExecutor>();
+  auto wire = std::make_shared<ScriptTransport>();
+  runtime::Options options;
+  options.api_key = "synthetic-key";
+  auto client = runtime::detail::ClientAccess::make(router, options, executor, wire);
+  runtime::RunOptions run;
+  run.deadline = executor->now() + 10s;
+  wire->script = [](Exchange& e) { e.reply(200, "application/json", R"({"results":[{"index":0,"relevance_score":0.5},{"index":1,"relevance_score":0.2}]})"); };
+  auto call = client.start(client.prepare(rerank::Request{"m", "q", {"a", "b"}}, run));
+  executor->drain();
+  CHECK(std::holds_alternative<rerank::Result>(call.join()));
+  CHECK(header(wire->exchanges.back()->request, "x-sp-test") == "1");
+}
 }  // namespace
 
 // A MIME type may have whitespace around its parameters. A data URL is written without it, a JSON member keeps it as
@@ -284,6 +390,6 @@ void mime_parameters_with_whitespace() {
 }
 
 int main() {
-  try { embedding_endpoints(); rerank_endpoint(); moderation_endpoint(); speech_endpoint(); transcription_endpoint(); generation_endpoint(); mime_parameters_with_whitespace(); std::cout << "endpoint properties passed\n"; return 0; }
+  try { embedding_endpoints(); rerank_endpoint(); fact_headers(); moderation_endpoint(); speech_endpoint(); transcription_endpoint(); generation_endpoint(); mime_parameters_with_whitespace(); std::cout << "endpoint properties passed\n"; return 0; }
   catch (const std::exception& error) { std::cerr << "endpoint test failed: " << error.what() << '\n'; return 1; }
 }
