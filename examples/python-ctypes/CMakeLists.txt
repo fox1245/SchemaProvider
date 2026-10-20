@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 project(sp_capi_example LANGUAGES CXX)
 
 # An installed SchemaProvider (see the README install recipe) and the header-only cppdotenv.
-find_package(SchemaProvider 0.3.0 EXACT CONFIG REQUIRED)
+find_package(SchemaProvider 0.4.0 EXACT CONFIG REQUIRED)
 find_package(cppdotenv CONFIG QUIET)
 if(NOT cppdotenv_FOUND)
   include(FetchContent)

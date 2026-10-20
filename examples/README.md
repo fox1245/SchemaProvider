@@ -1,6 +1,6 @@
 # SchemaProvider outside NeoGraph
 
-These examples use the installed C++ SDK directly. They do not link NeoGraph. Install the matching **0.3.0 alpha / interface 7** SDK using the [SDK build recipe](../README.md#install-and-use-the-unstable-c-sdk), then set `SDK_PREFIX` to that installation directory. A static SDK used inside the example shared library must be built with position-independent code (`-DCMAKE_POSITION_INDEPENDENT_CODE=ON` on ELF platforms).
+These examples use the installed C++ SDK directly. They do not link NeoGraph. Install the matching **0.4.0 alpha / interface 7** SDK using the [SDK build recipe](../README.md#install-and-use-the-unstable-c-sdk), then set `SDK_PREFIX` to that installation directory. A static SDK used inside the example shared library must be built with position-independent code (`-DCMAKE_POSITION_INDEPENDENT_CODE=ON` on ELF platforms).
 
 Both consumers load a named key using [`cppdotenv::dotenv_values`](https://github.com/fox1245/cppdotenv) without modifying the process environment. Their CMake projects fetch pinned cppdotenv source if needed; an offline build can set `FETCHCONTENT_SOURCE_DIR_CPPDOTENV` to an existing checkout. No model download or local inference runtime is needed.
 

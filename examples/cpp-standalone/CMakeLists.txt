@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(sp_chat_standalone LANGUAGES CXX)
 
-find_package(SchemaProvider 0.3.0 EXACT CONFIG REQUIRED)
+find_package(SchemaProvider 0.4.0 EXACT CONFIG REQUIRED)
 
 include(FetchContent)
 FetchContent_Declare(cppdotenv

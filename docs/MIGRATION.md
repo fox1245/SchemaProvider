@@ -23,7 +23,7 @@ Family C++ code now owns request structure, tool/native checks, stream correlati
 
 ## From interface 6 to 7
 
-The package remains 0.3.0 alpha; the interface and shared-library generation advance to 7 (`libsp_*.so.7`). Replace `<core/image.h>` with `<core/media.h>`, `sp::Image` with `sp::Media`, and `chat::InputMessage::images` with `media`. Construct an image with `Media::image(mime, shared_base64, detail)` rather than the old aggregate layout. Generic `Message::parts` still preserves caller order; its variant now holds `Media` at the former image index. No image-header/type/field alias is retained.
+Package 0.4.0 alpha carries interface revision 7 and shared-library generation 7 (`libsp_*.so.7`); CMake consumers select `SchemaProvider 0.4.0 EXACT`. Replace `<core/image.h>` with `<core/media.h>`, `sp::Image` with `sp::Media`, and `chat::InputMessage::images` with `media`. Construct an image with `Media::image(mime, shared_base64, detail)` rather than the old aggregate layout. Generic `Message::parts` still preserves caller order; its variant now holds `Media` at the former image index. No image-header/type/field alias is retained.
 
 `Media` distinguishes Image/Audio/Video/Document and Inline/Url/File, with MIME, shared immutable base64 or a provider reference, optional name, image detail, generated identity and audio transcript. Do not treat every media part as an image or dereference `data` for URL/file sources. Generated media may have an unknown (empty) MIME when the provider and request do not identify it; do not fabricate a format from the kind. An unsealed partial media part has no payload.
 
