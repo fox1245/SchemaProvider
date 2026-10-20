@@ -239,10 +239,10 @@ The four listings:
 
 The rules of a refresh:
 - **Source URL and origin.** A source's `url` is where the listing is served (https, or http on a loopback host). Its `origin` is the descriptor origin the entries are scoped to. Both default to the provider's API.
-- **What a source owns.** Each source owns the entries whose `source` is the listing's name (`openrouter`, `gemini`, `anthropic`, `openai`) and whose origins are its origin.
-- **Failures keep old entries.** A source that fails keeps its entries from `previous`, so an outage never drops models. `RefreshResult::sources` reports the failure as fixed text: never a URL, header, credential or body.
+- **What a source owns.** Each source owns the entries whose `source` is the listing's name (`openrouter`, `gemini`, `anthropic`, `openai`) and whose origins are its origin. An id that sources of different kinds list is one entry with every origin they gave and every listing name, joined with `+` (`gemini+openai`); it is removed only when the sources that serve each of its origins listed this time and none of them names it.
+- **Failures keep old entries.** A source that fails keeps its entries from `previous`, so an outage never drops models. `RefreshResult::sources` reports the failure as fixed text: never a URL, header, credential or body. A source also fails, and keeps its entries, when its listing names no models or fewer than `RefreshRequest::min_kept_percent` percent (50 by default; 0 turns this second test off) of the entries `previous` has from it (a proxy or a captive portal can answer 200 with an empty list; `RefreshRequest::allow_drop` takes such a listing as it is), when a Gemini `nextPageToken` or an Anthropic `last_id` cannot continue the listing, and when the listing does not fit the catalogue's bounds (16384 entries, 8 MiB), alone or together with the other sources.
 - **Listings are provider data.** Unknown members are ignored. A value the catalogue cannot hold is left out. An id that is not a model name is counted in `skipped`, and a price that is not plain decimal text (a number, or text such as `1e-7`) or that is past the 64 units an entry keeps in `skipped_prices`. A body that is not a listing fails that source.
-- **Bounds.** Each page waits at most `page_timeout` and may be at most 32 MiB. A source stops after 64 pages, or when it repeats its page token.
+- **Bounds.** Each page waits at most `page_timeout` and may be at most 32 MiB, and the whole refresh at most `total_timeout` (five minutes by default); a source the deadline stops fails. A source stops after 64 pages, or when it repeats its page token.
 - **Result.** `generated` is the provider facts alone, `catalogue` is `generated` with the overlays merged over it, and `diff` runs from `previous` to `generated`.
 - **Blocking.** The call waits for each page, so it must not run on one of the transport's I/O threads.
 
@@ -253,6 +253,8 @@ The `sp_catalogue_refresh` tool, built with the tests, runs a refresh from the c
 ```bash
 sp_catalogue_refresh --out models.json --generated generated.json --builtin-overlay [--previous generated.json] [--overlay mine.json]
 ```
+
+If a source fails, the tool exits 3 and writes nothing, so a scheduled job keeps the file it had during an outage; `--write-partial` writes the catalogue anyway, with the failed sources' previous entries. `--min-kept-percent` sets that share and `--allow-drop` accepts a listing that names no models or fewer than it, and `--url <source>=<url>` reads a source's listing from another URL. Each file is replaced whole or not at all.
 
 ### Pricing by the catalogue
 

@@ -3,17 +3,26 @@
 //
 //   sp_catalogue_refresh --out models.json [--previous generated.json] [--overlay file]...
 //                        [--builtin-overlay] [--source openrouter|gemini|anthropic|openai]...
+//                        [--url source=url]... [--min-kept-percent n] [--allow-drop] [--write-partial]
 //
 // Keys come from OPENROUTER_API_KEY (optional), GEMINI_API_KEY, ANTHROPIC_API_KEY and
 // OPENAI_API_KEY. Without --source, OpenRouter and every provider with a key are listed. With
 // --generated, the provider facts alone are written there as well, to pass as --previous next time.
-// Keys are never printed.
+// --url serves a source's listing from another URL (a mirror; https, or http on loopback).
+// A source that fails exits 3 and writes nothing, so a scheduled job keeps the file it had during
+// an outage; --write-partial writes the catalogue anyway, with the previous entries of the failed
+// sources. A source whose listing names no models, or fewer than --min-kept-percent percent (default
+// 50) of the entries --previous has from it, fails; --allow-drop accepts such a listing.
+// A file is replaced whole or not at all. Keys are never printed.
 #include "descriptor/catalogue.h"
 #include "transport/catalogue_refresh.h"
 #include <algorithm>
+#include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -33,17 +42,38 @@ sp::descriptor::CatalogueSnapshot load(const std::string& path) {
   }
   return std::get<sp::descriptor::CatalogueSnapshot>(std::move(loaded));
 }
-bool write(const std::string& path, const sp::descriptor::ModelCatalogue& catalogue) {
-  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+// A file written next to its destination, to be renamed over it once every file is complete.
+struct Staged {
+  std::string path, temporary;
+};
+bool stage(Staged& file, const std::string& path, const sp::descriptor::ModelCatalogue& catalogue) {
+  file.path = path;
+  file.temporary = path + ".tmp";
+  std::ofstream out(file.temporary, std::ios::binary | std::ios::trunc);
   out << catalogue.to_json() << '\n';
+  out.flush();
   return static_cast<bool>(out);
+}
+void discard(const std::vector<Staged>& files) {
+  std::error_code ignored;
+  for (const auto& file : files) if (!file.temporary.empty()) std::filesystem::remove(file.temporary, ignored);
+}
+bool commit(const std::vector<Staged>& files) {
+  for (const auto& file : files) {
+    std::error_code error;
+    std::filesystem::rename(file.temporary, file.path, error);
+    if (error) return false;
+  }
+  return true;
 }
 } // namespace
 
 int main(int argc, char** argv) {
   std::string out, generated_out;
+  bool write_partial = false;
   sp::transport::RefreshRequest request;
   std::vector<Listing> chosen;
+  std::map<Listing, std::string> urls;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     auto value = [&]() -> std::string {
@@ -55,13 +85,32 @@ int main(int argc, char** argv) {
     else if (arg == "--previous") request.previous = load(value());
     else if (arg == "--overlay") request.overlays.push_back(load(value()));
     else if (arg == "--builtin-overlay") request.overlays.push_back(sp::descriptor::builtin_catalogue());
-    else if (arg == "--source") {
-      const auto name = value();
-      if (name == "openrouter") chosen.push_back(Listing::OpenRouter);
-      else if (name == "gemini") chosen.push_back(Listing::Gemini);
-      else if (name == "anthropic") chosen.push_back(Listing::Anthropic);
-      else if (name == "openai") chosen.push_back(Listing::OpenAI);
+    else if (arg == "--allow-drop") request.allow_drop = true;
+    else if (arg == "--min-kept-percent") {
+      const auto text = value();
+      char* end = nullptr;
+      const auto percent = std::strtoul(text.c_str(), &end, 10);
+      if (text.empty() || *end != '\0' || percent > 100) { std::cerr << "--min-kept-percent needs a number from 0 to 100\n"; return 2; }
+      request.min_kept_percent = static_cast<std::uint32_t>(percent);
+    }
+    else if (arg == "--write-partial") write_partial = true;
+    else if (arg == "--source" || arg == "--url") {
+      auto name = value();
+      std::string url;
+      if (arg == "--url") {
+        const auto cut = name.find('=');
+        if (cut == std::string::npos) { std::cerr << "--url needs source=url\n"; return 2; }
+        url = name.substr(cut + 1);
+        name.resize(cut);
+      }
+      Listing listing = Listing::OpenRouter;
+      if (name == "openrouter") listing = Listing::OpenRouter;
+      else if (name == "gemini") listing = Listing::Gemini;
+      else if (name == "anthropic") listing = Listing::Anthropic;
+      else if (name == "openai") listing = Listing::OpenAI;
       else { std::cerr << "unknown source " << name << '\n'; return 2; }
+      if (arg == "--url") urls[listing] = url;
+      else chosen.push_back(listing);
     } else { std::cerr << "unknown argument " << arg << '\n'; return 2; }
   }
   if (out.empty()) { std::cerr << "--out is required\n"; return 2; }
@@ -70,7 +119,7 @@ int main(int argc, char** argv) {
   for (const auto& [listing, variable] : keys) {
     const bool wanted = chosen.empty() ? (listing == Listing::OpenRouter || !key(variable).empty())
                                        : std::find(chosen.begin(), chosen.end(), listing) != chosen.end();
-    if (wanted) request.sources.push_back({listing, {}, key(variable), {}});
+    if (wanted) request.sources.push_back({listing, urls[listing], key(variable), {}});
   }
 
   sp::transport::Transport transport;
@@ -90,8 +139,18 @@ int main(int argc, char** argv) {
   }
   std::cout << "diff: " << refreshed.diff.added.size() << " added, " << refreshed.diff.removed.size() << " removed, "
             << refreshed.diff.changed.size() << " changed\n";
-  if (!generated_out.empty() && !write(generated_out, *refreshed.generated)) { std::cerr << "could not write " << generated_out << '\n'; return 1; }
-  if (!write(out, *refreshed.catalogue)) { std::cerr << "could not write " << out << '\n'; return 1; }
+  if (!all_ok && !write_partial) {
+    std::cout << "a source failed: nothing written (--write-partial writes the catalogue with the previous entries of the failed sources)\n";
+    return 3;
+  }
+  std::vector<Staged> files(generated_out.empty() ? 1 : 2);
+  const bool staged = (generated_out.empty() || stage(files[0], generated_out, *refreshed.generated)) &&
+                      stage(files.back(), out, *refreshed.catalogue);
+  if (!staged || !commit(files)) {
+    discard(files);
+    std::cerr << "could not write " << (generated_out.empty() ? out : generated_out + " or " + out) << '\n';
+    return 1;
+  }
   std::cout << "wrote " << refreshed.catalogue->entries().size() << " entries, sha256 " << refreshed.catalogue->digest_hex() << '\n';
   return all_ok ? 0 : 3;
 }
