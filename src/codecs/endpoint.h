@@ -21,11 +21,12 @@ struct FileSlice {
   std::string sha256{};
 };
 // What the runtime hands a call's decoder beside the model, and no accessor of the prepared call shows: how many
-// inputs the call sent and how many results it asked for (zero when it states none), and a value that must not reach
-// a journal (a chunked upload's session URL).
+// inputs the call sent and how many results it asked for (zero when it states none), a value that must not reach
+// a journal (a chunked upload's session URL), and the job a poll asked about, which its answer must name.
 struct Context {
   std::uint64_t inputs = 0, results = 0;
   std::string secret{};
+  std::string job{};
 };
 // An encoded endpoint call: the path at the origin, the body and its media type, what the call accepts back, the
 // model it names, the authentication header, and whether the provider charges once it accepts it.

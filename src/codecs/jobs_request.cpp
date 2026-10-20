@@ -33,6 +33,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   auto& [fact, path] = std::get<0>(found);
   Encoded encoded{std::move(path), {}, poll.handle.model, false, fact->auth};
   endpoints::add_fact_headers(encoded, *fact);
+  encoded.context.job = poll.handle.id;
   encoded.method = "GET";
   encoded.content_type.clear();
   return encoded;

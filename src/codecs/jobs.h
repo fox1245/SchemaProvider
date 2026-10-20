@@ -64,14 +64,16 @@ using Close = endpoints::Close;
 // The state of a job, from a submit's or a poll's response.
 class StateCodec final : public endpoints::Codec {
  public:
-  StateCodec(const descriptor::ValidatedDescriptor&, Accumulator&, std::string requested, std::string endpoint, SemanticLimits = {});
+  // `job` is the id a poll asked about; the answer must name it. A submit has none.
+  StateCodec(const descriptor::ValidatedDescriptor&, Accumulator&, std::string requested, std::string endpoint, SemanticLimits = {},
+             std::string job = {});
   bool buffered(std::string_view body, Close close) override;
  private:
   bool fail(ErrorKind, std::string);
   bool emit(const Event&);
   const descriptor::ValidatedDescriptor& descriptor_;
   Accumulator& accumulator_;
-  std::string requested_, endpoint_;
+  std::string requested_, endpoint_, job_;
   SemanticLimits limits_;
 };
 // A downloaded output: its body in memory, or the file the runtime wrote it to.

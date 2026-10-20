@@ -13,6 +13,13 @@ bool token(std::string_view value) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == ':' || c == '.' || c == '_' || c == '-';
   });
 }
+// The type of an inline image the provider did not name, read from the payload's signature.
+std::string sniffed_type(std::string_view base64) {
+  if (!canonical_base64(base64)) return {};
+  for (const char* type : {"image/png", "image/jpeg", "image/gif", "image/webp", "image/avif", "image/heic", "image/bmp", "image/tiff"})
+    if (media_signature_matches(type, base64)) return type;
+  return {};
+}
 std::optional<Count> counter(json::Value value) {
   if (!value.is_uint()) return std::nullopt;
   return Count{value.as_uint(), Evidence::Reported};
@@ -57,8 +64,15 @@ bool Codec::buffered(std::string_view body, Close close) {
     header.media.mime = type.is_string() ? std::string(type.as_string()) : shared_mime;
     const bool inline_image = b64.is_string() && !b64.as_string().empty();
     if (inline_image) header.media.source = MediaSource::Inline;
-    else if (url.is_string() && !url.as_string().empty()) { header.media.source = MediaSource::Url; header.media.reference = std::string(url.as_string()); }
+    else if (url.is_string() && !url.as_string().empty()) {
+      // A result is reused as a reference, which admits https locations only.
+      if (!url_syntax(url.as_string())) return fail(ErrorKind::ProtocolCorrupt, "image URL is not an https location");
+      header.media.source = MediaSource::Url;
+      header.media.reference = std::string(url.as_string());
+    }
     else return fail(ErrorKind::ProtocolCorrupt, "image item has no data");
+    if (inline_image && header.media.mime.empty()) header.media.mime = sniffed_type(b64.as_string());
+    if (inline_image && header.media.mime.empty()) return fail(ErrorKind::ProtocolCorrupt, "image item has no media type");
     const LocalId local{++index};
     if (!emit(PartBegin{{0}, local, PartKind::Media, std::move(header), index - 1})) return false;
     if (inline_image && !emit(PartDelta{local, {PartKind::Media, b64.as_string()}})) return false;

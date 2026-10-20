@@ -191,6 +191,20 @@ void job_states() {
   CHECK(std::get<jobs::State>(state_of(router, R"({"id":"j","status":"failed","error":"moderated"})")).status == jobs::Status::Failed);
   CHECK(std::get<jobs::State>(state_of(router, R"({"id":"j","status":"in_progress"})")).status == jobs::Status::Running);
   CHECK(std::get<jobs::State>(state_of(router, R"({"id":"j","status":"rendering"})")).status == jobs::Status::Unknown);
+  // A poll names the job it asks about; the answer must name the same one. A submit asks about none.
+  {
+    const auto polled = [&](std::string_view body) {
+      Accumulator accumulator;
+      jobs::StateCodec codec(router, accumulator, "x-ai/grok-imagine-video-1.5-lite", "videos", {}, "job-7f3a");
+      codec.buffered(body, {});
+      CHECK(accumulator.outcome());
+      return jobs::typed(*accumulator.outcome());
+    };
+    CHECK(std::get<jobs::State>(polled(R"({"id":"job-7f3a","status":"pending"})")).handle.id == "job-7f3a");
+    const auto other = polled(R"({"id":"job-9999","status":"pending"})");
+    CHECK(std::holds_alternative<Failure>(other) && std::get<Failure>(other).error.kind == ErrorKind::ProtocolCorrupt &&
+          std::get<Failure>(other).error.reason == "jobs.state.id_mismatch");
+  }
   for (const auto* body : {R"({"status":"pending"})", R"({"id":"j"})", R"({"id":"j","status":"completed","urls":"x"})", R"([1])"}) {
     const auto failed = state_of(router, body);
     CHECK(std::holds_alternative<Failure>(failed) && std::get<Failure>(failed).error.kind == ErrorKind::ProtocolCorrupt &&
@@ -271,6 +285,11 @@ void runtime_job() {
   const auto& poll = wire->exchanges.back()->request;
   CHECK(poll.method == "GET" && poll.url == "http://127.0.0.1:18080/api/v1/videos/job-1" && header(poll, "Content-Type").empty() && poll.body.empty());
   CHECK(std::get<jobs::State>(polled).status == jobs::Status::Completed && std::get<jobs::State>(polled).outputs == 1);
+  // An answer about another job is not the state of this one, and its id does not replace the handle's.
+  wire->script = [](Exchange& e) { e.reply(200, "application/json", R"({"id":"job-2","status":"completed","unsigned_urls":["u"]})"); };
+  const auto other = complete(client.prepare(jobs::Poll{handle}, run_for()));
+  CHECK(std::holds_alternative<Failure>(other) && std::get<Failure>(other).error.kind == ErrorKind::ProtocolCorrupt &&
+        std::get<Failure>(other).error.reason == "jobs.state.id_mismatch");
 
   const auto directory = std::filesystem::temp_directory_path() / ("sp-jobs-test-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()));
   std::filesystem::create_directories(directory);

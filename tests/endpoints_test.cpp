@@ -522,6 +522,16 @@ void response_bounds() {
   }
 }
 
+// RFC 3339 times name real days: February has 28 or 29, and the short months 30.
+void calendar_dates() {
+  const auto at = [](std::string_view text) { return endpoints::unix_seconds(text); };
+  CHECK(at("2024-02-29T00:00:00Z") == 1709164800u && at("2000-02-29T00:00:00Z") && at("2026-02-28T23:59:59Z") && at("2026-04-30T00:00:00Z"));
+  for (const char* text : {"2026-02-31T00:00:00Z", "2026-02-30T00:00:00Z", "2026-02-29T00:00:00Z", "2100-02-29T00:00:00Z", "2026-04-31T00:00:00Z",
+                           "2026-06-31T00:00:00Z", "2026-09-31T00:00:00Z", "2026-11-31T00:00:00Z", "2026-01-32T00:00:00Z", "2026-01-00T00:00:00Z"})
+    CHECK(!at(text));
+  CHECK(at("2026-01-31T00:00:00Z") && at("2026-12-31T00:00:00+01:00"));
+}
+
 // A transcription asks for the response form its options name; timestamps come only in `verbose_json`.
 void transcription_forms() {
   const auto openai = at("https://api.openai.com");
@@ -636,6 +646,6 @@ void mime_parameters_with_whitespace() {
 }
 
 int main() {
-  try { embedding_endpoints(); embedding_counts(); rerank_endpoint(); rerank_results(); runtime_checks(); fact_headers(); moderation_endpoint(); speech_endpoint(); transcription_endpoint(); generation_endpoint(); mime_parameters_with_whitespace(); response_bounds(); transcription_forms(); transcription_audio(); std::cout << "endpoint properties passed\n"; return 0; }
+  try { embedding_endpoints(); embedding_counts(); rerank_endpoint(); rerank_results(); runtime_checks(); fact_headers(); moderation_endpoint(); speech_endpoint(); transcription_endpoint(); generation_endpoint(); mime_parameters_with_whitespace(); response_bounds(); calendar_dates(); transcription_forms(); transcription_audio(); std::cout << "endpoint properties passed\n"; return 0; }
   catch (const std::exception& error) { std::cerr << "endpoint test failed: " << error.what() << '\n'; return 1; }
 }

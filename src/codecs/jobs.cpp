@@ -30,8 +30,10 @@ std::string essence(std::string_view type) {
 }
 }  // namespace
 
-StateCodec::StateCodec(const descriptor::ValidatedDescriptor& descriptor, Accumulator& accumulator, std::string requested, std::string endpoint, SemanticLimits limits)
-    : descriptor_(descriptor), accumulator_(accumulator), requested_(std::move(requested)), endpoint_(std::move(endpoint)), limits_(limits) {}
+StateCodec::StateCodec(const descriptor::ValidatedDescriptor& descriptor, Accumulator& accumulator, std::string requested, std::string endpoint,
+                       SemanticLimits limits, std::string job)
+    : descriptor_(descriptor), accumulator_(accumulator), requested_(std::move(requested)), endpoint_(std::move(endpoint)),
+      job_(std::move(job)), limits_(limits) {}
 bool StateCodec::emit(const Event& event) { return accumulator_.accept(event); }
 bool StateCodec::fail(ErrorKind kind, std::string text) {
   Error error{kind, std::move(text)};
@@ -51,6 +53,7 @@ bool StateCodec::buffered(std::string_view body, Close close) {
   if (!emit(RawWire{"job.response", wire})) return false;
   const auto id = root.get("id"), status = root.get("status");
   if (!id.is_string() || id.as_string().empty() || !status.is_string()) return fail(ErrorKind::ProtocolCorrupt, "a job names its id and status");
+  if (!job_.empty() && id.as_string() != job_) return fail(ErrorKind::ProtocolCorrupt, "a poll answers for the job it names");
   for (const char* key : {"urls", "unsigned_urls"})
     if (root.get(key).valid() && !root.get(key).is_null() && !root.get(key).is_array()) return fail(ErrorKind::ProtocolCorrupt, "job outputs are a list");
   // Which job this is, for the typed state: the endpoint and origin the call reached.
