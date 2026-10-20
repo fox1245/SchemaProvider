@@ -3,6 +3,7 @@
 #include "descriptor/policy.h"
 #include "json/json.h"
 #include <algorithm>
+#include <charconv>
 
 namespace sp::files {
 namespace {
@@ -13,10 +14,16 @@ template <class Check> bool optional_member(json::Value value, Check check) { re
 bool is_string(json::Value value) { return value.is_string(); }
 bool is_uint(json::Value value) { return value.is_uint(); }
 bool is_time(json::Value value) { return value.is_string() && unix_seconds(value.as_string()).has_value(); }
-bool is_digits(json::Value value) {
-  return value.is_string() && !value.as_string().empty() && value.as_string().size() <= 20 &&
-         std::all_of(value.as_string().begin(), value.as_string().end(), [](char c) { return c >= '0' && c <= '9'; });
+// A decimal number a server wrote as a string, when it is digits only and fits 64 bits.
+std::optional<std::uint64_t> to_uint(std::string_view text) {
+  if (text.empty() || text.front() < '0' || text.front() > '9') return std::nullopt;
+  std::uint64_t value = 0;
+  const auto end = text.data() + text.size();
+  const auto [stop, error] = std::from_chars(text.data(), end, value);
+  if (stop != end || error != std::errc{}) return std::nullopt;
+  return value;
 }
+bool is_digits(json::Value value) { return value.is_string() && to_uint(value.as_string()); }
 // Google gives its SHA-256 as the base64 of the digest's hex, or of the digest itself.
 std::string google_digest(std::string_view encoded) {
   std::string decoded;
@@ -44,7 +51,7 @@ bool file_of(json::Value item, std::string_view shape, std::string_view origin, 
     file.uri = text_of(item.get("uri"));
     file.name = text_of(item.get("displayName"));
     file.mime = text_of(item.get("mimeType"));
-    if (item.get("sizeBytes").is_string()) file.bytes = std::stoull(std::string(item.get("sizeBytes").as_string()));
+    if (item.get("sizeBytes").is_string()) file.bytes = to_uint(item.get("sizeBytes").as_string());
     if (item.get("createTime").is_string()) file.created_at = unix_seconds(item.get("createTime").as_string());
     if (item.get("expirationTime").is_string()) file.expires_at = unix_seconds(item.get("expirationTime").as_string());
     const auto state = text_of(item.get("state"));
@@ -112,9 +119,7 @@ std::string_view header(const Close& close, std::string_view name) {
   for (const auto& [key, value] : close.headers) if (key == name) return value;
   return {};
 }
-bool digits(std::string_view text) {
-  return !text.empty() && text.size() <= 20 && std::all_of(text.begin(), text.end(), [](char c) { return c >= '0' && c <= '9'; });
-}
+bool digits(std::string_view text) { return to_uint(text).has_value(); }
 std::optional<Session> session_of(json::Value value) {
   if (!value.is_object()) return std::nullopt;
   Session session{text_of(value.get("origin")), text_of(value.get("shape")), text_of(value.get("id")), text_of(value.get("url"))};
@@ -276,7 +281,7 @@ ProgressOutcome typed_progress(const sp::Outcome& internal) {
   if (step == "start") {
     if (google) {
       session.url = text_of(context.get("url"));
-      if (digits(text_of(context.get("granularity")))) session.granularity = std::stoull(text_of(context.get("granularity")));
+      if (const auto granularity = to_uint(text_of(context.get("granularity")))) session.granularity = *granularity;
     } else {
       session.id = text_of(response.get("id"));
       if (response.get("expires_at").is_uint()) session.expires_at = response.get("expires_at").as_uint();
@@ -284,8 +289,8 @@ ProgressOutcome typed_progress(const sp::Outcome& internal) {
   } else if (step == "part") {
     session.sent += context.get("session").get("part").as_uint();
     if (!google) session.parts.push_back(text_of(response.get("id")));
-  } else if (step == "query" && digits(text_of(context.get("received")))) {
-    session.sent = std::stoull(text_of(context.get("received")));
+  } else if (step == "query") {
+    if (const auto received = to_uint(text_of(context.get("received")))) session.sent = *received;
   }
   // The file, once the upload finished it: Google's last chunk (or a query after it), OpenAI's completion.
   const auto object = google ? file_object(response, "google") : response.get("file");
