@@ -667,8 +667,9 @@ void content_arrays_and_image_history() {
   const auto audio_first = stream(deltas_then_stop({audio_delta("\"data\":\"Qg==\"", true), array_message}),
                                   context(router(), "wav", true), {}, {}, router());
   CHECK(std::get<Media>(parts_of(completed(audio_first))[0]).kind == MediaKind::Audio);
+  // Text that follows an array's last text element continues it.
   const auto scalar_tail = stream(deltas_then_stop({array_message, R"({"content":"tail"})"}), {}, {}, {}, router());
-  CHECK(is_text(parts_of(completed(scalar_tail))[3], "tail"));
+  CHECK(parts_of(completed(scalar_tail)).size() == 3 && is_text(parts_of(completed(scalar_tail))[2], "aftertail"));
   const auto high = buffered(body(R"({"role":"assistant","content":[{"type":"image_url","image_url":{"url":"https://example.com/image.png","detail":"high"}}]})"), {}, {}, router());
   CHECK(std::get<Media>(parts_of(completed(high))[0]).detail == ImageDetail::High);
   failed(buffered(body(array_message), {}, {}, desc()), ErrorKind::Unsupported);
@@ -732,6 +733,35 @@ void content_arrays_and_image_history() {
   convenience.messages[1].media[0].data = std::make_shared<const std::string>("QR==");
   const auto malformed = chat::encode(router(), convenience, false);
   CHECK(std::holds_alternative<Error>(malformed) && std::get<Error>(malformed).kind == ErrorKind::InvalidRequest);
+}
+// A stream may carry its text as content arrays, one element a chunk. Consecutive text elements are one part, as they are in
+// the buffered reply however many chunks they take. An image or an audio reply ends the run.
+void streamed_content_arrays_continue_parts() {
+  const std::string png = b64(std::string("\x89PNG\r\n\x1a\n", 8) + "generated");
+  const std::string image = R"({"type":"image_url","image_url":{"url":"data:image/png;base64,)" + png + R"("}})";
+  constexpr std::size_t chunks = 3000;
+  auto element = [](std::string_view text) { return R"({"content":[{"type":"text","text":")" + std::string(text) + R"("}]})"; };
+  std::vector<std::string> deltas{R"({"role":"assistant","content":[{"type":"text","text":"x"}]})"};
+  for (std::size_t i = 1; i < chunks / 2; ++i) deltas.push_back(element("x"));
+  for (std::size_t i = chunks / 2; i < chunks; ++i) deltas.push_back(R"({"content":"x"})");
+  const auto live = stream(deltas_then_stop(deltas), {}, {}, {}, router());
+  const auto whole = buffered(body(R"({"role":"assistant","content":[{"type":"text","text":")" + std::string(chunks, 'x') + R"("}]})"), {}, {}, router());
+  for (const auto* outcome : {&live, &whole}) {
+    const auto& parts = parts_of(completed(*outcome));
+    CHECK(parts.size() == 1 && is_text(parts[0], std::string(chunks, 'x')));
+  }
+  // The limit bounds the parts of the answer, not its chunks.
+  CHECK(std::holds_alternative<Completion>(stream(deltas_then_stop(deltas), {}, {}, tight_parts(1), router())));
+  // Text on either side of an image stays two parts in arrival order, however the text arrives.
+  std::vector<std::string> around;
+  for (std::size_t i = 0; i < chunks; ++i) around.push_back(element("a"));
+  around.push_back(R"({"content":[)" + image + "]}");
+  for (std::size_t i = 0; i < chunks; ++i) around.push_back(i % 2 ? element("b") : R"({"content":"b"})");
+  const auto split = stream(deltas_then_stop(around), {}, {}, {}, router());
+  const auto& parts = parts_of(completed(split));
+  CHECK(parts.size() == 3 && is_text(parts[0], std::string(chunks, 'a')) && is_text(parts[2], std::string(chunks, 'b')));
+  expect_media(parts[1], Expect{MediaKind::Image, "image/png", MediaSource::Inline, png});
+  failed(stream(deltas_then_stop(around), {}, {}, tight_parts(2), router()), ErrorKind::ResourceLimit);
 }
 void pdf_and_citation_annotations() {
   // https://openrouter.ai/docs/guides/overview/multimodal/pdfs.md
@@ -957,7 +987,8 @@ void gemini_tts_and_transcripts() {
 }
 // Streamed audio arrives as one inlineData part per frame (26 or more a second of TTS). Consecutive frames of one
 // concatenable MIME are one Media part: each frame is a delta of an append-only canonical base64 stream, so the deltas
-// a sink sees join to the sealed payload. The retained wire keeps every frame for native replay.
+// a sink sees join to the sealed payload. The retained wire holds the run as one inlineData part, which is also what
+// native replay sends.
 void gemini_audio_frames_merge() {
   const std::string l16 = "audio/l16; rate=24000; channels=1";
   auto frame = [](std::string_view mime, std::string_view data) {
@@ -980,12 +1011,13 @@ void gemini_audio_frames_merge() {
   CHECK(parts.size() == 1 && std::holds_alternative<Media>(parts[0]));
   const auto& media = std::get<Media>(parts[0]);
   CHECK(media.mime == l16 && media.data && *media.data == "AAECAwQFBg==" && deltas == *media.data);
-  CHECK(completion.messages[0].wire_output && completion.messages[0].wire_output->root().size() == 4);
-  // Native replay sends the frames as received.
+  const auto expected_wire = parse_doc(R"([{"inlineData":{"mimeType":"audio/l16; rate=24000; channels=1","data":"AAECAwQFBg=="}},{"text":""}])");
+  CHECK(completion.messages[0].wire_output && json::equal(completion.messages[0].wire_output->root(), expected_wire->root()));
+  // Native replay sends the merged part and the empty one.
   auto next = gemini_request(); next.messages.push_back(completion.messages[0]); next.messages.push_back(Message{"", Role::User, {Text{"again"}}});
   const auto replay = gemini::encode(gemini_desc(), next, false);
   CHECK(std::holds_alternative<gemini::EncodedRequest>(replay));
-  CHECK(parse_doc(std::get<gemini::EncodedRequest>(replay).body)->root().get("contents").at(1).get("parts").size() == 4);
+  CHECK(json::equal(parse_doc(std::get<gemini::EncodedRequest>(replay).body)->root().get("contents").at(1).get("parts"), expected_wire->root()));
   // A buffered body with consecutive frames is the same one part.
   const auto buffered_frames = gemini_decode(gemini_body("[" + frame(l16, "AAE=") + "," + frame(l16, "Ag==") + "," + frame(l16, "AwQFBg==") + "]"), false);
   CHECK(parts_of(completed(buffered_frames)).size() == 1 && *std::get<Media>(parts_of(completed(buffered_frames))[0]).data == "AAECAwQFBg==");
@@ -1009,6 +1041,41 @@ void gemini_audio_frames_merge() {
   CHECK(cut_acc.outcome() && std::holds_alternative<Failure>(*cut_acc.outcome()));
   for (const auto& m : std::get<Failure>(*cut_acc.outcome()).partial.messages)
     for (const auto& p : m.parts) if (const auto* x = std::get_if<Media>(&p)) CHECK(!x->data);
+}
+// Streamed TTS is thousands of frames. They are one part however many there are, and the stream and the buffered reply of the
+// same audio have the same typed part and the same native array.
+void gemini_long_audio_stream() {
+  const std::string l16 = "audio/l16; rate=24000; channels=1";
+  auto frame = [&](std::string_view data) {
+    return R"({"inlineData":{"mimeType":)" + json::quote(l16) + R"(,"data":")" + std::string(data) + R"("}})";
+  };
+  constexpr std::size_t frames = 3000;
+  std::string joined;
+  for (std::size_t i = 0; i < frames; ++i) joined += "AAEC";
+  auto encoded = gemini::encode(gemini_desc(), gemini_request(), true);
+  CHECK(std::holds_alternative<gemini::EncodedRequest>(encoded));
+  Accumulator a;
+  gemini::Codec c(gemini_desc(), gemini::Mode::Sse, a, std::get<gemini::EncodedRequest>(encoded).context);
+  for (std::size_t i = 0; i < frames; ++i) CHECK(c.frame({}, gemini_body("[" + frame("AAEC") + "]", false)));
+  CHECK(c.frame({}, gemini_body(R"([{"text":""}])")));
+  c.finish();
+  CHECK(a.outcome());
+  const auto& live = completed(*a.outcome());
+  const auto whole = gemini_decode(gemini_body("[" + frame(joined) + R"(,{"text":""}])"), false);
+  for (const auto* completion : {&live, &completed(whole)}) {
+    const auto& parts = parts_of(*completion);
+    CHECK(parts.size() == 1 && std::holds_alternative<Media>(parts[0]));
+    CHECK(std::get<Media>(parts[0]).mime == l16 && *std::get<Media>(parts[0]).data == joined);
+  }
+  CHECK(json::equal(live.messages[0].wire_output->root(), completed(whole).messages[0].wire_output->root()));
+  // The limit bounds the parts of the answer: a run and a part in between fit a limit of two, and a third part does not.
+  Accumulator tight_a(tight_parts(2));
+  gemini::Codec tight(gemini_desc(), gemini::Mode::Sse, tight_a, std::get<gemini::EncodedRequest>(encoded).context, tight_parts(2));
+  for (std::size_t i = 0; i < frames; ++i) CHECK(tight.frame({}, gemini_body("[" + frame("AAEC") + "]", false)));
+  CHECK(tight.frame({}, gemini_body(R"([{"text":"between"}])", false)));
+  CHECK(!tight.frame({}, gemini_body("[" + frame("AAEC") + "]", false)));
+  CHECK(tight_a.outcome());
+  failed(*tight_a.outcome(), ErrorKind::ResourceLimit);
 }
 void gemini_generated() {
   const auto payload = b64(bytes_of(43));
@@ -1248,6 +1315,7 @@ int main() {
     chat_fixture::images_buffered_and_streamed();
     chat_fixture::images_malformed();
     chat_fixture::content_arrays_and_image_history();
+    chat_fixture::streamed_content_arrays_continue_parts();
     chat_fixture::pdf_and_citation_annotations();
     chat_fixture::typed_tool_media_is_not_chat_content();
     chat_fixture::chat_limits();
@@ -1255,6 +1323,7 @@ int main() {
     google_fixture::gemini_generated();
     google_fixture::gemini_tts_and_transcripts();
     google_fixture::gemini_audio_frames_merge();
+    google_fixture::gemini_long_audio_stream();
     google_fixture::interactions_generated();
     google_fixture::interactions_transcription_annotations();
     google_fixture::media_kinds_and_unknown_formats();

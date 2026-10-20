@@ -352,12 +352,26 @@ bool Codec::annotations(json::Value value) {
   }
   return true;
 }
+// Text of a content array. A streamed run of text elements is one Text part that grows by each element; an image or
+// audio reply ends the run, so the parts stay in the order they arrived.
+bool Codec::structured_text(std::string_view value, bool streaming) {
+  if (streaming && structured_run_) return emit(PartDelta{*structured_run_, {PartKind::Text, value}});
+  const LocalId id{next_part_++};
+  if (!emit(PartBegin{{0}, id, PartKind::Text, {}, media_order()})) return false;
+  if (!streaming) return emit(PartSeal{id, value});
+  structured_run_ = id;
+  return emit(PartDelta{id, {PartKind::Text, value}});
+}
+bool Codec::end_structured_text() {
+  if (!structured_run_) return true;
+  const auto id = *structured_run_;
+  structured_run_.reset();
+  return emit(PartSeal{id, {}});
+}
 bool Codec::content(json::Value value, bool streaming) {
   if (!value.is_array()) {
     if (!structured_content_ || !value.is_string()) return text(value, PartKind::Text, streaming);
-    const LocalId id{next_part_++};
-    return emit(PartBegin{{0}, id, PartKind::Text, {}, media_order()}) &&
-           emit(PartSeal{id, value.as_string()});
+    return structured_text(value.as_string(), streaming);
   }
   if (!descriptor::contains(descriptor_.family_policy().openrouter_origins, descriptor_.base_url()))
     return fail(ErrorKind::Unsupported, "assistant content arrays require declared OpenRouter origin");
@@ -369,9 +383,7 @@ bool Codec::content(json::Value value, bool streaming) {
     if (type == "text") {
       if (!part.get("text").is_string()) return fail(ErrorKind::ProtocolCorrupt, "content text must be string");
       unknown(part, {"type", "text", "cache_control", "prompt_cache_breakpoint"});
-      const LocalId id{next_part_++};
-      if (!emit(PartBegin{{0}, id, PartKind::Text, {}, media_order()}) ||
-          !emit(PartSeal{id, part.get("text").as_string()})) return false;
+      if (!structured_text(part.get("text").as_string(), streaming)) return false;
     } else if (type == "image_url") {
       if (!image(part, false)) return false;
     } else return fail(ErrorKind::Unsupported, "unsupported assistant content part type");
@@ -396,37 +408,17 @@ bool Codec::reasoning_details(json::Value value, bool streaming) {
   if (!value.is_array()) return fail(ErrorKind::ProtocolCorrupt, "reasoning_details must be array");
   if (!descriptor::contains(descriptor_.family_policy().openrouter_origins, descriptor_.base_url()))
     return fail(ErrorKind::Unsupported, "reasoning_details requires declared OpenRouter origin");
-  if (reasoning_details_count_ >= limits_.max_parts)
-    return fail(ErrorKind::ResourceLimit, "reasoning details part limit");
   for (auto detail : value.elements())
     if (!detail.is_object()) return fail(ErrorKind::ProtocolCorrupt, "reasoning detail must be object");
-  const json::Limits limits{limits_.max_content_bytes, limits_.max_json_depth};
-  const std::string_view type = streaming ? "reasoning_details.frame" : "reasoning_details";
-  auto write = [&](json::BoundedWriter& writer) {
-    writer.raw("{\"type\":").quoted(type).raw(",\"details\":").value(value, 1).raw("}");
-  };
-  json::BoundedWriter measure(limits);
-  write(measure);
-  if (!measure.ok()) return fail(ErrorKind::ResourceLimit, "reasoning details metadata limit");
-  std::string bytes;
-  bytes.reserve(measure.size());
-  json::BoundedWriter output(limits, &bytes);
-  write(output);
-  auto parsed = json::parse(bytes, limits);
-  auto* document = std::get_if<json::Document>(&parsed);
-  if (!document) return fail(ErrorKind::ResourceLimit, "reasoning details metadata cannot be retained");
-  auto metadata = std::make_shared<const json::Document>(std::move(*document));
-  const LocalId id{next_part_++};
-  const uint64_t order = 1 + reasoning_details_count_++;
-  if (!emit(PartBegin{{0}, id, PartKind::Opaque,
-                      {{}, {}, ToolCallKind::ClientExecuted, std::string(type), metadata}, order}) ||
-      !emit(PartSeal{id, {}})) return false;
-  if (!streaming) return true;
-  reasoning_frames_.push_back(std::move(metadata));
+  if (!streaming) return emit_reasoning_details(value);
+  // A streamed frame holds fragments of entries, not parts of the answer. They merge into the entries a buffered
+  // response carries, and the one part holding them is emitted with the finish reason. The detail values alias the
+  // frame's raw document, which the accumulator keeps.
+  reasoning_streamed_ = true;
   // Indexed text/summary deltas can interleave; keep each binding at its first
   // arrival position. Unindexed deltas join only a compatible consecutive item.
   // Encrypted objects are discrete blobs and are never concatenated.
-  for (auto detail : reasoning_frames_.back()->root().get("details").elements()) {
+  for (auto detail : value.elements()) {
     const auto detail_type = detail.get("type");
     if (!detail_type.is_string() || detail_type.as_string().empty())
       return fail(ErrorKind::ProtocolCorrupt, "reasoning detail requires a type");
@@ -496,8 +488,33 @@ bool Codec::reasoning_details(json::Value value, bool streaming) {
   }
   return true;
 }
+// The part that holds a reply's reasoning_details. It is the same part, at the same position, whether the entries arrived
+// whole or as streamed fragments.
+bool Codec::emit_reasoning_part(std::shared_ptr<const json::Document> metadata) {
+  const LocalId id{next_part_++};
+  return emit(PartBegin{{0}, id, PartKind::Opaque, {{}, {}, ToolCallKind::ClientExecuted, "reasoning_details", std::move(metadata)}, 1}) &&
+         emit(PartSeal{id, {}});
+}
+bool Codec::emit_reasoning_details(json::Value details) {
+  const json::Limits limits{limits_.max_content_bytes, limits_.max_json_depth};
+  auto write = [&](json::BoundedWriter& writer) {
+    writer.raw("{\"type\":\"reasoning_details\",\"details\":").value(details, 1).raw("}");
+  };
+  json::BoundedWriter measure(limits);
+  write(measure);
+  if (!measure.ok()) return fail(ErrorKind::ResourceLimit, "reasoning details metadata limit");
+  std::string bytes;
+  bytes.reserve(measure.size());
+  json::BoundedWriter output(limits, &bytes);
+  write(output);
+  auto parsed = json::parse(bytes, limits);
+  auto* document = std::get_if<json::Document>(&parsed);
+  if (!document) return fail(ErrorKind::ResourceLimit, "reasoning details metadata cannot be retained");
+  return emit_reasoning_part(std::make_shared<const json::Document>(std::move(*document)));
+}
 bool Codec::finish_reasoning_details() {
-  if (reasoning_frames_.empty()) return true;
+  if (!reasoning_streamed_) return true;
+  reasoning_streamed_ = false;
   const json::Limits limits{limits_.max_content_bytes, limits_.max_json_depth};
   auto write = [&](json::BoundedWriter& writer) {
     writer.raw("{\"type\":\"reasoning_details\",\"details\":[");
@@ -518,13 +535,6 @@ bool Codec::finish_reasoning_details() {
         writer.quoted(binding.payload_key).raw(":").quoted(binding.payload).raw("}");
       }
     }
-    writer.raw("],\"frames\":[");
-    comma = false;
-    for (const auto& frame : reasoning_frames_) {
-      if (comma) writer.raw(",");
-      comma = true;
-      writer.value(frame->root().get("details"), 2);
-    }
     writer.raw("]}");
   };
   json::BoundedWriter measure(limits);
@@ -537,11 +547,9 @@ bool Codec::finish_reasoning_details() {
   auto parsed = json::parse(bytes, limits);
   auto* document = std::get_if<json::Document>(&parsed);
   if (!document) return fail(ErrorKind::ResourceLimit, "completed reasoning metadata cannot be retained");
-  auto metadata = std::make_shared<const json::Document>(std::move(*document));
-  const LocalId id{next_part_++};
-  return emit(PartBegin{{0}, id, PartKind::Opaque,
-                        {{}, {}, ToolCallKind::ClientExecuted, "reasoning_details", metadata},
-                        1 + reasoning_details_count_}) && emit(PartSeal{id, {}});
+  reasoning_bindings_.clear();
+  reasoning_indices_.clear();
+  return emit_reasoning_part(std::make_shared<const json::Document>(std::move(*document)));
 }
 bool Codec::tool(json::Value value, bool streaming, uint64_t position) {
   if (!value.is_object()) return fail(ErrorKind::ProtocolCorrupt, "tool call must be object");
@@ -671,6 +679,7 @@ void Codec::finish(Close close) {
   if (!begun_ || !stopped_ || (mode_ == Mode::Sse && !done_)) { fail(ErrorKind::Truncated, "missing family terminal evidence"); return; }
   if (mode_ == Mode::Sse) {
     if (!finish_audio()) return;
+    if (!end_structured_text()) return;
     if (text_ && !emit(PartSeal{*text_, {}, {}, citations_})) return;
     if (refusal_ && !emit(PartSeal{*refusal_, {}})) return;
     if (thinking_ && !emit(PartSeal{*thinking_, {}})) return;
@@ -695,6 +704,7 @@ bool Codec::audio(json::Value value, bool streaming) {
     if (!audio_.id.empty() && audio_.id != id.as_string()) return fail(ErrorKind::ProtocolCorrupt, "audio identity changed");
     audio_.id = id.as_string();
   }
+  if (!audio_.seen && !end_structured_text()) return false;
   if (!audio_.seen) audio_.order = media_order();
   audio_.seen = true;
   if (transcript.is_string()) {
@@ -802,7 +812,7 @@ bool Codec::image(json::Value entry, bool indexed) {
         else return fail(ErrorKind::Unsupported, "unsupported image detail");
       }
     }
-    if (!media_output::emit_part([this](const Event& event) { return emit(event); }, LocalId{0}, LocalId{next_part_++},
+    if (!end_structured_text() || !media_output::emit_part([this](const Event& event) { return emit(event); }, LocalId{0}, LocalId{next_part_++},
                                  media_order(), std::move(media), payload)) return false;
   return true;
 }

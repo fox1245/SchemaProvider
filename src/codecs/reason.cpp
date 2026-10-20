@@ -67,7 +67,6 @@ constexpr Entry chat_table[] = {
   {"text channels must be strings or null", "chat.text.type_invalid"},
   {"reasoning_details must be array", "chat.reasoning_details.array_required"},
   {"reasoning_details requires declared OpenRouter origin", "chat.reasoning_details.origin_required"},
-  {"reasoning details part limit", "chat.reasoning_details.part_limit"},
   {"reasoning detail must be object", "chat.reasoning_detail.object_required"},
   {"reasoning details metadata limit", "chat.reasoning_details.metadata_limit"},
   {"reasoning details metadata cannot be retained", "chat.reasoning_details.metadata_unretainable"},

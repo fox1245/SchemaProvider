@@ -749,18 +749,21 @@ Traced traced(std::initializer_list<std::string> chunks, gemini::Close close = {
   return result;
 }
 void empty_text_delta_is_withheld() {
-  // Every wire part with a text member is a part of its own, and Gemini ends most answers with a part whose text is
-  // "" next to the finish reason. Without a signature that part says nothing: it is not a typed part, and the
-  // retained wire still holds it for native replay.
+  // Gemini ends most answers with a part whose text is "" next to the finish reason. Without a signature that part says
+  // nothing: it is not a typed part. A streamed one joins the answer it ends in the retained wire; one with nothing to
+  // join stays a wire part of its own, and native replay sends it.
   const auto streamed = traced({body(R"([{"text":"Hel"}])", "", "null"), body(R"([{"text":"lo"}])", "", "null"), body(R"([{"text":""}])")});
-  CHECK(streamed.trace == "[begin][delta:Hel][seal][begin][delta:lo][seal]");
+  CHECK(streamed.trace == "[begin][delta:Hel][delta:lo][seal]");
   const auto& completion = complete(streamed.outcome);
-  CHECK(completion.joined_text() == "Hello" && completion.messages.size() == 1 && completion.messages[0].parts.size() == 2);
-  CHECK(completion.messages[0].wire_output && completion.messages[0].wire_output->root().size() == 3);
-  // The same parts in one buffered body.
+  CHECK(completion.joined_text() == "Hello" && completion.messages.size() == 1 && completion.messages[0].parts.size() == 1);
+  CHECK(completion.messages[0].wire_output && json::equal(completion.messages[0].wire_output->root(), owned(R"([{"text":"Hello"}])")->root()));
+  // A buffered body has the parts it has: each wire part is a part of its own.
   const auto whole = complete(buffered(body(R"([{"text":"Hel"},{"text":"lo"},{"text":""}])")));
   CHECK(whole.joined_text() == "Hello" && whole.messages[0].parts.size() == 2 && whole.stop.kind == completion.stop.kind);
-  for (size_t i = 0; i < 2; ++i) CHECK(std::holds_alternative<Text>(completion.messages[0].parts[i]) && std::holds_alternative<Text>(whole.messages[0].parts[i]));
+  for (size_t i = 0; i < 2; ++i) CHECK(std::holds_alternative<Text>(whole.messages[0].parts[i]));
+  CHECK(whole.messages[0].wire_output && whole.messages[0].wire_output->root().size() == 3);
+  const auto leading = traced({body(R"([{"text":""}])", "", "null"), body(R"([{"text":"ok"}])")});
+  CHECK(leading.trace == "[begin][delta:ok][seal]" && complete(leading.outcome).messages[0].wire_output->root().size() == 2);
 
   // An empty text part that carries a signature is the same part with the same signature in both modes.
   const auto signed_empty = R"([{"text":"","thoughtSignature":"EMPTY_TEXT_SIG"}])";
@@ -780,8 +783,102 @@ void empty_text_delta_is_withheld() {
   const auto thought = traced({body(R"([{"text":"","thought":true}])", "", "null"), body(R"([{"text":"ok"}])")});
   CHECK(thought.trace == "[begin][other:][seal][begin][delta:ok][seal]");
 }
+Outcome stream_all(const std::vector<std::string>& chunks, SemanticLimits limits = {}, std::shared_ptr<const NativeContext> ctx = {}) {
+  Accumulator a(limits); gemini::Codec c(desc(), gemini::Mode::Sse, a, ctx ? ctx : context(), limits);
+  for (const auto& b : chunks) if (!c.frame({}, b)) break;
+  c.finish(); CHECK(a.outcome()); return *a.outcome();
+}
+std::string repeat(std::string_view piece, size_t count) { std::string result; for (size_t i = 0; i < count; ++i) result += piece; return result; }
+// Parts that differ in nothing but their text are the chunks of one part. Thousands of them are one typed part and one
+// retained wire part, the ones a buffered reply of the same content carries.
+void streamed_chunks_continue_their_part() {
+  constexpr size_t n = 1000;
+  std::vector<std::string> chunks;
+  for (size_t i = 0; i < n; ++i) chunks.push_back(body(R"([{"text":"t","thought":true}])", "", "null"));
+  for (size_t i = 0; i < 2 * n; ++i) chunks.push_back(body(R"([{"text":"x"}])", "", "null"));
+  chunks.push_back(body(R"([{"text":""}])"));
+  const auto live = stream_all(chunks);
+  const auto whole = buffered(body("[{\"text\":" + json::quote(repeat("t", n)) + ",\"thought\":true},{\"text\":" + json::quote(repeat("x", 2 * n)) + "}]"));
+  for (const auto* outcome : {&live, &whole}) {
+    const auto& m = complete(*outcome).messages.at(0);
+    CHECK(m.parts.size() == 2 && std::get<Thinking>(m.parts[0]).text == repeat("t", n) && !std::get<Thinking>(m.parts[0]).signature);
+    CHECK(std::get<Text>(m.parts[1]).value == repeat("x", 2 * n));
+  }
+  CHECK(json::equal(complete(live).messages[0].wire_output->root(), complete(whole).messages[0].wire_output->root()));
+  CHECK(complete(live).usage.output_total->value == complete(whole).usage.output_total->value);
+  // Replay sends the merged parts, as it does after the buffered reply.
+  std::string replayed[2];
+  size_t at = 0;
+  for (const auto* outcome : {&live, &whole}) {
+    auto r = request();
+    r.messages.push_back(complete(*outcome).messages[0]);
+    r.messages.push_back(Message{"", Role::User, {Text{"again"}}});
+    const auto encoded = gemini::encode(desc(), r, false);
+    CHECK(std::holds_alternative<gemini::EncodedRequest>(encoded));
+    replayed[at++] = owned(std::get<gemini::EncodedRequest>(encoded).body)->root().get("contents").at(1).get("parts").dump();
+  }
+  CHECK(json::equal(owned(replayed[0])->root(), owned(replayed[1])->root()));
+
+  // A signature, a call, or any other difference in the part ends the run: those chunks are parts of their own.
+  chunks.clear();
+  for (size_t i = 0; i < n; ++i) chunks.push_back(body(R"([{"text":"p","thought":true}])", "", "null"));
+  chunks.push_back(body(R"([{"text":"q","thought":true,"thoughtSignature":"THOUGHT_SIG"}])", "", "null"));
+  for (size_t i = 0; i < n; ++i) chunks.push_back(body(R"([{"text":"r","thought":true}])", "", "null"));
+  for (size_t i = 0; i < n; ++i) chunks.push_back(body(R"([{"text":"a"}])", "", "null"));
+  chunks.push_back(body(R"([{"text":"b","thoughtSignature":"TEXT_SIG"}])", "", "null"));
+  for (size_t i = 0; i < n; ++i) chunks.push_back(body(R"([{"text":"c"}])", "", "null"));
+  chunks.push_back(body(R"([{"functionCall":{"id":"call_1","name":"lookup","args":{"x":1}}}])", "", "null"));
+  for (size_t i = 0; i < n; ++i) chunks.push_back(body(R"([{"text":"d","partMetadata":{"k":1}}])", "", "null"));
+  for (size_t i = 0; i < n; ++i) chunks.push_back(body(R"([{"text":"e","partMetadata":{"k":2}}])", "", "null"));
+  for (size_t i = 0; i < n; ++i) chunks.push_back(body(R"([{"text":"f","thought":false}])", "", "null"));
+  for (size_t i = 0; i < n; ++i) chunks.push_back(body(R"([{"text":"g"}])", "", "null"));
+  chunks.push_back(body(R"([{"text":""}])"));
+  const auto mixed = complete(stream_all(chunks)).messages.at(0);
+  CHECK(mixed.parts.size() == 11);
+  CHECK(std::get<Thinking>(mixed.parts[0]).text == repeat("p", n) && !std::get<Thinking>(mixed.parts[0]).signature);
+  CHECK(std::get<Thinking>(mixed.parts[1]).text == "q" && std::get<Thinking>(mixed.parts[1]).signature == "THOUGHT_SIG");
+  CHECK(std::get<Thinking>(mixed.parts[2]).text == repeat("r", n));
+  CHECK(std::get<Text>(mixed.parts[3]).value == repeat("a", n) && std::get<Text>(mixed.parts[4]).value == "b");
+  CHECK(std::get<Text>(mixed.parts[5]).value == repeat("c", n) && std::get<ToolCall>(mixed.parts[6]).id == "call_1");
+  CHECK(std::get<Text>(mixed.parts[7]).value == repeat("d", n) && std::get<Text>(mixed.parts[8]).value == repeat("e", n));
+  CHECK(std::get<Text>(mixed.parts[9]).value == repeat("f", n) && std::get<Text>(mixed.parts[10]).value == repeat("g", n));
+  const auto wire = mixed.wire_output->root();
+  CHECK(wire.size() == 11 && wire.at(1).get("thoughtSignature").as_string() == "THOUGHT_SIG" && wire.at(4).get("thoughtSignature").as_string() == "TEXT_SIG");
+  CHECK(wire.at(0).get("text").as_string() == repeat("p", n) && wire.at(0).get("thought").as_bool() && !wire.at(0).get("thoughtSignature").valid());
+  CHECK(wire.at(7).get("partMetadata").get("k").as_uint() == 1 && wire.at(8).get("partMetadata").get("k").as_uint() == 2);
+  CHECK(wire.at(9).get("thought").valid() && !wire.at(10).get("thought").valid());
+  // The mixed message replays under the signatures it was given.
+  auto r = request();
+  r.messages.push_back(mixed);
+  r.messages.push_back(Message{"", Role::Tool, {ToolResult{"call_1", R"({"result":1})"}}});
+  const auto encoded = gemini::encode(desc(), r, false);
+  CHECK(std::holds_alternative<gemini::EncodedRequest>(encoded));
+  CHECK(json::equal(owned(std::get<gemini::EncodedRequest>(encoded).body)->root().get("contents").at(1).get("parts"), wire));
+
+  // A transcript arrives the same way.
+  chunks.clear();
+  for (size_t i = 0; i < 2 * n; ++i) chunks.push_back(body(R"([{"audioTranscription":{"text":"hi "}}])", "", "null"));
+  chunks.push_back(body(R"([{"text":""}])"));
+  const auto transcript = complete(stream_all(chunks)).messages.at(0);
+  CHECK(transcript.parts.size() == 1 && std::get<Text>(transcript.parts[0]).value == repeat("hi ", 2 * n));
+  const auto transcript_whole = complete(buffered(body("[{\"audioTranscription\":{\"text\":" + json::quote(repeat("hi ", 2 * n)) + R"(}},{"text":""}])"))).messages.at(0);
+  CHECK(transcript_whole.parts.size() == 1 && json::equal(transcript.wire_output->root(), transcript_whole.wire_output->root()));
+
+  // The limit bounds the parts of the answer, not its chunks: two parts fit a limit of two however many chunks make them,
+  // and a third does not.
+  SemanticLimits tight;
+  tight.max_parts = 2;
+  chunks.clear();
+  for (size_t i = 0; i < n; ++i) chunks.push_back(body(R"([{"text":"t","thought":true}])", "", "null"));
+  for (size_t i = 0; i < n; ++i) chunks.push_back(body(R"([{"text":"x"}])", "", "null"));
+  chunks.push_back(body(R"([{"text":""}])"));
+  CHECK(complete(stream_all(chunks, tight)).messages.at(0).parts.size() == 2);
+  chunks.insert(chunks.end() - 1, body(R"([{"text":"s","thoughtSignature":"SIG"}])", "", "null"));
+  const auto refused = failure(stream_all(chunks, tight), ErrorKind::ResourceLimit);
+  CHECK(refused.error.reason == "gemini.part.limit");
+}
 }
 int main() {
-  try { http_error_envelope_in_an_array_is_retained(); output_total_without_thoughts(); total_proves_zero_thoughts(); total_without_candidates_bounds_the_output(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); tool_result_helper_needs_a_json_object(); successive_unidentified_calls(); local_ids_carry_a_random_token_per_response(); native_group_and_replay(); nullable_usage(); uncached_input_rule(); stop_kinds_match_policy_table(); invalid_model_calls(); errors_and_terminals(); loaded_routes_encode_for_their_model(); empty_text_delta_is_withheld(); one_descriptor_serves_every_model(); served_model_is_recorded(); failure_reasons(); std::cout << "Gemini semantic invariants passed\n"; }
+  try { http_error_envelope_in_an_array_is_retained(); output_total_without_thoughts(); total_proves_zero_thoughts(); total_without_candidates_bounds_the_output(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); tool_result_helper_needs_a_json_object(); successive_unidentified_calls(); local_ids_carry_a_random_token_per_response(); native_group_and_replay(); nullable_usage(); uncached_input_rule(); stop_kinds_match_policy_table(); invalid_model_calls(); errors_and_terminals(); loaded_routes_encode_for_their_model(); empty_text_delta_is_withheld(); streamed_chunks_continue_their_part(); one_descriptor_serves_every_model(); served_model_is_recorded(); failure_reasons(); std::cout << "Gemini semantic invariants passed\n"; }
   catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

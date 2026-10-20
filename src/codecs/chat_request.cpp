@@ -210,6 +210,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
           return Error{ErrorKind::ReplayIneligible, "Chat requires one plain unsigned assistant thinking part"};
         has_thinking = true;
       } else if (const auto* opaque = std::get_if<Opaque>(&part)) {
+        // History captured while a stream kept each reasoning frame as a part carries these parts and a `frames` member; it still replays.
         if (opaque->wire_type == "reasoning_details.frame") {
           if (!message.native || !opaque->wire_metadata)
             return Error{ErrorKind::ReplayIneligible, "reasoning frame lacks native authority"};

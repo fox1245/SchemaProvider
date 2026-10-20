@@ -1215,8 +1215,36 @@ void empty_text_delta_is_withheld() {
   CHECK(text(completed(*acc.outcome()).messages) == "hello" && completed(*acc.outcome()).messages[0].parts.size() == 1);
 }
 } // namespace
+// An output text and a reasoning summary are one part each however many deltas make them, as in the buffered reply.
+void long_streams_are_one_part_per_content_part() {
+  constexpr size_t chunks = 3000;
+  const std::string answer(chunks, 'x'), summary_text(chunks, 's');
+  const std::string reasoning_item = R"({"id":"rs_1","type":"reasoning","status":"completed","summary":[{"type":"summary_text","text":")" + summary_text + R"("}]})";
+  const std::string message_item = R"({"id":"msg_1","type":"message","status":"completed","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":")" + answer + R"(","annotations":[]}]})";
+  std::vector<Frame> frames{created(), added(0, R"({"id":"rs_1","type":"reasoning","status":"in_progress","summary":[]})"),
+    event("response.reasoning_summary_part.added", R"(,"item_id":"rs_1","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""})")};
+  for (size_t i = 0; i < chunks; ++i)
+    frames.push_back(event("response.reasoning_summary_text.delta", R"(,"item_id":"rs_1","output_index":0,"summary_index":0,"delta":"s")"));
+  frames.push_back(event("response.reasoning_summary_text.done", ",\"item_id\":\"rs_1\",\"output_index\":0,\"summary_index\":0,\"text\":" + json::quote(summary_text)));
+  frames.push_back(event("response.reasoning_summary_part.done", ",\"item_id\":\"rs_1\",\"output_index\":0,\"summary_index\":0,\"part\":{\"type\":\"summary_text\",\"text\":" + json::quote(summary_text) + "}"));
+  frames.push_back(item_done(0, reasoning_item));
+  frames.push_back(added(1, R"({"id":"msg_1","type":"message","status":"in_progress","role":"assistant","content":[]})"));
+  frames.push_back(event("response.content_part.added", R"(,"item_id":"msg_1","output_index":1,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]})"));
+  for (size_t i = 0; i < chunks; ++i) frames.push_back(text_delta("msg_1", 1, "x"));
+  frames.push_back(event("response.output_text.done", ",\"item_id\":\"msg_1\",\"output_index\":1,\"content_index\":0,\"text\":" + json::quote(answer)));
+  frames.push_back(event("response.content_part.done", ",\"item_id\":\"msg_1\",\"output_index\":1,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":" + json::quote(answer) + ",\"annotations\":[]}"));
+  frames.push_back(item_done(1, message_item));
+  frames.push_back(terminal("[" + reasoning_item + "," + message_item + "]"));
+  const auto live = stream(frames);
+  const auto whole = buffered(body("[" + reasoning_item + "," + message_item + "]"));
+  for (const auto* outcome : {&live, &whole}) {
+    const auto& parts = completed(*outcome).messages[0].parts;
+    CHECK(parts.size() == 2 && std::get<Reasoning>(parts[0]).summary.size() == 1 && std::get<Reasoning>(parts[0]).summary[0] == summary_text);
+    CHECK(std::get<Text>(parts[1]).value == answer);
+  }
+}
 int main() {
-  try { empty_text_delta_is_withheld(); failure_reasons(); provider_money_and_snapshot_aliases(); named_error_precedence(); named_error_raw_capacity(); completed_reasoning_ciphertext_authority(); reviewed_wire_boundaries(); typed_encode(); controls_and_cursor_boundaries(); openrouter_max_price(); strict_tool_schemas(); previous_response_ownership(); grouped_native_and_owned_outcomes(); normal_close_required(); cancellation_observation_boundary(); reasoning_stream_snapshots(); tools_interleaving_and_ownership(); incomplete_and_server_items(); unknown_hosted_item_ownership(); unknown_wire_observation_boundary(); usage_boundaries(); uncached_input_rule(); corruption_and_bounds();
+  try { empty_text_delta_is_withheld(); long_streams_are_one_part_per_content_part(); failure_reasons(); provider_money_and_snapshot_aliases(); named_error_precedence(); named_error_raw_capacity(); completed_reasoning_ciphertext_authority(); reviewed_wire_boundaries(); typed_encode(); controls_and_cursor_boundaries(); openrouter_max_price(); strict_tool_schemas(); previous_response_ownership(); grouped_native_and_owned_outcomes(); normal_close_required(); cancellation_observation_boundary(); reasoning_stream_snapshots(); tools_interleaving_and_ownership(); incomplete_and_server_items(); unknown_hosted_item_ownership(); unknown_wire_observation_boundary(); usage_boundaries(); uncached_input_rule(); corruption_and_bounds();
     named_includes(); hosted_tool_options(); openrouter_server_tools_and_images(); service_item_progress_events(); computer_calls_and_mcp_approvals(); plugins_and_citations();
     std::cout << "Responses semantic contracts passed\n"; return 0;
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
