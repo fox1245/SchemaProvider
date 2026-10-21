@@ -1,0 +1,106 @@
+{
+  "version": 1,
+  "resolved_on": "2026-10-21",
+  "exclude_newer": "2026-10-19T00:00:00Z",
+  "node": {
+    "version": "24.21.0"
+  },
+  "rust": {
+    "version": "1.99.1"
+  },
+  "python": {
+    "openai": {
+      "repo": "https://github.com/openai/openai-python",
+      "sha": "3e63d33f6258f47285007aaee30df251d5127820",
+      "default_branch": "main",
+      "builder": "hatch-1.32.4",
+      "extras": []
+    },
+    "anthropic": {
+      "repo": "https://github.com/anthropics/anthropic-sdk-python",
+      "sha": "5738a256035e35285857fde0e89ae9b11b805f2f",
+      "default_branch": "main",
+      "builder": "hatch-1.26.3",
+      "extras": []
+    },
+    "any-llm": {
+      "repo": "https://github.com/mozilla-ai/any-llm",
+      "sha": "d69a13c6c765668334c6b6ccfa7b75ad103e4b77",
+      "default_branch": "main",
+      "builder": "setuptools",
+      "extras": [],
+      "pypi_name": "any-llm-sdk"
+    },
+    "aisuite": {
+      "repo": "https://github.com/andrewyng/aisuite",
+      "sha": "66c7890c2d68c2d67f41723bc848bb6713d82a9c",
+      "default_branch": "main",
+      "builder": "poetry",
+      "extras": [
+        "openai",
+        "anthropic"
+      ]
+    },
+    "litellm": {
+      "pypi": "litellm",
+      "version": "1.105.1",
+      "head_not_used_because": "pinned to a release that no published advisory lists as affected and that has been public for at least seven days; the two malicious releases 1.82.7 and 1.82.8 are never resolver candidates because the version is pinned exactly"
+    }
+  },
+  "native": {
+    "ai-sdk-cpp": {
+      "repo": "https://github.com/ClickHouse/ai-sdk-cpp",
+      "sha": "9d8cd18200a33b64460c9101ed0dd6d4988bea61",
+      "default_branch": "main"
+    },
+    "rust-genai": {
+      "repo": "https://github.com/jeremychone/rust-genai",
+      "sha": "06eca2124811a3384f1c5e4d30e0a27c3a0b5fcb",
+      "default_branch": "main"
+    },
+    "asio": {
+      "repo": "https://github.com/chriskohlhoff/asio",
+      "tag": "asio-1-30-2",
+      "sha": "12e0ce9e0500bf0f247dbd1ae894272656456079",
+      "note": "standalone Asio headers for SchemaProvider's transport"
+    },
+    "yyjson": {
+      "repo": "https://github.com/ibireme/yyjson",
+      "tag": "0.12.0",
+      "sha": "8b4a38dc994a110abaec8a400615567bd996105f"
+    },
+    "zlib": {
+      "repo": "https://github.com/madler/zlib",
+      "sha": "5a82f71ed1dfc0bec044d9702463dbdf84ea3b71",
+      "note": "fetched by ai-sdk-cpp's CMake at this commit; installed here so that the build does not download it"
+    },
+    "curl": {
+      "version": "8.23.0",
+      "released": "2026-10-14",
+      "url": "https://curl.se/download/curl-8.23.0.tar.xz",
+      "sha256": "8dadd7d2536a314f982ad05a651b713f426bf7d02cc2c76cffb9796f2218e6c5",
+      "sha256_published_at": "the digest GitHub shows for the asset of the curl-8_23_0 release",
+      "note": "a second libcurl for the SchemaProvider and null-client rows; built into a private prefix with OpenSSL (the system's) and nghttp2, without compression libraries, which neither client uses"
+    },
+    "nghttp2": {
+      "version": "1.70.0",
+      "url": "https://github.com/nghttp2/nghttp2/releases/download/v1.70.0/nghttp2-1.70.0.tar.xz",
+      "sha256": "e05cb1388eaca3830aded4ccf20044b6e1ac1a61411dcca11b0437c4285c8bc2",
+      "sha256_published_at": "checksums.txt of the v1.70.0 release",
+      "note": "HTTP/2 library for the private curl; the system has no development files for nghttp2"
+    }
+  },
+  "javascript": {
+    "vercel-ai": {
+      "repo": "https://github.com/vercel/ai",
+      "sha": "e741656ed17aad861d3a0bc3f571e5301fe1eb9d",
+      "default_branch": "main",
+      "npm": {
+        "ai": "7.0.148",
+        "@ai-sdk/openai": "4.0.99",
+        "@ai-sdk/anthropic": "4.0.85"
+      },
+      "head_not_built_because": "the repository is a large pnpm and turbo monorepo; the packages published for its HEAD commit carry the same versions as the HEAD package.json files, and are installed from the npm lockfile instead"
+    }
+  }
+}
