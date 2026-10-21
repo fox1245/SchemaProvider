@@ -4,9 +4,12 @@
 #include "codecs/interactions_request.h"
 #include "codecs/messages_request.h"
 #include "codecs/responses_request.h"
+#include "codecs/generations.h"
 #include "core/enum_names.h"
+#include "core/failure.h"
 #include "descriptor/policy.h"
 #include "descriptor/presets.h"
+#include "runtime/client.h"
 #include "sp/config_defaults.h"
 #include <iostream>
 #include <set>
@@ -288,12 +291,184 @@ void synthetic_policy() {
   CHECK(policy->family("zz.family") == nullptr);
   CHECK(!policy->model("zz.family", "https://zz.example", "zz-model-1").entry);
 }
+
+// ---- the refusal predicate ------------------------------------------------------------------------------------
+
+Failure declined_failure() {
+  Failure failure;
+  failure.error.kind = ErrorKind::InvalidRequest;
+  failure.error.retry_safety = RetrySafety::RejectedBeforeOutput;
+  failure.error.http_status = 400;
+  failure.error.attempt = AttemptEvidence{true, 271, true, 0, 1, false};
+  failure.partial.raw_events.push_back(RawWire{std::string(http_error_event), nullptr});
+  return failure;
+}
+
+void refusal_predicate() {
+  CHECK(request_declined(declined_failure()));
+  // No raw event at all is still a refusal; the diagnostic body is optional.
+  auto bare = declined_failure(); bare.partial.raw_events.clear();
+  CHECK(request_declined(bare));
+  // Each piece of evidence the rule rests on, taken away or contradicted, ends it.
+  auto changed = [](auto&& edit) { auto failure = declined_failure(); edit(failure); return request_declined(failure); };
+  CHECK(!changed([](Failure& f) { f.error.retry_safety = RetrySafety::PossiblyAccepted; }));
+  CHECK(!changed([](Failure& f) { f.error.retry_safety = RetrySafety::NotSent; }));
+  CHECK(!changed([](Failure& f) { f.error.retry_safety = RetrySafety::OutputObserved; }));
+  CHECK(!changed([](Failure& f) { f.error.attempt.request_may_have_left = false; }));
+  CHECK(!changed([](Failure& f) { f.error.attempt.response_head_seen = false; }));
+  CHECK(!changed([](Failure& f) { f.error.attempt.transport_internal_resends = 1; }));
+  CHECK(!changed([](Failure& f) { f.error.attempt.prior_usage_unknown = true; }));
+  CHECK(!changed([](Failure& f) { f.partial.messages.push_back(Message::assistant_text("partial")); }));
+  CHECK(!changed([](Failure& f) { f.partial.stop = StopReason{}; }));
+  CHECK(!changed([](Failure& f) { f.partial.raw_events.push_back(RawWire{"response.created", nullptr}); }));
+  CHECK(!changed([](Failure& f) { f.partial.usage.stage = UsageStage::Partial; }));
+  CHECK(!changed([](Failure& f) { f.partial.usage.input_total = Count{1, Evidence::Reported}; }));
+  CHECK(!changed([](Failure& f) { f.partial.usage.extra["iterations.0.input_tokens"] = Count{1, Evidence::Reported}; }));
+  CHECK(!changed([](Failure& f) { f.partial.usage.conflicts.push_back({"total", "x"}); }));
+  CHECK(!changed([](Failure& f) { f.partial.usage.provider_cost.source = CostSource::OpenRouterUsd; }));
+  CHECK(!changed([](Failure& f) { f.partial.usage.provider_cost.status[2] = CostStatus::Malformed; }));
+  CHECK(!changed([](Failure& f) { f.partial.usage.provider_cost.is_byok = false; }));
+  // Usage that reported zero is not usage that reported nothing.
+  Usage zero; zero.input_total = Count{0, Evidence::Reported};
+  CHECK(usage_reported_nothing(Usage{}) && !usage_reported_nothing(zero));
+  CHECK(http_error_event == "http.error");
+}
+
+// ---- the facts of a prepared request --------------------------------------------------------------------------
+
+using namespace std::chrono_literals;
+runtime::RunOptions run_with(std::uint32_t attempts) {
+  runtime::RunOptions run;
+  run.streaming = false;
+  run.retry = runtime::RetryPolicy{attempts > 1, false, attempts, 0ms, 0ms};
+  return run;
+}
+runtime::Client client_of(descriptor::ValidatedDescriptor d) { return runtime::Client(std::move(d), "sk-not-a-real-key"); }
+runtime::PreparedRequest prepared_ok(runtime::Client& client, runtime::Request request, std::uint32_t attempts = 1) {
+  auto prepared = client.prepare(std::move(request), run_with(attempts));
+  if (!prepared.valid() || prepared.error()) throw std::runtime_error("request did not prepare: " + (prepared.error() ? prepared.error()->safe_message + " / " + prepared.error()->reason : std::string("invalid")));
+  return prepared;
+}
+descriptor::ValidatedDescriptor openrouter_chat(descriptor::PolicySnapshot policy = {}) {
+  descriptor::presets::PresetOptions options;
+  options.policy = std::move(policy);
+  auto loaded = descriptor::presets::try_openrouter_chat(options);
+  if (auto* error = std::get_if<descriptor::ConfigError>(&loaded)) throw std::runtime_error("descriptor refused: " + error->pointer);
+  return std::get<descriptor::ValidatedDescriptor>(std::move(loaded));
+}
+chat::Request chat_request(std::string model, std::optional<std::uint64_t> cap) {
+  chat::Request request;
+  request.model = std::move(model);
+  request.messages.push_back({Role::User, "hello"});
+  request.max_output_tokens = cap;
+  return request;
+}
+messages::ToolDefinition messages_tool(std::string type, std::string name, std::optional<std::uint64_t> max_uses = std::nullopt) {
+  messages::ToolDefinition tool;
+  tool.type = std::move(type);
+  tool.name = std::move(name);
+  tool.max_uses = max_uses;
+  return tool;
+}
+
+void facts_of_prepared_requests() {
+  using runtime::PreparedRequest;
+  // Messages: the caller's tools are left out; a service tool carries its own cap; code execution admits none.
+  auto messages = client_of(descriptor_of("anthropic.messages"));
+  {
+    auto request = messages::Request::simple("zz-model-1", "hi", 1000);
+    request.tools.push_back(messages_tool("memory_20250818", "memory"));
+    request.tools.push_back(messages_tool("web_search_20250305", "web_search", 2));
+    auto prepared = prepared_ok(messages, request);
+    const auto& facts = prepared.facts();
+    CHECK(facts.tools.size() == 1 && facts.tools[0].types == std::vector<std::string>{"web_search_20250305"});
+    CHECK(facts.tools[0].uses == 2u && facts.tools[0].member == "max_uses" && facts.tools[0].cap_admitted);
+    CHECK(!facts.plugins && !facts.routing && facts.fallback_models.empty() && facts.service_tier.empty());
+  }
+  {
+    auto request = messages::Request::simple("zz-model-1", "hi", 1000);
+    request.tools.push_back(messages_tool("code_execution_20250825", "code_execution"));
+    auto prepared = prepared_ok(messages, request);
+    const auto& facts = prepared.facts();
+    CHECK(facts.tools.size() == 1 && !facts.tools[0].uses && !facts.tools[0].cap_admitted && facts.tools[0].member == "max_uses");
+  }
+  // Responses: one cap, `max_tool_calls`, for all the hosted tools; the tier is the request's or the policy's default.
+  auto responses = client_of(descriptor_of("openai.responses"));
+  {
+    auto request = responses::Request::simple("zz-model-1", "hi", 1000);
+    request.hosted_tools.push_back(responses::WebSearchTool{});
+    request.hosted_tools.push_back(responses::ImageGenerationTool{});
+    request.max_tool_calls = 3;
+    request.service_tier = "flex";
+    auto prepared = prepared_ok(responses, request);
+    const auto& facts = prepared.facts();
+    CHECK(facts.tools.size() == 1 && facts.tools[0].types == (std::vector<std::string>{"web_search", "image_generation"}));
+    CHECK(facts.tools[0].uses == 3u && facts.tools[0].member == "max_tool_calls" && facts.tools[0].cap_admitted);
+    CHECK(facts.service_tier == "flex");
+    CHECK(prepared.model_invocation_limit() == 4u);
+  }
+  CHECK(prepared_ok(responses, responses::Request::simple("zz-model-1", "hi", 1000)).facts().tools.empty());
+  // Interactions: no tier named, so the policy's default tier, which bills at the standard rates.
+  auto interactions = client_of(descriptor_of("google.interactions"));
+  {
+    auto request = interactions::Request::simple("zz-model-1", "hi", 1000);
+    request.builtin_tools.push_back(interactions::GoogleSearchTool{});
+    auto prepared = prepared_ok(interactions, request);
+    const auto& facts = prepared.facts();
+    CHECK(facts.service_tier == "standard" && prepared.descriptor()->policy()->billing_tier("google.interactions", facts.service_tier).empty());
+    CHECK(facts.tools.size() == 1 && facts.tools[0].types == std::vector<std::string>{"google_search"} && !facts.tools[0].uses && facts.tools[0].member.empty());
+  }
+  // Generate: built-in tools and MCP servers, none capped.
+  auto generate = client_of(descriptor_of("google.generate"));
+  {
+    auto request = gemini::Request::simple("zz-model-1", "hi", 1000);
+    request.builtin_tools.push_back(gemini::GoogleSearchTool{});
+    request.builtin_tools.push_back(gemini::UrlContextTool{});
+    gemini::McpServer server;
+    server.name = "docs";
+    server.url = "https://mcp.example.com/mcp";
+    request.mcp_servers.push_back(server);
+    auto prepared = prepared_ok(generate, request);
+    const auto& facts = prepared.facts();
+    CHECK(facts.tools.size() == 3 && facts.tools[0].types == std::vector<std::string>{"google_search"} &&
+          facts.tools[1].types == std::vector<std::string>{"url_context"} && facts.tools[2].types == std::vector<std::string>{"mcp:docs"});
+    for (const auto& cap : facts.tools) CHECK(!cap.uses && cap.member.empty() && !cap.cap_admitted);
+  }
+  // Chat at a routing gateway: fallback models, plugins and the routing the request sends, which the body carries too.
+  auto gateway = client_of(openrouter_chat());
+  {
+    auto request = chat_request("vendor/zz-routed", 500);
+    request.models = {"vendor/zz-second"};
+    request.plugins.push_back(OpenRouterPlugin{"moderation", nullptr});
+    request.provider = OpenRouterRouting{};
+    request.provider->only = {"zz-host"};
+    request.provider->max_price = OpenRouterMaxPrice{1'500'000'000u, 3'000'000'000u, std::nullopt, std::nullopt, std::nullopt};
+    auto prepared = prepared_ok(gateway, request);
+    const auto& facts = prepared.facts();
+    CHECK(facts.fallback_models == std::vector<std::string>{"vendor/zz-second"} && facts.plugins);
+    CHECK(facts.routing && facts.routing->only == std::vector<std::string>{"zz-host"});
+    CHECK(facts.routing->max_price && facts.routing->max_price->prompt_nano_usd == 1'500'000'000u && facts.routing->max_price->completion_nano_usd == 3'000'000'000u);
+    CHECK(prepared.encoded_body().find(R"("max_price":{"prompt":1.5,"completion":3})") != std::string_view::npos);
+    CHECK(prepared.encoded_body().find(R"("only":["zz-host"])") != std::string_view::npos);
+  }
+  // A request that sets a tier names it; a call that is not a chat request has no facts.
+  {
+    auto request = chat_request("zz-model-1", 100);
+    request.service_tier = "flex";
+    auto chat = client_of(descriptor_of("openai.chat"));
+    CHECK(prepared_ok(chat, request).facts().service_tier == "flex");
+    CHECK(prepared_ok(chat, chat_request("zz-model-1", 100)).facts().service_tier.empty());
+  }
+  CHECK(PreparedRequest{}.facts().tools.empty() && PreparedRequest{}.facts().service_tier.empty());
+}
+
 } // namespace
 
 int main() {
   try {
     enum_names();
     controls_match_the_encoders(); controls_data(); billing_tiers(); routing_and_tools(); synthetic_policy();
+    refusal_predicate(); facts_of_prepared_requests();
     std::cout << "host query properties passed\n"; return 0;
   }
   catch (const std::exception& error) { std::cerr << "host query test failed: " << error.what() << '\n'; return 1; }

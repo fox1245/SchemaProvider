@@ -48,6 +48,8 @@ struct GoogleSearchTool { std::vector<std::string> search_types; };  // web_sear
 struct UrlContextTool {};
 struct CodeExecutionTool {};
 using BuiltinTool = std::variant<GoogleSearchTool, UrlContextTool, CodeExecutionTool>;
+// The name a built-in tool bills under in the catalogue (`tool:<type>`), the `type` the tool is sent with.
+std::string_view tool_type(const BuiltinTool&) noexcept;
 // What a request does. Create starts an interaction; the others act on the stored interaction `interaction_id`
 // and send no input: Get returns its current state (Pending while it runs), Cancel stops a background one and
 // returns what it produced (stop raw "cancelled"), Delete removes it (stop raw "deleted").

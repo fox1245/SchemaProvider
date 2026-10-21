@@ -13,6 +13,19 @@
 #include <initializer_list>
 
 namespace sp::gemini {
+std::string_view tool_type(const BuiltinTool& tool) noexcept {
+  return std::visit([](const auto& value) -> std::string_view {
+    using T = std::decay_t<decltype(value)>;
+    if constexpr (std::is_same_v<T, GoogleSearchTool>) return "google_search";
+    else if constexpr (std::is_same_v<T, UrlContextTool>) return "url_context";
+    else if constexpr (std::is_same_v<T, CodeExecutionTool>) return "code_execution";
+    else if constexpr (std::is_same_v<T, GoogleMapsTool>) return "google_maps";
+    else if constexpr (std::is_same_v<T, ComputerUseTool>) return "computer_use";
+    else if constexpr (std::is_same_v<T, FileSearchTool>) return "file_search";
+    else static_assert(sizeof(T) == 0, "a built-in tool alternative has no type here");
+  }, tool);
+}
+std::string tool_type(const McpServer& server) { return "mcp:" + server.name; }
 namespace {
 bool name_valid(std::string_view name) {
   if (name.empty() || name.size() > 128) return false;

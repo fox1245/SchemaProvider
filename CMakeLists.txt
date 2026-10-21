@@ -200,7 +200,7 @@ else()
   endif()
 endif()
 
-add_library(sp_core src/core/media.cpp src/core/native.cpp src/core/native_archive.cpp src/core/pricing.cpp src/core/enum_names.cpp)
+add_library(sp_core src/core/media.cpp src/core/native.cpp src/core/native_archive.cpp src/core/pricing.cpp src/core/enum_names.cpp src/core/failure.cpp)
 # The archive's file custody backend (core/native_archive_fs.h): POSIX and Windows have one, WebAssembly does not and
 # refuses with a typed error.
 if(SP_WASM)
@@ -271,7 +271,7 @@ if(WIN32)
 endif()
 endif()
 
-add_library(sp_runtime src/runtime/client.cpp src/runtime/policy.cpp src/configuration/runtime_policy.cpp)
+add_library(sp_runtime src/runtime/client.cpp src/runtime/policy.cpp src/runtime/request_facts.cpp src/configuration/runtime_policy.cpp)
 target_compile_options(sp_runtime PRIVATE ${SP_WARNING_OPTIONS})
 target_link_libraries(sp_runtime PUBLIC sp_core sp_codecs sp_wire sp_descriptor sp_json)
 
@@ -502,7 +502,7 @@ if(SP_BUILD_TESTS)
   add_executable(sp_pricing_tests tests/pricing_test.cpp)
   target_link_libraries(sp_pricing_tests PRIVATE sp_core sp_descriptor sp_json)
   add_executable(sp_host_queries_tests tests/host_queries_test.cpp)
-  target_link_libraries(sp_host_queries_tests PRIVATE sp_runtime sp_codecs sp_core sp_descriptor sp_json)
+  target_link_libraries(sp_host_queries_tests PRIVATE sp_runtime sp_transport sp_codecs sp_core sp_descriptor sp_json)
   add_executable(sp_images_tests tests/images_test.cpp)
   target_link_libraries(sp_images_tests PRIVATE sp_runtime sp_codecs sp_descriptor sp_json)
   add_executable(sp_decisions_tests tests/decisions_test.cpp)

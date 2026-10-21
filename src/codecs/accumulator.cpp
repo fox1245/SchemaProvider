@@ -388,7 +388,7 @@ bool Accumulator::apply(const MessageSeal& e) {
 }
 bool Accumulator::apply(const RawWire& e) {
   // An HTTP error body may wrap its envelope in a one-element array; keep it as received.
-  const bool wrapped_error = e.payload && e.type == "http.error" && e.payload->root().is_array() &&
+  const bool wrapped_error = e.payload && e.type == http_error_event && e.payload->root().is_array() &&
       e.payload->root().size() == 1 && e.payload->root().at(0).is_object();
   if (e.type.empty() || !e.payload || (!e.payload->root().is_object() && !wrapped_error))
     return reject(ErrorKind::ProtocolCorrupt, "invalid raw wire event");
