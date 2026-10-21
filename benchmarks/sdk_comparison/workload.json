@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "model": "bench-model",
+  "system": "You are a benchmark assistant.",
+  "user_prefix": "benchmark-request:",
+  "user_payload_bytes": 128,
+  "max_tokens": 256,
+  "response_prefix": "benchmark-ok:",
+  "response_payload_bytes": 1200,
+  "stream_chunks": 50,
+  "api_key": "bench-not-a-real-key",
+  "apis": {
+    "openai": {"family": "openai.chat", "path_prefix": "/openai/chat/text"},
+    "anthropic": {"family": "anthropic.messages", "path_prefix": "/anthropic/messages/text"}
+  },
+  "concurrency_levels": [1, 8, 32, 128],
+  "min_measured_requests": 1000,
+  "measured_requests_per_slot": 20,
+  "min_warmup_requests": 300,
+  "warmup_requests_per_slot": 5
+}

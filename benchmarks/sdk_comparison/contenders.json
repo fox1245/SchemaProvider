@@ -1,0 +1,320 @@
+{
+  "version": 1,
+  "contenders": [
+    {
+      "id": "null-curl",
+      "label": "null client, libcurl 8.5.0 (system)",
+      "kind": "null",
+      "language": "C",
+      "cmd": [
+        "${INSTALL}/bin/null_client"
+      ],
+      "footprint": {
+        "kind": "binary",
+        "path": "${INSTALL}/bin/null_client"
+      },
+      "connection_reuse": true,
+      "installed": "${INSTALL}/installed/null-curl.json",
+      "per_request": [
+        "nothing: the request body is serialised once before the run, replies are counted and compared by length and event count, nothing is parsed"
+      ]
+    },
+    {
+      "id": "null-curl-823",
+      "label": "null client, libcurl 8.23.0 (private build)",
+      "kind": "null",
+      "language": "C",
+      "cmd": [
+        "${INSTALL}/bin/null_client_curl823"
+      ],
+      "footprint": {
+        "kind": "binary",
+        "path": "${INSTALL}/bin/null_client_curl823"
+      },
+      "connection_reuse": true,
+      "installed": "${INSTALL}/installed/null-curl-curl823.json",
+      "per_request": [
+        "nothing: the request body is serialised once before the run, replies are counted and compared by length and event count, nothing is parsed"
+      ]
+    },
+    {
+      "id": "null-curl-fresh",
+      "label": "null client, new connection per request, libcurl 8.5.0 (system)",
+      "kind": "null",
+      "language": "C",
+      "cmd": [
+        "${INSTALL}/bin/null_client"
+      ],
+      "args": [
+        "--fresh"
+      ],
+      "connection_reuse": false,
+      "installed": "${INSTALL}/installed/null-curl.json",
+      "per_request": [
+        "as null-curl, with a new TCP and TLS connection for every request"
+      ]
+    },
+    {
+      "id": "null-curl-fresh-823",
+      "label": "null client, new connection per request, libcurl 8.23.0 (private build)",
+      "kind": "null",
+      "language": "C",
+      "cmd": [
+        "${INSTALL}/bin/null_client_curl823"
+      ],
+      "args": [
+        "--fresh"
+      ],
+      "connection_reuse": false,
+      "installed": "${INSTALL}/installed/null-curl-curl823.json",
+      "per_request": [
+        "as null-curl, with a new TCP and TLS connection for every request"
+      ]
+    },
+    {
+      "id": "sp",
+      "label": "SchemaProvider, libcurl 8.5.0 (system)",
+      "kind": "multi-provider SDK",
+      "language": "C++20 (in process)",
+      "cmd": [
+        "${INSTALL}/bin/sp_client"
+      ],
+      "footprint": {
+        "kind": "binary",
+        "path": "${INSTALL}/bin/sp_client"
+      },
+      "connection_reuse": true,
+      "installed": "${INSTALL}/installed/sp.json",
+      "per_request": [
+        "typed request encoding with model and sampling admission from the built-in policy",
+        "per-request deadline and stall timers",
+        "bounded response queues with back-pressure",
+        "typed event decoding with stream causality and terminal-evidence checks (a stream that ends early fails)",
+        "usage kept as unknown versus zero",
+        "an immutable owned outcome per request",
+        "retries off by default; no telemetry or logging"
+      ]
+    },
+    {
+      "id": "sp-curl823",
+      "label": "SchemaProvider, libcurl 8.23.0 (private build)",
+      "kind": "multi-provider SDK",
+      "language": "C++20 (in process)",
+      "cmd": [
+        "${INSTALL}/bin/sp_client_curl823"
+      ],
+      "footprint": {
+        "kind": "binary",
+        "path": "${INSTALL}/bin/sp_client_curl823"
+      },
+      "connection_reuse": true,
+      "installed": "${INSTALL}/installed/sp-curl823.json",
+      "per_request": [
+        "typed request encoding with model and sampling admission from the built-in policy",
+        "per-request deadline and stall timers",
+        "bounded response queues with back-pressure",
+        "typed event decoding with stream causality and terminal-evidence checks (a stream that ends early fails)",
+        "usage kept as unknown versus zero",
+        "an immutable owned outcome per request",
+        "retries off by default; no telemetry or logging"
+      ]
+    },
+    {
+      "id": "ai-sdk-cpp",
+      "label": "ai-sdk-cpp (ClickHouse)",
+      "kind": "multi-provider SDK",
+      "language": "C++20 (in process)",
+      "cmd": [
+        "${INSTALL}/bin/ai_sdk_cpp_client"
+      ],
+      "footprint": {
+        "kind": "binary",
+        "path": "${INSTALL}/bin/ai_sdk_cpp_client"
+      },
+      "connection_reuse": false,
+      "installed": "${INSTALL}/installed/ai-sdk-cpp.json",
+      "per_request": [
+        "request JSON built with nlohmann::json",
+        "a new TCP and TLS connection for every request (cpp-httplib builds a new client per call)",
+        "a retry wrapper (default 2 retries, 2 s initial delay) that only acts on retryable failures",
+        "a thread per stream, and an event iterator that sleeps 1 ms when its queue is empty",
+        "logger calls compiled in, logger off by default",
+        "does not link libcurl (cpp-httplib over OpenSSL), so it has one row and the two libcurl builds do not apply to it"
+      ],
+      "na": {
+        "openai/buffered": "the SDK's buffered path builds its client from the bare string 'host:port' (cpp-httplib's SSLClient(host) then connects to port 443), so it cannot reach a TLS server on any other port; the peer cannot bind port 443 without privileges, and an unprivileged network namespace is not available on the hosts",
+        "anthropic/buffered": "the SDK's buffered path builds its client from the bare string 'host:port' (cpp-httplib's SSLClient(host) then connects to port 443), so it cannot reach a TLS server on any other port; the peer cannot bind port 443 without privileges, and an unprivileged network namespace is not available on the hosts"
+      }
+    },
+    {
+      "id": "rust-genai",
+      "label": "genai (Rust)",
+      "kind": "multi-provider SDK",
+      "language": "Rust (in process)",
+      "cmd": [
+        "${INSTALL}/bin/genai_client"
+      ],
+      "footprint": {
+        "kind": "binary",
+        "path": "${INSTALL}/bin/genai_client"
+      },
+      "connection_reuse": true,
+      "installed": "${INSTALL}/installed/rust-genai.json",
+      "per_request": [
+        "request built through genai's adapter dispatch (serde_json values)",
+        "typed response parsing into genai's chat types",
+        "gzip accepted on the wire (genai's default)",
+        "tracing events compiled in; no subscriber is installed",
+        "no retries"
+      ],
+      "pool_note": "genai's streamers end a stream at its terminal event ([DONE], message_stop) and stop polling the response body, so the connection can only go back to reqwest's pool if the end of the body had already arrived; the new connections in the window are the observed consequence"
+    },
+    {
+      "id": "openai-py",
+      "label": "openai (Python)",
+      "kind": "single-provider SDK",
+      "language": "Python 3.12",
+      "cmd": [
+        "${INSTALL}/venv-openai/bin/python",
+        "${HARNESS}/clients/py/c_openai.py"
+      ],
+      "footprint": {
+        "kind": "venv",
+        "path": "${INSTALL}/venv-openai"
+      },
+      "connection_reuse": true,
+      "installed": "${INSTALL}/installed/openai.json",
+      "na": {
+        "anthropic": "the SDK speaks the OpenAI API only"
+      },
+      "per_request": [
+        "pydantic construction and validation of the typed response and of every stream chunk",
+        "x-stainless-* platform headers on every request",
+        "default retry settings (max_retries=2), not triggered"
+      ]
+    },
+    {
+      "id": "anthropic-py",
+      "label": "anthropic (Python)",
+      "kind": "single-provider SDK",
+      "language": "Python 3.12",
+      "cmd": [
+        "${INSTALL}/venv-anthropic/bin/python",
+        "${HARNESS}/clients/py/c_anthropic.py"
+      ],
+      "footprint": {
+        "kind": "venv",
+        "path": "${INSTALL}/venv-anthropic"
+      },
+      "connection_reuse": true,
+      "installed": "${INSTALL}/installed/anthropic.json",
+      "na": {
+        "openai": "the SDK speaks the Messages API only"
+      },
+      "per_request": [
+        "pydantic construction of the typed response; the streaming helper also accumulates the message",
+        "x-stainless-* platform headers on every request",
+        "default retry settings (max_retries=2), not triggered"
+      ]
+    },
+    {
+      "id": "litellm",
+      "label": "LiteLLM SDK",
+      "kind": "multi-provider SDK",
+      "language": "Python 3.12",
+      "cmd": [
+        "${INSTALL}/venv-litellm/bin/python",
+        "${HARNESS}/clients/py/c_litellm.py"
+      ],
+      "footprint": {
+        "kind": "venv",
+        "path": "${INSTALL}/venv-litellm"
+      },
+      "connection_reuse": true,
+      "installed": "${INSTALL}/installed/litellm.json",
+      "env": {
+        "LITELLM_LOCAL_MODEL_COST_MAP": "True"
+      },
+      "env_note": "LITELLM_LOCAL_MODEL_COST_MAP=True uses the model cost map shipped in the wheel; without it litellm downloads the map from the network at import, which the benchmark must not depend on (and which fails against the peer-only trust store, with retries).",
+      "per_request": [
+        "model-string parsing and provider resolution",
+        "parameter mapping (get_optional_params) and a logging object per call",
+        "success handlers after each call, including completion_cost and, for streams, stream_chunk_builder and token counting",
+        "response conversion into litellm's ModelResponse",
+        "default retry settings, not triggered",
+        "litellm.telemetry=False; the model cost map is read from the wheel, not the network"
+      ]
+    },
+    {
+      "id": "any-llm",
+      "label": "any-llm",
+      "kind": "multi-provider SDK",
+      "language": "Python 3.12",
+      "cmd": [
+        "${INSTALL}/venv-any-llm/bin/python",
+        "${HARNESS}/clients/py/c_any_llm.py"
+      ],
+      "footprint": {
+        "kind": "venv",
+        "path": "${INSTALL}/venv-any-llm"
+      },
+      "connection_reuse": true,
+      "installed": "${INSTALL}/installed/any-llm.json",
+      "per_request": [
+        "wraps the official openai and anthropic SDKs, so every per-request cost of those SDKs applies",
+        "converts each response and each stream chunk into any-llm's own pydantic types",
+        "parameter mapping through its CompletionParams"
+      ],
+      "pool_note": "streamed Anthropic requests occasionally open a connection after the warm-up (seen at c=32 in two smoke runs); the cause was not established"
+    },
+    {
+      "id": "aisuite",
+      "label": "aisuite",
+      "kind": "multi-provider SDK",
+      "language": "Python 3.12",
+      "cmd": [
+        "${INSTALL}/venv-aisuite/bin/python",
+        "${HARNESS}/clients/py/c_aisuite.py"
+      ],
+      "footprint": {
+        "kind": "venv",
+        "path": "${INSTALL}/venv-aisuite"
+      },
+      "connection_reuse": true,
+      "installed": "${INSTALL}/installed/aisuite.json",
+      "pool_note": "aisuite cannot size the underlying SDK's pool, whose default keeps 100 idle connections",
+      "per_request": [
+        "wraps the official openai and anthropic SDKs (older majors than the standalone baselines, as aisuite's constraints require)",
+        "message conversion before the call and response post-processing (thinking-content extraction) after it",
+        "for Anthropic, every stream event is converted into an OpenAI-shaped chunk",
+        "trace sinks exist but none is registered"
+      ],
+      "concurrency_cap_note": {
+        "anthropic/buffered": "aisuite's Anthropic provider has no async buffered call, so acreate offloads the SDK's synchronous call with asyncio.to_thread; the default executor has min(32, CPU count + 4) threads, which caps the requests actually in flight"
+      }
+    },
+    {
+      "id": "vercel-ai",
+      "label": "Vercel AI SDK",
+      "kind": "multi-provider SDK",
+      "language": "TypeScript on Node",
+      "cmd": [
+        "${INSTALL}/node/bin/node",
+        "${INSTALL}/js/c_vercel_ai.mjs"
+      ],
+      "footprint": {
+        "kind": "node_modules",
+        "path": "${INSTALL}/js/node_modules"
+      },
+      "connection_reuse": true,
+      "installed": "${INSTALL}/installed/vercel-ai.json",
+      "per_request": [
+        "prompt standardisation and call-setting validation",
+        "zod-schema validation of every provider response and stream chunk",
+        "default retries (maxRetries=2, exponential backoff), not triggered",
+        "for streamText, a transform-stream pipeline and step bookkeeping",
+        "telemetry off unless experimental_telemetry is set"
+      ]
+    }
+  ]
+}

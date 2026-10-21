@@ -149,6 +149,7 @@ The old NeoGraph `Provider::complete`, `OpenAIProvider`, `RateLimitedProvider` a
 - [PoC and historical evidence](docs/POC_PLAN.md): separate cohort-scoped results, including the old-ABI lossless NO-GO and interface 3 typed-cutover provenance.
 - [Roadmap](docs/ROADMAP.md): implemented work versus unclaimed release/platform/vendor gates.
 - [Research](docs/RESEARCH.md) and [decisions](docs/decisions/): source-linked rationale; external papers are not proof of SDK behavior.
+- [SDK comparison harness](benchmarks/sdk_comparison/README.md): a reproducible comparison of this SDK with other LLM client SDKs against a mock peer. It holds the method, the pins and the tooling, and no results.
 - [SDK benchmark records](benchmarks/current-sdk-benchmark-results.json) and [summary](benchmarks/current-sdk-summary.json): model-free protocol/ownership measurements, not model inference speed.
 - [Qualification summary](config/qualification-final-summary.json): the paid baseline achieved 293/300 pairs, not an all-family pass. Google carrier acceptance does not prove signature validation or native consumption. That campaign has no remaining authorized calls.
 
