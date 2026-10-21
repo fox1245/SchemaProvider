@@ -1,12 +1,14 @@
 // The typed queries a host asks instead of restating provider facts, and the worst-case cost of a prepared request.
 #include "codecs/chat.h"
 #include "codecs/gemini_request.h"
+#include "codecs/messages.h"
 #include "codecs/interactions_request.h"
 #include "codecs/messages_request.h"
 #include "codecs/responses_request.h"
 #include "codecs/generations.h"
 #include "core/enum_names.h"
 #include "core/failure.h"
+#include "core/native.h"
 #include "core/pricing.h"
 #include "descriptor/policy.h"
 #include "descriptor/presets.h"
@@ -763,6 +765,92 @@ void worst_case_synthetic_policy() {
   const auto shipped = runtime::worst_case_cost(prepared, *descriptor::builtin_catalogue());
   CHECK(!shipped.total && has(shipped, pricing::UnboundedBy::ModelPrice, "zz-model-1"));
 }
+
+// ---- usage ---------------------------------------------------------------------------------------------------
+
+std::string show(const Usage& usage) {
+  auto count = [](const std::optional<Count>& c) { return c ? std::to_string(c->value) + (c->evidence == Evidence::Derived ? "d" : "r") : std::string("-"); };
+  std::string out = std::string(to_string(usage.stage)) + "/" + std::string(to_string(usage.quality)) + " in=" + count(usage.input_total) +
+      " out=" + count(usage.output_total) + " total=" + count(usage.total) + " uncached=" + count(usage.input_uncached) +
+      " read=" + count(usage.cache_read) + " write=" + count(usage.cache_write) + " reasoning=" + count(usage.reasoning);
+  for (const auto& [name, value] : usage.extra) out += " " + name + "=" + count(value);
+  for (const auto& conflict : usage.conflicts) out += " !" + conflict.counter + ":" + conflict.detail;
+  out += " cost=" + std::string(to_string(usage.provider_cost.source));
+  return out;
+}
+// The usage a whole response carries, read by the codec the way a call reads it.
+std::variant<Usage, Error> usage_of_response(const descriptor::ValidatedDescriptor& d, const std::string& usage) {
+  messages::Request request;
+  request.model = "fixture-model";
+  request.account_scope = "fixture-account";
+  request.messages.push_back(Message{"", Role::User, {Text{"Hello"}}});
+  auto encoded = messages::encode(d, request, false);
+  const auto* ok = std::get_if<messages::EncodedRequest>(&encoded);
+  if (!ok) throw std::runtime_error("fixture request did not encode");
+  Accumulator accumulator;
+  messages::Codec codec(d, messages::Mode::Buffered, accumulator, ok->context);
+  codec.buffered(R"({"type":"message","id":"msg-1","role":"assistant","model":"fixture-model","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":)" + usage + "}", {});
+  const auto& outcome = accumulator.outcome();
+  if (const auto* completion = outcome ? std::get_if<Completion>(&*outcome) : nullptr) return completion->usage;
+  return std::get<Failure>(*outcome).error;
+}
+
+void decoded_usage() {
+  const auto d = descriptor_of("anthropic.messages");
+  const std::string cases[] = {
+      R"({"input_tokens":10,"cache_creation_input_tokens":2,"cache_read_input_tokens":5,"output_tokens":7,"server_tool_use":{"web_search_requests":1,"web_fetch_requests":0},"service_tier":"standard","cache_creation":{"ephemeral_5m_input_tokens":2,"ephemeral_1h_input_tokens":0}})",
+      R"({"input_tokens":3,"output_tokens":9,"cache_read_input_tokens":null,"cache_creation_input_tokens":null,"output_tokens_details":{"thinking_tokens":4}})",
+      R"({"input_tokens":5,"output_tokens":6,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"iterations":[{"type":"compaction","input_tokens":100,"output_tokens":20,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},{"type":"message","input_tokens":5,"output_tokens":6}]})",
+      R"({"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":4,"cache_creation":{"ephemeral_5m_input_tokens":1,"ephemeral_1h_input_tokens":1}})",
+      R"({"input_tokens":0,"output_tokens":0})"};
+  for (const auto& usage : cases) {
+    const auto decoded = messages::decode_usage(d, usage);
+    const auto response = usage_of_response(d, usage);
+    const auto* a = std::get_if<Usage>(&decoded);
+    const auto* b = std::get_if<Usage>(&response);
+    CHECK(a && b);
+    CHECK(show(*a) == show(*b));
+    CHECK(a->stage == UsageStage::Final);
+  }
+  // The values a coding agent's result carries, read as the codec reads a response's.
+  const auto first = std::get<Usage>(messages::decode_usage(d, cases[0]));
+  CHECK(first.input_uncached && first.input_uncached->value == 10 && first.cache_read && first.cache_read->value == 5 &&
+        first.cache_write && first.cache_write->value == 2);
+  CHECK(first.input_total && first.input_total->value == 17 && first.input_total->evidence == Evidence::Derived);
+  CHECK(first.output_total && first.output_total->value == 7 && first.total && first.total->value == 24);
+  CHECK(first.extra.at("server_tool_use.web_search_requests").value == 1 && first.extra.at("cache_creation.ephemeral_5m_input_tokens").value == 2);
+  CHECK(first.quality == UsageQuality::Consistent && first.conflicts.empty());
+  const auto details = std::get<Usage>(messages::decode_usage(d, cases[1]));
+  CHECK(details.reasoning && details.reasoning->value == 4 && !details.cache_read && !details.input_total);
+  const auto contradicted = std::get<Usage>(messages::decode_usage(d, cases[3]));
+  CHECK(contradicted.quality == UsageQuality::Inconsistent && !contradicted.conflicts.empty());
+  // Anything the codec would refuse in a response is an Error here.
+  auto refused = [&](std::string_view text, ErrorKind kind) {
+    const auto decoded = messages::decode_usage(d, text);
+    const auto* error = std::get_if<Error>(&decoded);
+    return error && error->kind == kind;
+  };
+  CHECK(refused(R"({"input_tokens":1})", ErrorKind::ProtocolCorrupt));
+  CHECK(refused(R"({"output_tokens":1})", ErrorKind::ProtocolCorrupt));
+  CHECK(refused(R"({"input_tokens":-1,"output_tokens":1})", ErrorKind::ProtocolCorrupt));
+  CHECK(refused(R"({"input_tokens":"1","output_tokens":1})", ErrorKind::ProtocolCorrupt));
+  CHECK(refused(R"({"input_tokens":18446744073709551615,"output_tokens":1,"cache_read_input_tokens":1,"cache_creation_input_tokens":0})", ErrorKind::ProtocolCorrupt));
+  CHECK(refused("[1]", ErrorKind::ProtocolCorrupt) && refused("{", ErrorKind::ProtocolCorrupt) && refused("", ErrorKind::ProtocolCorrupt));
+  // The codec's refusals keep their reason codes, and a non-object has the one the codec gives a missing usage object.
+  CHECK(std::get<Error>(messages::decode_usage(d, "[1]")).reason == "messages.usage.object_required");
+  CHECK(std::get<Error>(messages::decode_usage(d, R"({"input_tokens":1})")).reason == "messages.usage.counters_missing");
+  CHECK(refused(R"({"input_tokens":1,"output_tokens":1,"service_tier":7})", ErrorKind::ProtocolCorrupt));
+  // Another family's descriptor is not asked.
+  const auto chat = descriptor_of("openai.chat");
+  const auto other = messages::decode_usage(chat, cases[4]);
+  CHECK(std::holds_alternative<Error>(other) && std::get<Error>(other).kind == ErrorKind::Misuse &&
+        std::get<Error>(other).reason == "messages.usage.wrong_family");
+  // A descriptor that keeps its usage elsewhere is read there.
+  auto moved = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"usage-path","family":"anthropic.messages","connection":{"base_url":"https://usage.example.test","paths":{"buffered":"/m","streaming":"/m"}},"bindings":{"model":"model","messages":"messages","stream":"stream","max_output_tokens":"max_tokens","usage":["metrics","tokens"]}})");
+  if (const auto* error = std::get_if<descriptor::ConfigError>(&moved)) throw std::runtime_error("descriptor refused: " + error->pointer);
+  const auto& relocated = std::get<descriptor::ValidatedDescriptor>(moved);
+  CHECK(show(std::get<Usage>(messages::decode_usage(relocated, cases[0]))) == show(first));
+}
 } // namespace
 
 int main() {
@@ -772,6 +860,7 @@ int main() {
     refusal_predicate(); facts_of_prepared_requests();
     worst_case_tokens(); worst_case_unbounded(); worst_case_tools(); worst_case_tiers_and_fallbacks(); worst_case_route_ceiling();
     worst_case_covers_usage(); worst_case_synthetic_policy();
+    decoded_usage();
     std::cout << "host query properties passed\n"; return 0;
   }
   catch (const std::exception& error) { std::cerr << "host query test failed: " << error.what() << '\n'; return 1; }

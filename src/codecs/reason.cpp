@@ -149,6 +149,7 @@ constexpr Entry messages_table[] = {
   {"duplicate message", "messages.message.duplicate"},
   {"invalid initial content", "messages.message.content_invalid"},
   {"usage object required", "messages.usage.object_required"},
+  {"usage decoding is for the Messages family", "messages.usage.wrong_family"},
   {"incomplete block lifecycle or index gap", "messages.block.lifecycle_incomplete"},
   {"invalid stop fields", "messages.stop.fields_invalid"},
   {"invalid stop details", "messages.stop.details_invalid"},
