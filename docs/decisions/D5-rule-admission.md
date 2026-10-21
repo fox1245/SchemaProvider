@@ -1,7 +1,6 @@
 # D5 — Descriptor rule admission
 
 - Status: FIRM, 2026-10-01
-- Deciders: maintainer + two-family review panel
 
 **Current implementation boundary.** This record governs the original proposed constraints grammar and future rule admission, not currently installed rule execution. Closed runtime/error and descriptor/codec policy snapshots are implemented; the broader descriptor constraints interpreter is not. The old NeoGraph interpreter cited as design-time evidence below was removed by the approved cutover, not retained behind a compatibility path. [Current inventory and admission APIs](../../README.md#owned-requests-results-and-configuration).
 

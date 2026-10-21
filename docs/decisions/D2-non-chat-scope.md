@@ -1,7 +1,6 @@
 # D2 — Non-chat scope
 
-- Status: SUPERSEDED by [D6](D6-endpoints.md) on 2026-10-19 (FIRM from 2026-10-01). The owner moved every provider surface into the SDK on 2026-10-18; the text below is the historical record.
-- Deciders: maintainer + two-family review panel
+- Status: SUPERSEDED by [D6](D6-endpoints.md) on 2026-10-19 (FIRM from 2026-10-01). Decision (2026-10-18): every provider surface moves into the SDK; the text below is the historical record.
 
 The approved typed C++ cutover removed the old interpreter and retained separate Images/Veo/Decisions clients in NeoGraph, not this SDK. [Recorded integrated proof](../POC_PLAN.md#current-typed-c-cutover-provenance) and [sanitized media observations](../../config/media-minimal-validation.json) preserve distinct host authority and one-shot scope; they are not universal endpoint qualification, invoices or permission for more requests. The original checklist below is historical acceptance rationale, not unfinished cutover work.
 
@@ -12,7 +11,7 @@ At the original design checkpoint, NeoGraph's provider descriptors also drove no
 The SDK covers **chat completion APIs only**: Chat Completions, Responses, Messages, Gemini generate and Interactions, including artifacts that arrive inside chat responses. The staged release gates remain in ../ROADMAP.md; implemented families do not imply every release cell is qualified.
 Not in the first release and not covered by the Event set: Veo long-running operations, standalone image endpoints, the OpenRouter Decisions endpoint. The property `OperationLifecycle` is dropped.
 
-Clean-cutover rule (owner principle: no shims, no half migration): NeoGraph's cutover deletes the old descriptor-grammar interpreter for operation/artifacts/prompt_template/prompt_field, `request_json` and `SchemaPrimitiveRegistry`. Any of the three features the owner keeps is rewritten by NeoGraph as a **typed client on NeoGraph's own async HTTP layer** (never interpreting the old grammar) in the same cutover. No feature is deleted without explicit owner approval.
+Clean-cutover rule (principle: no shims, no half migration): NeoGraph's cutover deletes the old descriptor-grammar interpreter for operation/artifacts/prompt_template/prompt_field, `request_json` and `SchemaPrimitiveRegistry`. Any of the three features that is kept is rewritten by NeoGraph as a **typed client on NeoGraph's own async HTTP layer** (never interpreting the old grammar) in the same cutover. No feature is deleted without explicit approval recorded in the cutover change.
 
 Decisions remains a separate typed NeoGraph endpoint matching the reviewed official OpenRouter request/response schema, not the old criteria-array fixture. It is an alpha endpoint, never surfaced as a chat Completion or fake EndTurn; one JeV1.13 observation does not establish broad endpoint support.
 
@@ -22,7 +21,7 @@ Decisions remains a separate typed NeoGraph endpoint matching the reviewed offic
 - [inference] Folding long-running operations into chat Events would force an operation lifecycle and polling semantics into every codec.
 
 ## Options considered
-- Endpoints target now: rejected (scope growth before any chat cell ships; two-person team).
+- Endpoints target now: rejected (scope growth before any chat cell ships; small team).
 - Keep the old grammar interpreter in NeoGraph: rejected (half migration; two interpreters).
 - Fold operations into Events: rejected (see inference).
 
@@ -32,13 +31,13 @@ Decisions remains a separate typed NeoGraph endpoint matching the reviewed offic
 
 ## Original cutover checklist (NeoGraph side; historical acceptance requirements)
 1. **Delete-list**: old interpreter for operation/artifacts/prompt_template/prompt_field, `request_json`, `SchemaPrimitiveRegistry`, and their tests and bindings.
-2. **Owner inventory input**: the owner lists live users of Images/Veo/Decisions; the list decides keep (typed client) versus delete.
-3. **Approval before any deletion**: no item on the delete-list is removed without explicit owner approval recorded in the cutover change.
+2. **Inventory input**: the live users of Images/Veo/Decisions are listed; the list decides keep (typed client) versus delete.
+3. **Approval before any deletion**: no item on the delete-list is removed without explicit approval recorded in the cutover change.
 4. **Half-migration test**: after cutover NeoGraph source contains zero code interpreting the old descriptor grammar (automated search gate).
 5. Every kept feature has a typed client on NeoGraph's async HTTP layer, landing in the same cutover.
 
 ## Reconsideration conditions
-Owner inventory confirms live users AND a second consumer appears, OR NeoGraph would otherwise hold two polling clients. **Resume path (minor release)**: an optional `Endpoints` target for Images/Veo inside this repo; chat Event and Completion stay untouched.
+An inventory confirms live users AND a second consumer appears, OR NeoGraph would otherwise hold two polling clients. **Resume path (minor release)**: an optional `Endpoints` target for Images/Veo inside this repo; chat Event and Completion stay untouched.
 
 ## What would falsify it
 A live user of Images/Veo/Decisions surfaced by the inventory that cannot be served by a typed client.

@@ -1,7 +1,6 @@
 # D7 — Files, batches and the remaining provider resources
 
 - Status: FIRM, 2026-10-19. Extends [D6](D6-endpoints.md).
-- Deciders: maintainer + review panel (eight seats from four model families, two rounds)
 
 ## Context
 D6 put non-chat endpoints on `runtime::Client`. Image generation, decisions, embeddings, rerank, moderation, speech, transcription and OpenRouter video jobs shipped under it. What remains of SchemaProvider#59 is different in kind:
@@ -32,16 +31,16 @@ The transport sent only an in-memory body, bounded by a policy limit (16 MiB by 
 - [read docs] OpenAI Uploads and Google's resumable protocol split a file over calls; OpenAI and Anthropic `/v1/files` do not.
 
 ## Options considered
-- In-memory bodies only, with a larger limit for uploads: rejected by 7 of 8 seats. 500 MB per admission slot is a heap hazard.
+- In-memory bodies only, with a larger limit for uploads: rejected. 500 MB per admission slot is a heap hazard.
 - A general byte source with a read callback: rejected. A callback cannot be journaled, and its bytes cannot be shown to be the ones the caller described.
 - Types per provider for files: rejected. A host names a file in a chat request the same way at every provider.
 - One generic call for every resource: rejected. D6's typed results catch shape errors in the SDK.
-- Typed envelopes for every store: the minority (3 of 8). Adopted only where the SDK adds meaning.
+- Typed envelopes for every store: not adopted wholesale. They are adopted only where the SDK adds meaning.
 
 ## Consequences
 - `transport::HttpRequest` gains `file_body`, and `transport::Result` gains `upload_sha256`. `FailureKind::UploadSource` reports a file that could not be read or no longer matched; the runtime reports it as `InvalidRequest` with the reason `transport.upload.source`.
 - `endpoints::Encoded` gains request headers and a file slice.
-- The panel recommends that models, generation statistics, caches, file search stores, vector stores, conversations, voices and translations may follow 0.4.0. The owner decided that every provider surface ships in interface 7, so this is a question for the owner, not part of the decision.
+- Whether models, generation statistics, caches, file search stores, vector stores, conversations, voices and translations may follow 0.4.0 is an open item, not part of this decision. Every provider surface ships in interface 7 (decision of 2026-10-18), so the question concerns release timing, not scope.
 
 ## Reconsideration conditions
 - A provider whose single-shot upload exceeds what a file slice can describe, such as a streamed body without a known length.

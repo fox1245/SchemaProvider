@@ -134,10 +134,10 @@ std::string extension_declaration(const Fixture& fixture, const Totals& before) 
       "\"baseline_ledger\":\"build/m5-live.ledger\",\"meter_ledger\":\"build/qualification-meter.ledger\","
       "\"catalog\":\"config/model-catalog.json\","
       "\"activation_anchor\":\"build/m5-live.ledger.qualification-binding\","
-      "\"owner_selection\":\"추가 480회·US$3 승인\","
+      "\"allowance_note\":\"additional 480 calls / US$3 allowance\","
       "\"billing_guarantee\":\"local_meter_and_stop_not_invoice\","
       "\"unknown_cost_policy\":\"retain_reservation\","
-      "\"excluded_paid_scope\":[\"video_generation\",\"image_generation\",\"remote_graphrag\"],"
+      "\"excluded_paid_scope\":[\"video_generation\",\"image_generation\",\"remote_retrieval\"],"
       "\"binding\":{\"original_authorization_sha256\":\"" + hash_file("config/qualification-authorization.json") +
       "\",\"baseline_sha256\":\"" + hash_file("build/m5-live.ledger") +
       "\",\"catalog_sha256\":\"" + hash_file("config/model-catalog.json") +

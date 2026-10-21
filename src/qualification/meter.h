@@ -53,7 +53,7 @@ class Meter {
   // external counter. Deliberate owner rollback/deletion/copy of ALL baseline,
   // activation, grant, and meter files is outside protection. The fixed private
   // activation anchor blocks ordinary reopen/reload/path replacement resets.
-  // The optional owner-approved extension is one durable authorization event in
+  // The optional approved extension is one durable authorization event in
   // that same ledger, never a replacement grant. Its declaration remains pinned
   // by exact bytes and file identity; removal/replacement fails closed.
   static Result<std::unique_ptr<Meter>> open(const std::string& project_root);

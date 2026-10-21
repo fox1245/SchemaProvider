@@ -1,10 +1,9 @@
 # D6 — Non-chat endpoints
 
 - Status: FIRM, 2026-10-19. Supersedes [D2](D2-non-chat-scope.md).
-- Deciders: maintainer + review panel (eight seats from four model families, two rounds)
 
 ## Context
-D2 kept the SDK chat-only: NeoGraph held its own typed clients for OpenAI image generation, Veo and OpenRouter Decisions, on its own HTTP layer. On 2026-10-18 the owner reversed that. Every provider surface moves into interface 7 (0.4.0), and NeoGraph 0.16.0 deletes its typed clients (SchemaProvider#58, #59, #61).
+D2 kept the SDK chat-only: NeoGraph held its own typed clients for OpenAI image generation, Veo and OpenRouter Decisions, on its own HTTP layer. Decision (2026-10-18): that is reversed. Every provider surface moves into interface 7 (0.4.0), and NeoGraph 0.16.0 deletes its typed clients (SchemaProvider#58, #59, #61).
 
 The endpoints differ from the chat families in shape, not in what a host needs from a call: a durable receipt before dispatch, an absolute deadline, cancellation, stall bounds, a shared retry budget, a stable error reason and the retained wire. They also differ among themselves. Images are base64 or URLs, speech is binary audio, embeddings are vectors, decisions are per-question answers, and video is an asynchronous job.
 

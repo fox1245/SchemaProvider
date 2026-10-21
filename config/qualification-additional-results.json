@@ -7,7 +7,7 @@
     "original_baseline_calls": 99,
     "original_baseline_exposure_micro_usd": 18979680,
     "original_baseline_sha256": "546bb5e2f08b7a28f0ea9b92b83702b2ffe87efc05b5362bff49e51be4501be3",
-    "authorization_sha256": "1bc7c4053ffa6444beeccebae71d322b62c5afd6ac8250d612c5f222b017e67a",
+    "authorization_sha256": "c6f4a5b4c24a0e6f5861dd343fef628ac4b68c40a5fb20ede1a657860c08616f",
     "billing": "local_meter_not_invoice"
   },
   "baseline_families": [
@@ -53,7 +53,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -175,7 +175,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -297,7 +297,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -419,7 +419,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -541,7 +541,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -663,7 +663,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -785,7 +785,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -907,7 +907,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -1029,7 +1029,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -1151,7 +1151,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -1273,7 +1273,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -1395,7 +1395,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -1517,7 +1517,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -1639,7 +1639,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -1761,7 +1761,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -1883,7 +1883,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -2005,7 +2005,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -2127,7 +2127,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -2249,7 +2249,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -2371,7 +2371,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -2493,7 +2493,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -2615,7 +2615,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -2737,7 +2737,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -2859,7 +2859,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -2981,7 +2981,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -3103,7 +3103,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -3225,7 +3225,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -3347,7 +3347,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -3469,7 +3469,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -3591,7 +3591,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -3713,7 +3713,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -3835,7 +3835,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -3957,7 +3957,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -4079,7 +4079,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -4201,7 +4201,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -4323,7 +4323,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -4445,7 +4445,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -4567,7 +4567,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -4689,7 +4689,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -4811,7 +4811,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -4933,7 +4933,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -5055,7 +5055,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -5177,7 +5177,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -5299,7 +5299,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -5421,7 +5421,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -5543,7 +5543,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -5665,7 +5665,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -5787,7 +5787,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -5909,7 +5909,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -6031,7 +6031,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -6153,7 +6153,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -6275,7 +6275,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -6397,7 +6397,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -6519,7 +6519,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -6641,7 +6641,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -6763,7 +6763,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -6885,7 +6885,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -7007,7 +7007,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -7129,7 +7129,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",
@@ -7251,7 +7251,7 @@
             "excluded_paid_scope": [
               "image_generation",
               "video_generation",
-              "remote_graphrag"
+              "remote_retrieval"
             ]
           },
           "billing": "catalogue_meter_not_provider_invoice",

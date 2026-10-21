@@ -8,9 +8,9 @@
   "baseline_ledger": "build/m5-live.ledger",
   "meter_ledger": "build/qualification-meter.ledger",
   "catalog": "config/model-catalog.json",
-  "owner_selection": "추가 630회 / US$1 계량 한도",
+  "allowance_note": "additional 630 calls / US$1 metering limit",
   "billing_guarantee": "local_meter_and_stop_not_invoice",
   "unknown_cost_policy": "retain_reservation",
   "unused_old_margin": "not_renewed",
-  "excluded_paid_scope": ["video_generation", "image_generation", "remote_graphrag"]
+  "excluded_paid_scope": ["video_generation", "image_generation", "remote_retrieval"]
 }

@@ -577,9 +577,9 @@ Descriptors are trusted deployment input (no remote refresh, no external `$ref`)
 
 **Historical admission versus target grammar.** Original M3 admitted Chat/Messages version/revision/identity/evidence, origin-only base URLs, literal paths/headers, request/usage bindings and stops, while pinning `anthropic-version:2023-06-01`; later cohorts added Responses, native Gemini and Interactions and their declared/reserved slots. Gemini's literal model routes permit its colon method and fixed `?alt=sse` suffix; both routes must address the same request model. Those earlier loader measurements remain in POC_PLAN5.3/5.7/5.8. The current installed loader retains immutable externally admitted descriptor/codec policies, distinct from runtime/error policy and qualification/model/grant inputs. This does not implement the entire target grammar below: auth programs, environment-header programs, model selectors, arbitrary query templates, namespaced option programs, constraints/D5 execution and schema generation are not implied by closed JSON admission.
 
-**Owner-controlled settings contract.** The arbitrary PoC output ceilings and output-versus-input shortcut are removed. Caller-selected typed caps are not silently clamped. Model/representation/resource bounds reject incompatible values separately from host financial authority. Historical five-family CLI proof carried 16384 unchanged in 38 peer requests; see [ROADMAP](ROADMAP.md#owner-requested-next-work) and [current controls](USAGE.md#request-families-and-controls).
+**Caller-controlled settings contract.** The arbitrary PoC output ceilings and output-versus-input shortcut are removed. Caller-selected typed caps are not silently clamped. Model/representation/resource bounds reject incompatible values separately from host financial authority. Historical five-family CLI proof carried 16384 unchanged in 38 peer requests; see [ROADMAP](ROADMAP.md#completed-next-work) and [current controls](USAGE.md#request-families-and-controls).
 
-Configurable values now have a closed/versioned JSON inventory: runtime/error defaults and classification, descriptor/codec policies, model/pricing catalogues, profiles and separate owner-approved campaign grants. Immutable runtime/descriptor snapshots affect newly admitted clients/descriptors, not existing ones; profiles/configuration cannot issue, reset or renew financial authority. [README inventory and loaders](../README.md#owned-requests-results-and-configuration) identify the realized admission APIs. Protocol framing, causality, correlation, signature assembly and terminal decisions remain typed logic, not executable configuration hooks. [ROADMAP](ROADMAP.md#owner-requested-next-work) records completed bounded HTTP/benchmark/integration proof alongside still-unclaimed release gates.
+Configurable values now have a closed/versioned JSON inventory: runtime/error defaults and classification, descriptor/codec policies, model/pricing catalogues, profiles and separate approved campaign grants. Immutable runtime/descriptor snapshots affect newly admitted clients/descriptors, not existing ones; profiles/configuration cannot issue, reset or renew financial authority. [README inventory and loaders](../README.md#owned-requests-results-and-configuration) identify the realized admission APIs. Protocol framing, causality, correlation, signature assembly and terminal decisions remain typed logic, not executable configuration hooks. [ROADMAP](ROADMAP.md#completed-next-work) records completed bounded HTTP/benchmark/integration proof alongside still-unclaimed release gates.
 
 The following table is the **original broader target descriptor grammar**, not a schema accepted in full by the current installed loader. In particular, proposed model/options/error/constraint constructs must not be inferred from the separate implemented policy loaders or copied as currently supported descriptor keys.
 
@@ -813,7 +813,7 @@ Native archive format remains v3/`spna3`. Policy/control identity changed indepe
 | **Gateway multi-backend nondeterminism** | same request behaves differently between runs (OpenRouter-style routing to different backends); flaky parity | record the routed backend when the wire exposes it; gateways never in an equivalence class; canary reports rates, not booleans |
 | **Canary keys, cost, fork-PR secrets, terms of service** | cost spikes; secrets in PR logs; vendor ToS on automated calls | canaries run only on protected branches/scheduled jobs with budgets; fork PRs get recordings only; per-cell spending cap; ToS reviewed before enabling a cell |
 | **Dual-implementation migration period** | NeoGraph carries old and new paths for long; parity drift | staged ROADMAP with a cutover gate; half-migration test in section 13; old path deleted at cutover |
-| **Bus factor** (a two-person team) | one person reviews all codec changes; stale ownership | each family has two named reviewers (may be one author plus an external vendor-doc cross-check); properties are machine-checked so review is not the only gate |
+| **Bus factor** (a small team) | one person reviews all codec changes; stale ownership | each family has two named reviewers (may be one author plus an external vendor-doc cross-check); properties are machine-checked so review is not the only gate |
 | **Proxy, CA, HTTP/2/3, pool** | enterprise users need CONNECT proxies or OS trust; QUIC may be unavailable or UDP blocked; connection-pool resets | libcurl's pool is the single reused-connection owner. M1b measures the custom-CA and h2c sibling scenarios, not every trust store, peer or platform. Proxies remain unsupported. Optional HTTP/3 is implemented with capable Linux plain/ASan+UBSan/TSan negotiation/lifecycle proof, one-POST connection-stage fallback and non-QUIC compatibility; exact backend/coverage limits remain in D1 and POC_PLAN R3, R4, R9 |
 | **Credential refresh and binary framing** (Vertex OAuth, Azure AD, SigV4, AWS event-stream) | requests for Bedrock/Vertex native access | declared out of scope (section 1) until separately designed |
 
@@ -834,7 +834,7 @@ Decided items, with status and the record. Nothing in this table is open unless 
 - **D1b. Future WebSocket lane.** Current SDK and release gates exclude Responses WebSocket. Any new lane requires a separate transport decision and actual causality/cancel/ownership proof; it is not a missing prerequisite for implemented Responses HTTP/SSE.
 - **O2. Native origin equivalence.** Direct Bedrock/Vertex credentials and a separate implementation/admission decision would be required; no active equivalence class exists.
 - **O3. NeoGraph's target concurrency** for the scheduled held-stream benchmark; capacity numbers in the decision are proposals, not measurements.
-- **O4. Future optional non-chat `Endpoints` target.** The approved cutover retained typed Images/Veo/Decisions in NeoGraph and removed the old interpreter; this is no longer a pending current cutover blocker. A later SDK target still requires a separate owner scope decision and qualification; single-shot media proof does not change SDK chat-only scope.
+- **O4. Future optional non-chat `Endpoints` target.** The approved cutover retained typed Images/Veo/Decisions in NeoGraph and removed the old interpreter; this is no longer a pending current cutover blocker. A later SDK target still requires a separate scope decision and qualification; single-shot media proof does not change SDK chat-only scope.
 
 ## 13. Keep from the current NeoGraph implementation, and drop
 
@@ -889,12 +889,12 @@ Two independent reviews (wire-level W01-W24, architecture F01-F27) were triaged.
 | W19 | 4.4 Responses ordered groups, 3.2 |
 | F02 | 5.5, 5.6, 9(a) |
 | F05 | 6.1 threat model |
-| F06 | 6.3 demotion (RESEARCH wording aligned by its owner) |
+| F06 | 6.3 demotion (RESEARCH wording aligned) |
 | F07 | 3.2 type-system immutability, binding facts |
 | F08 | 7 handle/outcome contract (accepted constraint: cross-thread join cycle not detectable) |
 | F09 | 3 error model, `ErrorKind::Misuse`, 7 callback policy (accepted constraint: blocking callbacks starve the pool) |
 | F11, F12 | 8 projection, parity statement, golden + kit, envelope dropped |
-| F14 | 3.7 (RESEARCH claim about schema re-validation aligned by its owner) |
+| F14 | 3.7 (RESEARCH claim about schema re-validation aligned) |
 | F16 | mutant catalog and deterministic scheduler seam live in CONFORMANCE |
 | F17 | ROADMAP; 12 and 13 |
 | F18 | 11 pre-mortem rows; 1 non-goals (Bedrock/Vertex native out of scope) |

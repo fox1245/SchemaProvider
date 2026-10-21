@@ -1,7 +1,6 @@
 # D8 — Realtime sessions
 
 - Status: FIRM, 2026-10-20. Builds on [D6](D6-endpoints.md) and the WebSocket transport of SchemaProvider#73.
-- Deciders: maintainer + review panel (eight seats from four model families, two rounds)
 
 ## Context
 Google Live (`BidiGenerateContent`, also serving live transcription and translation models), Google Lyria RealTime, OpenAI Realtime and OpenAI GPT-Live are full-duplex WebSocket protocols. The SDK has a client-only RFC 6455 transport (Autobahn cases 1 to 10 pass) that carries whole text and binary messages and decodes no provider event. A chat call is one request and one outcome; a realtime session is many turns, interleaved audio both ways, barge-in, tool calls, resumption handles and server drains, billed per turn while it is open. NeoGraph journals every provider call and enforces money budgets per run.

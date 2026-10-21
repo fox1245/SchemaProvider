@@ -63,7 +63,7 @@
           "excluded_paid_scope": [
             "image_generation",
             "video_generation",
-            "remote_graphrag"
+            "remote_retrieval"
           ]
         },
         "billing": "catalogue_meter_not_provider_invoice",
@@ -218,7 +218,7 @@
           "excluded_paid_scope": [
             "image_generation",
             "video_generation",
-            "remote_graphrag"
+            "remote_retrieval"
           ]
         },
         "billing": "catalogue_meter_not_provider_invoice",
@@ -360,7 +360,7 @@
           "excluded_paid_scope": [
             "image_generation",
             "video_generation",
-            "remote_graphrag"
+            "remote_retrieval"
           ]
         },
         "billing": "catalogue_meter_not_provider_invoice",
