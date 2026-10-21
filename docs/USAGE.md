@@ -1272,7 +1272,7 @@ The native gate checks descriptor/origin, model, original prefix, bound control/
 
 In-memory continuation requires no archive. Durable genuine native history uses `<core/native_archive.h>`:
 
-- `NativeArchive::provision(directory, independent_key_file, owner_scope, descriptor)` creates protected owner-private custody explicitly.
+- `NativeArchive::provision(directory, independent_key_file, owner_scope, descriptor)` creates protected owner-only custody explicitly.
 - `NativeArchive::open(...)` opens existing custody without renewing/resetting it.
 - `save(messages, binding)` returns a variant of opaque reference or `Error`; `load(reference, binding)` returns messages or `Error`. Check every arm.
 
