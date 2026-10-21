@@ -23,7 +23,14 @@ class Accumulator {
   std::optional<Outcome> take_outcome() { return std::move(outcome_); }
   bool terminal() const { return outcome_.has_value(); }
   // The model the response reported, recorded by the decoder when it first sees one.
-  void served_model(ServedModel model) { if (!terminal()) served_ = std::move(model); }
+  // The upstream name recorded by served_by() survives it.
+  void served_model(ServedModel model) {
+    if (terminal()) return;
+    if (served_.served_by) model.served_by = std::move(served_.served_by);
+    served_ = std::move(model);
+  }
+  // The upstream a routing gateway reports having served the response (ServedModel::served_by).
+  void served_by(std::string name) { if (!terminal()) served_.served_by = std::move(name); }
   // A value for the completion's `secret`, which the typed outcome reads and no raw event repeats.
   void secret(std::string value) { if (!terminal()) secret_ = std::move(value); }
   // Messages already begun are sealed without replay authority (an unexplained served model).

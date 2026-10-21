@@ -165,17 +165,17 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
   if (!identity(root, false)) return false;
   if (type == "message_delta") {
     // Threshold compaction reports `context_management` beside the delta, not in it.
-    unknown(root, {"type", "delta", "usage", "id", "model", "context_management", descriptor_.usage_path().front()});
+    unknown(root, {"type", "delta", "usage", "id", "model", "context_management", descriptor_.usage_path().front(), served::upstream_key(descriptor_)});
     if (!all_blocks_closed()) return false;
     message_delta_ = true;
     auto d = root.get("delta");
     if (!d.is_object()) return fail(ErrorKind::ProtocolCorrupt, "message delta required");
-    unknown(d, {"stop_reason", "stop_sequence", "stop_details", "container", "id", "model", "role", "input_transformations", "context_management"});
+    unknown(d, {"stop_reason", "stop_sequence", "stop_details", "container", "id", "model", "role", "input_transformations", "context_management", served::upstream_key(descriptor_)});
     if (!identity(d, false) || !metadata(d) || !metadata(root) || !usage(usage_at(root), false)) return false;
     return terminal(d);
   }
   if (type == "message_stop") {
-    unknown(root, {"type", "id", "model"});
+    unknown(root, {"type", "id", "model", served::upstream_key(descriptor_)});
     if (!all_blocks_closed()) return false;
     done_ = true; return true;
   }
@@ -184,9 +184,9 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
   if (!count_value(index)) return fail(ErrorKind::ProtocolCorrupt, "block index required");
   const auto position = number(index);
   if (position >= limits_.max_parts || position >= std::numeric_limits<uint32_t>::max()) return fail(ErrorKind::ResourceLimit, "block index limit");
-  if (type == "content_block_start") { unknown(root, {"type", "index", "content_block", "id", "model"}); return block(root.get("content_block"), position, true); }
-  if (type == "content_block_delta") { unknown(root, {"type", "index", "delta", "id", "model"}); return delta(root.get("delta"), position); }
-  unknown(root, {"type", "index", "id", "model"}); return end_block(position);
+  if (type == "content_block_start") { unknown(root, {"type", "index", "content_block", "id", "model", served::upstream_key(descriptor_)}); return block(root.get("content_block"), position, true); }
+  if (type == "content_block_delta") { unknown(root, {"type", "index", "delta", "id", "model", served::upstream_key(descriptor_)}); return delta(root.get("delta"), position); }
+  unknown(root, {"type", "index", "id", "model", served::upstream_key(descriptor_)}); return end_block(position);
 }
 bool Codec::identity(json::Value v, bool required) {
   auto id = v.get("id"), model = v.get("model"), role = v.get("role");
@@ -197,6 +197,12 @@ bool Codec::identity(json::Value v, bool required) {
   // and an unexplained one withholds replay authority. The name must stay stable, below.
   if (model.valid() && !begun_) served::observe(descriptor_, accumulator_, context_, model.as_string());
   if (begun_ && ((id.valid() && id.as_string() != generation_) || (model.valid() && model.as_string() != model_))) return fail(ErrorKind::ProtocolCorrupt, "inconsistent message identity");
+  // A gateway names the serving upstream in the message object; the first usable name is kept and another one is a different message.
+  switch (served::observe_upstream(descriptor_, v, upstream_, accumulator_)) {
+    case served::UpstreamSeen::Conflict: return fail(ErrorKind::ProtocolCorrupt, "inconsistent message identity");
+    case served::UpstreamSeen::Unusable: ++diagnostics_.unknown_properties; break;
+    case served::UpstreamSeen::Fine: break;
+  }
   return true;
 }
 bool Codec::metadata(json::Value v) {
@@ -226,7 +232,7 @@ bool Codec::message(json::Value v, bool streaming) {
   if (!v.is_object() || !v.get("type").is_string()) return fail(ErrorKind::ProtocolCorrupt, "message object required");
   if (v.get("type").as_string() != "message") return fail(ErrorKind::Unsupported, "unknown response object type");
   if (begun_) return fail(ErrorKind::ProtocolCorrupt, "duplicate message");
-  unknown(v, {"id", "type", "role", "model", "content", "usage", "stop_reason", "stop_sequence", "stop_details", "container", "diagnostics", "context_management", "input_transformations", descriptor_.usage_path().front()});
+  unknown(v, {"id", "type", "role", "model", "content", "usage", "stop_reason", "stop_sequence", "stop_details", "container", "diagnostics", "context_management", "input_transformations", descriptor_.usage_path().front(), served::upstream_key(descriptor_)});
   if (!identity(v, true) || !metadata(v)) return false;
   auto content = v.get("content");
   if (!content.is_array() || (streaming && content.size())) return fail(ErrorKind::ProtocolCorrupt, "invalid initial content");

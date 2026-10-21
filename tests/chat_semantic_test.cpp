@@ -3,6 +3,7 @@
 #include "codecs/interactions_request.h"
 #include "codecs/messages_request.h"
 #include "codecs/responses_request.h"
+#include "core/native.h"
 #include "descriptor/descriptor.h"
 #include "descriptor/policy.h"
 #include "descriptor/presets.h"
@@ -1445,6 +1446,122 @@ void simple_requests_all_families() {
   CHECK(std::get<Error>(chat::encode(descriptor_value(), edited, false)).kind == ErrorKind::ReplayIneligible);
 }
 } // namespace
+// A routing gateway names the upstream that served a response in the top-level `provider` member of the buffered body and
+// of every streamed chunk. It is recorded in ServedModel::served_by from the first object that names one.
+void served_by_upstream() {
+  auto loaded = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"served-by","family":"openai.chat","connection":{"base_url":"https://openrouter.ai","paths":{"buffered":"/api/v1/chat/completions","streaming":"/api/v1/chat/completions"}}})");
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
+  const auto& gateway = std::get<descriptor::ValidatedDescriptor>(loaded);
+  const auto named = [](std::string wire, std::string_view raw) { wire.insert(1, "\"provider\":" + std::string(raw) + ","); return wire; };
+  const auto quoted = [](std::string_view name) { return json::quote(name); };
+  struct Run { Outcome outcome; size_t unknown; };
+  const auto decode_buffered = [&](const descriptor::ValidatedDescriptor& d, const std::string& wire) {
+    Accumulator acc; chat::Codec codec(d, chat::Mode::Buffered, acc);
+    codec.buffered(wire, {}); CHECK(acc.outcome());
+    return Run{*acc.outcome(), codec.diagnostics().unknown_properties};
+  };
+  const auto decode_stream = [&](const descriptor::ValidatedDescriptor& d, const std::vector<std::string>& wires, bool normal = true) {
+    Accumulator acc; chat::Codec codec(d, chat::Mode::Sse, acc);
+    for (const auto& wire : wires) if (!codec.frame("message", wire)) break;
+    codec.finish({normal, ErrorKind::Truncated}); CHECK(acc.outcome());
+    return Run{*acc.outcome(), codec.diagnostics().unknown_properties};
+  };
+  const auto served_by = [](const Outcome& outcome) {
+    return completed(outcome).model.served_by;
+  };
+  const std::string answer = R"({"role":"assistant","content":"hi"})";
+  // Buffered: recorded beside the served model, which keeps its own record.
+  const auto buffered_named = decode_buffered(gateway, named(body(answer), quoted("DekaLLM")));
+  CHECK(served_by(buffered_named.outcome) == "DekaLLM" && buffered_named.unknown == 0);
+  CHECK(completed(buffered_named.outcome).model.served == "fixture-model" && text_of(completed(buffered_named.outcome).messages) == "hi");
+  // Absent, null: not reported. Neither is an unknown property.
+  const auto buffered_absent = decode_buffered(gateway, body(answer));
+  CHECK(!served_by(buffered_absent.outcome) && buffered_absent.unknown == 0);
+  CHECK(!served_by(decode_buffered(gateway, named(body(answer), "null")).outcome));
+  // Streamed: the first chunk that names an upstream decides, later chunks may leave the member out or repeat it.
+  const std::vector<std::string> streamed{
+      named(chunk(R"({"role":"assistant","content":"h"})"), quoted("DekaLLM")), chunk(R"({"content":"i"})"),
+      named(chunk("{}", "\"stop\""), quoted("DekaLLM")), named(usage_frame(full_usage), quoted("DekaLLM")), "[DONE]"};
+  const auto streamed_named = decode_stream(gateway, streamed);
+  CHECK(served_by(streamed_named.outcome) == "DekaLLM" && text_of(completed(streamed_named.outcome).messages) == "hi" && streamed_named.unknown == 0);
+  CHECK(completed(streamed_named.outcome).model.served == "fixture-model");
+  auto late = streamed; late[0] = chunk(R"({"role":"assistant","content":"h"})"); late[1] = named(late[1], quoted("DekaLLM"));
+  CHECK(served_by(decode_stream(gateway, late).outcome) == "DekaLLM");
+  auto unnamed = streamed; unnamed[0] = chunk(R"({"role":"assistant","content":"h"})"); unnamed[2] = chunk("{}", "\"stop\""); unnamed[3] = usage_frame(full_usage);
+  CHECK(!served_by(decode_stream(gateway, unnamed).outcome));
+  // A stream that ends early keeps the name it had, on the failure's partial result.
+  const auto cut = decode_stream(gateway, {streamed[0], streamed[1]}, false);
+  CHECK(failed(cut.outcome, ErrorKind::Truncated).partial.model.served_by == "DekaLLM");
+  // Another upstream mid-stream is a different stream, as another id or model is. The name is compared byte for byte.
+  const auto changed_id = [&] {
+    auto wires = streamed; wires[1].replace(wires[1].find("generation-1"), 12, "generation-2");
+    return failed(decode_stream(gateway, wires).outcome, ErrorKind::ProtocolCorrupt).error.reason;
+  }();
+  CHECK(!changed_id.empty());
+  for (const auto other : {"Other", "dekallm", "DekaLLM "}) {
+    auto wires = streamed; wires[2] = named(chunk("{}", "\"stop\""), quoted(other));
+    const auto contradicted = decode_stream(gateway, wires);
+    const auto& failure = failed(contradicted.outcome, ErrorKind::ProtocolCorrupt);
+    CHECK(failure.error.reason == changed_id && failure.partial.model.served_by == "DekaLLM");
+    wires[2] = named(chunk("{}", "\"stop\""), quoted("DekaLLM")); wires[3] = named(usage_frame(full_usage), quoted(other));
+    CHECK(failed(decode_stream(gateway, wires).outcome, ErrorKind::ProtocolCorrupt).partial.model.served_by == "DekaLLM");
+  }
+  // A member that is no usable name is not recorded and is counted as an unusable property; the answer is still delivered.
+  const std::string longest(256, 'u');  // the bound is 256 bytes
+  CHECK(served_by(decode_buffered(gateway, named(body(answer), quoted(longest))).outcome) == longest);
+  for (const auto& bad : std::vector<std::string>{quoted(longest + "u"), "7", "true", "{}", "[]", R"("")", R"("a\nb")", R"("tab\there")", R"("del\u007f")"}) {
+    const auto run = decode_buffered(gateway, named(body(answer), bad));
+    CHECK(!served_by(run.outcome) && run.unknown == 1 && text_of(completed(run.outcome).messages) == "hi");
+    // Unusable after a usable name neither replaces it nor contradicts it.
+    auto wires = streamed; wires[2] = named(chunk("{}", "\"stop\""), bad);
+    const auto after = decode_stream(gateway, wires);
+    CHECK(served_by(after.outcome) == "DekaLLM" && after.unknown == 1);
+    wires = streamed; wires[0] = named(chunk(R"({"role":"assistant","content":"h"})"), bad);
+    const auto before = decode_stream(gateway, wires);
+    CHECK(served_by(before.outcome) == "DekaLLM" && before.unknown == 1);
+  }
+  // An origin that is not a declared gateway does not report an upstream: the member stays unread and unknown, and a
+  // change of its value is not a contradiction.
+  const auto direct_named = decode_buffered(descriptor_value(), named(body(answer), quoted("DekaLLM")));
+  CHECK(!served_by(direct_named.outcome) && direct_named.unknown == decode_buffered(descriptor_value(), body(answer)).unknown + 1);
+  auto direct_wires = streamed; direct_wires[2] = named(chunk("{}", "\"stop\""), quoted("Other"));
+  const auto direct_stream = decode_stream(descriptor_value(), direct_wires);
+  CHECK(!served_by(direct_stream.outcome) && text_of(completed(direct_stream.outcome).messages) == "hi");
+  CHECK(direct_stream.unknown == decode_stream(descriptor_value(), unnamed).unknown + 3);
+}
+// The upstream's name is response metadata. An answer decoded with it and without it is sealed the same, so a follow-up
+// request replays either one, byte for byte.
+void served_by_leaves_replay_identity() {
+  auto loaded = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"served-by-replay","family":"openai.chat","connection":{"base_url":"https://openrouter.ai","paths":{"buffered":"/api/v1/chat/completions","streaming":"/api/v1/chat/completions"}}})");
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
+  const auto& gateway = std::get<descriptor::ValidatedDescriptor>(loaded);
+  chat::Request request; request.model = "fixture-model"; request.messages.push_back({Role::User, "hello"});
+  const auto sent = [&](const chat::Request& r) {
+    auto result = chat::encode(gateway, r, false);
+    CHECK(std::holds_alternative<chat::EncodedRequest>(result)); return std::move(std::get<chat::EncodedRequest>(result));
+  };
+  const auto first = sent(request);
+  const auto answer = [&](std::string wire) {
+    Accumulator accumulator;
+    chat::Codec codec(gateway, chat::Mode::Buffered, accumulator, {}, first.context);
+    codec.buffered(wire, {});
+    CHECK(accumulator.outcome() && std::holds_alternative<Completion>(*accumulator.outcome()));
+    return std::get<Completion>(*accumulator.outcome());
+  };
+  const std::string message = body(R"({"role":"assistant","content":"answer"})");
+  const auto plain = answer(message);
+  auto with_name = message; with_name.insert(1, R"("provider":"DekaLLM",)");
+  const auto named = answer(with_name);
+  CHECK(!plain.model.served_by && named.model.served_by == "DekaLLM");
+  CHECK(plain.messages.at(0).native && named.messages.at(0).native);
+  CHECK(plain.messages.at(0).native->complete() && named.messages.at(0).native->complete());
+  const auto follow_up = [&](const Message& assistant) {
+    auto next = request; next.messages.clear();
+    next.canonical_messages = {Message{{}, Role::User, {Text{"hello"}}}, assistant, Message{{}, Role::User, {Text{"next"}}}};
+    return sent(next).body;
+  };
+  CHECK(follow_up(plain.messages.at(0)) == follow_up(named.messages.at(0)));
+}
 int main() {
   try {
     idempotent_terminal_money_tail(); unlisted_usage_leaves_and_decimal_cost(); uncached_input_rule();
@@ -1455,6 +1572,7 @@ int main() {
     accumulator_interleaved_ordering(); accumulator_order_uniqueness_and_limits();
     tool_history_and_escaped_arguments(); one_tool_message_with_several_results(); output_cap_member_by_origin(); quoted_json_and_request_bounds();
     gateway_request_controls(); gateway_max_price(); gateway_plugins_and_citations();
+    served_by_upstream(); served_by_leaves_replay_identity();
     value_builders_and_projections(); simple_requests_all_families();
     std::cout << "chat semantic properties passed\n";
     return 0;

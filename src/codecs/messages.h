@@ -66,6 +66,8 @@ class Codec {
   std::optional<Error> buffered_failure_;
   std::optional<StopReason> stop_;
   std::string generation_, model_;
+  // The upstream a gateway named for this response (empty until it names one).
+  std::string upstream_;
   std::map<uint64_t, Block> blocks_;
   std::map<std::string, Call, std::less<>> calls_;
   std::set<std::string, std::less<>> results_;
