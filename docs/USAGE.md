@@ -160,7 +160,7 @@ A descriptor/codec snapshot can also be loaded from files, from one bundle, and 
 
 A policy has two digests. Both are lowercase 64-digit SHA-256 values computed from the parsed documents, not the raw file bytes:
 - `DescriptorPolicy::identity_hex()` is the replay identity. It covers the facts that decide how sealed history is written to and read from the wire: each family's bindings, stop reasons and Messages header version. Every native origin and archive binds it, so a policy that changes one of these facts makes history sealed under the previous snapshot `ReplayIneligible`.
-- `DescriptorPolicy::content_digest_hex()` covers the whole pair, including the admission data: model defaults and limits, media allowlists, sampling rules, server-tool facts, gateway origins and codec resources. Editing that data changes the content digest only, so sealed history stays replayable.
+- `DescriptorPolicy::content_digest_hex()` covers the whole pair, including the admission data: model defaults and limits, media allowlists, sampling rules, server-tool facts, control lists, standard service tiers, gateway origins and codec resources. Editing that data changes the content digest only, so sealed history stays replayable.
 
 A nonempty `expected_sha256_hex` must be 64 hexadecimal digits (either case) equal to the content digest, otherwise the load returns a `ConfigError` at `/content_digest`, so a malformed or wrong pin is never ignored. An empty pin means no check. The pin compares against a value you obtained out of band; it is an integrity check, not proof of who produced the file. The bundle covers the descriptor/codec pair only: runtime and error policy still load with `configuration::load_runtime_policy`.
 
@@ -299,6 +299,53 @@ Any unit may carry a service tier and an input band, in that order: `<unit>[/<ti
 - **Compaction.** Messages compaction iterations and Gemini's tool-use prompt tokens bill outside the call's counters and are not bounded.
 
 **Compared with reported cost.** On 2026-10-19 the estimate from a refreshed OpenRouter catalogue equalled OpenRouter's reported `usage.cost` to the nano-USD for `openai/gpt-5-nano` (with reasoning tokens) and `google/gemini-2.5-flash-lite`, buffered and streamed. For `meta-llama/llama-3.1-8b-instruct` it was higher than the reported cost, because OpenRouter routed the call to a cheaper endpoint than the listed price. On an aggregator the listed price is not the price of the endpoint that served the call, so prefer `Usage::provider_cost` there and use the estimate when the provider reports none.
+
+### Worst-case cost of a prepared request
+
+`sp::runtime::worst_case_cost(prepared, catalogue)` (`<runtime/cost.h>`) is the most a prepared chat request can bill, from the request's own caps and the catalogue's prices. It is a stateless function of its arguments: nothing is fetched, reserved or recorded, so a host keeps its own ledger and holds the amount it takes from here. `pricing::worst_case(input, catalogue)` (`<core/pricing.h>`) is the same computation over plain data, for a host that holds the facts itself.
+
+```cpp
+#include <runtime/cost.h>
+
+auto prepared = client.prepare(std::move(request), run);
+sp::runtime::WorstCaseOptions options;
+options.measured_input_tokens = counted_prompt_tokens;   // optional; must not understate the prompt
+auto bound = sp::runtime::worst_case_cost(prepared, *catalogue, options);   // or without `catalogue`: the descriptor policy's own
+if (bound.total) {
+  hold(bound.total->nano_usd);   // this one prepared request, over every attempt the retry policy allows
+  if (bound.route_ceiling && !bound.pinned) { /* prepare again with provider.max_price = *bound.pin */ }
+} else {
+  for (const auto& why : bound.unbounded) log(sp::pricing::to_string(why.by), why.subject, why.detail);
+}
+```
+
+**What is bounded.** One prepared request: the attempts the retry policy allows, each the sum over the request's model invocations (one, or `model_invocation_limit` with server tools) of:
+- **Input.** With one invocation, the host's measured count, else the model entry's input limit (`input_limit`, else `context_window`), and never above that limit. With several invocations, which server tools make by re-prompting the model with their results, the first as above and each later one at the limit, which must then exist. The count is the requested model's; a fallback model is bounded by its own limit, because its tokenizer may count differently.
+- **Output.** The request's output cap on every invocation, at the dearest output rate.
+- **Fees.** The request fee once, and each server tool's fee times its cap once. Tools that share a cap (all hosted tools of a Responses request share `max_tool_calls`; a Messages tool has its own `max_uses`) are bounded at the dearest fee of the group. The unit is `tool:<type>` under the tool's wire type.
+- **Candidates.** The requested model and each of Chat's fallback `models`, at the dearest.
+- **Service tier.** `DescriptorPolicy::billing_tier` maps the request's tier to the catalogue's: the standard tier prices at the unlabelled rates, and a tier the entry does not price has no price. Bands are read at the largest single invocation's input.
+- **Routing gateway.** At the route ceiling (`ceiling_input`, `ceiling_output`, and the request fee, the dearer of `request` and `ceiling_request`, when the entry lists one), the dearest over the candidates. The bound holds only if the request carries `bound.pin` as `provider.max_price`, the ceiling lowered field by field to the request's own cap; `bound.pinned` says it already does. The host prepares the request again with the pin.
+- **Attempts.** The retry policy's `max_attempts` multiply the sum, or one attempt when retry is off.
+
+The fees and the tool uses are charged once per attempt, the tokens on every invocation. The bound is for one request. A host that may send several (the steps of a run, a loop, a retry of its own after the SDK's attempts end) multiplies by their number; nothing here bounds a run.
+
+**No bound.** `total` is unset and `unbounded` lists every reason, each with a kind, the subject and a phrase:
+
+| `UnboundedBy` | Subject | Meaning |
+|---|---|---|
+| `OutputCap` | | the request states no output cap |
+| `InputBound` | model | no measured count and no catalogue limit, or several invocations and no limit |
+| `Invocations` | | the request does not state how many invocations it may make (an uncapped server tool) |
+| `ModelPrice` | model | no entry, or an entry with no price at the origin, or no rate the bound needs |
+| `TierPrice` | model | the entry prices no unit under the request's tier |
+| `ToolFee` | tool type | the entry lists no `tool:<type>` fee |
+| `ToolCap` | tool type | the tool's uses are uncapped: the request sets none, the policy admits none (code execution takes no `max_uses`), or the family has none (Google's built-in tools) |
+| `RouteCeiling` | model | a gateway entry without a ceiling, a ceiling at an origin that is not a gateway, or one above the largest `max_price` |
+| `Unmodeled` | what | OpenRouter plugins, an endpoint call or a request that did not prepare |
+| `Overflow` | | the bound does not fit 64 bits |
+
+**Not bounded.** Messages compaction iterations and Gemini's tool-use prompt tokens bill outside the counters, as for `upper_bound`. A request that names no service tier is priced at the standard rates, because neither the request nor the policy states another; an account that bills it at a dearer tier is not covered, so name the tier to bound it. A model whose entry lists no `cache_write` rate is bounded with its other input rates, so cache writes that bill above them are not covered. For usage within the caps, `estimate` never exceeds the bound less the tool fees it does not price. The bound is for a reservation, not for settlement: settle on the usage and the provider's reported cost.
 
 ### Served model identity and routing gateways
 
@@ -989,7 +1036,8 @@ if (const sp::Error* error = prepared.error()) {
     // Consume it to obtain the same owned Failure representation.
     auto rejected = client.complete(std::move(prepared));
 } else {
-    // Inspect family(), model(), max_output_tokens(), deadline(), limits() here.
+    // Inspect family(), model(), max_output_tokens(), deadline(), limits(), facts() here, and bound the cost
+    // with runtime::worst_case_cost(prepared, catalogue) (see Pricing by the catalogue).
     // If your host requires a durable receipt/budget claim, persist it here.
     // Do not log encoded_body(): it can contain sensitive native state.
     auto result = client.complete(std::move(prepared));
@@ -1008,6 +1056,26 @@ auto result = client.complete(std::move(request), run);  // blocking caller
 ```
 
 `complete()` translates `AdmissionError` to its owned `Failure` outcome. `prepare`/`start` callers catch `AdmissionError` and can retain `error.outcome()`. Linked-interface mismatch remains `InterfaceContractError`, not a successful provider result. `Client` construction and dispatch perform the out-of-line revision/capability gate; explicitly calling it at application startup makes dependency mismatch visible before doing host work. It checks loaded libraries, not only header constants, and is not a general ABI-safety guarantee.
+
+## Queries for hosts
+
+A host that sends to several families ends up restating what SchemaProvider already holds: which controls a family carries, whether it can route, which tools the caller runs, how a provider's refusal reads. Each of these is a query next to the data it reads, so the host's copy cannot drift. None of them changes a call: they answer, and the encoders and validation decide as before.
+
+**Controls.** `DescriptorPolicy::control_admitted(family, Control)` says whether the family's typed request carries a control, from the optional `controls` list of the family in `descriptor-policy.json` (`max_output_tokens`, `temperature`, `top_p`, `thinking_budget`, `include_thoughts`, `reasoning_effort`, `reasoning_summary`, `thinking_level`, `thinking_summaries`, `service_tier`, `required_tool`, `store`, `max_tool_calls`). It answers `std::nullopt` for a family the policy does not have and for a policy written before the list existed. Then the policy says nothing: send the control and let the encoder answer. The list can only narrow what an encoder writes. The loader checks the names, and that a control that takes listed values (`reasoning_effort`, `reasoning_summary`, `thinking_level`, `service_tier`) is carried only where the family lists some. A test checks the shipped lists against `validate_choices` and against the members of each family's request.
+
+**Routing.** `family_admits_routing(FamilyPolicy)` is true when the family declares routing origins (`openrouter_origins`); `routed_gateway(descriptor)` is true when this descriptor's origin is one.
+
+**Service tiers.** `DescriptorPolicy::billing_tier(family, tier)` returns the tier the catalogue prices a call under: empty for a tier that bills at the standard rates (the family's `standard_service_tiers`: `default` at Chat and Responses, `standard` at Interactions), the name itself for any other. Pass the result as `price_of`'s `service_tier`.
+
+**Tools.** `tool_facts(FamilyPolicy, type)` returns whether the policy lists the type, whether the caller executes it (`client`, which bills tokens only and takes no cap), whether it takes `max_uses`, and the catalogue unit its per-use fee is listed under, `tool_fee_unit(type)` (`tool:<type>`). A type the policy does not list is unknown: treat it as a server tool under that unit, which the catalogue prices or leaves without a price. `responses::tool_type`, `gemini::tool_type` and `interactions::tool_type` give the type of a typed tool alternative, and of a Gemini MCP server (`mcp:<name>`); each fails to compile for an alternative added without one.
+
+**The facts of a prepared request.** `PreparedRequest::facts()` returns what the typed request commits to beyond its body, read when it was prepared: the service tier (the request's, else the policy's default for the model), the fallback models, whether plugins are attached, the routing it sends with its `max_price`, and the tools the service runs grouped by cap with whether the policy admits the cap. A host need not parse `encoded_body()` for any of them. An endpoint call has none.
+
+**A declined request.** `request_declined(failure)` is true when the provider refused the request and accepted nothing: `RetrySafety::RejectedBeforeOutput`, the attempt evidence of a complete answer, and no output, stop reason or usage; a raw event, if any, is the error body (`http_error_event`). A host may release the hold it took for such a call. It restates no status list, and a missing usage or a status code alone does not prove it.
+
+**Names of enums.** `to_string` and `from_string<Enum>(name)` (`<core/enum_names.h>`) give the public enums a host stores a stable name, the enumerator's identifier (`RejectedBeforeOutput`, `Overloaded`, `OpenRouterUsd`), so a journal survives an inserted enumerator. They cover `Role`, `ToolCallKind`, `InvalidReason`, `Evidence`, `UsageStage`, `UsageQuality`, `CostSource`, `CostStatus`, `CostRounding`, `StopKind`, `ErrorKind`, `RetryClass`, `RetrySafety`, `ServedRelation`, `ImageDetail`, `MediaKind` and `MediaSource`, and `descriptor::StopKind` and `descriptor::ModelRelation`. A value outside the enumerators has no name, and an unknown name reads back as `std::nullopt`.
+
+**Usage a client reports.** `messages::decode_usage(descriptor, usage_json)` reads an Anthropic-shaped `usage` object that arrives outside a call, such as a coding agent's result event, as the codec reads a response's: the cache and tool details, the thinking tokens, the compaction iterations and the contradictions are normalized, and the stage is `Final`. It is an `Error` for a descriptor of another family and for an object the codec refuses in a response. Other shapes (a different agent's token events) are not SchemaProvider's wire formats.
 
 ## Streaming, deadlines, cancellation and backpressure
 
