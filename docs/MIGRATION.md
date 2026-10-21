@@ -270,6 +270,14 @@ Messages input blocks and skills (#53):
 - **Skills.** `messages::Request::skills` (`ContainerSkill`) sends `container` as an object with `skills`, and its `id` when `container` is set. The configuration digest binds the skills; a request without skills keeps its digest.
 - **Value schemas.** A string may now hold carriage returns, like tabs and line feeds.
 
+Queries a host asks instead of restating a fact (#144), all additive:
+- **Enum names.** `<core/enum_names.h>` adds `to_string` and `from_string<Enum>` for the enums a host stores. A host that journals an ordinal and checks it against the last enumerator can store the name.
+- **Policy queries.** `<descriptor/policy.h>` adds `Control`, `DescriptorPolicy::control_admitted` and `billing_tier`, `family_admits_routing`, `tool_facts` and `tool_fee_unit`. The policy files gain two optional per-family members, `controls` and `standard_service_tiers`; a policy without them loads and answers "undeclared". Nothing in the encoders or validation reads them.
+- **Prepared requests.** `PreparedRequest::facts()` returns the service tier, fallback models, plugins, routing and server tools of the typed request; `<core/request_facts.h>` has its types. `responses::tool_type`, `gemini::tool_type` and `interactions::tool_type` name a tool's type for its fee.
+- **Failures.** `<core/failure.h>` adds `request_declined(Failure)` and `usage_reported_nothing(Usage)`, and `<core/value.h>` adds `http_error_event`, the raw event type of an HTTP error body.
+- **Cost bound.** `<runtime/cost.h>` adds `worst_case_cost(prepared, catalogue, options)`, and `<core/pricing.h>` adds `pricing::worst_case` with `WorstCaseInput`, `WorstCase` and `UnboundedBy`.
+- **Usage.** `messages::decode_usage` reads a Messages `usage` object with the codec.
+
 ## From interface 5 to 6
 
 Package 0.3.0 alpha adds `Usage::provider_cost` and the fixed-size `ProviderReportedCost`, `UsdAmount`, `CostSource`, `CostStatus` and `CostRounding` types. Existing field access remains source-compatible, but `Usage`, `UsageUpdate`, `Completion`, `PartialCompletion` and the containing `Event` layouts grow. Rebuild every consumer against the same headers and generation 6 libraries (`libsp_*.so.6`); interface 5 binaries must not load interface 6 libraries. CMake consumers select `SchemaProvider 0.3.0 EXACT`.
