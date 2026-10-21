@@ -1,6 +1,7 @@
 // Real, model-free runtime properties. Usage: sp_runtime_tests <node> <runtime_server.mjs>
 #include "runtime/client.h"
 #include "runtime/testing.h"
+#include "core/failure.h"
 #include "core/native.h"
 #include "descriptor/descriptor.h"
 #include "json/json.h"
@@ -598,12 +599,14 @@ void http_rejections_are_definitive(Peer& peer) {
         require(rejected.error.retry_safety == sp::RetrySafety::RejectedBeforeOutput, "4xx answer kept the call possibly accepted");
         require(rejected.error.attempt.request_may_have_left && rejected.error.attempt.response_head_seen, "rejection lost its attempt evidence");
         require(rejected.partial.messages.empty() && rejected.partial.usage.stage == sp::UsageStage::Missing, "rejection invented output or usage");
+        require(sp::request_declined(rejected), "the declined-request predicate does not recognise a vendor 4xx");
         peer.count(model, 1, 1);
       }
       for (const auto* scenario : {"always-error", "rate"}) {
         const auto model = peer.arm(scenario);
         const auto result = client.complete(request(model, messages), run(streaming));
         require(failure(result).error.retry_safety == sp::RetrySafety::PossiblyAccepted, "5xx or 429 answer was treated as a rejection");
+        require(!sp::request_declined(failure(result)), "the declined-request predicate accepts a 5xx or 429 answer");
         peer.count(model, 1, 1);
       }
     }

@@ -12,6 +12,15 @@
 #include <initializer_list>
 
 namespace sp::interactions {
+std::string_view tool_type(const BuiltinTool& tool) noexcept {
+  return std::visit([](const auto& value) -> std::string_view {
+    using T = std::decay_t<decltype(value)>;
+    if constexpr (std::is_same_v<T, GoogleSearchTool>) return "google_search";
+    else if constexpr (std::is_same_v<T, UrlContextTool>) return "url_context";
+    else if constexpr (std::is_same_v<T, CodeExecutionTool>) return "code_execution";
+    else static_assert(sizeof(T) == 0, "a built-in tool alternative has no type here");
+  }, tool);
+}
 namespace {
 bool function_name(std::string_view name) {
   if (name.empty() || name.size() > 64) return false;

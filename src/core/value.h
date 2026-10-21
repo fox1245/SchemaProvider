@@ -302,6 +302,8 @@ struct Error {
 // Owned wire observations, in arrival order before their semantic projections.
 // Neither field grants native replay authority.
 struct RawWire { std::string type; std::shared_ptr<const json::Document> payload; };
+// The type of the raw event that keeps the body of an HTTP error response.
+inline constexpr std::string_view http_error_event = "http.error";
 // How the model a response reported relates to the requested one. A name never makes a completed,
 // billed response fail; only `Unexplained` withholds replay authority from the native state.
 enum class ServedRelation : std::uint8_t {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/interface_contract.h"
+#include "core/request_facts.h"
 #include "codecs/chat.h"
 #include "codecs/messages_request.h"
 #include "codecs/responses_request.h"
@@ -184,6 +185,9 @@ class PreparedRequest {
   const Limits* limits() const noexcept;
   const NativeContext* native_context() const noexcept;
   std::optional<std::uint64_t> model_invocation_limit() const noexcept;
+  // What the typed chat request commits to beyond its body: the service tier, fallback models, plugins, routing and
+  // the tools the service runs with their caps. Empty for an endpoint call and for a default-constructed handle.
+  const RequestFacts& facts() const noexcept;
   // The non-chat endpoint a prepared call reaches (`images`, D6), empty for a chat request.
   std::string_view endpoint() const noexcept;
   // The HTTP method and URL the call sends. With the body, they identify a call whose body is empty or read from a

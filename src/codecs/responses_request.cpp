@@ -10,6 +10,22 @@
 #include <limits>
 
 namespace sp::responses {
+std::string_view tool_type(const HostedTool& tool) noexcept {
+  return std::visit([](const auto& value) -> std::string_view {
+    using T = std::decay_t<decltype(value)>;
+    if constexpr (std::is_same_v<T, WebSearchTool>) return "web_search";
+    else if constexpr (std::is_same_v<T, ImageGenerationTool>) return "image_generation";
+    else if constexpr (std::is_same_v<T, FileSearchTool>) return "file_search";
+    else if constexpr (std::is_same_v<T, ToolSearchTool>) return "tool_search";
+    else if constexpr (std::is_same_v<T, ShellTool>) return "shell";
+    else if constexpr (std::is_same_v<T, CodeInterpreterTool>) return "code_interpreter";
+    else if constexpr (std::is_same_v<T, McpTool>) return "mcp";
+    else if constexpr (std::is_same_v<T, ComputerTool>) return "computer";
+    else if constexpr (std::is_same_v<T, ComputerUsePreviewTool>) return "computer_use_preview";
+    else if constexpr (std::is_same_v<T, OpenRouterServerTool> || std::is_same_v<T, GenericHostedTool>) return value.type;
+    else static_assert(sizeof(T) == 0, "a hosted tool alternative has no type here");
+  }, tool);
+}
 namespace {
 std::string lower(std::string_view text) {
   std::string value(text);
@@ -29,22 +45,6 @@ bool function_name(std::string_view name) {
   for (const char c : name) if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
       (c >= '0' && c <= '9') || c == '_' || c == '-')) return false;
   return true;
-}
-std::string_view hosted_type(const HostedTool& tool) {
-  return std::visit([](const auto& value) -> std::string_view {
-    using T = std::decay_t<decltype(value)>;
-    if constexpr (std::is_same_v<T, WebSearchTool>) return "web_search";
-    if constexpr (std::is_same_v<T, ImageGenerationTool>) return "image_generation";
-    if constexpr (std::is_same_v<T, FileSearchTool>) return "file_search";
-    if constexpr (std::is_same_v<T, ToolSearchTool>) return "tool_search";
-    if constexpr (std::is_same_v<T, ShellTool>) return "shell";
-    if constexpr (std::is_same_v<T, CodeInterpreterTool>) return "code_interpreter";
-    if constexpr (std::is_same_v<T, McpTool>) return "mcp";
-    if constexpr (std::is_same_v<T, ComputerTool>) return "computer";
-    if constexpr (std::is_same_v<T, ComputerUsePreviewTool>) return "computer_use_preview";
-    if constexpr (std::is_same_v<T, OpenRouterServerTool>) return value.type;
-    if constexpr (std::is_same_v<T, GenericHostedTool>) return value.type;
-  }, tool);
 }
 // The service's enumerations are lower-case names; the SDK checks only their shape.
 bool lower_token(std::string_view value, std::size_t maximum = 32) {
@@ -205,7 +205,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   const bool router = descriptor::contains(descriptor.family_policy().openrouter_origins, descriptor.base_url());
   std::set<std::string_view> hosted_types, mcp_labels;
   for (const auto& tool : request.hosted_tools) {
-    const auto type = hosted_type(tool);
+    const auto type = tool_type(tool);
     if (const auto* routed = std::get_if<OpenRouterServerTool>(&tool)) {
       // OpenRouter's server tools are its own catalogue: any openrouter: type is sent, at a declared origin.
       if (!router) return Error{ErrorKind::Unsupported, "OpenRouter server tools require a declared OpenRouter origin"};
@@ -478,7 +478,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       for (const auto& tool : request.hosted_tools) {
         if (comma) body.raw(",");
         comma = true;
-        body.raw("{\"type\":").quoted(hosted_type(tool));
+        body.raw("{\"type\":").quoted(tool_type(tool));
         auto text = [&](std::string_view key, const std::optional<std::string>& value) { if (value) body.raw(",").quoted(key).raw(":").quoted(*value); };
         auto flag = [&](std::string_view key, const std::optional<bool>& value) { if (value) body.raw(",").quoted(key).raw(*value ? ":true" : ":false"); };
         auto count = [&](std::string_view key, const std::optional<std::uint32_t>& value) { if (value) body.raw(",").quoted(key).raw(":").raw(std::to_string(*value)); };

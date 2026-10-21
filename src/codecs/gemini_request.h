@@ -72,6 +72,9 @@ struct FileSearchTool {
 };
 // New alternatives go at the end: the configuration digest binds the index.
 using BuiltinTool = std::variant<GoogleSearchTool, UrlContextTool, CodeExecutionTool, GoogleMapsTool, ComputerUseTool, FileSearchTool>;
+// The name a built-in tool bills under in the catalogue (`tool:<type>`): the tool's name in Interactions' `type` and in
+// Generate's `tools` member, which spells it in camel case.
+std::string_view tool_type(const BuiltinTool&) noexcept;
 // A remote MCP server that the service connects to over streamable HTTP and whose tools it runs.
 struct McpServer {
   std::string name, url;
@@ -80,6 +83,8 @@ struct McpServer {
   std::optional<std::string> timeout, sse_read_timeout;  // durations such as "30s"
   std::optional<bool> terminate_on_close;
 };
+// The name an MCP server bills under (`tool:mcp:<name>`): the service lists no fee for the server's own tools.
+std::string tool_type(const McpServer&);
 // toolConfig.retrievalConfig: the user's location and language for Maps and Search grounding.
 struct RetrievalConfig {
   std::optional<double> latitude, longitude;

@@ -79,6 +79,9 @@ struct GenericHostedTool { std::string type; std::shared_ptr<const json::Documen
 using HostedTool = std::variant<WebSearchTool, ImageGenerationTool, FileSearchTool, ToolSearchTool, ShellTool,
                                 CodeInterpreterTool, McpTool, ComputerTool, ComputerUsePreviewTool, OpenRouterServerTool,
                                 GenericHostedTool>;
+// The type a hosted tool has on the wire, which its per-use fee is listed under in the catalogue (`tool:<type>`). The
+// view borrows from the tool.
+std::string_view tool_type(const HostedTool&) noexcept;
 // The answer to an mcp_approval_request item of an earlier response.
 struct McpApproval { std::string request_id; bool approve = false; std::optional<std::string> reason; };
 // OpenRouter image output: Image in modalities, with Text when text is wanted too.

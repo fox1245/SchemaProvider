@@ -2,6 +2,7 @@
 #include "codecs/images.h"
 #include "codecs/decisions.h"
 #include "codecs/endpoint.h"
+#include "runtime/request_facts.h"
 #include "runtime/testing.h"
 #include "core/native.h"
 #include "codecs/messages.h"
@@ -386,6 +387,7 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
   std::string prepared_model;
   std::optional<std::uint64_t> prepared_max_output_tokens;
   std::optional<std::uint64_t> prepared_model_invocation_limit;
+  RequestFacts facts;
 
   mutable std::mutex mutex;
   std::condition_variable joined;
@@ -863,7 +865,7 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
     const bool normal = wire.status == transport::Status::Completed && !stopping_error && !http_error;
     if (!accumulator->terminal()) {
       if (http_error) {
-        if (observed_document) accumulator->accept(RawWire{"http.error", observed_document}, &close_error);
+        if (observed_document) accumulator->accept(RawWire{std::string(http_error_event), observed_document}, &close_error);
         if (!accumulator->terminal()) accumulator->accept(Fail{close_error});
       }
       else if (options.streaming) {
@@ -1231,6 +1233,7 @@ PreparedRequest ClientAccess::prepare_control(Client& client, Request request, R
     // cap/invocation proofs cannot authorize a bounded ordinary dispatch.
     state.prepared_max_output_tokens.reset();
     state.prepared_model_invocation_limit.reset();
+    state.facts = {};
   }
   if (error) {
     state.initial_error = error_for(*error);
@@ -1395,6 +1398,10 @@ const NativeContext* PreparedRequest::native_context() const noexcept {
 std::optional<std::uint64_t> PreparedRequest::model_invocation_limit() const noexcept {
   return state_ ? state_->prepared_model_invocation_limit : std::nullopt;
 }
+const RequestFacts& PreparedRequest::facts() const noexcept {
+  static const RequestFacts none;
+  return state_ ? state_->facts : none;
+}
 std::string_view PreparedRequest::endpoint() const noexcept {
   return state_ ? std::string_view(state_->endpoint) : std::string_view{};
 }
@@ -1535,6 +1542,7 @@ PreparedRequest Client::prepare(Request request, RunOptions options) {
       wire.body = std::move(value.body);
       operation->prepared_max_output_tokens = value.max_output_tokens;
       operation->prepared_model_invocation_limit = value.model_invocation_limit;
+      operation->facts = detail::request_facts(client->descriptor, typed);
       wire.headers.reserve(value.headers.size() + (client->options.api_key.empty() ? 0 : 1));
       for (auto& header : value.headers) wire.headers.push_back({std::move(header.first), std::move(header.second)});
       if (!client->options.api_key.empty()) {
