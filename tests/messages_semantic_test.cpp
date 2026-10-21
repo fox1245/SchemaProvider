@@ -537,6 +537,114 @@ void routed_gateway_model() {
   // Another origin delivers the same answer, with the name unexplained.
   CHECK(completed(buffered(served(body(), concrete))).model.relation == ServedRelation::Unexplained);
 }
+// A gateway names the upstream that served the message in the message object: the top level of a buffered body, or the
+// `message` of message_start. It is recorded in ServedModel::served_by from the first object that names one.
+void served_by_upstream() {
+  static auto loaded = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"served-by-messages","family":"anthropic.messages","connection":{"base_url":"https://openrouter.ai","paths":{"buffered":"/api/v1/messages","streaming":"/api/v1/messages"}}})");
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
+  const auto& gateway = std::get<descriptor::ValidatedDescriptor>(loaded);
+  messages::Request request; request.model = "fixture-model"; request.account_scope = "fixture-account";
+  request.messages.push_back(Message{"", Role::User, {Text{"Hello"}}});
+  const auto encode_context = [&](const descriptor::ValidatedDescriptor& d) {
+    auto encoded = messages::encode(d, request, true);
+    CHECK(std::holds_alternative<messages::EncodedRequest>(encoded));
+    return std::get<messages::EncodedRequest>(encoded).context;
+  };
+  const auto gateway_context = encode_context(gateway);
+  // The member goes first in the message object: after `{` of a buffered body, after `"message":{` of message_start.
+  const auto named = [](std::string wire, std::string_view raw) {
+    const auto at = wire.find(R"("type":"message",)");
+    CHECK(at != std::string::npos);
+    wire.insert(at, "\"provider\":" + std::string(raw) + ","); return wire;
+  };
+  const auto quoted = [](std::string_view name) { return json::quote(name); };
+  // A later event names an upstream at its top level (`root`) or in its `delta`.
+  const auto later = [](std::string wire, std::string_view raw, bool in_delta) {
+    const std::string anchor = in_delta ? R"("delta":{)" : R"({"type":"message_delta",)";
+    const auto at = wire.find(anchor);
+    CHECK(at != std::string::npos);
+    wire.insert(at + (in_delta ? anchor.size() : 1), "\"provider\":" + std::string(raw) + ","); return wire;
+  };
+  struct Run { Outcome outcome; size_t unknown; };
+  const auto run = [&](const descriptor::ValidatedDescriptor& d, const std::shared_ptr<const NativeContext>& ctx, const std::vector<Frame>& frames, bool sse, messages::Close close = {}) {
+    Accumulator acc; messages::Codec codec(d, sse ? messages::Mode::Sse : messages::Mode::Buffered, acc, ctx);
+    if (sse) { for (const auto& [event, data] : frames) if (!codec.frame(event, data)) break; codec.finish(close); }
+    else codec.buffered(frames.front().second, close);
+    CHECK(acc.outcome()); return Run{*acc.outcome(), codec.diagnostics().unknown_properties};
+  };
+  const auto served_by = [](const Outcome& outcome) { return completed(outcome).model.served_by; };
+  const std::string content = R"([{"type":"text","text":"hi"}])";
+  const auto buffered_run = [&](std::string_view raw) {
+    return run(gateway, gateway_context, {{"", raw.empty() ? body(content) : named(body(content), raw)}}, false);
+  };
+  const auto stream_frames = [&](std::string_view raw) {
+    return std::vector<Frame>{{"message_start", raw.empty() ? start().second : named(start().second, raw)},
+        block(0, R"({"type":"text","text":"hi"})"), end(0), stop(), done};
+  };
+  // Buffered.
+  const auto buffered_named = buffered_run(quoted("Amazon Bedrock"));
+  CHECK(served_by(buffered_named.outcome) == "Amazon Bedrock" && buffered_named.unknown == 0);
+  CHECK(completed(buffered_named.outcome).model.served == "fixture-model" && text(completed(buffered_named.outcome).messages) == "hi");
+  CHECK(!served_by(buffered_run("").outcome) && buffered_run("").unknown == 0);
+  CHECK(!served_by(buffered_run("null").outcome) && buffered_run("null").unknown == 0);
+  // Streamed: message_start names it, later events may repeat it at their top level or in their delta.
+  const auto streamed_named = run(gateway, gateway_context, stream_frames(quoted("Amazon Bedrock")), true);
+  CHECK(served_by(streamed_named.outcome) == "Amazon Bedrock" && streamed_named.unknown == 0);
+  CHECK(completed(streamed_named.outcome).model.served == "fixture-model" && text(completed(streamed_named.outcome).messages) == "hi");
+  CHECK(!served_by(run(gateway, gateway_context, stream_frames(""), true).outcome));
+  for (const bool in_delta : {false, true}) {
+    auto repeated = stream_frames(quoted("Amazon Bedrock"));
+    repeated[3].second = later(repeated[3].second, quoted("Amazon Bedrock"), in_delta);
+    const auto same = run(gateway, gateway_context, repeated, true);
+    CHECK(served_by(same.outcome) == "Amazon Bedrock" && same.unknown == 0);
+    // A stream whose message_start named none takes the name from the first later event that does.
+    auto late = stream_frames(""); late[3].second = later(late[3].second, quoted("Amazon Bedrock"), in_delta);
+    CHECK(served_by(run(gateway, gateway_context, late, true).outcome) == "Amazon Bedrock");
+  }
+  // A stream cut short keeps the name on the failure's partial result.
+  auto cut_frames = stream_frames(quoted("Amazon Bedrock")); cut_frames.resize(2);
+  const auto cut = run(gateway, gateway_context, cut_frames, true, {false, ErrorKind::Truncated});
+  CHECK(failed(cut.outcome, ErrorKind::Truncated).partial.model.served_by == "Amazon Bedrock");
+  // Another upstream later in the stream is a different message, as another id or model is. Names compare byte for byte.
+  auto changed_model = stream_frames(quoted("Amazon Bedrock"));
+  changed_model[3] = {"message_delta", R"({"type":"message_delta","model":"other","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}})"};
+  const auto changed_model_run = run(gateway, gateway_context, changed_model, true);
+  const auto changed_identity = failed(changed_model_run.outcome, ErrorKind::ProtocolCorrupt).error.reason;
+  CHECK(!changed_identity.empty());
+  for (const auto other : {"Other", "amazon bedrock", "Amazon Bedrock "}) {
+    for (const bool in_delta : {false, true}) {
+      auto contradicted = stream_frames(quoted("Amazon Bedrock"));
+      contradicted[3].second = later(contradicted[3].second, quoted(other), in_delta);
+      const auto result = run(gateway, gateway_context, contradicted, true);
+      const auto& failure = failed(result.outcome, ErrorKind::ProtocolCorrupt);
+      CHECK(failure.error.reason == changed_identity && failure.partial.model.served_by == "Amazon Bedrock");
+    }
+  }
+  // A member that is no usable name is not recorded and is counted as an unusable property; the answer is still delivered.
+  const std::string longest(256, 'u');  // the bound is 256 bytes
+  CHECK(served_by(buffered_run(quoted(longest)).outcome) == longest);
+  for (const auto& bad : std::vector<std::string>{quoted(longest + "u"), "7", "false", "{}", "[]", R"("")", R"("a\nb")", R"("tab\there")", R"("del\u007f")"}) {
+    const auto result = buffered_run(bad);
+    CHECK(!served_by(result.outcome) && result.unknown == 1 && text(completed(result.outcome).messages) == "hi");
+    const auto unusable_start = run(gateway, gateway_context, stream_frames(bad), true);
+    CHECK(!served_by(unusable_start.outcome) && unusable_start.unknown == 1);
+    // After a usable name, an unusable one neither replaces it nor contradicts it.
+    auto after = stream_frames(quoted("Amazon Bedrock")); after[3].second = later(after[3].second, bad, false);
+    const auto kept = run(gateway, gateway_context, after, true);
+    CHECK(served_by(kept.outcome) == "Amazon Bedrock" && kept.unknown == 1);
+  }
+  // An origin that is not a declared gateway does not report an upstream: the member stays unread and unknown, and a
+  // change of its value is not a contradiction.
+  const auto direct_context = context();
+  const auto plain_unknown = run(descriptor_value(), direct_context, {{"", body(content)}}, false).unknown;
+  const auto direct_named = run(descriptor_value(), direct_context, {{"", named(body(content), quoted("Amazon Bedrock"))}}, false);
+  CHECK(!served_by(direct_named.outcome) && direct_named.unknown == plain_unknown + 1);
+  auto direct_frames = stream_frames(quoted("Amazon Bedrock"));
+  direct_frames[3].second = later(direct_frames[3].second, quoted("Other"), false);
+  const auto direct_stream = run(descriptor_value(), direct_context, direct_frames, true);
+  CHECK(!served_by(direct_stream.outcome) && text(completed(direct_stream.outcome).messages) == "hi");
+  CHECK(direct_stream.unknown == run(descriptor_value(), direct_context, stream_frames(""), true).unknown + 2);
+}
 // Observed direct Anthropic behavior: the documented alias claude-haiku-4-5 is answered with
 // "model":"claude-haiku-4-5-20251001". Any origin reads a dated suffix as a snapshot.
 void direct_dated_snapshot_alias() {
@@ -633,6 +741,7 @@ void openrouter_sentinel_and_cost() {
   const auto check_stream = [&](const Outcome& outcome) {
     const auto& c = completed(outcome);
     CHECK(text(c.messages) == "tundra-ember" && c.stop.kind == StopKind::EndTurn);
+    CHECK(c.model.served_by == "Amazon Bedrock" && c.model.served == "anthropic/claude-haiku-4.5");
     CHECK(c.usage.stage == UsageStage::Final && c.usage.output_total->value == 8 && c.usage.cache_read->value == 6219 && c.usage.reasoning->value == 0);
     const auto& cost = c.usage.provider_cost;
     CHECK(cost.source == CostSource::OpenRouterUsd && cost.quality == UsageQuality::Consistent && cost.is_byok && !*cost.is_byok);
@@ -670,6 +779,7 @@ void openrouter_sentinel_and_cost() {
   const auto with_money_unknowns = unknown_properties;
   const auto& c = completed(bought);
   CHECK(text(c.messages) == "Blue" && c.usage.total->value == 33 && c.usage.extra.size() == 2);
+  CHECK(c.model.served_by == "Amazon Bedrock");
   CHECK(c.usage.provider_cost.source == CostSource::OpenRouterUsd && c.usage.provider_cost.total->nano_usd == 49000);
   CHECK(c.usage.provider_cost.upstream_input->nano_usd == 29000 && c.usage.provider_cost.upstream_output->nano_usd == 20000);
   CHECK(c.usage.provider_cost.upstream_total->nano_usd == 49000);
@@ -682,6 +792,8 @@ void openrouter_sentinel_and_cost() {
   direct_body.replace(direct_body.find("anthropic/claude-haiku-4.5"), 26, "fixture-model");
   const auto unknown_currency = completed(buffered(direct_body)).usage.provider_cost;
   CHECK(unknown_currency.source == CostSource::UnknownCurrency && !unknown_currency.total && unknown_currency.status[0] == CostStatus::UnknownCurrency);
+  // The member is only read at a declared gateway; the same body from another origin names no upstream.
+  CHECK(!completed(buffered(direct_body)).model.served_by);
 }
 
 // A call that is cut off (cancelled, deadline, reset) has the usage the provider had reported so far,
@@ -961,7 +1073,7 @@ void long_streams_are_one_part_per_block() {
 }
 int main() {
   try {
-    routed_gateway_model(); openrouter_sentinel_and_cost(); direct_dated_snapshot_alias(); served_model_is_recorded();
+    routed_gateway_model(); openrouter_sentinel_and_cost(); served_by_upstream(); direct_dated_snapshot_alias(); served_model_is_recorded();
     owned_raw_observations(); raw_failure_evidence(); typeless_buffered_error();
     usage_binding_precedence();
     usage_detail_forward_compatibility(); toolset_metadata_shapes();

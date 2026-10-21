@@ -148,6 +148,8 @@ class Codec {
   bool audio_usage_tail_ = false;
   std::optional<Error> buffered_failure_;
   std::string generation_, model_, finish_reason_;
+  // The upstream a gateway named for this response (empty until it names one).
+  std::string upstream_;
   uint64_t created_ = 0;  // Latest chunk created value; nondecreasing within a stream.
   std::optional<bool> indexed_tools_;
   uint32_t next_part_ = 1;

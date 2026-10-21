@@ -913,6 +913,33 @@ void input_blocks_and_skills() {
     CHECK(document(encoded(anthropic, versioned).body)->root().get("container").get("skills").size() == 1);
   }
 }
+// The upstream a gateway names is response metadata. An answer decoded with it and without it is sealed the same, so a
+// follow-up request replays either one, byte for byte, and neither request nor history binds the name.
+void served_by_leaves_replay_identity() {
+  const auto gateway = descriptor_value("https://openrouter.ai", "/api/v1/messages");
+  auto request = base_request();
+  const auto decode = [&](const std::string& wire) {
+    const auto sent = encoded(gateway, request);
+    Accumulator accumulator;
+    messages::Codec codec(gateway, messages::Mode::Buffered, accumulator, sent.context);
+    codec.buffered(wire, {}); codec.finish();
+    CHECK(accumulator.outcome() && std::holds_alternative<Completion>(*accumulator.outcome()));
+    return std::get<Completion>(*accumulator.outcome());
+  };
+  const auto plain_wire = response(thinking_content);
+  auto named_wire = plain_wire; named_wire.insert(1, R"("provider":"Amazon Bedrock",)");
+  const auto plain = decode(plain_wire), named = decode(named_wire);
+  CHECK(!plain.model.served_by && named.model.served_by == "Amazon Bedrock");
+  CHECK(plain.messages.at(0).native && named.messages.at(0).native);
+  CHECK(plain.messages.at(0).native->complete() && named.messages.at(0).native->complete());
+  const auto follow_up = [&](const Message& assistant) {
+    auto next = request; next.messages.push_back(assistant); next.messages.push_back(user("Continue"));
+    return encoded(gateway, next).body;
+  };
+  const auto replayed = follow_up(plain.messages.at(0));
+  CHECK(replayed == follow_up(named.messages.at(0)));
+  CHECK(replayed.find("SECRET_SIGNATURE") != std::string::npos && replayed.find("Amazon Bedrock") == std::string::npos);
+}
 int main() {
   try {
     server_tool_options(); typed_client_tools_and_betas(); mcp_connector_and_replay(); compaction_and_history_roots(); input_blocks_and_skills();
@@ -921,7 +948,7 @@ int main() {
     invalid_calls_are_not_repaired();
     bounded_json_serialization(); request_encoded_byte_boundaries(); request_json_encoding_and_depth();
     effective_policy_lineage();
-    thinking_cache_tool_controls(); openrouter_max_price(); tool_role_helper_admission();
+    thinking_cache_tool_controls(); openrouter_max_price(); tool_role_helper_admission(); served_by_leaves_replay_identity();
     std::cout << "Messages replay properties passed\n"; return 0;
   } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

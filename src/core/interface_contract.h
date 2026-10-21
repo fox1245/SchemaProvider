@@ -50,10 +50,14 @@ inline constexpr std::uint64_t HostSeam = 1ULL << 13;
 // consumer built with this header would read past, so it lacks this bit and a require_interface_contract call with
 // RequiredProvider refuses it.
 inline constexpr std::uint64_t PartCacheMarks = 1ULL << 14;
+// ServedModel (Completion::model, PartialCompletion::model) carries `served_by`, the upstream a routing gateway named. A
+// library built before the member has a smaller ServedModel, which a consumer built with this header would read past, so
+// it lacks this bit and a require_interface_contract call with RequiredProvider refuses it.
+inline constexpr std::uint64_t ServedByUpstream = 1ULL << 15;
 inline constexpr std::uint64_t RequiredProvider = TypedRuntime | PreparedAdmission |
     NullableUsage | All5Native | TrustedArchive | OrderedWireEvents | NativeSocketRuntime |
     RetainedJsonSize | CompleteAttemptEvidence | OpenRouterRoutingMaxPrice | ErrorReason | PolicyAdmittedExtensions |
-    CompletionSecret | PartCacheMarks;
+    CompletionSecret | PartCacheMarks | ServedByUpstream;
 }
 InterfaceContract core_interface_contract() noexcept;
 std::uint32_t codec_interface_revision() noexcept;

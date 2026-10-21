@@ -153,7 +153,13 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
     return fail(ErrorKind::ProtocolCorrupt, "inconsistent response identity");
   if (begun_ && uint_value(created) < created_) return fail(ErrorKind::ProtocolCorrupt, "creation counter decreased");
   created_ = uint_value(created);
-  unknown(root, {"id", "model", "object", "created", "choices", "usage", "error"});
+  // A gateway names the serving upstream on every chunk; the first usable name is kept and another one is a different stream.
+  switch (served::observe_upstream(descriptor_, root, upstream_, accumulator_)) {
+    case served::UpstreamSeen::Conflict: return fail(ErrorKind::ProtocolCorrupt, "inconsistent response identity");
+    case served::UpstreamSeen::Unusable: ++diagnostics_.unknown_properties; break;
+    case served::UpstreamSeen::Fine: break;
+  }
+  unknown(root, {"id", "model", "object", "created", "choices", "usage", "error", served::upstream_key(descriptor_)});
   auto choices = root.get("choices");
   // A bare envelope without choices is still malformed; omitted-choice heartbeats carry
   // an explicit usage slot or obfuscation metadata rather than silently losing a choice.

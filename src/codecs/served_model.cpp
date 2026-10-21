@@ -26,6 +26,10 @@ bool listed(const descriptor::ValidatedDescriptor& d, std::string_view requested
   }
   return false;
 }
+bool usable(std::string_view name) noexcept {
+  return !name.empty() && name.size() <= max_upstream_bytes &&
+         std::none_of(name.begin(), name.end(), [](char c) { return static_cast<unsigned char>(c) < 0x20 || c == 0x7f; });
+}
 }  // namespace
 
 ServedRelation relation(const descriptor::ValidatedDescriptor& d, std::string_view requested, std::string_view served) noexcept {
@@ -45,5 +49,24 @@ void observe(const descriptor::ValidatedDescriptor& descriptor, Accumulator& acc
   if (!bind_replay || kind != ServedRelation::Unexplained) return;
   if (context && context->replay_eligible()) context = context->decoding_only();
   accumulator.withhold_replay();
+}
+
+std::string_view upstream_key(const descriptor::ValidatedDescriptor& descriptor) noexcept {
+  return descriptor::routed_gateway(descriptor) ? "provider" : std::string_view{};
+}
+
+UpstreamSeen observe_upstream(const descriptor::ValidatedDescriptor& descriptor, json::Value object, std::string& held,
+                              Accumulator& accumulator) {
+  if (!descriptor::routed_gateway(descriptor)) return UpstreamSeen::Fine;
+  const auto member = object.get("provider");
+  if (!member.valid() || member.is_null()) return UpstreamSeen::Fine;
+  if (!member.is_string() || !usable(member.as_string())) return UpstreamSeen::Unusable;
+  const auto name = member.as_string();
+  if (held.empty()) {
+    held = std::string(name);
+    accumulator.served_by(held);
+    return UpstreamSeen::Fine;
+  }
+  return held == name ? UpstreamSeen::Fine : UpstreamSeen::Conflict;
 }
 }  // namespace sp::served

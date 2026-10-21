@@ -71,6 +71,7 @@ void interface_contract_capabilities() {
   static_assert((RequiredProvider & ErrorReason) == ErrorReason);
   static_assert((RequiredProvider & CompletionSecret) == CompletionSecret);
   static_assert((RequiredProvider & PartCacheMarks) == PartCacheMarks);
+  static_assert((RequiredProvider & ServedByUpstream) == ServedByUpstream);
   const auto linked = sp::runtime::interface_contract();
   require(linked.revision == sp::EXPECTED_INTERFACE_REVISION, "linked interface revision differs");
   require((linked.capabilities & RequiredProvider) == RequiredProvider, "required capabilities are not advertised");
@@ -78,10 +79,12 @@ void interface_contract_capabilities() {
   require((sp::core_interface_contract().capabilities & ErrorReason) != 0, "core omits Error::reason");
   require((sp::core_interface_contract().capabilities & CompletionSecret) != 0, "core omits Completion::secret");
   require((sp::core_interface_contract().capabilities & PartCacheMarks) != 0, "core omits the typed cache marks");
+  require((sp::core_interface_contract().capabilities & ServedByUpstream) != 0, "core omits ServedModel::served_by");
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, OpenRouterRoutingMaxPrice);
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, ErrorReason);
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, CompletionSecret);
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, PartCacheMarks);
+  sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, ServedByUpstream);
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, RequiredProvider);
   constexpr std::uint64_t ungranted = 1ULL << 63;
   require((linked.capabilities & ungranted) == 0, "test capability bit is granted");

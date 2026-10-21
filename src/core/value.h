@@ -322,6 +322,10 @@ enum class ServedRelation : std::uint8_t {
 struct ServedModel {
   std::string requested, served;
   ServedRelation relation = ServedRelation::NotReported;
+  // The upstream a routing gateway names as having served the response (OpenRouter's top-level `provider`), as
+  // reported and bounded to a short name without control characters. Absent when the response names none, names
+  // an unusable one, or comes from an origin that does not report it. Not part of replay or request identity.
+  std::optional<std::string> served_by{};
 };
 struct Completion {
   std::vector<Message> messages;
