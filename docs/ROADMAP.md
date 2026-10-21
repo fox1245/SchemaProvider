@@ -2,9 +2,9 @@
 
 Package 0.4.0 alpha uses typed interface/shared-library generation 7 with five HTTP/SSE chat families, the non-chat endpoints (D6, D7) and realtime WebSocket sessions (D8). [Usage](USAGE.md) defines typed media, separate provider-reported costs, nullable token evidence, preserved controls, Responses provider-held cursors and explicit Generate portable imports. [Recorded provenance](POC_PLAN.md#current-typed-c-cutover-provenance) keeps earlier interface 3–5 runs unchanged; implementation, fresh wire proof and release/support admission are separate claims.
 
-## Owner-requested next work
+## Completed next work
 
-The heading retains links from the original work sequence. These C++ items are implemented, not a pending plan:
+This section keeps the original work sequence. These C++ items are implemented, not a pending plan:
 
 | Item | Current state and evidence |
 |---|---|
@@ -21,7 +21,7 @@ The preservation cutover adds Chat reasoning/usage/alternative-model controls, M
 
 ## External-runtime examples
 
-Owner-requested examples are tracked separately from SDK release gates:
+These examples are tracked separately from SDK release gates:
 
 | Item | State |
 |---|---|

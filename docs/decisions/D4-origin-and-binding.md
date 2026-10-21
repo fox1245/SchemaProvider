@@ -1,7 +1,6 @@
 # D4 — Origin, binding facts and replay of native reasoning
 
 - Status: FIRM exact-origin/binding decision; equivalence/treatment proposals remain unimplemented, 2026-10-01
-- Deciders: maintainer + two-family review panel
 
 ## Context
 Signed/encrypted reasoning blocks must be replayed to the producing model to keep multi-step tool loops valid. Replaying them to the wrong route can fail (400) or be silently dropped.
@@ -14,7 +13,7 @@ Earlier drafts claimed that cross-host signature interoperability is "unverified
 2. Exact native eligibility or rejection is implemented; no caller-provided binding hash can mint a seal.
 3. A documented direct/Bedrock/Vertex equivalence allow-list was proposed, requiring separate implementation and negative-control admission. No such active class exists in the installed SDK. OpenRouter was excluded from that proposal.
 4. The live canary carries a NEGATIVE CONTROL (tampered signature must be rejected) and records `negative_control: rejected|accepted|not_run` plus `client_retention_verified`, `request_accepted`, `native_validation_evidenced`. A cell whose negative control is accepted/not_run is `ReplayAcceptanceUnobservable` and never "replay verified". Acceptance alone is vacuous because Anthropic degrades gracefully (a 200 was seen after stripping thinking in a same-turn loop), so the oracle also observes thinking presence / usage / cache evidence. Results are N-run acceptance rates with a lower confidence bound, with model and account age in the manifest. Property `CanaryNegativeControl`.
-5. Equivalence-class admission: vendor documentation + 60-run no-failure canary per (host, model, direction) + 100% negative-control rejection. Bedrock/Vertex direct access is currently UNTESTED (no credentials on the owner's machine).
+5. Equivalence-class admission: vendor documentation + 60-run no-failure canary per (host, model, direction) + 100% negative-control rejection. Bedrock/Vertex direct access is currently UNTESTED (no credentials were available for it).
 6. Per-model `required|optional|ignored` replay capabilities and explicit Drop/Demote were historical target grammar/treatments. The installed descriptor root has no `models` program, and the SDK exposes no Drop/Demote policy; ineligible native replay rejects.
 
 Origin is a configured replay boundary, not proof of vendor issuer. In-process sealing provides provenance/content integrity; explicit independent-key archive custody authenticates local restoration, not encryption or vendor identity. Editable JSON cannot mint native authority.
@@ -35,7 +34,7 @@ M3 signatures, encrypted leaves and server IDs were synthetic local retention/re
 
 ## Evidence
 - [read docs] Anthropic extended-thinking documentation: `signature` values are compatible across the Claude API, Amazon Bedrock and Google Cloud; a thinking block is readable only by the producing model and certain other models (unreadable blocks are silently ignored/dropped); newer models bind blocks to the preceding system/tools/messages prefix (400 when it changes; enforced by default for accounts created on/after 2026-08-31, opt-in through `thinking.block_binding.prefix_mismatch_behavior` for older accounts); Sonnet 5.5 blocks are account-bound; toggling thinking mid-turn silently disables thinking.
-- [live observation] Experiment 2026-09-30, maintainer's keys, claude-haiku-4-5 / anthropic/claude-haiku-4.5; thinking enabled (budget 1024) + one tool; turn 1 captured thinking+tool_use, turn 2 replayed with tool_result. Routes: Anthropic-direct `/v1/messages`; OpenRouter `/v1/chat/completions` with `provider.order=[X]`, `allow_fallbacks=false`, X in {Anthropic, Amazon Bedrock, Google Vertex, Azure}.
+- [live observation] Single-account experiment, 2026-09-30, claude-haiku-4-5 / anthropic/claude-haiku-4.5; thinking enabled (budget 1024) + one tool; turn 1 captured thinking+tool_use, turn 2 replayed with tool_result. Routes: Anthropic-direct `/v1/messages`; OpenRouter `/v1/chat/completions` with `provider.order=[X]`, `allow_fallbacks=false`, X in {Anthropic, Amazon Bedrock, Google Vertex, Azure}.
 
 | Replay path | Result | Reading |
 |---|---|---|

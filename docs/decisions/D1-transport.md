@@ -1,7 +1,7 @@
 # D1 — Transport
 
 - Status: FIRM, revised 2026-10-01. Supersedes the earlier GATED default "A: one private Asio + OpenSSL stack, no libcurl".
-- Decider: the owner accepts one libcurl/Asio stack and optional HTTP/3. Both capable and incapable Linux transport scenarios have been exercised, including capable plain/ASan+UBSan/TSan runs; hosted-provider interoperability, broad platform coverage and release-backend instrumentation limits remain distinct.
+- Decision: one libcurl/Asio stack and optional HTTP/3. Both capable and incapable Linux transport scenarios have been exercised, including capable plain/ASan+UBSan/TSan runs; hosted-provider interoperability, broad platform coverage and release-backend instrumentation limits remain distinct.
 - Evidence labels: `[read source]`, `[read docs]`, `[live observation]`, `[inference]`. Live observations are local loopback runs.
 
 ## Context
@@ -16,8 +16,8 @@ The library needs HTTP/1.1, HTTP/2 and optional HTTP/3, SSE, and cancellation/de
    - backpressure: read readiness is not reported for the socket of a paused HTTP/1.x transfer, because libcurl 8.5.0 otherwise reads and buffers while paused;
    - name resolution: single-flight, TTL-cached, on a bounded resolver pool, passed to libcurl with `CURLOPT_RESOLVE`, because libcurl's threaded resolver starts a thread per concurrent lookup;
    - normal-close classification: a body delimited only by connection close is a failure.
-4. **HTTP/2 comes from libcurl.** The opt-in HTTP/2 capability of the current NeoGraph implementation is therefore not retired; the former owner question O1 is closed.
-5. **No Responses WebSocket lane in this cutover.** The owner approved typed HTTP/SSE replacement rather than retaining the old interpreter or a permanent hybrid provider stack.
+4. **HTTP/2 comes from libcurl.** The opt-in HTTP/2 capability of the current NeoGraph implementation is therefore not retired; the former open question O1 on retiring the HTTP/2 capability is closed.
+5. **No Responses WebSocket lane in this cutover.** Typed HTTP/SSE replaces the old Responses WebSocket lane rather than retaining the old interpreter or a permanent hybrid provider stack.
 6. **HTTP/3 is optional within the same libcurl stack.** HTTP/3-capable builds can prefer it with safe connection-stage fallback; builds without it retain HTTP/2 and HTTP/1.1. No application-wide QUIC dependency requirement and no second HTTP stack. Policy and admission conditions follow below.
 
 ## Optional HTTP/3 policy
@@ -49,7 +49,7 @@ The operational rules are:
   - SSE, 32 concurrent, 8 events: completion p50 51.38 ms (Asio, new connection per request), 47.42 ms (libcurl HTTP/1.1, new connections), 24.77 ms (libcurl HTTP/1.1, reused), 22.25 ms (libcurl HTTP/2); first event 31.70, 30.41, 6.63, 6.45 ms. Connection reuse, not the protocol version, explains most of the difference.
   - Not covered: real vendors, proxies, WebSocket, the full NeoGraph call path. That benchmark polled in a worker thread; it did not use the Asio integration.
 - `[read source]` At NeoGraph commit 60b795aa the hand-written HTTP/1.1 exchange code is 2,287 lines (`src/async/conn_pool.cpp` 482, `src/async/http_client.cpp` 526, `src/async/http_exchange_detail.h` 1,279, counted with `wc -l`); the existing libcurl HTTP/2 wrapper `src/async/curl_h2_pool.cpp` is 686 lines.
-- `[live observation]` M1 transport spike, 27 tests green under plain, ASan+UBSan and TSan builds, plus a read-only review by a model of another family whose confirmed findings were fixed with regression tests (POC_PLAN section 5): the libcurl 8.5.0 pause behaviour under `multi_socket`, the resend refusal, the per-lookup resolver threads, framing that EOF could turn into success, a destructor deadlock on an I/O thread, and an AddressSanitizer use-after-free in the spike's own code.
+- `[live observation]` M1 transport spike, 27 tests green under plain, ASan+UBSan and TSan builds, plus a read-only review whose confirmed findings were fixed with regression tests (POC_PLAN section 5): the libcurl 8.5.0 pause behaviour under `multi_socket`, the resend refusal, the per-lookup resolver threads, framing that EOF could turn into success, a destructor deadlock on an I/O thread, and an AddressSanitizer use-after-free in the spike's own code.
 - `[live observation]` M1b extends this to 32 tests passing under plain, ASan+UBSan and TSan without a production transport change. Custom-CA TLS succeeds with HTTP/1.1 and ALPN HTTP/2; wrong-host, expired and self-signed certificates fail before any HTTP request. One paused h2c stream remains bounded while three siblings complete on the same session; cancellation preserves the sibling. GOAWAY and REFUSED_STREAM both trigger a refused resend with exactly one request seen by the peer. Resolver refresh affects fresh connections after idle retirement, not the lifetime of healthy pooled connections. Exact measurements and oracle corrections: POC_PLAN section 5.1.
 - `[live observation]` M2 adds the Chat fixture path above the same transport: 35 independently reviewed synthetic fixtures, 9,409 partition variants and five buffered/SSE parity pairs pass, with five CTest groups green under plain, ASan+UBSan and TSan. An observed empty-literal-header omission required one transport correction (libcurl's empty-header form); the existing 32 transport cases still pass. These are loopback results, not live-provider or HTTP/3 evidence. Details: POC_PLAN section 5.2.
 - `[live observation]` M3 adds 62 independently reviewed Messages fixtures, 30,430 partition variants, ten parity pairs and actual two-request tool/server continuation over the same transport. No production transport change was needed. All nine CTest groups pass under plain, ASan+UBSan and TSan. Initial RSS/settle-time test failures and the precise-RSS/bounded-plateau oracle corrections are retained in POC_PLAN section 5.3; thresholds were not relaxed. These remain model-free loopback results, not a live-provider or HTTP/3 claim.
@@ -60,7 +60,7 @@ The operational rules are:
 - Reproduce with an isolated HTTP/3-capable libcurl prefix, the existing `tests/support/http3_peer.py` and an isolated Python containing aioquic/h2. Select `SP_HTTP3_PYTHON`, configure the SDK against that prefix, then run the registered `http3_scenarios`; use `capable` or `incapable` when invoking the executable directly. Neither source acquisition nor prefix installation replaces system libraries or trust stores.
 
 ## Options considered
-- **A, one private Asio + OpenSSL stack (previous default):** rejected by the owner after the A/B result removed the performance argument, and because it keeps the maintenance of an HTTP/1.1 client, a connection pool and (later) an HTTP/2 path in this library.
+- **A, one private Asio + OpenSSL stack (previous default):** rejected after the A/B result removed the performance argument, and because it keeps the maintenance of an HTTP/1.1 client, a connection pool and (later) an HTTP/2 path in this library.
 - **C, Asio for WebSocket and libcurl for HTTP as a permanent state:** still rejected as a permanent state (two TLS, socket and cancel families); see item 5 for D1b.
 - **httplib:** rejected: blocking I/O, HTTP/1.1 only, no cancellation fit for the async core (D3).
 

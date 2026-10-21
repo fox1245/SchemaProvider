@@ -1,7 +1,6 @@
 {
   "version": 1,
-  "scope": "owner_requested_minimal_retained_endpoint_validation",
-  "owner_instruction": "셋 다 하되 검증은 최소 비용으로 짧게 ... 그것도 싼 모델로 최소한의 검증만",
+  "scope": "minimal_retained_endpoint_validation",
   "paid_attempts_per_feature": 1,
   "automatic_retry": false,
   "chat_qualification_grant_is_separate": true,

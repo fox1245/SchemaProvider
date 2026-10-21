@@ -159,7 +159,7 @@ void approved(std::string_view raw) {
     (void)value;
     constexpr std::array<std::string_view, 14> names{"version", "scope", "additional_calls", "micro_usd",
       "baseline_vision_calls", "baseline_vision_exposure_micro_usd", "baseline_ledger", "meter_ledger",
-      "catalog", "owner_selection", "billing_guarantee", "unknown_cost_policy", "unused_old_margin", "excluded_paid_scope"};
+      "catalog", "allowance_note", "billing_guarantee", "unknown_cost_policy", "unused_old_margin", "excluded_paid_scope"};
     if (std::find(names.begin(), names.end(), name) == names.end()) fail(Denial::Configuration);
   }
   auto eq = [&](std::string_view key, std::string_view expected) {
@@ -173,12 +173,12 @@ void approved(std::string_view raw) {
   eq("meter_ledger", "build/qualification-meter.ledger"); eq("catalog", "config/model-catalog.json");
   eq("billing_guarantee", "local_meter_and_stop_not_invoice"); eq("unknown_cost_policy", "retain_reservation");
   eq("unused_old_margin", "not_renewed");
-  auto owner = root.get("owner_selection");
-  if (!owner.is_string() || owner.as_string().empty()) fail(Denial::Configuration);
+  auto note = root.get("allowance_note");
+  if (!note.is_string() || note.as_string().empty()) fail(Denial::Configuration);
   auto excluded = root.get("excluded_paid_scope");
   if (!excluded.is_array() || excluded.size() != 3) fail(Denial::Configuration);
   std::size_t index = 0;
-  for (auto name : {"video_generation", "image_generation", "remote_graphrag"}) {
+  for (auto name : {"video_generation", "image_generation", "remote_retrieval"}) {
     auto v = excluded.at(index++);
     if (!v.is_string() || v.as_string() != name) fail(Denial::Configuration);
   }
@@ -234,7 +234,7 @@ std::optional<Extension> extension(int dir, std::string_view approval_hash,
   auto root = document->root();
   constexpr std::array<std::string_view, 14> names{"version", "scope", "additional_calls", "micro_usd",
       "original_authorization", "baseline_ledger", "meter_ledger", "catalog", "activation_anchor",
-      "owner_selection", "billing_guarantee", "unknown_cost_policy", "excluded_paid_scope", "binding"};
+      "allowance_note", "billing_guarantee", "unknown_cost_policy", "excluded_paid_scope", "binding"};
   if (!root.is_object() || root.size() != names.size()) fail(Denial::Configuration);
   for (auto [name, value] : root.members()) {
     (void)value;
@@ -253,13 +253,13 @@ std::optional<Extension> extension(int dir, std::string_view approval_hash,
   eq(root, "meter_ledger", "build/qualification-meter.ledger", Denial::Configuration);
   eq(root, "catalog", "config/model-catalog.json", Denial::Configuration);
   eq(root, "activation_anchor", "build/m5-live.ledger.qualification-binding", Denial::Configuration);
-  eq(root, "owner_selection", "추가 480회·US$3 승인", Denial::Configuration);
+  eq(root, "allowance_note", "additional 480 calls / US$3 allowance", Denial::Configuration);
   eq(root, "billing_guarantee", "local_meter_and_stop_not_invoice", Denial::Configuration);
   eq(root, "unknown_cost_policy", "retain_reservation", Denial::Configuration);
   auto excluded = root.get("excluded_paid_scope");
   if (!excluded.is_array() || excluded.size() != 3) fail(Denial::Configuration);
   std::size_t index = 0;
-  for (auto name : {"video_generation", "image_generation", "remote_graphrag"}) {
+  for (auto name : {"video_generation", "image_generation", "remote_retrieval"}) {
     auto value = excluded.at(index++);
     if (!value.is_string() || value.as_string() != name) fail(Denial::Configuration);
   }

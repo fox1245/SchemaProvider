@@ -1,7 +1,6 @@
 # D3 — Async-native core
 
 - Status: FIRM, 2026-10-01
-- Deciders: maintainer + two-family review panel
 
 Current runtime supports HTTP/SSE, not WebSocket. WS waits and the 45% WSS scheduled benchmark below preserve historical future acceptance proposals; they are excluded from current SDK release gates. See [Usage](../USAGE.md#streaming-deadlines-cancellation-and-backpressure) for actual callback/deadline/handle semantics.
 
@@ -56,4 +55,4 @@ At M5 the old result projection was deliberately refused with owned `BoundaryErr
 
 
 ## Open items
-- NeoGraph target concurrency C for the scheduled benchmark (owner input).
+- NeoGraph target concurrency C for the scheduled benchmark.
