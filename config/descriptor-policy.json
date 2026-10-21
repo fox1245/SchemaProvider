@@ -4,6 +4,8 @@
   "families": [
     {
       "family": "openai.chat",
+      "controls": ["max_output_tokens", "temperature", "top_p", "reasoning_effort", "service_tier"],
+      "standard_service_tiers": ["default"],
       "openrouter_origins": ["https://openrouter.ai"],
       "max_completion_tokens_origins": ["https://api.openai.com"],
       "temperature_forbidden_model_prefixes": ["gpt-5", "gpt-6", "o1", "o3", "o4"],
@@ -101,6 +103,7 @@
     },
     {
       "family": "anthropic.messages",
+      "controls": ["max_output_tokens", "temperature", "top_p", "thinking_budget"],
       "openrouter_origins": ["https://openrouter.ai"],
       "temperature_forbidden_model_prefixes": ["claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-sonnet-5", "claude-haiku-5", "claude-fable-"],
       "temperature_forbidden_generations": [{"series": "claude-", "from": "4.7"}],
@@ -270,6 +273,8 @@
     },
     {
       "family": "openai.responses",
+      "controls": ["max_output_tokens", "temperature", "top_p", "reasoning_effort", "reasoning_summary", "service_tier", "required_tool", "store", "max_tool_calls"],
+      "standard_service_tiers": ["default"],
       "openrouter_origins": ["https://openrouter.ai"],
       "temperature_forbidden_model_prefixes": ["gpt-5", "gpt-6", "o1", "o3", "o4"],
       "media": {
@@ -390,6 +395,7 @@
     },
     {
       "family": "google.generate",
+      "controls": ["max_output_tokens", "temperature", "thinking_budget", "include_thoughts", "thinking_level", "required_tool"],
       "openrouter_origins": [],
       "temperature_forbidden_model_prefixes": [],
       "media": {
@@ -463,6 +469,8 @@
     },
     {
       "family": "google.interactions",
+      "controls": ["max_output_tokens", "thinking_level", "thinking_summaries", "service_tier", "required_tool", "store"],
+      "standard_service_tiers": ["standard"],
       "openrouter_origins": [],
       "temperature_forbidden_model_prefixes": [],
       "media": {
