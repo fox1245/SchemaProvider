@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 
 const names = ['good', 'wrong', 'expired', 'untrusted'];
 const counters = Object.fromEntries(names.map(name => [name, {
-  requests: 0, tls_errors: 0, h2: 0, h1: 0, request_bytes: 0,
+  requests: 0, tls_errors: 0, h2: 0, h1: 0, request_bytes: 0, connections: 0,
 }]));
 const servers = [];
 const sockets = new Set();
@@ -92,27 +92,33 @@ function requestHandler(name, req, res) {
   count[protocol === 'h2' ? 'h2' : 'h1'] += 1;
   const chunks = [];
   let bytes = 0;
+  const url = new URL(req.url, 'http://fixture.invalid');
   req.on('error', () => res.destroy());
   res.on('error', () => req.destroy());
   req.on('data', chunk => {
     bytes += chunk.length;
     count.request_bytes += chunk.length;
-    if (req.url === '/echo') chunks.push(chunk);
+    if (url.pathname === '/echo') chunks.push(chunk);
   });
   req.on('end', () => {
-    if (req.url === '/hold' || res.destroyed) return;
-    if (req.url !== '/echo') {
+    if (url.pathname === '/hold' || res.destroyed) return;
+    if (url.pathname !== '/echo') {
       res.writeHead(404, { 'content-type': 'text/plain' });
       res.end('not found\n');
       return;
     }
     const body = Buffer.concat(chunks, bytes);
-    res.writeHead(200, {
-      'content-type': 'application/octet-stream',
-      'content-length': bytes,
-      'x-test-protocol': protocol,
-    });
-    res.end(body);
+    // /echo?delay=<ms> answers after that long, so that a burst of requests is in flight together.
+    const delay = Math.min(Number(url.searchParams.get('delay')) || 0, 5000);
+    setTimeout(() => {
+      if (res.destroyed) return;
+      res.writeHead(200, {
+        'content-type': 'application/octet-stream',
+        'content-length': bytes,
+        'x-test-protocol': protocol,
+      });
+      res.end(body);
+    }, delay);
   });
 }
 
@@ -174,7 +180,11 @@ commonName = supplied
       allowHTTP1: true,
       handshakeTimeout: 5000,
     }, (req, res) => requestHandler(name, req, res)));
-    server.on('secureConnection', trackSocket);
+    server.on('secureConnection', socket => {
+      // One per TLS connection, whatever the protocol: the oracle for connection reuse.
+      counters[name].connections += 1;
+      trackSocket(socket);
+    });
     server.on('tlsClientError', (_error, socket) => {
       counters[name].tls_errors += 1;
       socket.on('error', () => {});

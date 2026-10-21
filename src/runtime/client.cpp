@@ -271,6 +271,7 @@ void validate(const descriptor::ValidatedDescriptor& descriptor, const Options& 
   if (options.transport.io_threads == 0 || options.transport.io_threads > ceiling.io_threads) reject("/io_threads");
   if (options.transport.resolver_threads == 0 || options.transport.resolver_threads > ceiling.resolver_threads) reject("/resolver_threads");
   if (options.transport.max_host_connections < 0 || static_cast<std::uint64_t>(options.transport.max_host_connections) > ceiling.max_host_connections) reject("/max_host_connections");
+  if (options.transport.connection_cache_size > ceiling.max_operations) reject("/connection_cache_size");
   if (options.transport.max_head_bytes == 0 || options.transport.max_head_bytes > ceiling.max_head_bytes) reject("/max_head_bytes");
   if (options.transport.dns_ttl.count() < 0 || static_cast<std::uint64_t>(options.transport.dns_ttl.count()) > ceiling.dns_ttl_seconds) reject("/dns_ttl_seconds");
   // The stall bounds are durations no longer than the longest admissible operation deadline, so
@@ -1201,6 +1202,9 @@ Client ClientAccess::make(descriptor::ValidatedDescriptor descriptor, Options op
   if (!executor) executor = make_pool_executor(options.workers);
   if (!transport) {
     auto wire = options.transport;
+    // libcurl keeps idle connections only up to this many; it must cover every operation the client may
+    // run at once, or a burst of that size reconnects (a TLS handshake each) after the previous one drained.
+    if (wire.connection_cache_size == 0) wire.connection_cache_size = options.limits.max_operations;
     if (wire.resolve) {
       auto resolve = std::move(wire.resolve);
       wire.resolve = [resolve = std::move(resolve)](const std::string& host) {

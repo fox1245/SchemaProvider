@@ -1204,6 +1204,17 @@ A throwing nonterminal callback cancels with `Failure(Misuse)`. A throwing termi
 
 Retries are off by default. `RunOptions::retry` can replace the client's admitted default policy. If enabled, the runtime is the single retry owner with an attempt cap, shared token bucket and unchanged deadline. Retry class and safety are separate; no observed semantic output is retried, and possible acceptance requires explicit duplicate-billing-risk approval in the current policy. An endpoint call the provider charges for follows the rule under **Money** in the endpoint section instead. Retry-After cannot shorten a server wait to fit the deadline. `AttemptEvidence::prior_usage_unknown` keeps unknown earlier cost visible. If NeoGraph or another host owns retry, leave SDK retry off.
 
+### Connection reuse
+
+The transport keeps connections for reuse in libcurl's connection cache. Left at libcurl's default, that cache holds four connections per transfer running at the moment a connection is returned to it (libcurl 8.5 to 8.21; 8.22 and later hold two per attached transfer and close only a connection idle for a second, which spares a fast burst but can still lose the connections of transfers that finish more than a second apart), so a burst that drains closes the connections it no longer needs room for, and the next burst of the same size opens them again: one TCP and TLS handshake each. In the transport's burst test (256 requests in bursts at a concurrency of 8, 32 and 128, on libcurl 8.5.0) 32, 56 and 62 requests opened a new connection before the cache was sized, and none after. The transport now sets the cache to hold as many connections as the caller may run transfers at once, across all hosts (`CURLMOPT_MAXCONNECTS`):
+
+- **A `Client`** sizes it to `Options::limits.max_operations`, the most operations it admits at once.
+- **`Options::transport.connection_cache_size`** overrides it. Zero (the default) means the value above. A smaller value is honoured and trades reconnects for fewer idle sockets; a value above the admitted `max_operations` ceiling is rejected at `/connection_cache_size`.
+- **A `transport::Transport` built directly** has no operation limit of its own. Zero there means the larger of the default `max_operations` and `max_host_connections`; set `connection_cache_size` when you run more transfers than that at once.
+- **HTTP/2 and HTTP/3** multiplex requests over few connections, so the size matters less; the same cache holds them.
+
+The cache bounds what is kept, not what may run: no transfer waits for it. `max_host_connections` is the per-host bound on connections, and it still applies. A WebSocket connection is never pooled, but while a session is open it occupies one place in the cache.
+
 ## WebSocket sessions
 
 Realtime APIs (Gemini Live, Lyria RealTime, OpenAI Realtime and the like) speak WebSocket. `transport/ws_transport.h` opens an RFC 6455 client session on a `sp::transport::Transport`. The session shares that transport's I/O threads, resolver and TLS settings and costs no thread of its own. A `WsSession` moves whole text and binary messages; the provider protocols (setup messages, audio chunks, turn events) are decoded by [realtime sessions](#realtime-sessions), which run on it.

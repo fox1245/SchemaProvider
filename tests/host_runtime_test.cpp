@@ -283,6 +283,38 @@ void default_pool_refuses_without_threads() {
 #endif
 }
 
+// libcurl keeps idle connections only up to the size of its cache, and a burst that drains closes the surplus. The
+// client sizes the cache for the operations it may run at once, so that the next burst finds its connections.
+std::size_t g_built_cache_size = 0;
+std::shared_ptr<detail::AttemptTransport> capture_cache_size(transport::TransportOptions options) {
+  g_built_cache_size = options.connection_cache_size;
+  return std::make_shared<FakeTransport>(std::make_shared<HostExecutor>(), "application/json", std::vector<std::string>{});
+}
+void connection_cache_follows_operations() {
+  const auto build = [](Options options) {
+    g_built_cache_size = 0;
+    detail::ClientAccess::make(descriptor_value(), std::move(options), std::make_shared<HostExecutor>(), nullptr, {},
+                               &capture_cache_size);
+    return g_built_cache_size;
+  };
+  auto options = Options::with_api_key("sk-test");
+  CHECK(build(options) == options.limits.max_operations);        // derived: the operations it may run at once
+  options.limits.max_operations = 100;
+  CHECK(build(options) == 100);
+  options.transport.connection_cache_size = 8;                    // explicit: honoured, even below the concurrency
+  CHECK(build(options) == 8);
+  // A size above the admitted ceiling on operations is refused, as the limit it derives from is.
+  const std::uint64_t ceiling = options.policy->admission().max_operations;
+  if (ceiling < std::numeric_limits<std::size_t>::max()) {
+    options.transport.connection_cache_size = static_cast<std::size_t>(ceiling) + 1;
+    std::string refused_at;
+    try { build(options); }
+    catch (const descriptor::ConfigError& error) { refused_at = error.pointer; }
+    CHECK(refused_at == "/connection_cache_size");
+  }
+  std::puts("connection cache follows the operation limit");
+}
+
 // The seam is public, and the names the private header used for it are the same types.
 void seam_is_public() {
   static_assert(std::is_same_v<detail::Executor, runtime::Executor>);
@@ -506,6 +538,7 @@ int main() {
     policy_clamp();
     catalogue_error_is_returned();
     default_pool_refuses_without_threads();
+    connection_cache_follows_operations();
     seam_is_public();
     chat_call(false);
     chat_call(true);

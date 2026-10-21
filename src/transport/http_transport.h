@@ -190,6 +190,17 @@ using ResolveFn = std::function<std::vector<std::string>(const std::string& host
 struct TransportOptions {
   unsigned io_threads = static_cast<unsigned>(config_defaults::defaults_io_threads);
   long max_host_connections = static_cast<long>(config_defaults::defaults_max_host_connections); // 0 = unlimited
+  // Connections libcurl keeps cached for reuse, idle or in use, across all hosts (CURLMOPT_MAXCONNECTS).
+  // Left unset, libcurl 8.5 to 8.21 keeps only four per transfer running at the moment a connection is
+  // returned (8.22 and later: two per attached transfer, closing only a connection idle for a second),
+  // so a burst that drains closes its idle connections and the next burst of the same size opens them
+  // again, one TLS handshake each. A set size is applied the same way by every version, and must hold
+  // at least as many connections as the caller runs transfers at once. 0 = derive it: a Client sets it to
+  // Options::limits.max_operations; a Transport built directly has no such bound and takes the larger of
+  // the default operation ceiling (config_defaults::defaults_max_operations) and max_host_connections. A
+  // smaller explicit value is honoured and trades reconnects for fewer idle sockets. It limits what is
+  // kept, never what may run: no transfer waits for it (that is max_host_connections).
+  std::size_t connection_cache_size = 0;
   std::size_t max_head_bytes = config_defaults::defaults_max_head_bytes;
   // Name resolution is done by the transport, not by libcurl, because libcurl's threaded resolver
   // starts one thread per concurrent lookup (measured: 72 simultaneous lookups -> +72 threads),

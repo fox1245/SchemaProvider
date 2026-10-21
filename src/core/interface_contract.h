@@ -54,10 +54,15 @@ inline constexpr std::uint64_t PartCacheMarks = 1ULL << 14;
 // library built before the member has a smaller ServedModel, which a consumer built with this header would read past, so
 // it lacks this bit and a require_interface_contract call with RequiredProvider refuses it.
 inline constexpr std::uint64_t ServedByUpstream = 1ULL << 15;
+// transport::TransportOptions carries `connection_cache_size`, the size of libcurl's connection cache. A library built
+// before the member has a smaller TransportOptions (and so a smaller runtime::Options), which a consumer built with this
+// header would read past, and it keeps idle connections only up to libcurl's own default; it lacks this bit and a
+// require_interface_contract call with RequiredProvider refuses it.
+inline constexpr std::uint64_t TransportConnectionCache = 1ULL << 16;
 inline constexpr std::uint64_t RequiredProvider = TypedRuntime | PreparedAdmission |
     NullableUsage | All5Native | TrustedArchive | OrderedWireEvents | NativeSocketRuntime |
     RetainedJsonSize | CompleteAttemptEvidence | OpenRouterRoutingMaxPrice | ErrorReason | PolicyAdmittedExtensions |
-    CompletionSecret | PartCacheMarks | ServedByUpstream;
+    CompletionSecret | PartCacheMarks | ServedByUpstream | TransportConnectionCache;
 }
 InterfaceContract core_interface_contract() noexcept;
 std::uint32_t codec_interface_revision() noexcept;
