@@ -651,7 +651,7 @@ Vendor reasoning state (signed thinking blocks, encrypted reasoning items, thoug
 | Actors | a remote vendor or gateway (honest-but-buggy, or hostile); a tampered or attacker-supplied history file; other local processes reading logs or stores; an untrusted end user of the host app |
 | Not claimed | `sealed` is not authentication: it proves C++ immutability and provenance inside one process, not that the vendor issued the bytes. Origin is an observed label, not a proof of issuer |
 | Importer | Editable JSON/history imports cannot issue native replay authority. Only genuine in-process generations or authenticated local archive restoration supply native carry. |
-| Persistence | `NativeArchive::provision/open` activates protected owner-private custody with an independent key; closed v3/spna3 records authenticate all semantic descriptor bindings and representation custody. Old v2 references reject. This is not encryption or vendor-issuer authentication. |
+| Persistence | `NativeArchive::provision/open` activates protected owner-only custody with an independent key; closed v3/spna3 records authenticate all semantic descriptor bindings and representation custody. Old v2 references reject. This is not encryption or vendor-issuer authentication. |
 | Stored-block risk | Native state remains sensitive and may be attacker-influenced. Protect the archive directory/key separately; do not publish native leaves or export them through observer telemetry. |
 | Not defended | a hostile vendor producing a valid-looking block; a host that logs bytes despite redaction; side channels |
 

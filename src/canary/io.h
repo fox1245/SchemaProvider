@@ -19,10 +19,10 @@ class Fd {
  private:
   int fd_;
 };
-inline void regular(int fd, bool owner_private) {
+inline void regular(int fd, bool owner_only) {
   struct stat st{};
   if (::fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_nlink != 1 ||
-      (owner_private && (st.st_uid != ::geteuid() || (st.st_mode & 0077)))) fail();
+      (owner_only && (st.st_uid != ::geteuid() || (st.st_mode & 0077)))) fail();
 }
 inline std::string read_bounded(int fd, std::size_t limit) {
   std::string result;
@@ -36,9 +36,9 @@ inline std::string read_bounded(int fd, std::size_t limit) {
     result.append(bytes, static_cast<std::size_t>(n));
   }
 }
-inline std::string read_file(const std::string& path, std::size_t limit, bool owner_private) {
+inline std::string read_file(const std::string& path, std::size_t limit, bool owner_only) {
   Fd fd(::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK));
-  regular(fd.get(), owner_private);
+  regular(fd.get(), owner_only);
   return read_bounded(fd.get(), limit);
 }
 inline void write_all(int fd, std::string_view text) {
