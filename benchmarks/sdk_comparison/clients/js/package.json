@@ -1,0 +1,13 @@
+{
+  "name": "sdk-comparison-vercel-ai",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Client program for the SDK comparison. The packages are pinned in package-lock.json.",
+  "type": "module",
+  "engines": {"node": ">=22"},
+  "dependencies": {
+    "ai": "7.0.148",
+    "@ai-sdk/openai": "4.0.99",
+    "@ai-sdk/anthropic": "4.0.85"
+  }
+}

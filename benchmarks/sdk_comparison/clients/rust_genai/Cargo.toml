@@ -1,0 +1,17 @@
+[package]
+name = "sdkb-genai-client"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Client program for the SDK comparison; the genai crate is pinned by commit and Cargo.lock."
+
+[dependencies]
+genai = { git = "https://github.com/jeremychone/rust-genai", rev = "06eca2124811a3384f1c5e4d30e0a27c3a0b5fcb" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+futures = "0.3"
+# The same major version genai uses, so that the client below can be handed to Client::builder().with_reqwest.
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
