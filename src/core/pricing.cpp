@@ -1,4 +1,5 @@
 #include "core/pricing.h"
+#include "descriptor/policy.h"
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -107,7 +108,7 @@ std::optional<Unit> parse_unit(std::string_view unit) {
     out.tier = unit.substr(slash + 1);
     unit = unit.substr(0, slash);
   }
-  if (unit.empty() || (unit.starts_with("tool:") && unit.size() == 5)) return std::nullopt;
+  if (unit.empty() || (unit.starts_with(descriptor::tool_fee_prefix) && unit.size() == descriptor::tool_fee_prefix.size())) return std::nullopt;
   out.name = unit;
   return out;
 }
@@ -159,7 +160,7 @@ ModelPrice select(const descriptor::CatalogueEntry& entry, std::string_view serv
     else if (name == "ceiling_input") out.ceiling_input = pick.rate;
     else if (name == "ceiling_output") out.ceiling_output = pick.rate;
     else if (name == "ceiling_request") out.ceiling_request = pick.rate;
-    else if (name.starts_with("tool:")) out.tool_fees.emplace_back(name.substr(5), *pick.rate);
+    else if (name.starts_with(descriptor::tool_fee_prefix)) out.tool_fees.emplace_back(name.substr(descriptor::tool_fee_prefix.size()), *pick.rate);
   }
   std::sort(out.tool_fees.begin(), out.tool_fees.end());
   return out;
@@ -400,7 +401,7 @@ Bound upper_bound(const ModelPrice& price, const BoundRequest& request) {
     if (!uses) continue;
     const auto found = std::lower_bound(price.tool_fees.begin(), price.tool_fees.end(), type,
                                         [](const auto& entry, const std::string& name) { return entry.first < name; });
-    if (found == price.tool_fees.end() || found->first != type) { out.unpriced.push_back("tool:" + type); continue; }
+    if (found == price.tool_fees.end() || found->first != type) { out.unpriced.push_back(descriptor::tool_fee_unit(type)); continue; }
     sum += Wide::product(uses, found->second);
   }
   if (!out.unpriced.empty()) return out;
@@ -413,6 +414,237 @@ Bound upper_bound(const ModelPrice& price, const BoundRequest& request) {
 
 Bound upper_bound(const descriptor::CatalogueEntry& entry, std::string_view service_tier, const BoundRequest& request) {
   return upper_bound(dearest_price_of(entry, service_tier, request.input_tokens), request);
+}
+
+std::string_view to_string(UnboundedBy by) noexcept {
+  switch (by) {
+    case UnboundedBy::OutputCap: return "OutputCap";
+    case UnboundedBy::InputBound: return "InputBound";
+    case UnboundedBy::Invocations: return "Invocations";
+    case UnboundedBy::ModelPrice: return "ModelPrice";
+    case UnboundedBy::TierPrice: return "TierPrice";
+    case UnboundedBy::ToolFee: return "ToolFee";
+    case UnboundedBy::ToolCap: return "ToolCap";
+    case UnboundedBy::RouteCeiling: return "RouteCeiling";
+    case UnboundedBy::Unmodeled: return "Unmodeled";
+    case UnboundedBy::Overflow: return "Overflow";
+  }
+  return {};
+}
+
+namespace {
+constexpr std::uint64_t kMax = std::numeric_limits<std::uint64_t>::max();
+bool checked_mul(std::uint64_t a, std::uint64_t b, std::uint64_t& out) noexcept {
+  if (a != 0 && b > kMax / a) return false;
+  out = a * b;
+  return true;
+}
+bool checked_add(std::uint64_t a, std::uint64_t b, std::uint64_t& out) noexcept {
+  if (b > kMax - a) return false;
+  out = a + b;
+  return true;
+}
+// The smallest of the figures that state a limit; a zero is no limit.
+std::optional<std::uint64_t> smallest_limit(std::initializer_list<std::optional<std::uint64_t>> values) {
+  std::optional<std::uint64_t> result;
+  for (const auto& value : values)
+    if (value && *value > 0 && (!result || *value < *result)) result = value;
+  return result;
+}
+constexpr std::optional<std::uint64_t> OpenRouterMaxPrice::* kMaxPriceFields[] = {
+    &OpenRouterMaxPrice::prompt_nano_usd, &OpenRouterMaxPrice::completion_nano_usd, &OpenRouterMaxPrice::image_nano_usd,
+    &OpenRouterMaxPrice::audio_nano_usd, &OpenRouterMaxPrice::request_nano_usd};
+// Field by field, the lower of the route ceiling and the request's own cap; a field only the request caps keeps its amount.
+OpenRouterMaxPrice lowered(OpenRouterMaxPrice ceiling, const std::optional<OpenRouterMaxPrice>& own) {
+  if (!own) return ceiling;
+  for (const auto member : kMaxPriceFields) {
+    const auto& cap = (*own).*member;
+    auto& pinned = ceiling.*member;
+    if (cap && (!pinned || *cap < *pinned)) pinned = cap;
+  }
+  return ceiling;
+}
+bool same_max_price(const OpenRouterMaxPrice& left, const OpenRouterMaxPrice& right) {
+  for (const auto member : kMaxPriceFields)
+    if (left.*member != right.*member) return false;
+  return true;
+}
+}  // namespace
+
+WorstCase worst_case(const WorstCaseInput& in, const descriptor::ModelCatalogue& catalogue) {
+  static const RequestFacts no_facts;
+  const auto& facts = in.facts ? *in.facts : no_facts;
+  WorstCase out;
+  out.route_ceiling = in.routed_gateway;
+  out.attempts = in.attempts;
+  const auto block = [&](UnboundedBy by, std::string subject, std::string detail) {
+    out.unbounded.push_back({by, std::move(subject), std::move(detail)});
+  };
+  if (facts.plugins) block(UnboundedBy::Unmodeled, "OpenRouter plugins", "the catalogue prices no plugin");
+  if (!in.output_tokens) block(UnboundedBy::OutputCap, {}, "the request states no output cap");
+  if (!in.invocations || *in.invocations == 0 || in.attempts == 0)
+    block(UnboundedBy::Invocations, {}, "the request does not state how many model invocations it may bill");
+  for (const auto& group : facts.tools) {
+    if (group.uses || group.types.empty()) continue;
+    block(UnboundedBy::ToolCap, group.types.front(),
+          group.member.empty()   ? "the family takes no cap on the tool's uses"
+          : !group.cap_admitted  ? "the policy admits no " + group.member + " for the tool"
+                                 : "the request sets no " + group.member);
+  }
+  const std::uint64_t invocations = in.invocations && *in.invocations ? *in.invocations : 1;
+
+  // Every model that may serve the call: the requested one, then the gateway's fallbacks.
+  struct Candidate {
+    std::string model;
+    const descriptor::CatalogueEntry* entry = nullptr;
+    std::uint64_t input = 0, invocation_input = 0;
+    ModelPrice price;
+  };
+  std::vector<Candidate> candidates;
+  std::vector<std::string> models{std::string(in.model)};
+  for (const auto& model : facts.fallback_models)
+    if (std::find(models.begin(), models.end(), model) == models.end()) models.push_back(model);
+  for (const auto& model : models) {
+    const auto* entry = catalogue.find(in.family, in.origin, model).entry;
+    if (!entry || entry->pricing.empty()) {
+      block(UnboundedBy::ModelPrice, model, "the catalogue has no price for the model at the origin");
+      continue;
+    }
+    const auto limit = smallest_limit({entry->input_limit, entry->context_window});
+    const auto measured = model == in.model ? in.measured_input_tokens : std::nullopt;
+    const auto first = measured ? (limit ? std::optional<std::uint64_t>((std::min)(*measured, *limit)) : measured) : limit;
+    if (!first || (invocations > 1 && !limit)) {
+      block(UnboundedBy::InputBound, model,
+            !first ? "no measured input and no catalogue input limit" : "later invocations need a catalogue input limit");
+      continue;
+    }
+    Candidate candidate{model, entry, *first, invocations > 1 ? *limit : *first, {}};
+    std::uint64_t rest = 0;
+    if (invocations > 1 && (!checked_mul(invocations - 1, *limit, rest) || !checked_add(candidate.input, rest, candidate.input))) {
+      block(UnboundedBy::Overflow, model, "the input tokens do not fit 64 bits");
+      continue;
+    }
+    candidate.price = dearest_price_of(*entry, in.service_tier, candidate.invocation_input);
+    if (candidate.price.empty()) {
+      block(UnboundedBy::TierPrice, model,
+            in.service_tier.empty() ? "the entry prices no unit at the standard rates"
+                                    : "the entry prices no unit under service tier '" + std::string(in.service_tier) + "'");
+      continue;
+    }
+    const bool has_ceiling = candidate.price.ceiling_input || candidate.price.ceiling_output || candidate.price.ceiling_request;
+    if (!in.routed_gateway && has_ceiling) {
+      // The bound holds only if the router cannot pick a dearer endpoint, and only a routing gateway takes the pin.
+      block(UnboundedBy::RouteCeiling, model, "the entry lists a route ceiling but the origin is not a routing gateway, so it cannot be pinned");
+      continue;
+    }
+    if (in.routed_gateway && (!candidate.price.ceiling_input || !candidate.price.ceiling_output)) {
+      block(UnboundedBy::RouteCeiling, model, "the entry lists no route ceiling (ceiling_input, ceiling_output), so the router may pick any price");
+      continue;
+    }
+    candidates.push_back(std::move(candidate));
+  }
+  if (!out.unbounded.empty()) return out;
+
+  if (in.routed_gateway) {
+    // One pin covers every candidate, so each is bounded at the dearest ceiling.
+    OpenRouterMaxPrice ceiling;
+    std::optional<std::uint64_t> listed_request;
+    for (const auto& candidate : candidates) {
+      ceiling.prompt_nano_usd = (std::max)(ceiling.prompt_nano_usd.value_or(0), *candidate.price.ceiling_input);
+      ceiling.completion_nano_usd = (std::max)(ceiling.completion_nano_usd.value_or(0), *candidate.price.ceiling_output);
+      // The request fee the bound charges at a gateway is the dearer of the listed fee and the ceiling (upper_bound), so
+      // the pin has to state it: the router could otherwise pick an endpoint with a dearer one.
+      const auto fee = (std::max)(candidate.price.request.value_or(0), candidate.price.ceiling_request.value_or(0));
+      if (fee) listed_request = (std::max)(listed_request.value_or(0), fee);
+    }
+    // A request fee is listed in the scale of the rates, a million times its nano-USD amount; the pin states whole
+    // nano-USD, rounded up, and the bound charges exactly what the pin allows.
+    constexpr std::uint64_t scale = 1'000'000;
+    std::optional<std::uint64_t> pinned_request;
+    if (listed_request) {
+      ceiling.request_nano_usd = *listed_request / scale + (*listed_request % scale != 0 ? 1 : 0);
+      std::uint64_t exact = 0;
+      if (!checked_mul(*ceiling.request_nano_usd, scale, exact)) {
+        block(UnboundedBy::Overflow, std::string(in.model), "the route ceiling does not fit 64 bits");
+        return out;
+      }
+      pinned_request = exact;
+    }
+    if (*ceiling.prompt_nano_usd > max_price_limit_nano_usd || *ceiling.completion_nano_usd > max_price_limit_nano_usd ||
+        ceiling.request_nano_usd.value_or(0) > max_price_limit_nano_usd) {
+      block(UnboundedBy::RouteCeiling, std::string(in.model), "the route ceiling exceeds the largest provider.max_price amount");
+      return out;
+    }
+    const auto own = facts.routing ? facts.routing->max_price : std::nullopt;
+    out.pin = lowered(ceiling, own);
+    out.pinned = own && same_max_price(*own, *out.pin);
+    for (auto& candidate : candidates) {
+      candidate.price.ceiling_input = ceiling.prompt_nano_usd;
+      candidate.price.ceiling_output = ceiling.completion_nano_usd;
+      candidate.price.ceiling_request = pinned_request;
+    }
+  }
+
+  std::uint64_t output = 0;
+  if (!checked_mul(*in.output_tokens, invocations, output)) {
+    block(UnboundedBy::Overflow, {}, "the output tokens do not fit 64 bits");
+    return out;
+  }
+  std::uint64_t best = 0;
+  for (const auto& candidate : candidates) {
+    // Each group of tools that shares a cap is bounded at its dearest fee.
+    std::vector<std::pair<std::string, std::uint64_t>> uses;
+    ModelPrice fees;
+    bool priced = true;
+    for (const auto& group : facts.tools) {
+      std::optional<std::pair<std::string, std::uint64_t>> dearest;
+      for (const auto& type : group.types) {
+        const auto found = std::find_if(candidate.price.tool_fees.begin(), candidate.price.tool_fees.end(),
+                                        [&](const auto& fee) { return fee.first == type; });
+        if (found == candidate.price.tool_fees.end()) {
+          block(UnboundedBy::ToolFee, type, "catalogue entry '" + candidate.entry->id + "' lists no fee (unit " + descriptor::tool_fee_unit(type) + ")");
+          priced = false;
+          break;
+        }
+        if (!dearest || found->second > dearest->second) dearest = *found;
+      }
+      if (!priced) break;
+      if (!dearest) continue;
+      uses.emplace_back(dearest->first, *group.uses);
+      fees.tool_fees.push_back(*dearest);
+    }
+    if (!priced) continue;
+    std::sort(fees.tool_fees.begin(), fees.tool_fees.end());
+    const auto bound = upper_bound(candidate.price, {candidate.input, output, in.routed_gateway, uses});
+    if (!bound.total) {
+      for (const auto& name : bound.unpriced) {
+        if (name == "overflow") block(UnboundedBy::Overflow, candidate.model, "the bound does not fit 64 bits");
+        else if (name == "ceiling") block(UnboundedBy::RouteCeiling, candidate.model, "no route ceiling");
+        else if (name.starts_with(descriptor::tool_fee_prefix)) block(UnboundedBy::ToolFee, name.substr(descriptor::tool_fee_prefix.size()), "no fee");
+        else block(UnboundedBy::ModelPrice, candidate.model, "no " + name + " rate");
+      }
+      continue;
+    }
+    if (!out.entry.empty() && bound.total->nano_usd <= best) continue;
+    best = bound.total->nano_usd;
+    out.entry = candidate.entry->id;
+    out.model = candidate.model;
+    out.input_tokens = candidate.input;
+    out.invocation_input_tokens = candidate.invocation_input;
+    out.tool_uses = std::move(uses);
+    const auto tools = upper_bound(fees, {0, 0, false, out.tool_uses});
+    out.tool_fees_nano_usd = tools.total ? tools.total->nano_usd : 0;
+  }
+  if (!out.unbounded.empty()) { out.entry.clear(); out.model.clear(); out.tool_uses.clear(); return out; }
+  std::uint64_t total = 0;
+  if (!checked_mul(best, in.attempts, total)) {
+    block(UnboundedBy::Overflow, {}, "the bound over the attempts does not fit 64 bits");
+    return out;
+  }
+  out.output_tokens = output;
+  out.invocations = invocations;
+  out.total = UsdAmount{total, Evidence::Derived, CostRounding::CeilingCatalogueProduct};
+  return out;
 }
 
 } // namespace sp::pricing

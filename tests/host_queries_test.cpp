@@ -7,9 +7,11 @@
 #include "codecs/generations.h"
 #include "core/enum_names.h"
 #include "core/failure.h"
+#include "core/pricing.h"
 #include "descriptor/policy.h"
 #include "descriptor/presets.h"
 #include "runtime/client.h"
+#include "runtime/cost.h"
 #include "sp/config_defaults.h"
 #include <iostream>
 #include <set>
@@ -462,6 +464,305 @@ void facts_of_prepared_requests() {
   CHECK(PreparedRequest{}.facts().tools.empty() && PreparedRequest{}.facts().service_tier.empty());
 }
 
+// ---- the worst-case cost ---------------------------------------------------------------------------------------
+
+descriptor::CatalogueSnapshot catalogue_of(std::string_view json) {
+  auto loaded = descriptor::load_catalogue(json);
+  if (const auto* error = std::get_if<descriptor::ConfigError>(&loaded)) throw std::runtime_error("catalogue refused at " + error->pointer + ": " + error->expected);
+  return std::get<descriptor::CatalogueSnapshot>(std::move(loaded));
+}
+// Prices in USD per token. 1e-6 is 1000 nano-USD a token. The models and the tools are not in the shipped data. zz-model-1
+// bills cache writes dearer than input, so its input is bounded at 1250 nano-USD a token.
+constexpr std::uint64_t zz_input = 1250, zz_output = 4000;
+const auto priced = catalogue_of(R"({"version":1,"models":[
+  {"id":"zz-model-1","input_limit":100000,"context_window":120000,
+   "pricing":{"input":"0.000001","output":"0.000004","cache_read":"0.0000001","cache_write":"0.00000125",
+              "tool:web_search_20250305":"0.01","tool:zz_search_20300101":"0.02","tool:web_search":"0.01","tool:image_generation":"0.04"}},
+  {"id":"zz-flex","input_limit":1000,"pricing":{"input":"0.000001","output":"0.000001","input/flex":"0.0000005","output/flex":"0.0000005"}},
+  {"id":"zz-dear","input_limit":50000,"pricing":{"input":"0.000003","output":"0.000009"}},
+  {"id":"zz-unpriced","input_limit":50000},
+  {"id":"zz-nolimit","pricing":{"input":"0.000001","output":"0.000001"}},
+  {"id":"zz-band","input_limit":300000,"pricing":{"input":"0.000001","output":"0.000001","input+200000":"0.000002"}},
+  {"id":"zz-big","input_limit":4000000000000,"pricing":{"input":"1000","output":"1000"}},
+  {"id":"vendor/zz-routed","input_limit":10000,"origins":["https://openrouter.ai"],
+   "pricing":{"input":"0.000001","output":"0.000002","ceiling_input":"0.000002","ceiling_output":"0.000004"}},
+  {"id":"vendor/zz-second","input_limit":10000,"origins":["https://openrouter.ai"],
+   "pricing":{"input":"0.000001","output":"0.000001","ceiling_input":"0.000003","ceiling_output":"0.000003"}},
+  {"id":"vendor/zz-requested","input_limit":10000,"origins":["https://openrouter.ai"],
+   "pricing":{"input":"0.000001","output":"0.000001","request":"0.0001","ceiling_input":"0.000002","ceiling_output":"0.000002","ceiling_request":"0.0003"}},
+  {"id":"vendor/zz-fee-only","input_limit":10000,"origins":["https://openrouter.ai"],
+   "pricing":{"input":"0.000001","output":"0.000001","request":"0.0002","ceiling_input":"0.000002","ceiling_output":"0.000002"}},
+  {"id":"vendor/zz-unceilinged","input_limit":10000,"origins":["https://openrouter.ai"],"pricing":{"input":"0.000001","output":"0.000001"}},
+  {"id":"vendor/zz-flat","input_limit":10000,"pricing":{"input":"0.000001","output":"0.000001","ceiling_input":"0.000002","ceiling_output":"0.000002"}}]})");
+
+std::string dump(const pricing::WorstCase& wc) {
+  std::string out = wc.total ? "total " + std::to_string(wc.total->nano_usd) : "no total";
+  for (const auto& reason : wc.unbounded) out += "\n  " + std::string(pricing::to_string(reason.by)) + " [" + reason.subject + "] " + reason.detail;
+  return out;
+}
+std::string detail_of(const pricing::WorstCase& wc, pricing::UnboundedBy by, std::string_view subject) {
+  for (const auto& reason : wc.unbounded)
+    if (reason.by == by && reason.subject == subject) return reason.detail;
+  return "(none)";
+}
+bool has(const pricing::WorstCase& wc, pricing::UnboundedBy by, std::string_view subject = {}) {
+  for (const auto& reason : wc.unbounded)
+    if (reason.by == by && (subject.empty() || reason.subject == subject)) return true;
+  return false;
+}
+std::uint64_t nano(const pricing::WorstCase& wc) {
+  if (!wc.total) throw std::runtime_error("no bound: " + (wc.unbounded.empty() ? std::string("(no reason)") : std::string(pricing::to_string(wc.unbounded[0].by)) + " " + wc.unbounded[0].subject + " " + wc.unbounded[0].detail));
+  return wc.total->nano_usd;
+}
+pricing::WorstCase bound(runtime::Client& client, runtime::Request request, std::optional<std::uint64_t> measured = std::nullopt,
+                         std::uint32_t attempts = 1) {
+  auto prepared = prepared_ok(client, std::move(request), attempts);
+  runtime::WorstCaseOptions options;
+  options.measured_input_tokens = measured;
+  return runtime::worst_case_cost(prepared, *priced, options);
+}
+
+void worst_case_tokens() {
+  auto chat = client_of(descriptor_of("openai.chat"));
+  // Measured input and the output cap, at the dearest input rate and the output rate.
+  auto wc = bound(chat, chat_request("zz-model-1", 1000), 2000);
+  CHECK(nano(wc) == 2000u * zz_input + 1000u * zz_output && wc.unbounded.empty() && wc.entry == "zz-model-1" && wc.model == "zz-model-1");
+  CHECK(wc.input_tokens == 2000u && wc.output_tokens == 1000u && wc.invocations == 1u && wc.attempts == 1u && wc.tool_uses.empty());
+  CHECK(wc.total->evidence == Evidence::Derived && wc.total->rounding == CostRounding::CeilingCatalogueProduct);
+  CHECK(!wc.route_ceiling && !wc.pin && !wc.pinned);
+  // Without a count, the catalogue's input limit bounds the input; a count above the limit is bounded by it.
+  CHECK(nano(bound(chat, chat_request("zz-model-1", 1000))) == 100'000u * zz_input + 1000u * zz_output);
+  CHECK(nano(bound(chat, chat_request("zz-model-1", 1000), 5'000'000)) == 100'000u * zz_input + 1000u * zz_output);
+  // The attempts the retry policy allows multiply the bound.
+  CHECK(nano(bound(chat, chat_request("zz-model-1", 1000), 2000, 3)) == 3 * (2000u * zz_input + 1000u * zz_output));
+  CHECK(bound(chat, chat_request("zz-model-1", 1000), 2000, 3).attempts == 3u);
+  // The dearest rate over the counters an input may bill (cache writes here), and over the bands: a request that
+  // may pass 200000 input tokens is bounded at the long-context rate.
+  CHECK(nano(bound(chat, chat_request("zz-band", 10), 1000)) == 1000u * 1000u + 10u * 1000u);
+  CHECK(nano(bound(chat, chat_request("zz-band", 10))) == 300'000u * 2000u + 10u * 1000u);
+  // A count the host measured for a model with no limit stands in for the limit.
+  CHECK(nano(bound(chat, chat_request("zz-nolimit", 10), 500)) == 500u * 1000u + 10u * 1000u);
+}
+
+void worst_case_unbounded() {
+  auto chat = client_of(descriptor_of("openai.chat"));
+  // No output cap: the reason names it, and no total.
+  auto wc = bound(chat, chat_request("zz-model-1", std::nullopt), 2000);
+  CHECK(!wc.total && has(wc, pricing::UnboundedBy::OutputCap) && wc.unbounded.size() == 1);
+  // A model the catalogue does not price, at all or for the figure the bound needs.
+  wc = bound(chat, chat_request("zz-not-in-the-catalogue", 100), 100);
+  CHECK(!wc.total && has(wc, pricing::UnboundedBy::ModelPrice, "zz-not-in-the-catalogue"));
+  CHECK(has(bound(chat, chat_request("zz-unpriced", 100), 100), pricing::UnboundedBy::ModelPrice, "zz-unpriced"));
+  // Neither a count nor a limit: nothing bounds the input.
+  CHECK(has(bound(chat, chat_request("zz-nolimit", 100)), pricing::UnboundedBy::InputBound, "zz-nolimit"));
+  // Several reasons are all named.
+  wc = bound(chat, chat_request("zz-nolimit", std::nullopt));
+  CHECK(has(wc, pricing::UnboundedBy::OutputCap) && has(wc, pricing::UnboundedBy::InputBound) && wc.unbounded.size() == 2);
+  // Tokens past 64 bits.
+  CHECK(has(bound(chat, chat_request("zz-big", 100), 4'000'000'000'000u), pricing::UnboundedBy::Overflow, "zz-big"));
+  // The reasons have names.
+  CHECK(pricing::to_string(pricing::UnboundedBy::ToolCap) == "ToolCap" && pricing::to_string(pricing::UnboundedBy::OutputCap) == "OutputCap");
+  // A request that did not prepare, a handle with nothing, an endpoint call and plugins have no bound either.
+  runtime::PreparedRequest none;
+  CHECK(!runtime::worst_case_cost(none, *priced).total && has(runtime::worst_case_cost(none, *priced), pricing::UnboundedBy::Unmodeled));
+  CHECK(!runtime::worst_case_cost(none).total);
+  auto gateway = client_of(openrouter_chat());
+  auto request = chat_request("vendor/zz-routed", 100);
+  request.plugins.push_back(OpenRouterPlugin{"moderation", nullptr});
+  wc = bound(gateway, request, 100);
+  CHECK(!wc.total && has(wc, pricing::UnboundedBy::Unmodeled, "OpenRouter plugins"));
+  auto generations = client_of(openrouter_chat());
+  auto endpoint = generations.prepare(generations::Get{"gen-1"});
+  CHECK(endpoint.valid());
+  wc = runtime::worst_case_cost(endpoint.prepared(), *priced);
+  CHECK(!wc.total && has(wc, pricing::UnboundedBy::Unmodeled));
+}
+
+void worst_case_tools() {
+  // Messages server tools: three invocations (the request and two uses); each later one is re-prompted with the
+  // tool results, so it is bounded at the limit. 2000 + 2 x 100000 input tokens, 3 x 1000 output tokens, 2 uses.
+  auto messages = client_of(descriptor_of("anthropic.messages"));
+  auto request = messages::Request::simple("zz-model-1", "hi", 1000);
+  request.tools.push_back(messages_tool("memory_20250818", "memory"));
+  request.tools.push_back(messages_tool("web_search_20250305", "web_search", 2));
+  auto wc = bound(messages, request, 2000);
+  CHECK(wc.invocations == 3u && wc.input_tokens == 202'000u && wc.output_tokens == 3000u && wc.invocation_input_tokens == 100'000u);
+  CHECK(nano(wc) == 202'000u * zz_input + 3000u * zz_output + 2u * 10'000'000u);
+  CHECK(wc.tool_fees_nano_usd == 20'000'000u && wc.tool_uses.size() == 1 && wc.tool_uses[0].first == "web_search_20250305" && wc.tool_uses[0].second == 2u);
+  // Several invocations need the limit, even with a count.
+  CHECK(has(bound(messages, [] { auto r = messages::Request::simple("zz-nolimit", "hi", 10); r.tools.push_back(messages_tool("web_search_20250305", "web_search", 1)); return r; }(), 100),
+            pricing::UnboundedBy::InputBound, "zz-nolimit"));
+  // The tools' fees are once per attempt; the tokens are per invocation.
+  CHECK(nano(bound(messages, request, 2000, 2)) == 2 * nano(wc));
+  // No cap on a tool that takes one, and a tool that takes none: the reasons differ.
+  request.tools[1].max_uses.reset();
+  wc = bound(messages, request, 2000);
+  CHECK(!wc.total && detail_of(wc, pricing::UnboundedBy::ToolCap, "web_search_20250305").find("sets no max_uses") != std::string::npos);
+  auto code = messages::Request::simple("zz-model-1", "hi", 1000);
+  code.tools.push_back(messages_tool("code_execution_20250825", "code_execution"));
+  wc = bound(messages, code, 2000);
+  CHECK(!wc.total && detail_of(wc, pricing::UnboundedBy::ToolCap, "code_execution_20250825").find("admits no max_uses") != std::string::npos);
+  // A tool the entry lists no fee for.
+  auto unfeed = messages::Request::simple("zz-dear", "hi", 100);
+  unfeed.tools.push_back(messages_tool("web_search_20250305", "web_search", 1));
+  wc = bound(messages, unfeed, 100);
+  CHECK(!wc.total && detail_of(wc, pricing::UnboundedBy::ToolFee, "web_search_20250305").find("tool:web_search_20250305") != std::string::npos);
+
+  // Responses: one cap for the hosted tools, bounded at the dearest fee of the group.
+  auto responses = client_of(descriptor_of("openai.responses"));
+  auto hosted = responses::Request::simple("zz-model-1", "hi", 100);
+  hosted.hosted_tools.push_back(responses::WebSearchTool{});
+  hosted.hosted_tools.push_back(responses::ImageGenerationTool{});
+  hosted.max_tool_calls = 3;
+  wc = bound(responses, hosted, 1000);
+  CHECK(wc.invocations == 4u && wc.tool_uses.size() == 1 && wc.tool_uses[0].first == "image_generation" && wc.tool_uses[0].second == 3u);
+  CHECK(nano(wc) == (1000u + 3u * 100'000u) * zz_input + 4u * 100u * zz_output + 3u * 40'000'000u);
+  hosted.max_tool_calls.reset();
+  wc = bound(responses, hosted, 1000);
+  CHECK(!wc.total && detail_of(wc, pricing::UnboundedBy::ToolCap, "web_search").find("sets no max_tool_calls") != std::string::npos);
+  // Without the cap the request does not bound its invocations either; both are named.
+  CHECK(has(wc, pricing::UnboundedBy::Invocations) && wc.unbounded.size() == 2);
+  // Google's built-in tools take no cap.
+  auto interactions = client_of(descriptor_of("google.interactions"));
+  auto search = interactions::Request::simple("zz-model-1", "hi", 100);
+  search.builtin_tools.push_back(interactions::GoogleSearchTool{});
+  wc = bound(interactions, search, 100);
+  CHECK(!wc.total && detail_of(wc, pricing::UnboundedBy::ToolCap, "google_search").find("no cap") != std::string::npos);
+  // Without server tools the same Interactions request is bounded: the standard tier bills at the unlabelled rates.
+  CHECK(nano(bound(interactions, interactions::Request::simple("zz-model-1", "hi", 100), 100)) == 100u * zz_input + 100u * zz_output);
+}
+
+void worst_case_tiers_and_fallbacks() {
+  auto chat = client_of(descriptor_of("openai.chat"));
+  auto flex = chat_request("zz-flex", 100);
+  flex.service_tier = "flex";
+  CHECK(nano(bound(chat, flex, 100)) == 100u * 500u + 100u * 500u);
+  // The standard tier's own name is the unlabelled rates; a tier the entry does not price has no price.
+  auto standard = chat_request("zz-flex", 100);
+  standard.service_tier = "default";
+  CHECK(nano(bound(chat, standard, 100)) == 100u * 1000u + 100u * 1000u);
+  auto priority = chat_request("zz-flex", 100);
+  priority.service_tier = "priority";
+  auto wc = bound(chat, priority, 100);
+  CHECK(!wc.total && detail_of(wc, pricing::UnboundedBy::TierPrice, "zz-flex").find("'priority'") != std::string::npos);
+  auto automatic = chat_request("zz-flex", 100);
+  automatic.service_tier = "auto";
+  CHECK(has(bound(chat, automatic, 100), pricing::UnboundedBy::TierPrice, "zz-flex"));
+  // Fallback models: the dearest candidate sets the bound, and an unpriced one has none. The count is the requested
+  // model's; a fallback is bounded by its own limit.
+  auto gateway = client_of(openrouter_chat());
+  auto request = chat_request("vendor/zz-routed", 100);
+  request.models = {"vendor/zz-second", "vendor/zz-routed"};
+  request.provider = OpenRouterRouting{};
+  request.provider->max_price = OpenRouterMaxPrice{3'000'000'000u, 4'000'000'000u, std::nullopt, std::nullopt, std::nullopt};
+  wc = bound(gateway, request, 500);
+  // Routed: priced at the route ceiling, the dearest over the candidates (3 USD and 4 USD per million tokens).
+  CHECK(wc.route_ceiling && wc.pin && wc.pin->prompt_nano_usd == 3'000'000'000u && wc.pin->completion_nano_usd == 4'000'000'000u && wc.pinned);
+  // The requested model, counted at 500 tokens, costs less than the fallback at its own limit of 10000.
+  CHECK(nano(wc) == 10'000u * 3000u + 100u * 4000u && wc.model == "vendor/zz-second" && wc.entry == "vendor/zz-second");
+  request.models = {"vendor/zz-second", "vendor/zz-nowhere"};
+  CHECK(has(bound(gateway, request, 500), pricing::UnboundedBy::ModelPrice, "vendor/zz-nowhere"));
+}
+
+void worst_case_route_ceiling() {
+  auto gateway = client_of(openrouter_chat());
+  auto request = chat_request("vendor/zz-routed", 100);
+  // The ceiling is the price; the request must carry it as provider.max_price, which it does not yet.
+  auto wc = bound(gateway, request, 1000);
+  CHECK(wc.route_ceiling && nano(wc) == 1000u * 2000u + 100u * 4000u);
+  CHECK(wc.pin && wc.pin->prompt_nano_usd == 2'000'000'000u && wc.pin->completion_nano_usd == 4'000'000'000u && !wc.pin->image_nano_usd && !wc.pinned);
+  // The request's own cap below the ceiling lowers the pin, field by field; it is pinned when it already says so.
+  request.provider = OpenRouterRouting{};
+  request.provider->max_price = OpenRouterMaxPrice{1'000'000'000u, std::nullopt, std::nullopt, std::nullopt, 7'000'000'000u};
+  wc = bound(gateway, request, 1000);
+  CHECK(wc.pin && wc.pin->prompt_nano_usd == 1'000'000'000u && wc.pin->completion_nano_usd == 4'000'000'000u && wc.pin->request_nano_usd == 7'000'000'000u && !wc.pinned);
+  request.provider->max_price = OpenRouterMaxPrice{1'000'000'000u, 4'000'000'000u, std::nullopt, std::nullopt, 7'000'000'000u};
+  wc = bound(gateway, request, 1000);
+  CHECK(wc.pinned && wc.pin->prompt_nano_usd == 1'000'000'000u);
+  // A cap above the ceiling does not raise it.
+  request.provider->max_price = OpenRouterMaxPrice{9'000'000'000u, 9'000'000'000u, std::nullopt, std::nullopt, std::nullopt};
+  wc = bound(gateway, request, 1000);
+  CHECK(wc.pin->prompt_nano_usd == 2'000'000'000u && !wc.pinned);
+  // A gateway entry without a ceiling: the router may pick any price.
+  wc = bound(gateway, chat_request("vendor/zz-unceilinged", 100), 1000);
+  CHECK(!wc.total && has(wc, pricing::UnboundedBy::RouteCeiling, "vendor/zz-unceilinged"));
+  // An entry with a ceiling at an origin that is not a routing gateway cannot be pinned there.
+  auto direct = client_of(descriptor_of("openai.chat"));
+  wc = bound(direct, chat_request("vendor/zz-flat", 100), 1000);
+  CHECK(!wc.total && has(wc, pricing::UnboundedBy::RouteCeiling, "vendor/zz-flat"));
+  // A listed per-request ceiling is pinned like the token ceilings and charged once. 0.0003 USD is 300000 nano-USD.
+  auto fee = bound(gateway, chat_request("vendor/zz-requested", 100), 1000);
+  CHECK(nano(fee) == 1000u * 2000u + 100u * 2000u + 300'000u);
+  CHECK(fee.pin && fee.pin->request_nano_usd == 300'000u && fee.pin->prompt_nano_usd == 2'000'000'000u && !fee.pinned);
+  // The request's own cap lowers it, field by field, and it is pinned once the request says so.
+  request = chat_request("vendor/zz-requested", 100);
+  request.provider = OpenRouterRouting{};
+  request.provider->max_price = OpenRouterMaxPrice{2'000'000'000u, 2'000'000'000u, std::nullopt, std::nullopt, 100'000u};
+  fee = bound(gateway, request, 1000);
+  CHECK(fee.pin && fee.pin->request_nano_usd == 100'000u && fee.pinned && nano(fee) == 1000u * 2000u + 100u * 2000u + 300'000u);
+  request.provider->max_price->request_nano_usd = 900'000u;
+  fee = bound(gateway, request, 1000);
+  CHECK(fee.pin->request_nano_usd == 300'000u && !fee.pinned);
+  // One pin covers every candidate: a fallback that lists no per-request ceiling is bounded at the pinned one too, and
+  // at the dearest token ceilings (3 USD a million), on its own limit of 10000 input tokens.
+  request = chat_request("vendor/zz-requested", 100);
+  request.models = {"vendor/zz-second"};
+  fee = bound(gateway, request, 1000);
+  CHECK(nano(fee) == 10'000u * 3000u + 100u * 3000u + 300'000u && fee.model == "vendor/zz-second");
+  CHECK(fee.pin && fee.pin->request_nano_usd == 300'000u && fee.pin->prompt_nano_usd == 3'000'000'000u);
+  // A request fee without a ceiling is charged and pinned as well, and an entry with no request fee pins none.
+  fee = bound(gateway, chat_request("vendor/zz-fee-only", 100), 1000);
+  CHECK(nano(fee) == 1000u * 2000u + 100u * 2000u + 200'000u && fee.pin && fee.pin->request_nano_usd == 200'000u && !fee.pinned);
+  CHECK(!bound(gateway, chat_request("vendor/zz-routed", 100), 1000).pin->request_nano_usd);
+  // The route ceiling over the largest max_price amount.
+  const auto huge = catalogue_of(R"({"version":1,"models":[{"id":"vendor/zz-huge","input_limit":10,"pricing":{"input":"1","output":"1","ceiling_input":"10000000","ceiling_output":"1"}}]})");
+  auto prepared = prepared_ok(gateway, chat_request("vendor/zz-huge", 1), 1);
+  CHECK(has(runtime::worst_case_cost(prepared, *huge), pricing::UnboundedBy::RouteCeiling, "vendor/zz-huge"));
+}
+
+// The bound never falls under what the catalogue would charge for usage that reaches the caps, counter by counter.
+void worst_case_covers_usage() {
+  auto messages = client_of(descriptor_of("anthropic.messages"));
+  auto request = messages::Request::simple("zz-model-1", "hi", 1000);
+  request.tools.push_back(messages_tool("web_search_20250305", "web_search", 2));
+  const auto wc = bound(messages, request, 2000);
+  const ServedModel served{"zz-model-1", "zz-model-1", ServedRelation::Exact};
+  // The dearest mix of input counters: all of the bound's input as cache writes (the dearest input rate).
+  for (const bool writes : {false, true}) {
+    Usage usage;
+    usage.input_total = Count{wc.input_tokens, Evidence::Reported};
+    usage.output_total = Count{wc.output_tokens, Evidence::Reported};
+    if (writes) usage.cache_write = Count{wc.input_tokens, Evidence::Reported};
+    const auto estimate = pricing::estimate(*priced, "anthropic.messages", "https://api.anthropic.com", served, usage);
+    CHECK(estimate.total && estimate.total->nano_usd + wc.tool_fees_nano_usd <= wc.total->nano_usd);
+    if (writes) CHECK(estimate.total->nano_usd > wc.input_tokens * 1000u);
+  }
+}
+
+// The synthetic policy (an extra tool, an unknown model) through the estimator unchanged.
+void worst_case_synthetic_policy() {
+  auto text = policy_text();
+  const std::string memory = R"({"client":true,"max_uses":false,"name":"memory","type":"memory_20250818"},)";
+  text = replaced(text, memory, R"({"max_uses":true,"name":"zz_search","type":"zz_search_20300101"},)" + memory);
+  const auto policy = load(text);
+  auto with_priced = policy->with_catalogue(priced);
+  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(with_priced));
+  auto snapshot = std::get<descriptor::PolicySnapshot>(with_priced);
+  auto messages = client_of(descriptor_of("anthropic.messages", snapshot));
+  auto request = messages::Request::simple("zz-model-1", "hi", 1000);
+  request.tools.push_back(messages_tool("zz_search_20300101", "zz_search", 4));
+  auto prepared = prepared_ok(messages, request);
+  // The policy's own catalogue answers when none is passed, and the new tool is priced under its own unit.
+  const auto wc = runtime::worst_case_cost(prepared, runtime::WorstCaseOptions{2000});
+  CHECK(wc.invocations == 5u && wc.tool_uses.size() == 1 && wc.tool_uses[0].first == "zz_search_20300101" && wc.tool_fees_nano_usd == 4u * 20'000'000u);
+  // Without a fee for the new tool in the catalogue, the unit is named.
+  const auto bare = catalogue_of(R"({"version":1,"models":[{"id":"zz-model-1","input_limit":1000,"pricing":{"input":"0.000001","output":"0.000001"}}]})");
+  const auto without = runtime::worst_case_cost(prepared, *bare);
+  CHECK(!without.total && detail_of(without, pricing::UnboundedBy::ToolFee, "zz_search_20300101").find("tool:zz_search_20300101") != std::string::npos);
+  // The shipped catalogue knows no zz-model-1 at all.
+  const auto shipped = runtime::worst_case_cost(prepared, *descriptor::builtin_catalogue());
+  CHECK(!shipped.total && has(shipped, pricing::UnboundedBy::ModelPrice, "zz-model-1"));
+}
 } // namespace
 
 int main() {
@@ -469,6 +770,8 @@ int main() {
     enum_names();
     controls_match_the_encoders(); controls_data(); billing_tiers(); routing_and_tools(); synthetic_policy();
     refusal_predicate(); facts_of_prepared_requests();
+    worst_case_tokens(); worst_case_unbounded(); worst_case_tools(); worst_case_tiers_and_fallbacks(); worst_case_route_ceiling();
+    worst_case_covers_usage(); worst_case_synthetic_policy();
     std::cout << "host query properties passed\n"; return 0;
   }
   catch (const std::exception& error) { std::cerr << "host query test failed: " << error.what() << '\n'; return 1; }
