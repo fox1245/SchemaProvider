@@ -271,7 +271,7 @@ if(WIN32)
 endif()
 endif()
 
-add_library(sp_runtime src/runtime/client.cpp src/runtime/policy.cpp src/runtime/request_facts.cpp src/configuration/runtime_policy.cpp)
+add_library(sp_runtime src/runtime/client.cpp src/runtime/policy.cpp src/runtime/request_facts.cpp src/runtime/cost.cpp src/configuration/runtime_policy.cpp)
 target_compile_options(sp_runtime PRIVATE ${SP_WARNING_OPTIONS})
 target_link_libraries(sp_runtime PUBLIC sp_core sp_codecs sp_wire sp_descriptor sp_json)
 

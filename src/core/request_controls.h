@@ -25,6 +25,8 @@ namespace sp {
 struct OpenRouterMaxPrice {
   std::optional<std::uint64_t> prompt_nano_usd, completion_nano_usd, image_nano_usd, audio_nano_usd, request_nano_usd;
 };
+// The largest amount a `max_price` field may hold, in nanoUSD.
+inline constexpr std::uint64_t max_price_limit_nano_usd = std::uint64_t{1} << 53;
 struct OpenRouterRouting {
   std::optional<bool> zdr, allow_fallbacks, require_parameters;
   std::vector<std::string> only, order, ignore;
@@ -108,7 +110,7 @@ inline std::optional<std::string> validate_routing(
                                &price.audio_nano_usd, &price.request_nano_usd}) {
       if (!*amount) continue;
       any = true;
-      if (**amount > (std::uint64_t{1} << 53)) return "max_price amounts cannot exceed 2^53 nanoUSD";
+      if (**amount > max_price_limit_nano_usd) return "max_price amounts cannot exceed 2^53 nanoUSD";
     }
     if (!any) return "max_price requires at least one amount";
   }

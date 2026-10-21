@@ -1,6 +1,7 @@
 #pragma once
 // Prices from the model catalogue, and an estimate of a call's cost from its usage. The provider's own figure is
 // Usage::provider_cost; this is the catalogue's, for a provider that reports none or a host that budgets ahead.
+#include "core/request_facts.h"
 #include "core/value.h"
 #include "descriptor/catalogue.h"
 #include <cstdint>
@@ -123,5 +124,83 @@ struct Bound {
 Bound upper_bound(const ModelPrice& price, const BoundRequest& request);
 // The bound with the entry's dearest prices over every input band the request may reach.
 Bound upper_bound(const descriptor::CatalogueEntry& entry, std::string_view service_tier, const BoundRequest& request);
+
+
+// What a prepared request may bill at most, with the reason when no bound exists.
+enum class UnboundedBy : std::uint8_t {
+  OutputCap,      // the request states no output cap
+  InputBound,     // nothing bounds a model's input: no measured count and no catalogue limit
+  Invocations,    // the request does not state how many model invocations it may make
+  ModelPrice,     // the catalogue has no price for a model, or none for a unit the bound needs
+  TierPrice,      // the entry prices no unit under the request's service tier
+  ToolFee,        // the entry lists no fee for a server tool
+  ToolCap,        // a server tool's uses are not capped
+  RouteCeiling,   // a routing gateway's route ceiling is missing or cannot be pinned
+  Unmodeled,      // the request uses something the catalogue cannot price (plugins, an endpoint call)
+  Overflow,       // the bound does not fit 64 bits
+};
+std::string_view to_string(UnboundedBy) noexcept;
+struct UnboundedReason {
+  UnboundedBy by = UnboundedBy::Unmodeled;
+  // What lacks the bound: a model id, a tool type, a unit, a tier.
+  std::string subject;
+  // Why, in a short phrase for a person; not a key.
+  std::string detail;
+};
+// The request, as the bound reads it. `family`, `origin` and `model` select catalogue entries as
+// ModelCatalogue::find does.
+struct WorstCaseInput {
+  std::string_view family, origin, model;
+  const RequestFacts* facts = nullptr;
+  // The tier the catalogue prices the call under: empty for the standard rates (DescriptorPolicy::billing_tier). A request
+  // that names no tier and a policy that sets no default leave it empty, so the call is priced at the standard rates;
+  // an account that bills such a request at a dearer tier is not covered. Name the tier to bound it.
+  std::string_view service_tier;
+  // The origin is a routing gateway: its served endpoint is unknown, so the call is priced at the route ceiling.
+  bool routed_gateway = false;
+  // The request's output cap, in tokens.
+  std::optional<std::uint64_t> output_tokens;
+  // The input tokens of the request as the host counted them. It must not understate the prompt of `model`; it is
+  // not checked, and it is not used for a fallback model, whose tokenizer may count differently.
+  std::optional<std::uint64_t> measured_input_tokens;
+  // The model invocations one attempt may make (1 without server tools), and the attempts the retry policy allows.
+  std::optional<std::uint64_t> invocations;
+  std::uint64_t attempts = 1;
+};
+struct WorstCase {
+  // The largest amount the request can bill, rounded up once per attempt to whole nano-USD. Set exactly when
+  // `unbounded` is empty.
+  std::optional<UsdAmount> total;
+  std::vector<UnboundedReason> unbounded;
+  // How it was bounded, when it was: the entry and model whose prices were dearest, the input and output tokens one
+  // attempt may bill in all its invocations, the largest input of one invocation, the fees of the capped server
+  // tools in one attempt, and the dearest tool of each capped group with its cap.
+  std::string entry, model;
+  std::uint64_t input_tokens = 0, output_tokens = 0, invocation_input_tokens = 0, tool_fees_nano_usd = 0;
+  std::uint64_t invocations = 0, attempts = 0;
+  std::vector<std::pair<std::string, std::uint64_t>> tool_uses;
+  // Priced at the route ceiling (a routing gateway) and not at the listed rates. The bound holds only if the request
+  // carries `pin` as `provider.max_price`: the ceiling over every candidate (prompt, completion and, when an entry
+  // lists a request fee, that fee), lowered field by field to the request's own cap. `pinned` is true when it already does.
+  bool route_ceiling = false, pinned = false;
+  std::optional<OpenRouterMaxPrice> pin;
+};
+// A bound on what one prepared request can bill, from its caps and the catalogue's prices; a stateless function of its
+// arguments. It covers that request's own model invocations and retry attempts and nothing a host sends beyond it: a
+// host that may send several requests (the steps of a run, a loop, a retry of its own) multiplies by their number.
+// Per attempt it is the sum over the invocations of the input tokens at the dearest input rate and the output cap at
+// the dearest output rate, the request fee once, and the capped server tools' fees once:
+// - Input: with one invocation, the measured input, else the catalogue's input limit, never above that limit. With
+//   several (server tools re-prompt the model with the tool results), the first invocation as above and each later
+//   one at the limit, which must then exist.
+// - Output: the cap on every invocation. Compaction iterations and Gemini's tool-use prompt tokens bill outside the
+//   counters and are not bounded here.
+// - Tools: each capped group at the dearest fee of its types times its cap; a group with no cap, or a tool with no
+//   listed fee, is unbounded.
+// - Models: the model and each fallback model, at the dearest candidate.
+// - Gateway: at the route ceiling, the dearest over the candidates.
+// The attempts multiply the sum. Nothing here is a reservation or a ledger.
+// A request that names no service tier is priced at the standard rates (see WorstCaseInput::service_tier).
+WorstCase worst_case(const WorstCaseInput&, const descriptor::ModelCatalogue&);
 
 } // namespace sp::pricing

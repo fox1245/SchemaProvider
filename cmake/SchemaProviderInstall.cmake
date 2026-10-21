@@ -32,6 +32,7 @@ install(DIRECTORY
 install(FILES
   "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/client.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/host.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/cost.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/policy.h"
   DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/SchemaProvider/runtime")
 if(SP_BUILD_JS_HOST)
