@@ -234,7 +234,7 @@ class PolicyLoader {
         fail("", "configured policy depth limit");
       auto families=root.get("families"); if(!families.is_array() || families.size()!=5)fail("/families","all five typed families");
       for(auto v:families.elements()) {
-        closed(v,{"family","bindings","stop_reasons","defaults","required_output_cap","temperature_range","top_p_range","thinking_minimum","thinking_top_p_minimum","reasoning_efforts","reasoning_summaries","thinking_levels","service_tiers","header_versions","header_version","server_tools","openrouter_origins","temperature_forbidden_model_prefixes","media","openrouter_media"},"/families",{"temperature_forbidden_generations","max_completion_tokens_origins","unreplayable_parts","extensions","openrouter_plugins","openrouter_server_tools","betas","response_blocks","input_blocks"});
+        closed(v,{"family","bindings","stop_reasons","defaults","required_output_cap","temperature_range","top_p_range","thinking_minimum","thinking_top_p_minimum","reasoning_efforts","reasoning_summaries","thinking_levels","service_tiers","header_versions","header_version","server_tools","openrouter_origins","temperature_forbidden_model_prefixes","media","openrouter_media"},"/families",{"temperature_forbidden_generations","max_completion_tokens_origins","unreplayable_parts","extensions","openrouter_plugins","openrouter_server_tools","betas","response_blocks","input_blocks","controls","standard_service_tiers"});
         FamilyPolicy f; f.family=text(v.get("family"),"/families");
         if(f.family!="openai.chat" && f.family!="anthropic.messages" && f.family!="openai.responses" && f.family!="google.generate" && f.family!="google.interactions")fail("/families","typed family");
         if(policy->family(f.family))fail("/families","unique families");
@@ -319,6 +319,29 @@ class PolicyLoader {
         }
         if(f.family=="anthropic.messages" && (!f.header_version || !contains(f.header_versions,*f.header_version)))fail("/header_version","admitted Messages version");
         if(f.family!="anthropic.messages" && (f.header_version || !f.header_versions.empty()))fail("/header_version","no unsupported header version");
+        // Optional: the typed controls the family's request carries, and the service tiers that bill at the standard rates.
+        if (auto controls = v.get("controls"); controls.valid()) {
+          std::uint32_t bits = 0;
+          for (const auto& name : strings(controls, "/controls")) {
+            const auto control = control_from_name(name);
+            if (!control) fail("/controls", "declared control names");
+            bits |= 1u << static_cast<unsigned>(*control);
+          }
+          // A control that takes one of a listed set of values is carried only when the family lists values.
+          const std::pair<Control, const std::vector<std::string>*> valued[]{
+              {Control::ReasoningEffort, &f.reasoning_efforts}, {Control::ReasoningSummary, &f.reasoning_summaries},
+              {Control::ThinkingLevel, &f.thinking_levels}, {Control::ServiceTier, &f.service_tiers}};
+          for (const auto& [control, values] : valued)
+            if ((bits & (1u << static_cast<unsigned>(control))) && values->empty())
+              fail("/controls", "a control that takes listed values only where the family lists some");
+          policy->controls_.emplace_back(f.family, bits);
+        }
+        if (auto tiers = v.get("standard_service_tiers"); tiers.valid()) {
+          auto listed = strings(tiers, "/standard_service_tiers");
+          for (const auto& tier : listed)
+            if (!contains(f.service_tiers, tier)) fail("/standard_service_tiers", "values of the family's service_tiers");
+          policy->standard_tiers_.emplace_back(f.family, std::move(listed));
+        }
         auto schema_of = [](Value value, const std::string& pointer) {
           auto parsed = parse_value_schema(value, pointer);
           if (auto* error = std::get_if<ConfigError>(&parsed)) fail(error->pointer, error->expected);
@@ -987,6 +1010,50 @@ bool DescriptorPolicy::temperature_forbidden_by_generation(std::string_view fami
     }
   }
   return false;
+}
+namespace {
+constexpr std::string_view control_names[control_count]{
+    "max_output_tokens", "temperature", "top_p", "thinking_budget", "include_thoughts", "reasoning_effort",
+    "reasoning_summary", "thinking_level", "thinking_summaries", "service_tier", "required_tool", "store",
+    "max_tool_calls"};
+} // namespace
+std::string_view control_name(Control control) noexcept {
+  const auto index = static_cast<std::size_t>(control);
+  return index < control_count ? control_names[index] : std::string_view{};
+}
+std::optional<Control> control_from_name(std::string_view name) noexcept {
+  for (std::size_t i = 0; i < control_count; ++i)
+    if (control_names[i] == name) return static_cast<Control>(i);
+  return std::nullopt;
+}
+std::optional<bool> DescriptorPolicy::control_admitted(std::string_view family, Control control) const noexcept {
+  const auto index = static_cast<std::size_t>(control);
+  if (index >= control_count) return std::nullopt;
+  for (const auto& [name, bits] : controls_)
+    if (name == family) return (bits >> index & 1u) != 0;
+  return std::nullopt;
+}
+std::string_view DescriptorPolicy::billing_tier(std::string_view family, std::string_view tier) const noexcept {
+  for (const auto& [name, standard] : standard_tiers_)
+    if (name == family && contains(standard, tier)) return {};
+  return tier;
+}
+bool family_admits_routing(const FamilyPolicy& family) noexcept { return !family.openrouter_origins.empty(); }
+std::string tool_fee_unit(std::string_view type) { return std::string(tool_fee_prefix) + std::string(type); }
+ToolFacts tool_facts(const FamilyPolicy& family, std::string_view type) {
+  ToolFacts facts;
+  facts.fee_unit = tool_fee_unit(type);
+  for (const auto& tool : family.server_tools)
+    if (tool.type == type) {
+      facts.known = true;
+      facts.client = tool.client;
+      facts.admits_max_uses = tool.max_uses;
+      return facts;
+    }
+  // An OpenRouter server tool is a gateway's fact: the service runs it and it takes no `max_uses`.
+  for (const auto& tool : family.openrouter_server_tools)
+    if (tool.name == type) facts.known = true;
+  return facts;
 }
 const EndpointFact* DescriptorPolicy::endpoint(std::string_view endpoint, std::string_view origin) const noexcept {
   for (const auto& fact : endpoints_)

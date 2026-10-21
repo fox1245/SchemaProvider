@@ -4,9 +4,14 @@
 #include "descriptor/value_schema.h"
 #include "json/json.h"
 #include <array>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
+#include <string>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 namespace sp::descriptor {
 // Decoded-byte ceilings per media kind are the *_decoded_bytes members, in sp::MediaKind order
@@ -45,6 +50,20 @@ struct ServerToolFact {
   std::string type, name; bool max_uses; std::optional<ValueSchema> options{}; bool generic = false;
   bool client = false; std::string beta{}; bool container = false;
 };
+// A typed request control: the request member of that name (`reasoning_effort` is Chat's member and the `effort` of
+// Responses' `reasoning`). A family's policy lists the ones its typed request carries, in `controls`.
+enum class Control : std::uint8_t {
+  MaxOutputTokens, Temperature, TopP, ThinkingBudget, IncludeThoughts, ReasoningEffort, ReasoningSummary,
+  ThinkingLevel, ThinkingSummaries, ServiceTier, RequiredTool, Store, MaxToolCalls
+};
+inline constexpr std::size_t control_count = 13;
+// The policy's spelling of a control: `max_output_tokens`, `top_p`, `service_tier`.
+std::string_view control_name(Control) noexcept;
+std::optional<Control> control_from_name(std::string_view) noexcept;
+// What a policy says about one tool type of a family: whether it lists the type, whether the caller executes it (it
+// bills tokens only), whether the tool takes a `max_uses` cap, and the catalogue unit its per-use fee is listed under.
+// A type the policy does not list is unknown: a host treats it as a server tool the catalogue prices under `fee_unit`.
+struct ToolFacts { bool known = false, client = false, admits_max_uses = false; std::string fee_unit; };
 // An anthropic-beta value the policy admits at the listed origins. Messages only.
 struct BetaFact { std::string value; std::vector<std::string> origins; };
 // A Messages response block the SDK keeps whole and replays as captured (`fallback`, `mcp_tool_listing`), with the
@@ -163,6 +182,15 @@ class DescriptorPolicy final {
   // file bytes.
   std::string_view content_digest() const noexcept { return content_digest_; }
   std::string content_digest_hex() const;
+  // Whether the family's typed request carries `control`, from the family's `controls`. nullopt when the family is
+  // not in the policy or its `controls` are not declared (a policy written before they existed): the policy then
+  // says nothing, and a host sends the control and lets the encoder answer. The list can only narrow what the
+  // encoder writes.
+  std::optional<bool> control_admitted(std::string_view family, Control control) const noexcept;
+  // The service tier a catalogue prices `tier` under at the family: empty for a tier that bills at the standard
+  // rates (`standard_service_tiers`, so "default" at Chat and "standard" at Interactions), `tier` itself for any
+  // other. A tier the policy does not know is passed through, and the catalogue prices it or it has no price.
+  std::string_view billing_tier(std::string_view family, std::string_view tier) const noexcept;
   // True when `model` belongs to a series that the family's `temperature_forbidden_generations`
   // names, at or after the generation given there. Matching is ASCII case-insensitive against the
   // full model or the part after its last `/`. A model of the series whose generation cannot be
@@ -189,6 +217,8 @@ class DescriptorPolicy final {
   std::vector<GenerationRule> generation_rules_;
   std::vector<std::pair<std::string, std::string>> completion_cap_origins_;  // family, origin
   std::vector<EndpointFact> endpoints_;
+  std::vector<std::pair<std::string, std::uint32_t>> controls_;  // family, bit set of Control
+  std::vector<std::pair<std::string, std::vector<std::string>>> standard_tiers_;  // family, tiers
   friend class PolicyLoader;
 };
 // Without a catalogue argument, a policy uses builtin_catalogue().
@@ -227,4 +257,13 @@ const MediaPolicy& media_policy(const ValidatedDescriptor&) noexcept;
 // True when this descriptor targets an origin its family policy declares as a routing gateway
 // (openrouter_origins). Such a gateway may serve a different concrete model than the one requested.
 bool routed_gateway(const ValidatedDescriptor&) noexcept;
+// True when the family can carry OpenRouter routing at all: it declares at least one routing origin
+// (`openrouter_origins`). routed_gateway says whether this descriptor's origin is one.
+bool family_admits_routing(const FamilyPolicy&) noexcept;
+// The catalogue unit a server tool's per-use fee is listed under: `tool:` and the tool's type.
+inline constexpr std::string_view tool_fee_prefix = "tool:";
+std::string tool_fee_unit(std::string_view type);
+// The policy's facts for a tool type of the family: its server-tool fact, or for an OpenRouter server tool its
+// gateway fact.
+ToolFacts tool_facts(const FamilyPolicy&, std::string_view type);
 } // namespace sp::descriptor
