@@ -1646,6 +1646,93 @@ TEST(tls_trust_matrix_and_http2_alpn) {
        stats["wrong_requests"] + stats["expired_requests"] + stats["untrusted_requests"]);
 }
 
+// Connection reuse across bursts. libcurl's own cache (8.5 to 8.21) keeps four connections per transfer running
+// when a connection is returned, so a burst that drains prunes its idle connections and the next burst of the
+// same size opens them again, a TLS handshake each. The peer counts TLS connections, which no client-side
+// counter can fake: after a warm-up burst, bursts of the same concurrency must open none. libcurl 8.22 and
+// later close only a connection idle for a second, so a fast burst passes there with or without the size set;
+// small_connection_cache_reconnects_between_bursts is the test that sees a missing size on every version.
+struct BurstStats {
+  long new_connections = 0;  // the peer's count of TLS connections accepted during the measured bursts
+  long not_reused = 0;       // results that report a connection opened for them
+  long requests = 0;
+  long failed = 0;
+  long wrong_version = 0;
+};
+void run_burst(Transport& t, const std::string& url, const std::string& ca, HttpVersion version,
+               ResponseVersion expected, int concurrency, BurstStats* stats) {
+  std::vector<std::shared_ptr<Collector>> collectors;
+  std::vector<Operation> operations;
+  collectors.reserve(concurrency);
+  operations.reserve(concurrency);
+  for (int i = 0; i < concurrency; ++i) {
+    collectors.push_back(std::make_shared<Collector>());
+    HttpRequest req = post(url, "burst", 30000);
+    req.http_version = version;
+    req.ca_file = ca;
+    operations.push_back(t.start(std::move(req), collectors.back()->callbacks()));
+  }
+  for (auto& op : operations) {
+    const Result r = op.join();
+    if (!stats) continue;
+    ++stats->requests;
+    if (r.status != Status::Completed) ++stats->failed;
+    if (!r.attempt.connection_reused) ++stats->not_reused;
+    if (r.attempt.version != expected) ++stats->wrong_version;
+  }
+}
+BurstStats measure_bursts(Transport& t, const NodeServer& node, HttpVersion version, int concurrency,
+                          int requests) {
+  const std::string url = "https://127.0.0.1:" + std::to_string(node.port("good")) + "/echo?delay=40";
+  const std::string& ca = node.fields.at("ca");
+  const ResponseVersion expected = version == HttpVersion::Auto ? ResponseVersion::Http2 : ResponseVersion::Http1_1;
+  run_burst(t, url, ca, version, expected, concurrency, nullptr);  // warm-up: opens what the bursts reuse
+  const long before = node.stat("good_connections");
+  BurstStats stats;
+  for (int sent = 0; sent < requests; sent += concurrency)
+    run_burst(t, url, ca, version, expected, concurrency, &stats);
+  const long after = node.stat("good_connections");
+  // stat() answers -1 for a counter the peer does not have, and two of those would read as no new connections.
+  CHECK_MSG(before >= 0 && after >= before, "the peer reports %ld, then %ld, connections", before, after);
+  stats.new_connections = after - before;
+  return stats;
+}
+
+TEST(connections_survive_bursts_at_every_concurrency) {
+  NodeServer node;
+  const bool started = node.start(g_tls_script);
+  CHECK(started);
+  if (!started) return;
+  for (const auto version : {HttpVersion::Http1_1, HttpVersion::Auto}) {
+    for (const int n : {8, 32, 128}) {
+      Transport t;  // default options: the cache is sized without the caller asking
+      const BurstStats s = measure_bursts(t, node, version, n, 256);
+      note("%s, concurrency %d: %ld requests, %ld new TLS connections at the peer, %ld results report a new connection",
+           version == HttpVersion::Auto ? "HTTP/2" : "HTTP/1.1", n, s.requests, s.new_connections, s.not_reused);
+      CHECK(s.requests >= 256 && s.failed == 0 && s.wrong_version == 0);
+      CHECK_MSG(s.new_connections == 0, "%ld connections opened after the warm-up", s.new_connections);
+      if (version == HttpVersion::Http1_1)
+        CHECK_MSG(s.not_reused == 0, "%ld results report a new connection", s.not_reused);
+    }
+  }
+}
+
+// The knob reaches libcurl: a cache smaller than the burst gives back what it cannot keep. Four connections fit
+// libcurl's own default size (four per running transfer), so a burst of four reconnects only if the size of 2 was applied.
+TEST(small_connection_cache_reconnects_between_bursts) {
+  NodeServer node;
+  const bool started = node.start(g_tls_script);
+  CHECK(started);
+  if (!started) return;
+  TransportOptions options;
+  options.connection_cache_size = 2;
+  Transport t(options);
+  const BurstStats s = measure_bursts(t, node, HttpVersion::Http1_1, 4, 64);
+  note("cache of 2, concurrency 4: %ld new TLS connections over %ld requests", s.new_connections, s.requests);
+  CHECK(s.failed == 0 && s.wrong_version == 0);
+  CHECK_MSG(s.new_connections > 0, "a cache of 2 kept 4 connections");
+}
+
 HttpRequest h2_post(const NodeServer& node, const std::string& path, int deadline_ms = 15000,
                     const char* host = "127.0.0.1") {
   HttpRequest req = post("http://" + std::string(host) + ":" + std::to_string(node.h2) + path, "{}", deadline_ms);

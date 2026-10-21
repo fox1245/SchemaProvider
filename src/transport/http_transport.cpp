@@ -51,6 +51,7 @@
 #include <exception>
 #include <filesystem>
 #include <future>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <random>
@@ -1057,6 +1058,19 @@ void TransportCore::init() {
   curl_multi_setopt(multi, CURLMOPT_PIPELINING, static_cast<long>(CURLPIPE_MULTIPLEX));
   if (opts.max_host_connections > 0)
     curl_multi_setopt(multi, CURLMOPT_MAX_HOST_CONNECTIONS, opts.max_host_connections);
+  // Without this libcurl 8.5 to 8.21 sizes its cache at four connections per transfer running when a
+  // connection is returned, and closes idle ones beyond that one by one as a burst drains (8.22 and later
+  // guess two per attached transfer and close only a connection idle for a second). Size it for the most
+  // transfers the caller runs at once so that a burst of that size finds every connection again.
+  // This is the only multi handle, and WebSocket (CONNECT_ONLY) connections are never pooled.
+  const std::size_t cached = opts.connection_cache_size != 0
+      ? opts.connection_cache_size
+      : std::max<std::size_t>(config_defaults::defaults_max_operations,
+                              opts.max_host_connections > 0 ? static_cast<std::size_t>(opts.max_host_connections) : 0);
+  // libcurl 8.5 ignores a value above UINT_MAX (and keeps its default), so the largest it takes is the limit.
+  constexpr std::size_t largest = std::min<unsigned long long>(std::numeric_limits<long>::max(),
+                                                             std::numeric_limits<unsigned>::max());
+  curl_multi_setopt(multi, CURLMOPT_MAXCONNECTS, static_cast<long>(std::min<std::size_t>(cached, largest)));
 
   const unsigned n = std::max(1u, opts.io_threads);
   try {
