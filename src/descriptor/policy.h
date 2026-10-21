@@ -121,6 +121,38 @@ struct EndpointFact {
 };
 // The path of one operation of an endpoint fact, if it has one.
 std::optional<std::string_view> endpoint_path(const EndpointFact&, std::string_view operation) noexcept;
+// What an origin does with a cache mark (sp::CacheControl, core/cache_control.h), as the policy states it. A mark's
+// lifetime is its TTL, or the provider's default of five minutes when it has none; core/cache_marks.h reads the
+// fact for a TTL.
+struct CacheLifetime {
+  // The origin takes a mark with this lifetime.
+  bool offered = false;
+  // What a write of this lifetime costs as a multiple of the base input price; unset when the policy does not state it.
+  std::optional<double> write_multiplier;
+};
+struct CacheCapabilities {
+  // The origin takes marks and puts a breakpoint where one is written. False: the provider caches a prefix by
+  // itself, or not at all, and no mark is sent.
+  bool supports_explicit = false;
+  // The most marks the origin honors in one request. Zero when marks are not supported.
+  std::uint32_t max_breakpoints = 0;
+  CacheLifetime five_minutes, one_hour;
+  // The shortest prompt the origin caches, as a family and origin floor; a model may need more. Unset when the policy
+  // does not state one. A mark on a shorter prompt is accepted and caches nothing.
+  std::optional<std::uint64_t> min_cacheable_tokens;
+  // A mark with a longer lifetime must come before one with a shorter lifetime in prompt order (tools, system, then
+  // messages).
+  bool longest_first = false;
+  // Without explicit support, a mark is dropped and reported (`CacheMarkReport`) rather than refused.
+  bool ignore_unsupported = false;
+};
+// A cache fact of a family: the capabilities at the listed origins and, for a gateway origin, at the models whose id
+// starts with one of the `routes` (OpenRouter names a model `<upstream>/<model>`). Empty `origins` apply at every origin and
+// empty `routes` to every model. The first fact that matches wins.
+struct CacheFact {
+  std::vector<std::string> origins, routes;
+  CacheCapabilities capabilities;
+};
 // An OpenRouter plugin id or server tool type the policy admits at its declared origins, with the schema of the
 // plugin's other members or of the tool's `parameters` (none: no options).
 struct GatewayFact { std::string name; std::optional<ValueSchema> options; };
@@ -149,6 +181,8 @@ struct FamilyPolicy {
   MediaPolicy media;
   // Replaces `media` for a base URL in openrouter_origins, whose gateway admits more content.
   std::optional<MediaPolicy> openrouter_media;
+  // Cache mark facts, most specific first (CacheFact). Empty when the policy states none.
+  std::vector<CacheFact> cache;
 };
 class DescriptorPolicy;
 using PolicySnapshot = std::shared_ptr<const DescriptorPolicy>;
@@ -200,6 +234,10 @@ class DescriptorPolicy final {
   // family's own member, except on the origins a family lists in `max_completion_tokens_origins`
   // (direct OpenAI Chat, whose current models reject `max_tokens`).
   std::string_view default_output_cap_member(std::string_view family, std::string_view origin) const noexcept;
+  // What `family` does with a cache mark at `origin` for `model`: the first of the family's `cache` facts that matches.
+  // nullopt when the family is not in the policy or no fact matches (a policy written before the facts existed): the
+  // policy then says nothing, and an encoder refuses a mark.
+  std::optional<CacheCapabilities> cache_capabilities(std::string_view family, std::string_view origin, std::string_view model) const noexcept;
   // The fact of a non-chat endpoint (`images`) at `origin`, or null.
   const EndpointFact* endpoint(std::string_view endpoint, std::string_view origin) const noexcept;
   const std::vector<EndpointFact>& endpoints() const noexcept { return endpoints_; }
@@ -254,6 +292,8 @@ bool temperature_forbidden(const ValidatedDescriptor&, std::string_view model);
 std::optional<std::string> validate_choices(const ValidatedDescriptor&, std::string_view model, const EffectiveChoices&);
 // The media admission in force for this descriptor's origin.
 const MediaPolicy& media_policy(const ValidatedDescriptor&) noexcept;
+// What this descriptor's family does with a cache mark at its origin for `model` (DescriptorPolicy::cache_capabilities).
+std::optional<CacheCapabilities> cache_capabilities(const ValidatedDescriptor&, std::string_view model) noexcept;
 // True when this descriptor targets an origin its family policy declares as a routing gateway
 // (openrouter_origins). Such a gateway may serve a different concrete model than the one requested.
 bool routed_gateway(const ValidatedDescriptor&) noexcept;

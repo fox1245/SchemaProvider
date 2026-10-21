@@ -388,6 +388,7 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
   std::optional<std::uint64_t> prepared_max_output_tokens;
   std::optional<std::uint64_t> prepared_model_invocation_limit;
   RequestFacts facts;
+  CacheMarkReport prepared_cache_marks;
 
   mutable std::mutex mutex;
   std::condition_variable joined;
@@ -1234,6 +1235,7 @@ PreparedRequest ClientAccess::prepare_control(Client& client, Request request, R
     state.prepared_max_output_tokens.reset();
     state.prepared_model_invocation_limit.reset();
     state.facts = {};
+    state.prepared_cache_marks = {};
   }
   if (error) {
     state.initial_error = error_for(*error);
@@ -1402,6 +1404,10 @@ const RequestFacts& PreparedRequest::facts() const noexcept {
   static const RequestFacts none;
   return state_ ? state_->facts : none;
 }
+const CacheMarkReport& PreparedRequest::cache_marks() const noexcept {
+  static const CacheMarkReport none;
+  return state_ ? state_->prepared_cache_marks : none;
+}
 std::string_view PreparedRequest::endpoint() const noexcept {
   return state_ ? std::string_view(state_->endpoint) : std::string_view{};
 }
@@ -1543,6 +1549,7 @@ PreparedRequest Client::prepare(Request request, RunOptions options) {
       operation->prepared_max_output_tokens = value.max_output_tokens;
       operation->prepared_model_invocation_limit = value.model_invocation_limit;
       operation->facts = detail::request_facts(client->descriptor, typed);
+      operation->prepared_cache_marks = value.cache_marks;
       wire.headers.reserve(value.headers.size() + (client->options.api_key.empty() ? 0 : 1));
       for (auto& header : value.headers) wire.headers.push_back({std::move(header.first), std::move(header.second)});
       if (!client->options.api_key.empty()) {

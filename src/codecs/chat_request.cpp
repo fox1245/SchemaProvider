@@ -1,4 +1,5 @@
 #include "codecs/chat.h"
+#include "core/cache_marks.h"
 #include "core/native.h"
 #include "codecs/media_input.h"
 #include "descriptor/descriptor.h"
@@ -178,6 +179,30 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (media_error && !captured_history) return *media_error;
   if (auto refusal = request_controls::validate_extensions(descriptor, request.extensions))
     return Error{refusal->admitted ? ErrorKind::InvalidRequest : ErrorKind::Unsupported, std::move(refusal->message)};
+  // Cache marks (core/cache_marks.h) ride the text parts of the ordered conversation, where the policy says the origin
+  // and the model's route take them; elsewhere they are dropped and reported, or refused, as the policy says.
+  CacheMarkReport mark_report;
+  bool write_marks = false;
+  {
+    const auto marks = cache_marks::tally(request.canonical_messages);
+    auto admitted = cache_marks::admit(descriptor, request.model, marks.all);
+    if (auto* refusal = std::get_if<Error>(&admitted)) return std::move(*refusal);
+    const auto& admission = std::get<cache_marks::Admission>(admitted);
+    mark_report.requested = marks.all;
+    if (admission.disposition == cache_marks::Disposition::Emit) {
+      if (marks.all != marks.text) return Error{ErrorKind::Unsupported, "Chat carries cache marks on text parts only"};
+      std::vector<std::optional<CacheTtl>> lifetimes;
+      for (const auto& message : request.canonical_messages)
+        for (const auto& part : message.parts)
+          if (const auto* text = std::get_if<Text>(&part)) {
+            if (auto error = cache_marks::marked_text(*text)) return std::move(*error);
+            if (text->cache) lifetimes.push_back(text->cache->ttl);
+          }
+      if (auto error = cache_marks::check(admission.capabilities, lifetimes)) return std::move(*error);
+      write_marks = true;
+      mark_report.emitted = marks.all;
+    }
+  }
   auto context = std::shared_ptr<const NativeContext>(new NativeContext(descriptor, request, effective, streaming));
   if (!context->history_valid_)
     return Error{ErrorKind::ReplayIneligible, "native replay provenance, binding or content mismatch"};
@@ -300,7 +325,9 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
             if (const auto* text = std::get_if<Text>(&part)) {
               if (part_comma) body.raw(",");
               part_comma = true;
-              body.raw("{\"type\":\"text\",\"text\":").quoted(text->value).raw("}");
+              body.raw("{\"type\":\"text\",\"text\":").quoted(text->value);
+              if (write_marks && text->cache) cache_marks::write(body, *text->cache);
+              body.raw("}");
             } else if (const auto* media = std::get_if<Media>(&part)) {
               if (message.role == Role::Assistant && media->kind == MediaKind::Audio) continue;
               if (part_comma) body.raw(",");
@@ -500,6 +527,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (auto error = build(output, false)) return std::move(*error);
   result.context = std::move(context);
   result.max_output_tokens = effective.max_output_tokens;
+  result.cache_marks = mark_report;
   return result;
 }
 } // namespace sp::chat

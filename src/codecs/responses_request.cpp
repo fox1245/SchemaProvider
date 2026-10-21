@@ -1,5 +1,6 @@
 #include "codecs/responses_request.h"
 #include "codecs/media_input.h"
+#include "core/cache_marks.h"
 #include "core/native.h"
 #include "json/json.h"
 #include "descriptor/policy.h"
@@ -157,6 +158,8 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   auto replay_bad = []() -> EncodeResult { return Error{ErrorKind::ReplayIneligible, "native replay provenance, binding or content mismatch"}; };
   if (descriptor.family() != "openai.responses") return Error{ErrorKind::InvalidConfig, "Responses encoder requires Responses descriptor"};
   if (request.model.empty() || request.messages.empty()) return bad("model and messages are required");
+  CacheMarkReport mark_report;
+  if (auto error = cache_marks::drop(descriptor, request.model, request.messages, mark_report)) return std::move(*error);
   const auto& resources = descriptor.policy()->resources();
   const auto& defaults = descriptor::model_defaults(descriptor, request.model);
   auto effective = descriptor::effective_defaults(descriptor, request.model);
@@ -759,6 +762,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (auto error = build(body)) return *error;
   result.context = std::move(context);
   result.max_output_tokens = effective.max_output_tokens;
+  result.cache_marks = mark_report;
   if (!request.hosted_tools.empty()) {
     if (!request.max_tool_calls || *request.max_tool_calls == std::numeric_limits<std::uint64_t>::max())
       result.model_invocation_limit.reset();

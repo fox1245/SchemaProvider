@@ -575,6 +575,7 @@ constexpr Entry chat_request_table[] = {
   {"audio output needs a voice and a supported format", "request.chat.audio_output_needs_a_voice_and_a_supported_format"},
   {"image_config needs the image modality", "request.chat.image_config_needs_the_image_modality"},
   {"image output requires a declared OpenRouter origin", "request.chat.image_output_requires_a_declared_openrouter"},
+  {"Chat carries cache marks on text parts only", "request.chat.cache_marks_text_only"},
 };
 constexpr Entry messages_request_table[] = {
   {"model and messages are required", "request.messages.model_and_messages_are_required"},
@@ -659,6 +660,10 @@ constexpr Entry messages_request_table[] = {
   {"an MCP toolset must name one declared MCP server", "request.messages.mcp_toolset_server_invalid"},
   {"every MCP server needs its MCP toolset", "request.messages.mcp_server_without_toolset"},
   {"captured block metadata mismatch", "request.messages.captured_block_mismatch"},
+  {"system and system_blocks are mutually exclusive", "request.messages.system_blocks_conflict"},
+  {"Messages takes a cache mark on a tool result, not on a part inside it", "request.messages.cache_mark_in_tool_result"},
+  {"system blocks require nonempty text", "request.messages.system_block_empty"},
+  {"cache_control is set both in a tool's options and as a cache mark", "request.messages.cache_control_duplicate"},
 };
 constexpr Entry responses_request_table[] = {
   {"an OpenRouter server tool is not admitted by the policy", "request.responses.an_openrouter_server_tool_is_not_admitted_by"},
@@ -1249,6 +1254,13 @@ constexpr Entry shared_request_table[] = {
   {"invalid image detail", "request.media.invalid_image_detail"},
   {"invalid media name or identity", "request.media.invalid_media_name_or_identity"},
   {"invalid media", "request.media.invalid_media"},
+  {"the policy admits no cache marks at this origin", "request.cache.not_admitted"},
+  {"cache marks are not supported at this origin", "request.cache.unsupported"},
+  {"cache mark count exceeds the origin's breakpoint limit", "request.cache.breakpoint_limit"},
+  {"invalid cache mark TTL", "request.cache.ttl_invalid"},
+  {"cache mark lifetime is not offered at this origin", "request.cache.lifetime_not_offered"},
+  {"longer cache lifetimes must come before shorter ones", "request.cache.lifetime_order"},
+  {"a cache mark cannot be set on an empty text block", "request.cache.empty_text"},
 };
 }
 std::span<const Entry> entries(Source source) noexcept {

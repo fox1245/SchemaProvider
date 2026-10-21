@@ -32,7 +32,9 @@ struct Citation {
   std::optional<std::uint64_t> start, end;
   std::shared_ptr<const json::Document> raw;
 };
-struct Text { std::string value; std::vector<Citation> citations{}; };
+// `cache`: a cache mark after this part (core/cache_control.h). Input only; it is not part of a message's native seal
+// or content digest, and a decoded part never has one.
+struct Text { std::string value; std::vector<Citation> citations{}; std::optional<CacheControl> cache{}; };
 struct Refusal { std::string text; std::string raw_code; };
 struct ToolCall {
   std::string id, name;
@@ -73,6 +75,9 @@ struct ToolResult {
   // object content beside media-only parts as the response object. Generate partitions these into separately
   // ordered text and media lanes. An Opaque part is an input block the policy admits (Messages `search_result`).
   std::vector<std::variant<Text, Media, Opaque>> content_parts{};
+  // A cache mark after the whole result (Messages), which covers its content parts. The service takes no mark on a
+  // part inside a result, and Messages refuses one.
+  std::optional<CacheControl> cache{};
 };
 struct Reasoning {
   std::string id;

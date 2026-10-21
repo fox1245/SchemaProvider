@@ -319,6 +319,12 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
   Hash hash(descriptor.policy()->resources()); hash.text("sp.messages.configuration.v1");
   effective_digest(hash, choices);
   hash.text(request.model); hash.text(request.account_scope); hash.text(request.system);
+  // A system prompt given as blocks is bound by its text. The blocks' cache marks are not: they change what a request
+  // costs, not what it means, and a mark moves from turn to turn.
+  if (!request.system_blocks.empty()) {
+    hash.text("sp.messages.system_blocks.v1"); hash.number(request.system_blocks.size());
+    for (const auto& block : request.system_blocks) hash.text(block.text);
+  }
   hash.number(request.thinking_mode.has_value()); if (request.thinking_mode) hash.number(static_cast<unsigned>(*request.thinking_mode));
   hash.number(request.output_effort.has_value()); if (request.output_effort) hash.number(static_cast<unsigned>(*request.output_effort));
   hash.number(request.cache_control.has_value());
@@ -900,7 +906,7 @@ InterfaceContract core_interface_contract() noexcept {
   std::uint64_t capabilities = capability::NullableUsage |
       capability::All5Native | capability::TrustedArchive | capability::OrderedWireEvents |
       capability::OpenRouterRoutingMaxPrice | capability::ErrorReason | capability::PolicyAdmittedExtensions |
-      capability::CompletionSecret;
+      capability::CompletionSecret | capability::PartCacheMarks;
   if (json::retained_size_contract() == 1) capabilities |= capability::RetainedJsonSize;
 #if defined(__unix__) || defined(__APPLE__) || defined(_WIN32)
   return {7, capabilities | capability::NativeSocketRuntime};

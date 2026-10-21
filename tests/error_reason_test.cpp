@@ -56,7 +56,7 @@ const EncoderSource encoder_sources[]{
     {reason::Source::JobsRequest, {"codecs/jobs_request.cpp"}}, {reason::Source::RealtimeRequest, {"codecs/realtime.cpp"}}, {reason::Source::VideosRequest, {"codecs/videos_request.cpp"}},
     {reason::Source::FilesRequest, {"codecs/files_request.cpp"}}, {reason::Source::BatchesRequest, {"codecs/batches_request.cpp"}},
     {reason::Source::TokensRequest, {"codecs/tokens_request.cpp"}}, {reason::Source::GenerationsRequest, {"codecs/generations_request.cpp"}},
-    {reason::Source::SharedRequest, {"descriptor/policy.cpp", "core/request_controls.h", "codecs/media_input.cpp", "core/media.cpp", "core/native.cpp"}}};
+    {reason::Source::SharedRequest, {"descriptor/policy.cpp", "core/request_controls.h", "codecs/media_input.cpp", "core/media.cpp", "core/native.cpp", "core/cache_marks.h"}}};
 // The strings for an abnormal close belong to the transport: the close error's kind is the transport's, and so is its lack of a reason.
 const std::set<std::string> transport_strings{"abnormal response close", "abnormal Gemini response close", "abnormal interaction close"};
 

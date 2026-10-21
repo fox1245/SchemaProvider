@@ -7,6 +7,11 @@
       "controls": ["max_output_tokens", "temperature", "top_p", "reasoning_effort", "service_tier"],
       "standard_service_tiers": ["default"],
       "openrouter_origins": ["https://openrouter.ai"],
+      "cache": [
+        {"origins": ["https://openrouter.ai"], "routes": ["anthropic/"], "explicit": true, "max_breakpoints": 4, "ttls": ["5m", "1h"], "write_multiplier": {"5m": 1.25, "1h": 2}, "longest_first": true},
+        {"origins": ["https://openrouter.ai"], "routes": ["google/"], "explicit": true, "max_breakpoints": 1, "ttls": ["5m"]},
+        {"explicit": false, "unsupported": "ignore"}
+      ],
       "max_completion_tokens_origins": ["https://api.openai.com"],
       "temperature_forbidden_model_prefixes": ["gpt-5", "gpt-6", "o1", "o3", "o4"],
       "media": {
@@ -105,6 +110,10 @@
       "family": "anthropic.messages",
       "controls": ["max_output_tokens", "temperature", "top_p", "thinking_budget"],
       "openrouter_origins": ["https://openrouter.ai"],
+      "cache": [
+        {"origins": ["https://api.anthropic.com"], "explicit": true, "max_breakpoints": 4, "ttls": ["5m", "1h"], "write_multiplier": {"5m": 1.25, "1h": 2}, "longest_first": true},
+        {"explicit": true, "max_breakpoints": 4, "ttls": ["5m", "1h"], "longest_first": true}
+      ],
       "temperature_forbidden_model_prefixes": ["claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-sonnet-5", "claude-haiku-5", "claude-fable-"],
       "temperature_forbidden_generations": [{"series": "claude-", "from": "4.7"}],
       "media": {
@@ -276,6 +285,7 @@
       "controls": ["max_output_tokens", "temperature", "top_p", "reasoning_effort", "reasoning_summary", "service_tier", "required_tool", "store", "max_tool_calls"],
       "standard_service_tiers": ["default"],
       "openrouter_origins": ["https://openrouter.ai"],
+      "cache": [{"explicit": false, "unsupported": "ignore"}],
       "temperature_forbidden_model_prefixes": ["gpt-5", "gpt-6", "o1", "o3", "o4"],
       "media": {
         "image": {"mime": ["image/png", "image/jpeg", "image/webp", "image/gif"], "sources": ["inline", "url", "file"]},
@@ -397,6 +407,7 @@
       "family": "google.generate",
       "controls": ["max_output_tokens", "temperature", "thinking_budget", "include_thoughts", "thinking_level", "required_tool"],
       "openrouter_origins": [],
+      "cache": [{"explicit": false, "unsupported": "ignore"}],
       "temperature_forbidden_model_prefixes": [],
       "media": {
         "image": {"mime": ["image/png", "image/jpeg", "image/jpg", "image/webp", "image/heic", "image/heif", "image/gif", "image/avif", "image/bmp"], "sources": ["inline", "url", "file"]},
@@ -472,6 +483,7 @@
       "controls": ["max_output_tokens", "thinking_level", "thinking_summaries", "service_tier", "required_tool", "store"],
       "standard_service_tiers": ["standard"],
       "openrouter_origins": [],
+      "cache": [{"explicit": false, "unsupported": "ignore"}],
       "temperature_forbidden_model_prefixes": [],
       "media": {
         "image": {"mime": ["image/png", "image/jpeg", "image/webp", "image/heic", "image/heif", "image/gif", "image/bmp"], "sources": ["inline", "url", "file"]},

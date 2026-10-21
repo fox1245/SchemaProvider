@@ -1,4 +1,5 @@
 #pragma once
+#include "core/cache_control.h"
 #include "core/value.h"
 #include "descriptor/descriptor.h"
 #include "core/request_controls.h"
@@ -23,7 +24,12 @@ struct ToolDefinition {
   // A typed tool's other members (an advisor's model, a toolset's configs), sent as given after the typed ones. The
   // policy's fact for the tool type declares their schema (#32); nothing it does not name is sent.
   std::shared_ptr<const json::Document> options{};
+  // A cache mark after this definition (core/cache_control.h). It is not bound into native replay.
+  std::optional<CacheControl> cache{};
 };
+// One block of a system prompt given as blocks (`Request::system_blocks`). `cache` marks the prompt up to and
+// including the block.
+struct SystemBlock { std::string text; std::optional<CacheControl> cache{}; };
 // A remote MCP server the service connects to (the MCP connector). An `mcp_toolset` tool entry names it in its
 // options (`mcp_server_name`), and each server is named by exactly one. The authorization token is sent as given
 // and never bound into native replay state.
@@ -40,8 +46,8 @@ struct ContainerSkill {
 enum class ThinkingMode { Manual, Adaptive, Disabled };
 // New values go at the end.
 enum class OutputEffort { Low, Medium, High, Max, XHigh };
-enum class CacheTtl { FiveMinutes, OneHour };
-struct CacheControl { std::optional<CacheTtl> ttl; };
+using sp::CacheTtl;
+using sp::CacheControl;
 enum class ToolChoiceMode { Auto, Any, None, Tool };
 struct ToolChoice {
   ToolChoiceMode mode = ToolChoiceMode::Auto;
@@ -57,6 +63,8 @@ struct Request {
   std::optional<double> temperature, top_p;
   std::optional<ThinkingMode> thinking_mode{};
   std::optional<OutputEffort> output_effort{};
+  // The request-level cache mark: the service places the breakpoint at the end of the prompt. It is not sent when a
+  // part, system block or tool definition carries a mark (see EncodedRequest::cache_marks).
   std::optional<CacheControl> cache_control{};
   std::optional<ToolChoice> tool_choice{};
   std::optional<sp::OpenRouterRouting> provider{};
@@ -71,6 +79,9 @@ struct Request {
   std::vector<std::string> betas{};
   // MCP servers the service calls tools on (`mcp_servers`), each named by one `mcp_toolset` tool entry.
   std::vector<McpServer> mcp_servers{};
+  // The system prompt as blocks, each with its own cache mark; the alternative to `system`, which is a single string.
+  // Setting both is refused.
+  std::vector<SystemBlock> system_blocks{};
 
   static Request simple(std::string model_name, std::string user_prompt,
                         std::optional<uint64_t> output_cap = std::nullopt,
@@ -100,6 +111,8 @@ struct EncodedRequest {
   std::shared_ptr<const NativeContext> context;
   std::optional<std::uint64_t> max_output_tokens{};
   std::optional<std::uint64_t> model_invocation_limit{1};
+  // What the encoder did with the request's cache marks.
+  CacheMarkReport cache_marks{};
 };
 using EncodeResult = std::variant<EncodedRequest, Error>;
 EncodeResult encode(const descriptor::ValidatedDescriptor&, const Request&, bool streaming);

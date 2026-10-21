@@ -234,7 +234,7 @@ class PolicyLoader {
         fail("", "configured policy depth limit");
       auto families=root.get("families"); if(!families.is_array() || families.size()!=5)fail("/families","all five typed families");
       for(auto v:families.elements()) {
-        closed(v,{"family","bindings","stop_reasons","defaults","required_output_cap","temperature_range","top_p_range","thinking_minimum","thinking_top_p_minimum","reasoning_efforts","reasoning_summaries","thinking_levels","service_tiers","header_versions","header_version","server_tools","openrouter_origins","temperature_forbidden_model_prefixes","media","openrouter_media"},"/families",{"temperature_forbidden_generations","max_completion_tokens_origins","unreplayable_parts","extensions","openrouter_plugins","openrouter_server_tools","betas","response_blocks","input_blocks","controls","standard_service_tiers"});
+        closed(v,{"family","bindings","stop_reasons","defaults","required_output_cap","temperature_range","top_p_range","thinking_minimum","thinking_top_p_minimum","reasoning_efforts","reasoning_summaries","thinking_levels","service_tiers","header_versions","header_version","server_tools","openrouter_origins","temperature_forbidden_model_prefixes","media","openrouter_media"},"/families",{"temperature_forbidden_generations","max_completion_tokens_origins","unreplayable_parts","extensions","openrouter_plugins","openrouter_server_tools","betas","response_blocks","input_blocks","controls","standard_service_tiers","cache"});
         FamilyPolicy f; f.family=text(v.get("family"),"/families");
         if(f.family!="openai.chat" && f.family!="anthropic.messages" && f.family!="openai.responses" && f.family!="google.generate" && f.family!="google.interactions")fail("/families","typed family");
         if(policy->family(f.family))fail("/families","unique families");
@@ -499,6 +499,68 @@ class PolicyLoader {
             }
             for (const auto& existing : *target) if (existing.name == fact.name) fail(pointer, "unique names");
             target->push_back(std::move(fact));
+          }
+        }
+        // Cache mark facts: what an origin (and, at a gateway, a model route) does with a mark. The first match wins, so a
+        // fact for every origin and model comes last.
+        if (auto facts = v.get("cache"); facts.valid()) {
+          if (!facts.is_array() || facts.size() > 16) fail("/cache", "bounded array of cache facts");
+          for (auto c : facts.elements()) {
+            closed(c, {"explicit"}, "/cache", {"origins","routes","max_breakpoints","ttls","write_multiplier","min_cacheable_tokens","longest_first","unsupported"});
+            CacheFact fact;
+            auto& caps = fact.capabilities;
+            if (c.get("origins").valid()) fact.origins = strings(c.get("origins"), "/cache/origins", true);
+            for (const auto& origin : fact.origins)
+              if (!valid_origin(origin) || origin.ends_with('/')) fail("/cache/origins", "canonical origins without path");
+            if (c.get("routes").valid()) {
+              fact.routes = strings(c.get("routes"), "/cache/routes", true);
+              if (fact.origins.empty() || f.openrouter_origins.empty() ||
+                  std::any_of(fact.origins.begin(), fact.origins.end(), [&](const auto& origin) { return !contains(f.openrouter_origins, origin); }))
+                fail("/cache/routes", "routes only at the family's declared OpenRouter origins");
+              for (const auto& route : fact.routes)
+                if (route.size() > 64 || std::any_of(route.begin(), route.end(), [](unsigned char ch) {
+                      return !((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '.' || ch == '_' || ch == '~' || ch == '/');
+                    })) fail("/cache/routes", "lowercase model id prefixes");
+            }
+            for (const auto& earlier : f.cache)
+              if (earlier.origins.empty() && earlier.routes.empty()) fail("/cache", "no fact after the one for every origin and model");
+            caps.supports_explicit = boolean(c.get("explicit"), "/cache/explicit");
+            if (c.get("min_cacheable_tokens").valid()) {
+              const auto minimum = integer(c.get("min_cacheable_tokens"), "/cache/min_cacheable_tokens");
+              if (!minimum) fail("/cache/min_cacheable_tokens", "positive token count");
+              caps.min_cacheable_tokens = minimum;
+            }
+            if (caps.supports_explicit) {
+              if (c.get("unsupported").valid()) fail("/cache/unsupported", "absent where marks are supported");
+              const auto breakpoints = integer(c.get("max_breakpoints"), "/cache/max_breakpoints");
+              if (!breakpoints || breakpoints > 16) fail("/cache/max_breakpoints", "between 1 and 16 breakpoints");
+              caps.max_breakpoints = static_cast<std::uint32_t>(breakpoints);
+              const auto ttls = strings(c.get("ttls"), "/cache/ttls", true);
+              for (const auto& ttl : ttls) {
+                if (ttl != "5m" && ttl != "1h") fail("/cache/ttls", "5m or 1h");
+                (ttl == "5m" ? caps.five_minutes : caps.one_hour).offered = true;
+              }
+              if (auto multipliers = c.get("write_multiplier"); multipliers.valid()) {
+                if (!multipliers.is_object() || multipliers.size() > 2) fail("/cache/write_multiplier", "multipliers by TTL");
+                for (auto m : multipliers.members()) {
+                  const auto value = number(m.value, "/cache/write_multiplier");
+                  auto& lifetime = m.key == "5m" ? caps.five_minutes : caps.one_hour;
+                  if ((m.key != "5m" && m.key != "1h") || !lifetime.offered || value < 1 || value > 100)
+                    fail("/cache/write_multiplier", "a multiplier from 1 to 100 for each offered TTL");
+                  lifetime.write_multiplier = value;
+                }
+              }
+              if (c.get("longest_first").valid()) caps.longest_first = boolean(c.get("longest_first"), "/cache/longest_first");
+            } else {
+              for (const char* key : {"max_breakpoints", "ttls", "write_multiplier", "longest_first"})
+                if (c.get(key).valid()) fail("/cache", "no breakpoints, TTLs or multipliers where marks are not supported");
+              if (auto unsupported = c.get("unsupported"); unsupported.valid()) {
+                const auto mode = text(unsupported, "/cache/unsupported");
+                if (mode != "ignore" && mode != "reject") fail("/cache/unsupported", "ignore or reject");
+                caps.ignore_unsupported = mode == "ignore";
+              }
+            }
+            f.cache.push_back(std::move(fact));
           }
         }
         if(auto error=validate(f,choices(f.defaults),{},false))fail("/defaults",*error);
@@ -954,6 +1016,9 @@ const MediaPolicy& media_policy(const ValidatedDescriptor& d) noexcept {
   const auto& family = d.family_policy();
   return family.openrouter_media && routed_gateway(d) ? *family.openrouter_media : family.media;
 }
+std::optional<CacheCapabilities> cache_capabilities(const ValidatedDescriptor& d, std::string_view model) noexcept {
+  return d.policy()->cache_capabilities(d.family(), d.base_url(), model);
+}
 bool routed_gateway(const ValidatedDescriptor& d) noexcept { return contains(d.family_policy().openrouter_origins, d.base_url()); }
 namespace {
 char ascii_lower(char c) noexcept { return c >= 'A' && c <= 'Z' ? static_cast<char>(c + ('a' - 'A')) : c; }
@@ -1054,6 +1119,16 @@ ToolFacts tool_facts(const FamilyPolicy& family, std::string_view type) {
   for (const auto& tool : family.openrouter_server_tools)
     if (tool.name == type) facts.known = true;
   return facts;
+}
+std::optional<CacheCapabilities> DescriptorPolicy::cache_capabilities(std::string_view name, std::string_view origin, std::string_view model) const noexcept {
+  const auto* family = this->family(name);
+  if (!family) return std::nullopt;
+  for (const auto& fact : family->cache) {
+    if (!fact.origins.empty() && !contains(fact.origins, origin)) continue;
+    if (!fact.routes.empty() && std::none_of(fact.routes.begin(), fact.routes.end(), [&](const auto& route) { return model.starts_with(route); })) continue;
+    return fact.capabilities;
+  }
+  return std::nullopt;
 }
 const EndpointFact* DescriptorPolicy::endpoint(std::string_view endpoint, std::string_view origin) const noexcept {
   for (const auto& fact : endpoints_)

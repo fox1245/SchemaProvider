@@ -87,6 +87,8 @@ struct EncodedRequest {
   std::shared_ptr<const NativeContext> context{};
   std::optional<std::uint64_t> max_output_tokens{};
   std::optional<std::uint64_t> model_invocation_limit{1};
+  // What the encoder did with the cache marks of the text parts (canonical_messages).
+  CacheMarkReport cache_marks{};
 };
 using EncodeResult = std::variant<EncodedRequest, Error>;
 EncodeResult encode(const descriptor::ValidatedDescriptor&, const Request&, bool streaming);
