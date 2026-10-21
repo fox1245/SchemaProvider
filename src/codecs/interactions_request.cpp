@@ -1,6 +1,7 @@
 #include "codecs/interactions_request.h"
 #include "core/request_controls.h"
 #include "codecs/media_input.h"
+#include "core/cache_marks.h"
 #include "core/native.h"
 #include "json/json.h"
 #include "descriptor/policy.h"
@@ -146,6 +147,8 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     return result;
   }
   if (request.background.value_or(false) && !request.store.value_or(false)) return bad("a background interaction needs store");
+  CacheMarkReport mark_report;
+  if (auto error = cache_marks::drop(descriptor, request.model, request.messages, mark_report)) return std::move(*error);
   if (request.messages.empty() || request.messages.size() > resources.request_messages ||
       request.tools.size() + request.builtin_tools.size() > resources.request_tools)
     return bad("model and bounded messages/tools required");
@@ -459,6 +462,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (auto error = build(body)) return *error;
   result.context = std::move(context);
   result.max_output_tokens = effective.max_output_tokens;
+  result.cache_marks = mark_report;
   return result;
 }
 } // namespace sp::interactions

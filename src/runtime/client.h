@@ -188,6 +188,10 @@ class PreparedRequest {
   // What the typed chat request commits to beyond its body: the service tier, fallback models, plugins, routing and
   // the tools the service runs with their caps. Empty for an endpoint call and for a default-constructed handle.
   const RequestFacts& facts() const noexcept;
+  // What the encoder did with the request's cache marks: how many the typed request carried on what it sends, how
+  // many were written, and whether the request-level Messages mark was left out for them. A mark the policy says to
+  // ignore at this origin is requested and not written. Empty for an endpoint call.
+  const CacheMarkReport& cache_marks() const noexcept;
   // The non-chat endpoint a prepared call reaches (`images`, D6), empty for a chat request.
   std::string_view endpoint() const noexcept;
   // The HTTP method and URL the call sends. With the body, they identify a call whose body is empty or read from a

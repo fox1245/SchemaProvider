@@ -1,4 +1,5 @@
 #pragma once
+#include "core/cache_control.h"
 #include "sp/config_defaults.h"
 #include <cstddef>
 #include <cstdint>
@@ -32,6 +33,8 @@ struct Media {
   // Output audio: when the provider stops accepting `id` (Unix seconds), as reported with the reply. Not part of a
   // message's native seal, and an archived message restores without it.
   std::optional<std::uint64_t> expires_at;
+  // A cache mark after this part (core/cache_control.h). Input only; not part of a message's native seal.
+  std::optional<CacheControl> cache{};
 
   static Media inline_data(MediaKind kind, std::string mime, std::shared_ptr<const std::string> base64) {
     Media media; media.kind = kind; media.mime = std::move(mime); media.data = std::move(base64); return media;

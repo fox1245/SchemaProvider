@@ -1,6 +1,7 @@
 #include "codecs/gemini_request.h"
 #include "core/request_controls.h"
 #include "codecs/media_input.h"
+#include "core/cache_marks.h"
 #include "core/native.h"
 #include "json/json.h"
 #include "descriptor/policy.h"
@@ -162,6 +163,8 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       (descriptor.path(false) != base + ":generateContent" || descriptor.path(true) != base + ":streamGenerateContent?alt=sse"))
     return Error{ErrorKind::InvalidConfig, "Gemini descriptor paths must target the same literal model"};
   const auto& resources = descriptor.policy()->resources();
+  CacheMarkReport mark_report;
+  if (auto error = cache_marks::drop(descriptor, request.model, request.messages, mark_report)) return std::move(*error);
   auto effective = descriptor::effective_defaults(descriptor, request.model);
   if (request.max_output_tokens) effective.max_output_tokens = request.max_output_tokens;
   if (request.thinking_budget) effective.thinking_budget = request.thinking_budget;
@@ -698,6 +701,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (auto error = build(writer)) return *error;
   result.context = std::move(context);
   result.max_output_tokens = effective.max_output_tokens;
+  result.cache_marks = mark_report;
   return result;
 }
 PortableProjection project_portable(const Message& captured) {

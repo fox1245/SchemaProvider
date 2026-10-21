@@ -1,5 +1,6 @@
 #include "codecs/messages_request.h"
 #include "codecs/media_input.h"
+#include "core/cache_marks.h"
 #include "core/native.h"
 #include "json/json.h"
 #include "descriptor/policy.h"
@@ -8,6 +9,7 @@
 #include <cmath>
 #include <map>
 #include <set>
+#include <span>
 #include <limits>
 
 namespace sp::messages {
@@ -79,10 +81,11 @@ void write_source(json::BoundedWriter& body, const Media& media, std::string_vie
       break;
   }
 }
-void write_media(json::BoundedWriter& body, const Media& media, std::string_view decoded_text) {
+void write_media(json::BoundedWriter& body, const Media& media, std::string_view decoded_text, bool marks) {
   body.raw(media.kind == MediaKind::Image ? "{\"type\":\"image\",\"source\":" : "{\"type\":\"document\",\"source\":");
   write_source(body, media, decoded_text);
   if (media.kind == MediaKind::Document && !media.name.empty()) body.raw(",\"title\":").quoted(media.name);
+  if (marks && media.cache) cache_marks::write(body, *media.cache);
   body.raw("}");
 }
 } // namespace
@@ -308,6 +311,65 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         if (!beta_admitted(fact.beta)) return Error{ErrorKind::Unsupported, "an extension needs an anthropic-beta value this origin does not admit"};
         if (std::find(betas.begin(), betas.end(), fact.beta) == betas.end()) betas.push_back(fact.beta);
       }
+  // Cache marks (core/cache_marks.h). The marks the typed request carries on what is sent ask the policy what the
+  // origin does with them; marks written, they are listed in prompt order (tools, system, messages) for the limits.
+  // A cache_control written inside a block or a tool's options joins the list but never asks the policy.
+  if (!request.system.empty() && !request.system_blocks.empty()) return bad("system and system_blocks are mutually exclusive");
+  if (request.system_blocks.size() > resources.request_parts) return bad("request part count limit exceeded");
+  for (const auto& block : request.system_blocks) if (block.text.empty()) return bad("system blocks require nonempty text");
+  CacheMarkReport mark_report;
+  bool write_marks = false;
+  {
+    std::uint32_t requested = cache_marks::tally(std::span<const Message>(request.messages).subspan(first)).all;
+    for (const auto& tool : request.tools) requested += tool.cache.has_value();
+    for (const auto& block : request.system_blocks) requested += block.cache.has_value();
+    auto admitted = cache_marks::admit(descriptor, request.model, requested);
+    if (auto* refusal = std::get_if<Error>(&admitted)) return std::move(*refusal);
+    const auto& admission = std::get<cache_marks::Admission>(admitted);
+    mark_report.requested = requested;
+    if (admission.disposition == cache_marks::Disposition::Emit) {
+      std::vector<std::optional<CacheTtl>> lifetimes;
+      const auto raw_mark = [&](json::Value holder) {
+        const auto mark = holder.is_object() ? holder.get("cache_control") : json::Value{};
+        if (!mark.is_object()) return;
+        const auto ttl = mark.get("ttl");
+        lifetimes.push_back(!ttl.is_string() ? std::nullopt : ttl.as_string() == "1h" ? std::optional<CacheTtl>(CacheTtl::OneHour) : std::optional<CacheTtl>(CacheTtl::FiveMinutes));
+      };
+      for (const auto& tool : request.tools) {
+        if (tool.cache && tool.options && tool.options->root().is_object() && tool.options->root().get("cache_control").valid())
+          return bad("cache_control is set both in a tool's options and as a cache mark");
+        if (tool.cache) lifetimes.push_back(tool.cache->ttl);
+        else if (tool.options) raw_mark(tool.options->root());
+      }
+      for (const auto& block : request.system_blocks) if (block.cache) lifetimes.push_back(block.cache->ttl);
+      for (std::size_t i = first; i < request.messages.size(); ++i)
+        for (const auto& part : request.messages[i].parts) {
+          if (const auto* text = std::get_if<Text>(&part)) {
+            if (auto error = cache_marks::marked_text(*text)) return std::move(*error);
+            if (text->cache) lifetimes.push_back(text->cache->ttl);
+          } else if (const auto* media = std::get_if<Media>(&part)) {
+            if (media->cache) lifetimes.push_back(media->cache->ttl);
+          } else if (const auto* block = std::get_if<Opaque>(&part)) {
+            if (block->wire_metadata && request.messages[i].role != Role::Assistant) raw_mark(block->wire_metadata->root());
+          } else if (const auto* result = std::get_if<ToolResult>(&part)) {
+            // The service refuses a cache_control inside `tool_result.content`; the mark of the result covers its parts.
+            for (const auto& nested : result->content_parts) {
+              if (const auto* text = std::get_if<Text>(&nested); text && text->cache)
+                return Error{ErrorKind::Unsupported, "Messages takes a cache mark on a tool result, not on a part inside it"};
+              if (const auto* media = std::get_if<Media>(&nested); media && media->cache)
+                return Error{ErrorKind::Unsupported, "Messages takes a cache mark on a tool result, not on a part inside it"};
+              if (const auto* block = std::get_if<Opaque>(&nested); block && block->wire_metadata) raw_mark(block->wire_metadata->root());
+            }
+            if (result->cache) lifetimes.push_back(result->cache->ttl);
+          }
+        }
+      if (auto error = cache_marks::check(admission.capabilities, lifetimes)) return std::move(*error);
+      // The request-level mark yields to the marks of the parts.
+      write_marks = true;
+      mark_report.emitted = requested;
+      mark_report.tail_suppressed = request.cache_control.has_value();
+    }
+  }
   auto context = std::shared_ptr<const NativeContext>(new NativeContext(descriptor, request, effective, streaming));
   if (!context->history_valid_) return replay_bad();
   if (!context->valid_) return Error{ErrorKind::ResourceLimit, "native binding could not be captured"};
@@ -334,6 +396,17 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   body.raw(",").quoted(descriptor.max_output_tokens_member()).raw(":").raw(std::to_string(*effective.max_output_tokens));
   body.raw(",").quoted(descriptor.request_stream_member()).raw(streaming ? ":true" : ":false");
   if (!request.system.empty()) body.raw(",\"system\":").quoted(request.system);
+  if (!request.system_blocks.empty()) {
+    body.raw(",\"system\":[");
+    for (std::size_t i = 0; i < request.system_blocks.size(); ++i) {
+      const auto& block = request.system_blocks[i];
+      if (i) body.raw(",");
+      body.raw("{\"type\":\"text\",\"text\":").quoted(block.text);
+      if (write_marks && block.cache) cache_marks::write(body, *block.cache);
+      body.raw("}");
+    }
+    body.raw("]");
+  }
   if (request.container) {
     const auto& id = *request.container;
     if (id.empty() || id.size() > 256 || std::any_of(id.begin(), id.end(), [](unsigned char c) { return c <= 0x20 || c >= 0x7f || c == '"' || c == '\\'; }))
@@ -380,7 +453,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     body.raw("}");
   }
   if (request.output_effort) body.raw(",\"output_config\":{\"effort\":").quoted(effort).raw("}");
-  if (request.cache_control) {
+  if (request.cache_control && !write_marks) {
     body.raw(",\"cache_control\":{\"type\":\"ephemeral\"");
     if (!ttl.empty()) body.raw(",\"ttl\":").quoted(ttl);
     body.raw("}");
@@ -416,7 +489,9 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       if (!fact) {
         if (!tool.input_schema || !tool.input_schema->root().is_object() || tool.max_uses || server_options || tool.options)
           return bad("client tools require object schemas and no server fields");
-        body.raw("{\"name\":").quoted(tool.name).raw(",\"description\":").quoted(tool.description).raw(",\"input_schema\":").value(tool.input_schema->root(), 3).raw("}");
+        body.raw("{\"name\":").quoted(tool.name).raw(",\"description\":").quoted(tool.description).raw(",\"input_schema\":").value(tool.input_schema->root(), 3);
+        if (write_marks && tool.cache) cache_marks::write(body, *tool.cache);
+        body.raw("}");
       } else {
         if (tool.name != fact->name || tool.input_schema || !tool.description.empty()) return bad("server tool fields do not match typed schema");
         if (tool.options && !fact->options) return Error{ErrorKind::Unsupported, "the policy admits no options for this tool type"};
@@ -469,6 +544,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         if (tool.citations) body.raw(",\"citations\":{\"enabled\":").raw(*tool.citations ? "true" : "false").raw("}");
         if (tool.max_content_tokens) body.raw(",\"max_content_tokens\":").raw(std::to_string(*tool.max_content_tokens));
         if (tool.options) for (auto member : tool.options->root().members()) body.raw(",").quoted(member.key).raw(":").value(member.value, 3);
+        if (write_marks && tool.cache) cache_marks::write(body, *tool.cache);
         body.raw("}");
       }
       if (!body.ok()) return Error{has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest,
@@ -516,13 +592,15 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       if (const auto* text = std::get_if<Text>(&part)) {
         if (!assistant && responding_to_tools && server_waiting) return bad("pending server tools require tool-results-only continuation");
         text_seen = true;
-        body.raw("{\"type\":\"text\",\"text\":").quoted(text->value).raw("}");
+        body.raw("{\"type\":\"text\",\"text\":").quoted(text->value);
+        if (write_marks && text->cache) cache_marks::write(body, *text->cache);
+        body.raw("}");
       } else if (const auto* media = std::get_if<Media>(&part)) {
         if (responding_to_tools && server_waiting) return bad("pending server tools require tool-results-only continuation");
         text_seen = true; // Tool results, when present, must precede ordinary input.
         const auto decoded_text = media->source == MediaSource::Inline && plain_text(*media)
             ? std::string_view(decoded_documents.at(text_document_index++)) : std::string_view{};
-        write_media(body, *media, decoded_text);
+        write_media(body, *media, decoded_text, write_marks);
       } else if (const auto* thinking = std::get_if<Thinking>(&part)) {
         if (!assistant) return bad("thinking belongs to assistant messages");
         body.raw("{\"type\":\"thinking\",\"thinking\":").quoted(thinking->text);
@@ -575,14 +653,16 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
               const auto& media = std::get<Media>(nested);
               const auto decoded = media.kind == MediaKind::Document && media.source == MediaSource::Inline && plain_text(media)
                   ? std::string_view(decoded_documents.at(text_document_index++)) : std::string_view{};
-              write_media(body, media, decoded);
+              write_media(body, media, decoded, false);
             }
             if (!body.ok()) return Error{has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest,
                                         "request exceeds JSON limits or encoding"};
           }
           body.raw("]");
         }
-        body.raw(",\"is_error\":").raw(tool_result->is_error ? "true}" : "false}");
+        body.raw(",\"is_error\":").raw(tool_result->is_error ? "true" : "false");
+        if (write_marks && tool_result->cache) cache_marks::write(body, *tool_result->cache);
+        body.raw("}");
       } else if (const auto* server_result = std::get_if<ServerToolResult>(&part)) {
         const auto found = server_pending.find(server_result->tool_use_id);
         if (!assistant || found == server_pending.end() || !matching_result(found->second, server_result->wire_type) || !server_result->content) return bad("server result lacks unique server ownership");
@@ -626,6 +706,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (auto error = build(body)) return *error;
   result.context = std::move(context);
   result.max_output_tokens = effective.max_output_tokens;
+  result.cache_marks = mark_report;
   // Only the tools the service runs add model invocations; the caller runs memory, bash and the toolsets.
   for (const auto& tool : request.tools) if (const auto* fact = tool.type.empty() ? nullptr : fact_of(tool.type); fact && !fact->client) {
     if (!tool.max_uses || !result.model_invocation_limit ||

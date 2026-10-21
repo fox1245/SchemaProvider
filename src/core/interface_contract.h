@@ -45,10 +45,15 @@ inline constexpr std::uint64_t CompletionSecret = 1ULL << 12;
 // Executor without the virtual, so a host that supplies its own executor requires this bit itself; the bit is not
 // part of RequiredProvider, which a consumer that never uses the seam keeps meeting.
 inline constexpr std::uint64_t HostSeam = 1ULL << 13;
+// Text, Media and ToolResult carry `cache`, Messages tool definitions carry `cache` and a Messages request carries
+// `system_blocks`: the typed cache marks. A library built before them has smaller part and request layouts, which a
+// consumer built with this header would read past, so it lacks this bit and a require_interface_contract call with
+// RequiredProvider refuses it.
+inline constexpr std::uint64_t PartCacheMarks = 1ULL << 14;
 inline constexpr std::uint64_t RequiredProvider = TypedRuntime | PreparedAdmission |
     NullableUsage | All5Native | TrustedArchive | OrderedWireEvents | NativeSocketRuntime |
     RetainedJsonSize | CompleteAttemptEvidence | OpenRouterRoutingMaxPrice | ErrorReason | PolicyAdmittedExtensions |
-    CompletionSecret;
+    CompletionSecret | PartCacheMarks;
 }
 InterfaceContract core_interface_contract() noexcept;
 std::uint32_t codec_interface_revision() noexcept;

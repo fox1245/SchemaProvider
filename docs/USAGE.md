@@ -391,7 +391,7 @@ What the declaration keeps: the served identity must still stay the same for the
 | Request type / header | Family-specific fields besides model, messages and tools |
 |---|---|
 | `sp::chat::Request`, `<codecs/chat.h>` | `temperature`, `top_p`, `max_output_tokens`, scalar `reasoning_effort`, `service_tier`, `provider`, `response_format`, `modalities`, `audio`, OpenRouter `image_config`, `reasoning`, `include_reasoning`, `usage_include`, alternative `models`, `plugins`; choose either simple `messages` or ordered `canonical_messages`, never both. |
-| `sp::messages::Request`, `<codecs/messages_request.h>` | `system`, `account_scope`, **`max_tokens`**, `thinking_budget`, `thinking_mode`, `output_effort`, `cache_control`, `tool_choice`, `temperature`, `top_p`, `provider`, `container`. |
+| `sp::messages::Request`, `<codecs/messages_request.h>` | `system` or `system_blocks`, `account_scope`, **`max_tokens`**, `thinking_budget`, `thinking_mode`, `output_effort`, `cache_control`, `tool_choice`, `temperature`, `top_p`, `provider`, `container`. |
 | `sp::responses::Request`, `<codecs/responses_request.h>` | `instructions`, `account_scope`, `max_output_tokens`, `reasoning` (`effort`, `summary`), `required_tool`, `service_tier`, `temperature`, `top_p`, `store`, `response_format`, `provider`, `hosted_tools`, `max_tool_calls`, `previous_response_id`, `previous_response_history`, `parallel_tool_calls`, `verbosity`, `truncation`, `include`, `modalities`, `image_config`, `mcp_approvals`, `plugins`. |
 | `sp::gemini::Request`, `<codecs/gemini_request.h>` | `system`, `account_scope`, `max_output_tokens`, `thinking_budget`, typed `thinking_level`, `include_thoughts`, `temperature`, `safety_settings`, `tool_choice`, `required_tool`, `history_mode`, `response_modalities`, `speech_config`, `image_config`, `audio_transcription_config`, `audio_format`, `builtin_tools`, `mcp_servers`, `server_tool_invocations`, `retrieval_config`. |
 | `sp::interactions::Request`, `<codecs/interactions_request.h>` | `system`, `account_scope`, `max_output_tokens`, `thinking_level`, `thinking_summaries`, `service_tier`, `required_tool`, typed `response_format`, `speech_config`, `transcription_config`, `builtin_tools`, `previous_interaction_id`, `store`, `video_task`, `background`, `agent`, `lifecycle`, `interaction_id`. |
@@ -560,7 +560,7 @@ request.cache_control = sp::messages::CacheControl{sp::messages::CacheTtl::FiveM
 request.tool_choice = sp::messages::ToolChoice{sp::messages::ToolChoiceMode::Auto};
 ```
 
-`OutputEffort` is Low/Medium/High/Max. `CacheControl` requests ephemeral cache control with optional `CacheTtl::FiveMinutes`/`OneHour`; unset TTL emits no duration. This does not promise a cache hit or known cache usage. Tool choice is Auto/Any/None/Tool with an optional parallel-use flag. Named Tool requires a declared client tool: a custom tool, or a typed tool the caller runs, such as `memory`. The SDK currently rejects forced Any/Tool with enabled thinking, and None cannot carry the parallel-use flag. `provider` routing requires an admitted OpenRouter Messages origin.
+`OutputEffort` is Low/Medium/High/Max. `CacheControl` requests ephemeral cache control with optional `CacheTtl::FiveMinutes`/`OneHour`; unset TTL emits no duration. This does not promise a cache hit or known cache usage. `request.cache_control` asks the service to place the breakpoint at the end of the prompt; to place it elsewhere, mark a part (see [Cache marks](#cache-marks)), and the request-level member is then left out. Tool choice is Auto/Any/None/Tool with an optional parallel-use flag. Named Tool requires a declared client tool: a custom tool, or a typed tool the caller runs, such as `memory`. The SDK currently rejects forced Any/Tool with enabled thinking, and None cannot carry the parallel-use flag. `provider` routing requires an admitted OpenRouter Messages origin.
 
 A Messages server tool (`ToolDefinition` with a `type` the policy lists, such as `web_search_20260318`) takes options. Each is sent only when it is set, and the service judges whether that tool version accepts it:
 - `allowed_callers` (`{"direct"}`): the `_20260318` web tools default to programmatic callers, and a model without programmatic tool calling (`claude-haiku-4-5`) refuses them with HTTP 400 unless `direct` is listed;
@@ -607,6 +607,46 @@ request.tool_choice = sp::gemini::ToolChoice{sp::gemini::ToolChoiceMode::None};
 Safety categories are Harassment/HateSpeech/SexuallyExplicit/DangerousContent/CivicIntegrity; thresholds are BlockNone/BlockOnlyHigh/BlockMediumAndAbove/BlockLowAndAbove/Off. Duplicate categories and invalid values reject. These are explicit service controls, not a safety guarantee about returned content.
 
 The immutable family policy's `temperature_forbidden_model_prefixes` supplies model facts. Matching is ASCII case-insensitive against the full model or the suffix after its final `/`, so a gateway namespace does not bypass a prohibition. The embedded OpenAI facts cover gpt-5/gpt-6/o1/o3/o4 prefixes. Messages facts list the known Claude models and add the optional `temperature_forbidden_generations`, a rule by generation: every model of the `claude-` series from generation 4.7 on refuses `temperature`, whatever its family word (`opus`, `sonnet`, `haiku`, `fable` or one not yet released), dated suffix, gateway namespace or dotted gateway version (`anthropic/claude-opus-4.7`). The generation is the first one or two numbers of one or two digits after the series, so `claude-haiku-5-5` is 5.5 and `claude-opus-4-20250514` is 4.0 (a longer number is a date). A Claude id whose generation cannot be read is treated as the newest one and refused, which costs an omitted optional control instead of an HTTP 400. A snapshot without the key keeps only its listed prefixes. Loading a different closed policy creates a new identity, not a live edit to an existing client's behavior. Read the admitted facts for the selected deployment; do not guess temperature support from a model name alone.
+
+## Cache marks
+
+A cache mark names a breakpoint in the prompt: the provider may read the prompt up to and including the marked part from its prompt cache instead of processing it again. `sp::CacheControl{ttl}` (`<core/cache_control.h>`; `messages::CacheControl` is the same type) carries an optional `CacheTtl::FiveMinutes` or `OneHour`, and an unset TTL leaves the provider's default of five minutes. A mark does not promise a hit: the provider caches only a prompt of at least its minimum length (512 to 4096 tokens, by model), and a mark on a shorter prompt is accepted and caches nothing. A 1-hour write costs more than a 5-minute one, and a read costs less than the base price; the multipliers are in the policy (below).
+
+```cpp
+sp::Text stable{reference_text};
+stable.cache = sp::CacheControl{sp::CacheTtl::OneHour};   // the prompt through this part is a breakpoint
+sp::messages::Request request;
+request.system_blocks = {{rules_text, sp::CacheControl{sp::CacheTtl::OneHour}}, {"Answer briefly.", std::nullopt}};
+request.messages.push_back(sp::Message{{}, sp::Role::User, {stable, sp::Text{this_turns_question}}});
+```
+
+**Where a mark goes.**
+
+| Family | Carriers |
+|---|---|
+| Messages | `Text::cache`, `Media::cache` (an image or a document), `ToolResult::cache` (the result block, which covers its content parts), `messages::SystemBlock::cache` in `Request::system_blocks`, and `messages::ToolDefinition::cache`. |
+| Chat | `Text::cache` of a text part in `canonical_messages`, system and developer messages included. The simple `messages` form has no part to mark. Another part kind with a mark is `Unsupported` where the origin takes marks. |
+| Responses, Generate, Interactions | None: their caches are implicit. A mark is dropped and counted, or refused, as the policy says. |
+
+A mark inside `ToolResult::content_parts` is `Unsupported` on Messages: the service refuses a `cache_control` inside `tool_result.content` and wants it on the result. Thinking blocks and tool calls take none. A mark on a text part with no text is `InvalidRequest`, because the service refuses it. Marks live on the request only: a part the codec returns has none, and a mark is not part of a message's native seal or content digest.
+
+**Limits, from the policy.** `descriptor::cache_capabilities(descriptor, model)` (and `DescriptorPolicy::cache_capabilities(family, origin, model)`) answers what the descriptor's family does with a mark at its origin for that model, or `std::nullopt` when the policy states nothing:
+- `supports_explicit`: marks are written. False for a provider whose cache is implicit.
+- `max_breakpoints`: the most marks in one request (4 on Messages and on Anthropic's route at OpenRouter). More are `InvalidRequest` at prepare, never dropped. The request-level `cache_control` is one more mark only when it is sent, and it is sent only when no part carries a mark, so the two never add up.
+- `five_minutes`, `one_hour`: whether each lifetime is offered, with its `write_multiplier` (1.25 and 2 as a multiple of the base input price where the policy states them). A lifetime the origin does not offer is `Unsupported`. `cache_marks::lifetime(capabilities, ttl)` and `cache_marks::write_multiplier(capabilities, ttl)` (`<core/cache_marks.h>`) read the fact for a mark's TTL, where an unset TTL is five minutes.
+- `longest_first`: a longer lifetime may not follow a shorter one in prompt order, which is tools, then system, then messages. An unset TTL counts as five minutes. The refusal is `InvalidRequest`.
+- `min_cacheable_tokens`: the shortest prompt the origin caches, where the policy states one. It is a floor for the family and origin; a model may need more, so treat it as advice.
+- `ignore_unsupported`: without explicit support, a mark is dropped and reported instead of refused.
+
+A fact is chosen by origin, and at an OpenRouter origin also by the model's route (`anthropic/`, `google/`): the first fact of the family's `cache` list whose `origins` and `routes` match. The shipped policy has marks on Messages at every origin and at OpenRouter's Anthropic route (4 marks, both lifetimes), one mark of 5 minutes on its Google route, and nothing elsewhere: Chat to other routes and to the vendor's own origin, Responses, Generate and Interactions drop the marks. A policy without a `cache` list, or with none that matches, admits no marks, and a request that carries one is `Unsupported`; a request that carries none is not affected.
+
+**What was done with them.** `PreparedRequest::cache_marks()` returns a `CacheMarkReport` of what the encoder did: `requested` marks on the parts it sends (a mark on a message the history drops before a compaction block is not counted), `emitted` marks written, and `tail_suppressed` when `request.cache_control` was left out for them. A mark the policy says to ignore is requested and not emitted, and `request.cache_control` is then sent as before. A `cache_control` written inside a block or a tool's options (`search_result`, a toolset) counts toward the limit and the order once a typed mark is present; it never asks the policy, and a request without typed marks is unchanged.
+
+**Replay.** Marks are a billing control, not part of what the conversation means, so they do not enter the configuration or content digest: a host may move, add or drop marks between turns and captured history stays replayable. A system prompt given as `system_blocks` is bound by its text, as `system` is. The request-level `cache_control` keeps the binding it has.
+
+**Usage.** The service reports what it did in the usage object: `Usage::cache_read` and `cache_write` (`cache_read_input_tokens`, `cache_creation_input_tokens`), and on Messages the split by lifetime in `Usage::extra` (`cache_creation.ephemeral_5m_input_tokens`, `cache_creation.ephemeral_1h_input_tokens`). Chat reads `prompt_tokens_details.cached_tokens` and `cache_write_tokens`. Compare `cache_read` with the tokens before the breakpoint to see whether a mark hit.
+
+**Policy data.** The `cache` member of a family in `descriptor-policy.json` lists facts: `origins` (all when absent), `routes` (model id prefixes at the family's OpenRouter origins; all when absent), `explicit`, and for an explicit fact `max_breakpoints` (1 to 16), `ttls` (`"5m"`, `"1h"`), `write_multiplier` by TTL and `longest_first`; for a fact without explicit marks `unsupported` (`"ignore"` or `"reject"`, the default). `min_cacheable_tokens` is optional. The loader refuses an unknown member, a fact after one for every origin and model, and routes outside a declared OpenRouter origin. Cache facts are admission data: they change the policy's content digest and not its replay identity.
 
 ## OpenRouter plugins and citations
 
