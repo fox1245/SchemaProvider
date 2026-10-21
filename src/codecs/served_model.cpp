@@ -5,7 +5,7 @@
 namespace sp::served {
 namespace {
 // "-" and a suffix of digits and dashes that starts with a digit: dated snapshots
-// (claude-haiku-4-5-20251001, gpt-5-nano-2025-08-07) and numbered versions (gemini-2.5-flash-001).
+// (claude-haiku-4-5-20251001) and numbered versions (gemini-2.5-flash-001).
 bool snapshot(std::string_view requested, std::string_view served) noexcept {
   if (served.size() < requested.size() + 2 || !served.starts_with(requested) || served[requested.size()] != '-') return false;
   const auto suffix = served.substr(requested.size() + 1);

@@ -11,7 +11,7 @@
 namespace sp::speech {
 struct Request {
   std::string model, input, voice;
-  // How to speak (OpenAI `gpt-4o-mini-tts` and later, OpenRouter models that take it).
+  // How to speak, for the models that take it (the provider says which).
   std::optional<std::string> instructions{};
   // The audio format, a token the provider defines (`mp3`, `wav`, `opus`, `pcm`).
   std::optional<std::string> format{};
