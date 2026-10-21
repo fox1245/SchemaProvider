@@ -74,4 +74,11 @@ class Codec {
   std::optional<uint64_t> started_output_;
   size_t input_bytes_ = 0;
 };
+// The usage a Messages codec reads from a `usage` object (an API response's, or a client that reports the same
+// object, such as a coding agent's result event), as JSON text: the counters, the cache and tool details, the
+// compaction iterations and the provider cost, normalized exactly as a call's usage is, with stage Final. It is the
+// codec's own decoder run over a minimal message that carries the object, so there is no second reading of the
+// keys. A descriptor of another family, text that is not a JSON object, or an object without the counters a
+// response carries (`input_tokens` and `output_tokens`) is an Error.
+std::variant<Usage, Error> decode_usage(const descriptor::ValidatedDescriptor&, std::string_view usage_json);
 } // namespace sp::messages

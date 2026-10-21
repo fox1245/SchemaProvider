@@ -1,4 +1,5 @@
 #include "codecs/messages.h"
+#include "codecs/messages_request.h"
 #include "codecs/provider_cost.h"
 #include "codecs/reason.h"
 #include "codecs/served_model.h"
@@ -694,5 +695,42 @@ void Codec::finish(Close close) {
   if (!begun_ || !stopped_ || (mode_ == Mode::Sse && !done_)) { fail(ErrorKind::Truncated, "missing Messages terminal evidence"); return; }
   if (!all_blocks_closed() || !emit(MessageSeal{{0}})) return;
   emit(Commit{mode_ == Mode::Sse ? "messages.stop_reason+message_stop+normal_close" : "messages.stop_reason+normal_close"});
+}
+std::variant<Usage, Error> decode_usage(const descriptor::ValidatedDescriptor& descriptor, std::string_view usage_json) {
+  const auto required = [] {
+    Error error{ErrorKind::ProtocolCorrupt, "usage object required"};
+    error.reason = std::string(reason::code(reason::Source::Messages, error.safe_message));
+    return error;
+  };
+  if (descriptor.family() != "anthropic.messages") {
+    Error error{ErrorKind::Misuse, "usage decoding is for the Messages family"};
+    error.reason = std::string(reason::code(reason::Source::Messages, error.safe_message));
+    return error;
+  }
+  const auto& resources = descriptor.policy()->resources();
+  auto parsed = json::parse(usage_json, {resources.json_bytes, resources.json_depth});
+  auto* document = std::get_if<json::Document>(&parsed);
+  if (!document || !document->root().is_object()) return required();
+  // The object sits where the descriptor says a response keeps it.
+  std::string nested(usage_json);
+  const auto& path = descriptor.usage_path();
+  for (auto member = path.rbegin(); member != path.rend(); ++member) nested = "{" + json::quote(*member) + ":" + nested + "}";
+  const std::string body = nested.substr(0, nested.size() - 1) +
+      R"(,"type":"message","id":"usage","role":"assistant","model":"usage","content":[],"stop_reason":"end_turn","stop_sequence":null})";
+  // The codec reads a response against the request's context, so a minimal request supplies one.
+  Request request;
+  request.model = "usage";
+  request.account_scope = "usage";
+  request.messages.push_back(Message::user_text("."));
+  auto encoded = encode(descriptor, request, false);
+  if (auto* failure = std::get_if<Error>(&encoded)) return std::move(*failure);
+  const SemanticLimits limits;
+  Accumulator accumulator(limits);
+  Codec codec(descriptor, Mode::Buffered, accumulator, std::get<EncodedRequest>(encoded).context, limits);
+  codec.buffered(body, Close{});
+  const auto& outcome = accumulator.outcome();
+  if (const auto* completion = outcome ? std::get_if<Completion>(&*outcome) : nullptr) return completion->usage;
+  if (const auto* failure = outcome ? std::get_if<Failure>(&*outcome) : nullptr) return failure->error;
+  return required();
 }
 } // namespace sp::messages
