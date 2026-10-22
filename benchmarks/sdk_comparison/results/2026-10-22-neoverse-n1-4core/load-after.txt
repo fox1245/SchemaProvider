@@ -1,0 +1,6 @@
+Thu Oct 22 01:06:08 UTC 2026
+0.32 1.11 1.23 1/283 2892089
+    PID %CPU COMMAND
+2892026 28.1 /usr/lib/systemd/systemd --user
+ 147701  0.0 /snap/oracle-cloud-agent/current/plugins/gomon/gomon
+ 147734  0.0 /snap/oracle-cloud-agent/current/plugins/unifiedmonitoring/unifiedmonitoring
