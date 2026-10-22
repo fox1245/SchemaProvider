@@ -1,0 +1,10 @@
+{
+ "flag_new_connections": {
+  "vercel-ai": "The cause was not established; the new connections were almost all on streamed requests."
+ },
+ "comments": {
+  "any-llm": "in this session only the Anthropic cells opened connections inside the window, buffered and streamed, at concurrency 32 and 128; the manifest's wording about streamed requests dates from the smoke runs.",
+  "aisuite": "cells with new connections were at concurrency 32 and 128, on both routes; for the Anthropic buffered call the concurrency in flight is also capped by asyncio's default thread pool, as the note says.",
+  "rust-genai": "streamed cells opened new connections at every concurrency: on the Messages route about 300 of roughly 1,000 requests at concurrency 1 (301 to 304 in the three repetitions), 46 at concurrency 128; on the Chat route 4 to 65 at concurrency 1 and 132 to 140 at 128."
+ }
+}
