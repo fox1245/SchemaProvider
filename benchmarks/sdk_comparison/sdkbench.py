@@ -6,6 +6,9 @@ Python 3.10+ standard library only. See README.md for the method and the line pr
   sdkbench.py run   --install DIR --out DIR [--contenders ...] [--apis ...] [--modes ...] [--concurrency ...] [--reps N]
   sdkbench.py cold  --install DIR --out DIR [--contenders ...] [--reps N]
   sdkbench.py sizes --install DIR --out DIR [--contenders ...]
+
+Replay: `run --workload workload-replay.json --replay replay/recordings/DATE` answers every request with a recorded provider
+response instead of the generated one (see replay/README.md).
 """
 from __future__ import annotations
 
@@ -34,11 +37,29 @@ MAX_WARM_ROUNDS = 8
 # ----------------------------------------------------------------------------------------------------------------
 # workload and manifest
 
-def load_workload() -> dict:
-    w = json.loads((HARNESS / "workload.json").read_text())
+def load_workload(path: Path) -> dict:
+    w = json.loads(path.read_text())
     w["user"] = w["user_prefix"] + "x" * w["user_payload_bytes"]
     w["expect"] = w["response_prefix"] + "x" * w["response_payload_bytes"]
     return w
+
+
+def load_replay(directory: Path, w: dict, apis: list[str], modes: list[str]) -> dict:
+    """The recorded responses for every selected api and mode. They must all carry the text in reply.txt, which becomes the
+    text every client has to reproduce; the number of stream deltas differs between recordings, so it is not checked."""
+    text = (directory / "reply.txt").read_text()
+    digest = hashlib.sha256(text.encode()).hexdigest()
+    files = {}
+    for api in apis:
+        for mode in modes:
+            path = directory / f"{api}-{mode}.json"
+            meta = json.loads(path.read_text())
+            if meta["api"] != api or meta["mode"] != mode or meta["text_sha256"] != digest or not meta["recordings"]:
+                raise SystemExit(f"{path}: not a recording of {api}/{mode} with the text of reply.txt")
+            files[(api, mode)] = {"path": path, "file": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                                  "model": meta["model"], "recorded_utc": meta["recorded_utc"], "recordings": len(meta["recordings"])}
+    w["expect"] = text
+    return {"directory": directory.name, "reply_sha256": digest, "files": files}
 
 
 def load_contenders(install: Path, only: list[str] | None) -> list[dict]:
@@ -137,7 +158,8 @@ def stop(proc: subprocess.Popen | None) -> None:
 
 
 class Peer:
-    def __init__(self, workload: dict, api: str, mode: str, *, alpn: str, node: str, cpus: str | None, workdir: Path, barrier: int = 0, workers: int = 1):
+    def __init__(self, workload: dict, api: str, mode: str, *, alpn: str, node: str, cpus: str | None, workdir: Path, barrier: int = 0, workers: int = 1,
+                 replay_file: Path | None = None):
         w = workload
         cfg = {
             "family": w["apis"][api]["family"], "case": "text", "payload_bytes": w["user_payload_bytes"],
@@ -150,6 +172,8 @@ class Peer:
             cfg["warm_barrier"] = barrier
         if workers > 1:
             cfg["workers"] = workers
+        if replay_file:
+            cfg["replay_file"] = str(replay_file)
         self.cfg_path = workdir / f"peer-{api}-{mode}.json"
         self.cfg_path.write_text(json.dumps(cfg))
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
@@ -203,7 +227,7 @@ def client_argv(c: dict, w: dict, peer: Peer, api: str, mode: str, *, concurrenc
         "--api", api, "--mode", mode, "--concurrency", str(concurrency), "--warmup", str(warmup), "--requests", str(requests),
         "--base-prefix", peer.origin + w["apis"][api]["path_prefix"], "--ca", peer.ca, "--model", w["model"],
         "--system", w["system"], "--user", w["user"], "--max-tokens", str(w["max_tokens"]), "--expect", w["expect"],
-        "--chunks", str(w["stream_chunks"] if mode == "stream" else 1), "--api-key", w["api_key"],
+        "--chunks", str(0 if getattr(client_argv, "replay", None) else w["stream_chunks"] if mode == "stream" else 1), "--api-key", w["api_key"],
     ]
     argv += list(c.get("args", []))
     argv += list(getattr(client_argv, "extra", []))  # experiments only; recorded in session.json
@@ -246,6 +270,7 @@ def provenance(args, install: Path, contenders: list[dict], session: Path) -> di
         if p and p.exists():
             installed[c["id"]] = json.loads(p.read_text())
     scripts = {n: hashlib.sha256((HARNESS / n).read_bytes()).hexdigest() for n in ("sdkbench.py", "render.py", "workload.json", "contenders.json") if (HARNESS / n).exists()}
+    scripts[args.workload_path.name] = hashlib.sha256(args.workload_path.read_bytes()).hexdigest()
     scripts["benchmark_peer.mjs"] = hashlib.sha256(PEER.read_bytes()).hexdigest()
     return {
         "schema": SCHEMA,
@@ -260,7 +285,9 @@ def provenance(args, install: Path, contenders: list[dict], session: Path) -> di
             "rustc": first_line(sh([str(install / "rust" / "cargo" / "bin" / "rustc"), "--version"])) or first_line(sh(["rustc", "--version"])),
             "openssl": sh(["openssl", "version"]), "libcurl": first_line(sh(["curl-config", "--version"])),
         },
-        "script_sha256": scripts, "installed": installed, "session": session.name,
+        "script_sha256": scripts, "installed": installed, "session": session.name, "workload_file": args.workload_path.name,
+        "replay": None if not args.replay_info else {**args.replay_info, "files": {f"{a}/{m}": {k: v for k, v in f.items() if k != "path"}
+                                                                                  for (a, m), f in args.replay_info["files"].items()}},
     }
 
 
@@ -300,7 +327,9 @@ def run_cell(c: dict, w: dict, api: str, mode: str, conc: int, rep: int, args, p
     peer = client = None
     try:
         cap = c.get("concurrency_cap_note", {}).get(f"{api}/{mode}")
-        peer = Peer(w, api, mode, alpn=alpn, node=args.node, cpus=args.peer_cpus, workdir=work, barrier=0 if cap else conc, workers=args.peer_workers)
+        replay = args.replay_info["files"][(api, mode)] if args.replay_info else None
+        peer = Peer(w, api, mode, alpn=alpn, node=args.node, cpus=args.peer_cpus, workdir=work, barrier=0 if cap else conc, workers=args.peer_workers,
+                    replay_file=replay["path"] if replay else None)
         argv = taskset(args.client_cpus, client_argv(c, w, peer, api, mode, concurrency=conc, warmup=warmup, requests=requests, cold=False))
         home = scratch_home(session)
         client = spawn(argv, env=client_env(peer, w, c.get("env", {}), home), stderr_path=session / "logs" / f"{cid}.stderr", cwd=home)
@@ -343,7 +372,8 @@ def run_cell(c: dict, w: dict, api: str, mode: str, conc: int, rep: int, args, p
     raw = session / "samples" / f"{cid}.json.gz"
     with gzip.open(raw, "wt") as f:
         json.dump(samples, f)
-    d = {k: delta(s0, s1, k) for k in ("requests", "h1", "h2", "invalid", "connections", "tls_errors", "response_bytes", "request_bytes")}
+    d = {k: delta(s0, s1, k) for k in ("requests", "h1", "h2", "invalid", "connections", "tls_errors", "response_bytes", "request_bytes",
+                                       "replays", "replay_scheduled_us", "replay_late_us")}
     barrier_timeouts = s1.get("barrier_timeouts", 0)
     peer_cpu_us = delta(s0, s1, "cpu_user_us") + delta(s0, s1, "cpu_system_us")
     wall_ns = result["wall_ns"]
@@ -358,6 +388,8 @@ def run_cell(c: dict, w: dict, api: str, mode: str, conc: int, rep: int, args, p
         reasons.append(f"peer rejected {d['invalid']} requests")
     if d["h2"]:
         reasons.append(f"{d['h2']} requests used HTTP/2")
+    if args.replay_info and d["replays"] != requests:
+        reasons.append(f"peer replayed {d['replays']} recordings in the window, expected {requests}")
     flags = []
     if d["tls_errors"]:
         message = f"{d['tls_errors']} TLS handshakes were abandoned by the client"
@@ -384,6 +416,10 @@ def run_cell(c: dict, w: dict, api: str, mode: str, conc: int, rep: int, args, p
         "peer": {"window": d, "cpu_us": peer_cpu_us, "serving_processes": args.peer_workers, "cpu_utilization": peer_cpu_us / (wall_ns / 1000.0) if wall_ns else None,
                  "observed": s1.get("observed"), "alpn": alpn},
         "connection_reuse_expected": reuse,
+        "replay": None if not args.replay_info else {
+            "file": replay["file"], "sha256": replay["sha256"], "model": replay["model"],
+            "scheduled_mean_us": d["replays"] and d["replay_scheduled_us"] / d["replays"],
+            "late_mean_us": d["replays"] and d["replay_late_us"] / d["replays"]},
         "warm_rounds": rounds, "warm_settled": s0["connections"] == previous, "runner_wall_s": t_done - t_go, "start_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     })
     return record
@@ -503,6 +539,8 @@ def main() -> int:
     ap.add_argument("--timeout", type=float, default=900.0, help="per-cell seconds")
     ap.add_argument("--try-na", action="store_true", help="run cells that the manifest declares n/a (to confirm the reason)")
     ap.add_argument("--client-args", default="", help="extra arguments appended to every client's command line (experiments; recorded)")
+    ap.add_argument("--workload", default="workload.json", help="workload file, relative to this directory (default: workload.json)")
+    ap.add_argument("--replay", help="directory of recorded provider responses (replay/recordings/DATE); the run phase only")
     args = ap.parse_args()
 
     install = Path(args.install).expanduser().resolve()
@@ -511,7 +549,14 @@ def main() -> int:
     session = Path(args.out).expanduser().resolve()
     for sub in ("samples", "logs", "work"):
         (session / sub).mkdir(parents=True, exist_ok=True)
-    w = load_workload()
+    args.workload_path = HARNESS / args.workload
+    w = load_workload(args.workload_path)
+    args.replay_info = None
+    if args.replay:
+        if args.phase != "run":
+            raise SystemExit("--replay applies to the run phase only")
+        args.replay_info = load_replay(Path(args.replay).expanduser().resolve(), w, args.apis.split(","), args.modes.split(","))
+    client_argv.replay = bool(args.replay_info)
     contenders = load_contenders(install, args.contenders.split(",") if args.contenders else None)
     levels = [int(x) for x in args.concurrency.split(",")] if args.concurrency else w["concurrency_levels"]
     client_argv.extra = args.client_args.split()

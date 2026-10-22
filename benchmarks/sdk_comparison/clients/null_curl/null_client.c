@@ -145,6 +145,11 @@ static void begin(Run *r, Slot *slot, int index) {
 static void check_reply(Run *r, const Slot *slot, int measured) {
   size_t len = slot->len;
   int events = count_events(slot->buf, len);
+  if (r->cfg->chunks == 0) { /* replay: recorded replies differ in length and event count; check each one on its own */
+    int ok = !strcmp(r->cfg->mode, "stream") ? events > 0 : strstr(slot->buf, r->cfg->expect) != NULL;
+    if (!ok) { if (measured) r->verify_failed++; fail(r, "reply does not carry the expected text"); }
+    return;
+  }
   if (!r->ref_len) { /* the first reply defines the shape, and must carry the expected text */
     int ok = !strcmp(r->cfg->mode, "stream") ? events >= r->cfg->chunks : strstr(slot->buf, r->cfg->expect) != NULL;
     if (!ok) { if (measured) r->verify_failed++; fail(r, "first reply does not carry the expected text"); return; }

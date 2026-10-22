@@ -60,7 +60,7 @@ def emit(obj: dict) -> None:
 
 def verify(args, payload) -> bool:
     if args.mode == "stream":
-        return isinstance(payload, list) and len(payload) == args.chunks and "".join(payload) == args.expect
+        return isinstance(payload, list) and (args.chunks == 0 or len(payload) == args.chunks) and "".join(payload) == args.expect
     return payload == args.expect
 
 

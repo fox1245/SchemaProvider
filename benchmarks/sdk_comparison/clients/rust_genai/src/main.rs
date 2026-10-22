@@ -196,7 +196,7 @@ async fn run_phase(client: Arc<Client>, a: Arc<Args>, count: usize, record: bool
 }
 
 fn verify(a: &Args, text: &str, deltas: usize) -> bool {
-    text == a.expect && (a.mode != "stream" || deltas == a.chunks)
+    text == a.expect && (a.mode != "stream" || a.chunks == 0 || deltas == a.chunks)
 }
 
 fn read_line() -> String {
