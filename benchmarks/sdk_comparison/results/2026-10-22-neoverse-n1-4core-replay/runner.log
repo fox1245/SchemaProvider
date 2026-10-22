@@ -1,0 +1,226 @@
+[cell] null-curl.openai.buffered.c1.r0: ok 
+[cell] null-curl.openai.buffered.c1.r1: ok 
+[cell] null-curl.openai.buffered.c16.r0: ok 
+[cell] null-curl.openai.buffered.c16.r1: ok 
+[cell] null-curl.openai.buffered.c128.r0: ok 
+[cell] null-curl.openai.buffered.c128.r1: ok 
+[cell] null-curl.openai.stream.c1.r0: ok 
+[cell] null-curl.openai.stream.c1.r1: ok 
+[cell] null-curl.openai.stream.c16.r0: ok 
+[cell] null-curl.openai.stream.c16.r1: ok 
+[cell] null-curl.openai.stream.c128.r0: ok 
+[cell] null-curl.openai.stream.c128.r1: ok 
+[cell] null-curl.anthropic.buffered.c1.r0: ok 
+[cell] null-curl.anthropic.buffered.c1.r1: ok 
+[cell] null-curl.anthropic.buffered.c16.r0: ok 
+[cell] null-curl.anthropic.buffered.c16.r1: ok 
+[cell] null-curl.anthropic.buffered.c128.r0: ok 
+[cell] null-curl.anthropic.buffered.c128.r1: ok 
+[cell] null-curl.anthropic.stream.c1.r0: ok 
+[cell] null-curl.anthropic.stream.c1.r1: ok 
+[cell] null-curl.anthropic.stream.c16.r0: ok 
+[cell] null-curl.anthropic.stream.c16.r1: ok 
+[cell] null-curl.anthropic.stream.c128.r0: ok 
+[cell] null-curl.anthropic.stream.c128.r1: ok 
+[cell] sp.openai.buffered.c1.r0: ok 
+[cell] sp.openai.buffered.c1.r1: ok 
+[cell] sp.openai.buffered.c16.r0: ok 
+[cell] sp.openai.buffered.c16.r1: ok 
+[cell] sp.openai.buffered.c128.r0: ok 
+[cell] sp.openai.buffered.c128.r1: ok 
+[cell] sp.openai.stream.c1.r0: ok 
+[cell] sp.openai.stream.c1.r1: ok 
+[cell] sp.openai.stream.c16.r0: ok 
+[cell] sp.openai.stream.c16.r1: ok 
+[cell] sp.openai.stream.c128.r0: ok 
+[cell] sp.openai.stream.c128.r1: ok 
+[cell] sp.anthropic.buffered.c1.r0: ok 
+[cell] sp.anthropic.buffered.c1.r1: ok 
+[cell] sp.anthropic.buffered.c16.r0: ok 
+[cell] sp.anthropic.buffered.c16.r1: ok 
+[cell] sp.anthropic.buffered.c128.r0: ok 
+[cell] sp.anthropic.buffered.c128.r1: ok 
+[cell] sp.anthropic.stream.c1.r0: ok 
+[cell] sp.anthropic.stream.c1.r1: ok 
+[cell] sp.anthropic.stream.c16.r0: ok 
+[cell] sp.anthropic.stream.c16.r1: ok 
+[cell] sp.anthropic.stream.c128.r0: ok 
+[cell] sp.anthropic.stream.c128.r1: ok 
+[cell] ai-sdk-cpp.openai.buffered.na: n/a the SDK's buffered path builds its client from the bare string 'host:port' (cpp-httplib's SSLClient(host) then connects to port 443), so it cannot reach a TLS server on any other port; the peer cannot bind port 443 without privileges, and an unprivileged network namespace is not available on the hosts
+[cell] ai-sdk-cpp.openai.stream.c1.r0: ok 
+[cell] ai-sdk-cpp.openai.stream.c1.r1: ok 
+[cell] ai-sdk-cpp.openai.stream.c16.r0: ok 
+[cell] ai-sdk-cpp.openai.stream.c16.r1: ok 
+[cell] ai-sdk-cpp.openai.stream.c128.r0: ok 
+[cell] ai-sdk-cpp.openai.stream.c128.r1: ok 
+[cell] ai-sdk-cpp.anthropic.buffered.na: n/a the SDK's buffered path builds its client from the bare string 'host:port' (cpp-httplib's SSLClient(host) then connects to port 443), so it cannot reach a TLS server on any other port; the peer cannot bind port 443 without privileges, and an unprivileged network namespace is not available on the hosts
+[cell] ai-sdk-cpp.anthropic.stream.c1.r0: ok 
+[cell] ai-sdk-cpp.anthropic.stream.c1.r1: ok 
+[cell] ai-sdk-cpp.anthropic.stream.c16.r0: ok 
+[cell] ai-sdk-cpp.anthropic.stream.c16.r1: ok 
+[cell] ai-sdk-cpp.anthropic.stream.c128.r0: ok 
+[cell] ai-sdk-cpp.anthropic.stream.c128.r1: ok 
+[cell] rust-genai.openai.buffered.c1.r0: ok 
+[cell] rust-genai.openai.buffered.c1.r1: ok 
+[cell] rust-genai.openai.buffered.c16.r0: ok 
+[cell] rust-genai.openai.buffered.c16.r1: ok 
+[cell] rust-genai.openai.buffered.c128.r0: ok 
+[cell] rust-genai.openai.buffered.c128.r1: ok 
+[cell] rust-genai.openai.stream.c1.r0: ok 
+[cell] rust-genai.openai.stream.c1.r1: ok 
+[cell] rust-genai.openai.stream.c16.r0: ok 
+[cell] rust-genai.openai.stream.c16.r1: ok 
+[cell] rust-genai.openai.stream.c128.r0: ok 
+[cell] rust-genai.openai.stream.c128.r1: ok 
+[cell] rust-genai.anthropic.buffered.c1.r0: ok 
+[cell] rust-genai.anthropic.buffered.c1.r1: ok 
+[cell] rust-genai.anthropic.buffered.c16.r0: ok 
+[cell] rust-genai.anthropic.buffered.c16.r1: ok 
+[cell] rust-genai.anthropic.buffered.c128.r0: ok 
+[cell] rust-genai.anthropic.buffered.c128.r1: ok 
+[cell] rust-genai.anthropic.stream.c1.r0: ok 
+[cell] rust-genai.anthropic.stream.c1.r1: ok 
+[cell] rust-genai.anthropic.stream.c16.r0: ok 
+[cell] rust-genai.anthropic.stream.c16.r1: ok 
+[cell] rust-genai.anthropic.stream.c128.r0: ok 
+[cell] rust-genai.anthropic.stream.c128.r1: ok 
+[cell] openai-py.openai.buffered.c1.r0: ok 
+[cell] openai-py.openai.buffered.c1.r1: ok 
+[cell] openai-py.openai.buffered.c16.r0: ok 
+[cell] openai-py.openai.buffered.c16.r1: ok 
+[cell] openai-py.openai.buffered.c128.r0: ok 
+[cell] openai-py.openai.buffered.c128.r1: ok 
+[cell] openai-py.openai.stream.c1.r0: ok 
+[cell] openai-py.openai.stream.c1.r1: ok 
+[cell] openai-py.openai.stream.c16.r0: ok 
+[cell] openai-py.openai.stream.c16.r1: ok 
+[cell] openai-py.openai.stream.c128.r0: ok 
+[cell] openai-py.openai.stream.c128.r1: ok 
+[cell] openai-py.anthropic.buffered.na: n/a the SDK speaks the OpenAI API only
+[cell] openai-py.anthropic.stream.na: n/a the SDK speaks the OpenAI API only
+[cell] anthropic-py.openai.buffered.na: n/a the SDK speaks the Messages API only
+[cell] anthropic-py.openai.stream.na: n/a the SDK speaks the Messages API only
+[cell] anthropic-py.anthropic.buffered.c1.r0: ok 
+[cell] anthropic-py.anthropic.buffered.c1.r1: ok 
+[cell] anthropic-py.anthropic.buffered.c16.r0: ok 
+[cell] anthropic-py.anthropic.buffered.c16.r1: ok 
+[cell] anthropic-py.anthropic.buffered.c128.r0: ok 
+[cell] anthropic-py.anthropic.buffered.c128.r1: ok 
+[cell] anthropic-py.anthropic.stream.c1.r0: ok 
+[cell] anthropic-py.anthropic.stream.c1.r1: ok 
+[cell] anthropic-py.anthropic.stream.c16.r0: ok 
+[cell] anthropic-py.anthropic.stream.c16.r1: ok 
+[cell] anthropic-py.anthropic.stream.c128.r0: ok 
+[cell] anthropic-py.anthropic.stream.c128.r1: ok 
+[cell] litellm.openai.buffered.c1.r0: ok 
+[cell] litellm.openai.buffered.c1.r1: ok 
+[cell] litellm.openai.buffered.c16.r0: ok 
+[cell] litellm.openai.buffered.c16.r1: ok 
+[cell] litellm.openai.buffered.c128.r0: ok 
+[cell] litellm.openai.buffered.c128.r1: ok 
+[cell] litellm.openai.stream.c1.r0: ok 
+[cell] litellm.openai.stream.c1.r1: ok 
+[cell] litellm.openai.stream.c16.r0: ok 
+[cell] litellm.openai.stream.c16.r1: ok 
+[cell] litellm.openai.stream.c128.r0: ok 
+[cell] litellm.openai.stream.c128.r1: ok 
+[cell] litellm.anthropic.buffered.c1.r0: ok 
+[cell] litellm.anthropic.buffered.c1.r1: ok 
+[cell] litellm.anthropic.buffered.c16.r0: ok 
+[cell] litellm.anthropic.buffered.c16.r1: ok 
+[cell] litellm.anthropic.buffered.c128.r0: ok 
+[cell] litellm.anthropic.buffered.c128.r1: ok 
+[cell] litellm.anthropic.stream.c1.r0: ok 
+[cell] litellm.anthropic.stream.c1.r1: ok 
+[cell] litellm.anthropic.stream.c16.r0: ok 
+[cell] litellm.anthropic.stream.c16.r1: ok 
+[cell] litellm.anthropic.stream.c128.r0: ok 
+[cell] litellm.anthropic.stream.c128.r1: ok 
+[cell] any-llm.openai.buffered.c1.r0: ok 
+[cell] any-llm.openai.buffered.c1.r1: ok 
+[cell] any-llm.openai.buffered.c16.r0: ok 
+[cell] any-llm.openai.buffered.c16.r1: ok 
+[cell] any-llm.openai.buffered.c128.r0: ok 
+[cell] any-llm.openai.buffered.c128.r1: ok 
+[cell] any-llm.openai.stream.c1.r0: ok 
+[cell] any-llm.openai.stream.c1.r1: ok 
+[cell] any-llm.openai.stream.c16.r0: ok 
+[cell] any-llm.openai.stream.c16.r1: ok 
+[cell] any-llm.openai.stream.c128.r0: ok 
+[cell] any-llm.openai.stream.c128.r1: ok 
+[cell] any-llm.anthropic.buffered.c1.r0: ok 
+[cell] any-llm.anthropic.buffered.c1.r1: ok 
+[cell] any-llm.anthropic.buffered.c16.r0: ok 
+[cell] any-llm.anthropic.buffered.c16.r1: ok 
+[cell] any-llm.anthropic.buffered.c128.r0: ok 
+[cell] any-llm.anthropic.buffered.c128.r1: ok 
+[cell] any-llm.anthropic.stream.c1.r0: ok 
+[cell] any-llm.anthropic.stream.c1.r1: ok 
+[cell] any-llm.anthropic.stream.c16.r0: ok 
+[cell] any-llm.anthropic.stream.c16.r1: ok 
+[cell] any-llm.anthropic.stream.c128.r0: ok 
+[cell] any-llm.anthropic.stream.c128.r1: ok 
+[cell] aisuite.openai.buffered.c1.r0: ok 
+[cell] aisuite.openai.buffered.c1.r1: ok 
+[cell] aisuite.openai.buffered.c16.r0: ok 
+[cell] aisuite.openai.buffered.c16.r1: ok 
+[cell] aisuite.openai.buffered.c128.r0: ok 
+[cell] aisuite.openai.buffered.c128.r1: ok 
+[cell] aisuite.openai.stream.c1.r0: ok 
+[cell] aisuite.openai.stream.c1.r1: ok 
+[cell] aisuite.openai.stream.c16.r0: ok 
+[cell] aisuite.openai.stream.c16.r1: ok 
+[cell] aisuite.openai.stream.c128.r0: ok 
+[cell] aisuite.openai.stream.c128.r1: ok 
+[cell] aisuite.anthropic.buffered.c1.r0: ok 
+[cell] aisuite.anthropic.buffered.c1.r1: ok 
+[cell] aisuite.anthropic.buffered.c16.r0: ok 
+[cell] aisuite.anthropic.buffered.c16.r1: ok 
+[cell] aisuite.anthropic.buffered.c128.r0: ok 
+[cell] aisuite.anthropic.buffered.c128.r1: ok 
+[cell] aisuite.anthropic.stream.c1.r0: ok 
+[cell] aisuite.anthropic.stream.c1.r1: ok 
+[cell] aisuite.anthropic.stream.c16.r0: ok 
+[cell] aisuite.anthropic.stream.c16.r1: ok 
+[cell] aisuite.anthropic.stream.c128.r0: ok 
+[cell] aisuite.anthropic.stream.c128.r1: ok 
+[cell] vercel-ai.openai.buffered.c1.r0: ok 
+[cell] vercel-ai.openai.buffered.c1.r1: ok 
+[cell] vercel-ai.openai.buffered.c16.r0: invalid 2 new connections inside the measured window
+[cell] vercel-ai.openai.buffered.c16.r0: invalid 2 new connections inside the measured window
+[cell] vercel-ai.openai.buffered.c16.r1: invalid 2 new connections inside the measured window
+[cell] vercel-ai.openai.buffered.c16.r1: invalid 2 new connections inside the measured window
+[cell] vercel-ai.openai.buffered.c128.r0: invalid 5 new connections inside the measured window
+[cell] vercel-ai.openai.buffered.c128.r0: invalid 6 new connections inside the measured window
+[cell] vercel-ai.openai.buffered.c128.r1: invalid 6 new connections inside the measured window
+[cell] vercel-ai.openai.buffered.c128.r1: invalid 6 new connections inside the measured window
+[cell] vercel-ai.openai.stream.c1.r0: ok 
+[cell] vercel-ai.openai.stream.c1.r1: ok 
+[cell] vercel-ai.openai.stream.c16.r0: invalid 2 new connections inside the measured window
+[cell] vercel-ai.openai.stream.c16.r0: invalid 2 new connections inside the measured window
+[cell] vercel-ai.openai.stream.c16.r1: invalid 1 new connections inside the measured window
+[cell] vercel-ai.openai.stream.c16.r1: invalid 2 new connections inside the measured window
+[cell] vercel-ai.openai.stream.c128.r0: invalid 126 new connections inside the measured window
+[cell] vercel-ai.openai.stream.c128.r0: invalid 128 new connections inside the measured window
+[cell] vercel-ai.openai.stream.c128.r1: invalid 123 new connections inside the measured window
+[cell] vercel-ai.openai.stream.c128.r1: invalid 127 new connections inside the measured window
+[cell] vercel-ai.anthropic.buffered.c1.r0: ok 
+[cell] vercel-ai.anthropic.buffered.c1.r1: ok 
+[cell] vercel-ai.anthropic.buffered.c16.r0: invalid 3 new connections inside the measured window
+[cell] vercel-ai.anthropic.buffered.c16.r0: invalid 3 new connections inside the measured window
+[cell] vercel-ai.anthropic.buffered.c16.r1: invalid 3 new connections inside the measured window
+[cell] vercel-ai.anthropic.buffered.c16.r1: invalid 3 new connections inside the measured window
+[cell] vercel-ai.anthropic.buffered.c128.r0: invalid 4 new connections inside the measured window
+[cell] vercel-ai.anthropic.buffered.c128.r0: invalid 6 new connections inside the measured window
+[cell] vercel-ai.anthropic.buffered.c128.r1: invalid 2 new connections inside the measured window
+[cell] vercel-ai.anthropic.buffered.c128.r1: invalid 2 new connections inside the measured window
+[cell] vercel-ai.anthropic.stream.c1.r0: ok 
+[cell] vercel-ai.anthropic.stream.c1.r1: ok 
+[cell] vercel-ai.anthropic.stream.c16.r0: invalid 1 new connections inside the measured window
+[cell] vercel-ai.anthropic.stream.c16.r0: invalid 1 new connections inside the measured window
+[cell] vercel-ai.anthropic.stream.c16.r1: invalid 2 new connections inside the measured window
+[cell] vercel-ai.anthropic.stream.c16.r1: invalid 1 new connections inside the measured window
+[cell] vercel-ai.anthropic.stream.c128.r0: invalid 21 new connections inside the measured window
+[cell] vercel-ai.anthropic.stream.c128.r0: invalid 23 new connections inside the measured window
+[cell] vercel-ai.anthropic.stream.c128.r1: invalid 17 new connections inside the measured window
+[cell] vercel-ai.anthropic.stream.c128.r1: invalid 24 new connections inside the measured window
