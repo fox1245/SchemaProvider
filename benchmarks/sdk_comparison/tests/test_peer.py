@@ -113,6 +113,39 @@ class PeerTests(unittest.TestCase):
             finally:
                 peer.close()
 
+    def test_replay_sends_each_recording_byte_for_byte_and_not_before_its_offsets(self):
+        import base64
+        pieces = [b'data: {"a":1}\n\n', b'data: {"b":2}\n\n', b"data: [DONE]\n\n"]
+        recordings = [{"status": 200, "headers": [["content-type", "text/event-stream"], ["x-request-id", f"req_bench{i}"]],
+                       "head_us": 40000, "chunks": [[60000 + 30000 * j, base64.b64encode(piece).decode()] for j, piece in enumerate(pieces)],
+                       "body_bytes": sum(map(len, pieces)), "deltas": 2} for i in range(2)]
+        path = Path(self.tmp) / "replay-test.json"
+        path.write_text(json.dumps({"version": 1, "api": "openai", "mode": "stream", "recordings": recordings}))
+        peer = Peer(base_config(expect_streaming=True, replay_file=str(path)), self.tmp)
+        try:
+            ids = []
+            for _ in range(3):
+                t0 = time.monotonic()
+                conn = http.client.HTTPSConnection("127.0.0.1", peer.port, context=peer.context)
+                conn.request("POST", "/openai/chat/text/v1/chat/completions", json.dumps(chat_body(True)),
+                             {"authorization": f"Bearer {KEY}", "content-type": "application/json"})
+                r = conn.getresponse()
+                t_head = time.monotonic() - t0
+                data = r.read()
+                t_end = time.monotonic() - t0
+                conn.close()
+                self.assertEqual(r.status, 200)
+                self.assertEqual(data, b"".join(pieces))
+                self.assertGreaterEqual(t_head, 0.040)
+                self.assertGreaterEqual(t_end, 0.120)
+                ids.append(r.getheader("x-request-id"))
+            self.assertEqual(ids, ["req_bench0", "req_bench1", "req_bench0"])  # the recordings are used in turn
+            st = peer.stats()
+            self.assertEqual(st["replays"], 3)
+            self.assertEqual(st["replay_scheduled_us"], 3 * 120000)
+        finally:
+            peer.close()
+
     def test_requests_that_differ_from_the_workload_are_rejected(self):
         peer = Peer(base_config(expect_streaming=False), self.tmp)
         try:

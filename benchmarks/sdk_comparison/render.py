@@ -186,6 +186,14 @@ def main() -> int:
     if sys.argv[1] == "--smoke":
         return smoke([Path(p) for p in sys.argv[2:]])
     sessions = [Path(p) for p in sys.argv[1:]]
+    replayed = [bool(json.loads((s / "session.json").read_text()).get("replay")) for s in sessions]
+    if any(replayed):
+        if not all(replayed):
+            raise SystemExit("a replay session cannot be rendered together with a mock-reply session")
+        sys.path.insert(0, str(HARNESS / "replay"))
+        from render_replay import render as render_replay  # noqa: E402
+        sys.stdout.write(render_replay(sessions))
+        return 0
     manifest = json.loads((HARNESS / "contenders.json").read_text())["contenders"]
     order = [c["id"] for c in manifest]
     meta = {c["id"]: c for c in manifest}

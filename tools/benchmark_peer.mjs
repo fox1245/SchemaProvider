@@ -23,6 +23,9 @@ for (const key of ['payload_bytes', 'server_delay_ms']) {
 //   workers         serve from this many processes sharing one port (default 1); statistics and the barrier span all of them
 //   warm_barrier    hold the replies to the first N requests until N are in flight at once, so that a warm-up opens N connections
 //   debug_rejections  write the reason and the head of the body of every rejected request to stderr
+//   replay_file     a file written by benchmarks/sdk_comparison/replay/record.mjs: every accepted request is answered with the
+//                   next recording in turn, byte for byte, its head and each body piece written at the recorded offset from the
+//                   end of the request (the generated text, stream_chunks and sse_flush are then unused)
 for (const key of ['response_bytes', 'stream_chunks']) {
   if (config[key] !== undefined && (!Number.isSafeInteger(config[key]) || config[key] < (key === 'stream_chunks' ? 1 : 0))) throw new Error(`invalid ${key}`);
 }
@@ -30,6 +33,16 @@ if (!['single', 'event'].includes(config.sse_flush ?? 'single')) throw new Error
 if (config.workers !== undefined && (!Number.isSafeInteger(config.workers) || config.workers < 1)) throw new Error('invalid workers');
 if (!['both', 'h1'].includes(config.alpn ?? 'both')) throw new Error('invalid alpn');
 const chunkCount = config.stream_chunks ?? 1, flushPerEvent = config.sse_flush === 'event';
+let replay;
+if (config.replay_file !== undefined) {
+  const file = JSON.parse(readFileSync(config.replay_file, 'utf8'));
+  if (file.version !== 1 || !Array.isArray(file.recordings) || !file.recordings.length) throw new Error('invalid replay_file');
+  replay = { next: 0, recordings: file.recordings.map(r => {
+    const pieces = r.chunks.map(([at, data]) => [at, Buffer.from(data, 'base64')]);
+    return { status: r.status, headers: Object.fromEntries(r.headers), head_us: r.head_us, pieces,
+      bytes: pieces.reduce((n, [, b]) => n + b.length, 0), end_us: pieces.length ? pieces.at(-1)[0] : r.head_us };
+  }) };
+}
 let barrierHeld = [], barrierOpen = !(config.warm_barrier > 1), barrierTimer;
 function openBarrier() { barrierOpen = true; clearTimeout(barrierTimer); for (const resume of barrierHeld) resume(); barrierHeld = []; }
 function barrier() {
@@ -55,7 +68,7 @@ const chatReasoning = () => [{ id: 'bench-reasoning', type: 'reasoning.encrypted
   data: signature, format: 'benchmark.synthetic', index: 0 }];
 const count = () => ({ requests: 0, h1: 0, h2: 0, invalid: 0, continuations: 0,
   native_replays: 0, request_bytes: 0, response_bytes: 0 });
-const stats = { version: 1, ...count(), connections: 0, active_connections: 0, tls_errors: 0, barrier_timeouts: 0, cases: {}, observed: { body_keys: {}, header_names: {}, user_agents: {} } };
+const stats = { version: 1, ...count(), connections: 0, active_connections: 0, tls_errors: 0, barrier_timeouts: 0, replays: 0, replay_scheduled_us: 0, replay_late_us: 0, cases: {}, observed: { body_keys: {}, header_names: {}, user_agents: {} } };
 const observe = (table, name) => { if (name in table || Object.keys(table).length < 32) table[name] = (table[name] ?? 0) + 1; };
 const sockets = new Set(), sessions = new Set();
 let directory, server, stopping = false;
@@ -253,6 +266,21 @@ function checkConfigured(family, req, body, streaming) {
     if (system !== config.system_text) throw new Error('system prompt');
   }
 }
+// Answers with one recording: the head at its recorded offset, then every body piece at its own, all measured from t0 (the
+// moment the reply may start). replay_late_us sums how far behind schedule the last write was, so a peer that cannot keep
+// up with the schedule is visible in the record.
+async function replayTo(res, bump) {
+  const rec = replay.recordings[replay.next++ % replay.recordings.length];
+  const t0 = process.hrtime.bigint();
+  const until = at => { const ms = (at * 1000 - Number(process.hrtime.bigint() - t0)) / 1e6; return ms > 0 ? new Promise(r => setTimeout(r, ms)) : null; };
+  await until(rec.head_us);
+  if (res.destroyed) return;
+  res.writeHead(rec.status, rec.headers);
+  for (const [at, data] of rec.pieces) { await until(at); if (res.destroyed) return; res.write(data); }
+  const late = Math.max(0, Number(process.hrtime.bigint() - t0) / 1000 - rec.end_us);
+  res.end();
+  bump('response_bytes', rec.bytes); stats.replays += 1; stats.replay_scheduled_us += rec.end_us; stats.replay_late_us += Math.round(late);
+}
 async function handle(req, res) {
   req.on('error', () => {}); res.on('error', () => {});
   if (req.method === 'GET' && req.url === '/stats') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(snapshot())); return; }
@@ -291,6 +319,7 @@ async function handle(req, res) {
     await barrier();
     if (config.server_delay_ms) await new Promise(resolve => setTimeout(resolve, config.server_delay_ms));
     if (res.destroyed) return;
+    if (replay) { await replayTo(res, bump); return; }
     if (reply.events) {
       // One write per SSE event, so the body is sent with chunked transfer coding and arrives in pieces.
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });

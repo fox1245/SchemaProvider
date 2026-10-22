@@ -27,7 +27,7 @@ function statusKb(field) {
 }
 
 function verify(a, payload) {
-  if (a.mode === 'stream') return Array.isArray(payload) && payload.length === a.chunks && payload.join('') === a.expect;
+  if (a.mode === 'stream') return Array.isArray(payload) && (a.chunks === 0 || payload.length === a.chunks) && payload.join('') === a.expect;
   return payload === a.expect;
 }
 

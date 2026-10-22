@@ -112,7 +112,7 @@ inline std::string json_string(const std::string& s) {
 }
 
 inline bool verify(const Args& a, const std::string& text, int deltas) {
-  return text == a.expect && (!a.stream() || deltas == a.chunks);
+  return text == a.expect && (!a.stream() || a.chunks == 0 || deltas == a.chunks);
 }
 
 inline void usage_us(long& user, long& sys) {
