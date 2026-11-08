@@ -6,17 +6,6 @@
 namespace sp {
 // Sensitive native bytes stay in local host custody. References are not export
 // bundles. Provision/open is host activation, never a model-input operation.
-struct NativeArchiveLimits {
-  // Zero resolves from the admitted descriptor's closed/versioned resource
-  // policy: native_bytes, request_messages, request_parts, native_depth;
-  // store records=request_messages, store bytes=native_bytes*records.
-  size_t max_bytes = 0;
-  size_t max_messages = 0;
-  size_t max_parts = 0;
-  size_t max_json_depth = 0;
-  size_t max_records = 0;
-  uint64_t max_store_bytes = 0;
-};
 class NativeArchive final {
  public:
   using Activation = std::variant<std::shared_ptr<NativeArchive>, Error>;

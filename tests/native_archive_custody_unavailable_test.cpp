@@ -71,6 +71,26 @@ int main() {
           std::get<CustodyFault>(wrapped) == CustodyFault::InvalidKeyMaterial);
     CHECK(source->unwrap_dek("k1", "aad", std::string(72, '\0'), dek) == CustodyFault::InvalidKeyMaterial);
 
+    auto loaded = descriptor::load(
+        R"({"descriptor_version":1,"revision":1,"id":"archive-fixture","family":"anthropic.messages","connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":"/v1/messages","streaming":"/v1/messages"}}})");
+    CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
+    const auto& desc = std::get<descriptor::ValidatedDescriptor>(loaded);
+    const StoreHeader empty_header{};
+    check_unavailable(parse_header("header"));
+    check_unavailable(serialize_header(empty_header));
+    check_unavailable(create_header(*source, "owner", desc));
+    check_unavailable(rotate_header("header", *source, "k2", "owner", desc));
+    check_unavailable(retire_key_in_header("header", "k1", *source, "owner", desc));
+    check_unavailable(unwrap_requests("header", "owner", desc));
+
+    const CustodyError epoch_err = custody_error(CustodyFault::EpochLimit, "store-hex", "ignored");
+    CHECK(epoch_err.error.kind == ErrorKind::ResourceLimit);
+    CHECK(epoch_err.error.retry_class == RetryClass::Never);
+    CHECK(epoch_err.error.retry_safety == RetrySafety::NotSent);
+    CHECK(epoch_err.error.reason == "archive.custody.epoch_limit");
+    CHECK(epoch_err.store_id == "store-hex");
+    CHECK(epoch_err.key_id.empty());
+
     std::cout << "native archive custody unavailable test passed\n";
     return 0;
   } catch (const std::exception& e) {

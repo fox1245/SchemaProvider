@@ -111,6 +111,12 @@ CustodyError custody_error(CustodyFault fault,
       out.error.reason = "archive.custody.corrupt_record";
       out.store_id = std::string(store_id);
       break;
+    case CustodyFault::EpochLimit:
+      out.error.kind = ErrorKind::ResourceLimit;
+      out.error.safe_message = "Host native archive epoch limit reached";
+      out.error.reason = "archive.custody.epoch_limit";
+      out.store_id = std::string(store_id);
+      break;
     case CustodyFault::SourceUnavailable:
       out.error.kind = ErrorKind::Transport;
       out.error.retry_class = RetryClass::Transient;
@@ -275,6 +281,50 @@ std::shared_ptr<KeySource> make_hkdf_key_source(std::shared_ptr<SecretSource> /*
   return std::make_shared<UnavailableHkdfKeySource>();
 }
 
+CustodyOutcome<StoreHeader> parse_header(std::string_view /*header_bytes*/,
+                                         HostCustodyLimits /*limits*/) {
+  return custody_unavailable_error();
+}
+
+CustodyOutcome<std::string> serialize_header(const StoreHeader& /*header*/,
+                                             HostCustodyLimits /*limits*/) {
+  return custody_unavailable_error();
+}
+
+CustodyOutcome<std::string> create_header(KeySource& /*source*/,
+                                          std::string_view /*owner_scope*/,
+                                          const descriptor::ValidatedDescriptor& /*descriptor*/,
+                                          HostCustodyLimits /*limits*/) {
+  return custody_unavailable_error();
+}
+
+CustodyOutcome<std::string> rotate_header(std::string_view /*current_header_bytes*/,
+                                          KeySource& /*source*/,
+                                          std::string_view /*target_key_id*/,
+                                          std::string_view /*owner_scope*/,
+                                          const descriptor::ValidatedDescriptor& /*descriptor*/,
+                                          HostCustodyLimits /*limits*/) {
+  return custody_unavailable_error();
+}
+
+CustodyOutcome<std::string> retire_key_in_header(
+    std::string_view /*current_header_bytes*/,
+    std::string_view /*retired_key_id*/,
+    KeySource& /*source*/,
+    std::string_view /*owner_scope*/,
+    const descriptor::ValidatedDescriptor& /*descriptor*/,
+    HostCustodyLimits /*limits*/) {
+  return custody_unavailable_error();
+}
+
+CustodyOutcome<std::vector<UnwrapRequest>> unwrap_requests(
+    std::string_view /*header_bytes*/,
+    std::string_view /*owner_scope*/,
+    const descriptor::ValidatedDescriptor& /*descriptor*/,
+    HostCustodyLimits /*limits*/) {
+  return custody_unavailable_error();
+}
+
 namespace custody_ops {
 
 bool available() noexcept {
@@ -295,9 +345,13 @@ void fail_random_on_call(std::size_t /*call_index*/) noexcept {}
 
 void override_next_random_bytes(std::string_view /*bytes*/) {}
 
+std::vector<std::size_t> recorded_random_draws() { return {}; }
+
 void reset_random_seam() noexcept {}
 
 void fail_key_alloc_on_call(std::size_t /*call_index*/) noexcept {}
+
+void corrupt_next_cached_kek() noexcept {}
 
 CustodyOutcome<std::string> hkdf_sha256_expand(const DataKeyBuffer& /*prk*/,
                                                std::string_view /*info*/,

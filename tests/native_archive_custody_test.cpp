@@ -1,6 +1,9 @@
-// Host-native archive custody Slice 1 primitives: HKDF-SHA256, XChaCha20-Poly1305, derive_kek,
-// make_hkdf_key_source, LockedKeyBuffer, CleansedBuffer release observer, and CustodyFault mapping.
+// Host-native archive custody primitives and store header tests: HKDF-SHA256, XChaCha20-Poly1305,
+// derive_kek, make_hkdf_key_source, LockedKeyBuffer, CleansedBuffer, StoreHeader, and CustodyFault mapping.
+#include "codecs/messages.h"
+#include "codecs/messages_request.h"
 #include "core/interface_contract.h"
+#include "core/native.h"
 #include "core/native_archive.h"
 #include "core/native_archive_custody.h"
 #include "core/native_archive_custody_format.h"
@@ -11,17 +14,29 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
 #include <latch>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <aclapi.h>
+#include <windows.h>
+#else
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 namespace {
 using namespace sp;
@@ -84,14 +99,19 @@ std::string encode_text(std::string_view text) {
 std::string build_epoch_aad(const std::array<unsigned char, 32>& store_id,
                             std::uint64_t epoch_id,
                             std::string_view key_id) {
-  std::string out = encode_text(custody_format::epoch_aad_domain);
-  char ver[8];
-  write_be64(ver, custody_format::header_format_version);
-  out.append(ver, 8);
+  std::array<unsigned char, 32> descriptor_id{};
+  descriptor_id.fill(0xdd);
+  char ver_be[8];
+  write_be64(ver_be, custody_format::header_format_version);
+  char epoch_be[8];
+  write_be64(epoch_be, epoch_id);
+  std::string out;
+  out.append(encode_text(custody_format::epoch_aad_domain));
+  out.append(ver_be, 8);
   out.append(reinterpret_cast<const char*>(store_id.data()), store_id.size());
-  char ep[8];
-  write_be64(ep, epoch_id);
-  out.append(ep, 8);
+  out.append(encode_text("test-owner"));
+  out.append(reinterpret_cast<const char*>(descriptor_id.data()), descriptor_id.size());
+  out.append(epoch_be, 8);
   out.append(encode_text(key_id));
   return out;
 }
@@ -213,9 +233,25 @@ class FixedSecretSource final : public SecretSource {
  public:
   explicit FixedSecretSource(std::string active_id) : active_id_(std::move(active_id)) {}
 
+  void set_active_key_id(std::string active_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    active_id_ = std::move(active_id);
+  }
+
   void set_secret(std::string key_id, std::string secret_bytes) {
     std::lock_guard<std::mutex> lock(mutex_);
     secrets_[std::move(key_id)] = StoredEntry{std::move(secret_bytes), 0, false};
+  }
+
+  void remove_secret(std::string_view key_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    secrets_.erase(std::string(key_id));
+  }
+
+  void reset_counts() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    load_counts_.clear();
+    pair_load_counts_.clear();
   }
 
   void set_malformed_secret(std::string key_id, std::string raw_bytes, std::size_t reported_size) {
@@ -779,6 +815,8 @@ void test_error_mapping() {
        "archive.custody.source_unavailable", true},
       {CustodyFault::SourceRateLimited, ErrorKind::RateLimited, RetryClass::Transient, RetrySafety::NotSent,
        "archive.custody.source_rate_limited", true},
+      {CustodyFault::EpochLimit, ErrorKind::ResourceLimit, RetryClass::Never, RetrySafety::NotSent,
+       "archive.custody.epoch_limit", false},
   };
 
   for (const auto& row : kRows) {
@@ -914,6 +952,1270 @@ void test_derive_kek_and_fixed_nonce_wrap_vectors() {
   CHECK(actual_kek_64_hex == kExpectedKek64Hex);
 }
 
+descriptor::ValidatedDescriptor default_test_descriptor() {
+  auto loaded = descriptor::load(
+      R"({"descriptor_version":1,"revision":1,"id":"archive-fixture","family":"anthropic.messages","connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":"/v1/messages","streaming":"/v1/messages"}}})");
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
+  return std::get<descriptor::ValidatedDescriptor>(std::move(loaded));
+}
+
+descriptor::ValidatedDescriptor alternate_test_descriptor() {
+  auto loaded = descriptor::load(
+      R"({"descriptor_version":1,"revision":1,"id":"archive-fixture-other","family":"anthropic.messages","connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":"/v1/messages","streaming":"/v1/messages"}}})");
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
+  return std::get<descriptor::ValidatedDescriptor>(std::move(loaded));
+}
+
+std::string build_raw_header(std::string_view domain,
+                             std::uint64_t version,
+                             const std::array<unsigned char, 32>& store_id,
+                             std::string_view owner_scope,
+                             const std::array<unsigned char, 32>& descriptor_identity,
+                             std::uint64_t current_epoch,
+                             const std::vector<EpochKeyEntry>& epochs,
+                             std::string_view tag_bytes) {
+  archive_internal::Writer writer(archive_internal::resolve_default_archive_limits({}));
+  writer.text(domain);
+  writer.number(version);
+  writer.digest(store_id);
+  writer.text(owner_scope);
+  writer.digest(descriptor_identity);
+  writer.number(current_epoch);
+  writer.number(epochs.size());
+  for (const auto& entry : epochs) {
+    writer.number(entry.epoch);
+    writer.text(entry.wrapping_key_id);
+    writer.text(entry.wrapped_dek);
+  }
+  writer.raw(tag_bytes);
+  return std::move(writer.data);
+}
+
+#ifdef _WIN32
+struct PrivateSecurity {
+  std::vector<unsigned char> token;
+  std::vector<unsigned char> acl;
+  SECURITY_DESCRIPTOR security_descriptor{};
+  explicit PrivateSecurity(DWORD access) {
+    HANDLE handle = nullptr;
+    CHECK(::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &handle));
+    DWORD size = 0;
+    ::GetTokenInformation(handle, TokenUser, nullptr, 0, &size);
+    token.resize(size);
+    const BOOL ok = ::GetTokenInformation(handle, TokenUser, token.data(), size, &size);
+    ::CloseHandle(handle);
+    CHECK(ok);
+    size = static_cast<DWORD>(sizeof(ACL) + sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) +
+                              ::GetLengthSid(sid()));
+    acl.resize(size);
+    CHECK(::InitializeAcl(dacl(), size, ACL_REVISION));
+    CHECK(::AddAccessAllowedAceEx(dacl(), ACL_REVISION, 0, access, sid()));
+    CHECK(::InitializeSecurityDescriptor(&security_descriptor, SECURITY_DESCRIPTOR_REVISION));
+    CHECK(::SetSecurityDescriptorOwner(&security_descriptor, sid(), FALSE));
+    CHECK(::SetSecurityDescriptorDacl(&security_descriptor, TRUE, dacl(), FALSE));
+    CHECK(::SetSecurityDescriptorControl(
+        &security_descriptor, SE_DACL_PROTECTED, SE_DACL_PROTECTED));
+  }
+  PSID sid() const { return reinterpret_cast<const TOKEN_USER*>(token.data())->User.Sid; }
+  PACL dacl() { return reinterpret_cast<PACL>(acl.data()); }
+};
+#endif
+
+void create_private_directory(const std::filesystem::path& path) {
+#ifdef _WIN32
+  PrivateSecurity security(FILE_ALL_ACCESS);
+  SECURITY_ATTRIBUTES attributes{sizeof(SECURITY_ATTRIBUTES), &security.security_descriptor, FALSE};
+  CHECK(::CreateDirectoryW(path.c_str(), &attributes));
+#else
+  CHECK(::mkdir(path.c_str(), 0700) == 0);
+#endif
+}
+
+std::string path_utf8(const std::filesystem::path& path) {
+  const auto text = path.u8string();
+  return std::string(reinterpret_cast<const char*>(text.data()), text.size());
+}
+
+void test_existing_archive_portability_unchanged() {
+  CHECK(config_defaults::archive_custody_max_epochs == 4096);
+  const auto valid_desc = default_test_descriptor();
+  CHECK(valid_desc.policy() != nullptr);
+  CHECK(valid_desc.policy()->identity().size() == 32);
+
+  const HostCustodyLimits resolved = archive_internal::resolve_custody_limits({}, valid_desc);
+  CHECK(resolved.max_epochs == 4096);
+  CHECK(resolved.archive.max_bytes == valid_desc.policy()->resources().native_bytes);
+  CHECK(resolved.archive.max_messages == valid_desc.policy()->resources().request_messages);
+  CHECK(resolved.archive.max_parts == valid_desc.policy()->resources().request_parts);
+  CHECK(resolved.archive.max_json_depth == valid_desc.policy()->resources().native_depth);
+
+  namespace fs = std::filesystem;
+  const fs::path parent = fs::canonical(fs::temp_directory_path());
+  std::random_device rd;
+  static constexpr char kHexDigits[] = "0123456789abcdef";
+  std::string dir_name = "sp-archive-custody-portability-";
+  for (int i = 0; i < 32; ++i) {
+    dir_name += kHexDigits[rd() & 15];
+  }
+  const fs::path root = parent / dir_name;
+  create_private_directory(root);
+  struct ScopedCleanup {
+    fs::path path;
+    ~ScopedCleanup() {
+      std::error_code ignored;
+      fs::remove_all(path, ignored);
+    }
+  } cleanup{root};
+  create_private_directory(root / "keys");
+
+  messages::Request req;
+  req.model = "fixture-model";
+  req.account_scope = "fixture-account";
+  req.messages.push_back(Message{"", Role::User, {Text{"hello"}}});
+  auto initial_enc = messages::encode(valid_desc, req, false);
+  CHECK(std::holds_alternative<messages::EncodedRequest>(initial_enc));
+  Accumulator acc;
+  messages::Codec codec(
+      valid_desc, messages::Mode::Buffered, acc, std::get<messages::EncodedRequest>(initial_enc).context);
+  codec.buffered(
+      R"({"id":"msg_portable","type":"message","role":"assistant","model":"fixture-model","content":[{"type":"thinking","thinking":"reason","signature":"synthetic-fixture-signature"},{"type":"redacted_thinking","data":"synthetic-fixture-state"},{"type":"text","text":"answer"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":2,"output_tokens":3}})",
+      {});
+  codec.finish();
+  CHECK(acc.outcome() && std::holds_alternative<Completion>(*acc.outcome()));
+  const Completion& comp = std::get<Completion>(*acc.outcome());
+  CHECK(comp.messages.size() == 1 && comp.messages[0].native && comp.messages[0].native->complete());
+  req.messages.push_back(comp.messages[0]);
+  req.messages.push_back(Message{"", Role::User, {Text{"continue"}}});
+  auto expected_enc = messages::encode(valid_desc, req, false);
+  CHECK(std::holds_alternative<messages::EncodedRequest>(expected_enc));
+  const std::string expected_body = std::get<messages::EncodedRequest>(expected_enc).body;
+
+  const std::string records_dir = path_utf8(root / "records");
+  const std::string key_file = path_utf8(root / "keys" / "activation");
+  auto provisioned = NativeArchive::provision(records_dir, key_file, "synthetic-owner", valid_desc);
+  CHECK(std::holds_alternative<std::shared_ptr<NativeArchive>>(provisioned));
+  auto archive = std::get<std::shared_ptr<NativeArchive>>(std::move(provisioned));
+  auto saved_res = archive->save(req.messages, "native-call");
+  CHECK(std::holds_alternative<std::string>(saved_res));
+  const std::string reference = std::get<std::string>(std::move(saved_res));
+  CHECK(reference.size() == 70 && reference.substr(0, 6) == "spna3:");
+
+  auto reopened_res = NativeArchive::open(records_dir, key_file, "synthetic-owner", valid_desc);
+  CHECK(std::holds_alternative<std::shared_ptr<NativeArchive>>(reopened_res));
+  auto reopened = std::get<std::shared_ptr<NativeArchive>>(std::move(reopened_res));
+  auto loaded_res = reopened->load(reference, "native-call");
+  CHECK(std::holds_alternative<std::vector<Message>>(loaded_res));
+  messages::Request continued = req;
+  continued.messages = std::get<std::vector<Message>>(std::move(loaded_res));
+  auto reencoded = messages::encode(valid_desc, continued, false);
+  CHECK(std::holds_alternative<messages::EncodedRequest>(reencoded));
+  CHECK(std::get<messages::EncodedRequest>(reencoded).body == expected_body);
+}
+
+void test_golden_header_bytes() {
+  std::array<unsigned char, 32> store_id{};
+  for (std::size_t i = 0; i < store_id.size(); ++i) {
+    store_id[i] = static_cast<unsigned char>(i);
+  }
+  const std::string store_id_bytes(reinterpret_cast<const char*>(store_id.data()), store_id.size());
+
+  std::string secret_32_bytes(32, '\0');
+  for (std::size_t i = 0; i < 32; ++i) {
+    secret_32_bytes[i] = static_cast<char>(0x20 + i);
+  }
+  std::string dek_1_bytes(32, '\0');
+  for (std::size_t i = 0; i < 32; ++i) {
+    dek_1_bytes[i] = static_cast<char>(0x80 + i);
+  }
+  std::string nonce_1_bytes(24, '\0');
+  for (std::size_t i = 0; i < 24; ++i) {
+    nonce_1_bytes[i] = static_cast<char>(0xa0 + i);
+  }
+  std::array<unsigned char, 24> fixed_nonce{};
+  std::memcpy(fixed_nonce.data(), nonce_1_bytes.data(), fixed_nonce.size());
+
+  auto secrets = std::make_shared<FixedSecretSource>("key-fixed");
+  secrets->set_secret("key-fixed", secret_32_bytes);
+  auto key_source = make_hkdf_key_source(secrets);
+
+  const auto valid_desc = default_test_descriptor();
+
+  custody_ops::reset_random_seam();
+  custody_ops::override_next_random_bytes(store_id_bytes);
+  custody_ops::override_next_random_bytes(dek_1_bytes);
+  custody_ops::override_next_random_bytes(nonce_1_bytes);
+  auto created_res = create_header(*key_source, "owner-golden", valid_desc);
+  custody_ops::reset_random_seam();
+
+  CHECK(std::holds_alternative<std::string>(created_res));
+  const std::string& serialized = std::get<std::string>(created_res);
+  CHECK(serialized.size() == 288);
+
+  const std::string_view body(serialized.data(), 256);
+  const std::string_view tag(serialized.data() + 256, 32);
+
+  // Checked-in structural byte layout from `tests/custody_vectors.py`.
+  constexpr std::string_view kExpectedHeaderBodyPrefixHex =
+      "000000000000002373702e6e61746976652e617263686976652e637573746f64792e6865616465722e7631"
+      "0000000000000001"
+      "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+      "000000000000000c6f776e65722d676f6c64656e";
+  constexpr std::string_view kExpectedHeaderBodyMidAndNonceHex =
+      "0000000000000001"
+      "0000000000000001"
+      "0000000000000001"
+      "00000000000000096b65792d6669786564"
+      "0000000000000048"
+      "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7";
+  constexpr std::string_view kExpectedEpochAadPrefixHex =
+      "000000000000002673702e6e61746976652e617263686976652e637573746f64792e65706f63682d6161642e7631"
+      "0000000000000001"
+      "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+      "000000000000000c6f776e65722d676f6c64656e";
+  constexpr std::string_view kExpectedEpochAadSuffixHex =
+      "0000000000000001"
+      "00000000000000096b65792d6669786564";
+  constexpr std::string_view kExpectedHeaderTagExpandInputHex =
+      "000000000000002773702e6e61746976652e617263686976652e637573746f64792e6865616465722d7461672e763101";
+
+  const HostCustodyLimits resolved_limits = archive_internal::resolve_custody_limits({}, valid_desc);
+  const auto expected_desc_digest =
+      archive_internal::descriptor_binding_digest(valid_desc, resolved_limits.archive);
+  const std::string expected_desc_bytes(reinterpret_cast<const char*>(expected_desc_digest.data()),
+                                        expected_desc_digest.size());
+
+  CHECK(body.substr(0, 103) == from_hex(kExpectedHeaderBodyPrefixHex));
+  CHECK(body.substr(103, 32) == expected_desc_bytes);
+  CHECK(body.substr(135, 73) == from_hex(kExpectedHeaderBodyMidAndNonceHex));
+
+  const std::string expected_epoch_aad_1 =
+      from_hex(kExpectedEpochAadPrefixHex) + expected_desc_bytes + from_hex(kExpectedEpochAadSuffixHex);
+  const std::string actual_epoch_aad_1 = archive_internal::build_epoch_aad(
+      store_id, "owner-golden", expected_desc_digest, 1, "key-fixed", resolved_limits.archive);
+  CHECK(actual_epoch_aad_1 == expected_epoch_aad_1);
+
+  SecretBuffer secret_buf;
+  std::size_t written = 0;
+  CHECK(!secret_buf.assign_secret(secret_32_bytes, &written));
+  auto kek_res = custody_ops::derive_kek(secret_buf, written, store_id);
+  CHECK(std::holds_alternative<DataKeyBuffer>(kek_res));
+  const auto& kek_32 = std::get<DataKeyBuffer>(kek_res);
+
+  auto expected_aead =
+      custody_ops::aead_xchacha20poly1305_encrypt(kek_32, fixed_nonce, expected_epoch_aad_1, dek_1_bytes);
+  CHECK(std::holds_alternative<std::string>(expected_aead));
+  CHECK(body.substr(208, 48) == std::get<std::string>(expected_aead));
+
+  // Tag recomputation from the body using independent in-tree HMAC-SHA256 (`sp::crypto::hmac_sha256`).
+  const std::string header_tag_expand_input = from_hex(kExpectedHeaderTagExpandInputHex);
+  const auto expected_mac_key = crypto::hmac_sha256(dek_1_bytes, header_tag_expand_input);
+  const std::string expected_mac_key_view(reinterpret_cast<const char*>(expected_mac_key.data()),
+                                          expected_mac_key.size());
+  const auto expected_tag = crypto::hmac_sha256(expected_mac_key_view, body);
+  const std::string expected_tag_view(reinterpret_cast<const char*>(expected_tag.data()), expected_tag.size());
+  CHECK(tag == expected_tag_view);
+
+  // Parse and re-serialize round-trip.
+  auto parsed_res = parse_header(serialized);
+  CHECK(std::holds_alternative<StoreHeader>(parsed_res));
+  const StoreHeader& parsed = std::get<StoreHeader>(parsed_res);
+  CHECK(parsed.format_version == 1);
+  CHECK(parsed.store_id == store_id);
+  CHECK(parsed.owner_scope == "owner-golden");
+  CHECK(parsed.descriptor_identity == expected_desc_digest);
+  CHECK(parsed.current_epoch == 1);
+  CHECK(parsed.epochs.size() == 1);
+  CHECK(parsed.epochs[0].epoch == 1);
+  CHECK(parsed.epochs[0].wrapping_key_id == "key-fixed");
+  CHECK(parsed.header_tag == expected_tag);
+
+  auto reserialized_res = serialize_header(parsed);
+  CHECK(std::holds_alternative<std::string>(reserialized_res));
+  CHECK(std::get<std::string>(reserialized_res) == serialized);
+
+  // Fresh-source unwrap check on the wrapped DEK.
+  auto reqs_res = unwrap_requests(serialized, "owner-golden", valid_desc);
+  CHECK(std::holds_alternative<std::vector<UnwrapRequest>>(reqs_res));
+  const auto& reqs = std::get<std::vector<UnwrapRequest>>(reqs_res);
+  CHECK(reqs.size() == 1);
+  CHECK(reqs[0].key_id == "key-fixed");
+  CHECK(reqs[0].epoch_aad == expected_epoch_aad_1);
+
+  auto fresh_secrets = std::make_shared<FixedSecretSource>("key-fixed");
+  fresh_secrets->set_secret("key-fixed", secret_32_bytes);
+  auto fresh_source = make_hkdf_key_source(fresh_secrets);
+  DataKeyBuffer unwrapped_dek;
+  CHECK(!fresh_source->unwrap_dek(reqs[0].key_id, reqs[0].epoch_aad, reqs[0].wrapped_dek, unwrapped_dek));
+  CHECK(std::memcmp(unwrapped_dek.data(), dek_1_bytes.data(), 32) == 0);
+}
+
+void test_header_splices() {
+  auto secrets = std::make_shared<FixedSecretSource>("k1");
+  secrets->set_secret("k1", std::string(32, '\x11'));
+  secrets->set_secret("k2", std::string(32, '\x22'));
+  secrets->set_secret("k3", std::string(32, '\x33'));
+  auto key_source = make_hkdf_key_source(secrets);
+  const auto valid_desc = default_test_descriptor();
+
+  auto h1_res = create_header(*key_source, "owner-splice", valid_desc);
+  CHECK(std::holds_alternative<std::string>(h1_res));
+  auto h2_res = rotate_header(std::get<std::string>(h1_res), *key_source, "k2", "owner-splice", valid_desc);
+  CHECK(std::holds_alternative<std::string>(h2_res));
+  auto h3_res = rotate_header(std::get<std::string>(h2_res), *key_source, "k3", "owner-splice", valid_desc);
+  CHECK(std::holds_alternative<std::string>(h3_res));
+  const std::string& h3_bytes = std::get<std::string>(h3_res);
+
+  auto parsed_res = parse_header(h3_bytes);
+  CHECK(std::holds_alternative<StoreHeader>(parsed_res));
+  const StoreHeader h3 = std::get<StoreHeader>(parsed_res);
+  const std::string store_id_hex = to_hex(h3.store_id.data(), h3.store_id.size());
+  const std::string tag_bytes = h3_bytes.substr(h3_bytes.size() - 32);
+
+  auto check_structural_splice = [&](const std::string& spliced, const StoreHeader* bad_struct = nullptr) {
+    auto p = parse_header(spliced);
+    CHECK(std::holds_alternative<CustodyError>(p));
+    CHECK(std::get<CustodyError>(p).error.reason == "archive.custody.corrupt_header");
+
+    auto rot = rotate_header(spliced, *key_source, {}, "owner-splice", valid_desc);
+    CHECK(std::holds_alternative<CustodyError>(rot));
+    CHECK(std::get<CustodyError>(rot).error.reason == "archive.custody.corrupt_header");
+
+    auto ret = retire_key_in_header(spliced, "k1", *key_source, "owner-splice", valid_desc);
+    CHECK(std::holds_alternative<CustodyError>(ret));
+    CHECK(std::get<CustodyError>(ret).error.reason == "archive.custody.corrupt_header");
+
+    if (bad_struct != nullptr) {
+      auto ser = serialize_header(*bad_struct);
+      CHECK(std::holds_alternative<CustodyError>(ser));
+      CHECK(std::get<CustodyError>(ser).error.reason == "archive.custody.corrupt_header");
+    }
+  };
+
+  // 1a. Rewound current_epoch (structural mismatch: current_epoch = 2 while 3 epochs are present).
+  {
+    StoreHeader bad = h3;
+    bad.current_epoch = 2;
+    const std::string spliced =
+        build_raw_header(custody_format::header_body_domain, 1, bad.store_id, bad.owner_scope,
+                         bad.descriptor_identity, bad.current_epoch, bad.epochs, tag_bytes);
+    check_structural_splice(spliced, &bad);
+  }
+
+  // 1b. Rewound current_epoch with truncated epochs (epochs 1..2 with epoch 3's tag -> parses structurally,
+  // but rotate_header and retire_key_in_header refuse with Tampered when verifying the tag under dek_2).
+  {
+    std::vector<EpochKeyEntry> two_epochs = {h3.epochs[0], h3.epochs[1]};
+    const std::string rewound =
+        build_raw_header(custody_format::header_body_domain, 1, h3.store_id, h3.owner_scope,
+                         h3.descriptor_identity, 2, two_epochs, tag_bytes);
+    CHECK(std::holds_alternative<StoreHeader>(parse_header(rewound)));
+
+    auto rot = rotate_header(rewound, *key_source, {}, "owner-splice", valid_desc);
+    CHECK(std::holds_alternative<CustodyError>(rot));
+    CHECK(std::get<CustodyError>(rot).error.reason == "archive.custody.tampered");
+    CHECK(std::get<CustodyError>(rot).store_id == store_id_hex);
+
+    auto ret = retire_key_in_header(rewound, "k1", *key_source, "owner-splice", valid_desc);
+    CHECK(std::holds_alternative<CustodyError>(ret));
+    CHECK(std::get<CustodyError>(ret).error.reason == "archive.custody.tampered");
+    CHECK(std::get<CustodyError>(ret).store_id == store_id_hex);
+  }
+
+  // 2. Dropped middle epoch ([1, 3], current_epoch = 3).
+  {
+    StoreHeader bad = h3;
+    bad.epochs = {h3.epochs[0], h3.epochs[2]};
+    const std::string spliced =
+        build_raw_header(custody_format::header_body_domain, 1, bad.store_id, bad.owner_scope,
+                         bad.descriptor_identity, bad.current_epoch, bad.epochs, tag_bytes);
+    check_structural_splice(spliced, &bad);
+  }
+
+  // 3. Duplicated epoch ([1, 2, 2], current_epoch = 3; [1, 1, 3], current_epoch = 3; and [1, 1], current_epoch = 2).
+  {
+    StoreHeader bad_122 = h3;
+    bad_122.epochs[2].epoch = 2;
+    check_structural_splice(
+        build_raw_header(custody_format::header_body_domain, 1, bad_122.store_id, bad_122.owner_scope,
+                         bad_122.descriptor_identity, bad_122.current_epoch, bad_122.epochs, tag_bytes),
+        &bad_122);
+
+    StoreHeader bad_113 = h3;
+    bad_113.epochs[1].epoch = 1;
+    check_structural_splice(
+        build_raw_header(custody_format::header_body_domain, 1, bad_113.store_id, bad_113.owner_scope,
+                         bad_113.descriptor_identity, bad_113.current_epoch, bad_113.epochs, tag_bytes),
+        &bad_113);
+
+    StoreHeader bad_11 = h3;
+    bad_11.current_epoch = 2;
+    bad_11.epochs = {h3.epochs[0], h3.epochs[0]};
+    check_structural_splice(
+        build_raw_header(custody_format::header_body_domain, 1, bad_11.store_id, bad_11.owner_scope,
+                         bad_11.descriptor_identity, bad_11.current_epoch, bad_11.epochs, tag_bytes),
+        &bad_11);
+  }
+
+  // 4. Reordered epochs ([1, 3, 2], current_epoch = 3 and [2, 1, 3], current_epoch = 3).
+  {
+    StoreHeader bad_132 = h3;
+    std::swap(bad_132.epochs[1], bad_132.epochs[2]);
+    check_structural_splice(
+        build_raw_header(custody_format::header_body_domain, 1, bad_132.store_id, bad_132.owner_scope,
+                         bad_132.descriptor_identity, bad_132.current_epoch, bad_132.epochs, tag_bytes),
+        &bad_132);
+
+    StoreHeader bad_213 = h3;
+    std::swap(bad_213.epochs[0], bad_213.epochs[1]);
+    check_structural_splice(
+        build_raw_header(custody_format::header_body_domain, 1, bad_213.store_id, bad_213.owner_scope,
+                         bad_213.descriptor_identity, bad_213.current_epoch, bad_213.epochs, tag_bytes),
+        &bad_213);
+  }
+
+  // 5. Flipped body byte in an epoch entry that no unwrap on the tested path reads (epoch 2's wrapped_dek and
+  // epoch 2's wrapping_key_id when rotating or retiring "k1", where only epoch 3 is unwrapped before verify_header_tag).
+  {
+    StoreHeader dek_mut = h3;
+    dek_mut.epochs[1].wrapped_dek[0] ^= 0x01;
+    const std::string flipped_dek_body =
+        build_raw_header(custody_format::header_body_domain, 1, dek_mut.store_id, dek_mut.owner_scope,
+                         dek_mut.descriptor_identity, dek_mut.current_epoch, dek_mut.epochs, tag_bytes);
+    CHECK(std::holds_alternative<StoreHeader>(parse_header(flipped_dek_body)));
+
+    auto rot_dek = rotate_header(flipped_dek_body, *key_source, {}, "owner-splice", valid_desc);
+    CHECK(std::holds_alternative<CustodyError>(rot_dek));
+    CHECK(std::get<CustodyError>(rot_dek).error.reason == "archive.custody.tampered");
+    CHECK(std::get<CustodyError>(rot_dek).store_id == store_id_hex);
+
+    auto ret_dek = retire_key_in_header(flipped_dek_body, "k1", *key_source, "owner-splice", valid_desc);
+    CHECK(std::holds_alternative<CustodyError>(ret_dek));
+    CHECK(std::get<CustodyError>(ret_dek).error.reason == "archive.custody.tampered");
+    CHECK(std::get<CustodyError>(ret_dek).store_id == store_id_hex);
+
+    for (std::string_view mutated_kid : {std::string_view{"k9"}, std::string_view{"k\x7f", 2}}) {
+      StoreHeader kid_mut = h3;
+      kid_mut.epochs[1].wrapping_key_id = std::string(mutated_kid);
+      const std::string flipped_kid_body =
+          build_raw_header(custody_format::header_body_domain, 1, kid_mut.store_id, kid_mut.owner_scope,
+                           kid_mut.descriptor_identity, kid_mut.current_epoch, kid_mut.epochs, tag_bytes);
+      CHECK(std::holds_alternative<StoreHeader>(parse_header(flipped_kid_body)));
+
+      auto rot_kid = rotate_header(flipped_kid_body, *key_source, {}, "owner-splice", valid_desc);
+      CHECK(std::holds_alternative<CustodyError>(rot_kid));
+      CHECK(std::get<CustodyError>(rot_kid).error.reason == "archive.custody.tampered");
+      CHECK(std::get<CustodyError>(rot_kid).store_id == store_id_hex);
+
+      auto ret_kid = retire_key_in_header(flipped_kid_body, "k1", *key_source, "owner-splice", valid_desc);
+      CHECK(std::holds_alternative<CustodyError>(ret_kid));
+      CHECK(std::get<CustodyError>(ret_kid).error.reason == "archive.custody.tampered");
+      CHECK(std::get<CustodyError>(ret_kid).store_id == store_id_hex);
+    }
+  }
+
+  // 6. One flipped tag byte.
+  {
+    std::string flipped_tag = h3_bytes;
+    flipped_tag.back() ^= 0x01;
+    CHECK(std::holds_alternative<StoreHeader>(parse_header(flipped_tag)));
+
+    auto rot = rotate_header(flipped_tag, *key_source, {}, "owner-splice", valid_desc);
+    CHECK(std::holds_alternative<CustodyError>(rot));
+    CHECK(std::get<CustodyError>(rot).error.reason == "archive.custody.tampered");
+    CHECK(std::get<CustodyError>(rot).store_id == store_id_hex);
+
+    auto ret = retire_key_in_header(flipped_tag, "k1", *key_source, "owner-splice", valid_desc);
+    CHECK(std::holds_alternative<CustodyError>(ret));
+    CHECK(std::get<CustodyError>(ret).error.reason == "archive.custody.tampered");
+    CHECK(std::get<CustodyError>(ret).store_id == store_id_hex);
+  }
+
+  // 7. Additional structural boundary checks on parse_header / serialize_header.
+  {
+    // current_epoch == 0
+    StoreHeader zero_epoch = h3;
+    zero_epoch.current_epoch = 0;
+    zero_epoch.epochs.clear();
+    check_structural_splice(
+        build_raw_header(custody_format::header_body_domain, 1, zero_epoch.store_id, zero_epoch.owner_scope,
+                         zero_epoch.descriptor_identity, 0, zero_epoch.epochs, tag_bytes),
+        &zero_epoch);
+
+    // Empty key id
+    StoreHeader bad_kid = h3;
+    bad_kid.epochs[0].wrapping_key_id.clear();
+    check_structural_splice(
+        build_raw_header(custody_format::header_body_domain, 1, bad_kid.store_id, bad_kid.owner_scope,
+                         bad_kid.descriptor_identity, bad_kid.current_epoch, bad_kid.epochs, tag_bytes),
+        &bad_kid);
+
+    // Empty wrapped_dek
+    StoreHeader empty_dek = h3;
+    empty_dek.epochs[0].wrapped_dek.clear();
+    check_structural_splice(
+        build_raw_header(custody_format::header_body_domain, 1, empty_dek.store_id, empty_dek.owner_scope,
+                         empty_dek.descriptor_identity, empty_dek.current_epoch, empty_dek.epochs, tag_bytes),
+        &empty_dek);
+
+    // Trailing byte
+    check_structural_splice(h3_bytes + std::string(1, '\0'));
+  }
+}
+
+class UniformSecretSource final : public SecretSource {
+ public:
+  UniformSecretSource(std::string active_id, std::string secret_bytes)
+      : active_id_(std::move(active_id)), secret_bytes_(std::move(secret_bytes)) {}
+
+  CustodyResult<std::string> active_key_id() override { return active_id_; }
+
+  std::optional<CustodyFault> load_secret(std::string_view key_id,
+                                          SecretBuffer& out,
+                                          std::size_t* written_size) override {
+    if (key_id.empty()) {
+      return CustodyFault::InvalidKeyMaterial;
+    }
+    return out.assign_secret(secret_bytes_, written_size);
+  }
+
+ private:
+  std::string active_id_;
+  std::string secret_bytes_;
+};
+
+void test_epoch_aad_single_field_binding() {
+  // Every key_id resolves to the exact same secret, so KEK is identical across all key_ids for a given store_id;
+  // only the AAD differs when epoch, wrapping_key_id, owner_scope, or descriptor_identity is altered.
+  auto uniform_secrets = std::make_shared<UniformSecretSource>("k1", std::string(32, '\x5c'));
+  auto key_source = make_hkdf_key_source(uniform_secrets);
+  const auto valid_desc = default_test_descriptor();
+  const auto alt_desc = alternate_test_descriptor();
+
+  auto h1_res = create_header(*key_source, "owner-aad-bind", valid_desc);
+  CHECK(std::holds_alternative<std::string>(h1_res));
+  auto h2_res = rotate_header(std::get<std::string>(h1_res), *key_source, "k2", "owner-aad-bind", valid_desc);
+  CHECK(std::holds_alternative<std::string>(h2_res));
+  const std::string& h2_bytes = std::get<std::string>(h2_res);
+
+  auto parsed_res = parse_header(h2_bytes);
+  CHECK(std::holds_alternative<StoreHeader>(parsed_res));
+  const StoreHeader h2 = std::get<StoreHeader>(parsed_res);
+  const std::string store_id_hex = to_hex(h2.store_id.data(), h2.store_id.size());
+  const std::string tag_bytes = h2_bytes.substr(h2_bytes.size() - 32);
+
+  // Baseline: both epochs unwrap cleanly.
+  {
+    auto reqs_res = unwrap_requests(h2_bytes, "owner-aad-bind", valid_desc);
+    CHECK(std::holds_alternative<std::vector<UnwrapRequest>>(reqs_res));
+    const auto& reqs = std::get<std::vector<UnwrapRequest>>(reqs_res);
+    CHECK(reqs.size() == 2);
+    for (const auto& req : reqs) {
+      DataKeyBuffer out;
+      CHECK(!key_source->unwrap_dek(req.key_id, req.epoch_aad, req.wrapped_dek, out));
+    }
+  }
+
+  // 1a. Swap wrapped_dek between epochs 1 and 2 when both epochs use the same wrapping_key_id ("k1"),
+  // so only the epoch number (1 vs 2) in epoch_aad differs -> unwrap refuses with Tampered.
+  {
+    auto same_key_h2_res =
+        rotate_header(std::get<std::string>(h1_res), *key_source, "k1", "owner-aad-bind", valid_desc);
+    CHECK(std::holds_alternative<std::string>(same_key_h2_res));
+    const std::string& same_key_h2_bytes = std::get<std::string>(same_key_h2_res);
+    auto same_key_parsed = parse_header(same_key_h2_bytes);
+    CHECK(std::holds_alternative<StoreHeader>(same_key_parsed));
+    StoreHeader same_key_swapped = std::get<StoreHeader>(same_key_parsed);
+    CHECK(same_key_swapped.epochs[0].wrapping_key_id == "k1");
+    CHECK(same_key_swapped.epochs[1].wrapping_key_id == "k1");
+    std::swap(same_key_swapped.epochs[0].wrapped_dek, same_key_swapped.epochs[1].wrapped_dek);
+    const std::string same_key_tag = same_key_h2_bytes.substr(same_key_h2_bytes.size() - 32);
+    const std::string same_key_swapped_bytes = build_raw_header(
+        custody_format::header_body_domain, 1, same_key_swapped.store_id, same_key_swapped.owner_scope,
+        same_key_swapped.descriptor_identity, same_key_swapped.current_epoch, same_key_swapped.epochs, same_key_tag);
+    auto reqs_res = unwrap_requests(same_key_swapped_bytes, "owner-aad-bind", valid_desc);
+    CHECK(std::holds_alternative<std::vector<UnwrapRequest>>(reqs_res));
+    for (const auto& req : std::get<std::vector<UnwrapRequest>>(reqs_res)) {
+      DataKeyBuffer out;
+      CHECK(key_source->unwrap_dek(req.key_id, req.epoch_aad, req.wrapped_dek, out) ==
+            CustodyFault::Tampered);
+    }
+    auto rot = rotate_header(same_key_swapped_bytes, *key_source, {}, "owner-aad-bind", valid_desc);
+    CHECK(std::holds_alternative<CustodyError>(rot));
+    CHECK(std::get<CustodyError>(rot).error.reason == "archive.custody.tampered");
+  }
+
+  // 1b. Swap wrapped_dek between epochs 1 and 2 across distinct key ids -> unwrap refuses with Tampered.
+  {
+    StoreHeader swapped = h2;
+    std::swap(swapped.epochs[0].wrapped_dek, swapped.epochs[1].wrapped_dek);
+    const std::string swapped_bytes =
+        build_raw_header(custody_format::header_body_domain, 1, swapped.store_id, swapped.owner_scope,
+                         swapped.descriptor_identity, swapped.current_epoch, swapped.epochs, tag_bytes);
+    auto reqs_res = unwrap_requests(swapped_bytes, "owner-aad-bind", valid_desc);
+    CHECK(std::holds_alternative<std::vector<UnwrapRequest>>(reqs_res));
+    const auto& reqs = std::get<std::vector<UnwrapRequest>>(reqs_res);
+    for (const auto& req : reqs) {
+      DataKeyBuffer out;
+      CHECK(key_source->unwrap_dek(req.key_id, req.epoch_aad, req.wrapped_dek, out) ==
+            CustodyFault::Tampered);
+    }
+    auto rot = rotate_header(swapped_bytes, *key_source, {}, "owner-aad-bind", valid_desc);
+    CHECK(std::holds_alternative<CustodyError>(rot));
+    CHECK(std::get<CustodyError>(rot).error.reason == "archive.custody.tampered");
+  }
+
+  // 2. Change wrapping_key_id (while source returns the same secret) -> unwrap refuses with Tampered.
+  {
+    StoreHeader changed_kid = h2;
+    changed_kid.epochs[0].wrapping_key_id = "k1-other";
+    changed_kid.epochs[1].wrapping_key_id = "k2-other";
+    const std::string changed_bytes =
+        build_raw_header(custody_format::header_body_domain, 1, changed_kid.store_id, changed_kid.owner_scope,
+                         changed_kid.descriptor_identity, changed_kid.current_epoch, changed_kid.epochs, tag_bytes);
+    auto reqs_res = unwrap_requests(changed_bytes, "owner-aad-bind", valid_desc);
+    CHECK(std::holds_alternative<std::vector<UnwrapRequest>>(reqs_res));
+    const auto& reqs = std::get<std::vector<UnwrapRequest>>(reqs_res);
+    for (const auto& req : reqs) {
+      DataKeyBuffer out;
+      CHECK(key_source->unwrap_dek(req.key_id, req.epoch_aad, req.wrapped_dek, out) ==
+            CustodyFault::Tampered);
+    }
+    auto rot = rotate_header(changed_bytes, *key_source, {}, "owner-aad-bind", valid_desc);
+    CHECK(std::holds_alternative<CustodyError>(rot));
+    CHECK(std::get<CustodyError>(rot).error.reason == "archive.custody.tampered");
+  }
+
+  // 3. Change owner_scope (including empty owner_scope) -> unwrap_requests, rotate_header, and retire_key_in_header
+  // refuse with Tampered and populate store_id; if header owner_scope is also rewritten, unwrap_dek refuses
+  // because epoch_aad's owner_scope differs.
+  {
+    for (std::string_view bad_owner : {std::string_view{"other-owner"}, std::string_view{""}}) {
+      auto mismatch_res = unwrap_requests(h2_bytes, bad_owner, valid_desc);
+      CHECK(std::holds_alternative<CustodyError>(mismatch_res));
+      CHECK(std::get<CustodyError>(mismatch_res).error.reason == "archive.custody.tampered");
+      CHECK(std::get<CustodyError>(mismatch_res).store_id == store_id_hex);
+
+      auto rot_res = rotate_header(h2_bytes, *key_source, "k2", bad_owner, valid_desc);
+      CHECK(std::holds_alternative<CustodyError>(rot_res));
+      CHECK(std::get<CustodyError>(rot_res).error.reason == "archive.custody.tampered");
+      CHECK(std::get<CustodyError>(rot_res).store_id == store_id_hex);
+
+      auto ret_res = retire_key_in_header(h2_bytes, "k1", *key_source, bad_owner, valid_desc);
+      CHECK(std::holds_alternative<CustodyError>(ret_res));
+      CHECK(std::get<CustodyError>(ret_res).error.reason == "archive.custody.tampered");
+      CHECK(std::get<CustodyError>(ret_res).store_id == store_id_hex);
+    }
+
+    StoreHeader changed_owner = h2;
+    changed_owner.owner_scope = "other-owner";
+    const std::string changed_bytes = build_raw_header(
+        custody_format::header_body_domain, 1, changed_owner.store_id, changed_owner.owner_scope,
+        changed_owner.descriptor_identity, changed_owner.current_epoch, changed_owner.epochs, tag_bytes);
+    auto reqs_res = unwrap_requests(changed_bytes, "other-owner", valid_desc);
+    CHECK(std::holds_alternative<std::vector<UnwrapRequest>>(reqs_res));
+    for (const auto& req : std::get<std::vector<UnwrapRequest>>(reqs_res)) {
+      DataKeyBuffer out;
+      CHECK(key_source->unwrap_dek(req.key_id, req.epoch_aad, req.wrapped_dek, out) ==
+            CustodyFault::Tampered);
+    }
+  }
+
+  // 4. Change descriptor -> unwrap_requests refuses mismatch, and if header descriptor_identity is also rewritten,
+  // unwrap_dek refuses because epoch_aad's descriptor_identity differs.
+  {
+    auto mismatch_res = unwrap_requests(h2_bytes, "owner-aad-bind", alt_desc);
+    CHECK(std::holds_alternative<CustodyError>(mismatch_res));
+    CHECK(std::get<CustodyError>(mismatch_res).error.reason == "archive.custody.tampered");
+    CHECK(std::get<CustodyError>(mismatch_res).store_id == store_id_hex);
+
+    StoreHeader changed_desc = h2;
+    changed_desc.descriptor_identity = archive_internal::descriptor_binding_digest(
+        alt_desc, archive_internal::resolve_default_archive_limits({}));
+    const std::string changed_bytes = build_raw_header(
+        custody_format::header_body_domain, 1, changed_desc.store_id, changed_desc.owner_scope,
+        changed_desc.descriptor_identity, changed_desc.current_epoch, changed_desc.epochs, tag_bytes);
+    auto reqs_res = unwrap_requests(changed_bytes, "owner-aad-bind", alt_desc);
+    CHECK(std::holds_alternative<std::vector<UnwrapRequest>>(reqs_res));
+    for (const auto& req : std::get<std::vector<UnwrapRequest>>(reqs_res)) {
+      DataKeyBuffer out;
+      CHECK(key_source->unwrap_dek(req.key_id, req.epoch_aad, req.wrapped_dek, out) ==
+            CustodyFault::Tampered);
+    }
+  }
+}
+
+void test_retire_key_in_header() {
+  auto secrets = std::make_shared<FixedSecretSource>("k1");
+  secrets->set_secret("k1", std::string(32, '\x11'));
+  secrets->set_secret("k2", std::string(32, '\x22'));
+  secrets->set_secret("k3", std::string(32, '\x33'));
+  secrets->set_secret("k4", std::string(32, '\x44'));
+  auto key_source = make_hkdf_key_source(secrets);
+  const auto valid_desc = default_test_descriptor();
+
+  // Create under k1, rotate with explicit k2, rotate with explicit k3, then change active_key_id() to k4.
+  auto h1_res = create_header(*key_source, "owner-retire", valid_desc);
+  CHECK(std::holds_alternative<std::string>(h1_res));
+  auto h2_res = rotate_header(std::get<std::string>(h1_res), *key_source, "k2", "owner-retire", valid_desc);
+  CHECK(std::holds_alternative<std::string>(h2_res));
+  auto h3_res = rotate_header(std::get<std::string>(h2_res), *key_source, "k3", "owner-retire", valid_desc);
+  CHECK(std::holds_alternative<std::string>(h3_res));
+  const std::string h3_bytes = std::get<std::string>(h3_res);
+
+  // Record original DEKs for epochs 1, 2, 3 before retirement.
+  std::vector<std::string> original_deks;
+  {
+    auto reqs_res = unwrap_requests(h3_bytes, "owner-retire", valid_desc);
+    CHECK(std::holds_alternative<std::vector<UnwrapRequest>>(reqs_res));
+    const auto& reqs = std::get<std::vector<UnwrapRequest>>(reqs_res);
+    CHECK(reqs.size() == 3);
+    for (const auto& req : reqs) {
+      DataKeyBuffer dek;
+      CHECK(!key_source->unwrap_dek(req.key_id, req.epoch_aad, req.wrapped_dek, dek));
+      original_deks.emplace_back(reinterpret_cast<const char*>(dek.data()), dek.size());
+    }
+  }
+
+  secrets->set_active_key_id("k4");
+
+  // Retiring k3 (the current epoch's wrapping_key_id) is refused with KeyInUse even though active_key_id() is k4.
+  {
+    auto retire_k3 = retire_key_in_header(h3_bytes, "k3", *key_source, "owner-retire", valid_desc);
+    CHECK(std::holds_alternative<CustodyError>(retire_k3));
+    const auto& err = std::get<CustodyError>(retire_k3);
+    CHECK(err.error.kind == ErrorKind::Permission);
+    CHECK(err.error.reason == "archive.custody.key_in_use");
+    CHECK(err.key_id == "k3");
+    CHECK(err.store_id.size() == 64);
+  }
+
+  // Retiring k1 re-wraps epoch 1 under epochs[current].wrapping_key_id ("k3"), leaves epoch 2 wrapped under "k2"
+  // with its wrapped_dek bytes unchanged, and produces a valid header tag under dek_3.
+  auto h3_parsed_res = parse_header(h3_bytes);
+  CHECK(std::holds_alternative<StoreHeader>(h3_parsed_res));
+  const StoreHeader h3_parsed = std::get<StoreHeader>(h3_parsed_res);
+
+  auto retired_k1_res = retire_key_in_header(h3_bytes, "k1", *key_source, "owner-retire", valid_desc);
+  CHECK(std::holds_alternative<std::string>(retired_k1_res));
+  const std::string& retired_k1_bytes = std::get<std::string>(retired_k1_res);
+  {
+    auto parsed_k1_res = parse_header(retired_k1_bytes);
+    CHECK(std::holds_alternative<StoreHeader>(parsed_k1_res));
+    const StoreHeader& parsed_k1 = std::get<StoreHeader>(parsed_k1_res);
+    CHECK(parsed_k1.epochs.size() == 3);
+    CHECK(parsed_k1.epochs[0].wrapping_key_id == "k3");
+    CHECK(parsed_k1.epochs[1].wrapping_key_id == "k2");
+    CHECK(parsed_k1.epochs[1].wrapped_dek == h3_parsed.epochs[1].wrapped_dek);
+    CHECK(parsed_k1.epochs[2].wrapping_key_id == "k3");
+    CHECK(parsed_k1.epochs[2].wrapped_dek == h3_parsed.epochs[2].wrapped_dek);
+
+    const std::string_view k1_body(retired_k1_bytes.data(), retired_k1_bytes.size() - 32);
+    const std::string header_tag_expand_input =
+        encode_text(custody_format::header_tag_domain) + std::string(1, '\x01');
+    const auto mac_key = crypto::hmac_sha256(original_deks[2], header_tag_expand_input);
+    const std::string mac_key_view(reinterpret_cast<const char*>(mac_key.data()), mac_key.size());
+    const auto expected_tag = crypto::hmac_sha256(mac_key_view, k1_body);
+    CHECK(parsed_k1.header_tag == expected_tag);
+
+    auto rotated_from_retired =
+        rotate_header(retired_k1_bytes, *key_source, "k4", "owner-retire", valid_desc);
+    CHECK(std::holds_alternative<std::string>(rotated_from_retired));
+  }
+
+  auto retired_k1_k2_res =
+      retire_key_in_header(retired_k1_bytes, "k2", *key_source, "owner-retire", valid_desc);
+  CHECK(std::holds_alternative<std::string>(retired_k1_k2_res));
+  const std::string& retired_bytes = std::get<std::string>(retired_k1_k2_res);
+
+  // Delete k1 and k2 from the source; unwrap_requests + a fresh source unwraps every epoch with k3 only.
+  secrets->remove_secret("k1");
+  secrets->remove_secret("k2");
+
+  auto fresh_secrets = std::make_shared<FixedSecretSource>("k3");
+  fresh_secrets->set_secret("k3", std::string(32, '\x33'));
+  auto fresh_source = make_hkdf_key_source(fresh_secrets);
+
+  auto reqs_res = unwrap_requests(retired_bytes, "owner-retire", valid_desc);
+  CHECK(std::holds_alternative<std::vector<UnwrapRequest>>(reqs_res));
+  const auto& reqs = std::get<std::vector<UnwrapRequest>>(reqs_res);
+  CHECK(reqs.size() == 3);
+  for (std::size_t i = 0; i < reqs.size(); ++i) {
+    CHECK(reqs[i].key_id == "k3");
+    DataKeyBuffer dek;
+    CHECK(!fresh_source->unwrap_dek(reqs[i].key_id, reqs[i].epoch_aad, reqs[i].wrapped_dek, dek));
+    CHECK(std::memcmp(dek.data(), original_deks[i].data(), 32) == 0);
+  }
+
+  // A second retirement of k1 returns identical bytes.
+  auto second_retire_res = retire_key_in_header(retired_bytes, "k1", *key_source, "owner-retire", valid_desc);
+  CHECK(std::holds_alternative<std::string>(second_retire_res));
+  CHECK(std::get<std::string>(second_retire_res) == retired_bytes);
+}
+
+void test_random_failures_header() {
+  auto secrets = std::make_shared<FixedSecretSource>("k1");
+  secrets->set_secret("k1", std::string(32, '\x11'));
+  secrets->set_secret("k2", std::string(32, '\x22'));
+  auto key_source = make_hkdf_key_source(secrets);
+  const auto valid_desc = default_test_descriptor();
+
+  // Create random failures: call 1 = store_id (32), call 2 = DEK (32), call 3 = wrap_dek nonce (24).
+  constexpr std::size_t kCreateDraws[] = {32, 32, 24};
+  for (std::size_t call_idx = 1; call_idx <= std::size(kCreateDraws); ++call_idx) {
+    custody_ops::reset_random_seam();
+    custody_ops::fail_random_on_call(call_idx);
+    auto res = create_header(*key_source, "owner-rng", valid_desc);
+    const auto draws = custody_ops::recorded_random_draws();
+    custody_ops::reset_random_seam();
+    CHECK(draws == std::vector<std::size_t>(kCreateDraws, kCreateDraws + call_idx));
+    CHECK(std::holds_alternative<CustodyError>(res));
+    CHECK(std::get<CustodyError>(res).error.reason == "archive.custody.key_invalid");
+  }
+
+  std::string create_store_id(32, '\x31');
+  std::string create_dek(32, '\x41');
+  std::string create_nonce(24, '\x51');
+  custody_ops::reset_random_seam();
+  custody_ops::override_next_random_bytes(create_store_id);
+  custody_ops::override_next_random_bytes(create_dek);
+  custody_ops::override_next_random_bytes(create_nonce);
+  auto h1_res = create_header(*key_source, "owner-rng", valid_desc);
+  const auto create_draws = custody_ops::recorded_random_draws();
+  custody_ops::reset_random_seam();
+  CHECK(create_draws == (std::vector<std::size_t>{32, 32, 24}));
+  CHECK(std::holds_alternative<std::string>(h1_res));
+  const std::string& h1_bytes = std::get<std::string>(h1_res);
+  {
+    auto h1_parsed = parse_header(h1_bytes);
+    CHECK(std::holds_alternative<StoreHeader>(h1_parsed));
+    CHECK( std::get<StoreHeader>(h1_parsed).epochs[0].wrapped_dek.substr(0, 24) == create_nonce);
+  }
+
+  // Rotate random failures: call 1 = new DEK (32), call 2 = wrap_dek nonce (24).
+  constexpr std::size_t kRotateDraws[] = {32, 24};
+  for (std::size_t call_idx = 1; call_idx <= std::size(kRotateDraws); ++call_idx) {
+    custody_ops::reset_random_seam();
+    custody_ops::fail_random_on_call(call_idx);
+    auto res = rotate_header(h1_bytes, *key_source, "k2", "owner-rng", valid_desc);
+    const auto draws = custody_ops::recorded_random_draws();
+    custody_ops::reset_random_seam();
+    CHECK(draws == std::vector<std::size_t>(kRotateDraws, kRotateDraws + call_idx));
+    CHECK(std::holds_alternative<CustodyError>(res));
+    const auto& err = std::get<CustodyError>(res);
+    CHECK(err.error.reason == "archive.custody.key_invalid");
+    CHECK(err.store_id.size() == 64);
+    CHECK(err.key_id == "k2");
+  }
+
+  // Key buffer allocation failures across rotate_header (including mac_key allocation inside verify_header_tag).
+  for (std::size_t alloc_idx = 1; alloc_idx <= 7; ++alloc_idx) {
+    custody_ops::fail_key_alloc_on_call(alloc_idx);
+    auto res = rotate_header(h1_bytes, *key_source, "k2", "owner-rng", valid_desc);
+    custody_ops::reset_random_seam();
+    CHECK(std::holds_alternative<CustodyError>(res));
+    const auto& err = std::get<CustodyError>(res);
+    CHECK(err.error.reason == "archive.custody.key_invalid");
+    CHECK(err.store_id.size() == 64);
+    CHECK(err.key_id == "k1");
+  }
+
+  std::string rotate_dek(32, '\x61');
+  std::string rotate_nonce(24, '\x71');
+  custody_ops::reset_random_seam();
+  custody_ops::override_next_random_bytes(rotate_dek);
+  custody_ops::override_next_random_bytes(rotate_nonce);
+  auto h2_res = rotate_header(h1_bytes, *key_source, "k2", "owner-rng", valid_desc);
+  const auto rotate_draws = custody_ops::recorded_random_draws();
+  custody_ops::reset_random_seam();
+  CHECK(rotate_draws == (std::vector<std::size_t>{32, 24}));
+  CHECK(std::holds_alternative<std::string>(h2_res));
+  const std::string& h2_bytes = std::get<std::string>(h2_res);
+  {
+    auto h2_parsed = parse_header(h2_bytes);
+    CHECK(std::holds_alternative<StoreHeader>(h2_parsed));
+    CHECK(std::get<StoreHeader>(h2_parsed).epochs[1].wrapped_dek.substr(0, 24) == rotate_nonce);
+  }
+
+  // Retire random failure on 1-rewrap header: call 1 = re-wrap nonce (24).
+  custody_ops::reset_random_seam();
+  custody_ops::fail_random_on_call(1);
+  auto retire_res = retire_key_in_header(h2_bytes, "k1", *key_source, "owner-rng", valid_desc);
+  const auto retire_fail_draws = custody_ops::recorded_random_draws();
+  custody_ops::reset_random_seam();
+  CHECK(retire_fail_draws == (std::vector<std::size_t>{24}));
+  CHECK(std::holds_alternative<CustodyError>(retire_res));
+  const auto& retire_err = std::get<CustodyError>(retire_res);
+  CHECK(retire_err.error.reason == "archive.custody.key_invalid");
+  CHECK(retire_err.store_id.size() == 64);
+  CHECK(retire_err.key_id == "k2");
+
+  // Retire random failures and injected nonces when retiring 2 epochs wrapped under "k1": one 24-byte draw per re-wrap.
+  auto h1b_res = rotate_header(h1_bytes, *key_source, "k1", "owner-rng", valid_desc);
+  CHECK(std::holds_alternative<std::string>(h1b_res));
+  auto h3_two_k1_res =
+      rotate_header(std::get<std::string>(h1b_res), *key_source, "k2", "owner-rng", valid_desc);
+  CHECK(std::holds_alternative<std::string>(h3_two_k1_res));
+  const std::string& h3_two_k1 = std::get<std::string>(h3_two_k1_res);
+
+  for (std::size_t call_idx : {std::size_t{1}, std::size_t{2}}) {
+    custody_ops::reset_random_seam();
+    custody_ops::fail_random_on_call(call_idx);
+    auto r = retire_key_in_header(h3_two_k1, "k1", *key_source, "owner-rng", valid_desc);
+    const auto draws = custody_ops::recorded_random_draws();
+    custody_ops::reset_random_seam();
+    CHECK(draws == std::vector<std::size_t>(call_idx, 24));
+    CHECK(std::holds_alternative<CustodyError>(r));
+    CHECK(std::get<CustodyError>(r).error.reason == "archive.custody.key_invalid");
+  }
+
+  std::string retire_nonce_1(24, '\x81');
+  std::string retire_nonce_2(24, '\x91');
+  custody_ops::reset_random_seam();
+  custody_ops::override_next_random_bytes(retire_nonce_1);
+  custody_ops::override_next_random_bytes(retire_nonce_2);
+  auto retired_two_res = retire_key_in_header(h3_two_k1, "k1", *key_source, "owner-rng", valid_desc);
+  const auto retire_two_draws = custody_ops::recorded_random_draws();
+  custody_ops::reset_random_seam();
+  CHECK(retire_two_draws == (std::vector<std::size_t>{24, 24}));
+  CHECK(std::holds_alternative<std::string>(retired_two_res));
+  {
+    auto retired_parsed = parse_header(std::get<std::string>(retired_two_res));
+    CHECK(std::holds_alternative<StoreHeader>(retired_parsed));
+    const auto& rh = std::get<StoreHeader>(retired_parsed);
+    CHECK(rh.epochs[0].wrapped_dek.substr(0, 24) == retire_nonce_1);
+    CHECK(rh.epochs[1].wrapped_dek.substr(0, 24) == retire_nonce_2);
+  }
+
+  // Key buffer allocation failures across retire_key_in_header (including mac_key allocation inside verify_header_tag).
+  for (std::size_t alloc_idx = 1; alloc_idx <= 7; ++alloc_idx) {
+    custody_ops::fail_key_alloc_on_call(alloc_idx);
+    auto res = retire_key_in_header(h2_bytes, "k1", *key_source, "owner-rng", valid_desc);
+    custody_ops::reset_random_seam();
+    CHECK(std::holds_alternative<CustodyError>(res));
+    const auto& err = std::get<CustodyError>(res);
+    CHECK(err.error.reason == "archive.custody.key_invalid");
+    CHECK(err.store_id.size() == 64);
+    CHECK(err.key_id == "k2");
+  }
+}
+
+class MismatchedWrapKeySource final : public KeySource {
+ public:
+  MismatchedWrapKeySource(std::shared_ptr<KeySource> wrap_source,
+                          std::shared_ptr<KeySource> unwrap_source)
+      : wrap_source_(std::move(wrap_source)), unwrap_source_(std::move(unwrap_source)) {}
+
+  CustodyResult<std::string> active_key_id() override { return unwrap_source_->active_key_id(); }
+
+  CustodyResult<std::string> wrap_dek(std::string_view key_id,
+                                      std::string_view epoch_aad,
+                                      const DataKeyBuffer& dek) override {
+    return wrap_source_->wrap_dek(key_id, epoch_aad, dek);
+  }
+
+  std::optional<CustodyFault> unwrap_dek(std::string_view key_id,
+                                         std::string_view epoch_aad,
+                                         std::string_view wrapped_dek,
+                                         DataKeyBuffer& dek_out) override {
+    return unwrap_source_->unwrap_dek(key_id, epoch_aad, wrapped_dek, dek_out);
+  }
+
+ private:
+  std::shared_ptr<KeySource> wrap_source_;
+  std::shared_ptr<KeySource> unwrap_source_;
+};
+
+void test_wrap_verification() {
+  auto wrap_secrets = std::make_shared<FixedSecretSource>("k1");
+  wrap_secrets->set_secret("k1", std::string(32, '\xaa'));
+  wrap_secrets->set_secret("k2", std::string(32, '\xbb'));
+  auto wrap_source = make_hkdf_key_source(wrap_secrets);
+
+  auto unwrap_secrets = std::make_shared<FixedSecretSource>("k1");
+  unwrap_secrets->set_secret("k1", std::string(32, '\x11'));
+  unwrap_secrets->set_secret("k2", std::string(32, '\x22'));
+  auto unwrap_source = make_hkdf_key_source(unwrap_secrets);
+
+  MismatchedWrapKeySource mismatched(wrap_source, unwrap_source);
+  const auto valid_desc = default_test_descriptor();
+
+  // create_header fails post-wrap verification and returns no bytes.
+  {
+    auto res = create_header(mismatched, "owner-verify", valid_desc);
+    CHECK(std::holds_alternative<CustodyError>(res));
+    const auto& err = std::get<CustodyError>(res);
+    CHECK(err.error.reason == "archive.custody.key_invalid");
+    CHECK(err.key_id == "k1");
+    CHECK(err.store_id.size() == 64);
+  }
+
+  // Build valid 2-epoch header with unwrap_source so existing epochs unwrap cleanly, then test rotate and retire
+  // with `mismatched` so the failure occurs specifically on the verification unwrap of the newly wrapped DEK.
+  auto h1_res = create_header(*unwrap_source, "owner-verify", valid_desc);
+  CHECK(std::holds_alternative<std::string>(h1_res));
+  auto h2_res = rotate_header(std::get<std::string>(h1_res), *unwrap_source, "k2", "owner-verify", valid_desc);
+  CHECK(std::holds_alternative<std::string>(h2_res));
+  const std::string& h2_bytes = std::get<std::string>(h2_res);
+
+  // rotate_header fails post-wrap verification and returns no bytes.
+  {
+    auto res = rotate_header(h2_bytes, mismatched, "k2", "owner-verify", valid_desc);
+    CHECK(std::holds_alternative<CustodyError>(res));
+    const auto& err = std::get<CustodyError>(res);
+    CHECK(err.error.reason == "archive.custody.key_invalid");
+    CHECK(err.key_id == "k2");
+    CHECK(err.store_id.size() == 64);
+  }
+
+  // retire_key_in_header fails post-wrap verification and returns no bytes.
+  {
+    auto res = retire_key_in_header(h2_bytes, "k1", mismatched, "owner-verify", valid_desc);
+    CHECK(std::holds_alternative<CustodyError>(res));
+    const auto& err = std::get<CustodyError>(res);
+    CHECK(err.error.reason == "archive.custody.key_invalid");
+    CHECK(err.key_id == "k2");
+    CHECK(err.store_id.size() == 64);
+  }
+
+  // Post-wrap verification on HkdfKeySource derives the KEK fresh and never reuses cached_keks_.
+  // Corrupting the cached KEK causes wrap_dek to encrypt under the corrupted cached KEK while
+  // verify_unwrap_dek derives the uncorrupted KEK fresh and rejects with InvalidKeyMaterial.
+  const std::string& h1_bytes = std::get<std::string>(h1_res);
+  {
+    custody_ops::corrupt_next_cached_kek();
+    auto res = create_header(*unwrap_source, "owner-verify", valid_desc);
+    custody_ops::reset_random_seam();
+    CHECK(std::holds_alternative<CustodyError>(res));
+    const auto& err = std::get<CustodyError>(res);
+    CHECK(err.error.reason == "archive.custody.key_invalid");
+    CHECK(err.key_id == "k1");
+    CHECK(err.store_id.size() == 64);
+  }
+  {
+    custody_ops::corrupt_next_cached_kek();
+    auto res = rotate_header(h1_bytes, *unwrap_source, {}, "owner-verify", valid_desc);
+    custody_ops::reset_random_seam();
+    CHECK(std::holds_alternative<CustodyError>(res));
+    const auto& err = std::get<CustodyError>(res);
+    CHECK(err.error.reason == "archive.custody.key_invalid");
+    CHECK(err.key_id == "k1");
+    CHECK(err.store_id.size() == 64);
+  }
+  {
+    custody_ops::corrupt_next_cached_kek();
+    auto res = rotate_header(h1_bytes, *unwrap_source, "k2", "owner-verify", valid_desc);
+    custody_ops::reset_random_seam();
+    CHECK(std::holds_alternative<CustodyError>(res));
+    const auto& err = std::get<CustodyError>(res);
+    CHECK(err.error.reason == "archive.custody.key_invalid");
+    CHECK(err.key_id == "k2");
+    CHECK(err.store_id.size() == 64);
+  }
+  {
+    custody_ops::corrupt_next_cached_kek();
+    auto res = retire_key_in_header(h2_bytes, "k1", *unwrap_source, "owner-verify", valid_desc);
+    custody_ops::reset_random_seam();
+    CHECK(std::holds_alternative<CustodyError>(res));
+    const auto& err = std::get<CustodyError>(res);
+    CHECK(err.error.reason == "archive.custody.key_invalid");
+    CHECK(err.key_id == "k2");
+    CHECK(err.store_id.size() == 64);
+  }
+  {
+    // Warm the KEK cache in an outer scope before arming corrupt_next_cached_kek(), then rotate under the same key.
+    CustodyOperationScope outer_scope(*unwrap_source);
+    auto reqs_res = unwrap_requests(h1_bytes, "owner-verify", valid_desc);
+    CHECK(std::holds_alternative<std::vector<UnwrapRequest>>(reqs_res));
+    const auto& req = std::get<std::vector<UnwrapRequest>>(reqs_res).at(0);
+    DataKeyBuffer warm_dek;
+    CHECK(!unwrap_source->unwrap_dek(req.key_id, req.epoch_aad, req.wrapped_dek, warm_dek));
+    custody_ops::corrupt_next_cached_kek();
+    auto res = rotate_header(h1_bytes, *unwrap_source, "k1", "owner-verify", valid_desc);
+    custody_ops::reset_random_seam();
+    CHECK(std::holds_alternative<CustodyError>(res));
+    const auto& err = std::get<CustodyError>(res);
+    CHECK(err.error.reason == "archive.custody.key_invalid");
+    CHECK(err.key_id == "k1");
+    CHECK(err.store_id.size() == 64);
+  }
+}
+
+void test_epoch_cap() {
+  auto secrets = std::make_shared<FixedSecretSource>("k1");
+  secrets->set_secret("k1", std::string(32, '\x11'));
+  auto key_source = make_hkdf_key_source(secrets);
+  const auto valid_desc = default_test_descriptor();
+
+  HostCustodyLimits limits_3{};
+  limits_3.max_epochs = 3;
+
+  auto h1_res = create_header(*key_source, "owner-cap", valid_desc, limits_3);
+  CHECK(std::holds_alternative<std::string>(h1_res));
+  auto h2_res = rotate_header(std::get<std::string>(h1_res), *key_source, {}, "owner-cap", valid_desc, limits_3);
+  CHECK(std::holds_alternative<std::string>(h2_res));
+  auto h3_res = rotate_header(std::get<std::string>(h2_res), *key_source, {}, "owner-cap", valid_desc, limits_3);
+  CHECK(std::holds_alternative<std::string>(h3_res));
+  const std::string& h3_bytes = std::get<std::string>(h3_res);
+
+  // Fourth epoch rotation (would exceed max_epochs == 3) is refused with CustodyFault::EpochLimit.
+  auto h4_cap_res = rotate_header(h3_bytes, *key_source, {}, "owner-cap", valid_desc, limits_3);
+  CHECK(std::holds_alternative<CustodyError>(h4_cap_res));
+  const auto& cap_err = std::get<CustodyError>(h4_cap_res);
+  CHECK(cap_err.error.kind == ErrorKind::ResourceLimit);
+  CHECK(cap_err.error.retry_class == RetryClass::Never);
+  CHECK(cap_err.error.retry_safety == RetrySafety::NotSent);
+  CHECK(cap_err.error.reason == "archive.custody.epoch_limit");
+  CHECK(cap_err.store_id.size() == 64);
+  CHECK(cap_err.key_id.empty());
+
+  // Build a 4-epoch header under default limits, then verify parse_header accepts the 3-epoch header
+  // and refuses the 4-epoch header when max_epochs == 3, and accepts the 4-epoch header when max_epochs == 4.
+  CHECK(std::holds_alternative<StoreHeader>(parse_header(h3_bytes, limits_3)));
+
+  auto h4_default_res = rotate_header(h3_bytes, *key_source, {}, "owner-cap", valid_desc);
+  CHECK(std::holds_alternative<std::string>(h4_default_res));
+  const std::string& h4_bytes = std::get<std::string>(h4_default_res);
+  CHECK(std::holds_alternative<StoreHeader>(parse_header(h4_bytes)));
+
+  auto parsed_cap_res = parse_header(h4_bytes, limits_3);
+  CHECK(std::holds_alternative<CustodyError>(parsed_cap_res));
+  CHECK(std::get<CustodyError>(parsed_cap_res).error.reason == "archive.custody.corrupt_header");
+
+  HostCustodyLimits limits_4{};
+  limits_4.max_epochs = 4;
+  CHECK(std::holds_alternative<StoreHeader>(parse_header(h4_bytes, limits_4)));
+}
+
+class CountingKeySource final : public KeySource {
+ public:
+  explicit CountingKeySource(std::shared_ptr<KeySource> inner) : inner_(std::move(inner)) {}
+
+  void reset_counts() noexcept {
+    active_key_id_calls = 0;
+    wrap_calls = 0;
+    unwrap_calls = 0;
+    begin_scope_calls = 0;
+    end_scope_calls = 0;
+  }
+
+  CustodyResult<std::string> active_key_id() override {
+    ++active_key_id_calls;
+    return inner_->active_key_id();
+  }
+
+  CustodyResult<std::string> wrap_dek(std::string_view key_id,
+                                      std::string_view epoch_aad,
+                                      const DataKeyBuffer& dek) override {
+    ++wrap_calls;
+    return inner_->wrap_dek(key_id, epoch_aad, dek);
+  }
+
+  std::optional<CustodyFault> unwrap_dek(std::string_view key_id,
+                                         std::string_view epoch_aad,
+                                         std::string_view wrapped_dek,
+                                         DataKeyBuffer& dek_out) override {
+    ++unwrap_calls;
+    return inner_->unwrap_dek(key_id, epoch_aad, wrapped_dek, dek_out);
+  }
+
+  std::optional<CustodyFault> verify_unwrap_dek(std::string_view key_id,
+                                                std::string_view epoch_aad,
+                                                std::string_view wrapped_dek,
+                                                DataKeyBuffer& dek_out) override {
+    ++unwrap_calls;
+    return KeySource::forward_verify_unwrap_dek(*inner_, key_id, epoch_aad, wrapped_dek, dek_out);
+  }
+
+  void begin_operation_scope() noexcept override {
+    ++begin_scope_calls;
+    scopes_.push_back(std::make_unique<CustodyOperationScope>(*inner_));
+  }
+
+  void end_operation_scope() noexcept override {
+    ++end_scope_calls;
+    if (!scopes_.empty()) {
+      scopes_.pop_back();
+    }
+  }
+
+  std::size_t active_key_id_calls = 0;
+  std::size_t wrap_calls = 0;
+  std::size_t unwrap_calls = 0;
+  std::size_t begin_scope_calls = 0;
+  std::size_t end_scope_calls = 0;
+
+ private:
+  std::shared_ptr<KeySource> inner_;
+  std::vector<std::unique_ptr<CustodyOperationScope>> scopes_;
+};
+
+void test_header_call_counts() {
+  auto secrets = std::make_shared<FixedSecretSource>("k1");
+  secrets->set_secret("k1", std::string(32, '\x11'));
+  secrets->set_secret("k2", std::string(32, '\x22'));
+  secrets->set_secret("k3", std::string(32, '\x33'));
+  auto hkdf_source = make_hkdf_key_source(secrets);
+  CountingKeySource counting(hkdf_source);
+  const auto valid_desc = default_test_descriptor();
+
+  // 1. create_header: 1 scope, 1 active_key_id, 1 wrap, 1 verification unwrap;
+  // k1 loaded twice (1 for wrap_dek, 1 fresh derivation in verify_unwrap_dek).
+  counting.reset_counts();
+  secrets->reset_counts();
+  auto h1_res = create_header(counting, "owner-counts", valid_desc);
+  CHECK(std::holds_alternative<std::string>(h1_res));
+  CHECK(counting.begin_scope_calls == 1);
+  CHECK(counting.end_scope_calls == 1);
+  CHECK(counting.active_key_id_calls == 1);
+  CHECK(counting.wrap_calls == 1);
+  CHECK(counting.unwrap_calls == 1);
+  CHECK(secrets->load_count("k1") == 2);
+
+  // 2. rotate_header with empty target_key_id (active = k1): 1 scope, 1 active_key_id, 1 current unwrap +
+  // 1 wrap + 1 verification unwrap = 2 unwraps; k1 loaded twice (1 cached across current unwrap + wrap,
+  // 1 fresh derivation in verify_unwrap_dek).
+  counting.reset_counts();
+  secrets->reset_counts();
+  auto h2_res = rotate_header(std::get<std::string>(h1_res), counting, {}, "owner-counts", valid_desc);
+  CHECK(std::holds_alternative<std::string>(h2_res));
+  CHECK(counting.begin_scope_calls == 1);
+  CHECK(counting.end_scope_calls == 1);
+  CHECK(counting.active_key_id_calls == 1);
+  CHECK(counting.wrap_calls == 1);
+  CHECK(counting.unwrap_calls == 2);
+  CHECK(secrets->load_count("k1") == 2);
+
+  // 3. rotate_header with explicit target_key_id = "k3": 1 scope, 0 active_key_id, 1 current unwrap (k1) +
+  // 1 wrap (k3) + 1 verification unwrap (k3); k1 loaded once and k3 loaded twice (wrap + fresh verify).
+  counting.reset_counts();
+  secrets->reset_counts();
+  auto h3_res = rotate_header(std::get<std::string>(h2_res), counting, "k3", "owner-counts", valid_desc);
+  CHECK(std::holds_alternative<std::string>(h3_res));
+  CHECK(counting.begin_scope_calls == 1);
+  CHECK(counting.end_scope_calls == 1);
+  CHECK(counting.active_key_id_calls == 0);
+  CHECK(counting.wrap_calls == 1);
+  CHECK(counting.unwrap_calls == 2);
+  CHECK(secrets->load_count("k1") == 1);
+  CHECK(secrets->load_count("k3") == 2);
+
+  // 4. retire_key_in_header retiring "k1" (used by epochs 1 and 2, current epoch 3 uses "k3"):
+  // 1 scope, 0 active_key_id, 1 current unwrap (k3) + 2 retiring unwraps (k1) + 2 re-wraps (k3) +
+  // 2 verification unwraps (k3) = 2 wraps and 5 unwraps; k1 loaded once (cached across both retiring unwraps)
+  // and k3 loaded 3 times (1 cached across current unwrap + 2 re-wraps, plus 2 fresh derivations in verify_unwrap_dek).
+  counting.reset_counts();
+  secrets->reset_counts();
+  auto retired_res = retire_key_in_header(std::get<std::string>(h3_res), "k1", counting, "owner-counts", valid_desc);
+  CHECK(std::holds_alternative<std::string>(retired_res));
+  CHECK(counting.begin_scope_calls == 1);
+  CHECK(counting.end_scope_calls == 1);
+  CHECK(counting.active_key_id_calls == 0);
+  CHECK(counting.wrap_calls == 2);
+  CHECK(counting.unwrap_calls == 5);
+  CHECK(secrets->load_count("k1") == 1);
+  CHECK(secrets->load_count("k3") == 3);
+}
+
 }  // namespace
 
 int main() {
@@ -930,6 +2232,15 @@ int main() {
     test_wiping_buffer();
     test_error_mapping();
     test_derive_kek_and_fixed_nonce_wrap_vectors();
+    test_existing_archive_portability_unchanged();
+    test_golden_header_bytes();
+    test_header_splices();
+    test_epoch_aad_single_field_binding();
+    test_retire_key_in_header();
+    test_random_failures_header();
+    test_wrap_verification();
+    test_epoch_cap();
+    test_header_call_counts();
     std::cout << "native archive custody tests passed\n";
     return 0;
   } catch (const std::exception& e) {
