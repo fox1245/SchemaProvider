@@ -1,4 +1,5 @@
 #include "core/native_archive.h"
+#include "core/native_archive_custody_internal.h"
 #include "core/native_archive_fs.h"
 #include "core/native.h"
 #include "crypto/crypto.h"
@@ -13,7 +14,11 @@
 
 namespace sp {
 namespace {
-using Digest = std::array<unsigned char, 32>;
+using Digest = archive_internal::Digest;
+using archive_internal::Reader;
+using archive_internal::Writer;
+using archive_internal::descriptor_binding;
+using archive_internal::hex;
 using namespace archive_fs;
 Error error() { Error e; e.kind = ErrorKind::Permission; e.safe_message = "Trusted local native archive admission failed"; e.retry_safety = RetrySafety::NotSent; return e; }
 // This build has no file custody backend: the archive cannot be activated, and nothing is stored.
@@ -22,25 +27,6 @@ using Fd = archive_fs::Handle;
 Digest mac(const Digest& key, std::string_view bytes) {
   return crypto::hmac_sha256(key.data(), key.size(), bytes.data(), bytes.size());
 }
-std::string hex(const Digest& bytes) { static constexpr char digits[] = "0123456789abcdef"; std::string text; text.reserve(64); for (auto b : bytes) { text += digits[b>>4]; text += digits[b&15]; } return text; }
-class Writer {
- public:
-  explicit Writer(NativeArchiveLimits limits) : limits(limits) {}
-  void raw(std::string_view v) { require(v.size() <= limits.max_bytes - data.size()); data.append(v); }
-  void number(uint64_t n) { char b[8]; for (unsigned i=0;i<8;++i) b[7-i]=static_cast<char>(n>>(i*8)); raw({b,8}); }
-  void boolean(bool v) { number(v ? 1 : 0); }
-  void text(std::string_view v) { number(v.size()); raw(v); }
-  void optional(const std::optional<std::string>& v) { boolean(v.has_value()); if (v) text(*v); }
-  void strings(const std::vector<std::string>& v) { require(v.size() <= limits.max_parts); number(v.size()); for (const auto& s:v) text(s); }
-  void document(const std::shared_ptr<const json::Document>& v) {
-    boolean(bool(v));if(!v)return;
-    const auto length_offset=data.size();number(0);const auto start=data.size();
-    json::BoundedWriter writer({limits.max_bytes,limits.max_json_depth},&data);writer.value(v->root());require(writer.ok());
-    const uint64_t length=data.size()-start;for(unsigned i=0;i<8;++i)data[length_offset+7-i]=static_cast<char>(length>>(i*8));
-  }
-  void digest(const Digest& v) { raw({reinterpret_cast<const char*>(v.data()),v.size()}); }
-  NativeArchiveLimits limits; std::string data;
-};
 // The activation record is key material: the raw archive key is its first 32 bytes. It is built in fixed
 // storage that is wiped on every exit path, never in a growing std::string, because each reallocation of a
 // string would copy the key into a new heap block and free the old one unwiped.
@@ -69,30 +55,6 @@ struct ScopedWipe {
   ScopedWipe& operator=(const ScopedWipe&) = delete;
   explicit ScopedWipe(std::string& value) noexcept : bytes(value) {}
   ~ScopedWipe() { crypto::cleanse(bytes.data(),bytes.size()); }
-};
-class Reader {
- public:
-  Reader(std::string_view data, NativeArchiveLimits limits) : data(data), limits(limits) {}
-  std::string_view raw(size_t n) { require(n <= data.size()); auto out=data.substr(0,n); data.remove_prefix(n); return out; }
-  uint64_t number() { uint64_t n=0; for (unsigned char c:raw(8)) n=(n<<8)|c; return n; }
-  bool boolean() { auto n=number(); require(n<=1); return n!=0; }
-  size_t count(size_t limit) { auto n=number(); require(n<=limit && n<=data.size()/8); return static_cast<size_t>(n); }
-  std::string_view blob() { auto n=number();require(n<=data.size());return raw(static_cast<size_t>(n)); }
-  std::string text() { return std::string(blob()); }
-  std::optional<std::string> optional() { if (!boolean()) return {}; return text(); }
-  std::vector<std::string> strings() { std::vector<std::string> v; auto n=count(limits.max_parts); v.reserve(n); while(n--) v.push_back(text()); return v; }
-  std::shared_ptr<const json::Document> document(bool diagnostic = false) {
-    if (!boolean()) return {};
-    auto parsed = json::parse(blob(), {limits.max_bytes, limits.max_json_depth});
-    if (auto* accepted = std::get_if<json::Document>(&parsed))
-      return std::make_shared<const json::Document>(std::move(*accepted));
-    auto& rejected = std::get<json::ParseError>(parsed);
-    require(diagnostic && rejected.code == json::ParseCode::DuplicateKey && rejected.context.root().valid());
-    return std::make_shared<const json::Document>(std::move(rejected.context));
-  }
-  Digest digest() { Digest v{}; auto bytes=raw(v.size()); std::memcpy(v.data(),bytes.data(),v.size()); return v; }
-  template<class E> E enumeration(unsigned maximum) { auto n=number(); require(n<=maximum); return static_cast<E>(n); }
-  std::string_view data; NativeArchiveLimits limits;
 };
 void write_media(Writer& w, const Media& p) {
   w.number(static_cast<unsigned>(p.kind));w.number(static_cast<unsigned>(p.source));w.text(p.mime);
@@ -178,13 +140,6 @@ Part read_part(Reader& r, size_t& parts) {
     default:throw Rejected{};
   }
 }
-std::string descriptor_binding(const descriptor::ValidatedDescriptor& d, NativeArchiveLimits limits) {
-  Writer w(limits);w.text("sp.native.archive.descriptor.v2");w.text(d.id());w.number(d.revision());w.text(d.family());w.text(d.base_url());w.text(d.path(false));w.text(d.path(true));w.text(d.policy()->identity());w.number(d.headers().size());for(const auto& [name,value]:d.headers()){w.text(name);w.text(value);}
-  w.text(d.request_model_member());w.text(d.request_messages_member());w.text(d.request_stream_member());w.text(d.max_output_tokens_member());
-  w.number(d.usage_path().size());for(const auto& segment:d.usage_path())w.text(segment);
-  w.number(d.stop_mappings().size());for(const auto& [raw,kind]:d.stop_mappings()){w.text(raw);w.number(static_cast<unsigned>(kind));}
-  const Digest digest=crypto::sha256(w.data);return {reinterpret_cast<const char*>(digest.data()),digest.size()};
-}
 } // namespace
 struct NativeArchive::State {
   std::string directory, key_file, owner, descriptor_identity, activation;
@@ -219,22 +174,8 @@ NativeArchive::Activation NativeArchive::open(std::string d,std::string k,std::s
 NativeArchive::Activation NativeArchive::activate(std::string d,std::string k,std::string o,descriptor::ValidatedDescriptor v,NativeArchiveLimits l,bool create) {
   if(!archive_fs::available())return unavailable();
   try {
-    require(v.policy()!=nullptr);
-    const auto& resources=v.policy()->resources();
-    if(!l.max_bytes)l.max_bytes=resources.native_bytes;
-    if(!l.max_messages)l.max_messages=resources.request_messages;
-    if(!l.max_parts)l.max_parts=resources.request_parts;
-    if(!l.max_json_depth)l.max_json_depth=resources.native_depth;
-    if(!l.max_records)l.max_records=resources.request_messages;
-    if(!l.max_store_bytes){require(l.max_records && l.max_bytes<=UINT64_MAX/l.max_records);l.max_store_bytes=static_cast<uint64_t>(l.max_bytes)*l.max_records;}
-    require(resources.request_messages && resources.native_bytes <= UINT64_MAX / resources.request_messages);
-    const auto storage_ceiling = static_cast<uint64_t>(resources.native_bytes) * resources.request_messages;
-    require(!o.empty() && l.max_bytes > 0 && l.max_bytes <= resources.native_bytes &&
-            l.max_messages > 0 && l.max_messages <= resources.request_messages &&
-            l.max_parts > 0 && l.max_parts <= resources.request_parts &&
-            l.max_json_depth > 0 && l.max_json_depth <= resources.native_depth &&
-            l.max_records > 0 && l.max_records <= resources.request_messages &&
-            l.max_store_bytes >= l.max_bytes && l.max_store_bytes <= storage_ceiling);
+    l = archive_internal::resolve_archive_limits(l, v);
+    require(!o.empty());
     auto state=std::make_unique<State>(std::move(d),std::move(k),std::move(o),std::move(v),l);
     auto dir=locate(state->directory); auto key=locate(state->key_file); private_directory(key.parent);
     state->root=create ? create_directory(dir.parent,dir.name) : open_directory(dir.parent,dir.name);private_directory(state->root);state->root_identity=status(state->root);

@@ -132,12 +132,15 @@ def main():
     parser.add_argument('--errors', required=True)
     parser.add_argument('--descriptor-policy', required=True)
     parser.add_argument('--codec-defaults', required=True)
+    parser.add_argument('--archive-custody', default=None)
     parser.add_argument('--output', required=True)
     parser.add_argument('--asset', nargs=2, action='append', default=[], metavar=('NAME', 'PATH'))
     args = parser.parse_args()
     runtime, errors = load(args.runtime), load(args.errors)
     validate(runtime, errors)
     descriptor_policy, codec_defaults = load(args.descriptor_policy), load(args.codec_defaults)
+    archive_custody_path = args.archive_custody or Path(args.codec_defaults).with_name('archive-custody.json')
+    archive_custody = load(archive_custody_path)
     closed(codec_defaults, {'version', 'resources', 'admission'})
     if type(codec_defaults['version']) is not int or codec_defaults['version'] != 1:
         raise ValueError('codec resource version rejected')
@@ -147,6 +150,12 @@ def main():
             number(value, key)
             if not value or value > codec_defaults['admission'][key]:
                 raise ValueError('codec resource admission rejected')
+    closed(archive_custody, {'version', 'max_epochs'})
+    if type(archive_custody['version']) is not int or archive_custody['version'] != 1:
+        raise ValueError('archive custody version rejected')
+    number(archive_custody['max_epochs'], 'max_epochs')
+    if not archive_custody['max_epochs']:
+        raise ValueError('archive custody max_epochs rejected')
     lines = ['#pragma once', '#include <cstdint>', '#include <string_view>', 'namespace sp::config_defaults {']
     for prefix, values in [('defaults', runtime['defaults']), ('admission', runtime['admission'])]:
         for key, value in sorted(values.items()):
@@ -156,8 +165,10 @@ def main():
     for group in ('resources', 'admission'):
         for key, value in sorted(codec_defaults[group].items()):
             lines.append(f'inline constexpr std::uint64_t codec_{group}_{key} = {value}ULL;')
+    lines.append(f"inline constexpr std::uint64_t archive_custody_max_epochs = {archive_custody['max_epochs']}ULL;")
     assets = {'runtime_defaults_json': runtime, 'error_policy_json': errors,
-              'descriptor_policy_json': descriptor_policy, 'codec_defaults_json': codec_defaults}
+              'descriptor_policy_json': descriptor_policy, 'codec_defaults_json': codec_defaults,
+              'archive_custody_json': archive_custody}
     keywords = set(('alignas alignof and and_eq asm auto bitand bitor bool break case catch char char8_t '
                     'char16_t char32_t class compl concept const consteval constexpr constinit const_cast '
                     'continue co_await co_return co_yield decltype default delete do double dynamic_cast '
@@ -169,6 +180,7 @@ def main():
     reserved = {prefix + '_' + key for prefix, values in [('defaults', runtime['defaults']),
                 ('admission', runtime['admission'])] for key in values} | keywords
     reserved |= {f'codec_{group}_{key}' for group in ('resources', 'admission') for key in RESOURCES}
+    reserved |= {'archive_custody_max_epochs'}
     for name, path in args.asset:
         if not name or not name.isascii() or not name.isidentifier() or name.startswith('_') or name in assets or name in reserved:
             raise ValueError('configuration asset symbol rejected')

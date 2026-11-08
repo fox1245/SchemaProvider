@@ -199,6 +199,7 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/config/error-policy.json"
   "${CMAKE_CURRENT_SOURCE_DIR}/config/descriptor-policy.json"
   "${CMAKE_CURRENT_SOURCE_DIR}/config/codec-defaults.json"
+  "${CMAKE_CURRENT_SOURCE_DIR}/config/archive-custody.json"
   "${CMAKE_CURRENT_SOURCE_DIR}/config/model-catalog.json"
   "${CMAKE_CURRENT_SOURCE_DIR}/config/models.json")
 execute_process(
@@ -207,6 +208,7 @@ execute_process(
     --errors "${CMAKE_CURRENT_SOURCE_DIR}/config/error-policy.json"
     --descriptor-policy "${CMAKE_CURRENT_SOURCE_DIR}/config/descriptor-policy.json"
     --codec-defaults "${CMAKE_CURRENT_SOURCE_DIR}/config/codec-defaults.json"
+    --archive-custody "${CMAKE_CURRENT_SOURCE_DIR}/config/archive-custody.json"
     --asset model_catalog_json "${CMAKE_CURRENT_SOURCE_DIR}/config/model-catalog.json"
     --asset model_catalogue_json "${CMAKE_CURRENT_SOURCE_DIR}/config/models.json"
     --output "${SP_GENERATED_INCLUDE_DIR}/sp/config_defaults.h"

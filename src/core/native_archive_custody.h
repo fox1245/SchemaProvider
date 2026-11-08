@@ -1,5 +1,6 @@
 #pragma once
 #include "core/value.h"
+#include "descriptor/descriptor.h"
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -9,8 +10,26 @@
 #include <string>
 #include <string_view>
 #include <variant>
+#include <vector>
 
 namespace sp {
+
+// Zero resolves from the admitted descriptor's closed/versioned resource
+// policy: native_bytes, request_messages, request_parts, native_depth;
+// store records=request_messages, store bytes=native_bytes*records.
+struct NativeArchiveLimits {
+  std::size_t max_bytes = 0;
+  std::size_t max_messages = 0;
+  std::size_t max_parts = 0;
+  std::size_t max_json_depth = 0;
+  std::size_t max_records = 0;
+  std::uint64_t max_store_bytes = 0;
+};
+
+struct HostCustodyLimits {
+  NativeArchiveLimits archive{};
+  std::size_t max_epochs = 0;
+};
 
 namespace custody_detail {
 unsigned char* sodium_key_alloc(std::size_t size) noexcept;
@@ -26,6 +45,7 @@ enum class CustodyFault : std::uint8_t {
   KeyInUse,            // Attempted to retire the currently active key_id without rotating first
   CorruptHeader,       // Malformed or unsupported StoreHeader bytes
   CorruptRecord,       // Malformed or unsupported SealedRecord bytes
+  EpochLimit,          // StoreHeader epoch table reached configured max_epochs
   SourceUnavailable,   // Transient key source unreachable / timed out
   SourceRateLimited,   // Transient key source rate limit
 };
@@ -200,6 +220,12 @@ class SecretSource {
 };
 
 class CustodyOperationScope;
+class KeySource;
+std::optional<CustodyFault> verify_wrapped_dek(KeySource& source,
+                                               std::string_view key_id,
+                                               std::string_view epoch_aad,
+                                               std::string_view wrapped_dek,
+                                               const DataKeyBuffer& expected_dek);
 
 class KeySource {
  public:
@@ -217,8 +243,26 @@ class KeySource {
 
  protected:
   friend class CustodyOperationScope;
+  friend std::optional<CustodyFault> verify_wrapped_dek(KeySource& source,
+                                                        std::string_view key_id,
+                                                        std::string_view epoch_aad,
+                                                        std::string_view wrapped_dek,
+                                                        const DataKeyBuffer& expected_dek);
   virtual void begin_operation_scope() noexcept {}
   virtual void end_operation_scope() noexcept {}
+  virtual std::optional<CustodyFault> verify_unwrap_dek(std::string_view key_id,
+                                                        std::string_view epoch_aad,
+                                                        std::string_view wrapped_dek,
+                                                        DataKeyBuffer& dek_out) {
+    return unwrap_dek(key_id, epoch_aad, wrapped_dek, dek_out);
+  }
+  static std::optional<CustodyFault> forward_verify_unwrap_dek(KeySource& target,
+                                                               std::string_view key_id,
+                                                               std::string_view epoch_aad,
+                                                               std::string_view wrapped_dek,
+                                                               DataKeyBuffer& dek_out) {
+    return target.verify_unwrap_dek(key_id, epoch_aad, wrapped_dek, dek_out);
+  }
 };
 
 // Scopes one header operation on a KeySource so make_hkdf_key_source loads each
@@ -238,5 +282,84 @@ class CustodyOperationScope final {
 };
 
 std::shared_ptr<KeySource> make_hkdf_key_source(std::shared_ptr<SecretSource> secret_source);
+
+struct EpochKeyEntry {
+  std::uint64_t epoch = 0;
+  std::string wrapping_key_id;
+  std::string wrapped_dek;
+};
+
+struct StoreHeader {
+  std::uint64_t format_version = 0;
+  std::array<unsigned char, 32> store_id{};
+  std::string owner_scope;
+  std::array<unsigned char, 32> descriptor_identity{};
+  std::uint64_t current_epoch = 0;
+  std::vector<EpochKeyEntry> epochs;
+  std::array<unsigned char, 32> header_tag{};
+};
+
+struct UnwrapRequest {
+  std::string key_id;
+  std::string epoch_aad;
+  std::string wrapped_dek;
+};
+
+// Parses header bytes structurally without a key. Returns unauthenticated data; nothing
+// returned here may be treated as custody state before open_custody succeeds.
+// Malformed header bytes or invalid limits return CustodyFault::CorruptHeader.
+CustodyOutcome<StoreHeader> parse_header(std::string_view header_bytes,
+                                         HostCustodyLimits limits = {});
+
+// Serializes a StoreHeader structurally and verifies round-trip parsing under limits.
+// Structural or limit violations return CustodyFault::CorruptHeader.
+CustodyOutcome<std::string> serialize_header(const StoreHeader& header,
+                                             HostCustodyLimits limits = {});
+
+// Creates a new authenticated StoreHeader at epoch 1.
+// Invalid limits or an empty/overlong owner_scope return CustodyFault::CorruptHeader;
+// an invalid active key_id from source returns CustodyFault::InvalidKeyMaterial.
+CustodyOutcome<std::string> create_header(KeySource& source,
+                                          std::string_view owner_scope,
+                                          const descriptor::ValidatedDescriptor& descriptor,
+                                          HostCustodyLimits limits = {});
+
+// Verifies the current header tag and appends epoch current_epoch + 1.
+// Only the current epoch's entry is used before the header tag check.
+// Invalid limits return CustodyFault::CorruptHeader; caller owner_scope or descriptor
+// mismatch against the parsed header returns CustodyFault::Tampered; an invalid non-empty
+// target_key_id returns CustodyFault::InvalidKeyMaterial.
+CustodyOutcome<std::string> rotate_header(std::string_view current_header_bytes,
+                                          KeySource& source,
+                                          std::string_view target_key_id,
+                                          std::string_view owner_scope,
+                                          const descriptor::ValidatedDescriptor& descriptor,
+                                          HostCustodyLimits limits = {});
+
+// Verifies the current header tag and re-wraps any prior epoch entries wrapped under
+// retired_key_id to the current epoch's wrapping_key_id.
+// Only the current epoch's entry is used before the header tag check.
+// Invalid limits return CustodyFault::CorruptHeader; caller owner_scope or descriptor
+// mismatch against the parsed header returns CustodyFault::Tampered; an empty or
+// overlong retired_key_id returns CustodyFault::InvalidKeyMaterial; retiring the
+// current epoch's wrapping_key_id returns CustodyFault::KeyInUse.
+CustodyOutcome<std::string> retire_key_in_header(std::string_view current_header_bytes,
+                                                 std::string_view retired_key_id,
+                                                 KeySource& source,
+                                                 std::string_view owner_scope,
+                                                 const descriptor::ValidatedDescriptor& descriptor,
+                                                 HostCustodyLimits limits = {});
+
+// Parses header bytes without a key, checks owner_scope and descriptor_identity against
+// the caller's arguments, and builds one UnwrapRequest per epoch entry. Returns
+// unauthenticated data; nothing returned here may be treated as custody state before
+// open_custody succeeds.
+// Invalid limits or malformed header bytes return CustodyFault::CorruptHeader; caller
+// owner_scope or descriptor mismatch against the parsed header returns CustodyFault::Tampered.
+CustodyOutcome<std::vector<UnwrapRequest>> unwrap_requests(
+    std::string_view header_bytes,
+    std::string_view owner_scope,
+    const descriptor::ValidatedDescriptor& descriptor,
+    HostCustodyLimits limits = {});
 
 }  // namespace sp
