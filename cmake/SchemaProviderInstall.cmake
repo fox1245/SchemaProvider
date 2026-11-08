@@ -26,6 +26,8 @@ install(DIRECTORY
   DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/SchemaProvider"
   FILES_MATCHING PATTERN "*.h"
   PATTERN "native_archive_fs.h" EXCLUDE
+  PATTERN "native_archive_custody_format.h" EXCLUDE
+  PATTERN "native_archive_custody_internal.h" EXCLUDE
   PATTERN "io_thread.h" EXCLUDE
   PATTERN "reason.h" EXCLUDE
   PATTERN "served_model.h" EXCLUDE)
@@ -60,5 +62,9 @@ install(FILES
   DESTINATION "${SP_INSTALL_CMAKE_DIR}")
 if(SP_EXTERNAL_YYJSON)
   install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/cmake/Findyyjson.cmake"
+    DESTINATION "${SP_INSTALL_CMAKE_DIR}")
+endif()
+if(SP_SODIUM)
+  install(FILES "${CMAKE_CURRENT_BINARY_DIR}/FindSodium.cmake"
     DESTINATION "${SP_INSTALL_CMAKE_DIR}")
 endif()

@@ -1,0 +1,207 @@
+set(_Sodium_MIN_VERSION "@SP_SODIUM_MIN_VERSION@")
+set(Sodium_PINNED_VERSION "@SP_SODIUM_PINNED_VERSION@")
+set(Sodium_PINNED_ARCHIVE "@SP_SODIUM_ARCHIVE@")
+set(Sodium_PINNED_SHA256 "@SP_SODIUM_SHA256@")
+option(SODIUM_USE_STATIC_LIBS
+  "Link against a static libsodium library on Windows when not using a CMake package target (defines SODIUM_STATIC=1)"
+  OFF)
+
+set(_Sodium_ROOT "${SODIUM_ROOT}")
+if(NOT _Sodium_ROOT AND NOT "$ENV{SODIUM_ROOT}" STREQUAL "")
+  set(_Sodium_ROOT "$ENV{SODIUM_ROOT}")
+endif()
+
+if(DEFINED _Sodium_LAST_ROOT AND NOT "${_Sodium_LAST_ROOT}" STREQUAL "${_Sodium_ROOT}")
+  unset(Sodium_INCLUDE_DIR CACHE)
+  unset(Sodium_LIBRARY CACHE)
+  unset(unofficial-libsodium_DIR CACHE)
+  unset(libsodium_DIR CACHE)
+endif()
+if(DEFINED _Sodium_LAST_STATIC AND NOT "${_Sodium_LAST_STATIC}" STREQUAL "${SODIUM_USE_STATIC_LIBS}")
+  unset(Sodium_LIBRARY CACHE)
+endif()
+set(_Sodium_LAST_ROOT "${_Sodium_ROOT}" CACHE INTERNAL "Last SODIUM_ROOT used by FindSodium")
+set(_Sodium_LAST_STATIC "${SODIUM_USE_STATIC_LIBS}" CACHE INTERNAL "Last SODIUM_USE_STATIC_LIBS used by FindSodium")
+set(Sodium_VERSION "")
+set(_Sodium_CONFIG_TARGET "")
+
+if(_Sodium_ROOT)
+  find_package(unofficial-libsodium CONFIG QUIET PATHS "${_Sodium_ROOT}" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
+  if(NOT unofficial-libsodium_FOUND)
+    find_package(libsodium CONFIG QUIET PATHS "${_Sodium_ROOT}" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
+  endif()
+else()
+  find_package(unofficial-libsodium CONFIG QUIET)
+  if(NOT unofficial-libsodium_FOUND)
+    find_package(libsodium CONFIG QUIET)
+  endif()
+endif()
+
+if(unofficial-libsodium_FOUND AND TARGET unofficial-libsodium::unofficial-libsodium)
+  set(_Sodium_CONFIG_TARGET "unofficial-libsodium::unofficial-libsodium")
+  if(unofficial-libsodium_VERSION)
+    set(Sodium_VERSION "${unofficial-libsodium_VERSION}")
+  endif()
+elseif(libsodium_FOUND AND TARGET libsodium::libsodium)
+  set(_Sodium_CONFIG_TARGET "libsodium::libsodium")
+  if(libsodium_VERSION)
+    set(Sodium_VERSION "${libsodium_VERSION}")
+  endif()
+endif()
+
+if(_Sodium_CONFIG_TARGET)
+  get_target_property(Sodium_INCLUDE_DIR "${_Sodium_CONFIG_TARGET}" INTERFACE_INCLUDE_DIRECTORIES)
+  foreach(_Sodium_prop
+          IMPORTED_IMPLIB
+          IMPORTED_IMPLIB_RELEASE
+          IMPORTED_IMPLIB_RELWITHDEBINFO
+          IMPORTED_IMPLIB_DEBUG
+          IMPORTED_LOCATION
+          IMPORTED_LOCATION_RELEASE
+          IMPORTED_LOCATION_RELWITHDEBINFO
+          IMPORTED_LOCATION_DEBUG)
+    if(NOT Sodium_LIBRARY)
+      get_target_property(_Sodium_cand "${_Sodium_CONFIG_TARGET}" ${_Sodium_prop})
+      if(_Sodium_cand)
+        set(Sodium_LIBRARY "${_Sodium_cand}")
+      endif()
+    endif()
+  endforeach()
+  if(NOT Sodium_LIBRARY)
+    set(Sodium_LIBRARY "${_Sodium_CONFIG_TARGET}")
+  endif()
+endif()
+
+if(NOT Sodium_INCLUDE_DIR)
+  if(_Sodium_ROOT)
+    find_path(Sodium_INCLUDE_DIR NAMES sodium.h
+      PATHS "${_Sodium_ROOT}"
+      PATH_SUFFIXES include
+      NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
+  else()
+    find_path(Sodium_INCLUDE_DIR NAMES sodium.h
+      PATH_SUFFIXES include)
+  endif()
+endif()
+
+if(WIN32 AND SODIUM_USE_STATIC_LIBS)
+  set(_Sodium_LIB_NAMES libsodium_static libsodium.a liblibsodium.a libsodium sodium)
+  set(_Sodium_SAVED_FIND_LIBRARY_SUFFIXES "${CMAKE_FIND_LIBRARY_SUFFIXES}")
+  set(CMAKE_FIND_LIBRARY_SUFFIXES ".a;.lib")
+else()
+  set(_Sodium_LIB_NAMES sodium libsodium)
+endif()
+
+if(NOT Sodium_LIBRARY)
+  if(_Sodium_ROOT)
+    find_library(Sodium_LIBRARY NAMES ${_Sodium_LIB_NAMES}
+      PATHS "${_Sodium_ROOT}"
+      PATH_SUFFIXES lib lib64 "lib/${CMAKE_LIBRARY_ARCHITECTURE}"
+      NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
+  else()
+    find_library(Sodium_LIBRARY NAMES ${_Sodium_LIB_NAMES}
+      PATH_SUFFIXES lib lib64 "lib/${CMAKE_LIBRARY_ARCHITECTURE}")
+  endif()
+endif()
+
+if(NOT Sodium_VERSION)
+  find_package(PkgConfig QUIET)
+  if(PKG_CONFIG_FOUND)
+    set(_Sodium_saved_pkg_config_path "$ENV{PKG_CONFIG_PATH}")
+    set(_Sodium_saved_pkg_config_libdir "$ENV{PKG_CONFIG_LIBDIR}")
+    if(_Sodium_ROOT)
+      if(WIN32)
+        set(ENV{PKG_CONFIG_LIBDIR} "${_Sodium_ROOT}/lib/pkgconfig;${_Sodium_ROOT}/lib64/pkgconfig;${_Sodium_ROOT}/share/pkgconfig")
+      else()
+        set(ENV{PKG_CONFIG_LIBDIR} "${_Sodium_ROOT}/lib/pkgconfig:${_Sodium_ROOT}/lib64/pkgconfig:${_Sodium_ROOT}/lib/${CMAKE_LIBRARY_ARCHITECTURE}/pkgconfig:${_Sodium_ROOT}/share/pkgconfig")
+      endif()
+      set(ENV{PKG_CONFIG_PATH} "")
+    elseif(Sodium_LIBRARY AND EXISTS "${Sodium_LIBRARY}")
+      get_filename_component(_Sodium_libdir "${Sodium_LIBRARY}" DIRECTORY)
+      if(WIN32)
+        set(ENV{PKG_CONFIG_PATH} "${_Sodium_libdir}/pkgconfig;${_Sodium_saved_pkg_config_path}")
+      else()
+        set(ENV{PKG_CONFIG_PATH} "${_Sodium_libdir}/pkgconfig:${_Sodium_saved_pkg_config_path}")
+      endif()
+    endif()
+    unset(__pkg_config_checked__Sodium_PC CACHE)
+    unset(_Sodium_PC_FOUND CACHE)
+    unset(_Sodium_PC_VERSION CACHE)
+    pkg_check_modules(_Sodium_PC QUIET libsodium)
+    set(ENV{PKG_CONFIG_PATH} "${_Sodium_saved_pkg_config_path}")
+    set(ENV{PKG_CONFIG_LIBDIR} "${_Sodium_saved_pkg_config_libdir}")
+    if(_Sodium_PC_FOUND AND _Sodium_PC_VERSION)
+      set(Sodium_VERSION "${_Sodium_PC_VERSION}")
+      if(NOT Sodium_INCLUDE_DIR AND _Sodium_PC_INCLUDE_DIRS)
+        find_path(Sodium_INCLUDE_DIR NAMES sodium.h
+          PATHS ${_Sodium_PC_INCLUDE_DIRS}
+          NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
+      endif()
+      if(NOT Sodium_LIBRARY AND _Sodium_PC_LIBRARY_DIRS)
+        find_library(Sodium_LIBRARY NAMES ${_Sodium_LIB_NAMES}
+          PATHS ${_Sodium_PC_LIBRARY_DIRS}
+          NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
+      endif()
+    endif()
+  endif()
+endif()
+
+if(WIN32 AND SODIUM_USE_STATIC_LIBS)
+  set(CMAKE_FIND_LIBRARY_SUFFIXES "${_Sodium_SAVED_FIND_LIBRARY_SUFFIXES}")
+endif()
+
+set(_Sodium_VERSION_OK FALSE)
+if(Sodium_VERSION AND NOT Sodium_VERSION VERSION_LESS _Sodium_MIN_VERSION)
+  set(_Sodium_VERSION_OK TRUE)
+endif()
+
+include(CheckSymbolExists)
+set(_Sodium_SYMBOL_OK FALSE)
+if(Sodium_INCLUDE_DIR AND Sodium_LIBRARY)
+  set(_Sodium_saved_includes "${CMAKE_REQUIRED_INCLUDES}")
+  set(_Sodium_saved_libraries "${CMAKE_REQUIRED_LIBRARIES}")
+  set(_Sodium_saved_definitions "${CMAKE_REQUIRED_DEFINITIONS}")
+  set(_Sodium_saved_quiet "${CMAKE_REQUIRED_QUIET}")
+  if(_Sodium_CONFIG_TARGET)
+    set(CMAKE_REQUIRED_LIBRARIES "${_Sodium_CONFIG_TARGET}")
+  else()
+    set(CMAKE_REQUIRED_INCLUDES "${Sodium_INCLUDE_DIR}")
+    set(CMAKE_REQUIRED_LIBRARIES "${Sodium_LIBRARY}")
+    if(WIN32 AND SODIUM_USE_STATIC_LIBS)
+      set(CMAKE_REQUIRED_DEFINITIONS "-DSODIUM_STATIC=1")
+    endif()
+  endif()
+  set(CMAKE_REQUIRED_QUIET TRUE)
+  unset(Sodium_HAS_HKDF_SHA256 CACHE)
+  check_symbol_exists(crypto_kdf_hkdf_sha256_extract "sodium.h" Sodium_HAS_HKDF_SHA256)
+  set(CMAKE_REQUIRED_INCLUDES "${_Sodium_saved_includes}")
+  set(CMAKE_REQUIRED_LIBRARIES "${_Sodium_saved_libraries}")
+  set(CMAKE_REQUIRED_DEFINITIONS "${_Sodium_saved_definitions}")
+  set(CMAKE_REQUIRED_QUIET "${_Sodium_saved_quiet}")
+  if(Sodium_HAS_HKDF_SHA256)
+    set(_Sodium_SYMBOL_OK TRUE)
+  endif()
+endif()
+
+include(FindPackageHandleStandardArgs)
+find_package_handle_standard_args(Sodium
+  REQUIRED_VARS Sodium_LIBRARY Sodium_INCLUDE_DIR _Sodium_VERSION_OK _Sodium_SYMBOL_OK
+  VERSION_VAR Sodium_VERSION)
+
+if(Sodium_FOUND AND NOT TARGET sodium::sodium)
+  if(_Sodium_CONFIG_TARGET)
+    add_library(sodium::sodium INTERFACE IMPORTED)
+    set_target_properties(sodium::sodium PROPERTIES
+      INTERFACE_LINK_LIBRARIES "${_Sodium_CONFIG_TARGET}")
+  else()
+    add_library(sodium::sodium UNKNOWN IMPORTED)
+    set_target_properties(sodium::sodium PROPERTIES
+      IMPORTED_LOCATION "${Sodium_LIBRARY}"
+      INTERFACE_INCLUDE_DIRECTORIES "${Sodium_INCLUDE_DIR}")
+    if(WIN32 AND SODIUM_USE_STATIC_LIBS)
+      set_target_properties(sodium::sodium PROPERTIES
+        INTERFACE_COMPILE_DEFINITIONS "SODIUM_STATIC=1")
+    endif()
+  endif()
+endif()
+mark_as_advanced(Sodium_INCLUDE_DIR Sodium_LIBRARY)

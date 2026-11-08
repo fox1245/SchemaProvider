@@ -59,6 +59,12 @@ inline constexpr std::uint64_t ServedByUpstream = 1ULL << 15;
 // header would read past, and it keeps idle connections only up to libcurl's own default; it lacks this bit and a
 // require_interface_contract call with RequiredProvider refuses it.
 inline constexpr std::uint64_t TransportConnectionCache = 1ULL << 16;
+// The archive has the libsodium-backed host custody (core/native_archive.h): create_header,
+// rotate_header, retire_key_in_header, NativeArchive::open_custody, seal and open. A build
+// without libsodium lacks this bit and answers those calls with ErrorKind::Unsupported
+// (reason "archive.custody.unavailable"). The bit is not part of RequiredProvider, so an
+// embedder that uses only local file custody keeps meeting RequiredProvider.
+inline constexpr std::uint64_t HostArchiveCustody = 1ULL << 17;
 inline constexpr std::uint64_t RequiredProvider = TypedRuntime | PreparedAdmission |
     NullableUsage | All5Native | TrustedArchive | OrderedWireEvents | NativeSocketRuntime |
     RetainedJsonSize | CompleteAttemptEvidence | OpenRouterRoutingMaxPrice | ErrorReason | PolicyAdmittedExtensions |
