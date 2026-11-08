@@ -1,5 +1,6 @@
 #include "core/native.h"
 #include "core/interface_contract.h"
+#include "core/native_archive_custody_internal.h"
 #include "crypto/crypto.h"
 #include "json/json.h"
 #include <algorithm>
@@ -909,6 +910,7 @@ InterfaceContract core_interface_contract() noexcept {
       capability::CompletionSecret | capability::PartCacheMarks | capability::ServedByUpstream |
       capability::TransportConnectionCache;
   if (json::retained_size_contract() == 1) capabilities |= capability::RetainedJsonSize;
+  if (custody_ops::available()) capabilities |= capability::HostArchiveCustody;
 #if defined(__unix__) || defined(__APPLE__) || defined(_WIN32)
   return {7, capabilities | capability::NativeSocketRuntime};
 #else
