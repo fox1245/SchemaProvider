@@ -21,7 +21,7 @@ if(SP_BUILD_TESTS)
     endif()
     string(REPLACE "." "_" name "${family}_${case}_${mode}")
     configure_file("${CMAKE_CURRENT_LIST_DIR}/smoke.json.in" "${CMAKE_CURRENT_BINARY_DIR}/smoke/${name}.json" @ONLY)
-    add_test(NAME provider_benchmark_${name} COMMAND sp_provider_benchmark "${CMAKE_CURRENT_BINARY_DIR}/smoke/${name}.json"
+    add_test(NAME provider_benchmark_${name} COMMAND ${sp_test_runner} $<TARGET_FILE:sp_provider_benchmark> "${CMAKE_CURRENT_BINARY_DIR}/smoke/${name}.json"
              WORKING_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}/..")
     set_tests_properties(provider_benchmark_${name} PROPERTIES TIMEOUT 120)
   endforeach()

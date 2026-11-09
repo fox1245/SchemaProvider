@@ -201,6 +201,20 @@ def cmake_build(install: Path, source: Path, build: Path, targets: list[str], de
     run(locked(["cmake", "--build", build, "--target", *targets, "-j", str(jobs)]))
 
 
+def project_version(build: Path) -> str:
+    """The top-level project's version as CMake records it in the build tree's cache (`CMAKE_PROJECT_VERSION`, from the
+    `project(VERSION ...)` call of the configured source). Cache entries are `NAME:TYPE=VALUE` lines."""
+    cache = build / "CMakeCache.txt"
+    for line in cache.read_text().splitlines():
+        if not line or line.startswith(("#", "//")):
+            continue
+        entry, sep, value = line.partition("=")
+        name, _, _ = entry.partition(":")
+        if sep and name == "CMAKE_PROJECT_VERSION" and value:
+            return value
+    raise SystemExit(f"{cache} records no CMAKE_PROJECT_VERSION")
+
+
 def native_dep(install: Path, name: str) -> Path:
     pin = PINS["native"][name]
     dest = install / "deps" / name
@@ -309,7 +323,7 @@ def install_sp(install: Path, jobs: int, prefix: Path | None = None) -> None:
     rev = revision()
     installed_record(install, "sp" + tag, {
         "id": "sp", "libcurl_build": libcurl_facts(prefix), "kind": "built from the harness's own checkout", "source_commit": rev["commit"], "source_dirty": rev["dirty"],
-        "version": "0.4.0", "build_type": "Release", "compile_flags": flags, "compiler": compiler_info(),
+        "version": project_version(build), "build_type": "Release", "compile_flags": flags, "compiler": compiler_info(),
         "asio": PINS["native"]["asio"]["tag"], "yyjson": PINS["native"]["yyjson"]["tag"], "binary_sha256": sha256_file(out),
         "installed_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     })
