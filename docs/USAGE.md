@@ -1302,7 +1302,8 @@ sp::runtime::Client client(descriptor, options, executor, transport);
 - **No suspended stack.** It uses neither Asyncify nor JSPI, and not `<emscripten/fetch.h>`, which sits on `XMLHttpRequest` and does not exist in a Worker or in Node. JavaScript calls into the module from its own event loop and the module returns to it, so a blocking call cannot work and the `Client` refuses it.
 - **Browsers.** CORS and key exposure are the page's to decide: an API key in a page's memory is visible to the page's user.
 - **Host archive custody handoff (`examples/js-host/custody_handoff.mjs`).** When built with `-DSP_WITH_SODIUM=ON`, an asynchronous host resolves secret material outside WebAssembly and loads it into a `sp::PreResolvedSecretSource` before calling `create_header`, `rotate_header`, `retire_key_in_header` or `NativeArchive::open_custody`:
-  - **Handoff.** Secrets must be held in a `Uint8Array` and must never be converted to or passed as a JavaScript string (which is immutable and garbage-collected without deterministic zeroing). `handoffSecret` awaits any asynchronous secret provider first, calls `sp_custody_secret_alloc` to obtain an exact-length `sodium_malloc` transfer block in WebAssembly memory, indexes `Module.HEAPU8` fresh after the `await` so an intervening `WebAssembly.Memory.grow` cannot leave a stale detached view, calls `sp_custody_secret_commit` with the key id passed as `(ptr, len)` bytes, and in `finally` zeroes both the `Uint8Array` and the transfer slice of `Module.HEAPU8`.
+  - **Handoff.** Secrets must be held in a `Uint8Array` (32 to 64 bytes) and must never be converted to or passed as a JavaScript string (which is immutable and garbage-collected without deterministic zeroing). `handoffSecret` awaits any asynchronous secret provider first, calls `sp_custody_secret_alloc` to obtain an exact-length `sodium_malloc` transfer block in WebAssembly memory, indexes `Module.HEAPU8` fresh after the `await` so an intervening `WebAssembly.Memory.grow` cannot leave a stale detached view, calls `sp_custody_secret_commit` with the key id passed as `(ptr, len)` bytes, and in `finally` zeroes both the `Uint8Array` and the transfer slice of `Module.HEAPU8` (calling `sp_custody_secret_free` if commit did not consume the block).
+  - **Explicit clearing.** `PreResolvedSecretSource` retains staged secrets in `sodium_malloc` blocks until overwritten, removed (`remove` / `erase`), cleared (`clear()`), or destroyed (`sp_custody_secret_source_destroy`). Clear or destroy the source as soon as header operations and `NativeArchive::open_custody` complete.
   - **WebAssembly trap rule.** A WebAssembly trap (`WebAssembly.RuntimeError`) terminates execution immediately without unwinding the C++ stack or running destructors (`LockedKeyBuffer`, `CleansedBuffer`, `PreResolvedSecretSource`). After any trap, the host must discard the WebAssembly module instance and its `WebAssembly.Memory` rather than reusing it.
   - **Worker isolation.** In a browser, run the WebAssembly module that holds archive custody inside a dedicated Web Worker rather than on the main document thread so scripts in the page realm do not share direct access to the module's linear memory (`WebAssembly.Memory` / `HEAPU8`).
 
@@ -1404,12 +1405,142 @@ Here `call_id` must be the genuine completed client `ToolCall::id`, and `"42"` i
 
 The native gate checks descriptor/origin, model, original prefix, bound control/scope and completed content. Edited/reordered carry, incomplete/invalid calls and foreign native origins reject before sending. Output cap and documented per-turn tool selection/cursor behavior are not permission to edit bound reasoning or content. Local retention/remote acceptance does not prove vendor cryptographic validation. The explicit Generate portable-history path above imports no native authority; general cross-origin equivalence/Drop/Demote remain unavailable.
 
-In-memory continuation requires no archive. Durable genuine native history uses `<core/native_archive.h>`:
+In-memory continuation requires no archive. Durable genuine native history uses `<core/native_archive.h>` (directory-backed v3 custody) or `<core/native_archive_custody.h>` (host-backed v4 encrypted custody):
 
-- `NativeArchive::provision(directory, independent_key_file, owner_scope, descriptor)` creates protected owner-only custody explicitly.
-- `NativeArchive::open(...)` opens existing custody without renewing/resetting it.
+- `NativeArchive::provision(directory, independent_key_file, owner_scope, descriptor)` creates protected owner-only directory custody explicitly.
+- `NativeArchive::open(...)` opens existing directory custody without renewing/resetting it.
 - `save(messages, binding)` returns a variant of opaque reference or `Error`; `load(reference, binding)` returns messages or `Error`. Check every arm.
+- `NativeArchive::open_custody(header_bytes, key_source, owner_scope, descriptor, limits)` opens host-backed encrypted custody (`seal` and `open`); see [Host-native archive custody](#host-native-archive-custody) below.
 
 Archive v3 records and `spna3` references authenticate **local custody**, using an independent key and descriptor/owner/binding facts. They are not encryption, export bundles, vendor-issuer authentication or financial grants. Old v2 references reject rather than upgrading. Protect directory and key separately; never publish native leaves. JSON imports and portable message exports cannot mint the sidecar. NeoGraph owns durable checkpoint/budget integration; the archive does not create graph or dispatch authority.
 
 Interface 4 does not rename this archive format: it remains v3/`spna3`. The new admitted policy/control identity can make older policy-bound archive records honestly `ReplayIneligible` even though their storage format is readable. Format equality is not replay compatibility; do not rebind, relabel or repair old native records to make them pass.
+
+### Host-native archive custody
+
+When the host owns durable storage (SQLite, PostgreSQL, IndexedDB, an object store or a checkpoint table) or manages wrapping keys in a KMS, Vault, OS keychain or JavaScript secret store, `<core/native_archive_custody.h>` and `<core/native_archive.h>` provide encrypted, authenticated record custody without touching the local filesystem:
+
+- **Store header (`StoreHeader`, magic `SPNAHDR\0`, format version `1`).** Each store has one binary header (`StoreHeader`) that binds a 16-byte random `store_id`, `owner_scope` (1 to 256 bytes, no NUL bytes), a 32-byte `descriptor_identity` (computed from the descriptor's family, id, canonical base URL, buffered/streaming paths and policy identity), `current_epoch`, 1 to `limits.max_epochs` (`64` by default) `EpochKeyEntry` entries in strictly ascending `epoch` order, and a 32-byte `header_tag` (`SHA-256` over `"sp.native_archive.custody.v1.header-tag\0"` and the canonical header body). Each `EpochKeyEntry` holds `epoch`, `wrapping_key_id` (1 to `limits.max_key_id_bytes` = `256` opaque bytes), and `wrapped_dek` (1 to `limits.max_wrapped_dek_bytes` = `4096` bytes).
+  - `create_header(source, owner_scope, descriptor, limits = {})` validates `owner_scope` and `source.active_key_id()`, generates a 16-byte random `store_id` and a 32-byte random DEK for epoch `1` in `sodium_malloc` memory (`DataKeyBuffer`), builds the canonical `epoch_aad` binding `"sp.native_archive.custody.v1.dek\0"`, `store_id`, `owner_scope`, `descriptor_identity`, `epoch = 1` and `wrapping_key_id`, wraps the DEK via `source.wrap_dek(active_key_id, epoch_aad, dek)` inside a `CustodyOperationScope`, and returns `CustodyOutcome<std::string>` with the serialized header bytes.
+  - `parse_header(header_bytes, limits = {})` and `serialize_header(header, limits = {})` parse and serialize the binary header format, verifying `SPNAHDR\0`, `format_version == 1`, strictly ascending epochs containing `current_epoch`, field bounds, and `header_tag` in constant time (`CustodyFault::CorruptHeader` on structural violations; `CustodyFault::Tampered` on `header_tag` mismatch).
+  - `unwrap_requests(header_bytes, owner_scope, descriptor, limits = {})` parses and verifies `header_bytes` against `owner_scope` and `descriptor`, and returns `CustodyOutcome<std::vector<UnwrapRequest>>` with the `(key_id, epoch_aad, wrapped_dek)` tuple for every epoch in the header so an asynchronous host can pre-unwrap or stage the required keys before calling `NativeArchive::open_custody`.
+- **Key rotation and retirement.**
+  - `rotate_header(current_header_bytes, source, target_key_id, owner_scope, descriptor, limits = {})` verifies `current_header_bytes` against `owner_scope` and `descriptor`, checks that `current_epoch < UINT32_MAX` and `epochs.size() < limits.max_epochs` (`CustodyFault::EpochLimit` otherwise), verifies inside a `CustodyOperationScope` that every existing epoch entry in the header unwraps cleanly via `source.unwrap_dek`, generates a fresh 32-byte DEK for `current_epoch + 1`, wraps it under `target_key_id` (or `source.active_key_id()` when `target_key_id` is empty), appends the new `EpochKeyEntry`, updates `current_epoch` and `header_tag`, and returns the serialized header bytes. Persist the new header atomically in your store and open a new `NativeArchive` with `open_custody` so subsequent `seal` calls encrypt under the new epoch while earlier epochs remain readable by `open`.
+  - `retire_key_in_header(current_header_bytes, retired_key_id, source, owner_scope, descriptor, limits = {})` verifies `current_header_bytes` against `owner_scope` and `descriptor`, queries `source.active_key_id()`, refuses with `CustodyFault::KeyInUse` if `retired_key_id == active_key_id`, and refuses with `CustodyFault::KeyNotFound` if no epoch entry in the header uses `retired_key_id`. Otherwise, inside a `CustodyOperationScope`, it unwraps every epoch entry wrapped under `retired_key_id` and re-wraps that epoch's existing 32-byte DEK under `active_key_id` with an updated `epoch_aad`. Existing sealed records for those epochs do not need to be re-encrypted because their epoch DEKs are unchanged.
+- **Opening custody, sealing and opening records (`SPNA4\0\0\0`, reference `spna4:<64-hex>`).**
+  - `NativeArchive::open_custody(header_bytes, source, owner_scope, descriptor, limits = {})` parses `header_bytes`, verifies `owner_scope`, `descriptor_identity` and `header_tag`, unwraps all epoch DEKs via `source.unwrap_dek` inside a `CustodyOperationScope` into `DataKeyBuffer` (`LockedKeyBuffer<32>`, backed by `sodium_malloc`), marks every unwrapped DEK read-only (`sodium_mprotect_readonly`), and returns `CustodyOutcome<std::shared_ptr<NativeArchive>>`.
+  - `archive->seal(messages, binding = {})` validates `binding` (no NUL bytes, at most `4096` bytes) and `messages` (non-empty, at most `4096` messages, with genuine completed native replay sidecars matching the archive's descriptor and policy identity), serializes the native record body into a `CleansedBuffer`, derives a 32-byte per-record key from the current epoch's DEK using `crypto_kdf_hkdf_sha256_extract` (with a fresh 32-byte random `record_salt` and the current epoch's DEK) and `crypto_kdf_hkdf_sha256_expand` (context `"sp.native_archive.custody.v1.record\0"` + `store_id` + `epoch`), encrypts the body with `crypto_aead_xchacha20poly1305_ietf_encrypt` under a fresh 24-byte random `nonce` and AAD binding `"sp.native_archive.custody.v1.record-aad\0"`, the 72-byte `SPNA4\0\0\0` record prefix (`store_id`, `epoch`, `record_salt`, `nonce`), `owner_scope`, `descriptor_identity` and `binding`, and returns `CustodyOutcome<SealedRecord>` where `reference` is `"spna4:"` followed by the lowercase SHA-256 hex digest of `bytes`.
+  - `archive->open(reference, bytes, expected_binding = {})` validates that `reference` has prefix `"spna4:"` and 64 lowercase hex digits (`ErrorKind::InvalidRequest`, `archive.custody.invalid_input` otherwise), checks that `bytes` has the `SPNA4\0\0\0` header and satisfies `max_record_bytes` (`CustodyFault::CorruptRecord`), verifies in constant time that `SHA-256(bytes)` matches the digest in `reference` and that the record's `store_id` matches the archive's `store_id` (`CustodyFault::Tampered`), looks up the record's `epoch` in the archive's unwrapped DEKs (`CustodyFault::Tampered` if absent), derives the per-record key and decrypts with `crypto_aead_xchacha20poly1305_ietf_decrypt` against the reconstructed AAD (`CustodyFault::Tampered` if authentication fails or `expected_binding`, `owner_scope` or `descriptor_identity` differs), and decodes and verifies the restored `std::vector<Message>`.
+  - Directory-backed and host-backed modes do not mix: calling `save` or `load` on an archive opened with `open_custody` returns `ErrorKind::InvalidRequest` (`archive.custody.mode_mismatch`), and calling `seal` or `open` on an archive opened with `provision` or `open` returns `ErrorKind::InvalidRequest` (`archive.custody.invalid_input`).
+- **Key sources, secret sources and `PreResolvedSecretSource`.**
+  - `KeySource` is the synchronous wrapping interface (`active_key_id()`, `wrap_dek(key_id, epoch_aad, dek)`, `unwrap_dek(key_id, epoch_aad, wrapped_dek, dek_out)`). External KMS/Vault implementations bind `epoch_aad` as encryption context / AAD and return `CustodyFault::SourceUnavailable` or `CustodyFault::SourceRateLimited` on transient network or quota failures.
+  - `SecretSource` (`active_key_id()`, `load_secret(key_id, SecretBuffer& out, std::size_t* written_size)` filling 32 to 64 bytes of raw secret material into `LockedKeyBuffer<64>`) paired with `make_hkdf_key_source(secret_source)` builds an in-process `KeySource` that derives a 32-byte KEK per `(store_id, key_id)` with HKDF-SHA256 (`crypto_kdf_hkdf_sha256_extract` with `store_id` as salt and the secret bytes as IKM; `crypto_kdf_hkdf_sha256_expand` with `"sp.native_archive.custody.v1.kek\0"` + `store_id` + `key_id`) and wraps/unwraps each 32-byte DEK with XChaCha20-Poly1305-IETF (`SPKW1\0` envelope, 24-byte random nonce, `epoch_aad`).
+  - `CustodyOperationScope(KeySource& source)` is an RAII scope entered automatically by `create_header`, `rotate_header`, `retire_key_in_header` and `NativeArchive::open_custody` (and usable directly around custom batch calls). While one or more `CustodyOperationScope` guards are active on an HKDF `KeySource`, each `(store_id, key_id)` secret is loaded from the underlying `SecretSource` at most once and its derived KEK is held in `sodium_mprotect_readonly` memory; when the outermost `CustodyOperationScope` exits, all cached KEKs are wiped immediately.
+  - `PreResolvedSecretSource` implements `SecretSource` using `sodium_malloc` blocks for each staged key (`set_active_key_id`, `put(key_id, data, size)`, `put(key_id, bytes)`, `remove`/`erase`, `clear`). Secrets stay in `sodium_mprotect_readonly` memory until overwritten, removed, cleared with `clear()`, or the `PreResolvedSecretSource` is destroyed.
+
+```cpp
+#include <core/interface_contract.h>
+#include <core/native_archive.h>
+#include <core/native_archive_custody.h>
+
+// Verify that the loaded sp_core binary was built with libsodium custody support.
+const auto contract = sp::core_interface_contract();
+if ((contract.capabilities & sp::capability::HostArchiveCustody) == 0) {
+    // Built with -DSP_WITH_SODIUM=OFF.
+}
+
+auto secrets = std::make_shared<sp::PreResolvedSecretSource>("k1");
+secrets->put("k1", master_key_32_to_64_bytes);  // copied into a read-only sodium_malloc block
+auto key_source = sp::make_hkdf_key_source(secrets);
+
+auto header_res = sp::create_header(*key_source, "owner-1", descriptor);
+auto archive_res = sp::NativeArchive::open_custody(
+    std::get<std::string>(header_res), *key_source, "owner-1", descriptor);
+// Clear staged master secrets once open_custody has unwrapped the epoch DEKs.
+secrets->clear();
+
+auto archive = std::get<std::shared_ptr<sp::NativeArchive>>(archive_res);
+auto sealed = archive->seal(messages, "session-1/turn-1");
+const auto& record = std::get<sp::SealedRecord>(sealed);
+auto opened = archive->open(record.reference, record.bytes, "session-1/turn-1");
+```
+
+- **WebAssembly secret handoff (`sp_custody_secret_*` and `examples/js-host/custody_handoff.mjs`).** Because WebAssembly execution in `sp_runtime` / `sp_js_host` is synchronous and uses neither Asyncify nor JSPI, an asynchronous JavaScript host (Web Crypto, IndexedDB, KMS over `fetch`) resolves the 32-to-64-byte secret in JavaScript first, hands the bytes into a `PreResolvedSecretSource` via the C ABI functions `sp_custody_secret_source_create`, `sp_custody_secret_source_set_active_key_id`, `sp_custody_secret_alloc`, `sp_custody_secret_commit`, `sp_custody_secret_free` and `sp_custody_secret_source_destroy`, and then invokes the synchronous C++ custody entry point:
+  - Hold secret bytes in a `Uint8Array` only; never decode or pass a secret as a JavaScript string.
+  - `handoffSecret` awaits the asynchronous provider *before* touching WebAssembly memory, calls `sp_custody_secret_alloc(secret.byteLength)` to allocate a `sodium_malloc` transfer block, indexes `Module.HEAPU8` fresh after the `await` so an intervening `WebAssembly.Memory.grow` cannot leave a detached buffer view, copies the bytes into the transfer slice, passes `key_id` as `(ptr, len)` bytes to `sp_custody_secret_commit`, and in `finally` zeroes both the caller's `Uint8Array` and the transfer slice on a fresh `Module.HEAPU8` view (and calls `sp_custody_secret_free` if commit did not consume the block).
+
+#### Custody error table
+
+Low-level callbacks (`SecretSource`, `KeySource`) report `CustodyFault` (`CustodyResult<T>` = `std::variant<T, CustodyFault>`), while high-level custody operations return `CustodyOutcome<T>` (`std::variant<T, CustodyError>`). `CustodyError` holds a populated `sp::Error` (`retry_safety == RetrySafety::NotSent` on all custody errors) plus optional `store_id` (32 lowercase hex chars when known) and `key_id` (populated only for key-attributable faults):
+
+| `CustodyFault` | `ErrorKind` | `RetryClass` | `Error::reason` | Base `Error::safe_message` | `key_id` on `CustodyError` | Trigger |
+|---|---|---|---|---|---|---|
+| `Tampered` | `Permission` | `Never` | `archive.custody.tampered` | `Host native archive custody verification failed` | empty | `header_tag` mismatch, AEAD tag verification failure on DEK unwrap or `open`, header/record `store_id`, `owner_scope` or `descriptor_identity` mismatch, `spna4:` reference SHA-256 mismatch, unknown record `epoch`, wrong `expected_binding`, or restored message failing native lineage verification. |
+| `Unauthorized` | `Permission` | `Never` | `archive.custody.unauthorized` | `Host native archive key source rejected authorization` | set | The `KeySource` or `SecretSource` denied access to the requested key. |
+| `KeyNotFound` | `NotFound` | `Never` | `archive.custody.key_not_found` | `Host native archive key was not found` | set | A header epoch's `wrapping_key_id` or `active_key_id` is unknown to the `KeySource`/`SecretSource`, or `retire_key_in_header` named a `retired_key_id` not present in the header. |
+| `InvalidKeyMaterial` | `Permission` | `Never` | `archive.custody.key_invalid` | `Host native archive key material is invalid` | set | Secret material passed to `PreResolvedSecretSource::put` or written by `SecretSource::load_secret` is outside 32..64 bytes, or `KeySource::wrap_dek` returned an empty or oversized (`> max_wrapped_dek_bytes`) blob. |
+| `KeyInUse` | `Permission` | `Never` | `archive.custody.key_in_use` | `Host native archive active wrapping key is in use` | set | `retire_key_in_header` was asked to retire the `KeySource`'s current `active_key_id` (rotate to a new active key first). |
+| `CorruptHeader` | `Permission` | `Never` | `archive.custody.corrupt_header` | `Host native archive header is malformed` | empty | Header bytes fail `SPNAHDR\0` magic or `format_version == 1`, exceed `max_header_bytes`, have 0 or `> max_epochs` entries, non-ascending or duplicate epochs, missing `current_epoch` entry, invalid field lengths, or trailing bytes. |
+| `CorruptRecord` | `Permission` | `Never` | `archive.custody.corrupt_record` | `Host native archive record is malformed` | empty | Record bytes fail `SPNA4\0\0\0` magic or `format_version == 1`, are truncated below the 72-byte header + 16-byte Poly1305 tag minimum, exceed `max_record_bytes`, or decrypt to malformed native record payload bytes. |
+| `InvalidInput` | `InvalidRequest` | `Never` | `archive.custody.invalid_input` | `Host native archive custody input is invalid` | empty | Invalid `CustodyLimits`, empty/NUL/oversized `owner_scope` or `binding`, malformed `spna4:` reference, empty/oversized `key_id`, empty or non-native `messages` on `seal`, or calling `seal`/`open` on a directory-backed `NativeArchive`. |
+| `EpochLimit` | `ResourceLimit` | `Never` | `archive.custody.epoch_limit` | `Host native archive epoch limit reached` | empty | `rotate_header` called when `current_epoch == UINT32_MAX` or `epochs.size() >= limits.max_epochs`, or serialized header/record exceeds configured byte limits. |
+| `SourceUnavailable` | `Transport` | `Transient` | `archive.custody.source_unavailable` | `Host native archive key source is unavailable` | set | External `KeySource` (KMS/Vault/HSM) reported a transient connectivity or service failure, or `sodium_init`/OS entropy/secure allocation failed. |
+| `SourceRateLimited` | `RateLimited` | `Transient` | `archive.custody.source_rate_limited` | `Host native archive key source is rate limited` | set | External `KeySource` reported rate limiting or quota throttling. |
+| *(Unavailable build: `SP_WITH_SODIUM=OFF`)* | `Unsupported` | `Never` | `archive.custody.unavailable` | `Host native archive custody is unavailable in this build` | empty | Any custody function called in a build compiled without libsodium. |
+
+When `store_id` or a key-attributable `key_id` is present on `CustodyError`, `Error::safe_message` appends ` (key_id="<escaped>", store_id=<hex>)` or ` (store_id=<hex>)` using `quote_key_id_for_message`.
+
+#### Key identifiers as opaque bytes
+
+A `key_id` is an arbitrary sequence of 1 to `limits.max_key_id_bytes` (`256` by default) opaque bytes. The SDK compares and hashes `key_id` values byte-for-byte and never interprets them as UTF-8, file paths or structured syntax. Whenever `CustodyError` formats a key-attributable `key_id` into `Error::safe_message`, `quote_key_id_for_message` wraps it in double quotes, escapes `"` and `\`, and renders any byte outside printable ASCII (`0x20..0x7E`, including control characters, newlines, NUL and non-UTF-8 bytes) as `\xNN`. Any host diagnostic, audit log or UI that displays `CustodyError::key_id` directly must likewise treat it as untrusted opaque bytes and escape non-printable or non-ASCII bytes before logging or rendering.
+
+#### Version 1 custody limits
+
+Host-native archive custody v1 has three architectural limits that a host must account for in its threat model:
+
+1. **Whole-store rollback is not detected.** Each record's AEAD tag binds its `epoch`, `Binding` (`owner_scope`, `session_id`, `turn_id`, `sequence`) and the header's origin and policy identity, preventing mix-and-match splicing across sessions, turns, sequences or origins. However, the archive is stateless across reopenings: if an attacker with write access to the host's database or file store reverts *both* the stored header and the sealed records (or restores an older database/checkpoint row snapshot as a consistent whole), `open_custody` and `open` cannot detect that a newer epoch or newer turn once existed. Detecting whole-store rollback requires an external monotonic counter or append-only audit log outside the store.
+2. **Unwrapped DEKs live in process memory while an archive is open.** `NativeArchive::open_custody` unwraps the header's epoch DEKs once and holds them in `LockedKeyBuffer`s (`sodium_malloc`, set `sodium_mprotect_readonly` between operations and unlocked with `sodium_mprotect_readwrite` only during a `seal` or `open` call) for the lifetime of the `NativeArchive` object. While that object stays alive, the unwrapped DEKs reside in the process address space, and operating-system page locking (`mlock` / `VirtualLock` inside `sodium_malloc`) is best-effort and may be declined under OS `RLIMIT_MEMLOCK` or working-set quotas without failing the allocation. Destroy the `NativeArchive` when the conversation or checkpoint is no longer active.
+3. **Same-realm JavaScript can read WebAssembly memory, and traps skip destructors.** On Emscripten/WebAssembly, `sodium_malloc` allocates inside the module's linear `WebAssembly.Memory` (`Module.HEAPU8`), and `sodium_mprotect_*` cannot enforce hardware page protection against scripts in the same JavaScript realm. Any script running in the same realm that can reach the module instance or its `WebAssembly.Memory` can read all linear memory. In addition, a WebAssembly trap (`WebAssembly.RuntimeError`, such as an unreachable instruction or out-of-bounds fault) halts execution immediately without unwinding the C++ stack or running destructors (`LockedKeyBuffer`, `CleansedBuffer`, `PreResolvedSecretSource`). In a browser, run the custody WebAssembly module inside a dedicated Web Worker rather than on the main document thread, never represent secret bytes as JavaScript strings, and if the module ever traps, discard the WebAssembly instance and its `WebAssembly.Memory` immediately.
+
+#### Building with and without libsodium
+
+Host-native archive custody uses [libsodium](https://doc.libsodium.org/) (`1.0.19` minimum, `1.0.22` pinned in [`config/dependencies.json`](../config/dependencies.json); `crypto_kdf_hkdf_sha256_extract` was added in `1.0.19`). The CMake cache variable `SP_WITH_SODIUM` controls the backend:
+
+- `AUTO` (default): searches for libsodium `>= 1.0.19` via `FindSodium.cmake` and enables custody when found, or builds the unavailable stub when not found.
+- `ON`: requires libsodium `>= 1.0.19` (`FATAL_ERROR` at configure time if missing or older) and sets `SP_BUILD_SODIUM` to `1` in `<sp/build_config.h>` and `capability::HostArchiveCustody` in `core_interface_contract().capabilities`.
+- `OFF`: never searches for or links libsodium, sets `SP_BUILD_SODIUM` to `0`, leaves `capability::HostArchiveCustody` clear, and compiles `src/core/native_archive_custody_unavailable.cpp`.
+
+`tools/fetch_libsodium.py` (Python 3 standard library only) reads the pinned version, archive name, URL and SHA-256 from `config/dependencies.json`, downloads the release archive (or uses an existing file in `--cache-dir` / `--archive` without network access), prints the SHA-256 digest it checked (`sha256: <hex>`), refuses if the digest does not match the pin, unpacks the archive, and when `--prefix` is given builds and installs a static library:
+
+- **Linux and macOS (from pinned source or system package):**
+  ```sh
+  python3 tools/fetch_libsodium.py \
+    --cache-dir .cache/libsodium \
+    --unpack-dir build-sodium-src \
+    --prefix "$PWD/install-sodium"
+  cmake -S . -B build -DSP_WITH_SODIUM=ON -DSODIUM_ROOT="$PWD/install-sodium" \
+    -DYYJSON_ROOT="$YYJSON_ROOT" -DASIO_ROOT="$ASIO_ROOT"
+  ```
+  System packages providing libsodium `>= 1.0.19` (such as `libsodium-dev` on Ubuntu 24.04 or `brew install libsodium` on macOS) are also detected automatically when `SODIUM_ROOT` is unset.
+- **Windows (vcpkg `unofficial-libsodium` and `SODIUM_USE_STATIC_LIBS`):**
+  Install `libsodium` with vcpkg (`vcpkg install libsodium:x64-windows` or `libsodium:x64-windows-static`) and configure CMake with `-DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake -DSP_WITH_SODIUM=ON`. `FindSodium.cmake` checks `find_package(unofficial-libsodium CONFIG)` first and forwards the imported `unofficial-libsodium::unofficial-libsodium` target (including its `SODIUM_STATIC` definition on static triplets). When linking against a static libsodium library on Windows *without* a CMake config package (via `SODIUM_ROOT` raw headers and `.lib`/`.a`), pass `-DSODIUM_USE_STATIC_LIBS=ON` so `FindSodium.cmake` searches static library names first and defines `SODIUM_STATIC=1` on `sodium::sodium`.
+- **WebAssembly (Emscripten):**
+  Build static single-threaded libsodium under `emconfigure`/`emmake` (`--disable-shared --enable-static --with-pic --without-pthreads --disable-ssp --disable-asm`) with `tools/fetch_libsodium.py --wasm`:
+  ```sh
+  python3 tools/fetch_libsodium.py \
+    --cache-dir .cache/libsodium \
+    --unpack-dir build-sodium-wasm-src \
+    --prefix "$PWD/install-sodium-wasm" \
+    --wasm
+  emcmake cmake -S . -B build-wasm -G Ninja -DCMAKE_BUILD_TYPE=Release \
+    -DYYJSON_ROOT="$YYJSON_ROOT" \
+    -DSP_WITH_SODIUM=ON -DSODIUM_ROOT="$PWD/install-sodium-wasm" \
+    -DSP_BUILD_TRANSPORT=OFF -DSP_THREADS=OFF -DSP_BUILD_JS_HOST=ON \
+    -DSP_BUILD_TESTS=OFF -DSP_BUILD_CANARY=OFF -DSP_BUILD_RUNTIME_TESTS=ON
+  ```
+- **Building without libsodium (`-DSP_WITH_SODIUM=OFF`):**
+  ```sh
+  cmake -S . -B build-no-sodium -DSP_WITH_SODIUM=OFF \
+    -DYYJSON_ROOT="$YYJSON_ROOT" -DASIO_ROOT="$ASIO_ROOT"
+  ```
+- **Installed package and licence:** When SchemaProvider is built with `SP_WITH_SODIUM=ON` (or `AUTO` when found), `cmake --install` installs `FindSodium.cmake` into `lib/cmake/SchemaProvider` (pass `-DSODIUM_ROOT=<prefix>` when configuring a downstream CMake consumer if libsodium is in a non-default prefix; see `tests/install_consumer/`) and installs libsodium's ISC licence text from the unpacked pinned source archive to `share/doc/SchemaProvider/third_party/libsodium/LICENSE` (see [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md)).

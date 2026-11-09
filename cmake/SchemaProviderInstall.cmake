@@ -67,4 +67,23 @@ endif()
 if(SP_SODIUM)
   install(FILES "${CMAKE_CURRENT_BINARY_DIR}/FindSodium.cmake"
     DESTINATION "${SP_INSTALL_CMAKE_DIR}")
+  install(CODE "
+    if(NOT EXISTS \"${SP_SODIUM_STAGED_LICENSE}\")
+      execute_process(
+        COMMAND \"${Python3_EXECUTABLE}\" \"${CMAKE_CURRENT_SOURCE_DIR}/tools/fetch_libsodium.py\"
+          --dependencies \"${CMAKE_CURRENT_SOURCE_DIR}/config/dependencies.json\"
+          --unpack-dir \"${SP_SODIUM_UNPACK_DIR}\"
+        RESULT_VARIABLE _sp_sodium_lic_res)
+      if(NOT _sp_sodium_lic_res EQUAL 0)
+        message(FATAL_ERROR \"Failed to unpack pinned libsodium source for licence installation\")
+      endif()
+      file(MAKE_DIRECTORY \"${CMAKE_CURRENT_BINARY_DIR}/third_party/libsodium\")
+      file(COPY_FILE
+        \"${SP_SODIUM_UNPACK_DIR}/libsodium-${SP_SODIUM_PINNED_VERSION}/LICENSE\"
+        \"${SP_SODIUM_STAGED_LICENSE}\"
+        ONLY_IF_DIFFERENT)
+    endif()
+  ")
+  install(FILES "${SP_SODIUM_STAGED_LICENSE}"
+    DESTINATION "${CMAKE_INSTALL_DOCDIR}/third_party/libsodium")
 endif()
