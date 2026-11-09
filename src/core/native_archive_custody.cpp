@@ -35,6 +35,9 @@ bool sodium_ready() noexcept {
 thread_local custody_ops::ReleaseObserver g_release_observer = nullptr;
 thread_local void* g_release_observer_context = nullptr;
 
+thread_local custody_ops::AllocationObserver g_allocation_observer = nullptr;
+thread_local void* g_allocation_observer_context = nullptr;
+
 thread_local std::size_t g_random_call_count = 0;
 thread_local std::size_t g_random_fail_on_call = 0;
 thread_local std::deque<std::string> g_random_overrides;
@@ -43,6 +46,7 @@ thread_local std::vector<std::size_t> g_random_draw_sizes;
 thread_local std::size_t g_key_alloc_call_count = 0;
 thread_local std::size_t g_key_alloc_fail_on_call = 0;
 thread_local bool g_corrupt_next_cached_kek = false;
+thread_local std::map<const void*, std::size_t> g_live_key_allocs;
 
 bool key_alloc_should_fail() noexcept {
   if (g_key_alloc_fail_on_call == 0) {
@@ -367,6 +371,14 @@ unsigned char* sodium_key_alloc(std::size_t size) noexcept {
     return nullptr;
   }
   sodium_memzero(ptr, size);
+#ifdef SP_CUSTODY_TEST_SEAMS
+  try {
+    g_live_key_allocs[ptr] = size;
+  } catch (...) {
+    sodium_free(ptr);
+    return nullptr;
+  }
+#endif
   return static_cast<unsigned char*>(ptr);
 }
 
@@ -381,6 +393,9 @@ void sodium_key_free(void* ptr, std::size_t size) noexcept {
     if (size > 0) {
       sodium_memzero(ptr, size);
     }
+#ifdef SP_CUSTODY_TEST_SEAMS
+    g_live_key_allocs.erase(ptr);
+#endif
     sodium_free(ptr);
   }
 }
@@ -393,6 +408,7 @@ CustodyError custody_error(CustodyFault fault,
   CustodyError out;
   out.error.retry_safety = RetrySafety::NotSent;
   out.error.retry_class = RetryClass::Never;
+  bool carries_key_id = false;
   switch (fault) {
     case CustodyFault::Tampered:
       out.error.kind = ErrorKind::Permission;
@@ -406,6 +422,7 @@ CustodyError custody_error(CustodyFault fault,
       out.error.reason = "archive.custody.unauthorized";
       out.store_id = std::string(store_id);
       out.key_id = std::string(key_id);
+      carries_key_id = true;
       break;
     case CustodyFault::KeyNotFound:
       out.error.kind = ErrorKind::NotFound;
@@ -413,6 +430,7 @@ CustodyError custody_error(CustodyFault fault,
       out.error.reason = "archive.custody.key_not_found";
       out.store_id = std::string(store_id);
       out.key_id = std::string(key_id);
+      carries_key_id = true;
       break;
     case CustodyFault::InvalidKeyMaterial:
       out.error.kind = ErrorKind::Permission;
@@ -420,6 +438,7 @@ CustodyError custody_error(CustodyFault fault,
       out.error.reason = "archive.custody.key_invalid";
       out.store_id = std::string(store_id);
       out.key_id = std::string(key_id);
+      carries_key_id = true;
       break;
     case CustodyFault::KeyInUse:
       out.error.kind = ErrorKind::Permission;
@@ -427,6 +446,7 @@ CustodyError custody_error(CustodyFault fault,
       out.error.reason = "archive.custody.key_in_use";
       out.store_id = std::string(store_id);
       out.key_id = std::string(key_id);
+      carries_key_id = true;
       break;
     case CustodyFault::CorruptHeader:
       out.error.kind = ErrorKind::Permission;
@@ -438,6 +458,12 @@ CustodyError custody_error(CustodyFault fault,
       out.error.kind = ErrorKind::Permission;
       out.error.safe_message = "Host native archive record is malformed";
       out.error.reason = "archive.custody.corrupt_record";
+      out.store_id = std::string(store_id);
+      break;
+    case CustodyFault::InvalidInput:
+      out.error.kind = ErrorKind::InvalidRequest;
+      out.error.safe_message = "Host native archive custody input is invalid";
+      out.error.reason = "archive.custody.invalid_input";
       out.store_id = std::string(store_id);
       break;
     case CustodyFault::EpochLimit:
@@ -453,6 +479,7 @@ CustodyError custody_error(CustodyFault fault,
       out.error.reason = "archive.custody.source_unavailable";
       out.store_id = std::string(store_id);
       out.key_id = std::string(key_id);
+      carries_key_id = true;
       break;
     case CustodyFault::SourceRateLimited:
       out.error.kind = ErrorKind::RateLimited;
@@ -461,7 +488,21 @@ CustodyError custody_error(CustodyFault fault,
       out.error.reason = "archive.custody.source_rate_limited";
       out.store_id = std::string(store_id);
       out.key_id = std::string(key_id);
+      carries_key_id = true;
       break;
+  }
+  if (carries_key_id && !key_id.empty()) {
+    out.error.safe_message.append(" (key_id=");
+    out.error.safe_message.append(archive_internal::quote_key_id_for_message(key_id));
+    if (!store_id.empty()) {
+      out.error.safe_message.append(", store_id=");
+      out.error.safe_message.append(store_id);
+    }
+    out.error.safe_message.push_back(')');
+  } else if (!store_id.empty()) {
+    out.error.safe_message.append(" (store_id=");
+    out.error.safe_message.append(store_id);
+    out.error.safe_message.push_back(')');
   }
   return out;
 }
@@ -478,6 +519,11 @@ CustodyError custody_unavailable_error() {
 
 CleansedBuffer::CleansedBuffer(std::size_t size) {
   if (size > 0) {
+#ifdef SP_CUSTODY_TEST_SEAMS
+    if (g_allocation_observer != nullptr) {
+      g_allocation_observer(size, g_allocation_observer_context);
+    }
+#endif
     data_ = static_cast<unsigned char*>(::operator new(size));
     sodium_memzero(data_, size);
     size_ = size;
@@ -536,6 +582,11 @@ void CleansedBuffer::reallocate(std::size_t new_capacity) {
   if (new_capacity <= capacity_) {
     return;
   }
+#ifdef SP_CUSTODY_TEST_SEAMS
+  if (g_allocation_observer != nullptr) {
+    g_allocation_observer(new_capacity, g_allocation_observer_context);
+  }
+#endif
   auto* next = static_cast<unsigned char*>(::operator new(new_capacity));
   sodium_memzero(next, new_capacity);
   if (data_ != nullptr && size_ > 0) {
@@ -618,6 +669,16 @@ namespace {
 
 bool is_valid_key_id(std::string_view key_id, std::size_t max_bytes) noexcept {
   return !key_id.empty() && key_id.size() <= max_bytes;
+}
+
+bool constant_time_string_equal(std::string_view a, std::string_view b) noexcept {
+  if (a.size() != b.size()) {
+    return false;
+  }
+  if (a.empty()) {
+    return true;
+  }
+  return sodium_memcmp(a.data(), b.data(), a.size()) == 0;
 }
 
 void validate_header_structure(const StoreHeader& header, const HostCustodyLimits& resolved) {
@@ -812,12 +873,13 @@ CustodyOutcome<std::string> create_header(KeySource& source,
   HostCustodyLimits resolved{};
   archive_internal::Digest descriptor_identity{};
   try {
-    archive_fs::require(!owner_scope.empty());
     resolved = archive_internal::resolve_custody_limits(limits, descriptor);
-    archive_fs::require(owner_scope.size() <= resolved.archive.max_bytes);
     descriptor_identity = archive_internal::descriptor_binding_digest(descriptor, resolved.archive);
   } catch (const archive_fs::Rejected&) {
     return custody_error(CustodyFault::CorruptHeader);
+  }
+  if (owner_scope.empty() || owner_scope.size() > resolved.archive.max_bytes) {
+    return custody_error(CustodyFault::InvalidInput);
   }
 
   StoreHeader header;
@@ -920,7 +982,10 @@ CustodyOutcome<std::string> rotate_header(std::string_view current_header_bytes,
   StoreHeader header = std::get<StoreHeader>(std::move(parsed_res));
   const std::string store_id_hex = archive_internal::hex(header.store_id);
 
-  if (header.owner_scope != owner_scope ||
+  if (owner_scope.empty() || owner_scope.size() > resolved.archive.max_bytes) {
+    return custody_error(CustodyFault::InvalidInput, store_id_hex);
+  }
+  if (!constant_time_string_equal(header.owner_scope, owner_scope) ||
       sodium_memcmp(header.descriptor_identity.data(),
                     expected_descriptor_identity.data(),
                     expected_descriptor_identity.size()) != 0) {
@@ -1062,7 +1127,10 @@ CustodyOutcome<std::string> retire_key_in_header(std::string_view current_header
   StoreHeader header = std::get<StoreHeader>(std::move(parsed_res));
   const std::string store_id_hex = archive_internal::hex(header.store_id);
 
-  if (header.owner_scope != owner_scope ||
+  if (owner_scope.empty() || owner_scope.size() > resolved.archive.max_bytes) {
+    return custody_error(CustodyFault::InvalidInput, store_id_hex);
+  }
+  if (!constant_time_string_equal(header.owner_scope, owner_scope) ||
       sodium_memcmp(header.descriptor_identity.data(),
                     expected_descriptor_identity.data(),
                     expected_descriptor_identity.size()) != 0) {
@@ -1221,7 +1289,10 @@ CustodyOutcome<std::vector<UnwrapRequest>> unwrap_requests(
   const StoreHeader& header = std::get<StoreHeader>(parsed_res);
   const std::string store_id_hex = archive_internal::hex(header.store_id);
 
-  if (header.owner_scope != owner_scope ||
+  if (owner_scope.empty() || owner_scope.size() > resolved.archive.max_bytes) {
+    return custody_error(CustodyFault::InvalidInput, store_id_hex);
+  }
+  if (!constant_time_string_equal(header.owner_scope, owner_scope) ||
       sodium_memcmp(header.descriptor_identity.data(),
                     expected_descriptor_identity.data(),
                     expected_descriptor_identity.size()) != 0) {
@@ -1288,6 +1359,11 @@ void set_release_observer(ReleaseObserver observer, void* context) noexcept {
   g_release_observer_context = context;
 }
 
+void set_allocation_observer(AllocationObserver observer, void* context) noexcept {
+  g_allocation_observer = observer;
+  g_allocation_observer_context = context;
+}
+
 void fail_random_on_call(std::size_t call_index) noexcept {
   g_random_call_count = 0;
   g_random_fail_on_call = call_index;
@@ -1323,6 +1399,16 @@ void corrupt_next_cached_kek() noexcept {
   g_corrupt_next_cached_kek = true;
 }
 
+std::vector<std::size_t> live_key_allocation_sizes() {
+  std::vector<std::size_t> out;
+  out.reserve(g_live_key_allocs.size());
+  for (const auto& [ptr, size] : g_live_key_allocs) {
+    (void)ptr;
+    out.push_back(size);
+  }
+  return out;
+}
+
 CustodyOutcome<std::string> hkdf_sha256_expand(const DataKeyBuffer& prk,
                                                std::string_view info,
                                                std::size_t out_len) {
@@ -1342,6 +1428,158 @@ CustodyOutcome<std::string> hkdf_sha256_expand(const DataKeyBuffer& prk,
   return out;
 }
 #endif
+
+CustodyOutcome<AuthenticatedHeaderState> open_authenticated_header(
+    std::string_view header_bytes,
+    KeySource& source,
+    std::string_view owner_scope,
+    const descriptor::ValidatedDescriptor& descriptor,
+    HostCustodyLimits limits) {
+  if (!sodium_ready()) {
+    return custody_error(CustodyFault::InvalidKeyMaterial);
+  }
+  CustodyOperationScope scope(source);
+  HostCustodyLimits resolved{};
+  archive_internal::Digest expected_descriptor_identity{};
+  try {
+    resolved = archive_internal::resolve_custody_limits(limits, descriptor);
+    expected_descriptor_identity =
+        archive_internal::descriptor_binding_digest(descriptor, resolved.archive);
+  } catch (const archive_fs::Rejected&) {
+    return custody_error(CustodyFault::CorruptHeader);
+  }
+
+  auto parsed_res = parse_header_with_limits(header_bytes, resolved);
+  if (const auto* err = std::get_if<CustodyError>(&parsed_res)) {
+    return *err;
+  }
+  StoreHeader header = std::get<StoreHeader>(std::move(parsed_res));
+  const std::string store_id_hex = archive_internal::hex(header.store_id);
+
+  if (owner_scope.empty() || owner_scope.size() > resolved.archive.max_bytes) {
+    return custody_error(CustodyFault::InvalidInput, store_id_hex);
+  }
+  if (!constant_time_string_equal(header.owner_scope, owner_scope) ||
+      sodium_memcmp(header.descriptor_identity.data(),
+                    expected_descriptor_identity.data(),
+                    expected_descriptor_identity.size()) != 0) {
+    return custody_error(CustodyFault::Tampered, store_id_hex);
+  }
+
+  archive_internal::EpochKeyTable epoch_deks(header.epochs.size());
+  if (!epoch_deks.valid()) {
+    return custody_error(CustodyFault::InvalidKeyMaterial, store_id_hex);
+  }
+
+  DataKeyBuffer scratch_dek;
+  if (!scratch_dek.valid()) {
+    epoch_deks.release();
+    return custody_error(CustodyFault::InvalidKeyMaterial, store_id_hex);
+  }
+
+  // Only the current epoch's entry is used before the header tag check.
+  const EpochKeyEntry& current_entry =
+      header.epochs[static_cast<std::size_t>(header.current_epoch - 1)];
+  std::string current_aad;
+  try {
+    current_aad = archive_internal::build_epoch_aad(header.store_id,
+                                                    header.owner_scope,
+                                                    header.descriptor_identity,
+                                                    current_entry.epoch,
+                                                    current_entry.wrapping_key_id,
+                                                    resolved.archive);
+  } catch (const archive_fs::Rejected&) {
+    scratch_dek.wipe();
+    epoch_deks.release();
+    return custody_error(CustodyFault::CorruptHeader, store_id_hex);
+  }
+
+  if (auto fault = source.unwrap_dek(
+          current_entry.wrapping_key_id, current_aad, current_entry.wrapped_dek, scratch_dek)) {
+    scratch_dek.wipe();
+    epoch_deks.release();
+    return custody_error(*fault, store_id_hex, current_entry.wrapping_key_id);
+  }
+
+  const std::string_view header_body =
+      header_bytes.substr(0, header_bytes.size() - kHeaderTagBytes);
+  if (auto fault = verify_header_tag(scratch_dek, header_body, header.header_tag)) {
+    scratch_dek.wipe();
+    epoch_deks.release();
+    return custody_error(*fault, store_id_hex, current_entry.wrapping_key_id);
+  }
+
+  unsigned char* current_slot = epoch_deks.writable_epoch_dek(header.current_epoch);
+  if (current_slot == nullptr) {
+    scratch_dek.wipe();
+    epoch_deks.release();
+    return custody_error(CustodyFault::CorruptHeader, store_id_hex);
+  }
+  std::memcpy(current_slot, scratch_dek.data(), DataKeyBuffer::kSize);
+  scratch_dek.wipe();
+
+  for (std::uint64_t epoch = 1; epoch < header.current_epoch; ++epoch) {
+    const EpochKeyEntry& entry = header.epochs[static_cast<std::size_t>(epoch - 1)];
+    std::string epoch_aad;
+    try {
+      epoch_aad = archive_internal::build_epoch_aad(header.store_id,
+                                                    header.owner_scope,
+                                                    header.descriptor_identity,
+                                                    entry.epoch,
+                                                    entry.wrapping_key_id,
+                                                    resolved.archive);
+    } catch (const archive_fs::Rejected&) {
+      scratch_dek.wipe();
+      epoch_deks.release();
+      return custody_error(CustodyFault::CorruptHeader, store_id_hex);
+    }
+
+    if (auto fault = source.unwrap_dek(
+            entry.wrapping_key_id, epoch_aad, entry.wrapped_dek, scratch_dek)) {
+      scratch_dek.wipe();
+      epoch_deks.release();
+      return custody_error(*fault, store_id_hex, entry.wrapping_key_id);
+    }
+
+    unsigned char* slot = epoch_deks.writable_epoch_dek(entry.epoch);
+    if (slot == nullptr) {
+      scratch_dek.wipe();
+      epoch_deks.release();
+      return custody_error(CustodyFault::CorruptHeader, store_id_hex);
+    }
+    std::memcpy(slot, scratch_dek.data(), DataKeyBuffer::kSize);
+    scratch_dek.wipe();
+  }
+
+  scratch_dek.release();
+  return AuthenticatedHeaderState{std::move(header), resolved, std::move(epoch_deks)};
+}
+
+std::array<unsigned char, 32> compute_record_reference_digest(
+    std::string_view envelope_bytes) noexcept {
+  std::array<unsigned char, 32> digest{};
+  crypto_hash_sha256_state state{};
+  crypto_hash_sha256_init(&state);
+  unsigned char domain_len_be[8];
+  const std::uint64_t domain_len = custody_format::ref_domain.size();
+  for (unsigned i = 0; i < 8; ++i) {
+    domain_len_be[7 - i] = static_cast<unsigned char>(domain_len >> (i * 8));
+  }
+  crypto_hash_sha256_update(&state, domain_len_be, sizeof(domain_len_be));
+  crypto_hash_sha256_update(
+      &state,
+      reinterpret_cast<const unsigned char*>(custody_format::ref_domain.data()),
+      custody_format::ref_domain.size());
+  if (!envelope_bytes.empty()) {
+    crypto_hash_sha256_update(
+        &state,
+        reinterpret_cast<const unsigned char*>(envelope_bytes.data()),
+        envelope_bytes.size());
+  }
+  crypto_hash_sha256_final(&state, digest.data());
+  sodium_memzero(&state, sizeof(state));
+  return digest;
+}
 
 CustodyOutcome<DataKeyBuffer> hkdf_sha256_extract(std::string_view salt, std::string_view ikm) {
   if (!sodium_ready()) {
@@ -1402,12 +1640,13 @@ CustodyOutcome<DataKeyBuffer> derive_kek(const SecretBuffer& secret,
 }
 
 CustodyOutcome<std::string> aead_xchacha20poly1305_encrypt(
-    const DataKeyBuffer& key,
+    const unsigned char* key_32,
     const std::array<unsigned char, 24>& nonce,
     std::string_view aad,
-    std::string_view plaintext) {
-  if (!sodium_ready() || !key.valid()) {
-    return custody_error(CustodyFault::InvalidKeyMaterial);
+    std::string_view plaintext,
+    std::string_view store_id_hex) {
+  if (!sodium_ready() || key_32 == nullptr) {
+    return custody_error(CustodyFault::InvalidKeyMaterial, store_id_hex);
   }
   std::string out(plaintext.size() + kAeadTagBytes, '\0');
   unsigned long long clen = 0;
@@ -1422,24 +1661,33 @@ CustodyOutcome<std::string> aead_xchacha20poly1305_encrypt(
           aad.size(),
           nullptr,
           nonce.data(),
-          key.data()) != 0 ||
+          key_32) != 0 ||
       clen != out.size()) {
     sodium_memzero(out.data(), out.size());
-    return custody_error(CustodyFault::InvalidKeyMaterial);
+    return custody_error(CustodyFault::InvalidKeyMaterial, store_id_hex);
   }
   return out;
 }
 
-CustodyOutcome<CleansedBuffer> aead_xchacha20poly1305_decrypt(
+CustodyOutcome<std::string> aead_xchacha20poly1305_encrypt(
     const DataKeyBuffer& key,
     const std::array<unsigned char, 24>& nonce,
     std::string_view aad,
-    std::string_view ciphertext_and_tag) {
-  if (!sodium_ready() || !key.valid()) {
-    return custody_error(CustodyFault::InvalidKeyMaterial);
+    std::string_view plaintext) {
+  return aead_xchacha20poly1305_encrypt(key.data(), nonce, aad, plaintext);
+}
+
+CustodyOutcome<CleansedBuffer> aead_xchacha20poly1305_decrypt(
+    const unsigned char* key_32,
+    const std::array<unsigned char, 24>& nonce,
+    std::string_view aad,
+    std::string_view ciphertext_and_tag,
+    std::string_view store_id_hex) {
+  if (!sodium_ready() || key_32 == nullptr) {
+    return custody_error(CustodyFault::InvalidKeyMaterial, store_id_hex);
   }
   if (ciphertext_and_tag.size() < kAeadTagBytes) {
-    return custody_error(CustodyFault::Tampered);
+    return custody_error(CustodyFault::Tampered, store_id_hex);
   }
   const std::size_t mlen_expected = ciphertext_and_tag.size() - kAeadTagBytes;
   CleansedBuffer plaintext(mlen_expected);
@@ -1454,12 +1702,20 @@ CustodyOutcome<CleansedBuffer> aead_xchacha20poly1305_decrypt(
           ad_ptr,
           aad.size(),
           nonce.data(),
-          key.data()) != 0 ||
+          key_32) != 0 ||
       mlen != mlen_expected) {
     plaintext.wipe();
-    return custody_error(CustodyFault::Tampered);
+    return custody_error(CustodyFault::Tampered, store_id_hex);
   }
   return plaintext;
+}
+
+CustodyOutcome<CleansedBuffer> aead_xchacha20poly1305_decrypt(
+    const DataKeyBuffer& key,
+    const std::array<unsigned char, 24>& nonce,
+    std::string_view aad,
+    std::string_view ciphertext_and_tag) {
+  return aead_xchacha20poly1305_decrypt(key.data(), nonce, aad, ciphertext_and_tag);
 }
 
 }  // namespace custody_ops

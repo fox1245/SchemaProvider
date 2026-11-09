@@ -45,6 +45,7 @@ enum class CustodyFault : std::uint8_t {
   KeyInUse,            // Attempted to retire the currently active key_id without rotating first
   CorruptHeader,       // Malformed or unsupported StoreHeader bytes
   CorruptRecord,       // Malformed or unsupported SealedRecord bytes
+  InvalidInput,        // Caller input violates archive limits or structural requirements
   EpochLimit,          // StoreHeader epoch table reached configured max_epochs
   SourceUnavailable,   // Transient key source unreachable / timed out
   SourceRateLimited,   // Transient key source rate limit
@@ -305,6 +306,11 @@ struct UnwrapRequest {
   std::string wrapped_dek;
 };
 
+struct SealedRecord {
+  std::string reference;
+  std::string bytes;
+};
+
 // Parses header bytes structurally without a key. Returns unauthenticated data; nothing
 // returned here may be treated as custody state before open_custody succeeds.
 // Malformed header bytes or invalid limits return CustodyFault::CorruptHeader.
@@ -317,8 +323,9 @@ CustodyOutcome<std::string> serialize_header(const StoreHeader& header,
                                              HostCustodyLimits limits = {});
 
 // Creates a new authenticated StoreHeader at epoch 1.
-// Invalid limits or an empty/overlong owner_scope return CustodyFault::CorruptHeader;
-// an invalid active key_id from source returns CustodyFault::InvalidKeyMaterial.
+// Invalid limits return CustodyFault::CorruptHeader; an empty or oversized owner_scope
+// returns CustodyFault::InvalidInput; an invalid active key_id from source returns
+// CustodyFault::InvalidKeyMaterial.
 CustodyOutcome<std::string> create_header(KeySource& source,
                                           std::string_view owner_scope,
                                           const descriptor::ValidatedDescriptor& descriptor,
@@ -326,9 +333,10 @@ CustodyOutcome<std::string> create_header(KeySource& source,
 
 // Verifies the current header tag and appends epoch current_epoch + 1.
 // Only the current epoch's entry is used before the header tag check.
-// Invalid limits return CustodyFault::CorruptHeader; caller owner_scope or descriptor
-// mismatch against the parsed header returns CustodyFault::Tampered; an invalid non-empty
-// target_key_id returns CustodyFault::InvalidKeyMaterial.
+// Invalid limits or malformed header bytes return CustodyFault::CorruptHeader; an empty
+// or oversized owner_scope returns CustodyFault::InvalidInput; caller owner_scope or
+// descriptor mismatch against the parsed header returns CustodyFault::Tampered; an invalid
+// non-empty target_key_id returns CustodyFault::InvalidKeyMaterial.
 CustodyOutcome<std::string> rotate_header(std::string_view current_header_bytes,
                                           KeySource& source,
                                           std::string_view target_key_id,
@@ -339,8 +347,9 @@ CustodyOutcome<std::string> rotate_header(std::string_view current_header_bytes,
 // Verifies the current header tag and re-wraps any prior epoch entries wrapped under
 // retired_key_id to the current epoch's wrapping_key_id.
 // Only the current epoch's entry is used before the header tag check.
-// Invalid limits return CustodyFault::CorruptHeader; caller owner_scope or descriptor
-// mismatch against the parsed header returns CustodyFault::Tampered; an empty or
+// Invalid limits or malformed header bytes return CustodyFault::CorruptHeader; an empty
+// or oversized owner_scope returns CustodyFault::InvalidInput; caller owner_scope or
+// descriptor mismatch against the parsed header returns CustodyFault::Tampered; an empty or
 // overlong retired_key_id returns CustodyFault::InvalidKeyMaterial; retiring the
 // current epoch's wrapping_key_id returns CustodyFault::KeyInUse.
 CustodyOutcome<std::string> retire_key_in_header(std::string_view current_header_bytes,
@@ -354,8 +363,9 @@ CustodyOutcome<std::string> retire_key_in_header(std::string_view current_header
 // the caller's arguments, and builds one UnwrapRequest per epoch entry. Returns
 // unauthenticated data; nothing returned here may be treated as custody state before
 // open_custody succeeds.
-// Invalid limits or malformed header bytes return CustodyFault::CorruptHeader; caller
-// owner_scope or descriptor mismatch against the parsed header returns CustodyFault::Tampered.
+// Invalid limits or malformed header bytes return CustodyFault::CorruptHeader; an empty
+// or oversized owner_scope returns CustodyFault::InvalidInput; caller owner_scope or
+// descriptor mismatch against the parsed header returns CustodyFault::Tampered.
 CustodyOutcome<std::vector<UnwrapRequest>> unwrap_requests(
     std::string_view header_bytes,
     std::string_view owner_scope,

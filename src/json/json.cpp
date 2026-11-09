@@ -1,4 +1,5 @@
 #include "json/json.h"
+#include "crypto/crypto.h"
 
 #include <yyjson.h>
 
@@ -240,40 +241,122 @@ std::string quote(std::string_view input) {
     return serialize(&value);
 }
 
+namespace {
+
+bool valid_utf8(std::string_view text) noexcept {
+    std::size_t i = 0;
+    const std::size_t n = text.size();
+    while (i < n) {
+        const unsigned char b0 = static_cast<unsigned char>(text[i]);
+        if (b0 <= 0x7f) {
+            ++i;
+            continue;
+        }
+        if (b0 >= 0xc2 && b0 <= 0xdf) {
+            if (i + 1 >= n) return false;
+            const unsigned char b1 = static_cast<unsigned char>(text[i + 1]);
+            if ((b1 & 0xc0) != 0x80) return false;
+            i += 2;
+            continue;
+        }
+        if (b0 >= 0xe0 && b0 <= 0xef) {
+            if (i + 2 >= n) return false;
+            const unsigned char b1 = static_cast<unsigned char>(text[i + 1]);
+            const unsigned char b2 = static_cast<unsigned char>(text[i + 2]);
+            if ((b1 & 0xc0) != 0x80 || (b2 & 0xc0) != 0x80) return false;
+            if (b0 == 0xe0 && b1 < 0xa0) return false;
+            if (b0 == 0xed && b1 >= 0xa0) return false;
+            i += 3;
+            continue;
+        }
+        if (b0 >= 0xf0 && b0 <= 0xf4) {
+            if (i + 3 >= n) return false;
+            const unsigned char b1 = static_cast<unsigned char>(text[i + 1]);
+            const unsigned char b2 = static_cast<unsigned char>(text[i + 2]);
+            const unsigned char b3 = static_cast<unsigned char>(text[i + 3]);
+            if ((b1 & 0xc0) != 0x80 || (b2 & 0xc0) != 0x80 || (b3 & 0xc0) != 0x80) return false;
+            if (b0 == 0xf0 && b1 < 0x90) return false;
+            if (b0 == 0xf4 && b1 >= 0x90) return false;
+            i += 4;
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+
+void BoundedWriter::wipe_temporary(std::string& temporary) const {
+    if (wipe_temporaries_) crypto::cleanse(temporary.data(), temporary.size());
+}
 bool BoundedWriter::claim(std::size_t bytes) {
     if (!ok_ || bytes > limits_.max_bytes - size_) return ok_ = false;
     size_ += bytes;
     return true;
 }
 BoundedWriter& BoundedWriter::raw(std::string_view text) {
-    if (claim(text.size()) && output_) output_->append(text);
+    if (claim(text.size())) emit(text);
     return *this;
 }
 BoundedWriter& BoundedWriter::quoted(std::string_view text) {
     if (!claim(2)) return *this;
     // Count the exact default yyjson escaping before creating any encoded data.
-    // UTF-8 is checked by yyjson when emitting the bounded chunks below.
+    // UTF-8 is checked when emitting the bounded chunks below.
     for (const unsigned char c : text) {
         const std::size_t bytes = c == '"' || c == '\\' || c == '\b' ||
             c == '\f' || c == '\n' || c == '\r' || c == '\t' ? 2 : c < 0x20 ? 6 : 1;
         if (!claim(bytes)) return *this;
     }
-    if (!output_) return *this;
-    output_->push_back('"');
+    if (!has_output()) return *this;
+    emit("\"");
     while (!text.empty()) {
         auto length = std::min<std::size_t>(text.size(), 4096);
         // Never split a valid UTF-8 code point. Malformed sequences are not
-        // repaired: quote rejects them, including overlong/surrogate encodings.
+        // repaired: both paths reject them, including overlong/surrogate encodings.
         if (length < text.size()) {
             while (length && (static_cast<unsigned char>(text[length]) & 0xc0) == 0x80) --length;
             if (!length) { ok_ = false; return *this; }
         }
-        const auto chunk = quote(text.substr(0, length));
-        if (chunk.empty()) { ok_ = false; return *this; }
-        output_->append(chunk.data() + 1, chunk.size() - 2);
+        if (sink_) {
+            const auto sub = text.substr(0, length);
+            if (!valid_utf8(sub)) { ok_ = false; return *this; }
+            std::size_t start = 0;
+            for (std::size_t i = 0; i < sub.size(); ++i) {
+                const auto c = static_cast<unsigned char>(sub[i]);
+                if (c >= 0x20 && c != '"' && c != '\\') continue;
+                emit(sub.substr(start, i - start));
+                char escaped[6]{'\\', 'u', '0', '0', '0', '0'};
+                std::size_t esc_len = 2;
+                switch (c) {
+                    case '"': escaped[1] = '"'; break;
+                    case '\\': escaped[1] = '\\'; break;
+                    case '\b': escaped[1] = 'b'; break;
+                    case '\f': escaped[1] = 'f'; break;
+                    case '\n': escaped[1] = 'n'; break;
+                    case '\r': escaped[1] = 'r'; break;
+                    case '\t': escaped[1] = 't'; break;
+                    default: {
+                        // The same upper-case hex digits yyjson writes, so both forms emit identical bytes.
+                        constexpr char hex[] = "0123456789ABCDEF";
+                        escaped[4] = hex[c >> 4];
+                        escaped[5] = hex[c & 15];
+                        esc_len = 6;
+                        break;
+                    }
+                }
+                emit({escaped, esc_len});
+                start = i + 1;
+            }
+            emit(sub.substr(start));
+        } else {
+            auto chunk = quote(text.substr(0, length));
+            if (chunk.empty()) { ok_ = false; return *this; }
+            emit(std::string_view(chunk.data() + 1, chunk.size() - 2));
+        }
         text.remove_prefix(length);
     }
-    output_->push_back('"');
+    emit("\"");
     return *this;
 }
 BoundedWriter& BoundedWriter::value(Value item, std::size_t enclosing_depth) {
@@ -283,9 +366,11 @@ BoundedWriter& BoundedWriter::value(Value item, std::size_t enclosing_depth) {
     if (!item.is_object() && !item.is_array()) {
         // Only bounded scalar spellings reach yyjson's allocating serializer,
         // retaining its exact integer/real formatting and finite-number rules.
-        const auto scalar = item.dump();
+        auto scalar = item.dump();
         if (scalar.empty()) { ok_ = false; return *this; }
-        return raw(scalar);
+        raw(scalar);
+        wipe_temporary(scalar);
+        return *this;
     }
     if (enclosing_depth >= limits_.max_depth) { ok_ = false; return *this; }
     bool comma = false;

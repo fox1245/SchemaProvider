@@ -56,7 +56,8 @@ struct ScopedWipe {
   explicit ScopedWipe(std::string& value) noexcept : bytes(value) {}
   ~ScopedWipe() { crypto::cleanse(bytes.data(),bytes.size()); }
 };
-void write_media(Writer& w, const Media& p) {
+template <class WriterType>
+void write_media(WriterType& w, const Media& p) {
   w.number(static_cast<unsigned>(p.kind));w.number(static_cast<unsigned>(p.source));w.text(p.mime);
   w.boolean(bool(p.data));if(p.data)w.text(*p.data);
   w.text(p.reference);w.text(p.name);w.number(static_cast<unsigned>(p.detail));w.text(p.id);w.text(p.transcript);
@@ -67,7 +68,8 @@ Media read_media(Reader& r) {
   p.reference=r.text();p.name=r.text();p.detail=r.enumeration<ImageDetail>(3);p.id=r.text();p.transcript=r.text();
   return p;
 }
-void write_result(Writer& w, const ToolResult& p) {
+template <class WriterType>
+void write_result(WriterType& w, const ToolResult& p) {
   w.text(p.tool_use_id);w.text(p.content);w.boolean(p.is_error);w.boolean(p.host.has_value());
   if(p.host){w.text(p.host->name);w.text(p.host->status);w.boolean(p.host->retryable);w.boolean(p.host->effect_uncertain);}
 }
@@ -79,7 +81,8 @@ ToolResult read_result(Reader& r) {
 // Media is variant index 10 but is tagged 12: tag 10 stays the original inline-image layout, which
 // is still read so archives written before typed media load unchanged.
 // Extended tool results use tag 13; absent parts retain tag 7 and its exact layout.
-void write_part(Writer& w, const Part& part, size_t& parts) {
+template <class WriterType>
+void write_part(WriterType& w, const Part& part, size_t& parts) {
   const auto* result = std::get_if<ToolResult>(&part);
   w.number(std::holds_alternative<Media>(part) ? 12 : result && !result->content_parts.empty() ? 13 : part.index());
   std::visit([&](const auto& p) { using P=std::decay_t<decltype(p)>;
@@ -149,25 +152,193 @@ struct NativeArchive::State {
   Status root_identity{}, key_identity{};
   mutable std::mutex save_mutex;
   Digest key{};
+  bool host_custody = false;
+  Digest store_id{};
+  std::string store_id_hex;
+  Digest descriptor_identity_digest{};
+  std::uint64_t current_epoch = 0;
+  archive_internal::EpochKeyTable epoch_deks;
   State(std::string d,std::string k,std::string o,descriptor::ValidatedDescriptor descriptor,NativeArchiveLimits l)
       :directory(std::move(d)),key_file(std::move(k)),owner(std::move(o)),descriptor_identity(descriptor_binding(descriptor,l)),descriptor(std::move(descriptor)),limits(l) {}
+  State(custody_ops::AuthenticatedHeaderState authenticated, descriptor::ValidatedDescriptor descriptor)
+      :owner(std::move(authenticated.header.owner_scope)),
+       descriptor_identity(reinterpret_cast<const char*>(authenticated.header.descriptor_identity.data()),
+                           authenticated.header.descriptor_identity.size()),
+       descriptor(std::move(descriptor)),
+       limits(authenticated.resolved_limits.archive),
+       host_custody(true),
+       store_id(authenticated.header.store_id),
+       store_id_hex(hex(authenticated.header.store_id)),
+       descriptor_identity_digest(authenticated.header.descriptor_identity),
+       current_epoch(authenticated.header.current_epoch),
+       epoch_deks(std::move(authenticated.epoch_deks)) {}
   ~State() { crypto::cleanse(key.data(),key.size()); crypto::cleanse(activation.data(),activation.size()); }
   void verify() const {
+    require(!host_custody);
     auto d=locate(directory);auto root_now=open_directory(d.parent,d.name);private_directory(root_now);require(same_file(root_identity,status(root_now)));
     auto k=locate(key_file);private_directory(k.parent);independent_key_parent(root,k);auto key_now=open_file(k.parent,k.name);private_file(key_now,true);require(unchanged(key_identity,status(key_now)));auto bytes=read_all(key_now,96);ScopedWipe wipe(bytes);require(bytes.size()==activation.size() && crypto::constant_time_equal(bytes.data(),activation.data(),bytes.size()));
+  }
+  template <class WriterType>
+  void write_messages(WriterType& w, const std::vector<Message>& messages) const {
+    require(messages.size()<=limits.max_messages);
+    w.number(messages.size());
+    size_t parts=0;
+    for(const auto& m:messages) {
+      require(m.parts.size()<=limits.max_parts-parts);parts+=m.parts.size();w.text(m.id);w.number(static_cast<unsigned>(m.role));w.number(m.parts.size());for(const auto& p:m.parts)write_part(w,p,parts);w.document(m.wire_output);w.boolean(bool(m.native));
+      if(m.native) {
+        const auto& seal=*m.native;require(seal.archive_valid(m));const auto& c=*seal.context_;require(c.matches_descriptor(descriptor) && c.policy_->identity()==descriptor.policy()->identity());
+        w.number(static_cast<unsigned>(c.family_));w.text(c.model_);w.text(c.route_);w.number(c.prefix_count_);w.text(c.policy_->identity());w.digest(c.origin_);w.digest(c.prefix_);w.digest(c.root_);w.boolean(c.valid_);w.boolean(c.history_valid_);w.boolean(c.replay_eligible_);w.number(c.pending_server_tools_.size());for(const auto& [a,b]:c.pending_server_tools_){w.text(a);w.text(b);}w.strings(c.client_tools_);w.number(static_cast<unsigned>(seal.stop_));w.digest(seal.content_);w.boolean(seal.complete_);
+      }
+    }
+  }
+  std::vector<Message> read_messages(Reader& r) const {
+    auto count=r.count(limits.max_messages);std::vector<Message> messages;messages.reserve(count);size_t parts=0;
+    while(count--) {
+      Message m;m.id=r.text();m.role=r.enumeration<Role>(4);auto n=r.count(limits.max_parts-parts);parts+=n;m.parts.reserve(n);while(n--)m.parts.push_back(read_part(r,parts));m.wire_output=r.document(true);
+      if(r.boolean()) {
+        auto family=r.enumeration<NativeContext::Family>(4);auto model=r.text();auto route=r.text();auto prefix=r.number();require(prefix<=limits.max_messages && r.text()==descriptor.policy()->identity());
+        auto c=std::shared_ptr<NativeContext>(new NativeContext(family,std::move(model),std::move(route),static_cast<size_t>(prefix),descriptor.policy()));c->origin_=r.digest();c->prefix_=r.digest();c->root_=r.digest();c->valid_=r.boolean();c->history_valid_=r.boolean();c->replay_eligible_=r.boolean();auto pending=r.count(limits.max_parts);c->pending_server_tools_.reserve(pending);while(pending--){auto a=r.text();auto b=r.text();c->pending_server_tools_.emplace_back(std::move(a),std::move(b));}c->client_tools_=r.strings();auto stop=r.enumeration<StopKind>(12);auto digest=r.digest();auto complete=r.boolean();m.native=std::shared_ptr<const NativeReplay>(new NativeReplay(std::move(c),stop,digest,complete));require(m.native->archive_valid(m) && m.native->context_->matches_descriptor(descriptor));
+      }
+      messages.push_back(std::move(m));
+    }
+    require(r.data.empty());
+    return messages;
   }
 };
 NativeArchive::NativeArchive(std::unique_ptr<State> state):state_(std::move(state)) {}
 NativeArchive::~NativeArchive()=default;
 std::string_view NativeArchive::owner_scope() const noexcept { return state_->owner; }
+std::uint64_t NativeArchive::current_epoch() const noexcept { return state_->current_epoch; }
 bool NativeArchive::matches_descriptor(const descriptor::ValidatedDescriptor& descriptor) const noexcept {
   try {
     if (!descriptor.policy()) return false;
-    state_->verify();
+    if (!state_->host_custody) state_->verify();
     const auto binding = descriptor_binding(descriptor, state_->limits);
     return binding.size() == state_->descriptor_identity.size() &&
         crypto::constant_time_equal(binding.data(), state_->descriptor_identity.data(), binding.size());
   } catch (...) { return false; }
+}
+NativeArchive::CustodyActivation NativeArchive::open_custody(
+    std::string_view header_bytes,
+    KeySource& source,
+    std::string_view owner_scope,
+    descriptor::ValidatedDescriptor descriptor,
+    HostCustodyLimits limits) {
+  if (!custody_ops::available()) {
+    return custody_unavailable_error();
+  }
+  auto auth_res = custody_ops::open_authenticated_header(
+      header_bytes, source, owner_scope, descriptor, limits);
+  if (const auto* err = std::get_if<CustodyError>(&auth_res)) {
+    return *err;
+  }
+  auto state = std::make_unique<State>(
+      std::get<custody_ops::AuthenticatedHeaderState>(std::move(auth_res)),
+      std::move(descriptor));
+  return std::shared_ptr<NativeArchive>(new NativeArchive(std::move(state)));
+}
+NativeArchive::Sealed NativeArchive::seal(
+    const std::vector<Message>& messages,
+    std::string_view binding) const {
+  if (!custody_ops::available()) {
+    return custody_unavailable_error();
+  }
+  if (!state_ || !state_->host_custody) {
+    return custody_error(CustodyFault::InvalidKeyMaterial);
+  }
+  const unsigned char* dek = state_->epoch_deks.epoch_dek(state_->current_epoch);
+  if (dek == nullptr) {
+    return custody_error(CustodyFault::InvalidKeyMaterial, state_->store_id_hex);
+  }
+  archive_internal::CleansedWriter plaintext_writer(state_->limits);
+  std::string record_aad;
+  try {
+    record_aad = archive_internal::build_record_aad(
+        state_->store_id,
+        state_->current_epoch,
+        state_->owner,
+        state_->descriptor_identity_digest,
+        binding,
+        state_->limits);
+    state_->write_messages(plaintext_writer, messages);
+  } catch (const Rejected&) {
+    plaintext_writer.data.wipe();
+    return custody_error(CustodyFault::InvalidInput, state_->store_id_hex);
+  }
+  std::array<unsigned char, 24> nonce{};
+  if (!custody_ops::random_bytes(nonce.data(), nonce.size())) {
+    crypto::cleanse(nonce.data(), nonce.size());
+    plaintext_writer.data.wipe();
+    return custody_error(CustodyFault::InvalidKeyMaterial, state_->store_id_hex);
+  }
+  auto enc_res = custody_ops::aead_xchacha20poly1305_encrypt(
+      dek, nonce, record_aad, plaintext_writer.data.view(), state_->store_id_hex);
+  plaintext_writer.data.wipe();
+  if (const auto* err = std::get_if<CustodyError>(&enc_res)) {
+    return *err;
+  }
+  const std::string& ciphertext_and_tag = std::get<std::string>(enc_res);
+  std::string envelope_bytes = archive_internal::serialize_record_envelope(
+      state_->current_epoch, nonce, ciphertext_and_tag);
+  std::string reference = archive_internal::compute_record_reference(envelope_bytes);
+  return SealedRecord{std::move(reference), std::move(envelope_bytes)};
+}
+NativeArchive::Opened NativeArchive::open(
+    std::string_view reference,
+    std::string_view bytes,
+    std::string_view expected_binding) const {
+  if (!custody_ops::available()) {
+    return custody_unavailable_error();
+  }
+  if (!state_ || !state_->host_custody) {
+    return custody_error(CustodyFault::InvalidKeyMaterial);
+  }
+  if (expected_binding.size() > state_->limits.max_bytes) {
+    return custody_error(CustodyFault::InvalidInput, state_->store_id_hex);
+  }
+  if (archive_internal::exceeds_max_record_envelope_bytes(bytes.size(), state_->limits)) {
+    return custody_error(CustodyFault::CorruptRecord, state_->store_id_hex);
+  }
+  if (!archive_internal::verify_record_reference(reference, bytes)) {
+    return custody_error(CustodyFault::Tampered, state_->store_id_hex);
+  }
+  archive_internal::ParsedRecordEnvelopeView env;
+  try {
+    env = archive_internal::parse_record_envelope_view(bytes, state_->limits);
+  } catch (const Rejected&) {
+    return custody_error(CustodyFault::CorruptRecord, state_->store_id_hex);
+  }
+  const unsigned char* dek = state_->epoch_deks.epoch_dek(env.header_epoch);
+  if (dek == nullptr) {
+    return custody_error(CustodyFault::Tampered, state_->store_id_hex);
+  }
+  std::string record_aad;
+  try {
+    record_aad = archive_internal::build_record_aad(
+        state_->store_id,
+        env.header_epoch,
+        state_->owner,
+        state_->descriptor_identity_digest,
+        expected_binding,
+        state_->limits);
+  } catch (const Rejected&) {
+    return custody_error(CustodyFault::Tampered, state_->store_id_hex);
+  }
+  auto dec_res = custody_ops::aead_xchacha20poly1305_decrypt(
+      dek, env.nonce, record_aad, env.ciphertext_and_tag, state_->store_id_hex);
+  if (const auto* err = std::get_if<CustodyError>(&dec_res)) {
+    return *err;
+  }
+  CleansedBuffer plaintext = std::get<CleansedBuffer>(std::move(dec_res));
+  try {
+    Reader r(plaintext.view(), state_->limits);
+    std::vector<Message> messages = state_->read_messages(r);
+    plaintext.wipe();
+    return messages;
+  } catch (const Rejected&) {
+    plaintext.wipe();
+    return custody_error(CustodyFault::CorruptRecord, state_->store_id_hex);
+  }
 }
 NativeArchive::Activation NativeArchive::provision(std::string d,std::string k,std::string o,descriptor::ValidatedDescriptor v,NativeArchiveLimits l) {return activate(std::move(d),std::move(k),std::move(o),std::move(v),l,true);}
 NativeArchive::Activation NativeArchive::open(std::string d,std::string k,std::string o,descriptor::ValidatedDescriptor v,NativeArchiveLimits l) {return activate(std::move(d),std::move(k),std::move(o),std::move(v),l,false);}

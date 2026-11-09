@@ -142,8 +142,20 @@ std::string quote(std::string_view input);
 // A failed writer stays failed and never appends further bytes.
 class BoundedWriter {
 public:
+    // A sink receives every emitted byte instead of a string. A writer built with a sink escapes
+    // strings directly into the sink without temporaries and wipes scalar spellings after emitting
+    // them, for callers that serialize secret plaintext into a wiping buffer. The string form keeps
+    // its direct appends and does no wiping, so ordinary request encoding pays nothing for the sink.
+    using Sink = void (*)(void* context, std::string_view text);
     explicit BoundedWriter(Limits limits, std::string* output = nullptr)
         : limits_(limits), output_(output), size_(output ? output->size() : 0),
+          ok_(size_ <= limits.max_bytes) {}
+    BoundedWriter(Limits limits, Sink sink, void* sink_context, std::size_t initial_size = 0)
+        : limits_(limits),
+          sink_(sink),
+          sink_context_(sink_context),
+          wipe_temporaries_(true),
+          size_(initial_size),
           ok_(size_ <= limits.max_bytes) {}
     BoundedWriter& raw(std::string_view text);
     BoundedWriter& quoted(std::string_view text);
@@ -153,9 +165,19 @@ public:
     bool ok() const { return ok_; }
     std::size_t size() const { return size_; }
 private:
+    bool has_output() const { return output_ || sink_; }
+    void emit(std::string_view text) {
+        if (text.empty()) return;
+        if (output_) output_->append(text);
+        else if (sink_) sink_(sink_context_, text);
+    }
+    void wipe_temporary(std::string& temporary) const;
     bool claim(std::size_t bytes);
     Limits limits_;
-    std::string* output_;
+    std::string* output_ = nullptr;
+    Sink sink_ = nullptr;
+    void* sink_context_ = nullptr;
+    bool wipe_temporaries_ = false;
     std::size_t size_ = 0;
     bool ok_ = true;
 };
