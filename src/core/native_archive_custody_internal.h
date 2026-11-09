@@ -15,10 +15,16 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 namespace sp {
+
+namespace custody_ops {
+std::array<unsigned char, 32> compute_record_reference_digest(
+    std::string_view envelope_bytes) noexcept;
+}  // namespace custody_ops
 
 namespace archive_internal {
 
@@ -35,9 +41,31 @@ inline std::string hex(const Digest& bytes) {
   return text;
 }
 
-class Writer {
+inline std::string quote_key_id_for_message(std::string_view key_id) {
+  static constexpr char digits[] = "0123456789abcdef";
+  std::string out;
+  out.reserve(key_id.size() + 2);
+  out.push_back('"');
+  for (unsigned char c : key_id) {
+    if (c == '"' || c == '\\') {
+      out.push_back('\\');
+      out.push_back(static_cast<char>(c));
+    } else if (c >= 0x20 && c <= 0x7e) {
+      out.push_back(static_cast<char>(c));
+    } else {
+      out.append("\\x");
+      out.push_back(digits[c >> 4]);
+      out.push_back(digits[c & 15]);
+    }
+  }
+  out.push_back('"');
+  return out;
+}
+
+template <class Buffer = std::string>
+class BasicWriter {
  public:
-  explicit Writer(NativeArchiveLimits limits) : limits(limits) {}
+  explicit BasicWriter(NativeArchiveLimits limits) : limits(limits) {}
   void raw(std::string_view v) {
     archive_fs::require(v.size() <= limits.max_bytes - data.size());
     data.append(v);
@@ -67,16 +95,102 @@ class Writer {
     const auto length_offset = data.size();
     number(0);
     const auto start = data.size();
-    json::BoundedWriter writer({limits.max_bytes, limits.max_json_depth}, &data);
-    writer.value(v->root());
-    archive_fs::require(writer.ok());
+    if constexpr (std::is_same_v<Buffer, std::string>) {
+      json::BoundedWriter writer({limits.max_bytes, limits.max_json_depth}, &data);
+      writer.value(v->root());
+      archive_fs::require(writer.ok());
+    } else {
+      json::BoundedWriter writer(
+          {limits.max_bytes, limits.max_json_depth}, &append_json_chunk, &data, data.size());
+      writer.value(v->root());
+      archive_fs::require(writer.ok());
+    }
     const std::uint64_t length = data.size() - start;
+    auto* out = reinterpret_cast<unsigned char*>(data.data()) + length_offset;
     for (unsigned i = 0; i < 8; ++i)
-      data[length_offset + 7 - i] = static_cast<char>(length >> (i * 8));
+      out[7 - i] = static_cast<unsigned char>(length >> (i * 8));
   }
   void digest(const Digest& v) { raw({reinterpret_cast<const char*>(v.data()), v.size()}); }
   NativeArchiveLimits limits;
-  std::string data;
+  Buffer data;
+
+ private:
+  static void append_json_chunk(void* context, std::string_view chunk) {
+    static_cast<Buffer*>(context)->append(chunk);
+  }
+};
+
+using Writer = BasicWriter<std::string>;
+using CleansedWriter = BasicWriter<CleansedBuffer>;
+
+class EpochKeyTable final {
+ public:
+  static constexpr std::size_t kDekBytes = DataKeyBuffer::kSize;
+
+  EpochKeyTable() noexcept = default;
+  explicit EpochKeyTable(std::size_t epoch_count) noexcept
+      : bytes_(epoch_count > 0 && epoch_count <= std::numeric_limits<std::size_t>::max() / kDekBytes
+                   ? custody_detail::sodium_key_alloc(epoch_count * kDekBytes)
+                   : nullptr),
+        epoch_count_(bytes_ != nullptr ? epoch_count : 0) {}
+
+  EpochKeyTable(const EpochKeyTable&) = delete;
+  EpochKeyTable& operator=(const EpochKeyTable&) = delete;
+
+  EpochKeyTable(EpochKeyTable&& other) noexcept
+      : bytes_(other.bytes_), epoch_count_(other.epoch_count_) {
+    other.bytes_ = nullptr;
+    other.epoch_count_ = 0;
+  }
+
+  EpochKeyTable& operator=(EpochKeyTable&& other) noexcept {
+    if (this != &other) {
+      release();
+      bytes_ = other.bytes_;
+      epoch_count_ = other.epoch_count_;
+      other.bytes_ = nullptr;
+      other.epoch_count_ = 0;
+    }
+    return *this;
+  }
+
+  ~EpochKeyTable() noexcept { release(); }
+
+  [[nodiscard]] bool valid() const noexcept { return bytes_ != nullptr && epoch_count_ > 0; }
+  [[nodiscard]] std::size_t epoch_count() const noexcept { return epoch_count_; }
+  [[nodiscard]] std::size_t byte_size() const noexcept { return epoch_count_ * kDekBytes; }
+
+  [[nodiscard]] unsigned char* writable_epoch_dek(std::uint64_t epoch) noexcept {
+    if (bytes_ == nullptr || epoch < 1 || epoch > epoch_count_) {
+      return nullptr;
+    }
+    return bytes_ + static_cast<std::size_t>(epoch - 1) * kDekBytes;
+  }
+
+  [[nodiscard]] const unsigned char* epoch_dek(std::uint64_t epoch) const noexcept {
+    if (bytes_ == nullptr || epoch < 1 || epoch > epoch_count_) {
+      return nullptr;
+    }
+    return bytes_ + static_cast<std::size_t>(epoch - 1) * kDekBytes;
+  }
+
+  void wipe() noexcept {
+    if (bytes_ != nullptr && epoch_count_ > 0) {
+      custody_detail::sodium_key_wipe(bytes_, epoch_count_ * kDekBytes);
+    }
+  }
+
+  void release() noexcept {
+    if (bytes_ != nullptr) {
+      custody_detail::sodium_key_free(bytes_, epoch_count_ * kDekBytes);
+      bytes_ = nullptr;
+      epoch_count_ = 0;
+    }
+  }
+
+ private:
+  unsigned char* bytes_ = nullptr;
+  std::size_t epoch_count_ = 0;
 };
 
 class Reader {
@@ -265,7 +379,104 @@ inline std::string build_epoch_aad(const Digest& store_id,
   return std::move(w.data);
 }
 
+inline std::string build_record_aad(const Digest& store_id,
+                                    std::uint64_t header_epoch,
+                                    std::string_view owner_scope,
+                                    const Digest& descriptor_identity,
+                                    std::string_view binding,
+                                    NativeArchiveLimits limits) {
+  archive_fs::require(!owner_scope.empty() && owner_scope.size() <= limits.max_bytes);
+  archive_fs::require(binding.size() <= limits.max_bytes);
+  NativeArchiveLimits aad_limits = limits;
+  const std::size_t fixed_overhead =
+      8 + custody_format::record_aad_domain.size() + 8 + store_id.size() + 8 + 8 +
+      descriptor_identity.size() + 8;
+  aad_limits.max_bytes = fixed_overhead + owner_scope.size() + binding.size();
+  Writer w(aad_limits);
+  w.text(custody_format::record_aad_domain);
+  w.number(custody_format::record_format_version);
+  w.digest(store_id);
+  w.number(header_epoch);
+  w.text(owner_scope);
+  w.digest(descriptor_identity);
+  w.text(binding);
+  return std::move(w.data);
+}
+
+inline std::string serialize_record_envelope(std::uint64_t header_epoch,
+                                             const std::array<unsigned char, 24>& nonce,
+                                             std::string_view ciphertext_and_tag) {
+  NativeArchiveLimits envelope_limits{};
+  envelope_limits.max_bytes = 8 + 8 + nonce.size() + 8 + ciphertext_and_tag.size();
+  Writer w(envelope_limits);
+  w.number(custody_format::record_format_version);
+  w.number(header_epoch);
+  w.raw({reinterpret_cast<const char*>(nonce.data()), nonce.size()});
+  w.text(ciphertext_and_tag);
+  return std::move(w.data);
+}
+
+inline constexpr std::size_t kRecordEnvelopeFramingBytes = 8 + 8 + 24 + 8;
+inline constexpr std::size_t kRecordAeadTagBytes = 16;
+
+inline bool exceeds_max_record_envelope_bytes(std::size_t envelope_size,
+                                              const NativeArchiveLimits& limits) noexcept {
+  constexpr std::size_t kFixedBytes = kRecordEnvelopeFramingBytes + kRecordAeadTagBytes;
+  return envelope_size > kFixedBytes && envelope_size - kFixedBytes > limits.max_bytes;
+}
+
+struct ParsedRecordEnvelopeView {
+  std::uint64_t format_version = 0;
+  std::uint64_t header_epoch = 0;
+  std::array<unsigned char, 24> nonce{};
+  std::string_view ciphertext_and_tag;
+};
+
+inline ParsedRecordEnvelopeView parse_record_envelope_view(std::string_view envelope_bytes,
+                                                           NativeArchiveLimits limits) {
+  constexpr std::uint64_t kMinPlaintextBytes = 8;
+  Reader r(envelope_bytes, limits);
+  ParsedRecordEnvelopeView out;
+  out.format_version = r.number();
+  archive_fs::require(out.format_version == custody_format::record_format_version);
+  out.header_epoch = r.number();
+  const std::string_view nonce_view = r.raw(out.nonce.size());
+  std::memcpy(out.nonce.data(), nonce_view.data(), out.nonce.size());
+  const std::uint64_t ciphertext_len = r.number();
+  archive_fs::require(ciphertext_len >= kRecordAeadTagBytes + kMinPlaintextBytes);
+  archive_fs::require(ciphertext_len - kRecordAeadTagBytes <= limits.max_bytes);
+  archive_fs::require(ciphertext_len == r.data.size());
+  out.ciphertext_and_tag = r.raw(static_cast<std::size_t>(ciphertext_len));
+  archive_fs::require(r.data.empty());
+  return out;
+}
+
+inline Digest compute_record_reference_digest(std::string_view envelope_bytes) noexcept {
+  return custody_ops::compute_record_reference_digest(envelope_bytes);
+}
+
+inline std::string compute_record_reference(std::string_view envelope_bytes) {
+  return std::string(custody_format::ref_prefix) +
+         hex(compute_record_reference_digest(envelope_bytes));
+}
+
+inline bool verify_record_reference(std::string_view reference, std::string_view envelope_bytes) {
+  if (reference.size() != custody_format::ref_prefix.size() + 64 ||
+      reference.substr(0, custody_format::ref_prefix.size()) != custody_format::ref_prefix) {
+    return false;
+  }
+  const std::string_view hex_part = reference.substr(custody_format::ref_prefix.size());
+  for (char c : hex_part) {
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+      return false;
+    }
+  }
+  return reference == compute_record_reference(envelope_bytes);
+}
+
 }  // namespace archive_internal
+
+class NativeArchive;
 
 CustodyError custody_unavailable_error();
 
@@ -282,19 +493,47 @@ CustodyOutcome<DataKeyBuffer> derive_kek(const SecretBuffer& secret,
                                          const std::array<unsigned char, 32>& store_id);
 
 CustodyOutcome<std::string> aead_xchacha20poly1305_encrypt(
+    const unsigned char* key_32,
+    const std::array<unsigned char, 24>& nonce,
+    std::string_view aad,
+    std::string_view plaintext,
+    std::string_view store_id_hex = {});
+CustodyOutcome<std::string> aead_xchacha20poly1305_encrypt(
     const DataKeyBuffer& key,
     const std::array<unsigned char, 24>& nonce,
     std::string_view aad,
     std::string_view plaintext);
+CustodyOutcome<CleansedBuffer> aead_xchacha20poly1305_decrypt(
+    const unsigned char* key_32,
+    const std::array<unsigned char, 24>& nonce,
+    std::string_view aad,
+    std::string_view ciphertext_and_tag,
+    std::string_view store_id_hex = {});
 CustodyOutcome<CleansedBuffer> aead_xchacha20poly1305_decrypt(
     const DataKeyBuffer& key,
     const std::array<unsigned char, 24>& nonce,
     std::string_view aad,
     std::string_view ciphertext_and_tag);
 
+struct AuthenticatedHeaderState {
+  StoreHeader header;
+  HostCustodyLimits resolved_limits{};
+  archive_internal::EpochKeyTable epoch_deks;
+};
+
+CustodyOutcome<AuthenticatedHeaderState> open_authenticated_header(
+    std::string_view header_bytes,
+    KeySource& source,
+    std::string_view owner_scope,
+    const descriptor::ValidatedDescriptor& descriptor,
+    HostCustodyLimits limits = {});
+
 #ifdef SP_CUSTODY_TEST_SEAMS
 using ReleaseObserver = void (*)(std::size_t capacity, bool all_zero, void* context) noexcept;
 void set_release_observer(ReleaseObserver observer, void* context = nullptr) noexcept;
+
+using AllocationObserver = void (*)(std::size_t capacity, void* context) noexcept;
+void set_allocation_observer(AllocationObserver observer, void* context = nullptr) noexcept;
 
 void fail_random_on_call(std::size_t call_index) noexcept;
 void override_next_random_bytes(std::string_view bytes);
@@ -302,6 +541,7 @@ std::vector<std::size_t> recorded_random_draws();
 void reset_random_seam() noexcept;
 void fail_key_alloc_on_call(std::size_t call_index) noexcept;
 void corrupt_next_cached_kek() noexcept;
+std::vector<std::size_t> live_key_allocation_sizes();
 
 CustodyOutcome<std::string> hkdf_sha256_expand(const DataKeyBuffer& prk,
                                                std::string_view info,

@@ -1,7 +1,15 @@
-// Host-native archive custody primitives and store header tests: HKDF-SHA256, XChaCha20-Poly1305,
-// derive_kek, make_hkdf_key_source, LockedKeyBuffer, CleansedBuffer, StoreHeader, and CustodyFault mapping.
+// Host-native archive custody primitives, store header, and sealed record tests: HKDF-SHA256,
+// XChaCha20-Poly1305, derive_kek, make_hkdf_key_source, LockedKeyBuffer, CleansedBuffer,
+// StoreHeader, NativeArchive::open_custody/seal/open, and CustodyFault mapping.
+#include "codecs/chat.h"
+#include "codecs/gemini.h"
+#include "codecs/gemini_request.h"
+#include "codecs/interactions.h"
+#include "codecs/interactions_request.h"
 #include "codecs/messages.h"
 #include "codecs/messages_request.h"
+#include "codecs/responses.h"
+#include "codecs/responses_request.h"
 #include "core/interface_contract.h"
 #include "core/native.h"
 #include "core/native_archive.h"
@@ -9,6 +17,9 @@
 #include "core/native_archive_custody_format.h"
 #include "core/native_archive_custody_internal.h"
 #include "crypto/crypto.h"
+#include "descriptor/policy.h"
+#include "json/json.h"
+#include "sp/config_defaults.h"
 
 #include <algorithm>
 #include <array>
@@ -21,10 +32,12 @@
 #include <memory>
 #include <mutex>
 #include <random>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 #ifdef _WIN32
@@ -811,6 +824,8 @@ void test_error_mapping() {
        "archive.custody.corrupt_header", false},
       {CustodyFault::CorruptRecord, ErrorKind::Permission, RetryClass::Never, RetrySafety::NotSent,
        "archive.custody.corrupt_record", false},
+      {CustodyFault::InvalidInput, ErrorKind::InvalidRequest, RetryClass::Never, RetrySafety::NotSent,
+       "archive.custody.invalid_input", false},
       {CustodyFault::SourceUnavailable, ErrorKind::Transport, RetryClass::Transient, RetrySafety::NotSent,
        "archive.custody.source_unavailable", true},
       {CustodyFault::SourceRateLimited, ErrorKind::RateLimited, RetryClass::Transient, RetrySafety::NotSent,
@@ -1585,25 +1600,44 @@ void test_epoch_aad_single_field_binding() {
     CHECK(std::get<CustodyError>(rot).error.reason == "archive.custody.tampered");
   }
 
-  // 3. Change owner_scope (including empty owner_scope) -> unwrap_requests, rotate_header, and retire_key_in_header
-  // refuse with Tampered and populate store_id; if header owner_scope is also rewritten, unwrap_dek refuses
-  // because epoch_aad's owner_scope differs.
+  // 3. Change owner_scope -> unwrap_requests, rotate_header, and retire_key_in_header refuse a mismatched
+  // owner_scope with Tampered and an empty owner_scope with InvalidInput, populating store_id; if header
+  // owner_scope is also rewritten, unwrap_dek refuses because epoch_aad's owner_scope differs.
   {
-    for (std::string_view bad_owner : {std::string_view{"other-owner"}, std::string_view{""}}) {
-      auto mismatch_res = unwrap_requests(h2_bytes, bad_owner, valid_desc);
+    {
+      auto mismatch_res = unwrap_requests(h2_bytes, "other-owner", valid_desc);
       CHECK(std::holds_alternative<CustodyError>(mismatch_res));
       CHECK(std::get<CustodyError>(mismatch_res).error.reason == "archive.custody.tampered");
       CHECK(std::get<CustodyError>(mismatch_res).store_id == store_id_hex);
 
-      auto rot_res = rotate_header(h2_bytes, *key_source, "k2", bad_owner, valid_desc);
+      auto rot_res = rotate_header(h2_bytes, *key_source, "k2", "other-owner", valid_desc);
       CHECK(std::holds_alternative<CustodyError>(rot_res));
       CHECK(std::get<CustodyError>(rot_res).error.reason == "archive.custody.tampered");
       CHECK(std::get<CustodyError>(rot_res).store_id == store_id_hex);
 
-      auto ret_res = retire_key_in_header(h2_bytes, "k1", *key_source, bad_owner, valid_desc);
+      auto ret_res = retire_key_in_header(h2_bytes, "k1", *key_source, "other-owner", valid_desc);
       CHECK(std::holds_alternative<CustodyError>(ret_res));
       CHECK(std::get<CustodyError>(ret_res).error.reason == "archive.custody.tampered");
       CHECK(std::get<CustodyError>(ret_res).store_id == store_id_hex);
+    }
+    {
+      auto empty_unwrap = unwrap_requests(h2_bytes, "", valid_desc);
+      CHECK(std::holds_alternative<CustodyError>(empty_unwrap));
+      CHECK(std::get<CustodyError>(empty_unwrap).error.kind == ErrorKind::InvalidRequest);
+      CHECK(std::get<CustodyError>(empty_unwrap).error.reason == "archive.custody.invalid_input");
+      CHECK(std::get<CustodyError>(empty_unwrap).store_id == store_id_hex);
+
+      auto empty_rot = rotate_header(h2_bytes, *key_source, "k2", "", valid_desc);
+      CHECK(std::holds_alternative<CustodyError>(empty_rot));
+      CHECK(std::get<CustodyError>(empty_rot).error.kind == ErrorKind::InvalidRequest);
+      CHECK(std::get<CustodyError>(empty_rot).error.reason == "archive.custody.invalid_input");
+      CHECK(std::get<CustodyError>(empty_rot).store_id == store_id_hex);
+
+      auto empty_ret = retire_key_in_header(h2_bytes, "k1", *key_source, "", valid_desc);
+      CHECK(std::holds_alternative<CustodyError>(empty_ret));
+      CHECK(std::get<CustodyError>(empty_ret).error.kind == ErrorKind::InvalidRequest);
+      CHECK(std::get<CustodyError>(empty_ret).error.reason == "archive.custody.invalid_input");
+      CHECK(std::get<CustodyError>(empty_ret).store_id == store_id_hex);
     }
 
     StoreHeader changed_owner = h2;
@@ -2216,6 +2250,1664 @@ void test_header_call_counts() {
   CHECK(secrets->load_count("k3") == 3);
 }
 
+descriptor::ValidatedDescriptor provider_test_descriptor(
+    std::string_view family,
+    std::string_view base = "http://127.0.0.1:18080") {
+  const auto route = family == "anthropic.messages" ? "/v1/messages"
+                     : family == "openai.chat"      ? "/chat/completions"
+                                                    : "/v1/responses";
+  auto loaded = descriptor::load(
+      "{\"descriptor_version\":1,\"revision\":1,\"id\":\"archive-fixture\",\"family\":" +
+      json::quote(family) + ",\"connection\":{\"base_url\":" + json::quote(base) +
+      ",\"paths\":{\"buffered\":" + json::quote(route) +
+      ",\"streaming\":" + json::quote(route) + "}}}");
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
+  return std::get<descriptor::ValidatedDescriptor>(std::move(loaded));
+}
+
+std::shared_ptr<const json::Document> parse_json_doc(std::string_view bytes) {
+  auto parsed = json::parse(bytes);
+  CHECK(std::holds_alternative<json::Document>(parsed));
+  return std::make_shared<const json::Document>(std::get<json::Document>(std::move(parsed)));
+}
+
+Message make_user_message(std::string text) {
+  return Message{{}, Role::User, {Text{std::move(text)}}};
+}
+
+void check_same_document(const std::shared_ptr<const json::Document>& a,
+                         const std::shared_ptr<const json::Document>& b) {
+  CHECK(bool(a) == bool(b));
+  if (a) {
+    CHECK(json::equal(a->root(), b->root()));
+  }
+}
+
+void check_same_media(const Media& p, const Media& q) {
+  CHECK(p.kind == q.kind && p.source == q.source && p.mime == q.mime && p.detail == q.detail &&
+        p.reference == q.reference && p.name == q.name && p.id == q.id &&
+        p.transcript == q.transcript && bool(p.data) == bool(q.data));
+  if (p.data) {
+    CHECK(*p.data == *q.data);
+  }
+}
+
+void check_same_part(const Part& a, const Part& b) {
+  CHECK(a.index() == b.index());
+  std::visit(
+      [&](const auto& p) {
+        using P = std::decay_t<decltype(p)>;
+        const auto& q = std::get<P>(b);
+        if constexpr (std::is_same_v<P, Text>) {
+          CHECK(p.value == q.value);
+        } else if constexpr (std::is_same_v<P, Refusal>) {
+          CHECK(p.text == q.text && p.raw_code == q.raw_code);
+        } else if constexpr (std::is_same_v<P, ToolCall> || std::is_same_v<P, InvalidToolCall>) {
+          CHECK(p.id == q.id && p.name == q.name && p.kind == q.kind && p.wire_type == q.wire_type);
+          check_same_document(p.wire_metadata, q.wire_metadata);
+          if constexpr (std::is_same_v<P, ToolCall>) {
+            check_same_document(p.input, q.input);
+          } else {
+            CHECK(p.raw_fragment == q.raw_fragment && p.reason == q.reason);
+          }
+        } else if constexpr (std::is_same_v<P, Thinking>) {
+          CHECK(p.text == q.text && p.signature == q.signature);
+        } else if constexpr (std::is_same_v<P, RedactedThinking>) {
+          CHECK(p.data == q.data);
+        } else if constexpr (std::is_same_v<P, ServerToolResult>) {
+          CHECK(p.tool_use_id == q.tool_use_id && p.wire_type == q.wire_type);
+          check_same_document(p.content, q.content);
+        } else if constexpr (std::is_same_v<P, ToolResult>) {
+          CHECK(p.tool_use_id == q.tool_use_id && p.content == q.content &&
+                p.is_error == q.is_error && p.host.has_value() == q.host.has_value());
+          if (p.host) {
+            CHECK(p.host->name == q.host->name && p.host->status == q.host->status &&
+                  p.host->retryable == q.host->retryable &&
+                  p.host->effect_uncertain == q.host->effect_uncertain);
+          }
+          CHECK(p.content_parts.size() == q.content_parts.size());
+          for (std::size_t i = 0; i < p.content_parts.size(); ++i) {
+            CHECK(p.content_parts[i].index() == q.content_parts[i].index());
+            if (const auto* text = std::get_if<Text>(&p.content_parts[i])) {
+              CHECK(text->value == std::get<Text>(q.content_parts[i]).value);
+            } else if (const auto* block = std::get_if<Opaque>(&p.content_parts[i])) {
+              const auto& other_block = std::get<Opaque>(q.content_parts[i]);
+              CHECK(block->wire_type == other_block.wire_type);
+              check_same_document(block->wire_metadata, other_block.wire_metadata);
+            } else {
+              check_same_media(std::get<Media>(p.content_parts[i]),
+                               std::get<Media>(q.content_parts[i]));
+            }
+          }
+        } else if constexpr (std::is_same_v<P, Reasoning>) {
+          CHECK(p.id == q.id && p.summary == q.summary &&
+                p.encrypted_content == q.encrypted_content && p.status == q.status &&
+                p.content == q.content);
+        } else if constexpr (std::is_same_v<P, Opaque>) {
+          CHECK(p.wire_type == q.wire_type);
+          check_same_document(p.wire_metadata, q.wire_metadata);
+        } else if constexpr (std::is_same_v<P, Media>) {
+          check_same_media(p, q);
+        } else if constexpr (std::is_same_v<P, Thought>) {
+          CHECK(p.summary == q.summary && p.signature == q.signature);
+        }
+      },
+      a);
+}
+
+std::string gemini_routed_paths(std::string json_text, bool routed) {
+  if (!routed) return json_text;
+  for (auto at = json_text.find("/fixture-model:"); at != std::string::npos;
+       at = json_text.find("/fixture-model:")) {
+    json_text.replace(at + 1, 13, "{model}");
+  }
+  return json_text;
+}
+
+std::shared_ptr<NativeArchive> open_custody_checked(
+    std::string_view header_bytes,
+    KeySource& source,
+    std::string_view owner_scope,
+    const descriptor::ValidatedDescriptor& descriptor,
+    HostCustodyLimits limits = {}) {
+  auto opened = NativeArchive::open_custody(header_bytes, source, owner_scope, descriptor, limits);
+  CHECK(std::holds_alternative<std::shared_ptr<NativeArchive>>(opened));
+  return std::get<std::shared_ptr<NativeArchive>>(std::move(opened));
+}
+
+SealedRecord seal_checked(const NativeArchive& archive,
+                          const std::vector<Message>& messages,
+                          std::string_view binding = {}) {
+  auto sealed = archive.seal(messages, binding);
+  CHECK(std::holds_alternative<SealedRecord>(sealed));
+  return std::get<SealedRecord>(std::move(sealed));
+}
+
+std::vector<Message> open_checked(const NativeArchive& archive,
+                                  std::string_view reference,
+                                  std::string_view bytes,
+                                  std::string_view expected_binding = {}) {
+  auto opened = archive.open(reference, bytes, expected_binding);
+  CHECK(std::holds_alternative<std::vector<Message>>(opened));
+  return std::get<std::vector<Message>>(std::move(opened));
+}
+
+void test_custody_roundtrip_all_provider_families() {
+  auto secrets = std::make_shared<FixedSecretSource>("k1");
+  secrets->set_secret("k1", std::string(32, '\x11'));
+  auto hkdf_source = make_hkdf_key_source(secrets);
+  CountingKeySource counting(hkdf_source);
+
+  // 1. anthropic.messages: portable message with all part kinds + wire_output, genuine native message
+  // with thinking signature and redacted thinking, incomplete partial native message, diagnostic
+  // duplicate-key document, and extended tool result bounds.
+  {
+    const auto d = provider_test_descriptor("anthropic.messages");
+    auto h_res = create_header(counting, "owner-anthropic", d);
+    CHECK(std::holds_alternative<std::string>(h_res));
+    const std::string& header_bytes = std::get<std::string>(h_res);
+    auto archive = open_custody_checked(header_bytes, counting, "owner-anthropic", d);
+    auto reopened = open_custody_checked(header_bytes, *hkdf_source, "owner-anthropic", d);
+
+    counting.reset_counts();
+    secrets->reset_counts();
+    CHECK(archive->owner_scope() == "owner-anthropic");
+    CHECK(archive->current_epoch() == 1);
+    CHECK(archive->matches_descriptor(d));
+    CHECK(!archive->matches_descriptor(provider_test_descriptor("openai.responses")));
+
+    for (const auto mutation : std::array<std::string_view, 6>{
+             R"({"descriptor_version":1,"revision":1,"id":"archive-fixture","family":"anthropic.messages","connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":"/v1/messages","streaming":"/v1/messages"}},"bindings":{"model":"other_model"}})",
+             R"({"descriptor_version":1,"revision":1,"id":"archive-fixture","family":"anthropic.messages","connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":"/v1/messages","streaming":"/v1/messages"}},"bindings":{"messages":"other_messages"}})",
+             R"({"descriptor_version":1,"revision":1,"id":"archive-fixture","family":"anthropic.messages","connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":"/v1/messages","streaming":"/v1/messages"}},"bindings":{"stream":"other_stream"}})",
+             R"({"descriptor_version":1,"revision":1,"id":"archive-fixture","family":"anthropic.messages","connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":"/v1/messages","streaming":"/v1/messages"}},"bindings":{"max_output_tokens":"other_cap"}})",
+             R"({"descriptor_version":1,"revision":1,"id":"archive-fixture","family":"anthropic.messages","connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":"/v1/messages","streaming":"/v1/messages"}},"bindings":{"usage":["other_usage"]}})",
+             R"({"descriptor_version":1,"revision":1,"id":"archive-fixture","family":"anthropic.messages","connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":"/v1/messages","streaming":"/v1/messages"}},"stop_reasons":{"custom_stop":"EndTurn"}})"}) {
+      auto mutated_desc = descriptor::load(mutation);
+      CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(mutated_desc));
+      CHECK(!archive->matches_descriptor(std::get<descriptor::ValidatedDescriptor>(mutated_desc)));
+    }
+
+    auto object = parse_json_doc(
+        R"({"second":[1,true,null],"first":{"x":"value","float":1.0,"negative_zero":-0.0,"signed":-4,"large":18446744073709551615}})");
+    ToolCall call{"call", "lookup", ToolCallKind::ApprovalRequest, object, "function_call", object};
+    InvalidToolCall invalid{"bad", "lookup", ToolCallKind::ClientExecuted, "{",
+                            InvalidReason::Truncated, "function_call", object};
+    Message portable{
+        "portable",
+        Role::Developer,
+        {Text{std::string("a\0b", 3)},
+         Refusal{"no", "policy"},
+         call,
+         invalid,
+         Thinking{"t", std::string{"portable-sig-marker"}},
+         RedactedThinking{"portable-redacted-marker"},
+         ServerToolResult{"server", "search_result", object},
+         ToolResult{"call", "error", true},
+         Reasoning{"reason", {"one", "two"}, "portable-encrypted-marker", "completed", {"body"}},
+         Opaque{"future", object},
+         Media::image("image/png", std::make_shared<const std::string>("AAEC"), ImageDetail::Original),
+         Thought{{"thought"}, "portable-thought-sig"}},
+        {},
+        parse_json_doc(R"([{"raw":"ordered-wire-marker"},{"raw":"group"}])")};
+    std::get<ToolResult>(portable.parts[7]).host =
+        ToolResultHostMetadata{"lookup", "uncertain", true, true};
+    ToolResult extended{"nested", "", true,
+                        ToolResultHostMetadata{"lookup", "uncertain", true, true}};
+    auto audio =
+        Media::audio("audio/l16;rate=24000", std::make_shared<const std::string>("AQID"));
+    audio.name = "spoken.raw";
+    audio.id = "audio_identity";
+    audio.transcript = "spoken text";
+    auto image =
+        Media::image("image/png", std::make_shared<const std::string>("AAEC"), ImageDetail::High);
+    image.name = "image.png";
+    extended.content_parts = {
+        Text{std::string("nested\0text", 11)},
+        audio,
+        Media::url(MediaKind::Video, "https://example.test/clip", "video/mp4"),
+        image,
+        Media::file(MediaKind::Document, "file-owned", "application/pdf"),
+        Opaque{"nested_opaque", object},
+        Text{"last"}};
+    std::get<Media>(extended.content_parts[4]).name = "invoice.pdf";
+    portable.parts.emplace_back(extended);
+
+    const SealedRecord sealed_portable = seal_checked(*archive, {portable}, "portable-call");
+    CHECK(sealed_portable.reference.substr(0, 6) == "spna4:");
+    CHECK(sealed_portable.reference.size() == 70);
+    for (std::string_view marker :
+         {"portable-sig-marker", "portable-redacted-marker", "portable-encrypted-marker",
+          "portable-thought-sig", "ordered-wire-marker", "spoken text", "invoice.pdf"}) {
+      CHECK(sealed_portable.bytes.find(marker) == std::string::npos);
+    }
+
+    const auto restored_portable =
+        open_checked(*reopened, sealed_portable.reference, sealed_portable.bytes, "portable-call");
+    CHECK(restored_portable.size() == 1 && !restored_portable[0].native &&
+          restored_portable[0].id == portable.id && restored_portable[0].role == portable.role &&
+          restored_portable[0].parts.size() == portable.parts.size());
+    check_same_document(portable.wire_output, restored_portable[0].wire_output);
+    for (std::size_t i = 0; i < portable.parts.size(); ++i) {
+      check_same_part(portable.parts[i], restored_portable[0].parts[i]);
+    }
+
+    messages::Request r;
+    r.model = "fixture-model";
+    r.account_scope = "fixture-account";
+    r.messages.push_back(make_user_message("hello"));
+    auto enc_req = messages::encode(d, r, false);
+    CHECK(std::holds_alternative<messages::EncodedRequest>(enc_req));
+    Accumulator acc;
+    messages::Codec codec(
+        d, messages::Mode::Buffered, acc, std::get<messages::EncodedRequest>(enc_req).context);
+    codec.buffered(
+        R"({"id":"msg_archive","type":"message","role":"assistant","model":"fixture-model","content":[{"type":"thinking","thinking":"reason","signature":"synthetic-sensitive-signature"},{"type":"redacted_thinking","data":"synthetic-encrypted-state"},{"type":"text","text":"answer"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":2,"output_tokens":3}})",
+        {true, ErrorKind::Truncated});
+    codec.finish();
+    CHECK(acc.outcome() && std::holds_alternative<Completion>(*acc.outcome()));
+    Message genuine_msg = std::get<Completion>(*acc.outcome()).messages.at(0);
+    CHECK(genuine_msg.native && genuine_msg.native->complete());
+    r.messages.push_back(genuine_msg);
+    r.messages.push_back(make_user_message("continue"));
+
+    const auto expected_encoded = messages::encode(d, r, false);
+    CHECK(std::holds_alternative<messages::EncodedRequest>(expected_encoded));
+
+    const SealedRecord sealed_native = seal_checked(*archive, r.messages, "native-call");
+    for (std::string_view marker :
+         {"synthetic-sensitive-signature", "synthetic-encrypted-state", "msg_archive", "answer"}) {
+      CHECK(sealed_native.bytes.find(marker) == std::string::npos);
+    }
+
+    auto restored_native =
+        open_checked(*archive, sealed_native.reference, sealed_native.bytes, "native-call");
+    auto replay = r;
+    replay.messages = restored_native;
+    const auto actual_encoded = messages::encode(d, replay, false);
+    CHECK(std::holds_alternative<messages::EncodedRequest>(actual_encoded));
+    CHECK(std::get<messages::EncodedRequest>(actual_encoded).body ==
+          std::get<messages::EncodedRequest>(expected_encoded).body);
+
+    std::get<Thinking>(restored_native[1].parts[0]).signature = "changed";
+    auto bad_seal = archive->seal(restored_native, "native-call");
+    CHECK(std::holds_alternative<CustodyError>(bad_seal));
+    CHECK(std::get<CustodyError>(bad_seal).error.kind == ErrorKind::InvalidRequest);
+    CHECK(std::get<CustodyError>(bad_seal).error.reason == "archive.custody.invalid_input");
+    CHECK(std::get<CustodyError>(bad_seal).store_id.size() == 64);
+
+    // Incomplete partial native message round-trips with complete() == false and is refused for replay.
+    messages::Request incomplete_req;
+    incomplete_req.model = "fixture-model";
+    incomplete_req.account_scope = "fixture-account";
+    incomplete_req.messages.push_back(make_user_message("hello"));
+    auto inc_enc = messages::encode(d, incomplete_req, false);
+    CHECK(std::holds_alternative<messages::EncodedRequest>(inc_enc));
+    Accumulator inc_acc;
+    messages::Codec inc_codec(
+        d, messages::Mode::Buffered, inc_acc, std::get<messages::EncodedRequest>(inc_enc).context);
+    inc_codec.buffered(
+        R"({"id":"msg_archive","type":"message","role":"assistant","model":"fixture-model","content":[{"type":"thinking","thinking":"reason","signature":"synthetic-sensitive-signature"},{"type":"redacted_thinking","data":"synthetic-encrypted-state"},{"type":"text","text":"answer"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":2,"output_tokens":3}})",
+        {false, ErrorKind::Truncated});
+    inc_codec.finish();
+    CHECK(inc_acc.outcome() && std::holds_alternative<Failure>(*inc_acc.outcome()));
+    incomplete_req.messages.push_back(
+        std::get<Failure>(*inc_acc.outcome()).partial.messages.at(0));
+    const SealedRecord sealed_inc = seal_checked(*archive, incomplete_req.messages, "partial");
+    incomplete_req.messages =
+        open_checked(*archive, sealed_inc.reference, sealed_inc.bytes, "partial");
+    CHECK(incomplete_req.messages[1].native && !incomplete_req.messages[1].native->complete());
+    CHECK(std::holds_alternative<Error>(messages::encode(d, incomplete_req, false)));
+
+    // Diagnostic duplicate-key document round-trips on non-executable parts, but is refused on executable ToolCall.input.
+    auto dup_parsed = json::parse(R"({"x":1,"x":2})");
+    CHECK(std::holds_alternative<json::ParseError>(dup_parsed));
+    const auto diagnostic = std::make_shared<const json::Document>(
+        std::move(std::get<json::ParseError>(dup_parsed).context));
+    Message diag_msg{"diagnostic",
+                     Role::Assistant,
+                     {InvalidToolCall{"bad", "lookup", ToolCallKind::ClientExecuted,
+                                      R"({"x":1,"x":2})", InvalidReason::DuplicateKey, "tool_use",
+                                      diagnostic},
+                      Opaque{"future", diagnostic}},
+                     {},
+                     diagnostic};
+    const SealedRecord sealed_diag = seal_checked(*archive, {diag_msg}, "diagnostic-call");
+    const auto restored_diag =
+        open_checked(*archive, sealed_diag.reference, sealed_diag.bytes, "diagnostic-call");
+    CHECK(restored_diag.size() == 1 &&
+          restored_diag[0].wire_output->root().dump() == R"({"x":1,"x":2})");
+    Message exec_dup = diag_msg;
+    exec_dup.parts = {ToolCall{"bad", "lookup", ToolCallKind::ClientExecuted, diagnostic}};
+    const SealedRecord sealed_exec_dup =
+        seal_checked(*archive, {exec_dup}, "invalid-executable");
+    auto open_exec_dup = archive->open(
+        sealed_exec_dup.reference, sealed_exec_dup.bytes, "invalid-executable");
+    CHECK(std::holds_alternative<CustodyError>(open_exec_dup));
+    CHECK(std::get<CustodyError>(open_exec_dup).error.reason == "archive.custody.corrupt_record");
+
+    // Zero key-source calls across owner_scope, current_epoch, matches_descriptor, seal, and open.
+    CHECK(counting.begin_scope_calls == 0);
+    CHECK(counting.end_scope_calls == 0);
+    CHECK(counting.active_key_id_calls == 0);
+    CHECK(counting.wrap_calls == 0);
+    CHECK(counting.unwrap_calls == 0);
+    CHECK(secrets->load_count("k1") == 0);
+
+    // Extended tool result bounds under custom max_parts = 3.
+    HostCustodyLimits part_limits{};
+    part_limits.archive.max_parts = 3;
+    auto bounded_archive =
+        open_custody_checked(header_bytes, *hkdf_source, "owner-anthropic", d, part_limits);
+    ToolResult nested_res{"call", ""};
+    nested_res.content_parts = {Text{"archive-marker"}, Text{"last"}};
+    Message nested_msg{{}, Role::User, {nested_res}};
+    const SealedRecord sealed_nested = seal_checked(*bounded_archive, {nested_msg}, "nested");
+    const auto restored_nested =
+        open_checked(*bounded_archive, sealed_nested.reference, sealed_nested.bytes, "nested");
+    check_same_part(nested_msg.parts[0], restored_nested[0].parts[0]);
+
+    Message excessive = nested_msg;
+    std::get<ToolResult>(excessive.parts[0]).content_parts.emplace_back(Text{"third"});
+    auto excessive_seal = bounded_archive->seal({excessive}, "nested");
+    CHECK(std::holds_alternative<CustodyError>(excessive_seal));
+    CHECK(std::get<CustodyError>(excessive_seal).error.kind == ErrorKind::InvalidRequest);
+    CHECK(std::get<CustodyError>(excessive_seal).error.reason == "archive.custody.invalid_input");
+
+    Message exclusive = nested_msg;
+    std::get<ToolResult>(exclusive.parts[0]).content = "legacy";
+    auto exclusive_seal = bounded_archive->seal({exclusive}, "nested");
+    CHECK(std::holds_alternative<CustodyError>(exclusive_seal));
+    CHECK(std::get<CustodyError>(exclusive_seal).error.kind == ErrorKind::InvalidRequest);
+    CHECK(std::get<CustodyError>(exclusive_seal).error.reason == "archive.custody.invalid_input");
+
+    for (unsigned mutation = 0; mutation < 3; ++mutation) {
+      Message invalid_media_msg = nested_msg;
+      auto bad_media =
+          Media::image("image/png", std::make_shared<const std::string>("AAEC"));
+      if (mutation == 0) bad_media.kind = static_cast<MediaKind>(255);
+      if (mutation == 1) bad_media.source = static_cast<MediaSource>(255);
+      if (mutation == 2) bad_media.detail = static_cast<ImageDetail>(255);
+      std::get<ToolResult>(invalid_media_msg.parts[0]).content_parts = {bad_media};
+      const SealedRecord invalid_sealed =
+          seal_checked(*bounded_archive, {invalid_media_msg}, "invalid-enum");
+      const auto invalid_open = bounded_archive->open(
+          invalid_sealed.reference, invalid_sealed.bytes, "invalid-enum");
+      CHECK(std::holds_alternative<CustodyError>(invalid_open));
+      CHECK(std::get<CustodyError>(invalid_open).error.reason ==
+            "archive.custody.corrupt_record");
+    }
+  }
+
+  // 2. openai.responses: reasoning encrypted_content and wire_output.
+  {
+    const auto d = provider_test_descriptor("openai.responses");
+    auto h_res = create_header(*hkdf_source, "responses-owner", d);
+    CHECK(std::holds_alternative<std::string>(h_res));
+    auto archive = open_custody_checked(std::get<std::string>(h_res), *hkdf_source, "responses-owner", d);
+
+    responses::Request r;
+    r.model = "fixture-model";
+    r.account_scope = "fixture-account";
+    r.max_output_tokens = 128;
+    r.messages.push_back(make_user_message("hello"));
+    auto e = responses::encode(d, r, false);
+    CHECK(std::holds_alternative<responses::EncodedRequest>(e));
+    Accumulator acc;
+    responses::Codec codec(
+        d, responses::Mode::Buffered, acc, std::get<responses::EncodedRequest>(e).context);
+    codec.buffered(
+        R"({"id":"resp_archive","object":"response","created_at":1,"model":"fixture-model","status":"completed","output":[{"id":"rs_1","type":"reasoning","status":"completed","summary":[{"type":"summary_text","text":"reason"}],"encrypted_content":"encrypted-native"},{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"answer","annotations":[]}]}],"usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5},"incomplete_details":null,"error":null})",
+        {});
+    CHECK(acc.outcome() && std::holds_alternative<Completion>(*acc.outcome()));
+    auto m = std::get<Completion>(*acc.outcome()).messages.at(0);
+    CHECK(m.native && m.native->complete());
+    r.messages.push_back(m);
+    r.messages.push_back(make_user_message("next"));
+
+    const auto expected = responses::encode(d, r, false);
+    CHECK(std::holds_alternative<responses::EncodedRequest>(expected));
+    const SealedRecord sealed = seal_checked(*archive, r.messages, "response-call");
+    for (std::string_view marker : {"encrypted-native", "resp_archive", "rs_1", "msg_1", "answer"}) {
+      CHECK(sealed.bytes.find(marker) == std::string::npos);
+    }
+
+    r.messages = open_checked(*archive, sealed.reference, sealed.bytes, "response-call");
+    const auto actual = responses::encode(d, r, false);
+    CHECK(std::holds_alternative<responses::EncodedRequest>(actual));
+    CHECK(std::get<responses::EncodedRequest>(actual).body ==
+          std::get<responses::EncodedRequest>(expected).body);
+    check_same_document(m.wire_output, r.messages[1].wire_output);
+
+    r.messages[1].wire_output = parse_json_doc(R"([])");
+    CHECK(std::holds_alternative<Error>(responses::encode(d, r, false)));
+    auto bad_seal = archive->seal(r.messages, "response-call");
+    CHECK(std::holds_alternative<CustodyError>(bad_seal));
+    CHECK(std::get<CustodyError>(bad_seal).error.kind == ErrorKind::InvalidRequest);
+    CHECK(std::get<CustodyError>(bad_seal).error.reason == "archive.custody.invalid_input");
+  }
+
+  // 3. openai.chat: reasoning_details encrypted data and wire_metadata.
+  {
+    const auto d = provider_test_descriptor("openai.chat", "https://openrouter.ai");
+    auto h_res = create_header(*hkdf_source, "chat-owner", d);
+    CHECK(std::holds_alternative<std::string>(h_res));
+    auto archive = open_custody_checked(std::get<std::string>(h_res), *hkdf_source, "chat-owner", d);
+
+    chat::Request initial;
+    initial.model = "fixture-model";
+    initial.max_output_tokens = 128;
+    initial.messages.push_back({Role::User, "hello"});
+    auto e = chat::encode(d, initial, false);
+    CHECK(std::holds_alternative<chat::EncodedRequest>(e));
+    Accumulator acc;
+    chat::Codec codec(
+        d, chat::Mode::Buffered, acc, {}, std::get<chat::EncodedRequest>(e).context);
+    CHECK(codec.buffered(
+        R"({"id":"chat_archive","object":"chat.completion","created":1,"model":"fixture-model","choices":[{"index":0,"message":{"role":"assistant","content":"answer","reasoning":"consider","reasoning_details":[{"type":"reasoning.encrypted","data":"synthetic-encrypted","id":"rd_1","format":"provider-native","index":0}]},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}})",
+        {}));
+    CHECK(acc.outcome() && std::holds_alternative<Completion>(*acc.outcome()));
+    const auto native = std::get<Completion>(*acc.outcome()).messages.at(0);
+    CHECK(native.native && native.native->complete());
+
+    auto follow = initial;
+    follow.messages.clear();
+    follow.canonical_messages = {make_user_message("hello"), native, make_user_message("continue")};
+    const auto expected = chat::encode(d, follow, false);
+    CHECK(std::holds_alternative<chat::EncodedRequest>(expected));
+
+    const SealedRecord sealed = seal_checked(*archive, follow.canonical_messages, "chat-call");
+    for (std::string_view marker :
+         {"synthetic-encrypted", "provider-native", "rd_1", "consider", "answer"}) {
+      CHECK(sealed.bytes.find(marker) == std::string::npos);
+    }
+
+    follow.canonical_messages = open_checked(*archive, sealed.reference, sealed.bytes, "chat-call");
+    const auto actual = chat::encode(d, follow, false);
+    CHECK(std::holds_alternative<chat::EncodedRequest>(actual));
+    CHECK(std::get<chat::EncodedRequest>(actual).body ==
+          std::get<chat::EncodedRequest>(expected).body);
+
+    for (auto& part : follow.canonical_messages[1].parts) {
+      if (auto* opaque = std::get_if<Opaque>(&part)) {
+        opaque->wire_metadata = parse_json_doc(R"({"type":"reasoning_details","details":[]})");
+      }
+    }
+    CHECK(std::holds_alternative<Error>(chat::encode(d, follow, false)));
+    auto bad_seal = archive->seal(follow.canonical_messages, "chat-call");
+    CHECK(std::holds_alternative<CustodyError>(bad_seal));
+    CHECK(std::get<CustodyError>(bad_seal).error.kind == ErrorKind::InvalidRequest);
+    CHECK(std::get<CustodyError>(bad_seal).error.reason == "archive.custody.invalid_input");
+  }
+
+  // 4. google.generate (literal and model-routed paths): thoughtSignature and wire_output.
+  for (const bool routed : {false, true}) {
+    auto admitted_descriptor = descriptor::load(gemini_routed_paths(
+        R"({"descriptor_version":1,"revision":1,"id":"archive-gemini","family":"google.generate","connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":"/v1beta/models/fixture-model:generateContent","streaming":"/v1beta/models/fixture-model:streamGenerateContent?alt=sse"}}})",
+        routed));
+    CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(admitted_descriptor));
+    const auto d = std::get<descriptor::ValidatedDescriptor>(std::move(admitted_descriptor));
+
+    auto h_res = create_header(*hkdf_source, "google-owner", d);
+    CHECK(std::holds_alternative<std::string>(h_res));
+    auto archive = open_custody_checked(std::get<std::string>(h_res), *hkdf_source, "google-owner", d);
+
+    gemini::Request r;
+    r.model = "fixture-model";
+    r.account_scope = "fixture-account";
+    r.max_output_tokens = 2048;
+    r.thinking_budget = 1024;
+    r.messages.push_back(make_user_message("question"));
+    r.tools.push_back(
+        {"lookup", "Find value", parse_json_doc(R"({"type":"object","properties":{"x":{"type":"integer"}}})")});
+    auto e = gemini::encode(d, r, false);
+    CHECK(std::holds_alternative<gemini::EncodedRequest>(e));
+    Accumulator acc;
+    gemini::Codec codec(
+        d, gemini::Mode::Buffered, acc, std::get<gemini::EncodedRequest>(e).context);
+    codec.buffered(
+        R"({"modelVersion":"fixture-model","responseId":"generation","candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"Consider","thought":true,"thoughtSignature":"THOUGHT_SIG"},{"functionCall":{"id":"call_owned","name":"lookup","args":{"x":1}},"thoughtSignature":"CALL_SIG"},{"thoughtSignature":"EMPTY_SIG"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":7,"thoughtsTokenCount":3,"totalTokenCount":20}})",
+        {});
+    CHECK(acc.outcome() && std::holds_alternative<Completion>(*acc.outcome()));
+    r.messages.push_back(std::get<Completion>(*acc.outcome()).messages.at(0));
+    r.messages.push_back(Message{"", Role::Tool, {ToolResult{"call_owned", R"({"result":1})"}}});
+
+    const auto expected = gemini::encode(d, r, false);
+    CHECK(std::holds_alternative<gemini::EncodedRequest>(expected));
+    const SealedRecord sealed = seal_checked(*archive, r.messages, "gemini-tool-call");
+    for (std::string_view marker : {"THOUGHT_SIG", "CALL_SIG", "EMPTY_SIG", "call_owned", "Consider"}) {
+      CHECK(sealed.bytes.find(marker) == std::string::npos);
+    }
+
+    r.messages = open_checked(*archive, sealed.reference, sealed.bytes, "gemini-tool-call");
+    const auto actual = gemini::encode(d, r, false);
+    CHECK(std::holds_alternative<gemini::EncodedRequest>(actual));
+    CHECK(std::get<gemini::EncodedRequest>(actual).body ==
+          std::get<gemini::EncodedRequest>(expected).body);
+
+    std::get<Thinking>(r.messages[1].parts[0]).signature = "edited";
+    CHECK(std::holds_alternative<Error>(gemini::encode(d, r, false)));
+    auto bad_seal = archive->seal(r.messages, "gemini-tool-call");
+    CHECK(std::holds_alternative<CustodyError>(bad_seal));
+    CHECK(std::get<CustodyError>(bad_seal).error.kind == ErrorKind::InvalidRequest);
+    CHECK(std::get<CustodyError>(bad_seal).error.reason == "archive.custody.invalid_input");
+  }
+
+  // 5. google.interactions: thought signature and step wire_output.
+  {
+    auto admitted_descriptor = descriptor::load(
+        R"({"descriptor_version":1,"revision":1,"id":"archive-interactions","family":"google.interactions","connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":"/v1beta/interactions","streaming":"/v1beta/interactions"}}})");
+    CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(admitted_descriptor));
+    const auto d = std::get<descriptor::ValidatedDescriptor>(std::move(admitted_descriptor));
+
+    auto h_res = create_header(*hkdf_source, "google-owner", d);
+    CHECK(std::holds_alternative<std::string>(h_res));
+    auto archive = open_custody_checked(std::get<std::string>(h_res), *hkdf_source, "google-owner", d);
+
+    interactions::Request r;
+    r.model = "fixture-model";
+    r.account_scope = "fixture-account";
+    r.max_output_tokens = 128;
+    r.thinking_level = "low";
+    r.messages.push_back(make_user_message("question"));
+    r.tools.push_back(
+        {"lookup", "Find", parse_json_doc(R"({"type":"object","properties":{"x":{"type":"integer"}}})")});
+    auto e = interactions::encode(d, r, false);
+    CHECK(std::holds_alternative<interactions::EncodedRequest>(e));
+    Accumulator acc;
+    interactions::Codec codec(
+        d, interactions::Mode::Buffered, acc, std::get<interactions::EncodedRequest>(e).context);
+    codec.buffered(
+        R"({"id":"i1","model":"fixture-model","status":"requires_action","steps":[{"type":"thought","signature":"FINAL_OPAQUE","summary":[{"type":"text","text":"first"},{"type":"text","text":"second"}],"extra":"retain"},{"type":"function_call","id":"call1","name":"lookup","arguments":{"x":1}}],"usage":{"total_input_tokens":100,"total_output_tokens":25,"total_thought_tokens":22,"total_tokens":147,"total_tool_use_tokens":50}})",
+        {});
+    CHECK(acc.outcome() && std::holds_alternative<Completion>(*acc.outcome()));
+    r.messages.push_back(std::get<Completion>(*acc.outcome()).messages.at(0));
+    r.messages.push_back(Message{"", Role::Tool, {ToolResult{"call1", "one"}}});
+
+    const auto expected = interactions::encode(d, r, false);
+    CHECK(std::holds_alternative<interactions::EncodedRequest>(expected));
+    const SealedRecord sealed = seal_checked(*archive, r.messages, "interactions-tool-call");
+    for (std::string_view marker : {"FINAL_OPAQUE", "retain", "call1", "first", "second"}) {
+      CHECK(sealed.bytes.find(marker) == std::string::npos);
+    }
+
+    r.messages = open_checked(*archive, sealed.reference, sealed.bytes, "interactions-tool-call");
+    const auto actual = interactions::encode(d, r, false);
+    CHECK(std::holds_alternative<interactions::EncodedRequest>(actual));
+    CHECK(std::get<interactions::EncodedRequest>(actual).body ==
+          std::get<interactions::EncodedRequest>(expected).body);
+
+    std::get<Thought>(r.messages[1].parts[0]).signature = "edited";
+    CHECK(std::holds_alternative<Error>(interactions::encode(d, r, false)));
+    auto bad_seal = archive->seal(r.messages, "interactions-tool-call");
+    CHECK(std::holds_alternative<CustodyError>(bad_seal));
+    CHECK(std::get<CustodyError>(bad_seal).error.kind == ErrorKind::InvalidRequest);
+    CHECK(std::get<CustodyError>(bad_seal).error.reason == "archive.custody.invalid_input");
+  }
+}
+
+void test_custody_record_nonce_uniqueness() {
+  auto secrets = std::make_shared<FixedSecretSource>("k1");
+  secrets->set_secret("k1", std::string(32, '\x11'));
+  secrets->set_secret("k2", std::string(32, '\x22'));
+  auto key_source = make_hkdf_key_source(secrets);
+  const auto valid_desc = default_test_descriptor();
+  const std::vector<Message> messages = {make_user_message("same-message")};
+
+  auto h1_res = create_header(*key_source, "owner-nonce", valid_desc);
+  CHECK(std::holds_alternative<std::string>(h1_res));
+  const std::string& h1_bytes = std::get<std::string>(h1_res);
+
+  auto archive_a = open_custody_checked(h1_bytes, *key_source, "owner-nonce", valid_desc);
+  auto archive_b = open_custody_checked(h1_bytes, *key_source, "owner-nonce", valid_desc);
+
+  std::set<std::string> nonces;
+  std::set<std::string> envelopes;
+  std::set<std::string> references;
+
+  auto record_and_check = [&](const SealedRecord& rec) {
+    CHECK(rec.bytes.size() >= 48);
+    const std::string nonce = rec.bytes.substr(16, 24);
+    CHECK(nonces.insert(nonce).second);
+    CHECK(envelopes.insert(rec.bytes).second);
+    CHECK(references.insert(rec.reference).second);
+  };
+
+  // 1,000 seals of the same messages and binding in one epoch.
+  for (std::size_t i = 0; i < 1000; ++i) {
+    record_and_check(seal_checked(*archive_a, messages, "same-binding"));
+  }
+
+  // Seals from a second archive instance opened from the same header.
+  for (std::size_t i = 0; i < 32; ++i) {
+    record_and_check(seal_checked(*archive_b, messages, "same-binding"));
+  }
+
+  // Seals across 4 rotated epochs (epochs 1, 2, 3, 4).
+  std::string current_h = h1_bytes;
+  for (std::uint64_t target_epoch = 2; target_epoch <= 4; ++target_epoch) {
+    auto rot_res = rotate_header(current_h, *key_source, (target_epoch % 2 == 0) ? "k2" : "k1",
+                                 "owner-nonce", valid_desc);
+    CHECK(std::holds_alternative<std::string>(rot_res));
+    current_h = std::get<std::string>(std::move(rot_res));
+    auto rotated_archive = open_custody_checked(current_h, *key_source, "owner-nonce", valid_desc);
+    CHECK(rotated_archive->current_epoch() == target_epoch);
+    for (std::size_t i = 0; i < 16; ++i) {
+      record_and_check(seal_checked(*rotated_archive, messages, "same-binding"));
+    }
+  }
+
+  CHECK(nonces.size() == 1000 + 32 + 3 * 16);
+  CHECK(envelopes.size() == nonces.size());
+  CHECK(references.size() == nonces.size());
+}
+
+// KeySource that wraps and unwraps under a fixed KEK (independent of store_id/owner/descriptor in epoch_aad),
+// isolating Record AAD single-field checks so two headers with different store_id, owner_scope, or descriptor
+// can hold the exact same 32-byte DEK.
+class ConstantKekKeySource final : public KeySource {
+ public:
+  explicit ConstantKekKeySource(std::string key_id, std::string kek_bytes)
+      : key_id_(std::move(key_id)), kek_bytes_(std::move(kek_bytes)) {}
+
+  CustodyResult<std::string> active_key_id() override { return key_id_; }
+
+  CustodyResult<std::string> wrap_dek(std::string_view /*key_id*/,
+                                      std::string_view epoch_aad,
+                                      const DataKeyBuffer& dek) override {
+    DataKeyBuffer kek;
+    if (auto fault = kek.assign_exact(kek_bytes_)) {
+      return *fault;
+    }
+    std::array<unsigned char, 24> nonce{};
+    if (!custody_ops::random_bytes(nonce.data(), nonce.size())) {
+      return CustodyFault::InvalidKeyMaterial;
+    }
+    const std::string_view pt(reinterpret_cast<const char*>(dek.data()), dek.size());
+    auto enc = custody_ops::aead_xchacha20poly1305_encrypt(kek, nonce, epoch_aad, pt);
+    if (const auto* err = std::get_if<CustodyError>(&enc)) {
+      (void)err;
+      return CustodyFault::InvalidKeyMaterial;
+    }
+    std::string out(reinterpret_cast<const char*>(nonce.data()), nonce.size());
+    out.append(std::get<std::string>(enc));
+    return out;
+  }
+
+  std::optional<CustodyFault> unwrap_dek(std::string_view /*key_id*/,
+                                         std::string_view epoch_aad,
+                                         std::string_view wrapped_dek,
+                                         DataKeyBuffer& dek_out) override {
+    if (wrapped_dek.size() != 72) {
+      dek_out.wipe();
+      return CustodyFault::Tampered;
+    }
+    DataKeyBuffer kek;
+    if (auto fault = kek.assign_exact(kek_bytes_)) {
+      dek_out.wipe();
+      return *fault;
+    }
+    std::array<unsigned char, 24> nonce{};
+    std::memcpy(nonce.data(), wrapped_dek.data(), nonce.size());
+    auto dec = custody_ops::aead_xchacha20poly1305_decrypt(
+        kek, nonce, epoch_aad, wrapped_dek.substr(24));
+    if (const auto* err = std::get_if<CustodyError>(&dec)) {
+      (void)err;
+      dek_out.wipe();
+      return CustodyFault::Tampered;
+    }
+    const auto& pt = std::get<CleansedBuffer>(dec);
+    return dek_out.assign_exact(pt.view());
+  }
+
+ private:
+  std::string key_id_;
+  std::string kek_bytes_;
+};
+
+void test_record_aad_single_field_binding() {
+  ConstantKekKeySource fixed_kek_source("k1", std::string(32, '\x42'));
+  const auto desc_a = default_test_descriptor();
+  const auto desc_b = alternate_test_descriptor();
+  const std::vector<Message> messages = {make_user_message("aad-bound-payload")};
+
+  const std::string store_a(32, '\x11');
+  const std::string store_b(32, '\x22');
+  const std::string shared_dek(32, '\x77');
+  const std::string wrap_nonce(24, '\x88');
+
+  auto create_pinned_header = [&](const std::string& store_id_bytes,
+                                  const std::string& dek_bytes,
+                                  std::string_view owner,
+                                  const descriptor::ValidatedDescriptor& desc) {
+    custody_ops::reset_random_seam();
+    custody_ops::override_next_random_bytes(store_id_bytes);
+    custody_ops::override_next_random_bytes(dek_bytes);
+    custody_ops::override_next_random_bytes(wrap_nonce);
+    auto h = create_header(fixed_kek_source, owner, desc);
+    custody_ops::reset_random_seam();
+    CHECK(std::holds_alternative<std::string>(h));
+    return std::get<std::string>(std::move(h));
+  };
+
+  // Base archive: store_a, "owner-a", desc_a, epoch 1, DEK = shared_dek.
+  const std::string h_base = create_pinned_header(store_a, shared_dek, "owner-a", desc_a);
+  auto archive_base = open_custody_checked(h_base, fixed_kek_source, "owner-a", desc_a);
+  const SealedRecord sealed_e1 = seal_checked(*archive_base, messages, "binding-a");
+  CHECK(open_checked(*archive_base, sealed_e1.reference, sealed_e1.bytes, "binding-a").size() == 1);
+
+  auto check_tampered = [&](const NativeArchive::Opened& opened, std::string_view expected_store_hex) {
+    CHECK(std::holds_alternative<CustodyError>(opened));
+    const auto& err = std::get<CustodyError>(opened);
+    CHECK(err.error.kind == ErrorKind::Permission);
+    CHECK(err.error.reason == "archive.custody.tampered");
+    CHECK(err.store_id == expected_store_hex);
+  };
+
+  // 1. Different store_id only (same owner_scope, same descriptor, same DEK).
+  {
+    const std::string h_other_store = create_pinned_header(store_b, shared_dek, "owner-a", desc_a);
+    auto archive_other_store = open_custody_checked(h_other_store, fixed_kek_source, "owner-a", desc_a);
+    check_tampered(archive_other_store->open(sealed_e1.reference, sealed_e1.bytes, "binding-a"),
+                   to_hex(store_b));
+  }
+
+  // 2. Different owner_scope only (same store_id, same descriptor, same DEK).
+  {
+    const std::string h_other_owner = create_pinned_header(store_a, shared_dek, "owner-b", desc_a);
+    auto archive_other_owner = open_custody_checked(h_other_owner, fixed_kek_source, "owner-b", desc_a);
+    check_tampered(archive_other_owner->open(sealed_e1.reference, sealed_e1.bytes, "binding-a"),
+                   to_hex(store_a));
+  }
+
+  // 3. Different descriptor_identity only (same store_id, same owner_scope, same DEK).
+  {
+    const std::string h_other_desc = create_pinned_header(store_a, shared_dek, "owner-a", desc_b);
+    auto archive_other_desc = open_custody_checked(h_other_desc, fixed_kek_source, "owner-a", desc_b);
+    check_tampered(archive_other_desc->open(sealed_e1.reference, sealed_e1.bytes, "binding-a"),
+                   to_hex(store_a));
+  }
+
+  // 4. Different binding only (same archive).
+  {
+    check_tampered(archive_base->open(sealed_e1.reference, sealed_e1.bytes, "binding-b"),
+                   to_hex(store_a));
+    check_tampered(archive_base->open(sealed_e1.reference, sealed_e1.bytes, ""),
+                   to_hex(store_a));
+  }
+
+  // 5. Envelope's header_epoch rewritten to another existing epoch (even when both epochs hold the same DEK,
+  // and when they hold distinct DEKs), with the reference recomputed so the reference check passes.
+  for (const std::string& epoch_2_dek : {shared_dek, std::string(32, '\x99')}) {
+    custody_ops::reset_random_seam();
+    custody_ops::override_next_random_bytes(epoch_2_dek);
+    custody_ops::override_next_random_bytes(wrap_nonce);
+    auto h2_res = rotate_header(h_base, fixed_kek_source, {}, "owner-a", desc_a);
+    custody_ops::reset_random_seam();
+    CHECK(std::holds_alternative<std::string>(h2_res));
+    auto archive_e2 = open_custody_checked(std::get<std::string>(h2_res), fixed_kek_source, "owner-a", desc_a);
+    CHECK(archive_e2->current_epoch() == 2);
+
+    const SealedRecord sealed_e2 = seal_checked(*archive_e2, messages, "binding-a");
+    std::string rewritten_to_e1 = sealed_e2.bytes;
+    write_be64(rewritten_to_e1.data() + 8, 1);
+    const std::string recomputed_ref_e1 = archive_internal::compute_record_reference(rewritten_to_e1);
+    check_tampered(archive_e2->open(recomputed_ref_e1, rewritten_to_e1, "binding-a"),
+                   to_hex(store_a));
+
+    std::string rewritten_to_e2 = sealed_e1.bytes;
+    write_be64(rewritten_to_e2.data() + 8, 2);
+    const std::string recomputed_ref_e2 = archive_internal::compute_record_reference(rewritten_to_e2);
+    check_tampered(archive_e2->open(recomputed_ref_e2, rewritten_to_e2, "binding-a"),
+                   to_hex(store_a));
+
+    // Rewritten to absent epochs (0 and 3) with reference recomputed -> Tampered at epoch lookup.
+    for (std::uint64_t absent_epoch : {std::uint64_t{0}, std::uint64_t{3}}) {
+      std::string rewritten_absent = sealed_e2.bytes;
+      write_be64(rewritten_absent.data() + 8, absent_epoch);
+      const std::string recomputed_absent = archive_internal::compute_record_reference(rewritten_absent);
+      check_tampered(archive_e2->open(recomputed_absent, rewritten_absent, "binding-a"),
+                     to_hex(store_a));
+    }
+  }
+}
+
+void test_rotated_epochs_and_zero_source_calls_on_seal_and_open() {
+  auto secrets = std::make_shared<FixedSecretSource>("k1");
+  secrets->set_secret("k1", std::string(32, '\x11'));
+  secrets->set_secret("k2", std::string(32, '\x22'));
+  secrets->set_secret("k3", std::string(32, '\x33'));
+  secrets->set_secret("k4", std::string(32, '\x44'));
+  auto hkdf_source = make_hkdf_key_source(secrets);
+  CountingKeySource counting(hkdf_source);
+  const auto valid_desc = default_test_descriptor();
+
+  // Epoch 1: create and seal record 1.
+  auto h1_res = create_header(counting, "owner-rotated", valid_desc);
+  CHECK(std::holds_alternative<std::string>(h1_res));
+  const std::string& h1_bytes = std::get<std::string>(h1_res);
+  SealedRecord r1;
+  {
+    auto a1 = open_custody_checked(h1_bytes, counting, "owner-rotated", valid_desc);
+    CHECK(a1->current_epoch() == 1);
+    r1 = seal_checked(*a1, {make_user_message("msg-epoch-1")}, "bind-1");
+  }
+
+  // Rotation 1 -> Epoch 2: seal record 2.
+  auto h2_res = rotate_header(h1_bytes, counting, "k2", "owner-rotated", valid_desc);
+  CHECK(std::holds_alternative<std::string>(h2_res));
+  const std::string& h2_bytes = std::get<std::string>(h2_res);
+  SealedRecord r2;
+  {
+    auto a2 = open_custody_checked(h2_bytes, counting, "owner-rotated", valid_desc);
+    CHECK(a2->current_epoch() == 2);
+    r2 = seal_checked(*a2, {make_user_message("msg-epoch-2")}, "bind-2");
+  }
+
+  // Rotation 2 -> Epoch 3: seal record 3.
+  auto h3_res = rotate_header(h2_bytes, counting, "k3", "owner-rotated", valid_desc);
+  CHECK(std::holds_alternative<std::string>(h3_res));
+  const std::string& h3_bytes = std::get<std::string>(h3_res);
+  SealedRecord r3;
+  {
+    auto a3 = open_custody_checked(h3_bytes, counting, "owner-rotated", valid_desc);
+    CHECK(a3->current_epoch() == 3);
+    r3 = seal_checked(*a3, {make_user_message("msg-epoch-3")}, "bind-3");
+  }
+
+  // Rotation 3 -> Epoch 4 (three rotations total).
+  auto h4_res = rotate_header(h3_bytes, counting, "k4", "owner-rotated", valid_desc);
+  CHECK(std::holds_alternative<std::string>(h4_res));
+  const std::string& h4_bytes = std::get<std::string>(h4_res);
+
+  // Open the archive once after three rotations.
+  counting.reset_counts();
+  secrets->reset_counts();
+  custody_ops::reset_random_seam();
+  CHECK(custody_ops::live_key_allocation_sizes().empty());
+
+  auto archive = open_custody_checked(h4_bytes, counting, "owner-rotated", valid_desc);
+  CHECK(archive->current_epoch() == 4);
+  CHECK(counting.begin_scope_calls == 1);
+  CHECK(counting.end_scope_calls == 1);
+  CHECK(counting.active_key_id_calls == 0);
+  CHECK(counting.wrap_calls == 0);
+  CHECK(counting.unwrap_calls == 4);
+  CHECK(secrets->load_count("k1") == 1);
+  CHECK(secrets->load_count("k2") == 1);
+  CHECK(secrets->load_count("k3") == 1);
+  CHECK(secrets->load_count("k4") == 1);
+
+  // All 4 epoch DEKs live in one single sodium_malloc block of 4 * 32 = 128 bytes.
+  CHECK(custody_ops::live_key_allocation_sizes() == (std::vector<std::size_t>{4 * 32}));
+
+  // Reset source counters and open records of epochs 3, 1, 2 in that order, plus seal and open in epoch 4.
+  counting.reset_counts();
+  secrets->reset_counts();
+
+  const auto opened_3 = open_checked(*archive, r3.reference, r3.bytes, "bind-3");
+  CHECK(opened_3.size() == 1 && std::get<Text>(opened_3[0].parts[0]).value == "msg-epoch-3");
+
+  const auto opened_1 = open_checked(*archive, r1.reference, r1.bytes, "bind-1");
+  CHECK(opened_1.size() == 1 && std::get<Text>(opened_1[0].parts[0]).value == "msg-epoch-1");
+
+  const auto opened_2 = open_checked(*archive, r2.reference, r2.bytes, "bind-2");
+  CHECK(opened_2.size() == 1 && std::get<Text>(opened_2[0].parts[0]).value == "msg-epoch-2");
+
+  const SealedRecord r4 = seal_checked(*archive, {make_user_message("msg-epoch-4")}, "bind-4");
+  const auto opened_4 = open_checked(*archive, r4.reference, r4.bytes, "bind-4");
+  CHECK(opened_4.size() == 1 && std::get<Text>(opened_4[0].parts[0]).value == "msg-epoch-4");
+
+  CHECK(archive->owner_scope() == "owner-rotated");
+  CHECK(archive->current_epoch() == 4);
+  CHECK(archive->matches_descriptor(valid_desc));
+
+  // Zero key-source calls during every seal, open, and accessor call.
+  CHECK(counting.begin_scope_calls == 0);
+  CHECK(counting.end_scope_calls == 0);
+  CHECK(counting.active_key_id_calls == 0);
+  CHECK(counting.wrap_calls == 0);
+  CHECK(counting.unwrap_calls == 0);
+  CHECK(secrets->load_count("k1") == 0);
+  CHECK(secrets->load_count("k2") == 0);
+  CHECK(secrets->load_count("k3") == 0);
+  CHECK(secrets->load_count("k4") == 0);
+
+  archive.reset();
+  CHECK(custody_ops::live_key_allocation_sizes().empty());
+
+  // End-to-end key retirement: retire k1, k2, and k3 into k4, delete k1..k3 from the secret source,
+  // open_custody with a fresh source holding only k4, and open records of epochs 3, 1, 2 in that order.
+  auto ret1 = retire_key_in_header(h4_bytes, "k1", *hkdf_source, "owner-rotated", valid_desc);
+  CHECK(std::holds_alternative<std::string>(ret1));
+  auto ret2 = retire_key_in_header(std::get<std::string>(ret1), "k2", *hkdf_source, "owner-rotated", valid_desc);
+  CHECK(std::holds_alternative<std::string>(ret2));
+  auto ret3 = retire_key_in_header(std::get<std::string>(ret2), "k3", *hkdf_source, "owner-rotated", valid_desc);
+  CHECK(std::holds_alternative<std::string>(ret3));
+
+  auto k4_only_secrets = std::make_shared<FixedSecretSource>("k4");
+  k4_only_secrets->set_secret("k4", std::string(32, '\x44'));
+  auto k4_only_source = make_hkdf_key_source(k4_only_secrets);
+
+  auto retired_archive = open_custody_checked(
+      std::get<std::string>(ret3), *k4_only_source, "owner-rotated", valid_desc);
+  CHECK(k4_only_secrets->load_count("k4") == 1);
+  CHECK(std::get<Text>(open_checked(*retired_archive, r3.reference, r3.bytes, "bind-3")[0].parts[0]).value ==
+        "msg-epoch-3");
+  CHECK(std::get<Text>(open_checked(*retired_archive, r1.reference, r1.bytes, "bind-1")[0].parts[0]).value ==
+        "msg-epoch-1");
+  CHECK(std::get<Text>(open_checked(*retired_archive, r2.reference, r2.bytes, "bind-2")[0].parts[0]).value ==
+        "msg-epoch-2");
+}
+
+void record_allocation(std::size_t capacity, void* context) noexcept {
+  auto* capacities = static_cast<std::vector<std::size_t>*>(context);
+  capacities->push_back(capacity);
+}
+
+void test_record_tampering_and_truncation_bounds() {
+  auto secrets = std::make_shared<FixedSecretSource>("k1");
+  secrets->set_secret("k1", std::string(32, '\x11'));
+  auto key_source = make_hkdf_key_source(secrets);
+  const auto valid_desc = default_test_descriptor();
+
+  // The byte limit also bounds the descriptor binding and the header, so it must leave room for them.
+  HostCustodyLimits custom_limits{};
+  custom_limits.archive.max_bytes = 4096;
+
+  auto h_res = create_header(*key_source, "owner-tamper", valid_desc, custom_limits);
+  CHECK(std::holds_alternative<std::string>(h_res));
+  const std::string& header_bytes = std::get<std::string>(h_res);
+  const StoreHeader parsed_h = std::get<StoreHeader>(parse_header(header_bytes, custom_limits));
+  const std::string store_id_hex = to_hex(parsed_h.store_id.data(), parsed_h.store_id.size());
+
+  auto archive = open_custody_checked(header_bytes, *key_source, "owner-tamper", valid_desc, custom_limits);
+  const SealedRecord sealed =
+      seal_checked(*archive, {make_user_message("tamper-target-message")}, "tamper-bind");
+  CHECK(sealed.bytes.size() > 48 + 16);
+
+  auto check_fault = [&](const NativeArchive::Opened& res, std::string_view expected_reason) {
+    CHECK(std::holds_alternative<CustodyError>(res));
+    const auto& err = std::get<CustodyError>(res);
+    CHECK(err.error.kind == ErrorKind::Permission);
+    CHECK(err.error.reason == expected_reason);
+    CHECK(err.store_id == store_id_hex);
+    CHECK(err.key_id.empty());
+  };
+
+  // 1. Flip one bit in the ciphertext body (both with original reference and with recomputed reference).
+  {
+    std::string mutated = sealed.bytes;
+    mutated[48] ^= 0x01;
+    check_fault(archive->open(sealed.reference, mutated, "tamper-bind"), "archive.custody.tampered");
+    const std::string recomputed_ref = archive_internal::compute_record_reference(mutated);
+    check_fault(archive->open(recomputed_ref, mutated, "tamper-bind"), "archive.custody.tampered");
+  }
+
+  // 2. Flip one bit in the 16-byte AEAD tag (both with original reference and with recomputed reference).
+  {
+    std::string mutated = sealed.bytes;
+    mutated.back() ^= 0x01;
+    check_fault(archive->open(sealed.reference, mutated, "tamper-bind"), "archive.custody.tampered");
+    const std::string recomputed_ref = archive_internal::compute_record_reference(mutated);
+    check_fault(archive->open(recomputed_ref, mutated, "tamper-bind"), "archive.custody.tampered");
+  }
+
+  // 3. Flip one bit in the 24-byte nonce (both with original reference and with recomputed reference).
+  {
+    std::string mutated = sealed.bytes;
+    mutated[16] ^= 0x01;
+    check_fault(archive->open(sealed.reference, mutated, "tamper-bind"), "archive.custody.tampered");
+    const std::string recomputed_ref = archive_internal::compute_record_reference(mutated);
+    check_fault(archive->open(recomputed_ref, mutated, "tamper-bind"), "archive.custody.tampered");
+  }
+
+  // 4. Flip one nibble in the reference.
+  {
+    std::string bad_ref = sealed.reference;
+    bad_ref.back() = (bad_ref.back() == '0') ? '1' : '0';
+    check_fault(archive->open(bad_ref, sealed.bytes, "tamper-bind"), "archive.custody.tampered");
+  }
+
+  // 5. Truncations of the ciphertext to 0, 1, 15, 16, 23 bytes, and over-limit lengths, each with
+  // the reference recomputed over the truncated/mutated bytes so the length check refuses it with
+  // CorruptRecord and the allocation observer sees zero buffer allocations.
+  std::vector<std::size_t> observed_allocations;
+  custody_ops::set_allocation_observer(&record_allocation, &observed_allocations);
+  try {
+    for (std::size_t trunc_len : {std::size_t{0}, std::size_t{1}, std::size_t{15}, std::size_t{16},
+                                  std::size_t{23}}) {
+      std::string truncated = sealed.bytes.substr(0, 48 + trunc_len);
+      write_be64(truncated.data() + 40, trunc_len);
+      const std::string recomputed_ref = archive_internal::compute_record_reference(truncated);
+      observed_allocations.clear();
+      check_fault(archive->open(recomputed_ref, truncated, "tamper-bind"),
+                  "archive.custody.corrupt_record");
+      CHECK(observed_allocations.empty());
+    }
+
+    // Over-limit length: max_bytes + ABYTES (16) + 1 bytes (both with full payload and header-only claim).
+    const std::size_t over_limit_len = custom_limits.archive.max_bytes + 16 + 1;
+    {
+      std::string over_full = sealed.bytes.substr(0, 48) + std::string(over_limit_len, '\xaa');
+      write_be64(over_full.data() + 40, over_limit_len);
+      const std::string recomputed_ref = archive_internal::compute_record_reference(over_full);
+      observed_allocations.clear();
+      check_fault(archive->open(recomputed_ref, over_full, "tamper-bind"),
+                  "archive.custody.corrupt_record");
+      CHECK(observed_allocations.empty());
+    }
+    for (std::uint64_t claimed_huge :
+         {static_cast<std::uint64_t>(over_limit_len), std::uint64_t{1024 * 1024},
+          std::uint64_t{0xffffffffffffffffULL}}) {
+      std::string over_claim = sealed.bytes;
+      write_be64(over_claim.data() + 40, claimed_huge);
+      const std::string recomputed_ref = archive_internal::compute_record_reference(over_claim);
+      observed_allocations.clear();
+      check_fault(archive->open(recomputed_ref, over_claim, "tamper-bind"),
+                  "archive.custody.corrupt_record");
+      CHECK(observed_allocations.empty());
+    }
+
+    // Wrong record format version and trailing bytes after ciphertext (with reference recomputed).
+    {
+      std::string bad_ver = sealed.bytes;
+      write_be64(bad_ver.data(), 2);
+      const std::string recomputed_ref = archive_internal::compute_record_reference(bad_ver);
+      observed_allocations.clear();
+      check_fault(archive->open(recomputed_ref, bad_ver, "tamper-bind"),
+                  "archive.custody.corrupt_record");
+      CHECK(observed_allocations.empty());
+    }
+    {
+      std::string trailing = sealed.bytes + std::string(1, '\x00');
+      const std::string recomputed_ref = archive_internal::compute_record_reference(trailing);
+      observed_allocations.clear();
+      check_fault(archive->open(recomputed_ref, trailing, "tamper-bind"),
+                  "archive.custody.corrupt_record");
+      CHECK(observed_allocations.empty());
+    }
+
+    // A 1 MiB input under a 4096-byte limit is refused with CorruptRecord before reference hashing,
+    // without the allocation observer seeing any buffer allocation.
+    {
+      const std::string one_mib_input(1024 * 1024, '\xaa');
+      observed_allocations.clear();
+      check_fault(archive->open(sealed.reference, one_mib_input, "tamper-bind"),
+                  "archive.custody.corrupt_record");
+      CHECK(observed_allocations.empty());
+    }
+  } catch (...) {
+    custody_ops::set_allocation_observer(nullptr, nullptr);
+    throw;
+  }
+  custody_ops::set_allocation_observer(nullptr, nullptr);
+}
+
+void test_record_plaintext_residue_zeroed_on_release() {
+  std::array<unsigned char, 32> needle_bytes{};
+  CHECK(crypto::random_bytes(needle_bytes.data(), needle_bytes.size()));
+  const std::string needle_hex = to_hex(needle_bytes.data(), needle_bytes.size());
+  const std::string needle_raw(reinterpret_cast<const char*>(needle_bytes.data()),
+                               needle_bytes.size());
+
+  auto secrets = std::make_shared<FixedSecretSource>("k1");
+  secrets->set_secret("k1", std::string(32, '\x11'));
+  auto key_source = make_hkdf_key_source(secrets);
+  const auto valid_desc = default_test_descriptor();
+
+  auto h_res = create_header(*key_source, "owner-residue", valid_desc);
+  CHECK(std::holds_alternative<std::string>(h_res));
+  auto archive =
+      open_custody_checked(std::get<std::string>(h_res), *key_source, "owner-residue", valid_desc);
+
+  Message msg{"id-residue",
+              Role::Assistant,
+              {Text{needle_raw + ":" + needle_hex},
+               Thinking{"thought-" + needle_hex, needle_hex}},
+              {},
+              parse_json_doc("{\"needle\":" + json::quote(needle_hex) + "}")};
+
+  ObserverStats stats;
+  custody_ops::set_release_observer(&record_release, &stats);
+  try {
+    // 1. seal: releases plaintext buffer with all bytes zeroed.
+    stats = {};
+    const SealedRecord sealed = seal_checked(*archive, {msg}, "residue-bind");
+    CHECK(stats.releases >= 1);
+    CHECK(stats.all_zero_every_time);
+    CHECK(sealed.bytes.find(needle_raw) == std::string::npos);
+    CHECK(sealed.bytes.find(needle_hex) == std::string::npos);
+
+    // 2. open (success): releases decrypted plaintext buffer with all bytes zeroed.
+    stats = {};
+    const auto opened = open_checked(*archive, sealed.reference, sealed.bytes, "residue-bind");
+    CHECK(opened.size() == 1);
+    CHECK(stats.releases >= 1);
+    CHECK(stats.all_zero_every_time);
+
+    // 3. open (AEAD decrypt failure): releases plaintext buffer with all bytes zeroed.
+    stats = {};
+    std::string tampered = sealed.bytes;
+    tampered[48] ^= 0x01;
+    const std::string tampered_ref = archive_internal::compute_record_reference(tampered);
+    const auto failed_open = archive->open(tampered_ref, tampered, "residue-bind");
+    CHECK(std::holds_alternative<CustodyError>(failed_open));
+    CHECK(std::get<CustodyError>(failed_open).error.reason == "archive.custody.tampered");
+    CHECK(stats.releases >= 1);
+    CHECK(stats.all_zero_every_time);
+  } catch (...) {
+    custody_ops::set_release_observer(nullptr, nullptr);
+    throw;
+  }
+  custody_ops::set_release_observer(nullptr, nullptr);
+}
+
+void test_open_custody_refusals() {
+  const std::string special_kid("k2\x00\n\"\\id", 8);
+  auto secrets = std::make_shared<FixedSecretSource>("k1");
+  secrets->set_secret("k1", std::string(32, '\x11'));
+  secrets->set_secret(special_kid, std::string(32, '\x22'));
+  secrets->set_secret("k3", std::string(32, '\x33'));
+  auto key_source = make_hkdf_key_source(secrets);
+  const auto valid_desc = default_test_descriptor();
+  const auto other_desc = alternate_test_descriptor();
+
+  auto h1_res = create_header(*key_source, "owner-open", valid_desc);
+  CHECK(std::holds_alternative<std::string>(h1_res));
+  auto h2_res = rotate_header(std::get<std::string>(h1_res), *key_source, special_kid, "owner-open", valid_desc);
+  CHECK(std::holds_alternative<std::string>(h2_res));
+  auto h3_res = rotate_header(std::get<std::string>(h2_res), *key_source, "k3", "owner-open", valid_desc);
+  CHECK(std::holds_alternative<std::string>(h3_res));
+  const std::string& h3_bytes = std::get<std::string>(h3_res);
+
+  const StoreHeader h3 = std::get<StoreHeader>(parse_header(h3_bytes));
+  const std::string store_id_hex = to_hex(h3.store_id.data(), h3.store_id.size());
+  const std::string tag_bytes = h3_bytes.substr(h3_bytes.size() - 32);
+
+  auto check_refusal = [&](const NativeArchive::CustodyActivation& res,
+                           ErrorKind expected_kind,
+                           std::string_view expected_reason,
+                           std::string_view expected_key_id = {}) {
+    CHECK(std::holds_alternative<CustodyError>(res));
+    const auto& err = std::get<CustodyError>(res);
+    CHECK(err.error.kind == expected_kind);
+    CHECK(err.error.reason == expected_reason);
+    CHECK(err.store_id == store_id_hex);
+    CHECK(err.key_id == expected_key_id);
+    CHECK(custody_ops::live_key_allocation_sizes().empty());
+  };
+
+  // 1. Header with a zeroed tag -> Tampered.
+  {
+    std::string zeroed_tag = h3_bytes.substr(0, h3_bytes.size() - 32) + std::string(32, '\0');
+    check_refusal(NativeArchive::open_custody(zeroed_tag, *key_source, "owner-open", valid_desc),
+                  ErrorKind::Permission, "archive.custody.tampered");
+  }
+
+  // 2. Header rewound to an earlier epoch with a stale tag -> Tampered.
+  {
+    std::vector<EpochKeyEntry> two_epochs = {h3.epochs[0], h3.epochs[1]};
+    const std::string rewound =
+        build_raw_header(custody_format::header_body_domain, 1, h3.store_id, h3.owner_scope,
+                         h3.descriptor_identity, 2, two_epochs, tag_bytes);
+    check_refusal(NativeArchive::open_custody(rewound, *key_source, "owner-open", valid_desc),
+                  ErrorKind::Permission, "archive.custody.tampered");
+  }
+
+  // 3. Header with a flipped tag byte -> Tampered.
+  {
+    std::string flipped_tag = h3_bytes;
+    flipped_tag.back() ^= 0x01;
+    check_refusal(NativeArchive::open_custody(flipped_tag, *key_source, "owner-open", valid_desc),
+                  ErrorKind::Permission, "archive.custody.tampered");
+  }
+
+  // 4. Header with a mutated earlier epoch key_id ("missing-key") or flipped wrapped_dek byte is rejected by
+  // verify_header_tag with Tampered BEFORE attempting to unwrap epoch 1's key; structural splices (rewound
+  // current_epoch with all 3 epochs, dropped middle epoch, duplicated epoch, reordered epochs) are refused
+  // with CorruptHeader.
+  {
+    StoreHeader mutated = h3;
+    mutated.epochs[0].wrapping_key_id = "missing-key";
+    const std::string mutated_bytes =
+        build_raw_header(custody_format::header_body_domain, 1, mutated.store_id, mutated.owner_scope,
+                         mutated.descriptor_identity, mutated.current_epoch, mutated.epochs, tag_bytes);
+    check_refusal(NativeArchive::open_custody(mutated_bytes, *key_source, "owner-open", valid_desc),
+                  ErrorKind::Permission, "archive.custody.tampered");
+
+    StoreHeader dek_mut = h3;
+    dek_mut.epochs[0].wrapped_dek[0] ^= 0x01;
+    const std::string dek_mut_bytes =
+        build_raw_header(custody_format::header_body_domain, 1, dek_mut.store_id, dek_mut.owner_scope,
+                         dek_mut.descriptor_identity, dek_mut.current_epoch, dek_mut.epochs, tag_bytes);
+    check_refusal(NativeArchive::open_custody(dek_mut_bytes, *key_source, "owner-open", valid_desc),
+                  ErrorKind::Permission, "archive.custody.tampered");
+
+    StoreHeader bad_rewound = h3;
+    bad_rewound.current_epoch = 2;
+    check_refusal(NativeArchive::open_custody(
+                      build_raw_header(custody_format::header_body_domain, 1, bad_rewound.store_id,
+                                       bad_rewound.owner_scope, bad_rewound.descriptor_identity,
+                                       bad_rewound.current_epoch, bad_rewound.epochs, tag_bytes),
+                      *key_source, "owner-open", valid_desc),
+                  ErrorKind::Permission, "archive.custody.corrupt_header");
+
+    StoreHeader bad_dropped = h3;
+    bad_dropped.epochs = {h3.epochs[0], h3.epochs[2]};
+    check_refusal(NativeArchive::open_custody(
+                      build_raw_header(custody_format::header_body_domain, 1, bad_dropped.store_id,
+                                       bad_dropped.owner_scope, bad_dropped.descriptor_identity,
+                                       bad_dropped.current_epoch, bad_dropped.epochs, tag_bytes),
+                      *key_source, "owner-open", valid_desc),
+                  ErrorKind::Permission, "archive.custody.corrupt_header");
+
+    StoreHeader bad_dup = h3;
+    bad_dup.epochs[2].epoch = 2;
+    check_refusal(NativeArchive::open_custody(
+                      build_raw_header(custody_format::header_body_domain, 1, bad_dup.store_id,
+                                       bad_dup.owner_scope, bad_dup.descriptor_identity,
+                                       bad_dup.current_epoch, bad_dup.epochs, tag_bytes),
+                      *key_source, "owner-open", valid_desc),
+                  ErrorKind::Permission, "archive.custody.corrupt_header");
+
+    StoreHeader bad_reordered = h3;
+    std::swap(bad_reordered.epochs[0], bad_reordered.epochs[1]);
+    check_refusal(NativeArchive::open_custody(
+                      build_raw_header(custody_format::header_body_domain, 1, bad_reordered.store_id,
+                                       bad_reordered.owner_scope, bad_reordered.descriptor_identity,
+                                       bad_reordered.current_epoch, bad_reordered.epochs, tag_bytes),
+                      *key_source, "owner-open", valid_desc),
+                  ErrorKind::Permission, "archive.custody.corrupt_header");
+  }
+
+  // 5. Another owner scope or another descriptor -> Tampered.
+  {
+    check_refusal(NativeArchive::open_custody(h3_bytes, *key_source, "other-owner", valid_desc),
+                  ErrorKind::Permission, "archive.custody.tampered");
+    check_refusal(NativeArchive::open_custody(h3_bytes, *key_source, "owner-open", other_desc),
+                  ErrorKind::Permission, "archive.custody.tampered");
+  }
+
+  // 6. Source missing one epoch's key -> KeyNotFound naming that key id (escaped in safe_message) and store_id,
+  // wiping every DEK unwrapped so far.
+  {
+    secrets->remove_secret(special_kid);
+    auto res = NativeArchive::open_custody(h3_bytes, *key_source, "owner-open", valid_desc);
+    check_refusal(res, ErrorKind::NotFound, "archive.custody.key_not_found", special_kid);
+    const auto& err = std::get<CustodyError>(res);
+    CHECK(err.error.safe_message.find("\"k2\\x00\\x0a\\\"\\\\id\"") != std::string::npos);
+    CHECK(err.error.safe_message.find(store_id_hex) != std::string::npos);
+    for (unsigned char c : err.error.safe_message) {
+      CHECK(c >= 0x20 && c <= 0x7e);
+    }
+  }
+}
+
+void test_record_nonce_random_failure() {
+  auto secrets = std::make_shared<FixedSecretSource>("k1");
+  secrets->set_secret("k1", std::string(32, '\x11'));
+  auto key_source = make_hkdf_key_source(secrets);
+  const auto valid_desc = default_test_descriptor();
+
+  auto h_res = create_header(*key_source, "owner-nonce-fail", valid_desc);
+  CHECK(std::holds_alternative<std::string>(h_res));
+  const std::string& header_bytes = std::get<std::string>(h_res);
+  const StoreHeader parsed_h = std::get<StoreHeader>(parse_header(header_bytes));
+  const std::string store_id_hex = to_hex(parsed_h.store_id.data(), parsed_h.store_id.size());
+
+  auto archive = open_custody_checked(header_bytes, *key_source, "owner-nonce-fail", valid_desc);
+
+  ObserverStats stats;
+  custody_ops::set_release_observer(&record_release, &stats);
+  try {
+    custody_ops::reset_random_seam();
+    custody_ops::fail_random_on_call(1);
+    auto res = archive->seal({make_user_message("secret-on-nonce-fail")}, "binding-rng");
+    const auto draws = custody_ops::recorded_random_draws();
+    custody_ops::reset_random_seam();
+
+    CHECK(draws == (std::vector<std::size_t>{24}));
+    CHECK(std::holds_alternative<CustodyError>(res));
+    const auto& err = std::get<CustodyError>(res);
+    CHECK(err.error.kind == ErrorKind::Permission);
+    CHECK(err.error.reason == "archive.custody.key_invalid");
+    CHECK(err.store_id == store_id_hex);
+    CHECK(stats.releases >= 1);
+    CHECK(stats.all_zero_every_time);
+  } catch (...) {
+    custody_ops::reset_random_seam();
+    custody_ops::set_release_observer(nullptr, nullptr);
+    throw;
+  }
+  custody_ops::set_release_observer(nullptr, nullptr);
+}
+
+void test_golden_record_bytes() {
+  // Checked-in reference vectors from `tests/custody_vectors.py`.
+  const std::string store_id_bytes =
+      from_hex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+  const std::string secret_32_bytes =
+      from_hex("202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f");
+  const std::string dek_1_bytes =
+      from_hex("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f");
+  const std::string wrap_nonce_bytes =
+      from_hex("a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7");
+  const std::string record_nonce_bytes =
+      from_hex("b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecf");
+
+  constexpr std::string_view kExpectedRecordAadPrefixHex =
+      "000000000000002773702e6e61746976652e617263686976652e637573746f64792e7265636f72642d6161642e7631"
+      "0000000000000001"
+      "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+      "0000000000000001"
+      "000000000000000c6f776e65722d676f6c64656e";
+  constexpr std::string_view kExpectedRecordAadSuffixHex =
+      "000000000000000e62696e64696e672d676f6c64656e";
+  constexpr std::string_view kExpectedRecordPlaintextHex =
+      "0000000000000001"
+      "00000000000000056d73672d31"
+      "0000000000000002"
+      "0000000000000001"
+      "0000000000000000"
+      "000000000000000568656c6c6f"
+      "0000000000000000"
+      "0000000000000000";
+  constexpr std::string_view kExpectedRecordEnvelopePrefixHex =
+      "0000000000000001"
+      "0000000000000001"
+      "b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecf"
+      "000000000000005a";
+  constexpr std::string_view kExpectedRecordRefDomainPrefixHex =
+      "000000000000002773702e6e61746976652e617263686976652e637573746f64792e7265636f72642d7265662e7631";
+
+  std::array<unsigned char, 32> store_id{};
+  std::memcpy(store_id.data(), store_id_bytes.data(), store_id.size());
+  std::array<unsigned char, 24> record_nonce{};
+  std::memcpy(record_nonce.data(), record_nonce_bytes.data(), record_nonce.size());
+
+  auto secrets = std::make_shared<FixedSecretSource>("key-fixed");
+  secrets->set_secret("key-fixed", secret_32_bytes);
+  auto key_source = make_hkdf_key_source(secrets);
+  const auto valid_desc = default_test_descriptor();
+
+  custody_ops::reset_random_seam();
+  custody_ops::override_next_random_bytes(store_id_bytes);
+  custody_ops::override_next_random_bytes(dek_1_bytes);
+  custody_ops::override_next_random_bytes(wrap_nonce_bytes);
+  auto created_res = create_header(*key_source, "owner-golden", valid_desc);
+  custody_ops::reset_random_seam();
+  CHECK(std::holds_alternative<std::string>(created_res));
+  const std::string& header_bytes = std::get<std::string>(created_res);
+
+  auto archive = open_custody_checked(header_bytes, *key_source, "owner-golden", valid_desc);
+
+  const HostCustodyLimits resolved_limits = archive_internal::resolve_custody_limits({}, valid_desc);
+  const auto expected_desc_digest =
+      archive_internal::descriptor_binding_digest(valid_desc, resolved_limits.archive);
+  const std::string expected_desc_bytes(reinterpret_cast<const char*>(expected_desc_digest.data()),
+                                        expected_desc_digest.size());
+
+  // 1. Record AAD matches `tests/custody_vectors.py` byte for byte.
+  const std::string expected_record_aad =
+      from_hex(kExpectedRecordAadPrefixHex) + expected_desc_bytes + from_hex(kExpectedRecordAadSuffixHex);
+  const std::string actual_record_aad = archive_internal::build_record_aad(
+      store_id, 1, "owner-golden", expected_desc_digest, "binding-golden", resolved_limits.archive);
+  CHECK(actual_record_aad == expected_record_aad);
+
+  // 2. Seal with fixed record nonce and verify envelope framing, ciphertext, and SHA-256 reference.
+  Message msg{"msg-1", Role::User, {Text{"hello"}}};
+  custody_ops::reset_random_seam();
+  custody_ops::override_next_random_bytes(record_nonce_bytes);
+  const SealedRecord sealed = seal_checked(*archive, {msg}, "binding-golden");
+  const auto draws = custody_ops::recorded_random_draws();
+  custody_ops::reset_random_seam();
+  CHECK(draws == (std::vector<std::size_t>{24}));
+
+  const std::string expected_envelope_prefix = from_hex(kExpectedRecordEnvelopePrefixHex);
+  const std::string expected_plaintext = from_hex(kExpectedRecordPlaintextHex);
+  CHECK(expected_plaintext.size() == 74);
+  CHECK(sealed.bytes.size() == 48 + 90);
+  CHECK(sealed.bytes.substr(0, 48) == expected_envelope_prefix);
+
+  DataKeyBuffer dek_1;
+  CHECK(!dek_1.assign_exact(dek_1_bytes));
+  auto expected_aead = custody_ops::aead_xchacha20poly1305_encrypt(
+      dek_1, record_nonce, expected_record_aad, expected_plaintext);
+  CHECK(std::holds_alternative<std::string>(expected_aead));
+  CHECK(sealed.bytes.substr(48) == std::get<std::string>(expected_aead));
+
+  const std::string expected_ref_input = from_hex(kExpectedRecordRefDomainPrefixHex) + sealed.bytes;
+  const auto expected_ref_digest = crypto::sha256(expected_ref_input);
+  const std::string expected_reference =
+      "spna4:" + to_hex(expected_ref_digest.data(), expected_ref_digest.size());
+  CHECK(sealed.reference == expected_reference);
+
+  // Also verify the script's sample_reference over synthetic 0..89 ciphertext bytes.
+  std::string sample_ciphertext(90, '\0');
+  for (std::size_t i = 0; i < sample_ciphertext.size(); ++i) {
+    sample_ciphertext[i] = static_cast<char>(i);
+  }
+  const std::string sample_envelope = expected_envelope_prefix + sample_ciphertext;
+  const auto sample_digest =
+      crypto::sha256(from_hex(kExpectedRecordRefDomainPrefixHex) + sample_envelope);
+  CHECK(archive_internal::compute_record_reference(sample_envelope) ==
+        "spna4:" + to_hex(sample_digest.data(), sample_digest.size()));
+
+  // 3. Round-trip open recovers the exact message.
+  const auto opened = open_checked(*archive, sealed.reference, sealed.bytes, "binding-golden");
+  CHECK(opened.size() == 1);
+  CHECK(opened[0].id == "msg-1");
+  CHECK(opened[0].role == Role::User);
+  CHECK(opened[0].parts.size() == 1);
+  CHECK(std::get<Text>(opened[0].parts[0]).value == "hello");
+}
+
+void append_test_sink(void* context, std::string_view chunk) {
+  static_cast<std::string*>(context)->append(chunk);
+}
+
+void test_json_sink_string_escaping_matches_string_writer() {
+  std::string all_controls;
+  all_controls.reserve(32);
+  for (unsigned c = 0; c < 0x20; ++c) {
+    all_controls.push_back(static_cast<char>(c));
+  }
+
+  // Multi-chunk UTF-8 string (> 8192 bytes) with 2/3/4-byte code points, quotes, backslashes, and controls
+  // crossing 4096-byte chunk boundaries.
+  std::string multi_chunk_utf8;
+  while (multi_chunk_utf8.size() < 9000) {
+    multi_chunk_utf8.append("ascii-\"-\\-\n-\t-\x01-\xc3\xa9-\xe2\x82\xac-\xed\x9f\xbf-\xf0\x9f\x98\x80-");
+  }
+
+  std::vector<std::string> corpus = {
+      "",
+      "plain ascii 0123456789 !#$%&'()*+,-./:;<=>?@[]^_`{|}~",
+      "\"",
+      "\\",
+      "\"\\\"",
+      "\\\\\"\\b\\f\\n\\r\\t",
+      std::string("\x7f", 1),
+      all_controls,
+      // 2-byte, 3-byte (including U+0800 and U+D7FF), and 4-byte (including U+10000 and U+10FFFF) UTF-8.
+      "\xc2\x80\xdf\xbf\xe0\xa0\x80\xe2\x82\xac\xed\x9f\xbf\xee\x80\x80\xef\xbf\xbd\xf0\x90\x80\x80\xf0\x9f\x98\x80\xf4\x8f\xbf\xbf",
+      multi_chunk_utf8,
+      // Malformed UTF-8 sequence:
+      std::string("\xc0\xaf", 2),
+  };
+  for (unsigned c = 0; c < 0x20; ++c) {
+    corpus.emplace_back(1, static_cast<char>(c));
+  }
+
+  const json::Limits limits{65536, 32};
+  for (const std::string& input : corpus) {
+    std::string string_bytes;
+    json::BoundedWriter string_writer(limits, &string_bytes);
+    string_writer.quoted(input);
+
+    std::string sink_bytes;
+    json::BoundedWriter sink_writer(limits, &append_test_sink, &sink_bytes);
+    sink_writer.quoted(input);
+
+    CHECK(sink_writer.ok() == string_writer.ok());
+    CHECK(sink_writer.size() == string_writer.size());
+    CHECK(sink_bytes == string_bytes);
+  }
+}
+
+void test_caller_invalid_input_faults() {
+  auto secrets = std::make_shared<FixedSecretSource>("k1");
+  secrets->set_secret("k1", std::string(32, '\x11'));
+  secrets->set_secret("k2", std::string(32, '\x22'));
+  auto key_source = make_hkdf_key_source(secrets);
+  const auto valid_desc = default_test_descriptor();
+
+  HostCustodyLimits limits{};
+  limits.archive.max_bytes = 4096;
+  limits.archive.max_messages = 2;
+  limits.archive.max_parts = 2;
+
+  const std::string oversized_text(limits.archive.max_bytes + 1, 'x');
+
+  // 1. Header functions with empty or oversized owner_scope -> InvalidInput.
+  for (std::string_view bad_owner : {std::string_view{""}, std::string_view{oversized_text}}) {
+    auto create_res = create_header(*key_source, bad_owner, valid_desc, limits);
+    CHECK(std::holds_alternative<CustodyError>(create_res));
+    const auto& create_err = std::get<CustodyError>(create_res);
+    CHECK(create_err.error.kind == ErrorKind::InvalidRequest);
+    CHECK(create_err.error.retry_class == RetryClass::Never);
+    CHECK(create_err.error.retry_safety == RetrySafety::NotSent);
+    CHECK(create_err.error.reason == "archive.custody.invalid_input");
+    CHECK(create_err.store_id.empty());
+    CHECK(create_err.key_id.empty());
+  }
+
+  auto h1_res = create_header(*key_source, "owner-valid", valid_desc, limits);
+  CHECK(std::holds_alternative<std::string>(h1_res));
+  const std::string& h1_bytes = std::get<std::string>(h1_res);
+  const StoreHeader parsed_h = std::get<StoreHeader>(parse_header(h1_bytes, limits));
+  const std::string store_id_hex = to_hex(parsed_h.store_id.data(), parsed_h.store_id.size());
+
+  for (std::string_view bad_owner : {std::string_view{""}, std::string_view{oversized_text}}) {
+    auto rot_res = rotate_header(h1_bytes, *key_source, "k2", bad_owner, valid_desc, limits);
+    CHECK(std::holds_alternative<CustodyError>(rot_res));
+    CHECK(std::get<CustodyError>(rot_res).error.kind == ErrorKind::InvalidRequest);
+    CHECK(std::get<CustodyError>(rot_res).error.reason == "archive.custody.invalid_input");
+    CHECK(std::get<CustodyError>(rot_res).store_id == store_id_hex);
+
+    auto ret_res = retire_key_in_header(h1_bytes, "k1", *key_source, bad_owner, valid_desc, limits);
+    CHECK(std::holds_alternative<CustodyError>(ret_res));
+    CHECK(std::get<CustodyError>(ret_res).error.kind == ErrorKind::InvalidRequest);
+    CHECK(std::get<CustodyError>(ret_res).error.reason == "archive.custody.invalid_input");
+    CHECK(std::get<CustodyError>(ret_res).store_id == store_id_hex);
+
+    auto unwrap_res = unwrap_requests(h1_bytes, bad_owner, valid_desc, limits);
+    CHECK(std::holds_alternative<CustodyError>(unwrap_res));
+    CHECK(std::get<CustodyError>(unwrap_res).error.kind == ErrorKind::InvalidRequest);
+    CHECK(std::get<CustodyError>(unwrap_res).error.reason == "archive.custody.invalid_input");
+    CHECK(std::get<CustodyError>(unwrap_res).store_id == store_id_hex);
+
+    auto open_res = NativeArchive::open_custody(h1_bytes, *key_source, bad_owner, valid_desc, limits);
+    CHECK(std::holds_alternative<CustodyError>(open_res));
+    CHECK(std::get<CustodyError>(open_res).error.kind == ErrorKind::InvalidRequest);
+    CHECK(std::get<CustodyError>(open_res).error.reason == "archive.custody.invalid_input");
+    CHECK(std::get<CustodyError>(open_res).store_id == store_id_hex);
+  }
+
+  // Structural parse still runs before caller owner_scope validation on existing headers.
+  {
+    auto malformed_open = NativeArchive::open_custody("not-a-header", *key_source, "", valid_desc, limits);
+    CHECK(std::holds_alternative<CustodyError>(malformed_open));
+    CHECK(std::get<CustodyError>(malformed_open).error.reason == "archive.custody.corrupt_header");
+  }
+
+  auto archive = open_custody_checked(h1_bytes, *key_source, "owner-valid", valid_desc, limits);
+  const SealedRecord valid_sealed =
+      seal_checked(*archive, {make_user_message("ok")}, "bind-ok");
+
+  auto check_invalid_input = [&](const auto& res) {
+    CHECK(std::holds_alternative<CustodyError>(res));
+    const auto& err = std::get<CustodyError>(res);
+    CHECK(err.error.kind == ErrorKind::InvalidRequest);
+    CHECK(err.error.retry_class == RetryClass::Never);
+    CHECK(err.error.retry_safety == RetrySafety::NotSent);
+    CHECK(err.error.reason == "archive.custody.invalid_input");
+    CHECK(err.store_id == store_id_hex);
+    CHECK(err.key_id.empty());
+  };
+
+  // 2. seal with messages over max_messages, parts over max_parts, messages over max_bytes, or oversized binding.
+  check_invalid_input(archive->seal(
+      {make_user_message("1"), make_user_message("2"), make_user_message("3")}, "bind-ok"));
+  check_invalid_input(archive->seal(
+      {Message{"", Role::User, {Text{"p1"}, Text{"p2"}, Text{"p3"}}}}, "bind-ok"));
+  check_invalid_input(archive->seal({make_user_message(oversized_text)}, "bind-ok"));
+  check_invalid_input(archive->seal({make_user_message("ok")}, oversized_text));
+
+  // 3. open with oversized expected_binding.
+  check_invalid_input(archive->open(valid_sealed.reference, valid_sealed.bytes, oversized_text));
+}
+
+void test_record_plaintext_exact_limit_edge() {
+  auto secrets = std::make_shared<FixedSecretSource>("k1");
+  secrets->set_secret("k1", std::string(32, '\x11'));
+  auto key_source = make_hkdf_key_source(secrets);
+  const auto valid_desc = default_test_descriptor();
+
+  HostCustodyLimits limits{};
+  limits.archive.max_bytes = 4096;
+
+  auto h_res = create_header(*key_source, "owner-edge", valid_desc, limits);
+  CHECK(std::holds_alternative<std::string>(h_res));
+  auto archive = open_custody_checked(
+      std::get<std::string>(h_res), *key_source, "owner-edge", valid_desc, limits);
+
+  // One message with empty id, one Text part, no wire_output, and no native seal has 64 bytes of framing:
+  // count(8) + id_len(8) + role(8) + parts_count(8) + part_tag(8) + text_len(8) + wire_output(8) + native(8) = 64.
+  constexpr std::size_t kSingleTextMessageOverhead = 64;
+  const std::string exact_text(limits.archive.max_bytes - kSingleTextMessageOverhead, 'e');
+  const Message exact_msg = make_user_message(exact_text);
+
+  const SealedRecord sealed = seal_checked(*archive, {exact_msg}, "edge-binding");
+  // Envelope = 48-byte framing + max_bytes ciphertext + 16-byte AEAD tag.
+  CHECK(sealed.bytes.size() ==
+        archive_internal::kRecordEnvelopeFramingBytes + limits.archive.max_bytes +
+            archive_internal::kRecordAeadTagBytes);
+
+  const auto opened = open_checked(*archive, sealed.reference, sealed.bytes, "edge-binding");
+  CHECK(opened.size() == 1);
+  CHECK(opened[0].parts.size() == 1);
+  CHECK(std::get<Text>(opened[0].parts[0]).value == exact_text);
+
+  // One byte more than max_bytes is refused by seal with InvalidInput.
+  const Message over_by_one_msg = make_user_message(exact_text + "!");
+  const auto refused = archive->seal({over_by_one_msg}, "edge-binding");
+  CHECK(std::holds_alternative<CustodyError>(refused));
+  const auto& err = std::get<CustodyError>(refused);
+  CHECK(err.error.kind == ErrorKind::InvalidRequest);
+  CHECK(err.error.retry_class == RetryClass::Never);
+  CHECK(err.error.retry_safety == RetrySafety::NotSent);
+  CHECK(err.error.reason == "archive.custody.invalid_input");
+}
+
+void test_open_custody_matches_descriptor() {
+  auto secrets = std::make_shared<FixedSecretSource>("k1");
+  secrets->set_secret("k1", std::string(32, '\x11'));
+  auto key_source = make_hkdf_key_source(secrets);
+  const auto desc_d = default_test_descriptor();
+  const auto desc_other = alternate_test_descriptor();
+
+  auto h_res = create_header(*key_source, "owner-desc", desc_d);
+  CHECK(std::holds_alternative<std::string>(h_res));
+  auto archive =
+      open_custody_checked(std::get<std::string>(h_res), *key_source, "owner-desc", desc_d);
+
+  CHECK(archive->matches_descriptor(desc_d));
+  CHECK(!archive->matches_descriptor(desc_other));
+  CHECK(!archive->matches_descriptor(provider_test_descriptor("openai.responses")));
+}
+
 }  // namespace
 
 int main() {
@@ -2241,6 +3933,19 @@ int main() {
     test_wrap_verification();
     test_epoch_cap();
     test_header_call_counts();
+    test_custody_roundtrip_all_provider_families();
+    test_custody_record_nonce_uniqueness();
+    test_record_aad_single_field_binding();
+    test_rotated_epochs_and_zero_source_calls_on_seal_and_open();
+    test_record_tampering_and_truncation_bounds();
+    test_record_plaintext_residue_zeroed_on_release();
+    test_open_custody_refusals();
+    test_record_nonce_random_failure();
+    test_golden_record_bytes();
+    test_json_sink_string_escaping_matches_string_writer();
+    test_caller_invalid_input_faults();
+    test_record_plaintext_exact_limit_edge();
+    test_open_custody_matches_descriptor();
     std::cout << "native archive custody tests passed\n";
     return 0;
   } catch (const std::exception& e) {

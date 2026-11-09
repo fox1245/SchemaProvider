@@ -7,10 +7,21 @@
 #include "core/native_archive_custody_internal.h"
 
 #include <array>
+#include <filesystem>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <variant>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <aclapi.h>
+#include <windows.h>
+#else
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 namespace {
 using namespace sp;
@@ -82,6 +93,28 @@ int main() {
     check_unavailable(rotate_header("header", *source, "k2", "owner", desc));
     check_unavailable(retire_key_in_header("header", "k1", *source, "owner", desc));
     check_unavailable(unwrap_requests("header", "owner", desc));
+    check_unavailable(NativeArchive::open_custody("header", *source, "owner", desc));
+
+    const auto base = std::filesystem::temp_directory_path() /
+                      ("sp-custody-unavail-" +
+#ifdef _WIN32
+                       std::to_string(::GetCurrentProcessId()));
+#else
+                       std::to_string(::getpid()));
+#endif
+    std::filesystem::remove_all(base);
+    std::filesystem::create_directories(base);
+#ifndef _WIN32
+    ::chmod(base.c_str(), 0700);
+#endif
+    const auto store_dir = (base / "store").string();
+    const auto key_file = (base / "activation.key").string();
+    auto provisioned = NativeArchive::provision(store_dir, key_file, "owner", desc);
+    if (const auto* local_archive = std::get_if<std::shared_ptr<NativeArchive>>(&provisioned)) {
+      check_unavailable((*local_archive)->seal({}, "binding"));
+      check_unavailable((*local_archive)->open("spna4:" + std::string(64, '0'), "bytes", "binding"));
+    }
+    std::filesystem::remove_all(base);
 
     const CustodyError epoch_err = custody_error(CustodyFault::EpochLimit, "store-hex", "ignored");
     CHECK(epoch_err.error.kind == ErrorKind::ResourceLimit);

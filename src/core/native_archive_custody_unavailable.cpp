@@ -13,6 +13,9 @@ namespace {
 #ifdef SP_CUSTODY_TEST_SEAMS
 thread_local custody_ops::ReleaseObserver g_release_observer = nullptr;
 thread_local void* g_release_observer_context = nullptr;
+
+thread_local custody_ops::AllocationObserver g_allocation_observer = nullptr;
+thread_local void* g_allocation_observer_context = nullptr;
 #endif
 
 class UnavailableHkdfKeySource final : public KeySource {
@@ -64,6 +67,7 @@ CustodyError custody_error(CustodyFault fault,
   CustodyError out;
   out.error.retry_safety = RetrySafety::NotSent;
   out.error.retry_class = RetryClass::Never;
+  bool carries_key_id = false;
   switch (fault) {
     case CustodyFault::Tampered:
       out.error.kind = ErrorKind::Permission;
@@ -77,6 +81,7 @@ CustodyError custody_error(CustodyFault fault,
       out.error.reason = "archive.custody.unauthorized";
       out.store_id = std::string(store_id);
       out.key_id = std::string(key_id);
+      carries_key_id = true;
       break;
     case CustodyFault::KeyNotFound:
       out.error.kind = ErrorKind::NotFound;
@@ -84,6 +89,7 @@ CustodyError custody_error(CustodyFault fault,
       out.error.reason = "archive.custody.key_not_found";
       out.store_id = std::string(store_id);
       out.key_id = std::string(key_id);
+      carries_key_id = true;
       break;
     case CustodyFault::InvalidKeyMaterial:
       out.error.kind = ErrorKind::Permission;
@@ -91,6 +97,7 @@ CustodyError custody_error(CustodyFault fault,
       out.error.reason = "archive.custody.key_invalid";
       out.store_id = std::string(store_id);
       out.key_id = std::string(key_id);
+      carries_key_id = true;
       break;
     case CustodyFault::KeyInUse:
       out.error.kind = ErrorKind::Permission;
@@ -98,6 +105,7 @@ CustodyError custody_error(CustodyFault fault,
       out.error.reason = "archive.custody.key_in_use";
       out.store_id = std::string(store_id);
       out.key_id = std::string(key_id);
+      carries_key_id = true;
       break;
     case CustodyFault::CorruptHeader:
       out.error.kind = ErrorKind::Permission;
@@ -109,6 +117,12 @@ CustodyError custody_error(CustodyFault fault,
       out.error.kind = ErrorKind::Permission;
       out.error.safe_message = "Host native archive record is malformed";
       out.error.reason = "archive.custody.corrupt_record";
+      out.store_id = std::string(store_id);
+      break;
+    case CustodyFault::InvalidInput:
+      out.error.kind = ErrorKind::InvalidRequest;
+      out.error.safe_message = "Host native archive custody input is invalid";
+      out.error.reason = "archive.custody.invalid_input";
       out.store_id = std::string(store_id);
       break;
     case CustodyFault::EpochLimit:
@@ -124,6 +138,7 @@ CustodyError custody_error(CustodyFault fault,
       out.error.reason = "archive.custody.source_unavailable";
       out.store_id = std::string(store_id);
       out.key_id = std::string(key_id);
+      carries_key_id = true;
       break;
     case CustodyFault::SourceRateLimited:
       out.error.kind = ErrorKind::RateLimited;
@@ -132,7 +147,21 @@ CustodyError custody_error(CustodyFault fault,
       out.error.reason = "archive.custody.source_rate_limited";
       out.store_id = std::string(store_id);
       out.key_id = std::string(key_id);
+      carries_key_id = true;
       break;
+  }
+  if (carries_key_id && !key_id.empty()) {
+    out.error.safe_message.append(" (key_id=");
+    out.error.safe_message.append(archive_internal::quote_key_id_for_message(key_id));
+    if (!store_id.empty()) {
+      out.error.safe_message.append(", store_id=");
+      out.error.safe_message.append(store_id);
+    }
+    out.error.safe_message.push_back(')');
+  } else if (!store_id.empty()) {
+    out.error.safe_message.append(" (store_id=");
+    out.error.safe_message.append(store_id);
+    out.error.safe_message.push_back(')');
   }
   return out;
 }
@@ -149,6 +178,11 @@ CustodyError custody_unavailable_error() {
 
 CleansedBuffer::CleansedBuffer(std::size_t size) {
   if (size > 0) {
+#ifdef SP_CUSTODY_TEST_SEAMS
+    if (g_allocation_observer != nullptr) {
+      g_allocation_observer(size, g_allocation_observer_context);
+    }
+#endif
     data_ = static_cast<unsigned char*>(::operator new(size));
     crypto::cleanse(data_, size);
     size_ = size;
@@ -207,6 +241,11 @@ void CleansedBuffer::reallocate(std::size_t new_capacity) {
   if (new_capacity <= capacity_) {
     return;
   }
+#ifdef SP_CUSTODY_TEST_SEAMS
+  if (g_allocation_observer != nullptr) {
+    g_allocation_observer(new_capacity, g_allocation_observer_context);
+  }
+#endif
   auto* next = static_cast<unsigned char*>(::operator new(new_capacity));
   crypto::cleanse(next, new_capacity);
   if (data_ != nullptr && size_ > 0) {
@@ -341,6 +380,11 @@ void set_release_observer(ReleaseObserver observer, void* context) noexcept {
   g_release_observer_context = context;
 }
 
+void set_allocation_observer(AllocationObserver observer, void* context) noexcept {
+  g_allocation_observer = observer;
+  g_allocation_observer_context = context;
+}
+
 void fail_random_on_call(std::size_t /*call_index*/) noexcept {}
 
 void override_next_random_bytes(std::string_view /*bytes*/) {}
@@ -353,12 +397,37 @@ void fail_key_alloc_on_call(std::size_t /*call_index*/) noexcept {}
 
 void corrupt_next_cached_kek() noexcept {}
 
+std::vector<std::size_t> live_key_allocation_sizes() { return {}; }
+
 CustodyOutcome<std::string> hkdf_sha256_expand(const DataKeyBuffer& /*prk*/,
                                                std::string_view /*info*/,
                                                std::size_t /*out_len*/) {
   return custody_unavailable_error();
 }
 #endif
+
+std::array<unsigned char, 32> compute_record_reference_digest(
+    std::string_view envelope_bytes) noexcept {
+  crypto::Sha256 hash;
+  unsigned char domain_len_be[8];
+  const std::uint64_t domain_len = custody_format::ref_domain.size();
+  for (unsigned i = 0; i < 8; ++i) {
+    domain_len_be[7 - i] = static_cast<unsigned char>(domain_len >> (i * 8));
+  }
+  hash.update(domain_len_be, sizeof(domain_len_be));
+  hash.update(custody_format::ref_domain);
+  hash.update(envelope_bytes);
+  return hash.finish();
+}
+
+CustodyOutcome<AuthenticatedHeaderState> open_authenticated_header(
+    std::string_view /*header_bytes*/,
+    KeySource& /*source*/,
+    std::string_view /*owner_scope*/,
+    const descriptor::ValidatedDescriptor& /*descriptor*/,
+    HostCustodyLimits /*limits*/) {
+  return custody_unavailable_error();
+}
 
 CustodyOutcome<DataKeyBuffer> hkdf_sha256_extract(std::string_view /*salt*/,
                                                   std::string_view /*ikm*/) {
@@ -377,10 +446,28 @@ CustodyOutcome<DataKeyBuffer> derive_kek(const SecretBuffer& /*secret*/,
 }
 
 CustodyOutcome<std::string> aead_xchacha20poly1305_encrypt(
+    const unsigned char* /*key_32*/,
+    const std::array<unsigned char, 24>& /*nonce*/,
+    std::string_view /*aad*/,
+    std::string_view /*plaintext*/,
+    std::string_view /*store_id_hex*/) {
+  return custody_unavailable_error();
+}
+
+CustodyOutcome<std::string> aead_xchacha20poly1305_encrypt(
     const DataKeyBuffer& /*key*/,
     const std::array<unsigned char, 24>& /*nonce*/,
     std::string_view /*aad*/,
     std::string_view /*plaintext*/) {
+  return custody_unavailable_error();
+}
+
+CustodyOutcome<CleansedBuffer> aead_xchacha20poly1305_decrypt(
+    const unsigned char* /*key_32*/,
+    const std::array<unsigned char, 24>& /*nonce*/,
+    std::string_view /*aad*/,
+    std::string_view /*ciphertext_and_tag*/,
+    std::string_view /*store_id_hex*/) {
   return custody_unavailable_error();
 }
 
