@@ -1,6 +1,7 @@
 // The JavaScript reference host (runtime/js_host.h). JavaScript owns the event loop: it calls the exported functions
 // below from timers, microtasks and fetch continuations, and the functions return. Nothing waits.
 #include "runtime/js_host.h"
+#include "core/native_archive_custody.h"
 #include "sp/build_config.h"
 
 #ifndef __EMSCRIPTEN__
@@ -507,5 +508,10 @@ EMSCRIPTEN_KEEPALIVE void sp_js_fetch_end(unsigned call, int code) {
   try {
     if (auto found = call_of(call)) found->post_end(code);
   } catch (...) {}
+}
+
+// Retains the WebAssembly custody handoff entry points from sp_core when sp_js_host is linked.
+EMSCRIPTEN_KEEPALIVE int sp_js_custody_handoff_linked() {
+  return sp_custody_fault_reason(0) != nullptr ? 1 : 0;
 }
 }
