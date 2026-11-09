@@ -1,6 +1,7 @@
 set(_Sodium_MIN_VERSION "@SP_SODIUM_MIN_VERSION@")
 set(Sodium_PINNED_VERSION "@SP_SODIUM_PINNED_VERSION@")
 set(Sodium_PINNED_ARCHIVE "@SP_SODIUM_ARCHIVE@")
+set(Sodium_PINNED_URL "@SP_SODIUM_URL@")
 set(Sodium_PINNED_SHA256 "@SP_SODIUM_SHA256@")
 option(SODIUM_USE_STATIC_LIBS
   "Link against a static libsodium library on Windows when not using a CMake package target (defines SODIUM_STATIC=1)"
@@ -14,13 +15,18 @@ endif()
 if(DEFINED _Sodium_LAST_ROOT AND NOT "${_Sodium_LAST_ROOT}" STREQUAL "${_Sodium_ROOT}")
   unset(Sodium_INCLUDE_DIR CACHE)
   unset(Sodium_LIBRARY CACHE)
+  unset(Sodium_LICENSE_FILE CACHE)
   unset(unofficial-libsodium_DIR CACHE)
   unset(libsodium_DIR CACHE)
+endif()
+if(DEFINED _Sodium_LAST_SOURCE_DIR AND NOT "${_Sodium_LAST_SOURCE_DIR}" STREQUAL "${SODIUM_SOURCE_DIR}")
+  unset(Sodium_LICENSE_FILE CACHE)
 endif()
 if(DEFINED _Sodium_LAST_STATIC AND NOT "${_Sodium_LAST_STATIC}" STREQUAL "${SODIUM_USE_STATIC_LIBS}")
   unset(Sodium_LIBRARY CACHE)
 endif()
 set(_Sodium_LAST_ROOT "${_Sodium_ROOT}" CACHE INTERNAL "Last SODIUM_ROOT used by FindSodium")
+set(_Sodium_LAST_SOURCE_DIR "${SODIUM_SOURCE_DIR}" CACHE INTERNAL "Last SODIUM_SOURCE_DIR used by FindSodium")
 set(_Sodium_LAST_STATIC "${SODIUM_USE_STATIC_LIBS}" CACHE INTERNAL "Last SODIUM_USE_STATIC_LIBS used by FindSodium")
 set(Sodium_VERSION "")
 set(_Sodium_CONFIG_TARGET "")
@@ -183,6 +189,45 @@ if(Sodium_INCLUDE_DIR AND Sodium_LIBRARY)
   endif()
 endif()
 
+if(NOT Sodium_LICENSE_FILE)
+  if(SODIUM_SOURCE_DIR)
+    find_file(Sodium_LICENSE_FILE NAMES LICENSE
+      PATHS "${SODIUM_SOURCE_DIR}/libsodium-${Sodium_PINNED_VERSION}" "${SODIUM_SOURCE_DIR}"
+      NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
+  endif()
+endif()
+if(NOT Sodium_LICENSE_FILE)
+  if(_Sodium_ROOT)
+    find_file(Sodium_LICENSE_FILE NAMES LICENSE copyright
+      PATHS "${_Sodium_ROOT}"
+      PATH_SUFFIXES
+        share/doc/libsodium
+        share/licenses/libsodium
+        share/libsodium
+      NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
+  else()
+    set(_Sodium_LICENSE_HINTS "")
+    if(Sodium_INCLUDE_DIR AND EXISTS "${Sodium_INCLUDE_DIR}")
+      get_filename_component(_Sodium_inc_parent "${Sodium_INCLUDE_DIR}" DIRECTORY)
+      list(APPEND _Sodium_LICENSE_HINTS "${_Sodium_inc_parent}")
+    endif()
+    if(Sodium_LIBRARY AND EXISTS "${Sodium_LIBRARY}")
+      get_filename_component(_Sodium_lib_dir "${Sodium_LIBRARY}" DIRECTORY)
+      get_filename_component(_Sodium_lib_parent "${_Sodium_lib_dir}" DIRECTORY)
+      get_filename_component(_Sodium_lib_grandparent "${_Sodium_lib_parent}" DIRECTORY)
+      list(APPEND _Sodium_LICENSE_HINTS "${_Sodium_lib_parent}" "${_Sodium_lib_grandparent}")
+    endif()
+    find_file(Sodium_LICENSE_FILE NAMES LICENSE copyright
+      HINTS ${_Sodium_LICENSE_HINTS}
+      PATH_SUFFIXES
+        share/doc/libsodium
+        share/licenses/libsodium
+        share/libsodium
+        share/doc/libsodium-dev
+        share/doc/libsodium23)
+  endif()
+endif()
+
 include(FindPackageHandleStandardArgs)
 find_package_handle_standard_args(Sodium
   REQUIRED_VARS Sodium_LIBRARY Sodium_INCLUDE_DIR _Sodium_VERSION_OK _Sodium_SYMBOL_OK
@@ -204,4 +249,4 @@ if(Sodium_FOUND AND NOT TARGET sodium::sodium)
     endif()
   endif()
 endif()
-mark_as_advanced(Sodium_INCLUDE_DIR Sodium_LIBRARY)
+mark_as_advanced(Sodium_INCLUDE_DIR Sodium_LIBRARY Sodium_LICENSE_FILE)

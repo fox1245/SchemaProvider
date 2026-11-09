@@ -6,6 +6,7 @@ on:
       - 'src/**'
       - 'tests/**'
       - 'tools/embed_configuration.py'
+      - 'tools/fetch_libsodium.py'
       - 'examples/js-host/**'
       - 'config/**'
       - 'CMakeLists.txt'
@@ -53,11 +54,31 @@ jobs:
           emcc --version | head -n 1
           node --version
           cmake --version | head -n 1
+      - name: Read pinned libsodium digest
+        id: sodium-pin
+        run: |
+          digest="$(python3 -c 'import json, pathlib; print(json.loads(pathlib.Path("config/dependencies.json").read_text(encoding="utf-8"))["libsodium"]["sha256"])')"
+          echo "sha256=$digest" >> "$GITHUB_OUTPUT"
+      - name: Cache libsodium source archive
+        uses: actions/cache@v4
+        with:
+          path: .cache/libsodium
+          key: libsodium-archive-${{ steps.sodium-pin.outputs.sha256 }}
+      - name: Build pinned libsodium for WebAssembly
+        run: |
+          source emsdk/emsdk_env.sh
+          python3 tools/fetch_libsodium.py \
+            --cache-dir "$PWD/.cache/libsodium" \
+            --unpack-dir "$PWD/build-sodium-wasm-src" \
+            --prefix "$PWD/install-sodium-wasm" \
+            --wasm
       - name: Configure the runtime without libcurl or threads, with the JavaScript host
         run: |
           source emsdk/emsdk_env.sh
           emcmake cmake -S . -B build-wasm -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DYYJSON_ROOT="$PWD/dependencies/deps/yyjson" \
+            -DSP_WITH_SODIUM=ON -DSODIUM_ROOT="$PWD/install-sodium-wasm" \
+            -DSODIUM_CACHE_DIR="$PWD/.cache/libsodium" \
             -DSP_BUILD_TRANSPORT=OFF -DSP_THREADS=OFF -DSP_BUILD_JS_HOST=ON \
             -DSP_BUILD_TESTS=OFF -DSP_BUILD_CANARY=OFF -DSP_BUILD_RUNTIME_TESTS=ON
       - name: Check that the configuration is curl-free and single-threaded
@@ -67,6 +88,7 @@ jobs:
           grep -q 'ASIO_DISABLE_THREADS' build-wasm/build.ninja || fail "ASIO_DISABLE_THREADS is not defined"
           grep -q 'fexceptions' build-wasm/build.ninja || fail "-fexceptions is not set"
           grep -Eq '^#define SP_BUILD_THREADS 0$' build-wasm/generated/sp/build_config.h || fail "build_config.h records threads"
+          grep -Eq '^#define SP_BUILD_SODIUM 1$' build-wasm/generated/sp/build_config.h || fail "build_config.h does not record libsodium"
           if ninja -C build-wasm -t targets all | grep -q 'sp_transport'; then fail "sp_transport is configured"; fi
           # The JavaScript host reaches fetch through EM_JS callbacks: nothing may suspend the WebAssembly stack.
           if grep -q -E -e '-sASYNCIFY|-sJSPI|-sFETCH' build-wasm/build.ninja; then fail "Asyncify, JSPI or emscripten fetch is linked"; fi
@@ -74,16 +96,23 @@ jobs:
         run: |
           source emsdk/emsdk_env.sh
           cmake --build build-wasm --parallel
-      - name: Run the host runtime test and the JavaScript host test under Node
+      - name: Run the host runtime test, the JavaScript host test and the custody tests under Node
         run: |
           source emsdk/emsdk_env.sh
           node --version
           # host_runtime: the public seam, chunk cuts, the blocking refusals. js_host: a buffered and an SSE chat
-          # through globalThis.fetch against an HTTP server the test starts, no network and no keys.
+          # through globalThis.fetch against an HTTP server the test starts, no network and no keys, plus the
+          # custody secret handoff. native_archive_custody: host archive custody with libsodium.
+          # native_archive_custody_unavailable: compiles native_archive_custody_unavailable.cpp directly into the
+          # test executable to check the unavailable backend alongside the sodium-enabled build.
           ctest --test-dir build-wasm --output-on-failure --timeout 180
       - name: Report artifact sizes
         run: |
           ls -l build-wasm/sp_host_runtime_tests.js build-wasm/sp_host_runtime_tests.wasm \
-                build-wasm/sp_js_host_tests.js build-wasm/sp_js_host_tests.wasm
+                build-wasm/sp_js_host_tests.js build-wasm/sp_js_host_tests.wasm \
+                build-wasm/sp_native_archive_custody_tests.js build-wasm/sp_native_archive_custody_tests.wasm \
+                build-wasm/sp_native_archive_custody_unavailable_tests.js build-wasm/sp_native_archive_custody_unavailable_tests.wasm
           gzip -c build-wasm/sp_host_runtime_tests.wasm | wc -c
           gzip -c build-wasm/sp_js_host_tests.wasm | wc -c
+          gzip -c build-wasm/sp_native_archive_custody_tests.wasm | wc -c
+          gzip -c build-wasm/sp_native_archive_custody_unavailable_tests.wasm | wc -c

@@ -142,8 +142,9 @@ string(JSON SP_DEPENDENCIES_VERSION GET "${SP_DEPENDENCIES_JSON}" version)
 string(JSON SP_SODIUM_PINNED_VERSION GET "${SP_DEPENDENCIES_JSON}" libsodium version)
 string(JSON SP_SODIUM_MIN_VERSION GET "${SP_DEPENDENCIES_JSON}" libsodium minimum_version)
 string(JSON SP_SODIUM_ARCHIVE GET "${SP_DEPENDENCIES_JSON}" libsodium archive)
+string(JSON SP_SODIUM_URL GET "${SP_DEPENDENCIES_JSON}" libsodium url)
 string(JSON SP_SODIUM_SHA256 GET "${SP_DEPENDENCIES_JSON}" libsodium sha256)
-if(NOT SP_DEPENDENCIES_VERSION OR NOT SP_SODIUM_PINNED_VERSION OR NOT SP_SODIUM_MIN_VERSION OR NOT SP_SODIUM_ARCHIVE OR NOT SP_SODIUM_SHA256)
+if(NOT SP_DEPENDENCIES_VERSION OR NOT SP_SODIUM_PINNED_VERSION OR NOT SP_SODIUM_MIN_VERSION OR NOT SP_SODIUM_ARCHIVE OR NOT SP_SODIUM_URL OR NOT SP_SODIUM_SHA256)
   message(FATAL_ERROR "config/dependencies.json libsodium pin fields must be non-empty")
 endif()
 if(SP_SODIUM_PINNED_VERSION VERSION_LESS SP_SODIUM_MIN_VERSION)
@@ -152,6 +153,14 @@ endif()
 string(FIND "${SP_SODIUM_ARCHIVE}" "${SP_SODIUM_PINNED_VERSION}" SP_SODIUM_ARCHIVE_VER_POS)
 if(SP_SODIUM_ARCHIVE_VER_POS LESS 0)
   message(FATAL_ERROR "config/dependencies.json libsodium archive (${SP_SODIUM_ARCHIVE}) does not match pinned version (${SP_SODIUM_PINNED_VERSION})")
+endif()
+string(FIND "${SP_SODIUM_URL}" "https://" SP_SODIUM_URL_SCHEME_POS)
+string(FIND "${SP_SODIUM_URL}" "/${SP_SODIUM_ARCHIVE}" SP_SODIUM_URL_ARCHIVE_POS REVERSE)
+string(LENGTH "${SP_SODIUM_URL}" SP_SODIUM_URL_LEN)
+string(LENGTH "/${SP_SODIUM_ARCHIVE}" SP_SODIUM_ARCHIVE_SUFFIX_LEN)
+math(EXPR SP_SODIUM_EXPECTED_ARCHIVE_POS "${SP_SODIUM_URL_LEN} - ${SP_SODIUM_ARCHIVE_SUFFIX_LEN}")
+if(NOT SP_SODIUM_URL_SCHEME_POS EQUAL 0 OR SP_SODIUM_URL_ARCHIVE_POS LESS 0 OR NOT SP_SODIUM_URL_ARCHIVE_POS EQUAL SP_SODIUM_EXPECTED_ARCHIVE_POS)
+  message(FATAL_ERROR "config/dependencies.json libsodium url (${SP_SODIUM_URL}) does not match archive (${SP_SODIUM_ARCHIVE})")
 endif()
 string(TOLOWER "${SP_SODIUM_SHA256}" SP_SODIUM_SHA256_LOWER)
 set(SP_SODIUM_SHA256_REM "${SP_SODIUM_SHA256_LOWER}")
@@ -167,6 +176,9 @@ configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindSodium.cmake.in"
 set(SP_WITH_SODIUM "AUTO" CACHE STRING "Build host-native archive custody with libsodium: AUTO uses libsodium when found, ON requires it, OFF disables it")
 set_property(CACHE SP_WITH_SODIUM PROPERTY STRINGS AUTO ON OFF)
 set(SODIUM_ROOT "${SODIUM_ROOT}" CACHE PATH "libsodium installation prefix")
+set(SODIUM_SOURCE_DIR "${SODIUM_SOURCE_DIR}" CACHE PATH "Unpacked pinned libsodium source directory")
+set(SODIUM_CACHE_DIR "${SODIUM_CACHE_DIR}" CACHE PATH "Directory holding the pinned libsodium source archive")
+set(SODIUM_ARCHIVE "${SODIUM_ARCHIVE}" CACHE FILEPATH "Path to the pinned libsodium source archive")
 string(TOUPPER "${SP_WITH_SODIUM}" SP_WITH_SODIUM_MODE)
 set(SP_WITH_SODIUM_VALID_MODES AUTO ON OFF TRUE FALSE YES NO 1 0)
 if(NOT SP_WITH_SODIUM_MODE IN_LIST SP_WITH_SODIUM_VALID_MODES)
@@ -268,6 +280,41 @@ endif()
 if(SP_SODIUM)
   target_sources(sp_core PRIVATE src/core/native_archive_custody.cpp)
   target_link_libraries(sp_core PRIVATE sodium::sodium)
+  set(SP_SODIUM_STAGED_LICENSE "${CMAKE_CURRENT_BINARY_DIR}/third_party/libsodium/LICENSE")
+  set(SP_SODIUM_UNPACK_DIR "${CMAKE_CURRENT_BINARY_DIR}/_libsodium_src")
+  if(SODIUM_ARCHIVE OR SODIUM_CACHE_DIR)
+    set(_sp_unpack_license_args
+      --dependencies "${CMAKE_CURRENT_SOURCE_DIR}/config/dependencies.json"
+      --unpack-dir "${SP_SODIUM_UNPACK_DIR}"
+      --offline)
+    if(SODIUM_ARCHIVE)
+      list(APPEND _sp_unpack_license_args --archive "${SODIUM_ARCHIVE}")
+    endif()
+    if(SODIUM_CACHE_DIR)
+      list(APPEND _sp_unpack_license_args --cache-dir "${SODIUM_CACHE_DIR}")
+    endif()
+    add_custom_command(
+      OUTPUT "${SP_SODIUM_STAGED_LICENSE}"
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/fetch_libsodium.py" ${_sp_unpack_license_args}
+      COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/third_party/libsodium"
+      COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+              "${SP_SODIUM_UNPACK_DIR}/libsodium-${SP_SODIUM_PINNED_VERSION}/LICENSE"
+              "${SP_SODIUM_STAGED_LICENSE}"
+      DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tools/fetch_libsodium.py"
+              "${CMAKE_CURRENT_SOURCE_DIR}/config/dependencies.json"
+      VERBATIM)
+    add_custom_target(sp_libsodium_license ALL DEPENDS "${SP_SODIUM_STAGED_LICENSE}")
+  elseif(Sodium_LICENSE_FILE AND EXISTS "${Sodium_LICENSE_FILE}")
+    add_custom_command(
+      OUTPUT "${SP_SODIUM_STAGED_LICENSE}"
+      COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/third_party/libsodium"
+      COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+              "${Sodium_LICENSE_FILE}"
+              "${SP_SODIUM_STAGED_LICENSE}"
+      DEPENDS "${Sodium_LICENSE_FILE}"
+      VERBATIM)
+    add_custom_target(sp_libsodium_license ALL DEPENDS "${SP_SODIUM_STAGED_LICENSE}")
+  endif()
 else()
   target_sources(sp_core PRIVATE src/core/native_archive_custody_unavailable.cpp)
 endif()
@@ -832,8 +879,11 @@ if(SP_BUILD_TESTS OR SP_BUILD_RUNTIME_TESTS)
     endif()
   endif()
   if(NOT BUILD_SHARED_LIBS)
-    add_executable(sp_native_archive_custody_unavailable_tests tests/native_archive_custody_unavailable_test.cpp
-                   src/core/native_archive.cpp src/core/native_archive_custody_unavailable.cpp)
+    add_executable(sp_native_archive_custody_unavailable_tests tests/native_archive_custody_unavailable_test.cpp)
+    if(SP_SODIUM)
+      target_sources(sp_native_archive_custody_unavailable_tests PRIVATE
+                     src/core/native_archive.cpp src/core/native_archive_custody_unavailable.cpp)
+    endif()
     target_compile_options(sp_native_archive_custody_unavailable_tests PRIVATE ${SP_WARNING_OPTIONS})
     target_link_libraries(sp_native_archive_custody_unavailable_tests PRIVATE sp_core sp_codecs)
     if(SP_THREADS)

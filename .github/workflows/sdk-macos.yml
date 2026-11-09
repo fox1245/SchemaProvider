@@ -8,6 +8,7 @@ on:
       - 'benchmarks/**'
       - 'tools/benchmark_peer.mjs'
       - 'tools/embed_configuration.py'
+      - 'tools/fetch_libsodium.py'
       - 'config/**'
       - 'CMakeLists.txt'
       - 'cmake/**'
@@ -59,12 +60,32 @@ jobs:
           curl --version
           curl --version | grep -q 'HTTP2'
           openssl version
+      - name: Read pinned libsodium digest
+        id: sodium-pin
+        run: |
+          digest="$(python3 -c 'import json, pathlib; print(json.loads(pathlib.Path("config/dependencies.json").read_text(encoding="utf-8"))["libsodium"]["sha256"])')"
+          echo "sha256=$digest" >> "$GITHUB_OUTPUT"
+      - name: Cache libsodium source archive
+        uses: actions/cache@v4
+        with:
+          path: .cache/libsodium
+          key: libsodium-archive-${{ steps.sodium-pin.outputs.sha256 }}
+      - name: Build pinned libsodium
+        run: |
+          python3 tools/fetch_libsodium.py \
+            --cache-dir "$PWD/.cache/libsodium" \
+            --unpack-dir "$PWD/build-sodium-src" \
+            --prefix "$PWD/install-sodium"
+          echo "SODIUM_ROOT=$PWD/install-sodium" >> "$GITHUB_ENV"
       - name: Configure complete SDK suite
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH="$SDK_PREFIXES" \
+            -DCMAKE_INSTALL_PREFIX="$PWD/install-sdk" \
             -DASIO_ROOT="$PWD/dependencies/deps/asio" \
             -DYYJSON_ROOT="$PWD/dependencies/deps/yyjson" \
+            -DSP_WITH_SODIUM=ON -DSODIUM_ROOT="$SODIUM_ROOT" \
+            -DSODIUM_CACHE_DIR="$PWD/.cache/libsodium" \
             -DSP_NODE="$(command -v node)" \
             -DSP_OPENSSL="$(command -v openssl)" \
             -DSP_BUILD_TESTS=ON -DSP_BUILD_CANARY=ON -DSP_BUILD_RUNTIME_TESTS=ON -DSP_BUILD_BENCHMARKS=ON
@@ -74,6 +95,28 @@ jobs:
         run: sudo ifconfig lo0 alias 127.0.0.2 netmask 255.0.0.0
       - name: Execute SDK runtime, lifecycle, crypto and custody tests
         run: ctest --test-dir build --parallel 2 --timeout 600 --output-on-failure
+      - name: Install SDK and build and run installed custody consumer
+        run: |
+          cmake --install build --prefix "$PWD/install-sdk"
+          test -s "$PWD/install-sdk/share/doc/SchemaProvider/third_party/libsodium/LICENSE"
+          cmake -S tests/install_consumer -B build-install-consumer -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$PWD/install-sdk;$SDK_PREFIXES" \
+            -DSODIUM_ROOT="$SODIUM_ROOT"
+          cmake --build build-install-consumer
+          ctest --test-dir build-install-consumer --output-on-failure
+      - name: Configure, build and test SDK without libsodium
+        run: |
+          cmake -S . -B build-no-sodium -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$SDK_PREFIXES" \
+            -DASIO_ROOT="$PWD/dependencies/deps/asio" \
+            -DYYJSON_ROOT="$PWD/dependencies/deps/yyjson" \
+            -DSP_WITH_SODIUM=OFF \
+            -DSP_NODE="$(command -v node)" \
+            -DSP_OPENSSL="$(command -v openssl)" \
+            -DSP_BUILD_TESTS=OFF -DSP_BUILD_CANARY=OFF -DSP_BUILD_RUNTIME_TESTS=ON -DSP_BUILD_BENCHMARKS=OFF
+          grep -Eq '^#define SP_BUILD_SODIUM 0$' build-no-sodium/generated/sp/build_config.h
+          cmake --build build-no-sodium --target sp_native_archive_custody_unavailable_tests --parallel 3
+          ctest --test-dir build-no-sodium -R '^native_archive_custody_unavailable$' --output-on-failure
       - name: Report capability skips
         if: always()
         run: ctest --test-dir build -R '^stall_' -V | grep -E '\[ SKIP \]|STALL_SKIPPED' || true
