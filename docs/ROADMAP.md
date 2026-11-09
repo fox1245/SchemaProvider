@@ -1,6 +1,6 @@
 # Roadmap and release gates
 
-Package 0.4.0 alpha uses typed interface/shared-library generation 7 with five HTTP/SSE chat families, the non-chat endpoints (D6, D7) and realtime WebSocket sessions (D8). [Usage](USAGE.md) defines typed media, separate provider-reported costs, nullable token evidence, preserved controls, Responses provider-held cursors and explicit Generate portable imports. [Recorded provenance](POC_PLAN.md#current-typed-c-cutover-provenance) keeps earlier interface 3–5 runs unchanged; implementation, fresh wire proof and release/support admission are separate claims.
+Package 0.4.1 alpha uses typed interface/shared-library generation 7 with five HTTP/SSE chat families, the non-chat endpoints (D6, D7), realtime WebSocket sessions (D8) and host archive custody (with libsodium). [Usage](USAGE.md) defines typed media, separate provider-reported costs, nullable token evidence, preserved controls, Responses provider-held cursors and explicit Generate portable imports. [Recorded provenance](POC_PLAN.md#current-typed-c-cutover-provenance) keeps earlier interface 3–5 runs unchanged; implementation, fresh wire proof and release/support admission are separate claims.
 
 ## Completed next work
 
