@@ -5,6 +5,10 @@
 // worker pool and the libcurl transport) and 0 for a single-thread build.
 #define SP_BUILD_THREADS @SP_BUILD_THREADS@
 
+// SP_BUILD_SODIUM is 1 when this SchemaProvider was built with libsodium (host-native archive custody, reported as
+// capability::HostArchiveCustody) and 0 when it was built without it (SP_WITH_SODIUM=OFF, or AUTO without libsodium).
+#define SP_BUILD_SODIUM @SP_BUILD_SODIUM@
+
 // Sentinel. Asio is header-only: its classes and inline code differ between ASIO_DISABLE_THREADS and a threaded
 // build, so two translation units of one program that disagree violate the one-definition rule and nothing
 // diagnoses it. Every SchemaProvider header reaches this one (through core/value.h), and a translation unit whose
