@@ -821,7 +821,7 @@ Earlier `descriptors/manifest.json`, `src/codecs/registry.cpp`, flat `types.h` a
 
 ## 10. Versioning and stability
 
-- **Source API.** Package 0.3.0 is alpha; interface 6 and shared generation 6 identify the typed provider-reported-cost outcome layout, not SemVer major 6. Rebuild and migrate consumers for the selected release. The older major/minor sketch is not a pre-stability compatibility promise; historical interface 3–5 proof is not current interface 6 verification.
+- **Source API.** The package is alpha. The interface revision and shared-library generation named in section 0 identify the typed layout, not a SemVer major. Rebuild and migrate consumers for the selected release. The older major/minor sketch is not a pre-stability compatibility promise; proof recorded for an earlier interface is not verification of the current one.
 - **ABI.** No stable cross-compiler ABI is promised. Shared builds are supported only with the same toolchain, standard library and flags; consumers rebuild per release.
 - **Descriptor.** `descriptor_version` (grammar) and `revision` (vendor facts) are separate. Grammar growth or any new rule bumps the descriptor major; correcting a fact bumps `revision` and must add fixture evidence. Exact-version support: newer versions and unknown keys are rejected. Changing a retention or usage-inclusion rule in data is still a semantic release.
 - **Fixtures and projection.** `fixture_version`, `projection_version` and NeoGraph `provider-completion` version are independent. Changing a fixture's expected meaning needs a justification and a reviewed old/new diff; expected files are never regenerated and approved unread. Old serialized artifacts are read by version-specific readers; no aliases or shims to the live API.
