@@ -95,26 +95,47 @@ int main() {
     check_unavailable(unwrap_requests("header", "owner", desc));
     check_unavailable(NativeArchive::open_custody("header", *source, "owner", desc));
 
-    const auto base = std::filesystem::temp_directory_path() /
-                      ("sp-custody-unavail-" +
+    PreResolvedSecretSource pre_resolved("k1");
+    CHECK(pre_resolved.put("k1", std::string(32, 's')) == CustodyFault::InvalidKeyMaterial);
+    CHECK(pre_resolved.load_secret("k1", secret, &written) == CustodyFault::KeyNotFound);
+    CHECK(written == 0);
+
+    sp::PreResolvedSecretSource* c_source = sp_custody_secret_source_create();
+    CHECK(c_source != nullptr);
+    CHECK(sp_custody_secret_alloc(32) == nullptr);
+    const unsigned char raw_kid[] = {'k', '1'};
+    CHECK(sp_custody_secret_commit(c_source, raw_kid, sizeof(raw_kid), nullptr, 32) ==
+          static_cast<int>(CustodyFault::InvalidKeyMaterial));
+    CHECK(std::string_view(sp_custody_fault_reason(static_cast<int>(CustodyFault::InvalidKeyMaterial))) ==
+          "archive.custody.key_invalid");
+    sp_custody_secret_source_destroy(c_source);
+
+    if (archive_fs::available()) {
+      const auto base = std::filesystem::temp_directory_path() /
+                        ("sp-custody-unavail-" +
 #ifdef _WIN32
-                       std::to_string(::GetCurrentProcessId()));
+                         std::to_string(::GetCurrentProcessId()));
 #else
-                       std::to_string(::getpid()));
+                         std::to_string(::getpid()));
 #endif
-    std::filesystem::remove_all(base);
-    std::filesystem::create_directories(base);
+      std::filesystem::remove_all(base);
+      std::filesystem::create_directories(base);
 #ifndef _WIN32
-    ::chmod(base.c_str(), 0700);
+      ::chmod(base.c_str(), 0700);
 #endif
-    const auto store_dir = (base / "store").string();
-    const auto key_file = (base / "activation.key").string();
-    auto provisioned = NativeArchive::provision(store_dir, key_file, "owner", desc);
-    if (const auto* local_archive = std::get_if<std::shared_ptr<NativeArchive>>(&provisioned)) {
-      check_unavailable((*local_archive)->seal({}, "binding"));
-      check_unavailable((*local_archive)->open("spna4:" + std::string(64, '0'), "bytes", "binding"));
+      const auto store_dir = (base / "store").string();
+      const auto key_file = (base / "activation.key").string();
+      auto provisioned = NativeArchive::provision(store_dir, key_file, "owner", desc);
+      if (const auto* local_archive = std::get_if<std::shared_ptr<NativeArchive>>(&provisioned)) {
+        check_unavailable((*local_archive)->seal({}, "binding"));
+        check_unavailable((*local_archive)->open("spna4:" + std::string(64, '0'), "bytes", "binding"));
+      }
+      std::filesystem::remove_all(base);
+    } else {
+      auto provisioned = NativeArchive::provision("store", "activation.key", "owner", desc);
+      CHECK(std::holds_alternative<Error>(provisioned));
+      CHECK(std::get<Error>(provisioned).kind == ErrorKind::Unsupported);
     }
-    std::filesystem::remove_all(base);
 
     const CustodyError epoch_err = custody_error(CustodyFault::EpochLimit, "store-hex", "ignored");
     CHECK(epoch_err.error.kind == ErrorKind::ResourceLimit);

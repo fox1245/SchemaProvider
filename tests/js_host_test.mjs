@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { createRequire } from 'node:module';
 import path from 'node:path';
+import { createSecretSource, destroySecretSource, handoffSecret } from '../examples/js-host/custody_handoff.mjs';
 
 const require = createRequire(import.meta.url);
 const createModule = require(path.resolve(process.argv[2]));
@@ -148,10 +149,12 @@ async function check(name, body) {
 // The cumulative offsets at which the fetch transport cut the stream.
 const boundaries = (chunks) => chunks.reduce((all, size) => [...all, (all.at(-1) ?? 0) + size], []).slice(0, -1);
 
+let custodyAvailable = false;
 await check('build', async () => {
   const report = await run('build');
   assert.equal(report.threads, 0);
   assert.equal(report.size_t, 4);
+  custodyAvailable = Boolean(report.custody);
 });
 
 await check('buffered chat', async () => {
@@ -319,6 +322,103 @@ await check('executor: order, timers, cancellation, batches', async () => {
   assert.equal(report.host_pumped, true);
   assert.equal(report.batch_ran, 1000);
 });
+
+if (custodyAvailable) {
+  await check('custody handoff: 32-byte secret round trip, Uint8Array and HEAPU8 transfer region zeroed', async () => {
+    const source = createSecretSource(mod);
+    try {
+      const secret = new Uint8Array(32);
+      for (let i = 0; i < secret.length; ++i) secret[i] = (0x21 + i * 5) & 0xff;
+      // Key id passed as raw bytes (including an embedded NUL byte).
+      const keyId = new Uint8Array([0x6b, 0x00, 0x31]);
+      const handoff = await handoffSecret(mod, source, keyId, secret);
+      assert.equal(handoff.ok, true, JSON.stringify(handoff));
+      assert.ok(handoff.transferOffset > 0);
+      assert.equal(handoff.transferLength, 32);
+      assert.equal(secret.every((b) => b === 0), true, 'caller Uint8Array is zeroed after handoff');
+      const transferRegion = mod.HEAPU8.subarray(handoff.transferOffset, handoff.transferOffset + handoff.transferLength);
+      assert.equal(transferRegion.every((b) => b === 0), true, 'HEAPU8 transfer region is zeroed after handoff');
+
+      const roundtripJson = mod.ccall(
+        'sp_test_custody_roundtrip',
+        'string',
+        ['number', 'string', 'string', 'string'],
+        [source, 'wasm-owner', 'wasm-context', 'hello from wasm custody']
+      );
+      const roundtrip = JSON.parse(roundtripJson);
+      assert.equal(roundtrip.ok, true, roundtripJson);
+      assert.equal(roundtrip.text, 'hello from wasm custody');
+      assert.match(roundtrip.reference, /^spna4:[0-9a-f]{64}$/);
+    } finally {
+      destroySecretSource(mod, source);
+    }
+  });
+
+  await check('custody handoff: 31-byte secret refused with archive.custody.key_invalid', async () => {
+    const source = createSecretSource(mod);
+    try {
+      const shortSecret = new Uint8Array(31).fill(0x7b);
+      const handoff = await handoffSecret(mod, source, 'short-key', shortSecret);
+      assert.equal(handoff.ok, false, JSON.stringify(handoff));
+      assert.equal(handoff.reason, 'archive.custody.key_invalid');
+      assert.equal(shortSecret.every((b) => b === 0), true, 'rejected Uint8Array is still zeroed');
+
+      const roundtripJson = mod.ccall(
+        'sp_test_custody_roundtrip',
+        'string',
+        ['number', 'string', 'string', 'string'],
+        [source, 'wasm-owner', 'wasm-context', 'must not seal']
+      );
+      const roundtrip = JSON.parse(roundtripJson);
+      assert.equal(roundtrip.ok, false, roundtripJson);
+      assert.equal(roundtrip.reason, 'archive.custody.key_invalid');
+    } finally {
+      destroySecretSource(mod, source);
+    }
+  });
+
+  await check('custody handoff: secret handed off before a memory growth between await and copy lands intact', async () => {
+    const source = createSecretSource(mod);
+    try {
+      const secret = new Uint8Array(32);
+      for (let i = 0; i < secret.length; ++i) secret[i] = (0xa0 + i * 3) & 0xff;
+      const bufferBefore = mod.HEAPU8.buffer;
+      const lengthBefore = mod.HEAPU8.byteLength;
+      const handoff = await handoffSecret(
+        mod,
+        source,
+        'growth-key',
+        async () => {
+          await sleep(5);
+          return secret;
+        },
+        {
+          beforeCopy: () => {
+            mod.ccall('sp_test_force_memory_growth', 'number', ['number'], [32 * 1024 * 1024]);
+          },
+        }
+      );
+      assert.notEqual(mod.HEAPU8.buffer, bufferBefore, 'WebAssembly memory buffer replaced by growth');
+      assert.ok(mod.HEAPU8.byteLength > lengthBefore, 'WebAssembly memory grew');
+      assert.equal(handoff.ok, true, JSON.stringify(handoff));
+      assert.equal(secret.every((b) => b === 0), true, 'caller Uint8Array is zeroed');
+      const transferRegion = mod.HEAPU8.subarray(handoff.transferOffset, handoff.transferOffset + handoff.transferLength);
+      assert.equal(transferRegion.every((b) => b === 0), true, 'HEAPU8 transfer region is zeroed');
+
+      const roundtripJson = mod.ccall(
+        'sp_test_custody_roundtrip',
+        'string',
+        ['number', 'string', 'string', 'string'],
+        [source, 'wasm-owner-growth', 'wasm-context-growth', 'survived memory growth']
+      );
+      const roundtrip = JSON.parse(roundtripJson);
+      assert.equal(roundtrip.ok, true, roundtripJson);
+      assert.equal(roundtrip.text, 'survived memory growth');
+    } finally {
+      destroySecretSource(mod, source);
+    }
+  });
+}
 
 // The example, which wires the seam in a few lines, against the same server (the module path is the optional second argument).
 if (process.argv[3]) {

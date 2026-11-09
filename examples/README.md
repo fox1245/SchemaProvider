@@ -92,6 +92,8 @@ OPENROUTER_API_KEY=... node examples/js-host/run.mjs build-wasm/sp_js_host_examp
 
 Without `stream` the call is buffered. A fifth argument replaces the preset's base URL (a local peer, for one). The key comes from the environment and is never printed; in a browser it would be visible to the page's user, so keep it on a server you control.
 
+`examples/js-host/custody_handoff.mjs` is the companion helper for host-backed archive custody (`-DSP_WITH_SODIUM=ON`). It transfers a 32..64-byte `Uint8Array` secret into a `sp::PreResolvedSecretSource` via `sp_custody_secret_alloc` and `sp_custody_secret_commit`, indexing `Module.HEAPU8` after any `await` (so a `WebAssembly.Memory.grow` cannot leave a stale view) and zeroing both the `Uint8Array` and the transfer region of `HEAPU8` in `finally`. Keys must never be JavaScript strings; after a WebAssembly trap the host must discard the module instance and its memory because C++ destructors and memory wipes did not run; in a browser, run the custody-holding WebAssembly module inside a dedicated Web Worker so main-thread scripts do not share its linear memory.
+
 ## Other C++ agent frameworks
 
 [`RunEdgeAI/agents.cpp`](https://github.com/RunEdgeAI/agents.cpp) documents hosted-provider integrations, tools and workflow patterns. [`mozilla-ai/agent.cpp`](https://github.com/mozilla-ai/agent.cpp) documents local agents tightly coupled to llama.cpp and explicitly says it is not intended for external LLM APIs. These are primary-source discoveries, not built SchemaProvider integrations or performance comparisons. SchemaProvider is a protocol client; it does not require an agent framework at all.

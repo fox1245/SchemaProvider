@@ -10,6 +10,14 @@
 //
 // Bytes cross the boundary as the response arrives, cut wherever the network cut them. SSE and UTF-8 framing is the
 // runtime's (transport::SseFramer), not JavaScript's.
+//
+// Host archive custody secrets cross into WebAssembly through `sp::PreResolvedSecretSource` and the exported
+// `sp_custody_secret_*` C functions declared in `<core/native_archive_custody.h>` (with the JavaScript handoff helper
+// in `examples/js-host/custody_handoff.mjs`). Keys must never be JavaScript strings: pass secret bytes only as a
+// `Uint8Array`, resolve any `await` before indexing `HEAPU8`, copy into the `sodium_malloc` block returned by
+// `sp_custody_secret_alloc`, commit under `(key_id, key_id_len)`, and zero both the `Uint8Array` and transfer bytes
+// in `finally`. After a WebAssembly trap (`WebAssembly.RuntimeError`), C++ destructors and wipes did not run, so the
+// host must discard the module instance and its linear memory.
 #include "runtime/host.h"
 
 #include <memory>

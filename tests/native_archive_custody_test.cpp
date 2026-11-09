@@ -21,13 +21,17 @@
 #include "json/json.h"
 #include "sp/config_defaults.h"
 
+#include <sodium.h>
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <iostream>
+#if SP_BUILD_THREADS
 #include <latch>
+#endif
 #include <map>
 #include <memory>
 #include <mutex>
@@ -36,7 +40,9 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#if SP_BUILD_THREADS
 #include <thread>
+#endif
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -616,6 +622,7 @@ void test_one_scope_two_stores_same_key_id() {
   }
 }
 
+#if SP_BUILD_THREADS
 void test_concurrent_operation_scopes() {
   auto secrets = std::make_shared<FixedSecretSource>("k-shared-1");
   secrets->set_secret("k-shared-1", std::string(32, '\x11'));
@@ -746,6 +753,7 @@ void test_concurrent_operation_scopes() {
   CHECK(secrets->load_count("k-only-a") == 2);
   CHECK(secrets->load_count("k-only-b") == 2);
 }
+#endif
 
 struct ObserverStats {
   std::size_t releases = 0;
@@ -1063,6 +1071,16 @@ void test_existing_archive_portability_unchanged() {
   CHECK(resolved.archive.max_messages == valid_desc.policy()->resources().request_messages);
   CHECK(resolved.archive.max_parts == valid_desc.policy()->resources().request_parts);
   CHECK(resolved.archive.max_json_depth == valid_desc.policy()->resources().native_depth);
+
+  if (!archive_fs::available()) {
+    auto unsupported_prov = NativeArchive::provision("records", "activation", "synthetic-owner", valid_desc);
+    CHECK(std::holds_alternative<Error>(unsupported_prov));
+    CHECK(std::get<Error>(unsupported_prov).kind == ErrorKind::Unsupported);
+    auto unsupported_open = NativeArchive::open("records", "activation", "synthetic-owner", valid_desc);
+    CHECK(std::holds_alternative<Error>(unsupported_open));
+    CHECK(std::get<Error>(unsupported_open).kind == ErrorKind::Unsupported);
+    return;
+  }
 
   namespace fs = std::filesystem;
   const fs::path parent = fs::canonical(fs::temp_directory_path());
@@ -3908,6 +3926,200 @@ void test_open_custody_matches_descriptor() {
   CHECK(!archive->matches_descriptor(provider_test_descriptor("openai.responses")));
 }
 
+void test_randomness_entropy_and_header_uniqueness() {
+  custody_ops::reset_random_seam();
+  CHECK(sodium_init() >= 0);
+
+  std::array<unsigned char, 32> sp_draw_a{};
+  std::array<unsigned char, 32> sp_draw_b{};
+  std::array<unsigned char, 32> all_zeros{};
+  CHECK(crypto::random_bytes(sp_draw_a.data(), sp_draw_a.size()));
+  CHECK(crypto::random_bytes(sp_draw_b.data(), sp_draw_b.size()));
+  CHECK(sp_draw_a != all_zeros);
+  CHECK(sp_draw_b != all_zeros);
+  CHECK(sp_draw_a != sp_draw_b);
+
+  std::array<unsigned char, 32> sodium_draw_a{};
+  std::array<unsigned char, 32> sodium_draw_b{};
+  randombytes_buf(sodium_draw_a.data(), sodium_draw_a.size());
+  randombytes_buf(sodium_draw_b.data(), sodium_draw_b.size());
+  CHECK(sodium_draw_a != all_zeros);
+  CHECK(sodium_draw_b != all_zeros);
+  CHECK(sodium_draw_a != sodium_draw_b);
+
+  auto secrets = std::make_shared<FixedSecretSource>("k-rng");
+  secrets->set_secret("k-rng", std::string(32, '\x42'));
+  auto key_source = make_hkdf_key_source(secrets);
+  const auto desc = default_test_descriptor();
+
+  auto h1_res = create_header(*key_source, "owner-entropy", desc);
+  auto h2_res = create_header(*key_source, "owner-entropy", desc);
+  CHECK(std::holds_alternative<std::string>(h1_res));
+  CHECK(std::holds_alternative<std::string>(h2_res));
+  const std::string& h1_bytes = std::get<std::string>(h1_res);
+  const std::string& h2_bytes = std::get<std::string>(h2_res);
+  CHECK(h1_bytes != h2_bytes);
+
+  auto parsed_h1_res = parse_header(h1_bytes);
+  auto parsed_h2_res = parse_header(h2_bytes);
+  CHECK(std::holds_alternative<StoreHeader>(parsed_h1_res));
+  CHECK(std::holds_alternative<StoreHeader>(parsed_h2_res));
+  const StoreHeader& parsed_h1 = std::get<StoreHeader>(parsed_h1_res);
+  const StoreHeader& parsed_h2 = std::get<StoreHeader>(parsed_h2_res);
+  CHECK(parsed_h1.store_id != all_zeros);
+  CHECK(parsed_h2.store_id != all_zeros);
+  CHECK(parsed_h1.store_id != parsed_h2.store_id);
+  CHECK(parsed_h1.epochs.size() == 1);
+  CHECK(parsed_h2.epochs.size() == 1);
+  CHECK(parsed_h1.epochs[0].wrapped_dek != parsed_h2.epochs[0].wrapped_dek);
+
+  auto reqs_1_res = unwrap_requests(h1_bytes, "owner-entropy", desc);
+  auto reqs_2_res = unwrap_requests(h2_bytes, "owner-entropy", desc);
+  CHECK(std::holds_alternative<std::vector<UnwrapRequest>>(reqs_1_res));
+  CHECK(std::holds_alternative<std::vector<UnwrapRequest>>(reqs_2_res));
+  const auto& reqs_1 = std::get<std::vector<UnwrapRequest>>(reqs_1_res);
+  const auto& reqs_2 = std::get<std::vector<UnwrapRequest>>(reqs_2_res);
+  CHECK(reqs_1.size() == 1 && reqs_2.size() == 1);
+
+  DataKeyBuffer dek_1;
+  DataKeyBuffer dek_2;
+  CHECK(!key_source->unwrap_dek(reqs_1[0].key_id, reqs_1[0].epoch_aad, reqs_1[0].wrapped_dek, dek_1));
+  CHECK(!key_source->unwrap_dek(reqs_2[0].key_id, reqs_2[0].epoch_aad, reqs_2[0].wrapped_dek, dek_2));
+  CHECK(std::memcmp(dek_1.data(), all_zeros.data(), 32) != 0);
+  CHECK(std::memcmp(dek_2.data(), all_zeros.data(), 32) != 0);
+  CHECK(std::memcmp(dek_1.data(), dek_2.data(), 32) != 0);
+}
+
+void test_pre_resolved_secret_source() {
+  custody_ops::fail_key_alloc_on_call(0);
+  const auto baseline_allocs = custody_ops::live_key_allocation_sizes();
+
+  {
+    PreResolvedSecretSource source;
+    CHECK(source.empty());
+    CHECK(source.size() == 0);
+    auto empty_active = source.active_key_id();
+    CHECK(std::holds_alternative<CustodyFault>(empty_active));
+    CHECK(std::get<CustodyFault>(empty_active) == CustodyFault::InvalidKeyMaterial);
+
+    source.set_active_key_id("k1");
+    auto active_k1 = source.active_key_id();
+    CHECK(std::holds_alternative<std::string>(active_k1));
+    CHECK(std::get<std::string>(active_k1) == "k1");
+
+    const std::string secret_32(32, '\x21');
+    const std::string secret_48(48, '\x43');
+    const std::string secret_64(64, '\x65');
+    const std::string binary_key_id("k\0bin", 5);
+
+    // Invalid lengths and invalid key_ids are refused with InvalidKeyMaterial and allocate nothing.
+    CHECK(source.put("k1", std::string_view{}) == CustodyFault::InvalidKeyMaterial);
+    CHECK(source.put("k1", std::string(31, '\x11')) == CustodyFault::InvalidKeyMaterial);
+    CHECK(source.put("k1", std::string(65, '\x11')) == CustodyFault::InvalidKeyMaterial);
+    CHECK(source.put("k1", nullptr, 32) == CustodyFault::InvalidKeyMaterial);
+    CHECK(source.put("", secret_32) == CustodyFault::InvalidKeyMaterial);
+    CHECK(custody_ops::live_key_allocation_sizes() == baseline_allocs);
+
+    // Valid 32..64 byte secrets allocate sodium_malloc blocks of exact length.
+    CHECK(!source.put("k1", secret_32));
+    CHECK(!source.put(binary_key_id, secret_48));
+    CHECK(!source.put("k3", secret_64));
+    CHECK(source.size() == 3);
+    CHECK(custody_ops::live_key_allocation_sizes().size() == baseline_allocs.size() + 3);
+
+    // Failed sodium_malloc on put returns InvalidKeyMaterial without disturbing existing entries.
+    custody_ops::fail_key_alloc_on_call(1);
+    CHECK(source.put("k-fail", secret_32) == CustodyFault::InvalidKeyMaterial);
+    custody_ops::fail_key_alloc_on_call(0);
+    CHECK(source.size() == 3);
+
+    // Overwriting an existing key_id replaces and frees the old block.
+    const std::string secret_32_replaced(40, '\x77');
+    CHECK(!source.put("k1", secret_32_replaced));
+    CHECK(source.size() == 3);
+    CHECK(custody_ops::live_key_allocation_sizes().size() == baseline_allocs.size() + 3);
+
+    SecretBuffer out;
+    std::size_t written = 0;
+    CHECK(!source.load_secret("k1", out, &written));
+    CHECK(written == 40);
+    CHECK(std::memcmp(out.data(), secret_32_replaced.data(), 40) == 0);
+
+    CHECK(!source.load_secret(binary_key_id, out, &written));
+    CHECK(written == 48);
+    CHECK(std::memcmp(out.data(), secret_48.data(), 48) == 0);
+
+    CHECK(!source.load_secret("k3", out, &written));
+    CHECK(written == 64);
+    CHECK(std::memcmp(out.data(), secret_64.data(), 64) == 0);
+
+    // Missing key_id wipes out and returns KeyNotFound.
+    CHECK(source.load_secret("absent", out, &written) == CustodyFault::KeyNotFound);
+    CHECK(written == 0);
+    std::array<unsigned char, 64> zero64{};
+    CHECK(std::memcmp(out.data(), zero64.data(), 64) == 0);
+
+    // Removing a key wipes and frees its block (counted against the live blocks just before, which include `out`).
+    const std::size_t live_before_remove = custody_ops::live_key_allocation_sizes().size();
+    CHECK(source.remove("k3"));
+    CHECK(!source.remove("k3"));
+    CHECK(source.size() == 2);
+    CHECK(custody_ops::live_key_allocation_sizes().size() == live_before_remove - 1);
+    CHECK(source.load_secret("k3", out, &written) == CustodyFault::KeyNotFound);
+
+    // Move construction transfers blocks without copying; destruction of the final owner frees all.
+    PreResolvedSecretSource moved(std::move(source));
+    CHECK(source.empty());
+    CHECK(moved.size() == 2);
+    CHECK(std::get<std::string>(moved.active_key_id()) == "k1");
+
+    const auto desc = default_test_descriptor();
+    auto key_source = make_hkdf_key_source(std::move(moved));
+    auto h1_res = create_header(*key_source, "owner-pre-resolved", desc);
+    CHECK(std::holds_alternative<std::string>(h1_res));
+    auto h2_res =
+        rotate_header(std::get<std::string>(h1_res), *key_source, binary_key_id, "owner-pre-resolved", desc);
+    CHECK(std::holds_alternative<std::string>(h2_res));
+    auto archive = open_custody_checked(
+        std::get<std::string>(h2_res), *key_source, "owner-pre-resolved", desc);
+    const std::vector<Message> messages = {make_user_message("pre-resolved secret roundtrip")};
+    const SealedRecord sealed = seal_checked(*archive, messages, "ctx-pre");
+    const auto opened = open_checked(*archive, sealed.reference, sealed.bytes, "ctx-pre");
+    CHECK(opened.size() == 1 && opened[0].id == messages[0].id &&
+          opened[0].role == messages[0].role && opened[0].parts.size() == messages[0].parts.size());
+    check_same_part(messages[0].parts[0], opened[0].parts[0]);
+  }
+  CHECK(custody_ops::live_key_allocation_sizes() == baseline_allocs);
+
+  // C handoff functions allocate, commit under a binary key_id, wipe and free the transfer block, and refuse invalid sizes.
+  sp::PreResolvedSecretSource* c_source = sp_custody_secret_source_create();
+  CHECK(c_source != nullptr);
+  CHECK(sp_custody_secret_alloc(0) == nullptr);
+  CHECK(sp_custody_secret_alloc(31) == nullptr);
+  CHECK(sp_custody_secret_alloc(65) == nullptr);
+  CHECK(std::string_view(sp_custody_fault_reason(static_cast<int>(CustodyFault::InvalidKeyMaterial))) ==
+        "archive.custody.key_invalid");
+
+  unsigned char* transfer = sp_custody_secret_alloc(32);
+  CHECK(transfer != nullptr);
+  std::memset(transfer, 0x5c, 32);
+  const unsigned char raw_kid[] = {'k', '\0', 'c'};
+  CHECK(sp_custody_secret_commit(c_source, raw_kid, sizeof(raw_kid), transfer, 32) == 0);
+  CHECK(custody_ops::live_key_allocation_sizes().size() == baseline_allocs.size() + 1);
+
+  SecretBuffer loaded;
+  std::size_t loaded_len = 0;
+  CHECK(!c_source->load_secret(std::string_view(reinterpret_cast<const char*>(raw_kid), sizeof(raw_kid)),
+                               loaded,
+                               &loaded_len));
+  CHECK(loaded_len == 32);
+  CHECK(std::memcmp(loaded.data(), std::string(32, '\x5c').data(), 32) == 0);
+  loaded.release();
+
+  sp_custody_secret_source_destroy(c_source);
+  CHECK(custody_ops::live_key_allocation_sizes() == baseline_allocs);
+}
+
 }  // namespace
 
 int main() {
@@ -3920,7 +4132,9 @@ int main() {
     test_random_source_failure();
     test_operation_scope_call_counting();
     test_one_scope_two_stores_same_key_id();
+#if SP_BUILD_THREADS
     test_concurrent_operation_scopes();
+#endif
     test_wiping_buffer();
     test_error_mapping();
     test_derive_kek_and_fixed_nonce_wrap_vectors();
@@ -3946,6 +4160,8 @@ int main() {
     test_caller_invalid_input_faults();
     test_record_plaintext_exact_limit_edge();
     test_open_custody_matches_descriptor();
+    test_randomness_entropy_and_header_uniqueness();
+    test_pre_resolved_secret_source();
     std::cout << "native archive custody tests passed\n";
     return 0;
   } catch (const std::exception& e) {

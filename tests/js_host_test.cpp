@@ -4,6 +4,8 @@
 //
 // Usage: node tests/js_host_test.mjs <sp_js_host_tests.js>
 #include "codecs/chat.h"
+#include "core/native_archive.h"
+#include "core/native_archive_custody.h"
 #include "descriptor/descriptor.h"
 #include "json/json.h"
 #include "runtime/client.h"
@@ -406,12 +408,105 @@ void chat_scenario(const std::string& name, const std::string& base_url) {
 }  // namespace
 
 extern "C" {
+EMSCRIPTEN_KEEPALIVE int sp_test_force_memory_growth(int bytes) {
+  static std::vector<std::vector<unsigned char>> retained;
+  if (bytes > 0) {
+    retained.emplace_back(static_cast<std::size_t>(bytes), 0xaa);
+  }
+  return static_cast<int>(retained.size());
+}
+
+EMSCRIPTEN_KEEPALIVE const char* sp_test_custody_roundtrip(
+    sp::PreResolvedSecretSource* source,
+    const char* owner_scope,
+    const char* context_binding,
+    const char* message_text) {
+  static std::string last_json;
+  try {
+    if (source == nullptr) {
+      last_json = Object().flag("ok", false).text("reason", "archive.custody.key_invalid").str();
+      return last_json.c_str();
+    }
+    auto shared_source =
+        std::shared_ptr<SecretSource>(source, [](SecretSource*) noexcept {});
+    auto key_source = make_hkdf_key_source(std::move(shared_source));
+    const auto desc = descriptor_for("https://api.openai.com");
+
+    auto header_res = create_header(*key_source, owner_scope, desc);
+    if (const auto* err = std::get_if<CustodyError>(&header_res)) {
+      last_json = Object()
+                      .flag("ok", false)
+                      .text("kind", kind_name(err->error.kind))
+                      .text("reason", err->error.reason)
+                      .str();
+      return last_json.c_str();
+    }
+    const std::string& header_bytes = std::get<std::string>(header_res);
+
+    auto custody_res =
+        NativeArchive::open_custody(header_bytes, *key_source, owner_scope, desc);
+    if (const auto* err = std::get_if<CustodyError>(&custody_res)) {
+      last_json = Object()
+                      .flag("ok", false)
+                      .text("kind", kind_name(err->error.kind))
+                      .text("reason", err->error.reason)
+                      .str();
+      return last_json.c_str();
+    }
+    auto archive = std::get<std::shared_ptr<NativeArchive>>(std::move(custody_res));
+
+    std::vector<Message> messages = {
+        Message::user_text(message_text ? message_text : "", "msg-wasm")};
+    auto sealed_res = archive->seal(messages, context_binding);
+    if (const auto* err = std::get_if<CustodyError>(&sealed_res)) {
+      last_json = Object()
+                      .flag("ok", false)
+                      .text("kind", kind_name(err->error.kind))
+                      .text("reason", err->error.reason)
+                      .str();
+      return last_json.c_str();
+    }
+    const SealedRecord& sealed = std::get<SealedRecord>(sealed_res);
+
+    auto opened_res = archive->open(sealed.reference, sealed.bytes, context_binding);
+    if (const auto* err = std::get_if<CustodyError>(&opened_res)) {
+      last_json = Object()
+                      .flag("ok", false)
+                      .text("kind", kind_name(err->error.kind))
+                      .text("reason", err->error.reason)
+                      .str();
+      return last_json.c_str();
+    }
+    const auto& opened = std::get<std::vector<Message>>(opened_res);
+    const std::string restored_text = !opened.empty() ? opened[0].joined_text() : "";
+    last_json = Object()
+                    .flag("ok", true)
+                    .text("text", restored_text)
+                    .text("reference", sealed.reference)
+                    .number("header_bytes", static_cast<long long>(header_bytes.size()))
+                    .number("record_bytes", static_cast<long long>(sealed.bytes.size()))
+                    .str();
+    return last_json.c_str();
+  } catch (const std::exception& error) {
+    last_json = Object().flag("ok", false).text("error", error.what()).str();
+    return last_json.c_str();
+  }
+}
+
 EMSCRIPTEN_KEEPALIVE void sp_test_run(const char* name, const char* base_url) {
   try {
     const std::string scenario = name;
     if (scenario == "build") {
+      unsigned char* probe = custody_detail::sodium_key_alloc(32);
+      const bool custody_available = (probe != nullptr);
+      if (probe != nullptr) {
+        custody_detail::sodium_key_free(probe, 32);
+      }
       Object out;
-      out.text("scenario", "build").number("threads", SP_BUILD_THREADS).number("size_t", static_cast<long long>(sizeof(std::size_t)));
+      out.text("scenario", "build")
+          .number("threads", SP_BUILD_THREADS)
+          .number("size_t", static_cast<long long>(sizeof(std::size_t)))
+          .flag("custody", custody_available);
       sp_test_report("build", out.str().c_str());
     } else if (scenario == "chat_destroy_now") {
       // A Client destroyed with a call in flight returns at once, and the call ends Cancelled when the loop turns.

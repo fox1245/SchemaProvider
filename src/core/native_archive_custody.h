@@ -220,6 +220,55 @@ class SecretSource {
                                                   std::size_t* written_size) = 0;
 };
 
+// Pre-resolved SecretSource that a host populates before calling header functions or
+// NativeArchive::open_custody. Each secret (32..64 bytes) is copied into its own
+// sodium_malloc block and wiped on overwrite, removal, clear, or destruction.
+//
+// Keys must never be represented as JavaScript strings. After a WebAssembly trap
+// (WebAssembly.RuntimeError), C++ destructors and memory wipes did not run, so the host
+// must discard the WebAssembly module instance and its linear memory.
+class PreResolvedSecretSource final : public SecretSource {
+ public:
+  PreResolvedSecretSource() noexcept = default;
+  explicit PreResolvedSecretSource(std::string_view active_key_id);
+  PreResolvedSecretSource(const PreResolvedSecretSource&) = delete;
+  PreResolvedSecretSource& operator=(const PreResolvedSecretSource&) = delete;
+  PreResolvedSecretSource(PreResolvedSecretSource&& other) noexcept;
+  PreResolvedSecretSource& operator=(PreResolvedSecretSource&& other) noexcept;
+  ~PreResolvedSecretSource() noexcept override;
+
+  void set_active_key_id(std::string_view key_id);
+  CustodyResult<std::string> active_key_id() override;
+
+  std::optional<CustodyFault> put(std::string_view key_id,
+                                  const void* data,
+                                  std::size_t size);
+  std::optional<CustodyFault> put(std::string_view key_id,
+                                  std::string_view bytes) {
+    return put(key_id, bytes.data(), bytes.size());
+  }
+
+  bool remove(std::string_view key_id) noexcept;
+  bool erase(std::string_view key_id) noexcept { return remove(key_id); }
+  void clear() noexcept;
+  [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }
+  [[nodiscard]] bool empty() const noexcept { return entries_.empty(); }
+
+  std::optional<CustodyFault> load_secret(std::string_view key_id,
+                                          SecretBuffer& out,
+                                          std::size_t* written_size) override;
+
+ private:
+  struct Entry {
+    std::string key_id;
+    unsigned char* data = nullptr;
+    std::size_t size = 0;
+  };
+
+  std::string active_key_id_;
+  std::vector<Entry> entries_;
+};
+
 class CustodyOperationScope;
 class KeySource;
 std::optional<CustodyFault> verify_wrapped_dek(KeySource& source,
@@ -283,6 +332,10 @@ class CustodyOperationScope final {
 };
 
 std::shared_ptr<KeySource> make_hkdf_key_source(std::shared_ptr<SecretSource> secret_source);
+inline std::shared_ptr<KeySource> make_hkdf_key_source(PreResolvedSecretSource&& secret_source) {
+  return make_hkdf_key_source(
+      std::make_shared<PreResolvedSecretSource>(std::move(secret_source)));
+}
 
 struct EpochKeyEntry {
   std::uint64_t epoch = 0;
@@ -373,3 +426,27 @@ CustodyOutcome<std::vector<UnwrapRequest>> unwrap_requests(
     HostCustodyLimits limits = {});
 
 }  // namespace sp
+
+extern "C" {
+
+// WebAssembly / C host handoff for sp::PreResolvedSecretSource.
+// Keys must never be JavaScript strings; pass secret material only as raw bytes (Uint8Array)
+// into the sodium_malloc block returned by sp_custody_secret_alloc.
+// Key identifiers cross the boundary as (key_id, key_id_len) byte spans, never NUL-terminated strings.
+// After a WebAssembly trap (WebAssembly.RuntimeError), C++ destructors and memory wipes did
+// not run, so the host must discard the WebAssembly module instance and its linear memory.
+sp::PreResolvedSecretSource* sp_custody_secret_source_create() noexcept;
+void sp_custody_secret_source_destroy(sp::PreResolvedSecretSource* source) noexcept;
+int sp_custody_secret_source_set_active_key_id(sp::PreResolvedSecretSource* source,
+                                               const unsigned char* key_id,
+                                               std::size_t key_id_len) noexcept;
+unsigned char* sp_custody_secret_alloc(std::size_t secret_len) noexcept;
+void sp_custody_secret_free(unsigned char* secret_ptr, std::size_t secret_len) noexcept;
+int sp_custody_secret_commit(sp::PreResolvedSecretSource* source,
+                             const unsigned char* key_id,
+                             std::size_t key_id_len,
+                             unsigned char* secret_ptr,
+                             std::size_t secret_len) noexcept;
+const char* sp_custody_fault_reason(int fault) noexcept;
+
+}  // extern "C"

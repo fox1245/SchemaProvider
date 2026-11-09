@@ -1,6 +1,14 @@
 #include "core/native_archive_custody.h"
+#include "core/native_archive_custody_format.h"
 #include "core/native_archive_custody_internal.h"
 #include "crypto/crypto.h"
+
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#define SP_CUSTODY_EXPORT EMSCRIPTEN_KEEPALIVE
+#else
+#define SP_CUSTODY_EXPORT
+#endif
 
 #include <algorithm>
 #include <cstring>
@@ -316,6 +324,84 @@ std::string_view CleansedBuffer::view() const noexcept {
   return {reinterpret_cast<const char*>(data_), size_};
 }
 
+PreResolvedSecretSource::PreResolvedSecretSource(std::string_view active_key_id)
+    : active_key_id_(active_key_id) {}
+
+PreResolvedSecretSource::PreResolvedSecretSource(PreResolvedSecretSource&& other) noexcept
+    : active_key_id_(std::move(other.active_key_id_)),
+      entries_(std::move(other.entries_)) {
+  other.active_key_id_.clear();
+  other.entries_.clear();
+}
+
+PreResolvedSecretSource& PreResolvedSecretSource::operator=(
+    PreResolvedSecretSource&& other) noexcept {
+  if (this != &other) {
+    clear();
+    active_key_id_ = std::move(other.active_key_id_);
+    entries_ = std::move(other.entries_);
+    other.active_key_id_.clear();
+    other.entries_.clear();
+  }
+  return *this;
+}
+
+PreResolvedSecretSource::~PreResolvedSecretSource() noexcept {
+  clear();
+}
+
+void PreResolvedSecretSource::set_active_key_id(std::string_view key_id) {
+  active_key_id_.assign(key_id.data(), key_id.size());
+}
+
+CustodyResult<std::string> PreResolvedSecretSource::active_key_id() {
+  if (active_key_id_.empty()) {
+    return CustodyFault::InvalidKeyMaterial;
+  }
+  return active_key_id_;
+}
+
+std::optional<CustodyFault> PreResolvedSecretSource::put(std::string_view /*key_id*/,
+                                                         const void* /*data*/,
+                                                         std::size_t /*size*/) {
+  return CustodyFault::InvalidKeyMaterial;
+}
+
+bool PreResolvedSecretSource::remove(std::string_view key_id) noexcept {
+  for (auto it = entries_.begin(); it != entries_.end(); ++it) {
+    if (it->key_id == key_id) {
+      custody_detail::sodium_key_free(it->data, it->size);
+      entries_.erase(it);
+      return true;
+    }
+  }
+  return false;
+}
+
+void PreResolvedSecretSource::clear() noexcept {
+  for (auto& entry : entries_) {
+    if (entry.data != nullptr) {
+      custody_detail::sodium_key_free(entry.data, entry.size);
+      entry.data = nullptr;
+      entry.size = 0;
+    }
+  }
+  entries_.clear();
+}
+
+std::optional<CustodyFault> PreResolvedSecretSource::load_secret(std::string_view key_id,
+                                                                 SecretBuffer& out,
+                                                                 std::size_t* written_size) {
+  if (written_size != nullptr) {
+    *written_size = 0;
+  }
+  out.wipe();
+  if (key_id.empty()) {
+    return CustodyFault::InvalidKeyMaterial;
+  }
+  return CustodyFault::KeyNotFound;
+}
+
 std::shared_ptr<KeySource> make_hkdf_key_source(std::shared_ptr<SecretSource> /*secret_source*/) {
   return std::make_shared<UnavailableHkdfKeySource>();
 }
@@ -481,3 +567,85 @@ CustodyOutcome<CleansedBuffer> aead_xchacha20poly1305_decrypt(
 
 }  // namespace custody_ops
 }  // namespace sp
+
+extern "C" {
+
+SP_CUSTODY_EXPORT sp::PreResolvedSecretSource* sp_custody_secret_source_create() noexcept {
+  return new (std::nothrow) sp::PreResolvedSecretSource();
+}
+
+SP_CUSTODY_EXPORT void sp_custody_secret_source_destroy(
+    sp::PreResolvedSecretSource* source) noexcept {
+  delete source;
+}
+
+SP_CUSTODY_EXPORT int sp_custody_secret_source_set_active_key_id(
+    sp::PreResolvedSecretSource* source,
+    const unsigned char* key_id,
+    std::size_t key_id_len) noexcept {
+  if (source == nullptr || key_id == nullptr || key_id_len == 0) {
+    return static_cast<int>(sp::CustodyFault::InvalidKeyMaterial);
+  }
+  try {
+    source->set_active_key_id(
+        std::string_view(reinterpret_cast<const char*>(key_id), key_id_len));
+    return 0;
+  } catch (...) {
+    return static_cast<int>(sp::CustodyFault::InvalidKeyMaterial);
+  }
+}
+
+SP_CUSTODY_EXPORT unsigned char* sp_custody_secret_alloc(std::size_t /*secret_len*/) noexcept {
+  return nullptr;
+}
+
+SP_CUSTODY_EXPORT void sp_custody_secret_free(unsigned char* /*secret_ptr*/,
+                                              std::size_t /*secret_len*/) noexcept {
+  // This build hands out no blocks (sp_custody_secret_alloc returns null), so there is nothing to free, and an
+  // address the module did not hand out is never written.
+}
+
+SP_CUSTODY_EXPORT int sp_custody_secret_commit(sp::PreResolvedSecretSource* /*source*/,
+                                               const unsigned char* /*key_id*/,
+                                               std::size_t /*key_id_len*/,
+                                               unsigned char* secret_ptr,
+                                               std::size_t secret_len) noexcept {
+  if (secret_ptr != nullptr && secret_len > 0 && secret_len <= sp::SecretBuffer::kSize) {
+    sp::custody_detail::sodium_key_wipe(secret_ptr, secret_len);
+  }
+  return static_cast<int>(sp::CustodyFault::InvalidKeyMaterial);
+}
+
+SP_CUSTODY_EXPORT int sp_custody_fault_code_invalid_key_material() noexcept {
+  return static_cast<int>(sp::CustodyFault::InvalidKeyMaterial);
+}
+
+SP_CUSTODY_EXPORT const char* sp_custody_fault_reason(int fault) noexcept {
+  switch (static_cast<sp::CustodyFault>(fault)) {
+    case sp::CustodyFault::Tampered:
+      return "archive.custody.tampered";
+    case sp::CustodyFault::Unauthorized:
+      return "archive.custody.unauthorized";
+    case sp::CustodyFault::KeyNotFound:
+      return "archive.custody.key_not_found";
+    case sp::CustodyFault::InvalidKeyMaterial:
+      return "archive.custody.key_invalid";
+    case sp::CustodyFault::KeyInUse:
+      return "archive.custody.key_in_use";
+    case sp::CustodyFault::CorruptHeader:
+      return "archive.custody.corrupt_header";
+    case sp::CustodyFault::CorruptRecord:
+      return "archive.custody.corrupt_record";
+    case sp::CustodyFault::InvalidInput:
+      return "archive.custody.invalid_input";
+    case sp::CustodyFault::EpochLimit:
+      return "archive.custody.epoch_limit";
+    case sp::CustodyFault::SourceUnavailable:
+      return "archive.custody.source_unavailable";
+    case sp::CustodyFault::SourceRateLimited:
+      return "archive.custody.source_rate_limited";
+  }
+  return "archive.custody.key_invalid";
+}
+
+}  // extern "C"

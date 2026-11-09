@@ -3,6 +3,13 @@
 #include "core/native_archive_custody_internal.h"
 #include "crypto/crypto.h"
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#define SP_CUSTODY_EXPORT EMSCRIPTEN_KEEPALIVE
+#else
+#define SP_CUSTODY_EXPORT
+#endif
+
 #include <sodium.h>
 
 #include <algorithm>
@@ -659,6 +666,113 @@ void CleansedBuffer::wipe() noexcept {
 
 std::string_view CleansedBuffer::view() const noexcept {
   return {reinterpret_cast<const char*>(data_), size_};
+}
+
+PreResolvedSecretSource::PreResolvedSecretSource(std::string_view active_key_id)
+    : active_key_id_(active_key_id) {}
+
+PreResolvedSecretSource::PreResolvedSecretSource(PreResolvedSecretSource&& other) noexcept
+    : active_key_id_(std::move(other.active_key_id_)),
+      entries_(std::move(other.entries_)) {
+  other.active_key_id_.clear();
+  other.entries_.clear();
+}
+
+PreResolvedSecretSource& PreResolvedSecretSource::operator=(
+    PreResolvedSecretSource&& other) noexcept {
+  if (this != &other) {
+    clear();
+    active_key_id_ = std::move(other.active_key_id_);
+    entries_ = std::move(other.entries_);
+    other.active_key_id_.clear();
+    other.entries_.clear();
+  }
+  return *this;
+}
+
+PreResolvedSecretSource::~PreResolvedSecretSource() noexcept {
+  clear();
+}
+
+void PreResolvedSecretSource::set_active_key_id(std::string_view key_id) {
+  active_key_id_.assign(key_id.data(), key_id.size());
+}
+
+CustodyResult<std::string> PreResolvedSecretSource::active_key_id() {
+  if (active_key_id_.empty()) {
+    return CustodyFault::InvalidKeyMaterial;
+  }
+  return active_key_id_;
+}
+
+std::optional<CustodyFault> PreResolvedSecretSource::put(std::string_view key_id,
+                                                         const void* data,
+                                                         std::size_t size) {
+  if (key_id.empty() || data == nullptr || size < SecretBuffer::kMinSecretSize ||
+      size > SecretBuffer::kSize) {
+    return CustodyFault::InvalidKeyMaterial;
+  }
+  unsigned char* block = custody_detail::sodium_key_alloc(size);
+  if (block == nullptr) {
+    return CustodyFault::InvalidKeyMaterial;
+  }
+  std::memcpy(block, data, size);
+  for (auto& entry : entries_) {
+    if (entry.key_id == key_id) {
+      custody_detail::sodium_key_free(entry.data, entry.size);
+      entry.data = block;
+      entry.size = size;
+      return std::nullopt;
+    }
+  }
+  try {
+    entries_.push_back(Entry{std::string(key_id), block, size});
+  } catch (...) {
+    custody_detail::sodium_key_free(block, size);
+    throw;
+  }
+  return std::nullopt;
+}
+
+bool PreResolvedSecretSource::remove(std::string_view key_id) noexcept {
+  for (auto it = entries_.begin(); it != entries_.end(); ++it) {
+    if (it->key_id == key_id) {
+      custody_detail::sodium_key_free(it->data, it->size);
+      entries_.erase(it);
+      return true;
+    }
+  }
+  return false;
+}
+
+void PreResolvedSecretSource::clear() noexcept {
+  for (auto& entry : entries_) {
+    if (entry.data != nullptr) {
+      custody_detail::sodium_key_free(entry.data, entry.size);
+      entry.data = nullptr;
+      entry.size = 0;
+    }
+  }
+  entries_.clear();
+}
+
+std::optional<CustodyFault> PreResolvedSecretSource::load_secret(std::string_view key_id,
+                                                                 SecretBuffer& out,
+                                                                 std::size_t* written_size) {
+  if (written_size != nullptr) {
+    *written_size = 0;
+  }
+  if (key_id.empty()) {
+    out.wipe();
+    return CustodyFault::InvalidKeyMaterial;
+  }
+  for (const auto& entry : entries_) {
+    if (entry.key_id == key_id) {
+      return out.assign_secret(entry.data, entry.size, written_size);
+    }
+  }
+  out.wipe();
+  return CustodyFault::KeyNotFound;
 }
 
 std::shared_ptr<KeySource> make_hkdf_key_source(std::shared_ptr<SecretSource> secret_source) {
@@ -1720,3 +1834,161 @@ CustodyOutcome<CleansedBuffer> aead_xchacha20poly1305_decrypt(
 
 }  // namespace custody_ops
 }  // namespace sp
+
+namespace {
+
+#if SP_BUILD_THREADS
+std::mutex g_handoff_mutex;
+#endif
+std::map<unsigned char*, std::size_t> g_handoff_blocks;
+
+bool register_handoff_block(unsigned char* ptr, std::size_t size) noexcept {
+  try {
+#if SP_BUILD_THREADS
+    std::lock_guard<std::mutex> lock(g_handoff_mutex);
+#endif
+    g_handoff_blocks[ptr] = size;
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+bool take_handoff_block(unsigned char* ptr, std::size_t* size_out) noexcept {
+#if SP_BUILD_THREADS
+  std::lock_guard<std::mutex> lock(g_handoff_mutex);
+#endif
+  const auto it = g_handoff_blocks.find(ptr);
+  if (it == g_handoff_blocks.end()) {
+    return false;
+  }
+  if (size_out != nullptr) {
+    *size_out = it->second;
+  }
+  g_handoff_blocks.erase(it);
+  return true;
+}
+
+}  // namespace
+
+extern "C" {
+
+SP_CUSTODY_EXPORT sp::PreResolvedSecretSource* sp_custody_secret_source_create() noexcept {
+  return new (std::nothrow) sp::PreResolvedSecretSource();
+}
+
+SP_CUSTODY_EXPORT void sp_custody_secret_source_destroy(
+    sp::PreResolvedSecretSource* source) noexcept {
+  delete source;
+}
+
+SP_CUSTODY_EXPORT int sp_custody_secret_source_set_active_key_id(
+    sp::PreResolvedSecretSource* source,
+    const unsigned char* key_id,
+    std::size_t key_id_len) noexcept {
+  if (source == nullptr || key_id == nullptr || key_id_len == 0) {
+    return static_cast<int>(sp::CustodyFault::InvalidKeyMaterial);
+  }
+  try {
+    source->set_active_key_id(
+        std::string_view(reinterpret_cast<const char*>(key_id), key_id_len));
+    return 0;
+  } catch (...) {
+    return static_cast<int>(sp::CustodyFault::InvalidKeyMaterial);
+  }
+}
+
+SP_CUSTODY_EXPORT unsigned char* sp_custody_secret_alloc(std::size_t secret_len) noexcept {
+  if (secret_len < sp::SecretBuffer::kMinSecretSize || secret_len > sp::SecretBuffer::kSize) {
+    return nullptr;
+  }
+  unsigned char* ptr = sp::custody_detail::sodium_key_alloc(secret_len);
+  if (ptr == nullptr) {
+    return nullptr;
+  }
+  if (!register_handoff_block(ptr, secret_len)) {
+    sp::custody_detail::sodium_key_free(ptr, secret_len);
+    return nullptr;
+  }
+  return ptr;
+}
+
+SP_CUSTODY_EXPORT void sp_custody_secret_free(unsigned char* secret_ptr,
+                                              std::size_t secret_len) noexcept {
+  if (secret_ptr == nullptr) {
+    return;
+  }
+  std::size_t tracked_len = 0;
+  // Only a block this module handed out and still tracks is wiped and freed; any other address is ignored, so the
+  // export cannot be used to write over arbitrary module memory.
+  (void)secret_len;
+  if (take_handoff_block(secret_ptr, &tracked_len)) {
+    sp::custody_detail::sodium_key_free(secret_ptr, tracked_len);
+  }
+}
+
+SP_CUSTODY_EXPORT int sp_custody_secret_commit(sp::PreResolvedSecretSource* source,
+                                               const unsigned char* key_id,
+                                               std::size_t key_id_len,
+                                               unsigned char* secret_ptr,
+                                               std::size_t secret_len) noexcept {
+  if (secret_ptr == nullptr) {
+    return static_cast<int>(sp::CustodyFault::InvalidKeyMaterial);
+  }
+  std::size_t tracked_len = 0;
+  if (!take_handoff_block(secret_ptr, &tracked_len)) {
+    return static_cast<int>(sp::CustodyFault::InvalidKeyMaterial);
+  }
+  if (tracked_len != secret_len || source == nullptr || key_id == nullptr || key_id_len == 0 ||
+      secret_len < sp::SecretBuffer::kMinSecretSize || secret_len > sp::SecretBuffer::kSize) {
+    sp::custody_detail::sodium_key_free(secret_ptr, tracked_len);
+    return static_cast<int>(sp::CustodyFault::InvalidKeyMaterial);
+  }
+  int result = 0;
+  try {
+    const std::string_view key_id_view(reinterpret_cast<const char*>(key_id), key_id_len);
+    if (auto fault = source->put(key_id_view, secret_ptr, secret_len)) {
+      result = static_cast<int>(*fault);
+    } else if (!std::holds_alternative<std::string>(source->active_key_id())) {
+      source->set_active_key_id(key_id_view);
+    }
+  } catch (...) {
+    result = static_cast<int>(sp::CustodyFault::InvalidKeyMaterial);
+  }
+  sp::custody_detail::sodium_key_free(secret_ptr, tracked_len);
+  return result;
+}
+
+SP_CUSTODY_EXPORT int sp_custody_fault_code_invalid_key_material() noexcept {
+  return static_cast<int>(sp::CustodyFault::InvalidKeyMaterial);
+}
+
+SP_CUSTODY_EXPORT const char* sp_custody_fault_reason(int fault) noexcept {
+  switch (static_cast<sp::CustodyFault>(fault)) {
+    case sp::CustodyFault::Tampered:
+      return "archive.custody.tampered";
+    case sp::CustodyFault::Unauthorized:
+      return "archive.custody.unauthorized";
+    case sp::CustodyFault::KeyNotFound:
+      return "archive.custody.key_not_found";
+    case sp::CustodyFault::InvalidKeyMaterial:
+      return "archive.custody.key_invalid";
+    case sp::CustodyFault::KeyInUse:
+      return "archive.custody.key_in_use";
+    case sp::CustodyFault::CorruptHeader:
+      return "archive.custody.corrupt_header";
+    case sp::CustodyFault::CorruptRecord:
+      return "archive.custody.corrupt_record";
+    case sp::CustodyFault::InvalidInput:
+      return "archive.custody.invalid_input";
+    case sp::CustodyFault::EpochLimit:
+      return "archive.custody.epoch_limit";
+    case sp::CustodyFault::SourceUnavailable:
+      return "archive.custody.source_unavailable";
+    case sp::CustodyFault::SourceRateLimited:
+      return "archive.custody.source_rate_limited";
+  }
+  return "archive.custody.key_invalid";
+}
+
+}  // extern "C"
