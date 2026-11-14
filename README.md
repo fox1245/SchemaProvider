@@ -1,4 +1,17 @@
+<div align="center">
+
+<img src="assets/logo.svg" width="160">
+
 # SchemaProvider
+
+**Multi-vendor LLM client for C++20 with typed errors, usage and per-call knobs.**
+
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](CMakeLists.txt)
+
+</div>
+
+---
 
 SchemaProvider is a C++20 client for five LLM API families: Chat Completions, Responses, Messages, Gemini generate and Interactions. A **family** is a wire protocol, not a model or endpoint operator. Each family has a typed request encoder and response codec; the runtime supplies HTTP/SSE transport, deadlines, cancellation and owned results.
 
