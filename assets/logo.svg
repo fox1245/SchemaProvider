@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="t">
+  <title id="t">SchemaProvider</title>
+  <rect x="2" y="2" width="252" height="252" rx="54" fill="#0f172a" stroke="#334155" stroke-width="4"/>
+  <g stroke="#e2e8f0" stroke-width="10" stroke-linecap="round">
+    <line x1="128" y1="128" x2="128" y2="66"/><line x1="128" y1="128" x2="74" y2="160"/><line x1="128" y1="128" x2="182" y2="160"/>
+  </g>
+  <g fill="#e2e8f0" stroke="#0f172a" stroke-width="6">
+    <circle cx="128" cy="62" r="18"/><circle cx="70" cy="162" r="18"/><circle cx="186" cy="162" r="18"/>
+  </g>
+  <rect x="104" y="104" width="48" height="48" rx="12" fill="#34d399" stroke="#0f172a" stroke-width="6"/>
+</svg>
