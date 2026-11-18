@@ -86,6 +86,78 @@ bool decimal(std::string_view value) noexcept {
   return digits(whole) && (dot == std::string_view::npos || digits(value.substr(dot + 1)));
 }
 bool origin(std::string_view value) noexcept { return valid_origin(value) && !value.ends_with('/'); }
+
+// The item price grammar, `item:<kind>[<key>=<value>,...][/<tier>][+<tokens>]`, read from left to right. A qualifier
+// value and a tier take the characters of a request token; a qualifier key lower-case letters, digits and '_'.
+bool request_token_character(char c) noexcept {
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == ':' || c == '.' || c == '_' || c == '-';
+}
+bool qualifier_key_character(char c) noexcept { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'; }
+bool bounded(std::string_view part, bool (*allowed)(char) noexcept) noexcept {
+  return !part.empty() && part.size() <= max_token_bytes && std::all_of(part.begin(), part.end(), allowed);
+}
+constexpr std::string_view qualifier_shape = "qualifier of key=value dimensions in brackets";
+// Reads the qualifier between the brackets, counting its dimensions. Returns what the catalogue expects where it is
+// not one it holds, and nothing when it is.
+std::string_view read_qualifier(std::string_view qualifier, std::size_t& dimensions) noexcept {
+  dimensions = 0;
+  if (qualifier.empty()) return qualifier_shape;
+  std::string_view previous;
+  for (std::size_t start = 0;;) {
+    const auto comma = qualifier.find(',', start);
+    const auto dimension = qualifier.substr(start, comma == std::string_view::npos ? std::string_view::npos : comma - start);
+    if (++dimensions > max_item_dimensions) return "at most 8 qualifier dimensions";
+    const auto equals = dimension.find('=');
+    if (equals == std::string_view::npos) return qualifier_shape;
+    const auto key = dimension.substr(0, equals), value = dimension.substr(equals + 1);
+    if (!bounded(key, qualifier_key_character)) return "qualifier key of 1 to 64 lower-case letters, digits or '_'";
+    if (!bounded(value, request_token_character)) return "qualifier value of 1 to 64 letters, digits, ':', '.', '_' or '-'";
+    // One spelling: the keys in increasing order, so none twice.
+    if (dimensions > 1 && !(previous < key)) return "qualifier keys sorted and unique";
+    previous = key;
+    if (comma == std::string_view::npos) return {};
+    start = comma + 1;
+  }
+}
+// Reads an item price unit into `out`. Returns what the catalogue expects where `key` is not an item unit it holds,
+// and nothing when it is one. Every unit has one spelling: no empty qualifier, tier or band, and no band of zero or
+// with a leading zero.
+std::string_view read_item_key(std::string_view key, ItemPriceKey& out) noexcept {
+  if (!key.starts_with(item_unit_prefix)) return "a qualifier on an item unit only";
+  if (key.size() > max_name_bytes) return "item price unit of at most 256 bytes";
+  const auto kind_end = std::min(key.find_first_of("[/+", item_unit_prefix.size()), key.size());
+  const auto kind = key.substr(item_unit_prefix.size(), kind_end - item_unit_prefix.size());
+  if (std::none_of(std::begin(item_kinds), std::end(item_kinds), [&](const ItemKind& known) { return known.name == kind; }))
+    return "item unit of a known kind";
+  out = ItemPriceKey{};
+  out.unit = key.substr(0, kind_end);
+  auto rest = key.substr(kind_end);
+  if (rest.starts_with('[')) {
+    const auto close = rest.find(']');
+    if (close == std::string_view::npos) return qualifier_shape;
+    out.qualifier = rest.substr(1, close - 1);
+    if (const auto refusal = read_qualifier(out.qualifier, out.dimensions); !refusal.empty()) return refusal;
+    rest.remove_prefix(close + 1);
+    if (!rest.empty() && !rest.starts_with('/') && !rest.starts_with('+')) return qualifier_shape;
+  }
+  // What follows the qualifier is a tier and a band, which hold no qualifier.
+  if (rest.find_first_of("[]") != std::string_view::npos) return "item unit, qualifier, tier and band in that order";
+  const auto plus = rest.find('+');
+  if (rest.starts_with('/')) {
+    out.tier = rest.substr(1, plus == std::string_view::npos ? std::string_view::npos : plus - 1);
+    if (!bounded(out.tier, request_token_character)) return "service tier of 1 to 64 letters, digits, ':', '.', '_' or '-'";
+  }
+  if (plus != std::string_view::npos) {
+    const auto digits = rest.substr(plus + 1);
+    if (digits.empty() || digits.size() > max_band_digits || digits.front() == '0' ||
+        !std::all_of(digits.begin(), digits.end(), [](char c) { return c >= '0' && c <= '9'; }))
+      return "input band of 1 to 19 digits without a leading zero";
+    for (const char c : digits) out.above = out.above * 10 + static_cast<std::uint64_t>(c - '0');
+  }
+  return {};
+}
+// Whether the catalogue reads a price key by the item grammar: an item unit, or a key with a qualifier.
+bool item_grammar(std::string_view key) noexcept { return key.starts_with(item_unit_prefix) || key.find('[') != std::string_view::npos; }
 bool known_family(std::string_view family) noexcept {
   return std::find(std::begin(families_known), std::end(families_known), family) != std::end(families_known);
 }
@@ -224,7 +296,12 @@ CatalogueEntry parse_entry(Value value, const std::string& pointer) {
     if (!pricing.is_object() || pricing.size() > max_prices) fail(at(pointer, "pricing"), "bounded object");
     for (auto member : pricing.members()) {
       const auto where = at(at(pointer, "pricing"), member.key);
-      if (!token(member.key)) fail(where, "price unit token");
+      if (item_grammar(member.key)) {
+        ItemPriceKey item;
+        if (const auto refusal = read_item_key(member.key, item); !refusal.empty()) fail(where, refusal);
+      } else if (!token(member.key)) {
+        fail(where, "price unit token");
+      }
       entry.pricing.emplace_back(std::string(member.key), text(member.value, where, decimal, "decimal USD text"));
     }
     std::sort(entry.pricing.begin(), entry.pricing.end());
@@ -659,6 +736,27 @@ std::string_view unbanded_unit(std::string_view unit) noexcept {
   return unit.substr(0, plus);
 }
 
+std::optional<ItemPriceKey> item_price_key(std::string_view unit) noexcept {
+  ItemPriceKey out;
+  if (!unit.starts_with(item_unit_prefix) || !read_item_key(unit, out).empty()) return std::nullopt;
+  return out;
+}
+
+bool qualifier_offered(std::string_view qualifier, std::span<const std::pair<std::string, std::string>> dimensions) noexcept {
+  if (qualifier.empty()) return true;
+  for (std::size_t start = 0;;) {
+    const auto comma = qualifier.find(',', start);
+    const auto dimension = qualifier.substr(start, comma == std::string_view::npos ? std::string_view::npos : comma - start);
+    const auto equals = dimension.find('=');
+    if (equals == std::string_view::npos) return false;
+    const auto key = dimension.substr(0, equals), value = dimension.substr(equals + 1);
+    const auto offered = std::find_if(dimensions.begin(), dimensions.end(), [&](const auto& item) { return item.first == key; });
+    if (offered == dimensions.end() || offered->second != value) return false;
+    if (comma == std::string_view::npos) return true;
+    start = comma + 1;
+  }
+}
+
 std::string_view listing_name(Listing listing) noexcept {
   switch (listing) {
     case Listing::OpenRouter: return "openrouter";
@@ -695,11 +793,11 @@ bool page_token(std::string_view value) noexcept {
          std::all_of(value.begin(), value.end(), [](unsigned char c) { return c > 0x20 && c < 0x7f; });
 }
 // A price member a models listing names in the provider's words: a unit token without the grammar's tier (`/`) or band
-// (`+`), and not a unit only the catalogue writes, a route ceiling or a tool fee. Any other key is a skipped price, and
-// its text reaches no report.
+// (`+`), and not a unit only the catalogue writes, a route ceiling, a tool fee or an item unit or item ceiling. Any other
+// key is a skipped price, and its text reaches no report.
 bool listed_unit(std::string_view key) {
   return token(key) && key.find('/') == std::string_view::npos && key.find('+') == std::string_view::npos &&
-         !key.starts_with(tool_fee_prefix) &&
+         !key.starts_with(tool_fee_prefix) && !key.starts_with(item_unit_prefix) && !key.starts_with(item_ceiling_prefix) &&
          std::find(std::begin(route_ceiling_units), std::end(route_ceiling_units), key) == std::end(route_ceiling_units);
 }
 bool supported(Value capabilities, std::string_view name) {
