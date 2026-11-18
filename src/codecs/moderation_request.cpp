@@ -11,10 +11,11 @@ namespace {
 Error bad(std::string message) { return Error{ErrorKind::InvalidRequest, std::move(message)}; }
 }  // namespace
 
+std::string_view operation(const Request&) noexcept { return "check"; }
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
   const auto* fact = descriptor.policy()->endpoint("moderation", descriptor.base_url());
   if (!fact) return Error{ErrorKind::Unsupported, "moderation endpoints are not admitted at this origin"};
-  const auto path = descriptor::endpoint_path(*fact, "check");
+  const auto path = descriptor::endpoint_path(*fact, operation(request));
   if (!path) return Error{ErrorKind::Unsupported, "the moderation endpoint has no path"};
   if (request.model.empty() || request.inputs.empty()) return bad("a moderation needs a model and inputs");
   bool media = false;

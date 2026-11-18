@@ -38,6 +38,9 @@ using Outcome = std::variant<Result, Failure>;
 
 using Encoded = endpoints::Encoded;
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor&, const Request&);
+// The operation of the transcription fact a request performs: `translate` with `translate`, otherwise `transcribe`.
+// The encoder sends the request to that operation's path, and the policy states its billing under it.
+std::string_view operation(const Request&) noexcept;
 
 using Close = endpoints::Close;
 class Codec final : public endpoints::Codec {

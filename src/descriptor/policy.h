@@ -126,6 +126,19 @@ struct EndpointFact {
 };
 // The path of one operation of an endpoint fact, if it has one.
 std::optional<std::string_view> endpoint_path(const EndpointFact&, std::string_view operation) noexcept;
+// Whether the provider bills an operation of an endpoint, as the fact's `billing` states it (`none`, `model`,
+// `carried`). `Unstated` when the policy does not say: a fact without `billing`, or a per-operation statement that does
+// not name the operation. Unstated never means not billed. New values go at the end.
+enum class EndpointBilling : std::uint8_t {
+  Unstated,
+  // The provider does not bill the call.
+  None,
+  // The call bills the model its request names, by that model's catalogue entry.
+  Model,
+  // The call bills the chat requests it carries (a batch submit), each by its own model's entry under the fact's
+  // `carried_tier`.
+  Carried
+};
 // What an origin does with a cache mark (sp::CacheControl, core/cache_control.h), as the policy states it. A mark's
 // lifetime is its TTL, or the provider's default of five minutes when it has none; core/cache_marks.h reads the
 // fact for a TTL.
@@ -259,6 +272,13 @@ class DescriptorPolicy final {
   // The fact of a non-chat endpoint (`images`) at `origin`, or null.
   const EndpointFact* endpoint(std::string_view endpoint, std::string_view origin) const noexcept;
   const std::vector<EndpointFact>& endpoints() const noexcept { return endpoints_; }
+  // How the provider bills `operation` of the endpoint fact for `endpoint` at `origin`: Unstated when there is no such
+  // fact, when the fact states no billing, or when its per-operation billing does not name the operation. A fact that
+  // states one value for the endpoint answers it for every operation.
+  EndpointBilling endpoint_billing(std::string_view endpoint, std::string_view origin, std::string_view operation) const noexcept;
+  // The catalogue tier carried requests are priced under (a batch submit's `carried_tier`), empty when the fact carries
+  // none.
+  std::string_view carried_tier(std::string_view endpoint, std::string_view origin) const noexcept;
  private:
   DescriptorPolicy() = default;
   // The first entry, in lookup order, whose `control_values` name `control` (ModelCatalogue::for_each_match).
@@ -277,6 +297,14 @@ class DescriptorPolicy final {
   std::vector<EndpointFact> endpoints_;
   std::vector<std::pair<std::string, std::uint32_t>> controls_;  // family, bit set of Control
   std::vector<std::pair<std::string, std::vector<std::string>>> standard_tiers_;  // family, tiers
+  // The billing statement of the endpoint fact at the same index of endpoints_: each operation with its value, one
+  // entry with an empty operation for a value that covers every call, none when the fact states no billing; and the
+  // tier carried requests are priced under.
+  struct EndpointBillingFact {
+    std::vector<std::pair<std::string, EndpointBilling>> operations;
+    std::string carried_tier;
+  };
+  std::vector<EndpointBillingFact> billing_;
   friend class PolicyLoader;
 };
 // Without a catalogue argument, a policy uses builtin_catalogue().

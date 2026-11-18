@@ -140,6 +140,19 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor&, cons
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor&, const Delete&);
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor&, const List&);
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor&, const Download&);
+// The operation of the files fact each call performs: `upload`, `get`, `list`, `delete`, `content` (a download),
+// `start`, `part`, `complete`, `query` and `cancel`. The encoder sends the call to that operation's path (a step of
+// Google's resumable upload goes to the session's URL instead), and the policy states its billing under it.
+std::string_view operation(const Upload&) noexcept;
+std::string_view operation(const Get&) noexcept;
+std::string_view operation(const List&) noexcept;
+std::string_view operation(const Delete&) noexcept;
+std::string_view operation(const Download&) noexcept;
+std::string_view operation(const Start&) noexcept;
+std::string_view operation(const Part&) noexcept;
+std::string_view operation(const Complete&) noexcept;
+std::string_view operation(const Query&) noexcept;
+std::string_view operation(const Cancel&) noexcept;
 
 // The file as a chat request's reference: Google's URI, or the OpenAI or Anthropic id, with its MIME type. It is
 // refused for another origin than the file's, while the file is not active, and once it expired (`now` in Unix

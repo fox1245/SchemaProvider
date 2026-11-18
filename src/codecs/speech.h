@@ -33,6 +33,9 @@ using Outcome = std::variant<Result, Failure>;
 
 using Encoded = endpoints::Encoded;
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor&, const Request&);
+// The operation of the speech fact a request performs (`speak`): the encoder sends the request to that operation's
+// path, and the policy states its billing under it.
+std::string_view operation(const Request&) noexcept;
 
 using Close = endpoints::Close;
 class Codec final : public endpoints::Codec {

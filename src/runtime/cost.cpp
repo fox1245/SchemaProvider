@@ -13,10 +13,34 @@ pricing::WorstCase unmodeled(std::string subject, std::string detail) {
 pricing::WorstCase worst_case_cost(const PreparedRequest& prepared, const descriptor::ModelCatalogue& catalogue,
                                    const WorstCaseOptions& options) {
   if (!prepared.valid() || prepared.error()) return unmodeled("request", "the request did not prepare");
-  // The catalogue prices chat tokens and the tools of a chat request, not an endpoint call.
-  if (!prepared.endpoint().empty()) return unmodeled(std::string(prepared.endpoint()), "an endpoint call has no catalogue bound");
   const auto* descriptor = prepared.descriptor();
   const auto* retry = prepared.retry_policy();
+  // An endpoint call is bounded by what the policy states about its operation. One the provider does not bill is
+  // bounded at exactly zero, without a catalogue lookup: its model needs no entry, and the usage its answer reports (a
+  // generation statistics read, a finished job's poll) is another call's. The catalogue prices chat tokens and the
+  // tools of a chat request, not a billed endpoint call; and an operation whose billing the policy does not state has
+  // no bound at all.
+  if (!prepared.endpoint().empty()) {
+    const auto& facts = prepared.endpoint_facts();
+    switch (facts.billing) {
+      case descriptor::EndpointBilling::None: {
+        pricing::WorstCase out;
+        out.total = UsdAmount{0, Evidence::Derived, CostRounding::CeilingCatalogueProduct};
+        out.model = facts.model;
+        out.attempts = retry ? (retry->enabled ? retry->max_attempts : 1) : 0;
+        return out;
+      }
+      case descriptor::EndpointBilling::Model:
+      case descriptor::EndpointBilling::Carried:
+        return unmodeled(std::string(prepared.endpoint()), "an endpoint call has no catalogue bound");
+      case descriptor::EndpointBilling::Unstated:
+        break;
+    }
+    pricing::WorstCase out;
+    out.unbounded.push_back({pricing::UnboundedBy::Billing, facts.endpoint + "/" + facts.operation,
+                             "the policy does not state whether the provider bills the operation"});
+    return out;
+  }
   if (!descriptor) return unmodeled("request", "the request has no admitted descriptor");
   pricing::WorstCaseInput input;
   input.family = prepared.family();

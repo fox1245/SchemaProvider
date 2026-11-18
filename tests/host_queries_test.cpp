@@ -12,9 +12,11 @@
 #include "core/pricing.h"
 #include "descriptor/policy.h"
 #include "descriptor/presets.h"
+#include "json/json.h"
 #include "runtime/client.h"
 #include "runtime/cost.h"
 #include "sp/config_defaults.h"
+#include <algorithm>
 #include <iostream>
 #include <set>
 #include <stdexcept>
@@ -47,6 +49,7 @@ void enum_names() {
   names_round_trip<RetrySafety>(4); names_round_trip<ServedRelation>(6); names_round_trip<ImageDetail>(4);
   names_round_trip<MediaKind>(4); names_round_trip<MediaSource>(3);
   names_round_trip<descriptor::StopKind>(11); names_round_trip<descriptor::ModelRelation>(4);
+  names_round_trip<descriptor::EndpointBilling>(4);
   // The last enumerator of each is the one a host used to bound an ordinal by.
   CHECK(from_string<ErrorKind>("Overloaded") == ErrorKind::Overloaded);
   CHECK(from_string<RetrySafety>("RejectedBeforeOutput") == RetrySafety::RejectedBeforeOutput);
@@ -584,11 +587,12 @@ void worst_case_unbounded() {
   request.plugins.push_back(OpenRouterPlugin{"moderation", nullptr});
   wc = bound(gateway, request, 100);
   CHECK(!wc.total && has(wc, pricing::UnboundedBy::Unmodeled, "OpenRouter plugins"));
+  // A generation statistics read is not billed: its bound is zero, though its result carries another call's cost.
   auto generations = client_of(openrouter_chat());
   auto endpoint = generations.prepare(generations::Get{"gen-1"});
   CHECK(endpoint.valid());
   wc = runtime::worst_case_cost(endpoint.prepared(), *priced);
-  CHECK(!wc.total && has(wc, pricing::UnboundedBy::Unmodeled));
+  CHECK(wc.total && wc.total->nano_usd == 0 && wc.unbounded.empty());
 }
 
 void worst_case_tools() {
@@ -883,6 +887,368 @@ void worst_case_shadowed_profile() {
   CHECK(nano(runtime::worst_case_cost(prepared_ok(local, chat_request("gpt-5-mini", 100)), catalogue, options)) == 100u * 1000u + 100u * 1000u);
 }
 
+// ---- endpoint billing ----------------------------------------------------------------------------------------
+
+using Billing = descriptor::EndpointBilling;
+// The built-in policy text with `endpoints` in place of its endpoint facts.
+std::string policy_with_endpoints(std::string_view endpoints) {
+  auto parsed = json::parse(config_defaults::descriptor_policy_json);
+  const auto root = std::get<json::Document>(parsed).root();
+  std::string text = "{";
+  for (auto member : root.members()) {
+    if (text.size() > 1) text += ',';
+    text += json::quote(member.key) + ":" + (member.key == "endpoints" ? std::string(endpoints) : member.value.dump());
+  }
+  return text + "}";
+}
+// The built-in endpoint facts without `billing` and `carried_tier`, as a policy written before they existed states them.
+std::string facts_without_billing() {
+  auto parsed = json::parse(config_defaults::descriptor_policy_json);
+  const auto root = std::get<json::Document>(parsed).root();
+  std::string out = "[";
+  for (auto fact : root.get("endpoints").elements()) {
+    if (out.size() > 1) out += ',';
+    std::string members;
+    for (auto member : fact.members()) {
+      if (member.key == "billing" || member.key == "carried_tier") continue;
+      members += (members.empty() ? "" : ",") + json::quote(member.key) + ":" + member.value.dump();
+    }
+    out += "{" + members + "}";
+  }
+  return out + "]";
+}
+// One endpoint fact: `fact` (its text without the closing brace) and `members`.
+std::string one_fact(std::string_view fact, std::string_view members = {}) {
+  return policy_with_endpoints("[" + std::string(fact) + std::string(members) + "}]");
+}
+constexpr std::string_view openai = "https://api.openai.com", anthropic = "https://api.anthropic.com",
+                           google = "https://generativelanguage.googleapis.com", openrouter = "https://openrouter.ai";
+const std::string images_fact = R"({"endpoint":"images","shape":"openai","origins":["https://api.openai.com"],"paths":{"generate":"/v1/images/generations","edit":"/v1/images/edits"},"charge_on_accept":true)";
+const std::string videos_fact = R"({"endpoint":"videos","shape":"openrouter","origins":["https://openrouter.ai"],"paths":{"submit":"/api/v1/videos","poll":"/api/v1/videos/{id}","download":"/api/v1/videos/{id}/content"},"charge_on_accept":true)";
+const std::string files_fact = R"({"endpoint":"files","shape":"google","origins":["https://generativelanguage.googleapis.com"],"paths":{"upload":"/upload/v1beta/files","get":"/v1beta/{id}","start":"/upload/v1beta/files"},"auth":"x-goog-api-key")";
+const std::string batches_fact = R"({"endpoint":"batches","shape":"anthropic","origins":["https://api.anthropic.com"],"paths":{"submit":"/v1/messages/batches","get":"/v1/messages/batches/{id}"},"auth":"x-api-key","charge_on_accept":true)";
+const std::string moderation_fact = R"({"endpoint":"moderation","shape":"openai","origins":["https://api.openai.com"],"paths":{"check":"/v1/moderations"})";
+
+void endpoint_billing_forms() {
+  // One value for the whole endpoint: every call, a Google upload step that has no path of its own included.
+  auto policy = load(one_fact(files_fact, R"(,"billing":"none")"));
+  for (const auto operation : {"upload", "get", "start", "list", "content", "part", "query", "cancel"})
+    CHECK(policy->endpoint_billing("files", google, operation) == Billing::None);
+  CHECK(policy->carried_tier("files", google).empty());
+  // At another origin, or for another endpoint, the policy says nothing.
+  CHECK(policy->endpoint_billing("files", openai, "get") == Billing::Unstated && policy->endpoint_billing("batches", google, "get") == Billing::Unstated);
+  // Per operation.
+  policy = load(one_fact(images_fact, R"(,"billing":{"generate":"model","edit":"model"})"));
+  CHECK(policy->endpoint_billing("images", openai, "generate") == Billing::Model && policy->endpoint_billing("images", openai, "edit") == Billing::Model);
+  CHECK(policy->endpoint_billing("images", openai, "") == Billing::Unstated && policy->endpoint_billing("images", openai, "zz") == Billing::Unstated);
+  policy = load(one_fact(videos_fact, R"(,"billing":{"submit":"model","poll":"none","download":"none"})"));
+  CHECK(policy->endpoint_billing("videos", openrouter, "submit") == Billing::Model && policy->endpoint_billing("videos", openrouter, "poll") == Billing::None &&
+        policy->endpoint_billing("videos", openrouter, "download") == Billing::None);
+  // Carried requests, priced under the fact's tier. An operation of the shape without a path may be named, and one the
+  // statement leaves out is unstated.
+  policy = load(one_fact(batches_fact, R"(,"billing":{"submit":"carried","get":"none","delete":"none"},"carried_tier":"batch")"));
+  CHECK(policy->endpoint_billing("batches", anthropic, "submit") == Billing::Carried && policy->endpoint_billing("batches", anthropic, "get") == Billing::None &&
+        policy->endpoint_billing("batches", anthropic, "delete") == Billing::None && policy->endpoint_billing("batches", anthropic, "cancel") == Billing::Unstated);
+  CHECK(policy->carried_tier("batches", anthropic) == "batch" && policy->carried_tier("batches", openai).empty());
+  // A fact without charge_on_accept may state any admitted value.
+  CHECK(load(one_fact(moderation_fact, R"(,"billing":"none")"))->endpoint_billing("moderation", openai, "check") == Billing::None);
+  CHECK(load(one_fact(moderation_fact, R"(,"billing":"model")"))->endpoint_billing("moderation", openai, "check") == Billing::Model);
+  // Without the member, every operation is unstated.
+  policy = load(one_fact(images_fact));
+  CHECK(policy->endpoint_billing("images", openai, "generate") == Billing::Unstated && policy->endpoint_billing("images", openai, "edit") == Billing::Unstated &&
+        policy->carried_tier("images", openai).empty());
+  // The statement survives another catalogue.
+  auto recatalogued = descriptor::builtin_policy()->with_catalogue(descriptor::builtin_catalogue());
+  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(recatalogued));
+  const auto& other = std::get<descriptor::PolicySnapshot>(recatalogued);
+  CHECK(other->endpoint_billing("videos", openrouter, "poll") == Billing::None && other->endpoint_billing("videos", openrouter, "submit") == Billing::Model &&
+        other->carried_tier("batches", openai) == "batch");
+  // The names.
+  CHECK(to_string(Billing::Unstated) == "Unstated" && to_string(Billing::Carried) == "Carried" && from_string<Billing>("None") == Billing::None);
+}
+
+void endpoint_billing_refusals() {
+  constexpr auto billing = "/endpoints/billing", tier = "/endpoints/carried_tier";
+  // An operation the shape does not have, and a statement that leaves out an operation of `paths`.
+  CHECK(refused(one_fact(images_fact, R"(,"billing":{"generate":"model","edit":"model","speak":"model"})"), billing));
+  CHECK(refused(one_fact(R"({"endpoint":"images","shape":"openrouter","origins":["https://openrouter.ai"],"paths":{"generate":"/api/v1/images"},"charge_on_accept":true)",
+                         R"(,"billing":{"generate":"model","edit":"model"})"), billing));
+  CHECK(refused(one_fact(images_fact, R"(,"billing":{"generate":"model"})"), billing));
+  CHECK(refused(one_fact(images_fact, R"(,"billing":{})"), billing));
+  // A value other than none, model or carried.
+  for (const auto value : {R"("free")", R"("Model")", R"("unstated")", "1", "null", "true", R"(["none"])", R"("")"})
+    CHECK(refused(one_fact(moderation_fact, std::string(R"(,"billing":)") + value), billing));
+  CHECK(refused(one_fact(images_fact, R"(,"billing":{"generate":"model","edit":"free"})"), billing));
+  CHECK(refused(one_fact(images_fact, R"(,"billing":{"generate":"model","edit":null})"), billing));
+  // `carried` only for a batch submit, `model` only where the request names a model.
+  CHECK(refused(one_fact(images_fact, R"(,"billing":{"generate":"carried","edit":"model"},"carried_tier":"batch")"), billing));
+  CHECK(refused(one_fact(batches_fact, R"(,"billing":{"submit":"carried","get":"carried"},"carried_tier":"batch")"), billing));
+  CHECK(refused(one_fact(batches_fact, R"(,"billing":"carried","carried_tier":"batch")"), billing));
+  CHECK(refused(one_fact(batches_fact, R"(,"billing":{"submit":"model","get":"none"})"), billing));
+  CHECK(refused(one_fact(files_fact, R"(,"billing":{"upload":"model","get":"none","start":"none"})"), billing));
+  CHECK(refused(one_fact(files_fact, R"(,"billing":"model")"), billing));
+  CHECK(refused(one_fact(videos_fact, R"(,"billing":{"submit":"model","poll":"model","download":"none"})"), billing));
+  CHECK(refused(one_fact(videos_fact, R"(,"billing":"model")"), billing));
+  // A fact that charges once it accepts a call bills one of its operations.
+  CHECK(refused(one_fact(images_fact, R"(,"billing":{"generate":"none","edit":"none"})"), billing));
+  CHECK(refused(one_fact(videos_fact, R"(,"billing":"none")"), billing));
+  CHECK(refused(one_fact(batches_fact, R"(,"billing":{"submit":"none","get":"none"})"), billing));
+  // The tier: with carried requests only, and a tier name.
+  CHECK(refused(one_fact(batches_fact, R"(,"billing":{"submit":"carried","get":"none"})"), tier));
+  CHECK(refused(one_fact(moderation_fact, R"(,"billing":"none","carried_tier":"batch")"), tier));
+  CHECK(refused(one_fact(batches_fact, R"(,"carried_tier":"batch")"), tier));
+  for (const auto value : {R"("")", R"("a/b")", R"("a+b")", R"("a b")", "7", "null"})
+    CHECK(refused(one_fact(batches_fact, std::string(R"(,"billing":{"submit":"carried","get":"none"},"carried_tier":)") + value), tier));
+}
+
+// What the built-in policy states, per endpoint, shape and operation. Every operation of every fact's `paths` is here,
+// and so are the steps of Google's resumable upload, which have no path of their own.
+struct BuiltinBilling { std::string_view endpoint, shape, operation; Billing billing; };
+constexpr BuiltinBilling builtin_billing[]{
+    {"images", "openai", "generate", Billing::Model}, {"images", "openai", "edit", Billing::Model},
+    {"images", "openrouter", "generate", Billing::Model},
+    {"decisions", "openai", "decide", Billing::Model}, {"decisions", "openrouter", "decide", Billing::Model},
+    {"embeddings", "openai", "embed", Billing::Model}, {"embeddings", "openrouter", "embed", Billing::Model},
+    {"embeddings", "google", "embed", Billing::Model},
+    {"rerank", "openrouter", "rank", Billing::Model},
+    {"moderation", "openai", "check", Billing::None},
+    {"speech", "openai", "speak", Billing::Model}, {"speech", "openrouter", "speak", Billing::Model},
+    {"transcription", "openai", "transcribe", Billing::Model}, {"transcription", "openai", "translate", Billing::Model},
+    {"transcription", "openrouter", "transcribe", Billing::Model},
+    {"videos", "openrouter", "submit", Billing::Model}, {"videos", "openrouter", "poll", Billing::None},
+    {"videos", "openrouter", "download", Billing::None},
+    {"files", "openai", "upload", Billing::None}, {"files", "openai", "get", Billing::None}, {"files", "openai", "list", Billing::None},
+    {"files", "openai", "delete", Billing::None}, {"files", "openai", "content", Billing::None}, {"files", "openai", "start", Billing::None},
+    {"files", "openai", "part", Billing::None}, {"files", "openai", "complete", Billing::None}, {"files", "openai", "cancel", Billing::None},
+    {"files", "anthropic", "upload", Billing::None}, {"files", "anthropic", "get", Billing::None}, {"files", "anthropic", "list", Billing::None},
+    {"files", "anthropic", "delete", Billing::None}, {"files", "anthropic", "content", Billing::None},
+    {"files", "google", "upload", Billing::None}, {"files", "google", "get", Billing::None}, {"files", "google", "list", Billing::None},
+    {"files", "google", "delete", Billing::None}, {"files", "google", "content", Billing::None}, {"files", "google", "start", Billing::None},
+    {"files", "google", "part", Billing::None}, {"files", "google", "query", Billing::None}, {"files", "google", "cancel", Billing::None},
+    {"batches", "openai", "submit", Billing::Carried}, {"batches", "openai", "get", Billing::None}, {"batches", "openai", "cancel", Billing::None},
+    {"batches", "anthropic", "submit", Billing::Carried}, {"batches", "anthropic", "get", Billing::None},
+    {"batches", "anthropic", "cancel", Billing::None}, {"batches", "anthropic", "delete", Billing::None},
+    {"batches", "anthropic", "results", Billing::None},
+    {"batches", "google", "submit", Billing::Carried}, {"batches", "google", "get", Billing::None}, {"batches", "google", "cancel", Billing::None},
+    {"batches", "google", "delete", Billing::None},
+    {"tokens", "openai", "count", Billing::None}, {"tokens", "anthropic", "count", Billing::None}, {"tokens", "google", "count", Billing::None},
+    {"generations", "openrouter", "get", Billing::None},
+    {"realtime", "google", "connect", Billing::Model}, {"realtime", "openai", "connect", Billing::Model}};
+
+void endpoint_billing_builtin() {
+  const auto policy = descriptor::builtin_policy();
+  const auto expected = [&](const descriptor::EndpointFact& fact, std::string_view operation) -> const BuiltinBilling* {
+    for (const auto& row : builtin_billing)
+      if (row.endpoint == fact.endpoint && row.shape == fact.shape && row.operation == operation) return &row;
+    return nullptr;
+  };
+  // Every operation the policy has a path for is in the table, with the value the policy states.
+  std::size_t paths = 0;
+  for (const auto& fact : policy->endpoints())
+    for (const auto& [operation, path] : fact.paths) {
+      const auto* row = expected(fact, operation);
+      if (!row) throw std::runtime_error("no expected billing for " + fact.endpoint + " " + fact.shape + " " + operation);
+      for (const auto& origin : fact.origins)
+        if (policy->endpoint_billing(fact.endpoint, origin, operation) != row->billing)
+          throw std::runtime_error("billing of " + fact.endpoint + " " + fact.shape + " " + operation + " at " + origin + " is " +
+                                   std::string(to_string(policy->endpoint_billing(fact.endpoint, origin, operation))));
+      ++paths;
+    }
+  // Every row names a fact of the policy, and the rows without a path (Google's upload steps) read as the table says.
+  for (const auto& row : builtin_billing) {
+    const auto fact = std::find_if(policy->endpoints().begin(), policy->endpoints().end(),
+                                   [&](const auto& f) { return f.endpoint == row.endpoint && f.shape == row.shape; });
+    CHECK(fact != policy->endpoints().end());
+    CHECK(policy->endpoint_billing(row.endpoint, fact->origins.front(), row.operation) == row.billing);
+  }
+  CHECK(paths + 3 == std::size(builtin_billing));
+  // Carried requests are priced under the batch tier; nothing else carries any.
+  for (const auto& fact : policy->endpoints())
+    for (const auto& origin : fact.origins)
+      CHECK(policy->carried_tier(fact.endpoint, origin) == (fact.endpoint == "batches" ? "batch" : ""));
+  // A policy written before the members states nothing about any operation.
+  const auto older = load(policy_with_endpoints(facts_without_billing()));
+  CHECK(older->endpoints().size() == policy->endpoints().size());
+  for (const auto& row : builtin_billing)
+    for (const auto& fact : older->endpoints())
+      if (fact.endpoint == row.endpoint && fact.shape == row.shape)
+        CHECK(older->endpoint_billing(row.endpoint, fact.origins.front(), row.operation) == Billing::Unstated && older->carried_tier(row.endpoint, fact.origins.front()).empty());
+}
+
+// The facts of one prepared endpoint call, checked against what it should report.
+template <class Outcome>
+void reports(const runtime::PreparedEndpoint<Outcome>& call, std::string_view endpoint, std::string_view operation, Billing billing,
+             std::string_view model = {}) {
+  const auto& prepared = call.prepared();
+  const auto label = std::string(endpoint) + "/" + std::string(operation);
+  if (!prepared.valid() || prepared.error())
+    throw std::runtime_error(label + " did not prepare: " + (prepared.error() ? prepared.error()->safe_message + " / " + prepared.error()->reason : std::string("invalid")));
+  const auto& facts = prepared.endpoint_facts();
+  const auto* d = prepared.descriptor();
+  if (facts.endpoint != endpoint || facts.operation != operation || facts.billing != billing || facts.model != model ||
+      facts.family != d->family() || facts.origin != d->base_url() || facts.routed_gateway != descriptor::routed_gateway(*d) ||
+      facts.carried_tier != (billing == Billing::Carried ? "batch" : "") || !facts.quantities.empty() || !facts.carried.empty())
+    throw std::runtime_error(label + " reports " + facts.endpoint + "/" + facts.operation + " " + std::string(to_string(facts.billing)) +
+                             " model '" + facts.model + "' at " + facts.origin);
+}
+std::shared_ptr<const json::Document> json_text(std::string_view value) {
+  auto parsed = json::parse(json::quote(value));
+  return std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
+}
+decisions::Request decision(std::string model) {
+  decisions::Request request{std::move(model), json_text("The checkout page charged me twice.")};
+  request.questions.push_back({"is_bug", decisions::Kind::Predicate, json_text("Is the customer reporting a defect?")});
+  return request;
+}
+std::shared_ptr<const std::string> bytes(std::size_t size) { return std::make_shared<const std::string>(std::string(size, 'x')); }
+transcription::Request transcript(std::string model, bool translate = false) {
+  transcription::Request request{std::move(model), Media::audio("audio/wav", std::make_shared<const std::string>("UklGRiQAAABXQVZFZm10IHN5bnRoZXRpYw=="))};
+  request.translate = translate;
+  return request;
+}
+batches::Batch batch_at(std::string_view origin, std::string_view shape, std::string id, std::string output_file = {}) {
+  batches::Batch batch;
+  batch.origin = std::string(origin);
+  batch.shape = std::string(shape);
+  batch.id = std::move(id);
+  batch.output_file = std::move(output_file);
+  return batch;
+}
+
+void endpoint_facts_of_prepared_calls() {
+  auto direct = client_of(descriptor_of("openai.chat"));
+  reports(direct.prepare(images::Request{"zz-image", "A flat icon of a fox"}), "images", "generate", Billing::Model, "zz-image");
+  auto edit = images::Request{"zz-image", "The same fox, in blue"};
+  edit.references.push_back(Media::file(MediaKind::Image, "file-abc"));
+  reports(direct.prepare(edit), "images", "edit", Billing::Model, "zz-image");
+  reports(direct.prepare(decision("zz-decider")), "decisions", "decide", Billing::Model, "zz-decider");
+  reports(direct.prepare(embeddings::Request{"zz-embed", {{"a"}}}), "embeddings", "embed", Billing::Model, "zz-embed");
+  reports(direct.prepare(moderation::Request{"zz-moderation", {{"a sentence"}}}), "moderation", "check", Billing::None, "zz-moderation");
+  reports(direct.prepare(speech::Request{"zz-speech", "Hello there.", "alloy"}), "speech", "speak", Billing::Model, "zz-speech");
+  reports(direct.prepare(transcript("zz-transcribe")), "transcription", "transcribe", Billing::Model, "zz-transcribe");
+  reports(direct.prepare(transcript("zz-transcribe", true)), "transcription", "translate", Billing::Model, "zz-transcribe");
+  reports(direct.prepare(files::Upload{{bytes(4)}, "note.txt", "text/plain", "user_data"}), "files", "upload", Billing::None);
+  reports(direct.prepare(files::Get{"file-1"}), "files", "get", Billing::None);
+  reports(direct.prepare(files::List{}), "files", "list", Billing::None);
+  reports(direct.prepare(files::Delete{"file-1"}), "files", "delete", Billing::None);
+  reports(direct.prepare(files::Download{"file-1"}), "files", "content", Billing::None);
+  reports(direct.prepare(files::Start{"note.txt", "text/plain", 4, "user_data"}), "files", "start", Billing::None);
+  files::Session uploads{std::string(openai), "openai", "upload_1", {}, 4};
+  reports(direct.prepare(files::Part{uploads, {bytes(4)}}), "files", "part", Billing::None);
+  auto whole = uploads; whole.sent = 4; whole.parts = {"part_1"};
+  reports(direct.prepare(files::Complete{whole}), "files", "complete", Billing::None);
+  reports(direct.prepare(files::Cancel{uploads}), "files", "cancel", Billing::None);
+  reports(direct.prepare(batches::Submit{{}, "file-in", "/v1/responses"}), "batches", "submit", Billing::Carried);
+  reports(direct.prepare(batches::Get{"batch_1"}), "batches", "get", Billing::None);
+  reports(direct.prepare(batches::Cancel{"batch_1"}), "batches", "cancel", Billing::None);
+  // An OpenAI batch's results are its output file.
+  reports(direct.prepare(batches::Results{batch_at(openai, "openai", "batch_1", "file-out")}), "files", "content", Billing::None);
+  auto responses = client_of(descriptor_of("openai.responses"));
+  reports(responses.prepare(tokens::Count{responses::Request::simple("zz-count", "hi", 16)}), "tokens", "count", Billing::None, "zz-count");
+
+  auto messages_api = client_of(descriptor_of("anthropic.messages"));
+  reports(messages_api.prepare(files::Upload{{bytes(4)}, "note.txt", "text/plain"}), "files", "upload", Billing::None);
+  reports(messages_api.prepare(files::Get{"file_1"}), "files", "get", Billing::None);
+  reports(messages_api.prepare(files::List{}), "files", "list", Billing::None);
+  reports(messages_api.prepare(files::Delete{"file_1"}), "files", "delete", Billing::None);
+  reports(messages_api.prepare(files::Download{"file_1"}), "files", "content", Billing::None);
+  reports(messages_api.prepare(batches::Submit{{{"a-1", messages::Request::simple("zz-messages", "Say: alpha", 16)}}}), "batches", "submit", Billing::Carried);
+  reports(messages_api.prepare(batches::Get{"msgbatch_1"}), "batches", "get", Billing::None);
+  reports(messages_api.prepare(batches::Cancel{"msgbatch_1"}), "batches", "cancel", Billing::None);
+  reports(messages_api.prepare(batches::Delete{"msgbatch_1"}), "batches", "delete", Billing::None);
+  // An Anthropic batch serves its results itself.
+  reports(messages_api.prepare(batches::Results{batch_at(anthropic, "anthropic", "msgbatch_1")}), "batches", "results", Billing::None);
+  reports(messages_api.prepare(tokens::Count{messages::Request::simple("zz-messages", "hi", 16)}), "tokens", "count", Billing::None, "zz-messages");
+
+  auto generate_api = client_of(descriptor_of("google.generate"));
+  reports(generate_api.prepare(embeddings::Request{"zz-embed", {{"a"}}}), "embeddings", "embed", Billing::Model, "zz-embed");
+  reports(generate_api.prepare(files::Upload{{bytes(4)}, "note.txt", "text/plain"}), "files", "upload", Billing::None);
+  reports(generate_api.prepare(files::Get{"files/abc"}), "files", "get", Billing::None);
+  reports(generate_api.prepare(files::List{}), "files", "list", Billing::None);
+  reports(generate_api.prepare(files::Delete{"files/abc"}), "files", "delete", Billing::None);
+  reports(generate_api.prepare(files::Download{"files/abc"}), "files", "content", Billing::None);
+  reports(generate_api.prepare(files::Start{"note.txt", "text/plain", 4}), "files", "start", Billing::None);
+  // The steps of a resumable upload go to the session's URL; the policy's one value for files covers them.
+  files::Session resumable{std::string(google), "google", {}, std::string(google) + "/upload/v1beta/files?upload_id=AB-cd_12&upload_protocol=resumable", 4};
+  reports(generate_api.prepare(files::Part{resumable, {bytes(4)}}), "files", "part", Billing::None);
+  reports(generate_api.prepare(files::Query{resumable}), "files", "query", Billing::None);
+  reports(generate_api.prepare(files::Cancel{resumable}), "files", "cancel", Billing::None);
+  reports(generate_api.prepare(batches::Submit{{{"g-1", gemini::Request::simple("zz-gemini", "Say: alpha")}}}), "batches", "submit", Billing::Carried);
+  reports(generate_api.prepare(batches::Get{"batches/b1"}), "batches", "get", Billing::None);
+  reports(generate_api.prepare(batches::Cancel{"batches/b1"}), "batches", "cancel", Billing::None);
+  reports(generate_api.prepare(batches::Delete{"batches/b1"}), "batches", "delete", Billing::None);
+  reports(generate_api.prepare(batches::Results{batch_at(google, "google", "batches/b1", "files/out")}), "files", "content", Billing::None);
+  reports(generate_api.prepare(tokens::Count{gemini::Request::simple("zz-gemini", "hi", 16)}), "tokens", "count", Billing::None, "zz-gemini");
+
+  auto router = client_of(openrouter_chat());
+  reports(router.prepare(images::Request{"vendor/zz-image", "A flat icon of a fox"}), "images", "generate", Billing::Model, "vendor/zz-image");
+  reports(router.prepare(decision("vendor/zz-decider")), "decisions", "decide", Billing::Model, "vendor/zz-decider");
+  reports(router.prepare(embeddings::Request{"vendor/zz-embed", {{"a"}}}), "embeddings", "embed", Billing::Model, "vendor/zz-embed");
+  reports(router.prepare(rerank::Request{"vendor/zz-rank", "fox", {"a fox", "a dog"}}), "rerank", "rank", Billing::Model, "vendor/zz-rank");
+  reports(router.prepare(speech::Request{"vendor/zz-speech", "Hello there.", "alloy"}), "speech", "speak", Billing::Model, "vendor/zz-speech");
+  reports(router.prepare(transcript("vendor/zz-transcribe")), "transcription", "transcribe", Billing::Model, "vendor/zz-transcribe");
+  reports(router.prepare(videos::Request{"vendor/zz-video", "A fox in the snow."}), "videos", "submit", Billing::Model, "vendor/zz-video");
+  // A poll and a download reach the job's fact as their own operations; the codec that reads them stays the submit's.
+  const jobs::Handle job{"videos", std::string(openrouter), "job-1", "vendor/zz-video"};
+  const auto poll = router.prepare(jobs::Poll{job});
+  reports(poll, "videos", "poll", Billing::None, "vendor/zz-video");
+  CHECK(poll.prepared().endpoint() == "videos");
+  reports(router.prepare(jobs::Download{job, 0}), "videos", "download", Billing::None, "vendor/zz-video");
+  reports(router.prepare(generations::Get{"gen-1"}), "generations", "get", Billing::None);
+  CHECK(router.prepare(generations::Get{"gen-1"}).prepared().endpoint_facts().routed_gateway);
+  // A chat request, a call that did not prepare, and an empty handle report nothing.
+  CHECK(prepared_ok(direct, chat_request("zz-model-1", 10)).endpoint_facts().endpoint.empty());
+  const auto refused_call = direct.prepare(moderation::Request{"", {}});
+  CHECK(refused_call.prepared().error() && refused_call.prepared().endpoint_facts().operation.empty() &&
+        refused_call.prepared().endpoint_facts().billing == Billing::Unstated);
+  CHECK(runtime::PreparedRequest{}.endpoint_facts().billing == Billing::Unstated);
+}
+
+template <class Outcome> pricing::WorstCase bound_of(const runtime::PreparedEndpoint<Outcome>& call) {
+  return runtime::worst_case_cost(call.prepared(), *priced);
+}
+bool zero(const pricing::WorstCase& wc) {
+  return wc.total && wc.total->nano_usd == 0 && wc.total->evidence == Evidence::Derived && wc.total->rounding == CostRounding::CeilingCatalogueProduct &&
+         wc.unbounded.empty();
+}
+
+void worst_case_endpoint_calls() {
+  // An operation the policy states the provider does not bill is bounded at zero, with no catalogue entry for its model.
+  auto direct = client_of(descriptor_of("openai.chat"));
+  CHECK(zero(bound_of(direct.prepare(moderation::Request{"zz-not-in-the-catalogue", {{"a sentence"}}}))));
+  CHECK(zero(runtime::worst_case_cost(direct.prepare(moderation::Request{"zz-not-in-the-catalogue", {{"a sentence"}}}).prepared())));
+  CHECK(zero(bound_of(direct.prepare(files::Get{"file-1"}))));
+  auto responses = client_of(descriptor_of("openai.responses"));
+  CHECK(zero(bound_of(responses.prepare(tokens::Count{responses::Request::simple("zz-not-in-the-catalogue", "hi", 16)}))));
+  auto messages_api = client_of(descriptor_of("anthropic.messages"));
+  CHECK(zero(bound_of(messages_api.prepare(tokens::Count{messages::Request::simple("zz-not-in-the-catalogue", "hi", 16)}))));
+  CHECK(zero(bound_of(messages_api.prepare(batches::Results{batch_at(anthropic, "anthropic", "msgbatch_1")}))));
+  auto generate_api = client_of(descriptor_of("google.generate"));
+  CHECK(zero(bound_of(generate_api.prepare(tokens::Count{gemini::Request::simple("zz-not-in-the-catalogue", "hi", 16)}))));
+  auto router = client_of(openrouter_chat());
+  const jobs::Handle job{"videos", std::string(openrouter), "job-1", "vendor/zz-not-in-the-catalogue"};
+  CHECK(zero(bound_of(router.prepare(jobs::Poll{job}))));
+  CHECK(zero(bound_of(router.prepare(jobs::Download{job, 0}))));
+  CHECK(zero(bound_of(router.prepare(generations::Get{"gen-1"}))));
+  // A billed operation keeps no bound: neither one that bills its model nor a batch that bills the requests it carries.
+  auto wc = bound_of(direct.prepare(images::Request{"zz-model-1", "A flat icon of a fox"}));
+  CHECK(!wc.total && has(wc, pricing::UnboundedBy::Unmodeled, "images"));
+  CHECK(has(bound_of(direct.prepare(decision("zz-model-1"))), pricing::UnboundedBy::Unmodeled, "decisions"));
+  CHECK(has(bound_of(router.prepare(videos::Request{"vendor/zz-video", "A fox in the snow."})), pricing::UnboundedBy::Unmodeled, "videos"));
+  wc = bound_of(messages_api.prepare(batches::Submit{{{"a-1", messages::Request::simple("zz-model-1", "Say: alpha", 16)}}}));
+  CHECK(!wc.total && has(wc, pricing::UnboundedBy::Unmodeled, "batches"));
+  // A policy that does not state the billing: no total, and the reason names the endpoint and operation.
+  const auto older = load(policy_with_endpoints(facts_without_billing()));
+  auto unstated = client_of(descriptor_of("openai.chat", older));
+  wc = bound_of(unstated.prepare(moderation::Request{"zz-not-in-the-catalogue", {{"a sentence"}}}));
+  CHECK(!wc.total && wc.unbounded.size() == 1 &&
+        detail_of(wc, pricing::UnboundedBy::Billing, "moderation/check") == "the policy does not state whether the provider bills the operation");
+  CHECK(has(bound_of(unstated.prepare(files::Get{"file-1"})), pricing::UnboundedBy::Billing, "files/get"));
+  auto unstated_router = client_of(openrouter_chat(older));
+  CHECK(has(bound_of(unstated_router.prepare(jobs::Poll{job})), pricing::UnboundedBy::Billing, "videos/poll"));
+  CHECK(pricing::to_string(pricing::UnboundedBy::Billing) == "Billing" && pricing::to_string(pricing::UnboundedBy::Quantity) == "Quantity");
+}
+
 // ---- usage ---------------------------------------------------------------------------------------------------
 
 std::string show(const Usage& usage) {
@@ -977,6 +1343,8 @@ int main() {
     refusal_predicate(); facts_of_prepared_requests();
     worst_case_tokens(); worst_case_unbounded(); worst_case_tools(); worst_case_tiers_and_fallbacks(); worst_case_route_ceiling();
     worst_case_covers_usage(); worst_case_synthetic_policy(); worst_case_shadowed_profile();
+    endpoint_billing_forms(); endpoint_billing_refusals(); endpoint_billing_builtin(); endpoint_facts_of_prepared_calls();
+    worst_case_endpoint_calls();
     model_facts();
     decoded_usage();
     std::cout << "host query properties passed\n"; return 0;

@@ -27,8 +27,10 @@ std::variant<std::pair<const descriptor::EndpointFact*, std::string>, Error> job
 }
 }  // namespace
 
+std::string_view operation(const Poll&) noexcept { return "poll"; }
+std::string_view operation(const Download&) noexcept { return "download"; }
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Poll& poll) {
-  auto found = job_path(descriptor, poll.handle, "poll");
+  auto found = job_path(descriptor, poll.handle, operation(poll));
   if (auto* error = std::get_if<Error>(&found)) return *error;
   auto& [fact, path] = std::get<0>(found);
   Encoded encoded{std::move(path), {}, poll.handle.model, false, fact->auth};
@@ -39,7 +41,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   return encoded;
 }
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Download& download) {
-  auto found = job_path(descriptor, download.handle, "download");
+  auto found = job_path(descriptor, download.handle, operation(download));
   if (auto* error = std::get_if<Error>(&found)) return *error;
   auto& [fact, path] = std::get<0>(found);
   if (!download.max_bytes) return bad("a download needs a positive byte limit");

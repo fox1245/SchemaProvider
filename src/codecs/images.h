@@ -41,6 +41,10 @@ using Outcome = std::variant<Result, Failure>;
 
 using Encoded = endpoints::Encoded;
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor&, const Request&);
+// The operation of the images fact `fact` a request performs: `edit` at the `openai` shape when it has references,
+// otherwise `generate`. The encoder sends the request to that operation's path, and the policy states its billing
+// under it.
+std::string_view operation(const descriptor::EndpointFact& fact, const Request&) noexcept;
 
 using Close = endpoints::Close;
 // Decodes one buffered response into accumulator events: one assistant message with a Media part per image.

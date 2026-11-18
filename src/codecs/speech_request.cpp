@@ -16,10 +16,11 @@ bool token(std::string_view value) {
 }
 }  // namespace
 
+std::string_view operation(const Request&) noexcept { return "speak"; }
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
   const auto* fact = descriptor.policy()->endpoint("speech", descriptor.base_url());
   if (!fact) return Error{ErrorKind::Unsupported, "speech endpoints are not admitted at this origin"};
-  const auto path = descriptor::endpoint_path(*fact, "speak");
+  const auto path = descriptor::endpoint_path(*fact, operation(request));
   if (!path) return Error{ErrorKind::Unsupported, "the speech endpoint has no path"};
   if (request.model.empty() || request.input.empty()) return bad("speech needs a model and input");
   if (!request.voice.empty() && request.voice.size() > 256) return bad("a speech voice is bounded text");

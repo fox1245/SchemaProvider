@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/endpoint_facts.h"
 #include "core/interface_contract.h"
 #include "core/request_facts.h"
 #include "codecs/chat.h"
@@ -192,8 +193,14 @@ class PreparedRequest {
   // many were written, and whether the request-level Messages mark was left out for them. A mark the policy says to
   // ignore at this origin is requested and not written. Empty for an endpoint call.
   const CacheMarkReport& cache_marks() const noexcept;
-  // The non-chat endpoint a prepared call reaches (`images`, D6), empty for a chat request.
+  // The non-chat endpoint a prepared call reaches (`images`, D6), empty for a chat request. It names the codec that
+  // reads the answer, which a job's poll shares with its submit; endpoint_facts() names the policy fact and operation.
   std::string_view endpoint() const noexcept;
+  // What a prepared endpoint call bills by: the policy fact and operation it reaches (`videos` and `poll`), whether the
+  // policy says the provider bills that operation, the model the request names, and the client's family, origin and
+  // whether that origin is a routing gateway. Empty for a chat request, for a call that did not prepare and for a
+  // default-constructed handle.
+  const EndpointFacts& endpoint_facts() const noexcept;
   // The HTTP method and URL the call sends. With the body, they identify a call whose body is empty or read from a
   // file (`GET .../files/{id}`, a part of an upload). Like encoded_body, the URL may be secret: a resumable upload's
   // session URL is as sensitive as the API key, so hash it rather than store or log it.
@@ -403,9 +410,11 @@ class Client {
   explicit Client(std::shared_ptr<detail::ClientState>);
   // The admission and option checks every call shares; `encode` fills the operation's wire request and model.
   PreparedRequest prepare_call(RunOptions, const std::function<void(detail::OperationState&, std::optional<Error>&)>& encode);
-  // An endpoint call's wire request from its encoder's result (D6).
+  // An endpoint call's wire request from its encoder's result (D6). `endpoint` names the codec that reads the answer;
+  // `fact`, `operation` and `model` are what endpoint_facts() reports once the call encoded.
   template <class Encoded> PreparedRequest prepare_endpoint(RunOptions, std::string_view endpoint, int reason_source,
-                                                           const std::function<std::variant<Encoded, Error>()>& encode);
+                                                           const std::function<std::variant<Encoded, Error>()>& encode,
+                                                           std::string_view fact, std::string_view operation, std::string_view model);
   // `complete` and `start` for a prepared endpoint call of any typed outcome.
   template <class Outcome> Outcome complete_endpoint(PreparedEndpoint<Outcome>);
   template <class Outcome> EndpointCall<Outcome> start_endpoint(PreparedEndpoint<Outcome>, std::function<void(Outcome)>);

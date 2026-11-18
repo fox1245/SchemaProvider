@@ -94,6 +94,16 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor&, cons
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor&, const Cancel&);
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor&, const Delete&);
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor&, const Results&);
+// The operation of the batches fact each call performs: `submit`, `get`, `cancel` and `delete`. The encoder sends the
+// call to that operation's path, and the policy states its billing under it.
+std::string_view operation(const Submit&) noexcept;
+std::string_view operation(const Get&) noexcept;
+std::string_view operation(const Cancel&) noexcept;
+std::string_view operation(const Delete&) noexcept;
+// The endpoint fact and operation a results download reaches: the batches fact's `results` for an Anthropic batch,
+// which serves its results itself, and the files fact's `content` for OpenAI and Google, whose results are a file of
+// the origin.
+std::pair<std::string_view, std::string_view> results_operation(const Results&) noexcept;
 
 using Close = endpoints::Close;
 // A batch object, or a deletion, as the endpoint's shape answers it.
