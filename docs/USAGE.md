@@ -363,7 +363,7 @@ Any unit may carry a service tier and an input band, in that order: `<unit>[/<ti
 - **Bands.** `input+200000` prices a call with more than 200,000 input tokens, cache reads and writes included, for all of its tokens: a long-context surcharge. Unit by unit, the highest band the call is above wins over the lower ones and the unbanded unit. `price_of(entry, tier, input_tokens)` takes the call's input length, and `estimate` takes it from the usage.
 - **Malformed.** A unit whose band is not a decimal count is no unit.
 
-**Item units.** An entry may also price an item a call makes or takes, rather than a token, under the reserved prefix `item:`. A models listing never gives one, since a listed key in the `item:` or `ceiling_item:` namespace is a skipped price, so item units come from a catalogue layer a host writes. Nothing prices with them yet: `price_of`, `estimate`, `upper_bound` and the worst-case bound read no item unit.
+**Item units.** An entry may also price an item a call makes or takes, rather than a token, under the reserved prefix `item:`. A models listing never gives one, since a listed key in the `item:` or `ceiling_item:` namespace is a skipped price, so item units come from a catalogue layer a host writes. `price_of`, `estimate`, `upper_bound` and the chat worst-case bound read no item unit; the [endpoint bound](#the-bound-of-an-endpoint-call) prices with them.
 - **Kinds.** `descriptor::item_kinds` (`<descriptor/catalogue.h>`) names each kind and what one unit counts: `item:image`, an image the call makes; `item:input_image`, an image the call takes as a reference; `item:character`, a character of the text to speak, as the provider counts it; `item:second`, a second of audio taken or of video made, in whole seconds rounded up; `item:document`, a document the request ranks; `item:search_unit`, a search unit as the provider counts it. An `item:` unit of another kind is refused.
 - **Qualifier.** `item:<kind>[<key>=<value>,...]` prices only a call that offers each dimension it names with that value, such as `item:image[quality=high,size=1024x1024]` or `item:image[operation=edit]`. Keys are lower-case letters, digits and `_`, in increasing order and each named once. Values are 1 to 64 letters, digits, `:`, `.`, `_` or `-`, the characters of a request token. A qualifier names one to eight dimensions (`max_item_dimensions`), and the whole unit is at most 256 bytes.
 - **Tier and band.** They follow the qualifier, in the grammar's order: `item:<kind>[<qualifier>][/<tier>][+<tokens>]`, such as `item:image[quality=high]/batch+200000`.
@@ -414,7 +414,7 @@ The fees and the tool uses are charged once per attempt, the tokens on every inv
 **Endpoint calls.** For a prepared [non-chat endpoint](#non-chat-endpoints) call, the bound follows what the policy states about the operation the call performs (`PreparedRequest::endpoint_facts().billing`):
 - **Not billed** (`EndpointBilling::None`: moderation, token counting, file calls, a job's poll and download, a batch's get, cancel, deletion and results, generation statistics). `total` is exactly zero (`Evidence::Derived`, `CostRounding::CeilingCatalogueProduct`) and nothing is unbounded. The catalogue is not consulted, so the model needs no entry. The usage a poll's or a generation read's answer reports is the cost of another call, the job or the generation it describes, and is not this call's.
 - **Not stated** (`Unstated`: a policy without the fact's `billing`, or a per-operation statement that does not name the operation). No total, and the reason is `Billing` with the subject `<endpoint>/<operation>` (`moderation/check`). A missing statement never reads as not billed.
-- **Billed** (`Model`, `Carried`: images, decisions, embeddings, rerank, speech, transcription, a video submit, a batch submit). No total, and the reason is `Unmodeled` with the endpoint as its subject, as before: the catalogue does not price these calls.
+- **Billed** (`Model`, `Carried`: images, decisions, embeddings, rerank, speech, transcription, a video submit, a batch submit). No total, and the reason is `Unmodeled` with the endpoint as its subject, as before: a prepared call does not state its quantities yet. A host that holds them bounds the call with [`pricing::endpoint_worst_case`](#the-bound-of-an-endpoint-call).
 
 **No bound.** `total` is unset and `unbounded` lists every reason, each with a kind, the subject and a phrase:
 
@@ -431,9 +431,85 @@ The fees and the tool uses are charged once per attempt, the tokens on every inv
 | `Unmodeled` | what | OpenRouter plugins, a billed endpoint call or a request that did not prepare |
 | `Overflow` | | the bound does not fit 64 bits |
 | `Billing` | endpoint/operation | the policy does not state whether the provider bills the endpoint call's operation |
-| `Quantity` | unit | the request does not state a quantity of a unit the entry prices above zero; no bound reports it |
+| `Quantity` | unit | the request does not state a quantity of a unit the entry prices above zero ([endpoint bound](#the-bound-of-an-endpoint-call) only) |
 
 **Not bounded.** Messages compaction iterations and Gemini's tool-use prompt tokens bill outside the counters, as for `upper_bound`. A request that names no service tier is priced at the standard rates, because neither the request nor the policy states another; an account that bills it at a dearer tier is not covered, so name the tier to bound it. A model whose entry lists no `cache_write` rate is bounded with its other input rates, so cache writes that bill above them are not covered. For usage within the caps, `estimate` never exceeds the bound less the tool fees it does not price. The bound is for a reservation, not for settlement: settle on the usage and the provider's reported cost.
+
+### The bound of an endpoint call
+
+`sp::pricing::endpoint_worst_case(input, catalogue)` (`<core/endpoint_pricing.h>`) is the most one non-chat endpoint call can bill, computed over plain data: the call's facts (`EndpointFacts`, `<core/endpoint_facts.h>`) and the catalogue's prices. It is a stateless function of its arguments; nothing is fetched, reserved or recorded.
+
+```cpp
+#include <core/endpoint_pricing.h>
+
+sp::EndpointFacts facts;                   // endpoint, operation, billing, family, origin, model, gateway
+facts.dimensions = {{"quality", "high"}, {"size", "1024x1024"}};    // sorted by key, each key once
+facts.quantities = {{"item:image", 2}, {"input", std::nullopt, sp::EndpointQuantity::Source::InputLimit},
+                    {"output", std::nullopt, sp::EndpointQuantity::Source::OutputLimit}};
+sp::pricing::EndpointWorstCaseInput input;
+input.facts = &facts;
+input.attempts = retry_policy.max_attempts;          // the attempts the retry policy allows
+input.charge_on_accept = endpoint_fact.charge_on_accept;   // the policy's descriptor::EndpointFact for the call
+auto bound = sp::pricing::endpoint_worst_case(input, *catalogue);
+if (bound.total) hold(bound.total->nano_usd);
+else for (const auto& why : bound.unbounded) log(sp::pricing::to_string(why.by), why.subject, why.detail);
+```
+
+**What it takes.** `EndpointWorstCaseInput` holds:
+- `facts`: the call's facts.
+- `service_tier`: the catalogue tier the call is priced under, empty for the standard rates.
+- `measured_input_tokens`: the host's count of the input. It must not understate it.
+- `stated_seconds`: the audio's length in whole seconds, rounded up, for a quantity whose source is `StatedSeconds`. It must not understate it.
+- `attempts`: the attempts the retry policy allows.
+- `charge_on_accept`: the provider charges the operation once it accepts it (`EndpointFact::charge_on_accept`).
+- `measured_carried_input_tokens`: read by no bound yet.
+
+**What it bounds.** By the operation's billing:
+- **`None`.** Exactly zero, with no catalogue lookup.
+- **`Unstated`.** No total.
+- **`Carried`.** No total: the requests a batch carries are not priced here.
+- **`Model`.** Bounded by the entry `find(family, origin, model)` gives, under `service_tier`.
+
+**Quantities.** Each `EndpointQuantity` names a unit and its count, which is `at_most` when the request states it. Without `at_most`, the count comes from the quantity's source:
+- `InputLimit`: the entry's input limit (the smaller of `input_limit` and `context_window`) times `per`, the number of inputs when the limit counts per input. A measured count is capped at that product.
+- `OutputLimit`: the entry's `output_limit`.
+- `StatedSeconds`: `stated_seconds`.
+- `Request`: none, so the quantity is not stated.
+
+**Dimensions.** The call offers its `dimensions` and its operation (`operation=<operation>`), so a row qualified by another operation does not apply. A dimension the call leaves unset is offered by no value, so only a row without a qualifier prices it.
+
+**Prices.**
+- **Input.** `input` bills at the dearest input rate: `input`, `cache_read`, `cache_write`, `cache_write_1h`, `input_audio` or `input_image`. An `input` rate is needed. A non-zero `input_image` quantity, the image tokens the input count includes, needs an `input_image` rate as well.
+- **Output.** `output` bills at the dearest output rate: `output`, `reasoning`, `output_image` or `output_audio`. An `output` rate is needed.
+- **Request fee.** `request` is charged once when the entry lists it.
+- **Items.** An `item:<kind>` quantity bills at `dearest_item_price` for the offered dimensions.
+- **Bands.** The `input` count is the input length that picks bands. When it is not stated, every band applies.
+
+**Declared zeros.** A quantity that can be above zero needs a rate. A listed `"0"` is a declared zero. A unit the entry does not list has no price, never a price of zero, and neither does a row that applies at a variable price (`-1`). A rate above zero needs the count. A unit whose rates are all declared zeros needs no count.
+
+**Total.**
+- **Rounding.** The lines (`EndpointLine`: unit, price key, count, rate) and the fee are summed exactly and rounded up once to whole nano-USD.
+- **Attempts.** A charge-on-accept operation bounds one attempt, since the runtime sends such a call again only when the provider never accepted it. Any other operation multiplies by `attempts`.
+- **Result.** `EndpointBound` holds `total`, the `entry` and `model` that priced the call, the `lines` of one attempt and the `attempts` they were multiplied by. With any reason in `unbounded` there is no total and no lines, never a partial sum.
+
+**Reasons.**
+
+| `UnboundedBy` | Subject | When |
+|---|---|---|
+| `Billing` | `<endpoint>/<operation>` | the policy does not state whether the provider bills the operation |
+| `Unmodeled` | `<endpoint>/<operation>` | the call bills the requests it carries (a batch submit) |
+| `Unmodeled` | the endpoint, `dimensions`, a unit or a price key | the call names no operation; its dimensions are unsorted, repeat a key or name another operation; a quantity of a unit the bound does not price; a row that applies to the call, is not a declared zero, and is of an item kind none of the quantities count, such as output seconds of a speech model |
+| `ModelPrice` | model | no entry, or an entry without prices |
+| `ModelPrice` | unit | no rate for a quantity that can be above zero, or a variable price on a row that applies; an item unit is named with the offered dimensions, such as `item:image[operation=generate,quality=high]` |
+| `RouteCeiling` | model | a routing gateway: no route ceiling or pin covers an endpoint call's prices; or an entry with a route ceiling at an origin that is not a gateway |
+| `TierPrice` | model | the entry prices no unit under `service_tier` |
+| `InputBound` | `input` | no `at_most`, no measured count and no input limit, and an input rate above zero |
+| `OutputCap` | `output` | no `at_most` and no output limit, and an output rate above zero |
+| `Quantity` | unit | an item count the request does not state, and a rate above zero |
+| `Invocations` | | `attempts` is zero |
+| `Overflow` | | the bound, or the bound over the attempts, does not fit 64 bits; with a unit as subject, a count that does not |
+
+`runtime::worst_case_cost` does not call it yet: a prepared endpoint call's facts carry no dimensions or quantities, so a billed operation still answers `Unmodeled` there.
 
 ### Served model identity and routing gateways
 
