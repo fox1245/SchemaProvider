@@ -251,7 +251,8 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (request.response_format)
     if (auto error = request_controls::validate_response_format(*request.response_format, resources)) return bad(std::move(*error));
   const bool router = descriptor::contains(descriptor.family_policy().openrouter_origins, descriptor.base_url());
-  std::set<std::string_view> hosted_types, mcp_labels;
+  // The types of the declared MCP servers are kept apart: a server is chosen by its label, never by its type.
+  std::set<std::string_view> hosted_types, mcp_labels, server_types;
   for (const auto& tool : request.hosted_tools) {
     const auto type = tool_type(tool);
     if (const auto* routed = std::get_if<OpenRouterServerTool>(&tool)) {
@@ -275,6 +276,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     }
     if (const auto* mcp = std::get_if<McpTool>(&tool)) {
       if (!function_name(mcp->server_label) || !mcp_labels.insert(mcp->server_label).second) return bad("MCP tools require unique server labels");
+      server_types.insert(type);
     } else if (!hosted_types.insert(type).second) return bad("hosted tool types must be unique");
     if (const auto* image = std::get_if<ImageGenerationTool>(&tool)) {
       if (image->size && !image_size(*image->size)) return bad("image generation size must be auto or WIDTHxHEIGHT");
@@ -395,6 +397,8 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       const auto facts = descriptor::tool_facts(descriptor.family_policy(), type);
       return hosted_types.contains(type) && facts.known && !facts.client;
     };
+    // A type the request declares only through an MCP server.
+    const auto server_only = [&](std::string_view type) { return server_types.contains(type) && !hosted_types.contains(type); };
     switch (choice.mode) {
       case ToolChoiceMode::Auto: case ToolChoiceMode::Required: case ToolChoiceMode::None:
         if (!choice.name.empty()) return bad("only a named tool choice takes a name");
@@ -403,6 +407,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         if (!functions.contains(choice.name)) return bad("a function tool choice must name a declared function");
         break;
       case ToolChoiceMode::Hosted:
+        if (server_only(choice.name)) return bad("an MCP server is chosen by its label, not as a hosted tool");
         if (!hosted(choice.name)) return bad("a hosted tool choice must name a declared hosted tool");
         break;
       case ToolChoiceMode::Mcp:
@@ -410,8 +415,9 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         break;
       default: return bad("invalid tool choice mode");
     }
-    if (choice.mcp_tool && (choice.mode != ToolChoiceMode::Mcp || !request_controls::bounded_text(*choice.mcp_tool, 256)))
-      return bad("only an MCP tool choice names one tool of its server");
+    if (choice.mcp_tool && choice.mode != ToolChoiceMode::Mcp) return bad("only an MCP tool choice names one tool of its server");
+    if (choice.mcp_tool && !request_controls::bounded_text(*choice.mcp_tool, 256))
+      return bad("an MCP tool choice's tool name must be short text");
     if (choice.allowed) {
       if (choice.mode != ToolChoiceMode::Auto && choice.mode != ToolChoiceMode::Required)
         return bad("allowed tools require the auto or required mode");
@@ -422,7 +428,10 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         switch (tool.kind) {
           case AllowedToolKind::Function: declared = functions.contains(tool.name); break;
           case AllowedToolKind::Mcp: declared = mcp_labels.contains(tool.name); break;
-          case AllowedToolKind::Hosted: declared = hosted(tool.name); break;
+          case AllowedToolKind::Hosted:
+            if (server_only(tool.name)) return bad("an MCP server is chosen by its label, not as a hosted tool");
+            declared = hosted(tool.name);
+            break;
           default: return bad("invalid allowed tool kind");
         }
         if (!declared) return bad("allowed tools must be declared tools");

@@ -1,3 +1,4 @@
+#include "codecs/reason.h"
 #include "codecs/responses.h"
 #include "codecs/responses_request.h"
 #include "core/enum_names.h"
@@ -1361,23 +1362,38 @@ void typed_tool_choice() {
   CHECK(json::equal(parse(encoded_ok(std::get<descriptor::ValidatedDescriptor>(gateway), routed).body).root().get("tool_choice"), parse(R"({"type":"openrouter:datetime"})").root()));
 
   // A refusal names the line of the case that was not refused.
-  const auto refuse = [&](ToolChoice value, std::source_location at = std::source_location::current()) {
+  // A refusal names the line of the case that was not refused, or that was refused by another check than `code`.
+  const auto refuse = [&](ToolChoice value, std::string_view code = {}, std::source_location at = std::source_location::current()) {
     auto q = r; q.tool_choice = std::move(value);
     const auto result = responses::encode(desc(), q, false);
     if (!std::holds_alternative<Error>(result) || std::get<Error>(result).kind != ErrorKind::InvalidRequest)
       throw std::runtime_error("tool choice not refused at line " + std::to_string(at.line()));
+    const auto refused_by = reason::request_code(reason::Source::ResponsesRequest, std::get<Error>(result).safe_message);
+    if (!code.empty() && refused_by != code)
+      throw std::runtime_error("tool choice refused by " + std::string(refused_by) + " at line " + std::to_string(at.line()));
   };
   refuse(ToolChoice{ToolChoiceMode::Function, "missing", {}, {}});
   refuse(ToolChoice{ToolChoiceMode::Function, {}, {}, {}});
   // The policy lists file_search, but the request does not declare it; the other two are no hosted tool here.
   refuse(ToolChoice{ToolChoiceMode::Hosted, "file_search", {}, {}});
   refuse(ToolChoice{ToolChoiceMode::Hosted, "zz_unlisted_tool", {}, {}});
-  refuse(ToolChoice{ToolChoiceMode::Hosted, "mcp", {}, {}});
+  // A declared MCP server is chosen by its label with the Mcp mode, never as a hosted tool of its type.
+  const std::string server_type(responses::tool_type(r.hosted_tools[1]));
+  refuse(ToolChoice{ToolChoiceMode::Hosted, server_type, {}, {}}, "request.responses.mcp_server_is_not_a_hosted_tool_choice");
+  refuse(ToolChoice{ToolChoiceMode::Auto, {}, {}, std::vector<AllowedTool>{{AllowedToolKind::Hosted, server_type}}},
+         "request.responses.mcp_server_is_not_a_hosted_tool_choice");
+  auto serverless = r; serverless.hosted_tools = {responses::WebSearchTool{}};
+  serverless.tool_choice = ToolChoice{ToolChoiceMode::Hosted, server_type, {}, {}};
+  const auto undeclared_server = responses::encode(desc(), serverless, false);
+  CHECK(std::holds_alternative<Error>(undeclared_server) && reason::request_code(reason::Source::ResponsesRequest, std::get<Error>(undeclared_server).safe_message) ==
+        "request.responses.hosted_tool_choice_must_be_declared");
   refuse(ToolChoice{ToolChoiceMode::Mcp, "other", {}, {}});
   refuse(ToolChoice{static_cast<ToolChoiceMode>(99), {}, {}, {}});
   refuse(ToolChoice{ToolChoiceMode::Auto, "lookup", {}, {}});
-  refuse(ToolChoice{ToolChoiceMode::Function, "lookup", std::string("search"), {}});
-  refuse(ToolChoice{ToolChoiceMode::Mcp, "docs", std::string(), {}});
+  refuse(ToolChoice{ToolChoiceMode::Function, "lookup", std::string("search"), {}}, "request.responses.only_an_mcp_tool_choice_names_a_server_tool");
+  refuse(ToolChoice{ToolChoiceMode::Auto, {}, std::string("search"), {}}, "request.responses.only_an_mcp_tool_choice_names_a_server_tool");
+  refuse(ToolChoice{ToolChoiceMode::Mcp, "docs", std::string(), {}}, "request.responses.mcp_tool_choice_tool_name_must_be_short_text");
+  refuse(ToolChoice{ToolChoiceMode::Mcp, "docs", std::string(257, 'x'), {}}, "request.responses.mcp_tool_choice_tool_name_must_be_short_text");
   refuse(ToolChoice{ToolChoiceMode::None, {}, {}, std::vector<AllowedTool>{{AllowedToolKind::Function, "lookup"}}});
   refuse(ToolChoice{ToolChoiceMode::Function, "lookup", {}, std::vector<AllowedTool>{{AllowedToolKind::Function, "lookup"}}});
   refuse(ToolChoice{ToolChoiceMode::Auto, {}, {}, std::vector<AllowedTool>{}});
