@@ -766,6 +766,108 @@ void worst_case_synthetic_policy() {
   CHECK(!shipped.total && has(shipped, pricing::UnboundedBy::ModelPrice, "zz-model-1"));
 }
 
+// ---- model facts from the catalogue --------------------------------------------------------------------------
+
+// What the catalogue states about a model's temperature and control values, the questions a host's reject list asks.
+void model_facts() {
+  using descriptor::Control;
+  const auto policy = descriptor::builtin_policy();
+  CHECK(policy->temperature_admitted("openai.chat", "https://api.openai.com", "gpt-6-luna") == false);
+  CHECK(policy->temperature_admitted("openai.responses", "https://api.openai.com", "o3-mini") == false);
+  CHECK(policy->temperature_admitted("anthropic.messages", "https://api.anthropic.com", "claude-opus-4-8") == false);
+  // Nothing stated: send it, and the provider answers.
+  CHECK(!policy->temperature_admitted("openai.chat", "https://api.example.test", "gpt-6-luna"));
+  CHECK(!policy->temperature_admitted("anthropic.messages", "https://api.anthropic.com", "claude-haiku-4-5-20251001"));
+  CHECK(!policy->temperature_admitted("anthropic.messages", "https://openrouter.ai", "anthropic/claude-opus-4.7"));
+  CHECK(!policy->temperature_admitted("zz.family", "https://zz.example", "zz-model-1"));
+  for (const auto family : families)
+    for (const auto control : all_controls) CHECK(!policy->control_value_admitted(family, "https://api.openai.com", "gpt-6-luna", control, "low"));
+  // The retired members say nothing.
+  CHECK(!policy->temperature_forbidden_by_generation("anthropic.messages", "claude-opus-4-8"));
+  for (const auto family : families) CHECK(policy->family(family)->temperature_forbidden_model_prefixes.empty());
+  for (const auto control : all_controls)
+    CHECK(descriptor::control_takes_values(control) == (control == Control::ReasoningEffort || control == Control::ReasoningSummary ||
+                                                         control == Control::ThinkingLevel || control == Control::ServiceTier));
+
+  // A model whose entry narrows the family's thinking levels.
+  const auto facts = catalogue_of(R"({"version":1,"models":[{"id":"x-model","families":["google.interactions"],"control_values":{"thinking_level":["low","high"]}}]})");
+  auto attached = policy->with_catalogue(facts);
+  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(attached));
+  const auto snapshot = std::get<descriptor::PolicySnapshot>(attached);
+  const auto d = descriptor_of("google.interactions", snapshot);
+  const auto origin = d.base_url();
+  CHECK(snapshot->control_value_admitted("google.interactions", origin, "x-model", Control::ThinkingLevel, "high") == true);
+  CHECK(snapshot->control_value_admitted("google.interactions", origin, "x-model", Control::ThinkingLevel, "medium") == false);
+  CHECK(!snapshot->control_value_admitted("google.interactions", origin, "x-model", Control::ServiceTier, "flex"));
+  CHECK(!snapshot->control_value_admitted("google.interactions", origin, "x-model", Control::Temperature, "low"));
+  CHECK(!snapshot->control_value_admitted("google.interactions", origin, "zz-model-1", Control::ThinkingLevel, "medium"));
+  CHECK(!snapshot->control_value_admitted("google.generate", origin, "x-model", Control::ThinkingLevel, "medium"));
+  auto client = client_of(d);
+  auto request = interactions::Request::simple("x-model", "hi", 1000);
+  request.thinking_level = "high";
+  prepared_ok(client, request);
+  auto reason_of = [&](const interactions::Request& value) {
+    auto prepared = client.prepare(value, run_with(1));
+    CHECK(prepared.error() && prepared.error()->kind == ErrorKind::InvalidRequest);
+    return prepared.error() ? prepared.error()->reason : std::string();
+  };
+  request.thinking_level = "medium";
+  CHECK(reason_of(request) == "request.choice.control_value_not_admitted_for_the_model");
+  // A value the family does not list keeps its own refusal; a model no entry names takes any value the family lists.
+  request.thinking_level = "ultra";
+  CHECK(reason_of(request) == "request.choice.unsupported_typed_semantic_control");
+  auto other = interactions::Request::simple("zz-model-1", "hi", 1000);
+  other.thinking_level = "medium";
+  prepared_ok(client, other);
+
+  // An entry's own defaults, over each family it lists or over every family, must take a value it admits. The
+  // family's default counts: Interactions bills at "standard" and Responses reasons at "low" by default.
+  auto pointer = [&](std::string_view models) {
+    const auto loaded = policy->with_catalogue(catalogue_of(std::string(R"({"version":1,"models":[)") + std::string(models) + "]}"));
+    const auto* error = std::get_if<descriptor::ConfigError>(&loaded);
+    return error ? error->pointer : std::string("attached");
+  };
+  CHECK(pointer(R"({"id":"x-model","families":["google.interactions"],"control_values":{"thinking_level":["low","high"]},"defaults":{"google.interactions":{"thinking_level":"medium"}}})") ==
+        "/model_catalogue/models/x-model/defaults/google.interactions");
+  CHECK(pointer(R"({"id":"x-model","families":["google.interactions"],"control_values":{"service_tier":["flex"]}})") ==
+        "/model_catalogue/models/x-model/defaults/google.interactions");
+  CHECK(pointer(R"({"id":"x-model","control_values":{"reasoning_effort":["high"]}})") == "/model_catalogue/models/x-model/defaults/openai.responses");
+  CHECK(pointer(R"({"id":"x-model","control_values":{"reasoning_effort":["high"]},"defaults":{"openai.responses":{"reasoning_effort":"high"}}})") == "attached");
+  CHECK(pointer(R"({"id":"x-model","families":["openai.chat"],"control_values":{"reasoning_effort":["high"]}})") == "attached");
+  // Across entries nothing is checked at attach: a profile's values that contradict an exact entry's default refuse
+  // the request that inherits it.
+  const auto across = catalogue_of(R"({"version":1,"models":[
+    {"id":"x-","match":"prefix","families":["google.interactions"],"control_values":{"thinking_level":["low"]}},
+    {"id":"x-model","families":["google.interactions"],"defaults":{"google.interactions":{"thinking_level":"high"}}}]})");
+  auto inherited = policy->with_catalogue(across);
+  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(inherited));
+  auto inheriting = client_of(descriptor_of("google.interactions", std::get<descriptor::PolicySnapshot>(inherited)));
+  auto prepared = inheriting.prepare(interactions::Request::simple("x-model", "hi", 1000), run_with(1));
+  CHECK(prepared.error() && prepared.error()->reason == "request.choice.control_value_not_admitted_for_the_model");
+  auto explicit_level = interactions::Request::simple("x-model", "hi", 1000);
+  explicit_level.thinking_level = "low";
+  prepared_ok(inheriting, explicit_level);
+}
+
+// The embedded temperature profiles take part in the lookup that prices a call. A host's shorter profile with prices,
+// merged under the embedded catalogue, is shadowed for the ids an embedded profile covers at that profile's origin, so
+// the bound there names the model; at another origin, and for an id no embedded profile covers, the host's prices bound it.
+void worst_case_shadowed_profile() {
+  const auto host = catalogue_of(R"({"version":1,"models":[{"id":"gpt-","match":"prefix","input_limit":1000,"pricing":{"input":"0.000001","output":"0.000001"}}]})");
+  const descriptor::CatalogueSnapshot layers[]{host, descriptor::builtin_catalogue()};
+  auto merged = descriptor::merge_catalogues(layers);
+  CHECK(std::holds_alternative<descriptor::CatalogueSnapshot>(merged));
+  const auto& catalogue = *std::get<descriptor::CatalogueSnapshot>(merged);
+  runtime::WorstCaseOptions options;
+  options.measured_input_tokens = 100;
+  auto direct = client_of(descriptor_of("openai.chat"));
+  const auto shadowed = runtime::worst_case_cost(prepared_ok(direct, chat_request("gpt-5-mini", 100)), catalogue, options);
+  CHECK(!shadowed.total && detail_of(shadowed, pricing::UnboundedBy::ModelPrice, "gpt-5-mini") == "the catalogue has no price for the model at the origin");
+  CHECK(nano(runtime::worst_case_cost(prepared_ok(direct, chat_request("gpt-4o", 100)), catalogue, options)) == 100u * 1000u + 100u * 1000u);
+  auto local = client_of(descriptor::presets::loopback_chat());
+  CHECK(nano(runtime::worst_case_cost(prepared_ok(local, chat_request("gpt-5-mini", 100)), catalogue, options)) == 100u * 1000u + 100u * 1000u);
+}
+
 // ---- usage ---------------------------------------------------------------------------------------------------
 
 std::string show(const Usage& usage) {
@@ -859,7 +961,8 @@ int main() {
     controls_match_the_encoders(); controls_data(); billing_tiers(); routing_and_tools(); synthetic_policy();
     refusal_predicate(); facts_of_prepared_requests();
     worst_case_tokens(); worst_case_unbounded(); worst_case_tools(); worst_case_tiers_and_fallbacks(); worst_case_route_ceiling();
-    worst_case_covers_usage(); worst_case_synthetic_policy();
+    worst_case_covers_usage(); worst_case_synthetic_policy(); worst_case_shadowed_profile();
+    model_facts();
     decoded_usage();
     std::cout << "host query properties passed\n"; return 0;
   }

@@ -2,10 +2,58 @@
   "version": 1,
   "models": [
     {
+      "id": "claude-fable-",
+      "match": "prefix",
+      "families": ["anthropic.messages"],
+      "origins": ["https://api.anthropic.com"],
+      "temperature": false,
+      "source": "verified"
+    },
+    {
       "id": "claude-haiku-4-5-20251001",
       "families": ["anthropic.messages"],
       "input_limit": 200000,
       "output_limit": 64000,
+      "source": "verified"
+    },
+    {
+      "id": "claude-haiku-5",
+      "match": "prefix",
+      "families": ["anthropic.messages"],
+      "origins": ["https://api.anthropic.com"],
+      "temperature": false,
+      "source": "verified"
+    },
+    {
+      "id": "claude-opus-4-7",
+      "match": "prefix",
+      "families": ["anthropic.messages"],
+      "origins": ["https://api.anthropic.com"],
+      "temperature": false,
+      "source": "verified"
+    },
+    {
+      "id": "claude-opus-4-8",
+      "match": "prefix",
+      "families": ["anthropic.messages"],
+      "origins": ["https://api.anthropic.com"],
+      "temperature": false,
+      "source": "verified"
+    },
+    {
+      "id": "claude-opus-5",
+      "match": "prefix",
+      "families": ["anthropic.messages"],
+      "origins": ["https://api.anthropic.com"],
+      "temperature": false,
+      "source": "verified"
+    },
+    {
+      "id": "claude-sonnet-5",
+      "match": "prefix",
+      "families": ["anthropic.messages"],
+      "origins": ["https://api.anthropic.com"],
+      "temperature": false,
       "source": "verified"
     },
     {
@@ -37,6 +85,22 @@
       "source": "verified"
     },
     {
+      "id": "gpt-5",
+      "match": "prefix",
+      "families": ["openai.chat", "openai.responses"],
+      "origins": ["https://api.openai.com"],
+      "temperature": false,
+      "source": "verified"
+    },
+    {
+      "id": "gpt-6",
+      "match": "prefix",
+      "families": ["openai.chat", "openai.responses"],
+      "origins": ["https://api.openai.com"],
+      "temperature": false,
+      "source": "verified"
+    },
+    {
       "id": "gpt-6-luna",
       "families": ["openai.chat", "openai.responses"],
       "input_limit": 922000,
@@ -47,6 +111,30 @@
       "id": "lyria-3-pro-preview",
       "families": ["google.generate", "google.interactions"],
       "served_as": ["lyria-3.5"],
+      "source": "verified"
+    },
+    {
+      "id": "o1",
+      "match": "prefix",
+      "families": ["openai.chat", "openai.responses"],
+      "origins": ["https://api.openai.com"],
+      "temperature": false,
+      "source": "verified"
+    },
+    {
+      "id": "o3",
+      "match": "prefix",
+      "families": ["openai.chat", "openai.responses"],
+      "origins": ["https://api.openai.com"],
+      "temperature": false,
+      "source": "verified"
+    },
+    {
+      "id": "o4",
+      "match": "prefix",
+      "families": ["openai.chat", "openai.responses"],
+      "origins": ["https://api.openai.com"],
+      "temperature": false,
       "source": "verified"
     }
   ]

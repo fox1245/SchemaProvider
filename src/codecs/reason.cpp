@@ -1234,6 +1234,7 @@ constexpr Entry shared_request_table[] = {
   {"thinking level unsupported for family", "request.choice.thinking_level_unsupported_for_family"},
   {"service tier unsupported for family", "request.choice.service_tier_unsupported_for_family"},
   {"temperature is prohibited for the admitted model", "request.choice.temperature_is_prohibited_for_the_admitted"},
+  {"control value is not admitted for the model", "request.choice.control_value_not_admitted_for_the_model"},
   {"OpenRouter routing requires a declared OpenRouter origin", "request.controls.openrouter_routing_requires_a_declared"},
   {"data_collection must be allow or deny", "request.controls.data_collection_must_be_allow_or_deny"},
   {"routing lists require bounded unique nonempty provider names", "request.controls.routing_lists_require_bounded_unique_nonempty"},

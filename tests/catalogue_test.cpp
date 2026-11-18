@@ -258,13 +258,19 @@ void policy_reads_the_catalogue() {
     CHECK(validate_choices(chat, "gpt-6-luna", over_limit).has_value());
     CHECK(!validate_choices(chat, "gpt-6-luna-unlisted", over_limit).has_value());
 
-    // A host catalogue: a profile for a family of ids, and facts the family rules do not have.
+    // A host catalogue, merged over the embedded one: a profile for a family of ids, and facts the embedded data does
+    // not have. An exact entry that states temperature decides it over the embedded profile.
     const auto host = catalogue(R"([
         {"id":"acme-","match":"prefix","output_limit":100,"temperature":false,
          "defaults":{"openai.chat":{"reasoning_effort":"high","max_output_tokens":80}}},
         {"id":"gpt-5-sampled","temperature":true}])");
     if (!host) return;
-    auto edited = policy->with_catalogue(host);
+    const CatalogueSnapshot layers[]{builtin_catalogue(), host};
+    auto merged = merge_catalogues(layers);
+    CHECK(std::holds_alternative<CatalogueSnapshot>(merged));
+    if (!std::holds_alternative<CatalogueSnapshot>(merged)) return;
+    const auto& with_builtin = std::get<CatalogueSnapshot>(merged);
+    auto edited = policy->with_catalogue(with_builtin);
     CHECK(std::holds_alternative<PolicySnapshot>(edited));
     if (!std::holds_alternative<PolicySnapshot>(edited)) return;
     const auto& custom = std::get<PolicySnapshot>(edited);
@@ -276,6 +282,14 @@ void policy_reads_the_catalogue() {
     CHECK(temperature_forbidden(custom_chat, "acme-1"));
     CHECK(temperature_forbidden(custom_chat, "gpt-5-nano") && !temperature_forbidden(custom_chat, "gpt-5-sampled"));
     CHECK(model_defaults(custom_chat, "gpt-6-luna").reasoning_effort == chat.family_policy().defaults.reasoning_effort);
+    // with_catalogue replaces the catalogue: a host catalogue attached without the embedded one has no embedded
+    // temperature profiles, so the provider answers for those ids.
+    auto replaced = policy->with_catalogue(host);
+    CHECK(std::holds_alternative<PolicySnapshot>(replaced));
+    if (std::holds_alternative<PolicySnapshot>(replaced)) {
+        const auto replaced_chat = descriptor("openai.chat", "https://api.openai.com", std::get<PolicySnapshot>(replaced));
+        CHECK(!temperature_forbidden(replaced_chat, "gpt-5-nano") && temperature_forbidden(replaced_chat, "acme-1"));
+    }
 
     // Entry defaults are held to the family rules; the refusal points into the catalogue.
     auto bad_effort = policy->with_catalogue(catalogue(R"([{"id":"acme/x","defaults":{"openai.chat":{"reasoning_effort":"bogus"}}}])"));
@@ -295,8 +309,167 @@ void policy_reads_the_catalogue() {
         CHECK(std::holds_alternative<ConfigError>(load_policy(text, sp::config_defaults::codec_defaults_json)));
     }
 
-    auto overload = load_policy(sp::config_defaults::descriptor_policy_json, sp::config_defaults::codec_defaults_json, host);
+    auto overload = load_policy(sp::config_defaults::descriptor_policy_json, sp::config_defaults::codec_defaults_json, with_builtin);
     CHECK(std::holds_alternative<PolicySnapshot>(overload) && std::get<PolicySnapshot>(overload)->content_digest() == custom->content_digest());
+}
+
+// A fact comes from the first entry that states it, in lookup order. An exact entry, or a longer profile, that says
+// nothing about temperature does not hide the profile that does. Defaults and limits still come from the best match.
+void exact_entry_does_not_hide_a_profile_fact() {
+    const auto host = catalogue(R"([
+        {"id":"profiled-","match":"prefix","temperature":false},
+        {"id":"profiled-exact","output_limit":64},
+        {"id":"profiled-longer-","match":"prefix","output_limit":32},
+        {"id":"profiled-stated","temperature":true}])");
+    if (!host) return;
+    auto attached = builtin_policy()->with_catalogue(host);
+    CHECK(std::holds_alternative<PolicySnapshot>(attached));
+    if (!std::holds_alternative<PolicySnapshot>(attached)) return;
+    const auto chat = descriptor("openai.chat", "https://api.example.test", std::get<PolicySnapshot>(attached));
+    const auto exact = model_match(chat, "profiled-exact");
+    CHECK(exact.entry && exact.relation == ModelRelation::Exact && exact.entry->output_limit == 64u);
+    const auto longer = model_match(chat, "profiled-longer-model");
+    CHECK(longer.entry && longer.relation == ModelRelation::Prefix && longer.entry->output_limit == 32u);
+    for (const auto* model : {"profiled-exact", "profiled-longer-model", "profiled-other"}) {
+        if (!temperature_forbidden(chat, model)) std::fprintf(stderr, "  temperature admitted for %s\n", model);
+        CHECK(temperature_forbidden(chat, model));
+        auto choices = effective_defaults(chat, model);
+        choices.temperature = 0.5;
+        const auto refused = validate_choices(chat, model, choices);
+        CHECK(refused && *refused == "temperature is prohibited for the admitted model");
+    }
+    // An entry that states the fact decides it, over the profile.
+    CHECK(!temperature_forbidden(chat, "profiled-stated"));
+    // An entry that lists other families only does not state the fact for this one.
+    const auto other_family = catalogue(R"([{"id":"profiled-elsewhere","families":["anthropic.messages"],"temperature":false}])");
+    if (!other_family) return;
+    auto elsewhere = builtin_policy()->with_catalogue(other_family);
+    CHECK(std::holds_alternative<PolicySnapshot>(elsewhere));
+    if (const auto* snapshot = std::get_if<PolicySnapshot>(&elsewhere)) {
+        CHECK(model_match(descriptor("openai.chat", "https://api.example.test", *snapshot), "profiled-elsewhere").entry);
+        CHECK(!(*snapshot)->temperature_admitted("openai.chat", "https://api.example.test", "profiled-elsewhere"));
+        CHECK((*snapshot)->temperature_admitted("anthropic.messages", "https://api.example.test", "profiled-elsewhere") == false);
+    }
+}
+
+// A model listing's supported parameters state the temperature fact at the listing's origin: the parameter is listed
+// or it is not. An empty list states nothing, and the entry does not apply at another origin.
+void listed_parameters_state_temperature() {
+    auto fact = [](std::string_view parameters, std::string_view origin) -> std::optional<bool> {
+        const auto listed = parse_listing(Listing::OpenRouter,
+            std::string(R"({"data":[{"id":"vendor/listed-model","architecture":{"output_modalities":["text"]})") +
+            std::string(parameters) + "}]}", "https://openrouter.ai");
+        const auto* page = std::get_if<ListingPage>(&listed);
+        CHECK(page && page->entries.size() == 1);
+        if (!page || page->entries.size() != 1) return std::nullopt;
+        auto built = make_catalogue(page->entries);
+        CHECK(std::holds_alternative<CatalogueSnapshot>(built));
+        if (!std::holds_alternative<CatalogueSnapshot>(built)) return std::nullopt;
+        auto attached = builtin_policy()->with_catalogue(std::get<CatalogueSnapshot>(std::move(built)));
+        CHECK(std::holds_alternative<PolicySnapshot>(attached));
+        if (!std::holds_alternative<PolicySnapshot>(attached)) return std::nullopt;
+        const auto& policy = std::get<PolicySnapshot>(attached);
+        const auto answer = policy->temperature_admitted("openai.chat", origin, "vendor/listed-model");
+        CHECK(temperature_forbidden(descriptor("openai.chat", origin, policy), "vendor/listed-model") == (answer == false));
+        return answer;
+    };
+    const std::string_view gateway = "https://openrouter.ai";
+    CHECK(fact(R"(,"supported_parameters":["max_tokens","tools"])", gateway) == false);
+    CHECK(fact(R"(,"supported_parameters":["temperature","max_tokens"])", gateway) == true);
+    CHECK(!fact(R"(,"supported_parameters":[])", gateway));
+    CHECK(!fact("", gateway));
+    CHECK(!fact(R"(,"supported_parameters":["max_tokens","tools"])", "https://api.example.test"));
+    // In a file, `temperature` is read before `parameters`.
+    const auto both = catalogue(R"([{"id":"vendor/listed-model","parameters":["max_tokens"],"temperature":true}])");
+    if (!both) return;
+    auto attached = builtin_policy()->with_catalogue(both);
+    CHECK(std::holds_alternative<PolicySnapshot>(attached) &&
+          std::get<PolicySnapshot>(attached)->temperature_admitted("openai.chat", gateway, "vendor/listed-model") == true);
+}
+
+// The embedded temperature profiles reproduce the refusals of the retired family lists, each at its provider's own
+// origin and for the families that provider serves, and no embedded entry states control values.
+void embedded_temperature_profiles() {
+    const auto builtin = builtin_catalogue();
+    std::size_t profiles = 0;
+    for (const auto& entry : builtin->entries()) {
+        CHECK(entry.control_values.empty());
+        if (!entry.temperature) continue;
+        ++profiles;
+        if (entry.origins.size() != 1) std::fprintf(stderr, "  temperature profile %s is not scoped to one origin\n", entry.id.c_str());
+        CHECK(entry.prefix && entry.temperature == false && entry.source == std::optional<std::string>("verified"));
+        CHECK(entry.origins.size() == 1 && !entry.families.empty());
+        const bool anthropic = entry.origins.size() == 1 && entry.origins[0] == "https://api.anthropic.com";
+        const bool openai = entry.origins.size() == 1 && entry.origins[0] == "https://api.openai.com";
+        CHECK(anthropic || openai);
+        CHECK(entry.families == (anthropic ? std::vector<std::string>{"anthropic.messages"} : std::vector<std::string>{"openai.chat", "openai.responses"}));
+    }
+    CHECK(profiles == 11);
+    CHECK(builtin->to_json().find("control_values") == std::string::npos);
+}
+
+// The embedded profiles take part in find() too, which picks defaults, limits and prices. A host's shorter profile is
+// shadowed at the embedded profile's origin for the ids it covers, which have no price there; elsewhere, and for the
+// ids no embedded profile covers, the host's profile still answers.
+void embedded_profiles_shadow_shorter_ones() {
+    const auto host = catalogue(R"([{"id":"gpt-","match":"prefix","output_limit":1000,"pricing":{"input":"0.000001","output":"0.000002"}}])");
+    if (!host) return;
+    const CatalogueSnapshot layers[]{host, builtin_catalogue()};
+    auto merged = merge_catalogues(layers);
+    CHECK(std::holds_alternative<CatalogueSnapshot>(merged));
+    if (!std::holds_alternative<CatalogueSnapshot>(merged)) return;
+    const auto& c = std::get<CatalogueSnapshot>(merged);
+    const auto direct = c->find("openai.chat", "https://api.openai.com", "gpt-5-mini");
+    CHECK(direct.entry && direct.relation == ModelRelation::Prefix && direct.entry->id == "gpt-5");
+    CHECK(direct.entry && direct.entry->pricing.empty() && !direct.entry->output_limit);
+    const auto elsewhere = c->find("openai.chat", "https://api.example.test", "gpt-5-mini");
+    CHECK(elsewhere.entry && elsewhere.entry->id == "gpt-" && elsewhere.entry->output_limit == 1000u && !elsewhere.entry->pricing.empty());
+    const auto uncovered = c->find("openai.chat", "https://api.openai.com", "gpt-4o");
+    CHECK(uncovered.entry && uncovered.entry->id == "gpt-" && !uncovered.entry->pricing.empty());
+}
+
+// `control_values` lists, by control, the values a model takes. Each list is a set, the member is written only when
+// set, and a later layer replaces one control's list and keeps the others.
+void control_values_by_control() {
+    const auto c = catalogue(R"([{"id":"x-model","control_values":{"thinking_level":["high","low"],"service_tier":["flex"]}}])");
+    if (!c) return;
+    const auto* entry = c->entry("x-model");
+    using Values = std::vector<std::pair<std::string, std::vector<std::string>>>;
+    CHECK(entry && entry->control_values == (Values{{"service_tier", {"flex"}}, {"thinking_level", {"high", "low"}}}));
+    CHECK(c->to_json().find(R"("control_values":{"service_tier":["flex"],"thinking_level":["high","low"]})") != std::string::npos);
+    auto again = load_catalogue(c->to_json());
+    CHECK(std::holds_alternative<CatalogueSnapshot>(again) && std::get<CatalogueSnapshot>(again)->digest() == c->digest());
+    auto rebuilt = make_catalogue(c->entries());
+    CHECK(std::holds_alternative<CatalogueSnapshot>(rebuilt) && std::get<CatalogueSnapshot>(rebuilt)->digest() == c->digest());
+    const auto reordered = catalogue(R"([{"id":"x-model","control_values":{"service_tier":["flex"],"thinking_level":["low","high"]}}])");
+    CHECK(reordered && reordered->digest() == c->digest());
+    const auto plain = catalogue(R"([{"id":"x-model"}])");
+    CHECK(plain && plain->to_json().find("control_values") == std::string::npos);
+
+    refused(R"([{"id":"x","control_values":[]}])", "/models/0/control_values");
+    refused(R"([{"id":"x","control_values":{"temperature":["low"]}}])", "/models/0/control_values/temperature");
+    refused(R"([{"id":"x","control_values":{"max_output_tokens":["1"]}}])", "/models/0/control_values/max_output_tokens");
+    refused(R"([{"id":"x","control_values":{"thinking":["low"]}}])", "/models/0/control_values/thinking");
+    refused(R"([{"id":"x","control_values":{"thinking_level":[]}}])", "/models/0/control_values/thinking_level");
+    refused(R"([{"id":"x","control_values":{"thinking_level":"low"}}])", "/models/0/control_values/thinking_level");
+    refused(R"([{"id":"x","control_values":{"thinking_level":["low","low"]}}])", "/models/0/control_values/thinking_level");
+    refused(R"([{"id":"x","control_values":{"thinking_level":["not a token"]}}])", "/models/0/control_values/thinking_level/0");
+    std::string many = "[";
+    for (int i = 0; i < 17; ++i) many += (i ? "," : "") + sp::json::quote("v" + std::to_string(i));
+    refused(R"([{"id":"x","control_values":{"service_tier":)" + many + "]}}]", "/models/0/control_values/service_tier");
+
+    const auto earlier = catalogue(R"([{"id":"m","control_values":{"thinking_level":["low"],"service_tier":["flex"]}}])");
+    const auto later = catalogue(R"([{"id":"m","control_values":{"thinking_level":["high","medium"]}},{"id":"n","control_values":{"reasoning_effort":["low"]}}])");
+    if (!earlier || !later) return;
+    const CatalogueSnapshot layers[]{earlier, later};
+    auto merged = merge_catalogues(layers);
+    CHECK(std::holds_alternative<CatalogueSnapshot>(merged));
+    if (!std::holds_alternative<CatalogueSnapshot>(merged)) return;
+    const auto& both = std::get<CatalogueSnapshot>(merged);
+    CHECK(both->entry("m") && both->entry("m")->control_values == (Values{{"service_tier", {"flex"}}, {"thinking_level", {"high", "medium"}}}));
+    CHECK(both->entry("n") && both->entry("n")->control_values == (Values{{"reasoning_effort", {"low"}}}));
+    const auto diff = diff_catalogues(*earlier, *both);
+    CHECK(diff.changed == std::vector<std::string>{"m"} && diff.added == std::vector<std::string>{"n"});
 }
 
 // A layer's origins scope the whole entry. A layer without origins applies at every origin, so over
@@ -398,6 +571,11 @@ int main() {
         canonical_text_ignores_the_locale();
         list_order_changes_nothing();
         policy_reads_the_catalogue();
+        exact_entry_does_not_hide_a_profile_fact();
+        listed_parameters_state_temperature();
+        embedded_temperature_profiles();
+        embedded_profiles_shadow_shorter_ones();
+        control_values_by_control();
         origins_scope_the_whole_entry();
         bundle_carries_the_catalogue();
         catalogue_files();

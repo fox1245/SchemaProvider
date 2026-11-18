@@ -548,7 +548,21 @@ void thinking_cache_tool_controls() {
   CHECK(wire->root().get("cache_control").get("ttl").as_string() == "1h");
   CHECK(!wire->root().get("tool_choice").get("disable_parallel_tool_use").as_bool());
   auto changed = request; changed.top_p = 0.9; rejected(descriptor, changed, ErrorKind::InvalidRequest);
-  changed = request; changed.model = "Anthropic/CLAUDE-OPUS-4-7"; rejected(descriptor, changed, ErrorKind::InvalidRequest);
+  // A catalogue fact that refuses temperature refuses an explicit one before thinking would leave it out. No entry
+  // states the fact for this spelling at this origin, so it is sent, without temperature.
+  changed = request; changed.model = "Anthropic/CLAUDE-OPUS-4-7";
+  CHECK(!document(encoded(descriptor, changed).body)->root().get("temperature").valid());
+  {
+    auto facts = descriptor::load_catalogue(R"({"version":1,"models":[{"id":"sampling-refused-","match":"prefix","origins":["http://127.0.0.1:18080"],"temperature":false}]})");
+    CHECK(std::holds_alternative<descriptor::CatalogueSnapshot>(facts));
+    auto policy = descriptor::builtin_policy()->with_catalogue(std::get<descriptor::CatalogueSnapshot>(std::move(facts)));
+    CHECK(std::holds_alternative<descriptor::PolicySnapshot>(policy));
+    const auto profiled = policy_descriptor(std::get<descriptor::PolicySnapshot>(std::move(policy)));
+    changed.model = "sampling-refused-model";
+    rejected(profiled, changed, ErrorKind::InvalidRequest);
+    changed.temperature.reset();
+    CHECK(!document(encoded(profiled, changed).body)->root().get("temperature").valid());
+  }
   changed = request; changed.temperature = std::numeric_limits<double>::quiet_NaN(); rejected(descriptor, changed, ErrorKind::InvalidRequest);
   changed = request; changed.thinking_mode = static_cast<messages::ThinkingMode>(99); rejected(descriptor, changed, ErrorKind::InvalidRequest);
   changed = request; changed.output_effort = static_cast<messages::OutputEffort>(99); rejected(descriptor, changed, ErrorKind::InvalidRequest);

@@ -929,7 +929,8 @@ void quoted_json_and_request_bounds() {
   CHECK(std::get<Error>(chat::encode(descriptor_value(), request, false)).kind == ErrorKind::InvalidRequest);
 }
 void gateway_request_controls() {
-  auto loaded = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"gateway","family":"openai.chat","connection":{"base_url":"https://openrouter.ai","paths":{"buffered":"/api/v1/chat/completions","streaming":"/api/v1/chat/completions"}}})");
+  const std::string gateway_source = R"({"descriptor_version":1,"revision":1,"id":"gateway","family":"openai.chat","connection":{"base_url":"https://openrouter.ai","paths":{"buffered":"/api/v1/chat/completions","streaming":"/api/v1/chat/completions"}}})";
+  auto loaded = descriptor::load(gateway_source);
   CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
   const auto& gateway = std::get<descriptor::ValidatedDescriptor>(loaded);
   chat::Request request; request.model = "fixture-model"; request.messages.push_back({Role::User, "hello"});
@@ -955,7 +956,24 @@ void gateway_request_controls() {
   changed = request; changed.reasoning->exclude = true; reject(changed);
   changed = request; changed.reasoning_effort = "low"; reject(changed);
   changed = request; changed.models.push_back(changed.models.front()); reject(changed);
-  changed = request; changed.temperature = 0.5; changed.models = {"OpenAI/GPT-5-nano"}; reject(changed);
+  // Each fallback model goes through the temperature check. No entry states the fact at this origin for this spelling,
+  // so it is sent and the provider answers; a listing entry whose parameters leave temperature out refuses it.
+  changed = request; changed.temperature = 0.5; changed.models = {"OpenAI/GPT-5-nano"};
+  CHECK(std::holds_alternative<chat::EncodedRequest>(chat::encode(gateway, changed, false)));
+  {
+    auto facts = descriptor::load_catalogue(R"({"version":1,"models":[{"id":"vendor/listed-without-temperature","origins":["https://openrouter.ai"],"parameters":["max_tokens","tools"]}]})");
+    CHECK(std::holds_alternative<descriptor::CatalogueSnapshot>(facts));
+    auto policy = descriptor::builtin_policy()->with_catalogue(std::get<descriptor::CatalogueSnapshot>(std::move(facts)));
+    CHECK(std::holds_alternative<descriptor::PolicySnapshot>(policy));
+    auto listed = descriptor::load(gateway_source, std::get<descriptor::PolicySnapshot>(std::move(policy)));
+    CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(listed));
+    const auto& listed_gateway = std::get<descriptor::ValidatedDescriptor>(listed);
+    changed.models = {"vendor/listed-without-temperature"};
+    const auto refused = chat::encode(listed_gateway, changed, false);
+    CHECK(std::holds_alternative<Error>(refused) && std::get<Error>(refused).kind == ErrorKind::InvalidRequest);
+    changed.temperature.reset();
+    CHECK(std::holds_alternative<chat::EncodedRequest>(chat::encode(listed_gateway, changed, false)));
+  }
   request.reasoning->effort.reset(); request.reasoning->max_tokens = 256; request.max_output_tokens = 512;
   result = chat::encode(gateway, request, false);
   CHECK(std::holds_alternative<chat::EncodedRequest>(result));

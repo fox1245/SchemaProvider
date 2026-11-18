@@ -65,10 +65,14 @@ inline constexpr std::uint64_t TransportConnectionCache = 1ULL << 16;
 // (reason "archive.custody.unavailable"). The bit is not part of RequiredProvider, so an
 // embedder that uses only local file custody keeps meeting RequiredProvider.
 inline constexpr std::uint64_t HostArchiveCustody = 1ULL << 17;
+// descriptor::CatalogueEntry carries `control_values`, and the policy reads temperature and control values from the
+// model catalogue. A library built before them has a smaller CatalogueEntry, which a consumer built with this header
+// would read past, so it lacks this bit and a require_interface_contract call with RequiredProvider refuses it.
+inline constexpr std::uint64_t ModelControlFacts = 1ULL << 18;
 inline constexpr std::uint64_t RequiredProvider = TypedRuntime | PreparedAdmission |
     NullableUsage | All5Native | TrustedArchive | OrderedWireEvents | NativeSocketRuntime |
     RetainedJsonSize | CompleteAttemptEvidence | OpenRouterRoutingMaxPrice | ErrorReason | PolicyAdmittedExtensions |
-    CompletionSecret | PartCacheMarks | ServedByUpstream | TransportConnectionCache;
+    CompletionSecret | PartCacheMarks | ServedByUpstream | TransportConnectionCache | ModelControlFacts;
 }
 InterfaceContract core_interface_contract() noexcept;
 std::uint32_t codec_interface_revision() noexcept;

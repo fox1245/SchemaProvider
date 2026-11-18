@@ -368,51 +368,53 @@ void deployment_header_admission() {
         CHECK(std::holds_alternative<ConfigError>(load_with_deployment_headers(plain, overrides, {}, {})));
     CHECK(std::holds_alternative<ConfigError>(load_with_deployment_headers(plain, {}, {"bad\nworkspace", {}}, {})));
 }
-void model_sampling_admission() {
+// Whether `temperature` is refused for `model` by a descriptor of `family` at `origin` under the built-in policy.
+bool temperature_refused(std::string_view family, std::string_view origin, std::string_view model) {
     using namespace sp::descriptor;
-    auto loaded = load(descriptor());
-    CHECK(std::holds_alternative<ValidatedDescriptor>(loaded));
-    if (!std::holds_alternative<ValidatedDescriptor>(loaded)) return;
-    const auto& value = std::get<ValidatedDescriptor>(loaded);
-    for (auto model : {"gpt-5-mini", "GPT-6", "openai/O3-mini", "gateway/OpenAI/O4-test", "o1-preview"}) {
-        auto controls = effective_defaults(value, model);
-        controls.temperature = 0.7;
-        CHECK(validate_choices(value, model, controls).has_value());
-    }
-    auto controls = effective_defaults(value, "gpt-4o-mini");
-    controls.temperature = 0.7;
-    CHECK(!validate_choices(value, "gpt-4o-mini", controls));
-    auto messages = descriptor({}, "https://api.example.test", "/v1/messages");
-    messages.replace(messages.find("openai.chat"), std::string_view("openai.chat").size(), "anthropic.messages");
-    auto anthropic = load(messages);
-    CHECK(std::holds_alternative<ValidatedDescriptor>(anthropic));
-    if (const auto* admitted = std::get_if<ValidatedDescriptor>(&anthropic)) {
-        for (auto model : {"anthropic/CLAUDE-OPUS-4-7", "claude-opus-4-8-test", "claude-opus-5", "claude-sonnet-5", "claude-fable-test"}) {
-            auto choices = effective_defaults(*admitted, model);
-            choices.temperature = 0.7;
-            CHECK(validate_choices(*admitted, model, choices).has_value());
-        }
-    }
-}
-
-// The Claude models that refuse `temperature` are a generation, not a list: Opus 4.7 and every
-// later model, whatever the family name. These are the ids the provider's model listing reported
-// when the bug was found plus the dated and older 4.x and 3.x ids; each one is classified, and the
-// table is read through the admitted policy rather than restated. A new id belongs in this list.
-void claude_temperature_by_generation() {
-    using namespace sp::descriptor;
-    auto source = std::string(descriptor({}, "https://api.example.test", "/v1/messages"));
-    source.replace(source.find("openai.chat"), std::string_view("openai.chat").size(), "anthropic.messages");
+    auto source = descriptor({}, origin, family == "anthropic.messages" ? "/v1/messages" : "/v1/chat/completions");
+    source.replace(source.find("openai.chat"), std::string_view("openai.chat").size(), family);
     auto loaded = load(source);
     CHECK(std::holds_alternative<ValidatedDescriptor>(loaded));
-    if (!std::holds_alternative<ValidatedDescriptor>(loaded)) return;
-    const auto& admitted = std::get<ValidatedDescriptor>(loaded);
-    struct Listed { std::string_view model; bool forbidden; };
+    if (!std::holds_alternative<ValidatedDescriptor>(loaded)) return false;
+    const auto& value = std::get<ValidatedDescriptor>(loaded);
+    auto choices = effective_defaults(value, model);
+    choices.temperature = 0.7;
+    const auto refused = validate_choices(value, model, choices);
+    CHECK(!refused || *refused == "temperature is prohibited for the admitted model");
+    CHECK(refused.has_value() == temperature_forbidden(value, model));
+    return refused.has_value();
+}
+// Temperature facts are the catalogue's, per origin. At the direct origins the embedded profiles refuse their ids;
+// another origin, and a spelling no entry has (another case, a gateway namespace), states nothing, so the request is
+// sent and the provider answers.
+void model_sampling_admission() {
+    for (auto model : {"gpt-5-mini", "gpt-6", "o3-mini", "o4-test", "o1-preview"}) {
+        CHECK(temperature_refused("openai.chat", "https://api.openai.com", model));
+        CHECK(temperature_refused("openai.responses", "https://api.openai.com", model));
+        CHECK(!temperature_refused("openai.chat", "https://api.example.test", model));
+    }
+    for (auto model : {"GPT-6", "openai/O3-mini", "gateway/OpenAI/O4-test", "openai/gpt-5-mini", "gpt-4o-mini"})
+        CHECK(!temperature_refused("openai.chat", "https://api.openai.com", model));
+    for (auto model : {"claude-opus-4-8-test", "claude-opus-5", "claude-sonnet-5", "claude-fable-test"}) {
+        CHECK(temperature_refused("anthropic.messages", "https://api.anthropic.com", model));
+        CHECK(!temperature_refused("anthropic.messages", "https://api.example.test", model));
+    }
+    for (auto model : {"anthropic/CLAUDE-OPUS-4-7", "CLAUDE-OPUS-4-7", "anthropic/claude-opus-4-7"})
+        CHECK(!temperature_refused("anthropic.messages", "https://api.anthropic.com", model));
+    // A profile lists its families: the OpenAI profiles say nothing for a Messages request at the OpenAI origin.
+    CHECK(!temperature_refused("anthropic.messages", "https://api.openai.com", "gpt-5-mini"));
+}
+
+// The Claude models that refuse `temperature` at the Anthropic origin are the catalogue's profiles: Opus 4.7, Opus 4.8
+// and the Claude 5 families, dated or not. A model no profile names is sent, and the provider answers; another origin
+// states nothing, so every id is sent there.
+void claude_temperature_by_origin() {
+    struct Listed { std::string_view model; bool refused; };
     const Listed listed[] = {
-        // Refused by the API with "`temperature` is deprecated for this model".
+        // The profiles: refused by the API with "`temperature` is deprecated for this model".
         {"claude-haiku-5-5", true}, {"claude-opus-5", true}, {"claude-opus-5-5", true}, {"claude-sonnet-5", true},
         {"claude-sonnet-5-5", true}, {"claude-fable-5", true}, {"claude-fable-5-1", true},
-        {"claude-opus-4-7", true}, {"claude-opus-4-8", true},
+        {"claude-opus-4-7", true}, {"claude-opus-4-8", true}, {"claude-opus-4-7-20271001", true}, {"claude-haiku-5-20270101", true},
         // Accepted: everything before Opus 4.7, with and without the date suffix.
         {"claude-opus-4-6", false}, {"claude-sonnet-4-6", false},
         {"claude-opus-4-5", false}, {"claude-opus-4-5-20251101", false},
@@ -423,73 +425,23 @@ void claude_temperature_by_generation() {
         {"claude-sonnet-4-0", false}, {"claude-sonnet-4-20250514", false},
         {"claude-3-7-sonnet-20250219", false}, {"claude-3-5-sonnet-20241022", false},
         {"claude-3-5-haiku-20241022", false}, {"claude-3-haiku-20240307", false}, {"claude-3-opus-20240229", false},
-        // Gateway spellings: namespace, dots for the version, any case.
-        {"anthropic/claude-haiku-5.5", true}, {"anthropic/claude-opus-4.7", true}, {"Anthropic/CLAUDE-HAIKU-5-5", true},
+        // No profile names these: sent, and the provider answers.
+        {"claude-haiku-6", false}, {"claude-sonnet-6-2", false}, {"claude-opus-4-9", false}, {"claude-opus-4-10", false},
+        {"claude-newfamily-5-1", false}, {"claude-future-7-20300101", false}, {"claude-experimental", false}, {"claude-opus-latest", false},
+        // Gateway spellings and another case are not the catalogue's ids.
+        {"anthropic/claude-haiku-5.5", false}, {"anthropic/claude-opus-4.7", false}, {"Anthropic/CLAUDE-HAIKU-5-5", false},
         {"anthropic/claude-opus-4.6", false}, {"anthropic/claude-sonnet-4.5", false}, {"anthropic/claude-3.5-sonnet", false},
         {"anthropic/claude-3.7-sonnet:thinking", false},
-        // The next releases need no new entry: a later generation of any family, dated or not.
-        {"claude-haiku-6", true}, {"claude-sonnet-6-2", true}, {"claude-opus-4-9", true}, {"claude-opus-4-10", true},
-        {"claude-opus-4-7-20271001", true}, {"claude-newfamily-5-1", true}, {"claude-future-7-20300101", true},
-        // A Claude id whose generation cannot be read is treated like the newest one.
-        {"claude-experimental", true}, {"claude-opus-latest", true},
-        // Other ids are not Claude and are not guessed at.
         {"gpt-4o", false}, {"vendor/some-model-5", false},
     };
     for (const auto& entry : listed) {
-        auto choices = effective_defaults(admitted, entry.model);
-        choices.temperature = 0.7;
-        const bool refused = validate_choices(admitted, entry.model, choices).has_value();
-        if (refused != entry.forbidden) std::fprintf(stderr, "temperature classification differs for %.*s\n", static_cast<int>(entry.model.size()), entry.model.data());
-        CHECK(refused == entry.forbidden);
-        CHECK(temperature_forbidden(admitted, entry.model) == entry.forbidden);
+        const bool direct = temperature_refused("anthropic.messages", "https://api.anthropic.com", entry.model);
+        const bool elsewhere = temperature_refused("anthropic.messages", "https://api.example.test", entry.model);
+        if (direct != entry.refused || elsewhere)
+            std::fprintf(stderr, "temperature classification differs for %.*s\n", static_cast<int>(entry.model.size()), entry.model.data());
+        CHECK(direct == entry.refused);
+        CHECK(!elsewhere);
     }
-
-    // The rule is policy data. A snapshot that predates it (no key) still loads and keeps only its
-    // prefixes; a malformed rule is refused.
-    auto document = sp::json::parse(sp::config_defaults::descriptor_policy_json);
-    CHECK(std::holds_alternative<sp::json::Document>(document));
-    if (!std::holds_alternative<sp::json::Document>(document)) return;
-    const auto root = std::get<sp::json::Document>(document).root();
-    auto policy_text = [&](std::string_view rule) {
-        std::string families = "[";
-        for (auto family : root.get("families").elements()) {
-            if (families.size() > 1) families += ',';
-            std::string member = "{";
-            for (auto field : family.members()) {
-                if (field.key == "temperature_forbidden_generations") continue;
-                if (member.size() > 1) member += ',';
-                member += sp::json::quote(field.key) + ':' + field.value.dump();
-            }
-            if (family.get("family").as_string() == "anthropic.messages" && !rule.empty()) member += ",\"temperature_forbidden_generations\":" + std::string(rule);
-            families += member + '}';
-        }
-        return "{\"version\":1,\"revision\":" + std::to_string(root.get("revision").as_uint()) + ",\"families\":" + families + "]}";
-    };
-    auto admit = [&](std::string_view rule) {
-        auto result = load_policy(policy_text(rule), sp::config_defaults::codec_defaults_json);
-        auto* snapshot = std::get_if<PolicySnapshot>(&result);
-        if (!snapshot) return std::optional<ValidatedDescriptor>{};
-        auto client = load(source, *snapshot);
-        return client.index() == 0 ? std::optional<ValidatedDescriptor>(std::get<ValidatedDescriptor>(std::move(client))) : std::nullopt;
-    };
-    auto forbids = [&](const ValidatedDescriptor& value, std::string_view model) { return temperature_forbidden(value, model); };
-    const auto without = admit({});
-    CHECK(without.has_value());
-    if (without) {
-        CHECK(forbids(*without, "claude-opus-4-8") && forbids(*without, "claude-haiku-5"));
-        CHECK(!forbids(*without, "claude-opus-4-6") && !forbids(*without, "claude-newfamily-9"));
-    }
-    const auto narrowed = admit(R"([{"series":"claude-","from":"5.0"}])");
-    CHECK(narrowed.has_value());
-    if (narrowed) {
-        CHECK(!forbids(*narrowed, "claude-sonnet-4-9"));
-        CHECK(forbids(*narrowed, "claude-sonnet-5") && forbids(*narrowed, "claude-future-6"));
-    }
-    for (std::string_view bad : {R"([{"series":"claude-"}])", R"([{"series":"claude-","from":"4"}])", R"([{"series":"claude-","from":"4.x"}])",
-                                 R"([{"series":"Claude-","from":"4.7"}])", R"([{"series":"claude-","from":"4.7","extra":1}])",
-                                 R"([{"series":"claude-","from":"4.7"},{"series":"claude-","from":"5.0"}])", R"({"series":"claude-","from":"4.7"})",
-                                 R"([{"series":"","from":"4.7"}])", R"([{"series":"a/b-","from":"4.7"}])"})
-        CHECK(!admit(bad).has_value());
 }
 void preset_builders_and_validation() {
     using namespace sp::descriptor;
@@ -553,6 +505,61 @@ std::string with_family_member(std::string_view family, std::string_view key, st
     }
     return with_member(root, "families", families + ']');
 }
+// Each temperature profile of the embedded catalogue refuses at the provider's own origin and nowhere else. The
+// exact gpt-6-luna entry states no temperature, so the gpt-6 profile still decides for it at the OpenAI origin.
+void temperature_profiles_by_origin() {
+    struct Profile { std::string_view family, origin, model; };
+    const Profile profiles[] = {
+        {"openai.chat", "https://api.openai.com", "gpt-5"}, {"openai.chat", "https://api.openai.com", "gpt-5-mini"},
+        {"openai.chat", "https://api.openai.com", "gpt-6"}, {"openai.chat", "https://api.openai.com", "gpt-6-luna"},
+        {"openai.chat", "https://api.openai.com", "o1-preview"}, {"openai.chat", "https://api.openai.com", "o3-mini"},
+        {"openai.chat", "https://api.openai.com", "o4-mini"},
+        {"openai.responses", "https://api.openai.com", "gpt-5-nano"}, {"openai.responses", "https://api.openai.com", "gpt-6-luna"},
+        {"openai.responses", "https://api.openai.com", "o1"}, {"openai.responses", "https://api.openai.com", "o3"},
+        {"openai.responses", "https://api.openai.com", "o4-mini"}, {"openai.responses", "https://api.openai.com", "gpt-6"},
+        {"anthropic.messages", "https://api.anthropic.com", "claude-opus-4-7"}, {"anthropic.messages", "https://api.anthropic.com", "claude-opus-4-8"},
+        {"anthropic.messages", "https://api.anthropic.com", "claude-opus-5"}, {"anthropic.messages", "https://api.anthropic.com", "claude-sonnet-5"},
+        {"anthropic.messages", "https://api.anthropic.com", "claude-haiku-5"}, {"anthropic.messages", "https://api.anthropic.com", "claude-fable-5"},
+    };
+    for (const auto& profile : profiles) {
+        const bool own = temperature_refused(profile.family, profile.origin, profile.model);
+        const bool elsewhere = temperature_refused(profile.family, "https://api.example.test", profile.model);
+        if (!own || elsewhere)
+            std::fprintf(stderr, "temperature profile differs for %.*s at %.*s\n", static_cast<int>(profile.model.size()), profile.model.data(),
+                         static_cast<int>(profile.origin.size()), profile.origin.data());
+        CHECK(own);
+        CHECK(!elsewhere);
+    }
+}
+// The family policy's temperature keys are retired. An empty list still loads, as older snapshots wrote it for the
+// families without facts; a fact in either key is refused with a pointer to the key.
+void retired_temperature_keys() {
+    using namespace sp::descriptor;
+    auto every_family = [](std::string_view raw) {
+        auto parsed = sp::json::parse(sp::config_defaults::descriptor_policy_json);
+        const auto root = std::get<sp::json::Document>(parsed).root();
+        std::string families = "[";
+        for (auto entry : root.get("families").elements()) {
+            if (families.size() > 1) families += ',';
+            auto prefixes = sp::json::parse(with_member(entry, "temperature_forbidden_model_prefixes", raw));
+            families += with_member(std::get<sp::json::Document>(prefixes).root(), "temperature_forbidden_generations", raw);
+        }
+        return with_member(root, "families", families + ']');
+    };
+    auto outcome = [](const std::string& text) {
+        auto loaded = load_policy(text, sp::config_defaults::codec_defaults_json);
+        if (const auto* error = std::get_if<ConfigError>(&loaded)) return error->pointer + " " + error->expected;
+        return std::string("loaded");
+    };
+    CHECK(outcome(every_family("[]")) == "loaded");
+    CHECK(outcome(with_family_member("google.generate", "temperature_forbidden_model_prefixes", "[]")) == "loaded");
+    CHECK(outcome(with_family_member("openai.chat", "temperature_forbidden_model_prefixes", R"(["gpt-5"])")) ==
+          "/temperature_forbidden_model_prefixes temperature facts in the model catalogue");
+    CHECK(outcome(with_family_member("anthropic.messages", "temperature_forbidden_generations", R"([{"series":"claude-","from":"4.7"}])")) ==
+          "/temperature_forbidden_generations temperature facts in the model catalogue");
+    CHECK(outcome(with_family_member("google.interactions", "temperature_forbidden_generations", R"({})")) ==
+          "/temperature_forbidden_generations temperature facts in the model catalogue");
+}
 void replay_identity_covers_wire_facts_only() {
     using namespace sp::descriptor;
     const auto builtin = builtin_policy();
@@ -577,8 +584,6 @@ void replay_identity_covers_wire_facts_only() {
     reversed += ']';
     auto chat = std::get<sp::json::Document>(parsed).root().get("families").at(0);
     CHECK(chat.get("family").as_string() == "openai.chat");
-    std::string prefixes = chat.get("temperature_forbidden_model_prefixes").dump();
-    prefixes.insert(prefixes.size() - 1, std::string(prefixes.size() > 2 ? "," : "") + "\"policy-test-\"");
     std::string origins = chat.get("openrouter_origins").dump();
     origins.insert(origins.size() - 1, std::string(origins.size() > 2 ? "," : "") + "\"https://gateway.example.test\"");
     const auto anthropic_defaults = with_member(root.get("families").at(1).get("defaults"), "max_output_tokens", "321");
@@ -586,7 +591,7 @@ void replay_identity_covers_wire_facts_only() {
     const std::string admission_edits[] = {
         with_member(root, "families", reversed),
         with_member(root, "revision", std::to_string(root.get("revision").as_uint() + 1)),
-        with_family_member("openai.chat", "temperature_forbidden_model_prefixes", prefixes),
+        with_family_member("openai.chat", "temperature_range", "[0,1.5]"),
         with_family_member("openai.chat", "openrouter_origins", origins),
         with_family_member("anthropic.messages", "defaults", anthropic_defaults),
         with_family_member("anthropic.messages", "header_versions", R"(["2023-06-01","2026-01-01"])"),
@@ -704,7 +709,9 @@ int main() {
     duplicate_errors_retain_only_unambiguous_revision();
     deployment_header_admission();
     model_sampling_admission();
-    claude_temperature_by_generation();
+    claude_temperature_by_origin();
+    temperature_profiles_by_origin();
+    retired_temperature_keys();
     preset_builders_and_validation();
     policy_bundle_and_identity_pinning();
     replay_identity_covers_wire_facts_only();

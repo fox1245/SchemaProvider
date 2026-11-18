@@ -13,7 +13,6 @@
         {"explicit": false, "unsupported": "ignore"}
       ],
       "max_completion_tokens_origins": ["https://api.openai.com"],
-      "temperature_forbidden_model_prefixes": ["gpt-5", "gpt-6", "o1", "o3", "o4"],
       "media": {
         "image": {"mime": ["image/png", "image/jpeg", "image/webp", "image/gif"], "sources": ["inline", "url"]},
         "audio": {"mime": ["audio/wav", "audio/mp3", "audio/mpeg"], "sources": ["inline"]},
@@ -114,8 +113,6 @@
         {"origins": ["https://api.anthropic.com"], "explicit": true, "max_breakpoints": 4, "ttls": ["5m", "1h"], "write_multiplier": {"5m": 1.25, "1h": 2}, "longest_first": true},
         {"explicit": true, "max_breakpoints": 4, "ttls": ["5m", "1h"], "longest_first": true}
       ],
-      "temperature_forbidden_model_prefixes": ["claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-sonnet-5", "claude-haiku-5", "claude-fable-"],
-      "temperature_forbidden_generations": [{"series": "claude-", "from": "4.7"}],
       "media": {
         "image": {"mime": ["image/jpeg", "image/png", "image/gif", "image/webp"], "sources": ["inline", "url", "file"]},
         "audio": {"mime": [], "sources": []},
@@ -286,7 +283,6 @@
       "standard_service_tiers": ["default"],
       "openrouter_origins": ["https://openrouter.ai"],
       "cache": [{"explicit": false, "unsupported": "ignore"}],
-      "temperature_forbidden_model_prefixes": ["gpt-5", "gpt-6", "o1", "o3", "o4"],
       "media": {
         "image": {"mime": ["image/png", "image/jpeg", "image/webp", "image/gif"], "sources": ["inline", "url", "file"]},
         "audio": {"mime": [], "sources": []},
@@ -408,7 +404,6 @@
       "controls": ["max_output_tokens", "temperature", "thinking_budget", "include_thoughts", "thinking_level", "required_tool"],
       "openrouter_origins": [],
       "cache": [{"explicit": false, "unsupported": "ignore"}],
-      "temperature_forbidden_model_prefixes": [],
       "media": {
         "image": {"mime": ["image/png", "image/jpeg", "image/jpg", "image/webp", "image/heic", "image/heif", "image/gif", "image/avif", "image/bmp"], "sources": ["inline", "url", "file"]},
         "audio": {"mime": ["audio/wav", "audio/mp3", "audio/aiff", "audio/aac", "audio/ogg", "audio/flac", "audio/mpeg", "audio/m4a", "audio/l16", "audio/opus", "audio/alaw", "audio/mulaw", "audio/webm", "video/audio/s16le", "video/audio/wav"], "sources": ["inline", "url", "file"]},
@@ -484,7 +479,6 @@
       "standard_service_tiers": ["standard"],
       "openrouter_origins": [],
       "cache": [{"explicit": false, "unsupported": "ignore"}],
-      "temperature_forbidden_model_prefixes": [],
       "media": {
         "image": {"mime": ["image/png", "image/jpeg", "image/webp", "image/heic", "image/heif", "image/gif", "image/bmp"], "sources": ["inline", "url", "file"]},
         "audio": {"mime": ["audio/wav", "audio/mp3", "audio/aiff", "audio/aac", "audio/ogg", "audio/flac", "audio/mpeg", "audio/m4a", "audio/l16", "audio/opus", "audio/alaw", "audio/mulaw", "audio/webm"], "sources": ["inline", "url", "file"]},

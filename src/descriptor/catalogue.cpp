@@ -1,5 +1,6 @@
 #include "descriptor/catalogue.h"
 #include "crypto/crypto.h"
+#include "descriptor/policy.h"
 #include "json/json.h"
 #include "sp/config_defaults.h"
 #include <algorithm>
@@ -21,6 +22,7 @@ constexpr std::size_t max_entries = 16384;
 constexpr std::size_t max_list = 256;
 constexpr std::size_t max_name_bytes = 256;
 constexpr std::size_t max_token_bytes = 64;
+constexpr std::size_t max_control_values = 16;
 
 constexpr std::string_view families_known[]{"openai.chat", "anthropic.messages", "openai.responses",
                                             "google.generate", "google.interactions"};
@@ -180,7 +182,7 @@ CatalogueEntry parse_entry(Value value, const std::string& pointer) {
   closed(value, {"id"},
          {"match", "families", "origins", "aliases", "served_as", "alias_of", "name", "lifecycle", "retires_at", "source",
           "context_window", "input_limit", "output_limit", "input_modalities", "output_modalities", "methods", "parameters",
-          "temperature", "pricing", "defaults"},
+          "temperature", "pricing", "defaults", "control_values"},
          pointer);
   CatalogueEntry entry;
   entry.id = text(value.get("id"), at(pointer, "id"), model_name, "model name");
@@ -228,6 +230,20 @@ CatalogueEntry parse_entry(Value value, const std::string& pointer) {
       entry.defaults.push_back(overlay(member.key, member.value, where));
     }
     std::sort(entry.defaults.begin(), entry.defaults.end(), [](const auto& a, const auto& b) { return a.family < b.family; });
+  }
+  // The values the model takes for a control that takes listed values, by the control's policy name.
+  if (const auto values = value.get("control_values"); present(values)) {
+    const auto where = at(pointer, "control_values");
+    if (!values.is_object()) fail(where, "object keyed by control");
+    for (auto member : values.members()) {
+      const auto control_at = at(where, member.key);
+      const auto control = control_from_name(member.key);
+      if (!control || !control_takes_values(*control)) fail(control_at, "a control that takes listed values");
+      if (!member.value.is_array() || !member.value.size() || member.value.size() > max_control_values)
+        fail(control_at, "one to sixteen unique tokens");
+      entry.control_values.emplace_back(std::string(member.key), list(member.value, control_at, token, "token"));
+    }
+    std::sort(entry.control_values.begin(), entry.control_values.end());
   }
   return entry;
 }
@@ -305,6 +321,16 @@ std::string entry_json(const CatalogueEntry& e) {
   put_list(out, "methods", e.methods);
   put_list(out, "parameters", e.parameters);
   if (e.temperature) out += std::string(",\"temperature\":") + (*e.temperature ? "true" : "false");
+  if (!e.control_values.empty()) {
+    out += ",\"control_values\":{";
+    for (std::size_t i = 0; i < e.control_values.size(); ++i) {
+      out += (i ? "," : "") + json::quote(e.control_values[i].first) + ":[";
+      const auto& values = e.control_values[i].second;
+      for (std::size_t j = 0; j < values.size(); ++j) out += (j ? "," : "") + json::quote(values[j]);
+      out += ']';
+    }
+    out += '}';
+  }
   if (!e.pricing.empty()) {
     out += ",\"pricing\":{";
     for (std::size_t i = 0; i < e.pricing.size(); ++i)
@@ -320,9 +346,6 @@ std::string entry_json(const CatalogueEntry& e) {
   return out + '}';
 }
 std::string key_of(const CatalogueEntry& e) { return e.prefix ? e.id + "*" : e.id; }
-bool contains(const std::vector<std::string>& values, std::string_view value) noexcept {
-  return std::find(values.begin(), values.end(), value) != values.end();
-}
 } // namespace
 
 class CatalogueBuilder {
@@ -380,6 +403,31 @@ ModelMatch ModelCatalogue::find(std::string_view family, std::string_view origin
     }
   }
   return best;
+}
+
+const CatalogueEntry* ModelCatalogue::for_each_match(std::string_view family, std::string_view origin, std::string_view model,
+                                                     MatchVisitor visit, const void* context) const noexcept {
+  auto applies = [&](const CatalogueEntry& e) {
+    return (e.origins.empty() || contains(e.origins, origin)) && (e.families.empty() || contains(e.families, family));
+  };
+  const auto first = std::lower_bound(names_.begin(), names_.end(), model,
+                                      [](const auto& item, std::string_view name) { return item.first < name; });
+  auto last = first;
+  while (last != names_.end() && last->first == model) ++last;
+  for (auto it = first; it != last; ++it) {
+    const auto& e = entries_[it->second];
+    if (e.id == model && applies(e) && visit(e, context)) return &e;
+  }
+  for (const bool scoped : {true, false})
+    for (auto it = first; it != last; ++it) {
+      const auto& e = entries_[it->second];
+      if (e.id != model && e.origins.empty() != scoped && applies(e) && visit(e, context)) return &e;
+    }
+  for (const auto index : prefixes_) {
+    const auto& e = entries_[index];
+    if (model.size() >= e.id.size() && model.substr(0, e.id.size()) == e.id && applies(e) && visit(e, context)) return &e;
+  }
+  return nullptr;
 }
 
 const CatalogueEntry* ModelCatalogue::entry(std::string_view id, bool prefix) const noexcept {
@@ -504,6 +552,13 @@ void merge_entry(CatalogueEntry& into, const CatalogueEntry& from) {
     take(found->top_p, overlay.top_p);
   }
   std::sort(into.defaults.begin(), into.defaults.end(), [](const auto& a, const auto& b) { return a.family < b.family; });
+  // A later layer's list for a control replaces the earlier one; other controls stay.
+  for (const auto& [control, values] : from.control_values) {
+    auto found = std::find_if(into.control_values.begin(), into.control_values.end(), [&](const auto& c) { return c.first == control; });
+    if (found != into.control_values.end()) found->second = values;
+    else into.control_values.emplace_back(control, values);
+  }
+  std::sort(into.control_values.begin(), into.control_values.end());
 }
 } // namespace
 
