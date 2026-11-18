@@ -12,6 +12,17 @@
 namespace sp::descriptor {
 namespace {
 using json::Value;
+// The controls that take one of a listed set of values, with the family's list and the effective value of each.
+struct ValuedControl {
+  Control control;
+  std::vector<std::string> FamilyPolicy::*listed;
+  std::optional<std::string_view> EffectiveChoices::*chosen;
+};
+constexpr ValuedControl valued_controls[]{
+    {Control::ReasoningEffort, &FamilyPolicy::reasoning_efforts, &EffectiveChoices::reasoning_effort},
+    {Control::ReasoningSummary, &FamilyPolicy::reasoning_summaries, &EffectiveChoices::reasoning_summary},
+    {Control::ThinkingLevel, &FamilyPolicy::thinking_levels, &EffectiveChoices::thinking_level},
+    {Control::ServiceTier, &FamilyPolicy::service_tiers, &EffectiveChoices::service_tier}};
 // A bundle may carry a refreshed catalogue, which load_catalogue bounds to 8 MiB.
 constexpr std::size_t bundle_catalogue_bytes = 8u * 1024u * 1024u;
 [[noreturn]] void fail(std::string_view path, std::string_view expected) {
@@ -234,7 +245,7 @@ class PolicyLoader {
         fail("", "configured policy depth limit");
       auto families=root.get("families"); if(!families.is_array() || families.size()!=5)fail("/families","all five typed families");
       for(auto v:families.elements()) {
-        closed(v,{"family","bindings","stop_reasons","defaults","required_output_cap","temperature_range","top_p_range","thinking_minimum","thinking_top_p_minimum","reasoning_efforts","reasoning_summaries","thinking_levels","service_tiers","header_versions","header_version","server_tools","openrouter_origins","temperature_forbidden_model_prefixes","media","openrouter_media"},"/families",{"temperature_forbidden_generations","max_completion_tokens_origins","unreplayable_parts","extensions","openrouter_plugins","openrouter_server_tools","betas","response_blocks","input_blocks","controls","standard_service_tiers","cache"});
+        closed(v,{"family","bindings","stop_reasons","defaults","required_output_cap","temperature_range","top_p_range","thinking_minimum","thinking_top_p_minimum","reasoning_efforts","reasoning_summaries","thinking_levels","service_tiers","header_versions","header_version","server_tools","openrouter_origins","media","openrouter_media"},"/families",{"temperature_forbidden_model_prefixes","temperature_forbidden_generations","max_completion_tokens_origins","unreplayable_parts","extensions","openrouter_plugins","openrouter_server_tools","betas","response_blocks","input_blocks","controls","standard_service_tiers","cache"});
         FamilyPolicy f; f.family=text(v.get("family"),"/families");
         if(f.family!="openai.chat" && f.family!="anthropic.messages" && f.family!="openai.responses" && f.family!="google.generate" && f.family!="google.interactions")fail("/families","typed family");
         if(policy->family(f.family))fail("/families","unique families");
@@ -247,38 +258,11 @@ class PolicyLoader {
         f.temperature_range=range(v.get("temperature_range")); f.top_p_range=range(v.get("top_p_range")); f.thinking_minimum=integer(v.get("thinking_minimum"),"/thinking_minimum"); f.thinking_top_p_minimum=number(v.get("thinking_top_p_minimum"),"/thinking_top_p_minimum");
         f.reasoning_efforts=strings(v.get("reasoning_efforts"),"/reasoning_efforts"); f.reasoning_summaries=strings(v.get("reasoning_summaries"),"/reasoning_summaries"); f.thinking_levels=strings(v.get("thinking_levels"),"/thinking_levels"); f.service_tiers=strings(v.get("service_tiers"),"/service_tiers"); f.header_versions=strings(v.get("header_versions"),"/header_versions"); f.header_version=optional_text(v.get("header_version"),"/header_version");
         f.openrouter_origins = strings(v.get("openrouter_origins"), "/openrouter_origins");
-        f.temperature_forbidden_model_prefixes = strings(v.get("temperature_forbidden_model_prefixes"), "/temperature_forbidden_model_prefixes");
-        for (const auto& prefix : f.temperature_forbidden_model_prefixes)
-          if (prefix.find('/') != std::string::npos ||
-              std::any_of(prefix.begin(), prefix.end(), [](unsigned char c) {
-                return !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.');
-              })) fail("/temperature_forbidden_model_prefixes", "lowercase model prefixes without gateway namespace");
-        // Optional: models of a series from a generation on. "from" is "major.minor".
-        if (auto rules = v.get("temperature_forbidden_generations"); rules.valid()) {
-          if (!rules.is_array() || rules.size() > 8) fail("/temperature_forbidden_generations", "bounded array of generation rules");
-          for (auto rule : rules.elements()) {
-            closed(rule, {"series", "from"}, "/temperature_forbidden_generations");
-            auto series = text(rule.get("series"), "/temperature_forbidden_generations");
-            if (series.back() != '-' || std::any_of(series.begin(), series.end(), [](unsigned char c) {
-                  return !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.');
-                })) fail("/temperature_forbidden_generations", "lowercase series prefix ending in '-' without gateway namespace");
-            if (std::any_of(policy->generation_rules_.begin(), policy->generation_rules_.end(),
-                            [&](const auto& old) { return old.family == f.family && old.series == series; }))
-              fail("/temperature_forbidden_generations", "one generation rule per series");
-            const auto from = text(rule.get("from"), "/temperature_forbidden_generations");
-            const auto dot = from.find('.');
-            auto component = [&](std::string_view digits) -> std::optional<std::uint32_t> {
-              if (digits.empty() || digits.size() > 3 || !std::all_of(digits.begin(), digits.end(), [](unsigned char c) { return c >= '0' && c <= '9'; })) return std::nullopt;
-              std::uint32_t value = 0;
-              for (const char c : digits) value = value * 10 + static_cast<std::uint32_t>(c - '0');
-              return value;
-            };
-            const auto major = dot == std::string::npos ? std::nullopt : component(std::string_view(from).substr(0, dot));
-            const auto minor = dot == std::string::npos ? std::nullopt : component(std::string_view(from).substr(dot + 1));
-            if (!major || !minor) fail("/temperature_forbidden_generations", "generation as major.minor digits");
-            policy->generation_rules_.push_back({f.family, std::move(series), *major, *minor});
-          }
-        }
+        // Retired: temperature facts are model catalogue facts. An empty list, as older snapshots wrote it for the
+        // families without facts, still loads; a fact in either key is refused.
+        for (const std::string_view key : {"temperature_forbidden_model_prefixes", "temperature_forbidden_generations"})
+          if (const auto retired = v.get(key); retired.valid() && (!retired.is_array() || retired.size()))
+            fail(std::string("/") + std::string(key), "temperature facts in the model catalogue");
         if (!f.openrouter_origins.empty() && f.family != "openai.chat" && f.family != "openai.responses" && f.family != "anthropic.messages")
           fail("/openrouter_origins", "routing only for declared OpenRouter API families");
         for (const auto& route : f.openrouter_origins)
@@ -328,11 +312,8 @@ class PolicyLoader {
             bits |= 1u << static_cast<unsigned>(*control);
           }
           // A control that takes one of a listed set of values is carried only when the family lists values.
-          const std::pair<Control, const std::vector<std::string>*> valued[]{
-              {Control::ReasoningEffort, &f.reasoning_efforts}, {Control::ReasoningSummary, &f.reasoning_summaries},
-              {Control::ThinkingLevel, &f.thinking_levels}, {Control::ServiceTier, &f.service_tiers}};
-          for (const auto& [control, values] : valued)
-            if ((bits & (1u << static_cast<unsigned>(control))) && values->empty())
+          for (const auto& valued : valued_controls)
+            if ((bits & (1u << static_cast<unsigned>(valued.control))) && (f.*valued.listed).empty())
               fail("/controls", "a control that takes listed values only where the family lists some");
           policy->controls_.emplace_back(f.family, bits);
         }
@@ -807,16 +788,36 @@ class PolicyLoader {
     policy.resolved_.clear();
     const auto& entries = catalogue->entries();
     for (std::size_t i = 0; i < entries.size(); ++i) {
+      auto pointer_of = [&](std::string_view family) {
+        std::string pointer = "/model_catalogue/models/";
+        for (const char c : entries[i].id) pointer += c == '~' ? std::string("~0") : c == '/' ? std::string("~1") : std::string(1, c);
+        return pointer + "/defaults/" + std::string(family);
+      };
       for (const auto& overlay : entries[i].defaults) {
         const auto* f = policy.family(overlay.family);
         if (!f) fail("/model_catalogue", "declared family");
-        std::string pointer = "/model_catalogue/models/";
-        for (const char c : entries[i].id) pointer += c == '~' ? std::string("~0") : c == '/' ? std::string("~1") : std::string(1, c);
-        pointer += "/defaults/" + overlay.family;
+        const auto pointer = pointer_of(overlay.family);
         auto resolved = over(f->defaults, overlay);
         if (auto error = validate(*f, choices(resolved), entries[i].output_limit, false)) fail(pointer, *error);
         if (resolved.strict_tools && f->family != "openai.responses") fail(pointer + "/strict_tools", "Responses strict tools only");
         policy.resolved_.push_back({i, overlay.family, std::move(resolved)});
+      }
+      // The entry's own defaults, over each family it lists (every family when it lists none), take a value its
+      // `control_values` admit. A contradiction with another entry shows at request time instead.
+      if (entries[i].control_values.empty()) continue;
+      for (const auto& f : policy.families_) {
+        if (!entries[i].families.empty() && !contains(entries[i].families, f.family)) continue;
+        const auto overlay = std::find_if(entries[i].defaults.begin(), entries[i].defaults.end(),
+                                          [&](const auto& o) { return o.family == f.family; });
+        const auto resolved = overlay == entries[i].defaults.end() ? f.defaults : over(f.defaults, *overlay);
+        const auto effective = choices(resolved);
+        for (const auto& valued : valued_controls) {
+          const auto& chosen = effective.*valued.chosen;
+          if (!chosen) continue;
+          for (const auto& [name, values] : entries[i].control_values)
+            if (name == control_name(valued.control) && !contains(values, *chosen))
+              fail(pointer_of(f.family), "defaults the entry's control_values admit");
+        }
       }
     }
     crypto::Sha256 hash;
@@ -1020,61 +1021,32 @@ std::optional<CacheCapabilities> cache_capabilities(const ValidatedDescriptor& d
   return d.policy()->cache_capabilities(d.family(), d.base_url(), model);
 }
 bool routed_gateway(const ValidatedDescriptor& d) noexcept { return contains(d.family_policy().openrouter_origins, d.base_url()); }
-namespace {
-char ascii_lower(char c) noexcept { return c >= 'A' && c <= 'Z' ? static_cast<char>(c + ('a' - 'A')) : c; }
-bool starts_with_ignore_case(std::string_view value, std::string_view prefix) noexcept {
-  if (value.size() < prefix.size()) return false;
-  for (std::size_t i = 0; i < prefix.size(); ++i) if (ascii_lower(value[i]) != prefix[i]) return false;
-  return true;
+bool DescriptorPolicy::temperature_forbidden_by_generation(std::string_view, std::string_view) const noexcept { return false; }
+std::optional<bool> DescriptorPolicy::temperature_admitted(std::string_view family, std::string_view origin, std::string_view model) const noexcept {
+  if (!catalogue_) return std::nullopt;
+  // An entry states the fact with `temperature`, or with a parameter list that names the control or does not.
+  const auto* entry = catalogue_->for_each_match(family, origin, model, [](const CatalogueEntry& e, const void*) noexcept {
+    return e.temperature.has_value() || !e.parameters.empty();
+  }, nullptr);
+  if (!entry) return std::nullopt;
+  if (entry->temperature) return *entry->temperature;
+  return contains(entry->parameters, control_name(Control::Temperature));
 }
-// The generation after a series prefix: "opus-4-8-20260101" is 4.8, "3-5-sonnet-20241022" is 3.5,
-// "sonnet-5" is 5.0 and gateway spellings with dots ("opus-4.7") read the same. The first component
-// is the first token of one or two digits and the second is the token right after it when it is
-// also one or two digits; a longer run of digits is a date and ends the version. No such token
-// (or a date before any version) leaves the generation unknown.
-std::optional<std::pair<std::uint32_t, std::uint32_t>> model_generation(std::string_view rest) noexcept {
-  auto number = [](std::string_view token) -> std::optional<std::uint32_t> {
-    if (token.empty() || token.size() > 2) return std::nullopt;
-    std::uint32_t value = 0;
-    for (const char c : token) {
-      if (c < '0' || c > '9') return std::nullopt;
-      value = value * 10 + static_cast<std::uint32_t>(c - '0');
-    }
-    return value;
+std::optional<bool> DescriptorPolicy::control_value_admitted(std::string_view family, std::string_view origin, std::string_view model,
+                                                             Control control, std::string_view value) const noexcept {
+  if (!catalogue_ || !control_takes_values(control)) return std::nullopt;
+  const auto name = control_name(control);
+  auto values_of = [](const CatalogueEntry& e, std::string_view wanted) -> const std::vector<std::string>* {
+    for (const auto& [listed, values] : e.control_values)
+      if (listed == wanted) return &values;
+    return nullptr;
   };
-  auto next = [&](std::string_view& view) {
-    const auto end = view.find_first_of("-.");
-    const auto token = view.substr(0, end);
-    view = end == std::string_view::npos ? std::string_view{} : view.substr(end + 1);
-    return token;
-  };
-  while (!rest.empty()) {
-    const auto token = next(rest);
-    if (const auto major = number(token)) {
-      std::uint32_t minor = 0;
-      if (!rest.empty()) {
-        auto look = rest;
-        if (const auto second = number(next(look))) minor = *second;
-      }
-      return std::pair{*major, minor};
-    }
-    if (!token.empty() && std::all_of(token.begin(), token.end(), [](char c) { return c >= '0' && c <= '9'; })) return std::nullopt;
-  }
-  return std::nullopt;
-}
-} // namespace
-bool DescriptorPolicy::temperature_forbidden_by_generation(std::string_view family, std::string_view model) const noexcept {
-  const auto slash = model.rfind('/');
-  const auto suffix = slash == std::string_view::npos ? model : model.substr(slash + 1);
-  for (const auto& rule : generation_rules_) {
-    if (rule.family != family) continue;
-    for (const auto candidate : {model, suffix}) {
-      if (!starts_with_ignore_case(candidate, rule.series)) continue;
-      const auto generation = model_generation(candidate.substr(rule.series.size()));
-      if (!generation || *generation >= std::pair{rule.major, rule.minor}) return true;
-    }
-  }
-  return false;
+  const auto* entry = catalogue_->for_each_match(family, origin, model, [](const CatalogueEntry& e, const void* context) noexcept {
+    const auto wanted = *static_cast<const std::string_view*>(context);
+    return std::any_of(e.control_values.begin(), e.control_values.end(), [&](const auto& listed) { return listed.first == wanted; });
+  }, &name);
+  if (!entry) return std::nullopt;
+  return contains(*values_of(*entry, name), value);
 }
 namespace {
 constexpr std::string_view control_names[control_count]{
@@ -1090,6 +1062,9 @@ std::optional<Control> control_from_name(std::string_view name) noexcept {
   for (std::size_t i = 0; i < control_count; ++i)
     if (control_names[i] == name) return static_cast<Control>(i);
   return std::nullopt;
+}
+bool control_takes_values(Control control) noexcept {
+  return std::any_of(std::begin(valued_controls), std::end(valued_controls), [&](const auto& valued) { return valued.control == control; });
 }
 std::optional<bool> DescriptorPolicy::control_admitted(std::string_view family, Control control) const noexcept {
   const auto index = static_cast<std::size_t>(control);
@@ -1146,26 +1121,17 @@ std::string_view DescriptorPolicy::default_output_cap_member(std::string_view fa
   return declared ? std::string_view(declared->cap_member) : std::string_view{};
 }
 bool temperature_forbidden(const ValidatedDescriptor& d, std::string_view model) {
-  // A catalogue entry that states the fact wins over the family's sampling rules.
-  if (const auto match = model_match(d, model); match.entry && match.entry->temperature) return !*match.entry->temperature;
-  const auto slash = model.rfind('/');
-  const auto suffix = slash == std::string_view::npos ? model : model.substr(slash + 1);
-  auto starts = [](std::string_view value, std::string_view prefix) {
-    if (value.size() < prefix.size()) return false;
-    for (std::size_t i = 0; i < prefix.size(); ++i) {
-      auto c = value[i];
-      if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + ('a' - 'A'));
-      if (c != prefix[i]) return false;
-    }
-    return true;
-  };
-  for (const auto& prefix : d.family_policy().temperature_forbidden_model_prefixes)
-    if (starts(model, prefix) || starts(suffix, prefix)) return true;
-  return d.policy()->temperature_forbidden_by_generation(d.family(), model);
+  return d.policy()->temperature_admitted(d.family(), d.base_url(), model) == false;
 }
 std::optional<std::string> validate_choices(const ValidatedDescriptor& d,std::string_view model,const EffectiveChoices& c) {
   if (c.temperature && temperature_forbidden(d, model)) return "temperature is prohibited for the admitted model";
-  return validate(d.family_policy(),c,d.policy()->output_limit(d.family(),d.base_url(),model),true);
+  if (auto error = validate(d.family_policy(),c,d.policy()->output_limit(d.family(),d.base_url(),model),true)) return error;
+  // The family admits the value; the model's catalogue facts may narrow it.
+  for (const auto& valued : valued_controls)
+    if (const auto& chosen = c.*valued.chosen;
+        chosen && d.policy()->control_value_admitted(d.family(), d.base_url(), model, valued.control, *chosen) == false)
+      return "control value is not admitted for the model";
+  return {};
 }
 std::uint32_t interface_revision() noexcept { return 7; }
 } // namespace sp::descriptor

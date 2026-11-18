@@ -60,6 +60,10 @@ inline constexpr std::size_t control_count = 13;
 // The policy's spelling of a control: `max_output_tokens`, `top_p`, `service_tier`.
 std::string_view control_name(Control) noexcept;
 std::optional<Control> control_from_name(std::string_view) noexcept;
+// True for a control that takes one of a listed set of values: `reasoning_effort`, `reasoning_summary`,
+// `thinking_level` and `service_tier`. A family lists the values it admits, and a catalogue entry's
+// `control_values` may narrow them for one model.
+bool control_takes_values(Control) noexcept;
 // What a policy says about one tool type of a family: whether it lists the type, whether the caller executes it (it
 // bills tokens only), whether the tool takes a `max_uses` cap, and the catalogue unit its per-use fee is listed under.
 // A type the policy does not list is unknown: a host treats it as a server tool the catalogue prices under `fee_unit`.
@@ -168,6 +172,8 @@ struct FamilyPolicy {
   std::vector<std::string> reasoning_efforts, reasoning_summaries, thinking_levels, service_tiers, header_versions;
   std::optional<std::string> header_version;
   std::vector<std::string> openrouter_origins;
+  // Deprecated, always empty: temperature facts are model catalogue facts (DescriptorPolicy::temperature_admitted).
+  // The member stays so the installed layout does not change within interface 7.
   std::vector<std::string> temperature_forbidden_model_prefixes;
   std::vector<ServerToolFact> server_tools;
   std::vector<ExtensionFact> extensions;
@@ -225,10 +231,21 @@ class DescriptorPolicy final {
   // rates (`standard_service_tiers`, so "default" at Chat and "standard" at Interactions), `tier` itself for any
   // other. A tier the policy does not know is passed through, and the catalogue prices it or it has no price.
   std::string_view billing_tier(std::string_view family, std::string_view tier) const noexcept;
-  // True when `model` belongs to a series that the family's `temperature_forbidden_generations`
-  // names, at or after the generation given there. Matching is ASCII case-insensitive against the
-  // full model or the part after its last `/`. A model of the series whose generation cannot be
-  // read counts as the newest one. This complements the exact `temperature_forbidden_model_prefixes`.
+  // Whether `model` takes `temperature` at `origin` for `family`, from the model catalogue. The
+  // entries that apply are visited in lookup order (ModelCatalogue::find: the exact entry, its
+  // aliases, then the prefix profiles from the longest), and the first one that states the fact
+  // decides: its `temperature` when set, otherwise its `parameters` when not empty (listed or not).
+  // An entry that states neither does not hide a later one that does, and an entry scoped to other
+  // origins, or one that lists other families only, is skipped. nullopt when no entry states it: the
+  // request is sent and the provider answers.
+  std::optional<bool> temperature_admitted(std::string_view family, std::string_view origin, std::string_view model) const noexcept;
+  // Whether `model` takes `value` for `control` at `origin` for `family`: the first entry, in the
+  // same order, whose `control_values` name the control decides. nullopt when none does, or when
+  // `control` takes no listed values. A family's own list still applies on top (validate_choices).
+  std::optional<bool> control_value_admitted(std::string_view family, std::string_view origin, std::string_view model,
+                                             Control control, std::string_view value) const noexcept;
+  // Deprecated, always false: temperature facts are model catalogue facts (temperature_admitted).
+  // The member stays so code built for interface 7 keeps compiling.
   bool temperature_forbidden_by_generation(std::string_view family, std::string_view model) const noexcept;
   // The request member the output cap is written to when a descriptor does not bind one. It is the
   // family's own member, except on the origins a family lists in `max_completion_tokens_origins`
@@ -244,7 +261,6 @@ class DescriptorPolicy final {
  private:
   DescriptorPolicy() = default;
   // New facts are kept here, after the members above, so the installed FamilyPolicy layout stays as it was.
-  struct GenerationRule { std::string family, series; std::uint32_t major = 0, minor = 0; };
   CodecResources resources_{};
   std::vector<FamilyPolicy> families_;
   // Defaults of one catalogue entry for one family, resolved over the family's defaults.
@@ -252,7 +268,6 @@ class DescriptorPolicy final {
   std::string identity_, content_digest_, pair_digest_;
   CatalogueSnapshot catalogue_;
   std::vector<ResolvedDefaults> resolved_;
-  std::vector<GenerationRule> generation_rules_;
   std::vector<std::pair<std::string, std::string>> completion_cap_origins_;  // family, origin
   std::vector<EndpointFact> endpoints_;
   std::vector<std::pair<std::string, std::uint32_t>> controls_;  // family, bit set of Control
@@ -288,7 +303,11 @@ const RequestDefaults& model_defaults(const ValidatedDescriptor&, std::string_vi
 ModelMatch model_match(const ValidatedDescriptor&, std::string_view model) noexcept;
 std::optional<std::string_view> borrowed(const std::optional<std::string>&);
 bool contains(const std::vector<std::string>&, std::string_view);
+// True when the catalogue states that `model` does not take `temperature` at this descriptor's family and origin
+// (DescriptorPolicy::temperature_admitted is false). A model no entry states it for is not refused.
 bool temperature_forbidden(const ValidatedDescriptor&, std::string_view model);
+// The policy-level checks of the effective controls: the catalogue's temperature fact, the family's rules and
+// limits, then the catalogue's `control_values` for each control that takes listed values.
 std::optional<std::string> validate_choices(const ValidatedDescriptor&, std::string_view model, const EffectiveChoices&);
 // The media admission in force for this descriptor's origin.
 const MediaPolicy& media_policy(const ValidatedDescriptor&) noexcept;

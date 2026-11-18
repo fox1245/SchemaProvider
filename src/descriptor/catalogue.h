@@ -2,7 +2,8 @@
 // The model catalogue: what the SDK knows about models, as data. It is separate from the
 // descriptor policy's replay identity, so a host can refresh or edit it without making sealed
 // history ReplayIneligible. Nothing here refuses a model: an id the catalogue does not know is
-// admitted with the family defaults, and a lookup only says how the id matched.
+// admitted with the family defaults, and a lookup only says how the id matched. A fact an entry
+// states (an output limit, temperature, control values) may refuse a request that contradicts it.
 #include "descriptor/descriptor.h"
 #include <cstdint>
 #include <memory>
@@ -45,13 +46,20 @@ struct CatalogueEntry {
   std::optional<std::string> name, lifecycle, retires_at, source;
   std::optional<std::uint64_t> context_window, input_limit, output_limit;
   // Provider-reported tokens: modalities, methods (Gemini supportedGenerationMethods) and
-  // supported request parameters.
+  // supported request parameters. A non-empty `parameters` states whether the model takes
+  // `temperature` (it is listed or not) when `temperature` is unset; an empty one states nothing.
   std::vector<std::string> input_modalities, output_modalities, methods, parameters;
-  // Whether the model accepts `temperature`. Unset defers to the family's sampling rules.
+  // Whether the model accepts `temperature`. Unset: `parameters` decide when listed, and otherwise
+  // the entry states nothing and a later entry of the lookup may (DescriptorPolicy::temperature_admitted).
   std::optional<bool> temperature;
   // Price per unit in USD, as the decimal text the listing gave ("0.00000015"), by unit name.
   std::vector<std::pair<std::string, std::string>> pricing;
   std::vector<DefaultsOverlay> defaults;
+  // The values the model takes for a control that takes listed values (`reasoning_effort`,
+  // `reasoning_summary`, `thinking_level`, `service_tier`), by control name, sorted by name, each
+  // list sorted. They narrow the family's list for this model and never widen it. A control the
+  // entry does not name is not stated (DescriptorPolicy::control_value_admitted).
+  std::vector<std::pair<std::string, std::vector<std::string>>> control_values;
 };
 
 enum class ModelRelation : std::uint8_t {
@@ -69,6 +77,7 @@ struct ModelMatch {
 };
 
 class ModelCatalogue;
+class DescriptorPolicy;
 using CatalogueSnapshot = std::shared_ptr<const ModelCatalogue>;
 using CatalogueResult = std::variant<CatalogueSnapshot, ConfigError>;
 
@@ -94,6 +103,14 @@ class ModelCatalogue final {
 
  private:
   ModelCatalogue() = default;
+  // The entries that apply to `model` at `origin` for `family`, in lookup order, until `visit`
+  // returns true for one, which is returned (nullptr when it never does): the exact entry, the
+  // entries that have the model as an alias, then the prefix profiles from the longest. Within one
+  // rank an entry scoped to `origin` comes before an unscoped one, as in find(). An entry scoped to
+  // other origins, or one that lists other families only, is skipped.
+  using MatchVisitor = bool (*)(const CatalogueEntry&, const void* context) noexcept;
+  const CatalogueEntry* for_each_match(std::string_view family, std::string_view origin, std::string_view model,
+                                       MatchVisitor visit, const void* context) const noexcept;
   std::vector<CatalogueEntry> entries_;
   // Indices into entries_: exact entries by id and alias, sorted by name; prefix profiles by
   // decreasing id length.
@@ -101,6 +118,7 @@ class ModelCatalogue final {
   std::vector<std::size_t> prefixes_;
   std::string digest_;
   friend class CatalogueBuilder;
+  friend class DescriptorPolicy;
 };
 
 // Bounded, closed JSON: {"version": 1, "models": [entry, ...]} (USAGE.md, model catalogue).
@@ -113,7 +131,8 @@ CatalogueSnapshot builtin_catalogue();
 std::string builtin_catalogue_json();
 
 // Layers in order, each over the ones before: an entry with the same id and kind is merged member
-// by member (a member the later entry sets replaces the earlier one), and a new entry is added.
+// by member (a member the later entry sets replaces the earlier one, and a control's list in
+// `control_values` replaces that control's list only), and a new entry is added.
 // `origins` scope the whole entry, so they are the exception: the later entry's origins replace
 // the earlier ones, and an entry without origins applies at every origin, as the merged one then
 // does. A layer of unscoped facts, such as the embedded catalogue, put over a refreshed one keeps
