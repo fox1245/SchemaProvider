@@ -13,6 +13,16 @@
 #include "codecs/transcription.h"
 
 namespace sp::endpoints {
+std::variant<std::optional<std::pair<std::string, std::string>>, Error> credential(std::string_view scheme, std::string_view key) {
+  if (key.empty()) return std::optional<std::pair<std::string, std::string>>{};
+  auto header = descriptor::credential_header(scheme, key);
+  if (!header) {
+    Error refused{ErrorKind::InvalidConfig, "the credential scheme names no header"};
+    refused.reason = "credential.scheme.no_header";
+    return refused;
+  }
+  return header;
+}
 // RFC 3339 (`2026-10-19T13:02:22.150902Z`, or an offset) as Unix seconds.
 std::optional<std::uint64_t> unix_seconds(std::string_view text) {
   const auto number = [&](std::size_t at, std::size_t digits) -> std::optional<int> {

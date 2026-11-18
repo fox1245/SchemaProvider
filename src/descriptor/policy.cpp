@@ -25,7 +25,7 @@ constexpr ValuedControl valued_controls[]{
     {Control::ReasoningSummary, &FamilyPolicy::reasoning_summaries, &EffectiveChoices::reasoning_summary},
     {Control::ThinkingLevel, &FamilyPolicy::thinking_levels, &EffectiveChoices::thinking_level},
     {Control::ServiceTier, &FamilyPolicy::service_tiers, &EffectiveChoices::service_tier}};
-// The one mapping from a credential scheme to the header that carries the key.
+// The mapping from a credential scheme to the header that carries the key, for the chat, endpoint and realtime paths.
 constexpr std::array<CredentialScheme, credential_scheme_count> scheme_table{{
     {"bearer", "Authorization", "Bearer "}, {"x-api-key", "x-api-key", ""}, {"x-goog-api-key", "x-goog-api-key", ""}}};
 // A bundle may carry a refreshed catalogue, which load_catalogue bounds to 8 MiB.

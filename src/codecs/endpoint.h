@@ -10,6 +10,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace sp::endpoints {
@@ -63,6 +64,11 @@ struct Close {
 };
 // An RFC 3339 time (`2026-10-19T13:02:22.150902Z`, or with an offset) as Unix seconds.
 std::optional<std::uint64_t> unix_seconds(std::string_view);
+// The header a call sends `key` in under the credential `scheme` (descriptor::credential_header): none without a key.
+// With a key and a scheme that names no header, the call would go out without the credential its caller gave it, so it
+// is refused before it is sent: an InvalidConfig Error with the reason `credential.scheme.no_header` and a fixed text
+// that names neither the scheme nor the key. The chat, endpoint and realtime paths take their credential from here.
+std::variant<std::optional<std::pair<std::string, std::string>>, Error> credential(std::string_view scheme, std::string_view key);
 // The literal headers and the response bound of the endpoint's fact, added to an encoded call.
 inline void add_fact_headers(Encoded& encoded, const descriptor::EndpointFact& fact) {
   for (const auto& header : fact.headers) encoded.headers.push_back(header);

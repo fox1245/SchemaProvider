@@ -140,8 +140,8 @@ enum class EndpointBilling : std::uint8_t {
   Carried
 };
 // How a call sends the API key, by the scheme a policy or a descriptor names: `bearer` as `Authorization: Bearer
-// <key>`, `x-api-key` and `x-goog-api-key` as a header of that name whose value is the key. Chat calls, endpoint calls
-// and realtime sessions all take their credential header from here, and there is no other scheme.
+// <key>`, `x-api-key` and `x-goog-api-key` as a header of that name whose value is the key. The chat, endpoint and
+// realtime paths take their credential header from here, and there is no other scheme.
 struct CredentialScheme { std::string_view scheme, header, prefix; };
 inline constexpr std::size_t credential_scheme_count = 3;
 // The schemes, in a fixed order.

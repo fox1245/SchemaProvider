@@ -463,7 +463,9 @@ StopKind ValidatedDescriptor::stop_kind(std::string_view raw) const {
 }
 const FamilyPolicy& ValidatedDescriptor::family_policy() const noexcept { return *policy_->family(family_); }
 std::string_view ValidatedDescriptor::auth() const noexcept {
-    return auth_ ? credential_schemes()[auth_ - 1].scheme : std::string_view{};
+    // A value outside the table states no scheme, so the policy's facts decide.
+    const auto& schemes = credential_schemes();
+    return auth_ >= 1 && static_cast<std::size_t>(auth_) <= schemes.size() ? schemes[auth_ - 1u].scheme : std::string_view{};
 }
 LoadResult load(std::string_view source, PolicySnapshot policy) { return Loader{std::move(policy)}.run(source); }
 LoadResult load(std::string_view source) { return load(source, builtin_policy()); }
