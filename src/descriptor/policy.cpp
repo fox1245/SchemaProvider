@@ -139,29 +139,15 @@ std::array<double,2> range(Value v) { if(!v.is_array() || v.size()!=2)fail("/ran
 EffectiveChoices choices(const RequestDefaults& d) {
   return {d.max_output_tokens,d.thinking_budget,d.include_thoughts,d.thinking_summaries,d.reasoning_enabled,borrowed(d.reasoning_effort),borrowed(d.reasoning_summary),borrowed(d.thinking_level),borrowed(d.service_tier),d.temperature,d.top_p};
 }
-std::optional<std::string> validate(const FamilyPolicy& f, const EffectiveChoices& c, std::optional<std::uint64_t> limit, bool require_cap) {
-  if ((require_cap && f.required_output_cap && !c.max_output_tokens) || (c.max_output_tokens && !*c.max_output_tokens)) return "positive output cap required";
-  if (limit && c.max_output_tokens && *c.max_output_tokens > *limit) return "output cap exceeds admitted model limit";
-  if (f.family=="google.interactions" && c.max_output_tokens && *c.max_output_tokens > static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max())) return "output cap is not representable as int32";
-  auto valid_number=[](const auto& value,const auto& bounds){return !value || (std::isfinite(*value) && *value>=bounds[0] && *value<=bounds[1]);};
-  if(!valid_number(c.temperature,f.temperature_range) || !valid_number(c.top_p,f.top_p_range)) return "sampling parameter outside admitted range";
-  if(c.thinking_budget && (*c.thinking_budget<f.thinking_minimum || (c.max_output_tokens && (f.family=="anthropic.messages" ? *c.thinking_budget>=*c.max_output_tokens : *c.thinking_budget>*c.max_output_tokens)))) return "thinking budget incompatible with output cap";
-  if (f.family=="google.generate" && c.thinking_budget && c.thinking_level) return "thinking budget and level are mutually exclusive";
-  if(f.family=="anthropic.messages" && c.thinking_budget && (c.temperature || (c.top_p && *c.top_p<f.thinking_top_p_minimum))) return "manual thinking sampling parameters are incompatible";
-  auto valid_text=[](const auto& value,const auto& allowed){return !value || contains(allowed,*value);};
-  if (f.family=="google.interactions" && (c.temperature || c.top_p)) return "sampling control unsupported by typed request";
-  if (f.family=="google.generate" && c.top_p) return "top_p unsupported by typed Generate request";
-  if(!valid_text(c.reasoning_effort,f.reasoning_efforts) || !valid_text(c.reasoning_summary,f.reasoning_summaries) || !valid_text(c.thinking_level,f.thinking_levels) || !valid_text(c.service_tier,f.service_tiers)) return "unsupported typed semantic control";
-  if(c.reasoning_enabled && f.family!="openai.responses") return "reasoning object unsupported for family";
-  if(c.reasoning_enabled && (!c.reasoning_effort || !c.reasoning_summary)) return "complete effective reasoning options required";
-  if(c.include_thoughts && f.family!="google.generate")return "includeThoughts unsupported for family";
-  if(c.thinking_summaries && f.family!="google.interactions")return "thinking summaries unsupported for family";
-  if(c.thinking_budget && f.family!="anthropic.messages" && f.family!="google.generate")return "thinking budget unsupported for family";
-  if(c.reasoning_effort && f.family!="openai.chat" && f.family!="openai.responses") return "reasoning effort unsupported for family";
-  if(c.reasoning_summary && f.family!="openai.responses") return "reasoning summary unsupported for family";
-  if(c.thinking_level && f.family!="google.interactions" && f.family!="google.generate") return "thinking level unsupported for family";
-  if(c.service_tier && f.family!="openai.chat" && f.family!="openai.responses" && f.family!="google.interactions") return "service tier unsupported for family";
-  return {};
+// The bit set of the controls a policy lists, each name once.
+std::uint32_t control_bits(Value controls) {
+  std::uint32_t bits = 0;
+  for (const auto& name : strings(controls, "/controls")) {
+    const auto control = control_from_name(name);
+    if (!control) fail("/controls", "declared control names");
+    bits |= 1u << static_cast<unsigned>(*control);
+  }
+  return bits;
 }
 // The replay identity covers only the facts that decide how sealed history is written to and read
 // from the wire. Families are hashed in name order and stop facts in key order, every text with its
@@ -251,7 +237,7 @@ class PolicyLoader {
         fail("", "configured policy depth limit");
       auto families=root.get("families"); if(!families.is_array() || families.size()!=5)fail("/families","all five typed families");
       for(auto v:families.elements()) {
-        closed(v,{"family","bindings","stop_reasons","defaults","required_output_cap","temperature_range","top_p_range","thinking_minimum","thinking_top_p_minimum","reasoning_efforts","reasoning_summaries","thinking_levels","service_tiers","header_versions","header_version","server_tools","openrouter_origins","media","openrouter_media"},"/families",{"temperature_forbidden_model_prefixes","temperature_forbidden_generations","max_completion_tokens_origins","unreplayable_parts","extensions","openrouter_plugins","openrouter_server_tools","betas","response_blocks","input_blocks","controls","standard_service_tiers","cache","auth"});
+        closed(v,{"family","bindings","stop_reasons","defaults","required_output_cap","temperature_range","top_p_range","thinking_minimum","thinking_top_p_minimum","reasoning_efforts","reasoning_summaries","thinking_levels","service_tiers","header_versions","header_version","server_tools","openrouter_origins","media","openrouter_media"},"/families",{"temperature_forbidden_model_prefixes","temperature_forbidden_generations","max_completion_tokens_origins","unreplayable_parts","extensions","openrouter_plugins","openrouter_server_tools","betas","response_blocks","input_blocks","controls","standard_service_tiers","cache","auth","output_cap_maximum","thinking_budget_below_cap","thinking_budget_excludes_level","thinking_budget_excludes_temperature"});
         FamilyPolicy f; f.family=text(v.get("family"),"/families");
         if(f.family!="openai.chat" && f.family!="anthropic.messages" && f.family!="openai.responses" && f.family!="google.generate" && f.family!="google.interactions")fail("/families","typed family");
         if(policy->family(f.family))fail("/families","unique families");
@@ -310,13 +296,10 @@ class PolicyLoader {
         if(f.family=="anthropic.messages" && (!f.header_version || !contains(f.header_versions,*f.header_version)))fail("/header_version","admitted Messages version");
         if(f.family!="anthropic.messages" && (f.header_version || !f.header_versions.empty()))fail("/header_version","no unsupported header version");
         // Optional: the typed controls the family's request carries, and the service tiers that bill at the standard rates.
+        std::optional<std::uint32_t> declared_controls;
         if (auto controls = v.get("controls"); controls.valid()) {
-          std::uint32_t bits = 0;
-          for (const auto& name : strings(controls, "/controls")) {
-            const auto control = control_from_name(name);
-            if (!control) fail("/controls", "declared control names");
-            bits |= 1u << static_cast<unsigned>(*control);
-          }
+          const auto bits = control_bits(controls);
+          declared_controls = bits;
           // A control that takes one of a listed set of values is carried only when the family lists values.
           for (const auto& valued : valued_controls)
             if ((bits & (1u << static_cast<unsigned>(valued.control))) && (f.*valued.listed).empty())
@@ -559,7 +542,47 @@ class PolicyLoader {
           policy->auth_.emplace_back(f.family, embedded->facts);
           borrowed.push_back({{f.family, "auth"}, embedded->json});
         }
-        if(auto error=validate(f,choices(f.defaults),{},false))fail("/defaults",*error);
+        // What the request checks read: the family's controls and the rules that bind a request's members. A policy
+        // that states none for a family has the embedded policy's, and its content digest covers them (borrowed_).
+        DescriptorPolicy::ValidationFacts rules;
+        if (declared_controls) {
+          rules.controls = *declared_controls;
+        } else {
+          const auto stated = embedded_member(f.family, "controls");
+          if (!stated.valid()) fail("/controls", "controls for the family in the embedded policy");
+          rules.controls = control_bits(stated);
+          borrowed.push_back({{f.family, "controls"}, stated.dump()});
+        }
+        // A rule the policy states is read as stated; one it leaves out is the embedded policy's for the family, and
+        // off where the embedded policy states none.
+        auto rule = [&](std::string_view key, bool& declared) {
+          declared = v.get(key).valid();
+          if (declared) return v.get(key);
+          const auto stated = embedded_member(f.family, key);
+          if (stated.valid()) borrowed.push_back({{f.family, std::string(key)}, stated.dump()});
+          return stated;
+        };
+        bool declared = false;
+        if (const auto maximum = rule("output_cap_maximum", declared); maximum.valid()) {
+          const auto value = integer(maximum, "/output_cap_maximum");
+          if (!value || value > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+            fail("/output_cap_maximum", "positive integer within the signed 64-bit range");
+          rules.output_cap_maximum = value;
+        }
+        if (const auto below = rule("thinking_budget_below_cap", declared); below.valid())
+          rules.thinking_budget_below_cap = boolean(below, "/thinking_budget_below_cap");
+        if (const auto exclusive = rule("thinking_budget_excludes_level", declared); exclusive.valid())
+          rules.thinking_budget_excludes_level = boolean(exclusive, "/thinking_budget_excludes_level");
+        if (const auto exclusive = rule("thinking_budget_excludes_temperature", declared); exclusive.valid()) {
+          rules.thinking_budget_excludes_temperature = boolean(exclusive, "/thinking_budget_excludes_temperature");
+          // The rule is about two controls the family must carry; a stated rule over controls it does not list is
+          // an error. A rule taken from the embedded policy is read as it is.
+          constexpr auto both = (1u << static_cast<unsigned>(Control::Temperature)) | (1u << static_cast<unsigned>(Control::ThinkingBudget));
+          if (declared && rules.thinking_budget_excludes_temperature && (rules.controls & both) != both)
+            fail("/thinking_budget_excludes_temperature", "Temperature and ThinkingBudget among the family's controls");
+        }
+        policy->validation_.emplace_back(f.family, rules);
+        if (auto error = DescriptorPolicy::check(f, rules, choices(f.defaults), {}, false)) fail("/defaults", *error);
         if(f.defaults.strict_tools && f.family!="openai.responses") fail("/defaults/strict_tools","Responses strict tools only");
         policy->families_.push_back(std::move(f));
       }
@@ -898,7 +921,7 @@ class PolicyLoader {
         if (!f) fail("/model_catalogue", "declared family");
         const auto pointer = pointer_of(overlay.family);
         auto resolved = over(f->defaults, overlay);
-        if (auto error = validate(*f, choices(resolved), entries[i].output_limit, false)) fail(pointer, *error);
+        if (auto error = DescriptorPolicy::check(*f, *policy.validation(f->family), choices(resolved), entries[i].output_limit, false)) fail(pointer, *error);
         if (resolved.strict_tools && f->family != "openai.responses") fail(pointer + "/strict_tools", "Responses strict tools only");
         policy.resolved_.push_back({i, overlay.family, std::move(resolved)});
       }
@@ -1005,6 +1028,17 @@ class PolicyLoader {
       if (name == family) return &auth;
     return nullptr;
   }
+  // A member of a family in the embedded policy, or an invalid value when it states none. The embedded text is
+  // parsed once; it never goes through builtin_policy(), which runs this loader.
+  static Value embedded_member(std::string_view family, std::string_view key) {
+    static const auto parsed = json::parse(config_defaults::descriptor_policy_json,
+                                           {config_defaults::codec_admission_policy_bytes, config_defaults::codec_admission_policy_depth});
+    const auto* document = std::get_if<json::Document>(&parsed);
+    if (!document) throw std::logic_error("the embedded descriptor policy is not admissible JSON");
+    for (auto entry : document->root().get("families").elements())
+      if (entry.get("family").is_string() && entry.get("family").as_string() == family) return entry.get(key);
+    return {};
+  }
   static RequestDefaults over(const RequestDefaults& base, const DefaultsOverlay& o) {
     RequestDefaults r = base;
     if (o.max_output_tokens) r.max_output_tokens = *o.max_output_tokens;
@@ -1022,6 +1056,39 @@ class PolicyLoader {
     return r;
   }
 };
+const DescriptorPolicy::ValidationFacts* DescriptorPolicy::validation(std::string_view name) const noexcept {
+  for (const auto& [family, facts] : validation_) if (family == name) return &facts;
+  return nullptr;
+}
+// The checks of the effective controls that need no model: the family's own lists and ranges, the rules that bind the
+// members to each other, and the controls the family's typed request carries. They run in this order, and the first
+// failure is the answer.
+std::optional<std::string> DescriptorPolicy::check(const FamilyPolicy& f, const ValidationFacts& rules, const EffectiveChoices& c, std::optional<std::uint64_t> limit, bool require_cap) {
+  const auto carries = [&](Control control) { return (rules.controls >> static_cast<unsigned>(control) & 1u) != 0; };
+  if ((require_cap && f.required_output_cap && !c.max_output_tokens) || (c.max_output_tokens && !*c.max_output_tokens)) return "positive output cap required";
+  if (limit && c.max_output_tokens && *c.max_output_tokens > *limit) return "output cap exceeds admitted model limit";
+  if (rules.output_cap_maximum && c.max_output_tokens && *c.max_output_tokens > *rules.output_cap_maximum) return "output cap is not representable as int32";
+  auto valid_number=[](const auto& value,const auto& bounds){return !value || (std::isfinite(*value) && *value>=bounds[0] && *value<=bounds[1]);};
+  if(!valid_number(c.temperature,f.temperature_range) || !valid_number(c.top_p,f.top_p_range)) return "sampling parameter outside admitted range";
+  if(c.thinking_budget && (*c.thinking_budget<f.thinking_minimum || (c.max_output_tokens && (rules.thinking_budget_below_cap ? *c.thinking_budget>=*c.max_output_tokens : *c.thinking_budget>*c.max_output_tokens)))) return "thinking budget incompatible with output cap";
+  if (rules.thinking_budget_excludes_level && c.thinking_budget && c.thinking_level) return "thinking budget and level are mutually exclusive";
+  if(rules.thinking_budget_excludes_temperature && c.thinking_budget && (c.temperature || (c.top_p && *c.top_p<f.thinking_top_p_minimum))) return "manual thinking sampling parameters are incompatible";
+  auto valid_text=[](const auto& value,const auto& allowed){return !value || contains(allowed,*value);};
+  // A family that carries neither sampling control refuses either; one that carries temperature only refuses top_p.
+  if ((c.temperature && !carries(Control::Temperature)) || (c.top_p && !carries(Control::Temperature) && !carries(Control::TopP))) return "sampling control unsupported by typed request";
+  if (c.top_p && !carries(Control::TopP)) return "top_p unsupported by typed Generate request";
+  if(!valid_text(c.reasoning_effort,f.reasoning_efforts) || !valid_text(c.reasoning_summary,f.reasoning_summaries) || !valid_text(c.thinking_level,f.thinking_levels) || !valid_text(c.service_tier,f.service_tiers)) return "unsupported typed semantic control";
+  if(c.reasoning_enabled && !(carries(Control::ReasoningEffort) && carries(Control::ReasoningSummary))) return "reasoning object unsupported for family";
+  if(c.reasoning_enabled && (!c.reasoning_effort || !c.reasoning_summary)) return "complete effective reasoning options required";
+  if(c.include_thoughts && !carries(Control::IncludeThoughts))return "includeThoughts unsupported for family";
+  if(c.thinking_summaries && !carries(Control::ThinkingSummaries))return "thinking summaries unsupported for family";
+  if(c.thinking_budget && !carries(Control::ThinkingBudget))return "thinking budget unsupported for family";
+  if(c.reasoning_effort && !carries(Control::ReasoningEffort)) return "reasoning effort unsupported for family";
+  if(c.reasoning_summary && !carries(Control::ReasoningSummary)) return "reasoning summary unsupported for family";
+  if(c.thinking_level && !carries(Control::ThinkingLevel)) return "thinking level unsupported for family";
+  if(c.service_tier && !carries(Control::ServiceTier)) return "service tier unsupported for family";
+  return {};
+}
 const FamilyPolicy* DescriptorPolicy::family(std::string_view name) const noexcept { for(const auto& f:families_)if(f.family==name)return &f; return nullptr; }
 ModelMatch DescriptorPolicy::model(std::string_view name, std::string_view origin, std::string_view model) const noexcept {
   return catalogue_ ? catalogue_->find(name, origin, model) : ModelMatch{};
@@ -1358,7 +1425,10 @@ bool temperature_forbidden(const ValidatedDescriptor& d, std::string_view model)
 }
 std::optional<std::string> validate_choices(const ValidatedDescriptor& d,std::string_view model,const EffectiveChoices& c) {
   if (c.temperature && temperature_forbidden(d, model)) return "temperature is prohibited for the admitted model";
-  if (auto error = validate(d.family_policy(),c,d.policy()->output_limit(d.family(),d.base_url(),model),true)) return error;
+  // A family the policy has no facts for carries no control, so every control set is refused.
+  static const DescriptorPolicy::ValidationFacts none{};
+  const auto* rules = d.policy()->validation(d.family());
+  if (auto error = DescriptorPolicy::check(d.family_policy(), rules ? *rules : none, c, d.policy()->output_limit(d.family(),d.base_url(),model), true)) return error;
   // The family admits the value; the model's catalogue facts may narrow it.
   for (const auto& valued : valued_controls)
     if (const auto& chosen = c.*valued.chosen;

@@ -109,6 +109,8 @@
     {
       "family": "anthropic.messages",
       "controls": ["max_output_tokens", "temperature", "top_p", "thinking_budget", "tool_choice"],
+      "thinking_budget_below_cap": true,
+      "thinking_budget_excludes_temperature": true,
       "openrouter_origins": ["https://openrouter.ai"],
       "auth": [{"scheme": "x-api-key"}],
       "cache": [
@@ -405,6 +407,7 @@
     {
       "family": "google.generate",
       "controls": ["max_output_tokens", "temperature", "thinking_budget", "include_thoughts", "thinking_level", "required_tool", "tool_choice"],
+      "thinking_budget_excludes_level": true,
       "openrouter_origins": [],
       "auth": [{"scheme": "x-goog-api-key"}],
       "cache": [{"explicit": false, "unsupported": "ignore"}],
@@ -480,6 +483,7 @@
     {
       "family": "google.interactions",
       "controls": ["max_output_tokens", "thinking_level", "thinking_summaries", "service_tier", "required_tool", "store", "tool_choice"],
+      "output_cap_maximum": 2147483647,
       "standard_service_tiers": ["standard"],
       "openrouter_origins": [],
       "auth": [{"scheme": "x-goog-api-key"}],
