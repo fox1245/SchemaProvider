@@ -224,15 +224,24 @@ void openai_realtime() {
   CHECK(std::get<Error>(codec->decode(false, "not json")).reason == "realtime.message.invalid");
 }
 
-// An OpenAI response.done ends the turn by its status: completed is EndTurn and incomplete MaxTokens. Any other status,
-// one the codec does not know or a failure, is Unknown with the status as its raw value, never EndTurn.
+// An OpenAI response.done ends the turn by its status: completed is EndTurn, and incomplete is read by the reason its
+// status_details state (content_filter, max_output_tokens), MaxTokens when it states none. A status the codec does not
+// know, or a reason it does not know, is Unknown with that value as the raw stop, never EndTurn. A failure-class status
+// is the provider's error.
 void response_statuses() {
   const auto d = descriptor::presets::openai_chat();
-  const auto turn_of = [&](std::string_view status, std::size_t errors = 0) {
+  // The events of a response.done with `status` and, when given, `status_details`, after a text delta when `content`.
+  const auto done = [&](realtime::Codec& codec, std::string_view status, std::string_view details, bool content) {
+    if (content) CHECK(std::get<std::vector<realtime::Event>>(codec.decode(false, R"({"type":"response.output_text.delta","delta":"hi"})")).size() == 1);
+    return std::get<std::vector<realtime::Event>>(codec.decode(false, R"({"type":"response.done","response":{"id":"r","status":)" +
+        json::quote(status) + (details.empty() ? std::string() : ",\"status_details\":" + std::string(details)) + "}}"));
+  };
+  const auto events_of = [&](std::string_view status, std::string_view details, bool content) {
     auto codec = realtime::make_codec(d);
-    CHECK(std::get<std::vector<realtime::Event>>(codec->decode(false, R"({"type":"response.output_text.delta","delta":"hi"})")).size() == 1);
-    const auto events = std::get<std::vector<realtime::Event>>(
-        codec->decode(false, R"({"type":"response.done","response":{"id":"r","status":)" + json::quote(status) + "}}"));
+    return done(*codec, status, details, content);
+  };
+  const auto turn_of = [&](std::string_view status, std::size_t errors = 0, std::string_view details = {}) {
+    const auto events = events_of(status, details, true);
     const auto turns = all<realtime::TurnCommitted>(events);
     CHECK(turns.size() == 1 && turns[0]->turn.joined_text() == "hi" && all<realtime::ProviderError>(events).size() == errors);
     return turns[0]->turn.stop;
@@ -240,21 +249,43 @@ void response_statuses() {
   const auto completed = turn_of("completed"), incomplete = turn_of("incomplete");
   CHECK(completed.kind == StopKind::EndTurn && completed.raw == "completed");
   CHECK(incomplete.kind == StopKind::MaxTokens && incomplete.raw == "incomplete");
-  const auto unexpected = turn_of("unexpected");
-  CHECK(unexpected.kind == StopKind::Unknown && unexpected.raw == "unexpected");
+  for (const std::string_view status : {"unexpected", "Error"}) {
+    const auto unexpected = turn_of(status);
+    CHECK(unexpected.kind == StopKind::Unknown && unexpected.raw == status);
+  }
   const auto failed = turn_of("failed", 1);
   CHECK(failed.kind == StopKind::Unknown && failed.raw == "failed");
-  // Without content as well, a status the codec cannot name ends a turn, so the status is delivered. An empty
-  // cancelled or failed response commits none, as before.
-  const auto bare = [&](std::string_view status) {
-    auto codec = realtime::make_codec(d);
-    return std::get<std::vector<realtime::Event>>(
-        codec->decode(false, R"({"type":"response.done","response":{"id":"r","status":)" + json::quote(status) + "}}"));
-  };
-  const auto unnamed = all<realtime::TurnCommitted>(bare("unexpected"));
+  // An incomplete response by its reason: a blocked one does not read as a truncated one.
+  const auto filtered = turn_of("incomplete", 0, R"({"type":"incomplete","reason":"content_filter"})");
+  CHECK(filtered.kind == StopKind::ContentFilter && filtered.raw == "content_filter");
+  const auto capped = turn_of("incomplete", 0, R"({"type":"incomplete","reason":"max_output_tokens"})");
+  CHECK(capped.kind == StopKind::MaxTokens && capped.raw == "max_output_tokens");
+  const auto other = turn_of("incomplete", 0, R"({"type":"incomplete","reason":"future_reason"})");
+  CHECK(other.kind == StopKind::Unknown && other.raw == "future_reason");
+  // Without content as well, a stop the codec cannot name ends a turn, so it is delivered. An empty cancelled or
+  // failed response commits none, and neither does an empty incomplete one whose reason the codec names.
+  const auto unnamed_events = events_of("unexpected", {}, false);
+  const auto unnamed = all<realtime::TurnCommitted>(unnamed_events);
   CHECK(unnamed.size() == 1 && unnamed[0]->turn.stop.kind == StopKind::Unknown && unnamed[0]->turn.stop.raw == "unexpected");
-  CHECK(all<realtime::TurnCommitted>(bare("cancelled")).empty() && all<realtime::TurnAborted>(bare("cancelled")).size() == 1);
-  CHECK(all<realtime::TurnCommitted>(bare("failed")).empty() && all<realtime::ProviderError>(bare("failed")).size() == 1);
+  const auto reason_events = events_of("incomplete", R"({"type":"incomplete","reason":"future_reason"})", false);
+  const auto unnamed_reason = all<realtime::TurnCommitted>(reason_events);
+  CHECK(unnamed_reason.size() == 1 && unnamed_reason[0]->turn.stop.kind == StopKind::Unknown && unnamed_reason[0]->turn.stop.raw == "future_reason");
+  CHECK(all<realtime::TurnCommitted>(events_of("cancelled", {}, false)).empty() && all<realtime::TurnAborted>(events_of("cancelled", {}, false)).size() == 1);
+  CHECK(all<realtime::TurnCommitted>(events_of("failed", {}, false)).empty() && all<realtime::ProviderError>(events_of("failed", {}, false)).size() == 1);
+  for (const std::string_view reason : {"content_filter", "max_output_tokens"})
+    CHECK(all<realtime::TurnCommitted>(events_of("incomplete", R"({"type":"incomplete","reason":")" + std::string(reason) + "\"}", false)).empty());
+  CHECK(all<realtime::TurnCommitted>(events_of("incomplete", {}, false)).empty());
+  // A failure-class status other than the lifecycle's own is the provider's error, with or without content, and
+  // commits no turn; what the response carried does not reach the next turn.
+  for (const bool content : {false, true}) {
+    auto codec = realtime::make_codec(d);
+    const auto erred = done(*codec, "error", {}, content);
+    CHECK(all<realtime::TurnCommitted>(erred).empty() && all<realtime::ProviderError>(erred).size() == 1);
+    CHECK(std::get<std::vector<realtime::Event>>(codec->decode(false, R"({"type":"response.output_text.delta","delta":"next"})")).size() == 1);
+    const auto next_events = done(*codec, "completed", {}, false);
+    const auto next = all<realtime::TurnCommitted>(next_events);
+    CHECK(next.size() == 1 && next[0]->turn.joined_text() == "next" && next[0]->turn.stop.kind == StopKind::EndTurn);
+  }
 }
 // A turn's usage keeps what the provider reports beside the totals.
 void usage_details() {

@@ -7,6 +7,7 @@
 #include "core/native.h"
 #include "descriptor/descriptor.h"
 #include "descriptor/policy.h"
+#include "descriptor/stop_facts.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -373,6 +374,8 @@ bool Codec::response(json::Value v, std::string_view event, bool streaming) {
   if (state == "incomplete") {
     if (!details.is_object() || !nonempty(details.get("reason"))) return fail(ErrorKind::ProtocolCorrupt, "incomplete reason required");
     const auto reason = details.get("reason").as_string();
+    // A failure-class word is not an unknown reason: the response failed.
+    if (descriptor::failure_stop(reason)) return fail(ErrorKind::Unsupported, "unsupported incomplete reason");
     // The stop table gives the reason's kind, and a reason it does not list is Unknown. An incomplete response never
     // takes a kind that would seal it as a finished turn (EndTurn, ToolUse, Refusal); such a row reads as Unknown.
     const auto kind = table_stop(descriptor_, reason);

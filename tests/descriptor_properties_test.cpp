@@ -703,9 +703,9 @@ void stop_tables_grow_but_never_change() {
         }
     }
     CHECK(families == 5);
-    // A policy that leaves a row out loads, and the descriptor's own table, which native bindings hash, lacks it (the
-    // codecs fall back to the embedded row). A descriptor under it may state the value again, but only with the kind
-    // the embedded policy gives it.
+    // A policy that leaves a row out loads, and the descriptor's own table, which native bindings hash, lacks it;
+    // stop_kind answers with the embedded row, as the codecs decode. A descriptor under it may state the value again,
+    // but only with the kind the embedded policy gives it.
     std::string without_length = "{";
     for (auto entry : root.get("families").elements()) {
         if (entry.get("family").as_string() != "openai.chat") continue;
@@ -719,7 +719,11 @@ void stop_tables_grow_but_never_change() {
     CHECK(std::holds_alternative<PolicySnapshot>(dropped));
     if (const auto* policy = std::get_if<PolicySnapshot>(&dropped)) {
         auto plain = load(source("openai.chat", "{}"), *policy);
-        CHECK(std::holds_alternative<ValidatedDescriptor>(plain) && std::get<ValidatedDescriptor>(plain).stop_kind("length") == StopKind::Unknown);
+        CHECK(std::holds_alternative<ValidatedDescriptor>(plain));
+        if (const auto* value = std::get_if<ValidatedDescriptor>(&plain)) {
+            CHECK(std::none_of(value->stop_mappings().begin(), value->stop_mappings().end(), [](const auto& row) { return row.first == "length"; }));
+            CHECK(value->stop_kind("length") == StopKind::MaxTokens && value->stop_kind("future_finish_reason") == StopKind::Unknown);
+        }
         auto restored = load(source("openai.chat", R"({"length":"MaxTokens"})"), *policy);
         CHECK(std::holds_alternative<ValidatedDescriptor>(restored) && std::get<ValidatedDescriptor>(restored).stop_kind("length") == StopKind::MaxTokens);
         auto remapped = load(source("openai.chat", R"({"length":"EndTurn"})"), *policy);

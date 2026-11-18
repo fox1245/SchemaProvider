@@ -445,6 +445,9 @@ private:
 
 StopKind ValidatedDescriptor::stop_kind(std::string_view raw) const {
     for (const auto& [key, value] : stop_reasons_) if (key == raw) return value;
+    // A value the table has no row for takes the embedded policy's row, so a custom policy that leaves one out does
+    // not change what the value means. The table itself, which native bindings hash, stays as it is.
+    for (const auto& [key, value] : embedded_stops(family_)) if (key == raw) return value;
     return StopKind::Unknown;
 }
 const FamilyPolicy& ValidatedDescriptor::family_policy() const noexcept { return *policy_->family(family_); }

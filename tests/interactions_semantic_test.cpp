@@ -576,6 +576,26 @@ void unknown_statuses_are_kept() {
   CHECK(std::any_of(c.raw_events.begin(), c.raw_events.end(), [](const RawWire& event) {
     return event.type == "interaction.status_update" && event.payload->root().get("status").as_string() == "paused_for_review";
   }));
+  // A failure-class word is not an unknown status: an update with it ends the stream, and so does a terminal resource
+  // with it. An update with `incomplete`, a status of the lifecycle, changes nothing, and another spelling of a word
+  // is an unknown status.
+  const auto with_update = [](std::string_view word) {
+    auto f = frames();
+    f.insert(f.begin() + 1, frame("interaction.status_update", ",\"interaction_id\":\"i1\",\"status\":" + json::quote(word)));
+    return stream(f);
+  };
+  const auto erred = with_update("error");
+  CHECK(failure(erred, ErrorKind::Unsupported).error.reason == "interactions.status.update_unsupported");
+  for (const std::string_view word : {"incomplete", "Error"}) {
+    const auto kept_update = with_update(word);
+    CHECK(complete(kept_update).stop.kind == StopKind::EndTurn && complete(kept_update).stop.raw == "completed");
+  }
+  const auto terminal_error = buffered(resource("[" + output + "]", "error"));
+  const auto streamed_error = stream({created(), start(0, output), stop(0), end("[" + output + "]", "error")});
+  for (const auto* outcome : {&terminal_error, &streamed_error})
+    CHECK(failure(*outcome, ErrorKind::Unsupported).error.reason == "interactions.terminal.status_unsupported");
+  const auto respelled = buffered(resource("[" + output + "]", "Error"));
+  CHECK(complete(respelled).stop.kind == StopKind::Unknown && complete(respelled).stop.raw == "Error");
 }
 // The codec maps the lifecycle statuses in code, so a custom policy without one of the family's embedded rows decodes
 // as before.

@@ -51,6 +51,8 @@ public:
     const Evidence& evidence() const { return evidence_; }
     const PolicySnapshot& policy() const noexcept { return policy_; }
     const FamilyPolicy& family_policy() const noexcept;
+    // The kind of a raw stop value, as the codecs decode it: the row of stop_mappings(), else the embedded policy's
+    // row for the family, else Unknown.
     StopKind stop_kind(std::string_view raw) const;
     const std::vector<std::pair<std::string, StopKind>>& stop_mappings() const noexcept { return stop_reasons_; }
 private:

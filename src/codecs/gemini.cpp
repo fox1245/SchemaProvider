@@ -196,16 +196,22 @@ bool Codec::candidate(json::Value c) {
   unknown(c, {"index", "content", "finishReason", "finishMessage", "safetyRatings", "citationMetadata", "tokenCount", "groundingAttributions", "groundingMetadata", "avgLogprobs", "logprobsResult", "urlContextMetadata"});
   if (terminal) {
     auto details = own(c); if (!details) return false;
+    // The two values that report a rejected request end the call before the stop table is read: whatever row gives
+    // them a kind, the stop stays Unknown and nothing the candidate carried is sealed, so no call becomes executable.
+    if (raw == "MISSING_THOUGHT_SIGNATURE" || raw == "MALFORMED_RESPONSE") {
+      stop_ = StopReason{StopKind::Unknown, std::string(raw), {}, std::move(details)};
+      stopped_ = true;
+      if (!emit(Stop{*stop_})) return false;
+      return fail(ErrorKind::RemoteFailure, "Gemini generation blocked or rejected", raw);
+    }
     stop_ = StopReason{stop_kind(descriptor_, raw, has_call_), std::string(raw), {}, std::move(details)};
     stopped_ = true;
     if (run_.open && !close_run()) return false;
     if (!emit(Stop{*stop_})) return false;
     for (auto local : pending_seals_) if (!emit(PartSeal{local, {}, {}})) return false;
     pending_seals_.clear();
-    // A blocked candidate (whatever value the table gives ContentFilter) and the two values that report a rejected
-    // request end the call; a failure is decided in code, not by the table.
-    if (stop_->kind == StopKind::ContentFilter || raw == "MISSING_THOUGHT_SIGNATURE" || raw == "MALFORMED_RESPONSE")
-      return fail(ErrorKind::RemoteFailure, "Gemini generation blocked or rejected", raw);
+    // A blocked candidate, whatever value the table gives ContentFilter, ends the call.
+    if (stop_->kind == StopKind::ContentFilter) return fail(ErrorKind::RemoteFailure, "Gemini generation blocked or rejected", raw);
   }
   return true;
 }

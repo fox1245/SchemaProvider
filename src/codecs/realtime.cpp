@@ -3,6 +3,7 @@
 #include "codecs/reason.h"
 #include "core/media.h"
 #include "descriptor/policy.h"
+#include "descriptor/stop_facts.h"
 #include "descriptor/value_schema.h"
 #include "json/json.h"
 #include <algorithm>
@@ -468,14 +469,35 @@ class OpenAICodec final : public FormatCodec {
       const auto status = text_of(response.get("status"));
       if (const auto usage = response.get("usage"); usage.is_object()) turn_.usage(openai_usage(usage));
       if (status == "cancelled") events.push_back(TurnAborted{});
-      if (status == "failed") events.push_back(ProviderError{reject(ErrorKind::RemoteFailure, "the provider reported an error in the session")});
-      // A realtime response has no stop table: its lifecycle statuses are mapped here. Any other status, a failure or
-      // one the codec does not know, is Unknown with the status as its raw value, never EndTurn.
-      const auto kind = status == "completed" ? StopKind::EndTurn : status == "incomplete" ? StopKind::MaxTokens : StopKind::Unknown;
-      // A status the codec cannot name ends a turn even without content, so that the status is delivered.
-      const bool unnamed = kind == StopKind::Unknown && !status.empty() && status != "cancelled" && status != "failed";
+      // `error`, `failed` and `cancelled` are failure-class statuses (`incomplete` is read by its reason below). All
+      // but `cancelled`, which aborts the turn, are the provider's error.
+      const bool failure_class = status != "incomplete" && descriptor::failure_stop(status);
+      if (failure_class && status != "cancelled") {
+        events.push_back(ProviderError{reject(ErrorKind::RemoteFailure, "the provider reported an error in the session")});
+        // Apart from `failed`, whose turn is committed below, such a response commits no turn, and what it carried
+        // does not reach the next one.
+        if (status != "failed") {
+          turn_ = Turn{};
+          return events;
+        }
+      }
+      // A realtime response has no stop table: its lifecycle statuses are mapped here. An incomplete response is read
+      // by the reason its status_details state, so a blocked response is not a truncated one, and is MaxTokens when it
+      // states none. Any other status, or a reason the codec does not know, is Unknown with that value as its raw
+      // stop, never EndTurn.
+      std::string raw = status == "cancelled" ? "interrupted" : status;
+      StopKind kind = status == "completed" ? StopKind::EndTurn : StopKind::Unknown;
+      if (status == "incomplete") {
+        kind = StopKind::MaxTokens;
+        if (const auto reason = response.get("status_details").get("reason"); reason.is_string() && !reason.as_string().empty()) {
+          raw = std::string(reason.as_string());
+          kind = raw == "max_output_tokens" ? StopKind::MaxTokens : raw == "content_filter" ? StopKind::ContentFilter : StopKind::Unknown;
+        }
+      }
+      // A stop the codec cannot name ends a turn even without content, so that it is delivered.
+      const bool unnamed = kind == StopKind::Unknown && !raw.empty() && !failure_class;
       if (turn_.active() || status == "completed" || unnamed) {
-        auto turn = turn_.commit(text_of(response.get("id")), StopReason{kind, status == "cancelled" ? "interrupted" : status}, limits_);
+        auto turn = turn_.commit(text_of(response.get("id")), StopReason{kind, raw}, limits_);
         if (auto* error = std::get_if<Error>(&turn)) return *error;
         events.push_back(TurnCommitted{std::move(std::get<Completion>(turn))});
       }
