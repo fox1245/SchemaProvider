@@ -1,4 +1,5 @@
 #include "core/pricing.h"
+#include "core/endpoint_pricing.h"
 #include "descriptor/catalogue.h"
 #include <algorithm>
 #include <iostream>
@@ -654,6 +655,199 @@ void listed_overrides_bound_every_call() {
   std::cout << "case passed: listed overrides never price below the listing's rule at any hour (" << listings << " listings, " << checked
             << " calls, " << exact << " exact, " << windows_held << " with windows only, " << refused << " refused)\n";
 }
+// Item rows are not token units: the token prices of an entry with item rows are those of the entry without them, in
+// every tier and band, and so is an estimate.
+void item_rows_change_no_token_price() {
+  const std::string token_units = R"("prompt":"0.000001","completion":"0.000002","input/batch":"0.0000005","prompt+200000":"0.000002",)"
+                                  R"("tool:web_search":"0.01","ceiling_input":"0.000003","request":"0.001")";
+  const auto without = catalogue(R"({"version":1,"models":[{"id":"vendor/model","pricing":{)" + token_units + "}}]}");
+  const auto with = catalogue(R"({"version":1,"models":[{"id":"vendor/model","pricing":{)" + token_units +
+                              R"(,"item:image":"9","item:image/batch":"9","item:image[quality=high]+100":"9","item:second/flex":"9","item:input_image":"0"}}]})");
+  const auto same = [](const pricing::ModelPrice& a, const pricing::ModelPrice& b) {
+    return a.input == b.input && a.output == b.output && a.cache_read == b.cache_read && a.cache_write == b.cache_write && a.reasoning == b.reasoning &&
+           a.request == b.request && a.cache_write_1h == b.cache_write_1h && a.output_image == b.output_image && a.input_audio == b.input_audio &&
+           a.output_audio == b.output_audio && a.ceiling_input == b.ceiling_input && a.ceiling_output == b.ceiling_output &&
+           a.ceiling_request == b.ceiling_request && a.tool_fees == b.tool_fees;
+  };
+  const auto& a = *without->entry("vendor/model");
+  const auto& b = *with->entry("vendor/model");
+  for (const std::string_view tier : {"", "batch", "flex", "priority"})
+    for (const std::uint64_t input : {0u, 100u, 101u, 200'000u, 200'001u})
+      CHECK(same(pricing::price_of(a, tier, input), pricing::price_of(b, tier, input)) &&
+            same(pricing::dearest_price_of(a, tier, input), pricing::dearest_price_of(b, tier, input)));
+  // A tier only item rows price has no token price.
+  CHECK(pricing::price_of(b, "flex").empty() && pricing::dearest_price_of(b, "flex", 1000).empty());
+  const ServedModel model{"vendor/model", "vendor/model", ServedRelation::Exact};
+  const auto e = pricing::estimate(*with, "openai.chat", "https://openrouter.ai", model, usage(1000, 100));
+  const auto f = pricing::estimate(*without, "openai.chat", "https://openrouter.ai", model, usage(1000, 100));
+  CHECK(e.total && f.total && e.total->nano_usd == f.total->nano_usd && e.unpriced == f.unpriced && e.assumptions == f.assumptions);
+  std::cout << "case passed: item rows change no token price\n";
+}
+
+// The rate of an item unit for a call: the bound takes the dearest row that applies, the estimate the most specific
+// one, and a row whose qualifier names a dimension the call leaves unset does not apply.
+void item_prices() {
+  const auto c = catalogue(R"({"version":1,"models":[{"id":"vendor/model","pricing":{"input":"0.000001",
+    "item:image":"0.04",
+    "item:image[quality=high]":"0.08",
+    "item:image[quality=high,size=1024x1024]":"0.06",
+    "item:image[quality=low]":"0.02",
+    "item:image+200000":"0.05",
+    "item:image[quality=high]+200000":"0.09",
+    "item:image/batch":"0.02",
+    "item:image[operation=edit]":"0.1",
+    "item:second[resolution=720p]":"0.1",
+    "item:document":"-1",
+    "item:search_unit[a=1]":"0.5",
+    "item:search_unit[b=1]":"0.5",
+    "item:input_image[a=1]":"0.1",
+    "item:input_image[b=1]":"0.3",
+    "item:character":"0"}},
+    {"id":"vendor/tokens","pricing":{"input":"0.000001"}}]})");
+  const auto& e = *c->entry("vendor/model");
+  using Dimensions = std::vector<std::pair<std::string, std::string>>;
+  using Priced = std::optional<std::pair<std::uint64_t, std::string>>;
+  // 0.01 USD per unit, in nano-USD per million units.
+  constexpr std::uint64_t cent = 10'000'000'000'000u;
+  const auto at = [](std::uint64_t rate, std::string key) { return Priced(std::pair{rate, std::move(key)}); };
+  const auto both = [&](std::string_view unit, const Dimensions& d, const Priced& expected, std::string_view tier = {}, std::uint64_t input = 0) {
+    return pricing::dearest_item_price(e, unit, d, tier, input) == expected && pricing::item_price(e, unit, d, tier, input) == expected;
+  };
+  const auto dearest = [&](std::string_view unit, const Dimensions& d, std::string_view tier = {}, std::uint64_t input = 0) {
+    return pricing::dearest_item_price(e, unit, d, tier, input);
+  };
+  const auto specific = [&](std::string_view unit, const Dimensions& d, std::string_view tier = {}, std::uint64_t input = 0) {
+    return pricing::item_price(e, unit, d, tier, input);
+  };
+  // A call that sets no dimension: only the row without a qualifier applies.
+  CHECK(both("item:image", {}, at(4 * cent, "item:image")));
+  CHECK(both("item:image", {{"quality", "high"}}, at(8 * cent, "item:image[quality=high]")));
+  // The bound takes the dearest row, the estimate the one that names the most dimensions.
+  CHECK(dearest("item:image", {{"quality", "high"}, {"size", "1024x1024"}}) == at(8 * cent, "item:image[quality=high]"));
+  CHECK(specific("item:image", {{"quality", "high"}, {"size", "1024x1024"}}) == at(6 * cent, "item:image[quality=high,size=1024x1024]"));
+  // A value no row names, and an unset quality, price only at the row without a qualifier.
+  CHECK(both("item:image", {{"quality", "medium"}}, at(4 * cent, "item:image")));
+  CHECK(both("item:image", {{"size", "1024x1024"}}, at(4 * cent, "item:image")));
+  CHECK(both("item:image", {{"background", "opaque"}, {"quality", "Low"}}, at(4 * cent, "item:image")));
+  // Bands: strictly more input tokens than the band; the estimate takes a qualifier's highest band.
+  CHECK(both("item:image", {{"quality", "high"}}, at(9 * cent, "item:image[quality=high]+200000"), {}, 300'000));
+  CHECK(both("item:image", {}, at(5 * cent, "item:image+200000"), {}, 300'000));
+  CHECK(both("item:image", {{"quality", "high"}}, at(8 * cent, "item:image[quality=high]"), {}, 200'000));
+  CHECK(dearest("item:image", {{"quality", "high"}, {"size", "1024x1024"}}, {}, 300'000) == at(9 * cent, "item:image[quality=high]+200000"));
+  CHECK(specific("item:image", {{"quality", "high"}, {"size", "1024x1024"}}, {}, 300'000) == at(6 * cent, "item:image[quality=high,size=1024x1024]"));
+  CHECK(dearest("item:image", {{"quality", "low"}}, {}, 300'000) == at(5 * cent, "item:image+200000"));
+  CHECK(specific("item:image", {{"quality", "low"}}, {}, 300'000) == at(2 * cent, "item:image[quality=low]"));
+  // Tiers are matched exactly.
+  CHECK(both("item:image", {}, at(2 * cent, "item:image/batch"), "batch"));
+  CHECK(both("item:image", {{"quality", "high"}}, at(2 * cent, "item:image/batch"), "batch"));
+  CHECK(both("item:image", {}, std::nullopt, "flex"));
+  // An operation is a dimension like any other.
+  CHECK(both("item:image", {{"operation", "edit"}}, at(10 * cent, "item:image[operation=edit]")));
+  CHECK(both("item:image", {{"operation", "generate"}}, at(4 * cent, "item:image")));
+  // Only qualified rows: a call that leaves the dimension unset, or offers another value, has no price.
+  CHECK(both("item:second", {}, std::nullopt));
+  CHECK(both("item:second", {{"resolution", "1080p"}}, std::nullopt));
+  CHECK(both("item:second", {{"resolution", "720p"}}, at(10 * cent, "item:second[resolution=720p]")));
+  // A declared zero is a price; a variable price that applies is none.
+  CHECK(both("item:character", {}, at(0, "item:character")));
+  CHECK(both("item:document", {}, std::nullopt));
+  // Ties: the dearest of the rows naming as many dimensions, then the first key.
+  CHECK(both("item:search_unit", {{"a", "1"}, {"b", "1"}}, at(50 * cent, "item:search_unit[a=1]")));
+  CHECK(both("item:input_image", {{"a", "1"}, {"b", "1"}}, at(30 * cent, "item:input_image[b=1]")));
+  // Dimensions out of order or named twice, a unit that is not an item unit, and a kind the entry does not price.
+  CHECK(both("item:image", {{"size", "1024x1024"}, {"quality", "high"}}, std::nullopt));
+  CHECK(both("item:image", {{"quality", "high"}, {"quality", "high"}}, std::nullopt));
+  CHECK(both("input", {}, std::nullopt) && both("item:image[quality=high]", {}, std::nullopt) && both("item:video", {}, std::nullopt));
+  CHECK(!pricing::dearest_item_price(*c->entry("vendor/tokens"), "item:image", {}, {}, 0) && !pricing::item_price(*c->entry("vendor/tokens"), "item:image", {}, {}, 0));
+  std::cout << "case passed: item prices for a call's dimensions, tier and band\n";
+}
+
+// For generated entries and calls, the bound's row is the dearest row that applies by the rule stated for rows (its
+// unit and tier, the call above its band, every dimension it names offered with its value), the estimate's row is the
+// most specific one, and either is none exactly when no row applies or a row that applies has a variable price.
+void item_prices_follow_the_rows() {
+  std::uint64_t seed = 20261124;
+  auto next = [&](std::uint64_t limit) { seed = seed * 6364136223846793005u + 1442695040888963407u; return (seed >> 33) % (limit + 1); };
+  const std::string names[]{"quality", "size"};
+  const std::string values[]{"high", "low", "medium"};
+  const std::string tiers[]{"", "batch"};
+  const std::uint64_t bands[]{0, 1000};
+  constexpr std::uint64_t cent = 10'000'000'000'000u;
+  struct Row {
+    std::map<std::string, std::string> dimensions;
+    std::string tier;
+    std::uint64_t above = 0, cents = 0;
+    bool variable = false;
+  };
+  std::size_t calls = 0, priced = 0;
+  for (int round = 0; round < 400; ++round) {
+    std::map<std::string, Row> rows;  // by price key
+    for (std::uint64_t i = 0, n = 1 + next(12); i < n; ++i) {
+      Row row;
+      for (const auto& name : names)
+        if (next(1)) row.dimensions[name] = values[next(1)];
+      row.tier = tiers[next(1)];
+      row.above = bands[next(1)];
+      row.cents = next(9);
+      row.variable = next(19) == 0;
+      std::string key = "item:image";
+      if (!row.dimensions.empty()) {
+        key += '[';
+        for (const auto& [name, value] : row.dimensions) key += (key.back() == '[' ? "" : ",") + name + "=" + value;
+        key += ']';
+      }
+      if (!row.tier.empty()) key += "/" + row.tier;
+      if (row.above) key += "+" + std::to_string(row.above);
+      rows[key] = row;
+    }
+    std::string json = R"({"version":1,"models":[{"id":"vendor/model","pricing":{"input":"0.000001")";
+    for (const auto& [key, row] : rows) json += ",\"" + key + "\":\"" + (row.variable ? std::string("-1") : "0.0" + std::to_string(row.cents)) + "\"";
+    const auto c = catalogue(json + "}}]}");
+    const auto& entry = *c->entry("vendor/model");
+    for (int call = 0; call < 8; ++call, ++calls) {
+      std::vector<std::pair<std::string, std::string>> offered;
+      for (const auto& name : names)
+        if (next(2)) offered.emplace_back(name, values[next(2)]);
+      const auto tier = tiers[next(1)];
+      const std::uint64_t input = std::uint64_t{1000} + next(2) - 1;
+      // The rows that apply, from the rows' own facts.
+      std::vector<std::pair<std::string, Row>> applying;
+      for (const auto& [key, row] : rows) {
+        if (row.tier != tier || (row.above && input <= row.above)) continue;
+        bool offers = true;
+        for (const auto& [name, value] : row.dimensions)
+          offers = offers && std::find(offered.begin(), offered.end(), std::pair{name, value}) != offered.end();
+        if (offers) applying.emplace_back(key, row);
+      }
+      const bool variable = std::any_of(applying.begin(), applying.end(), [](const auto& item) { return item.second.variable; });
+      const auto bound = pricing::dearest_item_price(entry, "item:image", offered, tier, input);
+      const auto estimate = pricing::item_price(entry, "item:image", offered, tier, input);
+      if (applying.empty() || variable) {
+        CHECK(!bound && !estimate);
+        continue;
+      }
+      ++priced;
+      const std::pair<std::string, Row>* dearest = nullptr;
+      for (const auto& item : applying)
+        if (!dearest || item.second.cents > dearest->second.cents) dearest = &item;
+      const std::pair<std::string, Row>* specific = nullptr;
+      for (const auto& item : applying) {
+        const bool higher_band = std::any_of(applying.begin(), applying.end(), [&](const auto& other) {
+          return other.second.dimensions == item.second.dimensions && other.second.above > item.second.above;
+        });
+        if (higher_band) continue;
+        if (!specific || item.second.dimensions.size() > specific->second.dimensions.size() ||
+            (item.second.dimensions.size() == specific->second.dimensions.size() && item.second.cents > specific->second.cents))
+          specific = &item;
+      }
+      CHECK(bound && bound->first == dearest->second.cents * cent && bound->second == dearest->first);
+      CHECK(estimate && estimate->first == specific->second.cents * cent && estimate->second == specific->first);
+      CHECK(estimate && bound && estimate->first <= bound->first);
+    }
+  }
+  CHECK(priced > calls / 4 && priced < calls);
+  std::cout << "case passed: item prices follow the rows (" << calls << " calls, " << priced << " priced)\n";
+}
 } // namespace
 
 int main() {
@@ -661,6 +855,7 @@ int main() {
     prices_from_entries(); estimates(); wide_products(); bounds(); bands(); dearer_rates();
     unpriced_usage(); zero_rates(); tier_reasons(); usage_stage(); reservation_from_entry(); skipped_prices();
     hour_cache_writes(); left_out_units_refuse(); override_keys_are_units(); bands_count_every_input_token(); listed_overrides_bound_every_call();
+    item_rows_change_no_token_price(); item_prices(); item_prices_follow_the_rows();
     std::cout << "pricing properties passed\n"; return 0;
   }
   catch (const std::exception& error) { std::cerr << "pricing test failed: " << error.what() << '\n'; return 1; }

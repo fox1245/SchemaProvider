@@ -178,6 +178,40 @@ inline constexpr std::size_t max_band_digits = 19;
 inline constexpr std::string_view route_ceiling_units[]{"ceiling_input", "ceiling_output", "ceiling_request"};
 // The unit a price unit names without its input band: `prompt` for `prompt+272000`; a unit without a band is itself.
 std::string_view unbanded_unit(std::string_view unit) noexcept;
+// Item units price an item a call makes or takes (an image, a second of audio) rather than a token:
+// `item:<kind>[<key>=<value>,...][/<tier>][+<tokens>]`. The qualifier in brackets names request dimensions, and a row
+// with one prices only a call that offers each of them with that value. A catalogue holds an item unit only of a kind
+// in `item_kinds` and in its one canonical spelling (USAGE.md, pricing by the catalogue); a models listing never
+// gives one.
+inline constexpr std::string_view item_unit_prefix = "item:";
+// The units of a routing gateway's per-item route ceilings, which a models listing never gives either.
+inline constexpr std::string_view item_ceiling_prefix = "ceiling_item:";
+// An item kind, the unit `item:<name>`, and what one unit of it counts.
+struct ItemKind {
+  std::string_view name, counts;
+};
+inline constexpr ItemKind item_kinds[]{
+    {"image", "one image the call makes"},
+    {"input_image", "one image the call takes as a reference"},
+    {"character", "one character of the text to speak, as the provider counts it"},
+    {"second", "one second of audio taken or of video made, in whole seconds rounded up"},
+    {"document", "one document the request ranks"},
+    {"search_unit", "one search unit, as the provider counts it"}};
+// The most dimensions the qualifier of one item unit names.
+inline constexpr std::size_t max_item_dimensions = 8;
+// An item price unit as the grammar reads it, its parts borrowed from the unit's text.
+struct ItemPriceKey {
+  std::string_view unit;       // `item:image`: the prefix and the kind
+  std::string_view qualifier;  // `quality=high,size=1024x1024`; empty when the unit has no qualifier
+  std::size_t dimensions = 0;  // how many dimensions the qualifier names
+  std::string_view tier;       // the service tier; empty for the standard rates
+  std::uint64_t above = 0;     // the input band: calls with strictly more input tokens; 0 for every call
+};
+// `unit` read as an item price unit, when it is one a catalogue holds; nothing for any other text.
+std::optional<ItemPriceKey> item_price_key(std::string_view unit) noexcept;
+// Whether a call that offers `dimensions` offers every dimension `qualifier` names, each with a byte-equal value. An
+// empty qualifier names none and matches every call; a dimension the call does not offer matches no value.
+bool qualifier_offered(std::string_view qualifier, std::span<const std::pair<std::string, std::string>> dimensions) noexcept;
 // A listed price member an entry leaves out (ListingPage::withheld): `pricing.overrides` may bill it above every price
 // the entry could claim for it, or bill the tokens of a unit left out that would otherwise be priced at it. An empty
 // `unit` is every price of the model: conditional prices that cannot be read at all.

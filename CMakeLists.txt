@@ -276,7 +276,7 @@ else()
   endif()
 endif()
 
-add_library(sp_core src/core/media.cpp src/core/native.cpp src/core/native_archive.cpp src/core/pricing.cpp src/core/enum_names.cpp src/core/failure.cpp)
+add_library(sp_core src/core/media.cpp src/core/native.cpp src/core/native_archive.cpp src/core/pricing.cpp src/core/endpoint_pricing.cpp src/core/enum_names.cpp src/core/failure.cpp)
 # The archive's file custody backend (core/native_archive_fs.h): POSIX and Windows have one, WebAssembly does not and
 # refuses with a typed error.
 if(SP_WASM)

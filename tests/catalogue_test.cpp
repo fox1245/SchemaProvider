@@ -38,6 +38,27 @@ void refused(std::string_view models, std::string_view pointer) {
         ++failures;
     }
 }
+// Refused at `pointer`, expecting `expected` there.
+void refused_as(std::string_view models, std::string_view pointer, std::string_view expected) {
+    auto loaded = load_catalogue(std::string(R"({"version":1,"models":)") + std::string(models) + "}");
+    auto* error = std::get_if<ConfigError>(&loaded);
+    if (!error) {
+        ++failures;
+        std::fprintf(stderr, "CHECK FAILED: loaded %s\n", std::string(models).c_str());
+        return;
+    }
+    if (error->pointer != pointer || error->expected != expected) {
+        ++failures;
+        std::fprintf(stderr, "CHECK FAILED: %s refused at %s expecting \"%s\", not at %s expecting \"%s\"\n", std::string(models).c_str(),
+                     error->pointer.c_str(), error->expected.c_str(), std::string(pointer).c_str(), std::string(expected).c_str());
+    }
+}
+// A price key of one entry refused at its own pointer, where a '/' is written "~1".
+void refused_key(std::string_view key, std::string_view expected) {
+    std::string pointer = "/models/0/pricing/";
+    for (const char c : key) pointer += c == '/' ? std::string("~1") : c == '~' ? std::string("~0") : std::string(1, c);
+    refused_as(R"([{"id":"vendor/model","pricing":{)" + sp::json::quote(key) + R"(:"0.04"}}])", pointer, expected);
+}
 ValidatedDescriptor descriptor(std::string_view family, std::string_view origin, PolicySnapshot policy) {
     const bool generate = family == "google.generate";
     const std::string paths = generate
@@ -657,6 +678,195 @@ void listed_override_bounds() {
     CHECK(std::holds_alternative<CatalogueSnapshot>(make_catalogue(widest.entries)));
 }
 
+// Item units: every kind, with and without a qualifier, a tier and a band, each held in its one spelling.
+void item_units_load() {
+    const auto c = catalogue(R"([{"id":"vendor/model","pricing":{"input":"0.000001","output":"0.000002",
+        "item:image":"0.04",
+        "item:image[quality=high,size=1024x1024]":"0.08",
+        "item:image[quality=high,size=1024x1024]/batch":"0.04",
+        "item:image[size=1024x1024]+200000":"0.1",
+        "item:image[aspect_ratio=16:9,operation=generate]/batch+200000":"0.2",
+        "item:image/flex+1":"0",
+        "item:input_image":"0.01",
+        "item:character":"0.000015",
+        "item:second[audio=true,resolution=720p]":"0.1",
+        "item:document":"0.001",
+        "item:search_unit/flex":"0.002"}}])");
+    if (!c) return;
+    CHECK(c->entry("vendor/model")->pricing.size() == 13);
+    // The canonical text holds each unit as written, and reads back as the same catalogue.
+    const auto text = c->to_json();
+    CHECK(text.find(R"("item:image[aspect_ratio=16:9,operation=generate]/batch+200000":"0.2")") != std::string::npos);
+    auto again = load_catalogue(text);
+    CHECK(std::holds_alternative<CatalogueSnapshot>(again) && std::get<CatalogueSnapshot>(again)->to_json() == text &&
+          std::get<CatalogueSnapshot>(again)->digest() == c->digest());
+    auto rebuilt = make_catalogue(c->entries());
+    CHECK(std::holds_alternative<CatalogueSnapshot>(rebuilt) && std::get<CatalogueSnapshot>(rebuilt)->digest() == c->digest());
+    // The parts of a unit.
+    const auto full = item_price_key("item:image[aspect_ratio=16:9,operation=generate]/batch+200000");
+    CHECK(full && full->unit == "item:image" && full->qualifier == "aspect_ratio=16:9,operation=generate" && full->dimensions == 2 &&
+          full->tier == "batch" && full->above == 200000u);
+    const auto bare = item_price_key("item:character");
+    CHECK(bare && bare->unit == "item:character" && bare->qualifier.empty() && bare->dimensions == 0 && bare->tier.empty() && bare->above == 0);
+    const auto widest = item_price_key("item:image[a=b]+9999999999999999999");
+    CHECK(widest && widest->above == 9999999999999999999u && widest->dimensions == 1 && widest->tier.empty());
+    for (const auto& kind : item_kinds) {
+        const auto unit = std::string(item_unit_prefix) + std::string(kind.name);
+        CHECK(item_price_key(unit) && item_price_key(unit)->unit == unit && !kind.counts.empty());
+        CHECK(catalogue(R"([{"id":"vendor/model","pricing":{)" + sp::json::quote(unit) + R"(:"1"}}])") != nullptr);
+    }
+    CHECK(!item_price_key("input") && !item_price_key("tool:x") && !item_price_key("item:video") && !item_price_key("item:image[size=b,quality=a]") &&
+          !item_price_key("item:image/") && !item_price_key("item:image+0") && !item_price_key("ceiling_item:image"));
+    // A qualifier matches a call that offers each dimension it names with the same value.
+    using Dimensions = std::vector<std::pair<std::string, std::string>>;
+    const Dimensions offered{{"quality", "high"}, {"size", "1024x1024"}};
+    CHECK(qualifier_offered("", offered) && qualifier_offered("", Dimensions{}));
+    CHECK(qualifier_offered("quality=high", offered) && qualifier_offered("quality=high,size=1024x1024", offered) && qualifier_offered("size=1024x1024", offered));
+    CHECK(!qualifier_offered("quality=low", offered) && !qualifier_offered("background=opaque", offered) && !qualifier_offered("quality=high", Dimensions{}));
+    CHECK(!qualifier_offered("quality=High", offered) && !qualifier_offered("quality=hig", offered) && !qualifier_offered("quality=high,size=512x512", offered));
+}
+
+// A price key that starts with `item:` or holds a qualifier is refused unless it is an item unit in its one spelling:
+// the unit, the qualifier, the tier and the band in that order, the qualifier's keys sorted and unique. Each refusal is
+// at the key's pointer.
+void item_units_refused() {
+    constexpr std::string_view too_long = "item price unit of at most 256 bytes";
+    constexpr std::string_view not_item = "a qualifier on an item unit only";
+    constexpr std::string_view kind = "item unit of a known kind";
+    constexpr std::string_view shape = "qualifier of key=value dimensions in brackets";
+    constexpr std::string_view key = "qualifier key of 1 to 64 lower-case letters, digits or '_'";
+    constexpr std::string_view value = "qualifier value of 1 to 64 letters, digits, ':', '.', '_' or '-'";
+    constexpr std::string_view count = "at most 8 qualifier dimensions";
+    constexpr std::string_view sorted = "qualifier keys sorted and unique";
+    constexpr std::string_view order = "item unit, qualifier, tier and band in that order";
+    constexpr std::string_view tier = "service tier of 1 to 64 letters, digits, ':', '.', '_' or '-'";
+    constexpr std::string_view band = "input band of 1 to 19 digits without a leading zero";
+    refused_as(R"([{"id":"vendor/model","pricing":{"item:image/batch[size=a]":"1"}}])", "/models/0/pricing/item:image~1batch[size=a]", order);
+    // Canonical order: unsorted or repeated keys are refused, not reordered.
+    refused_key("item:image[size=1024x1024,quality=high]", sorted);
+    refused_key("item:image[size=a,size=b]", sorted);
+    refused_key("item:image[quality=high,quality=high]", sorted);
+    // Values from the request-token alphabet, keys of lower-case letters, digits and '_'.
+    refused_key("item:image[size=]", value);
+    refused_key("item:image[size=a/b]", value);
+    refused_key("item:image[size=a+b]", value);
+    refused_key("item:image[size=a[b]", value);
+    refused_key("item:image[size=a=b]", value);
+    refused_key("item:image[size=" + std::string(65, 'v') + "]", value);
+    refused_key("item:image[Size=a]", key);
+    refused_key("item:image[=a]", key);
+    refused_key("item:image[size-x=a]", key);
+    refused_key("item:image[" + std::string(65, 'k') + "=a]", key);
+    refused_key("item:image[size=a,b]", shape);
+    refused_key("item:image[]", shape);
+    refused_key("item:image[size=a", shape);
+    refused_key("item:image[size]", shape);
+    refused_key("item:image[size=a,]", shape);
+    refused_key("item:image[,size=a]", shape);
+    refused_key("item:image[size=a]x", shape);
+    refused_key("item:image[size=a][quality=b]", shape);
+    refused_key("item:image[a=1,b=1,c=1,d=1,e=1,f=1,g=1,h=1,i=1]", count);
+    CHECK(catalogue(R"([{"id":"vendor/model","pricing":{"item:image[a=1,b=1,c=1,d=1,e=1,f=1,g=1,h=1]":"1"}}])") != nullptr);
+    // A kind of the kind table only.
+    refused_key("item:video", kind);
+    refused_key("item:", kind);
+    refused_key("item:Image", kind);
+    refused_key("item:image_output", kind);
+    refused_key("item:video[size=a]", kind);
+    refused_key("item:[size=a]", kind);
+    // A qualifier only on an item unit.
+    refused_key("input[size=a]", not_item);
+    refused_key("tool:web_search[size=a]", not_item);
+    refused_key("ceiling_item:image[size=a]", not_item);
+    refused_key("[size=a]", not_item);
+    std::string wide = "item:image[";
+    for (char k = 'a'; k <= 'e'; ++k) wide += std::string(k == 'a' ? "" : ",") + k + "=" + std::string(60, 'v');
+    refused_key(wide + "]", too_long);
+    refused_key("input" + wide.substr(10) + "]", not_item);
+    // The tier and the band follow the qualifier, the band last, each in one spelling.
+    refused_key("item:image+1000[size=a]", order);
+    refused_key("item:image[size=a]/batch[quality=b]", order);
+    refused_key("item:image/batch]", order);
+    refused_key("item:image/", tier);
+    refused_key("item:image/+1000", tier);
+    refused_key("item:image/batch/flex", tier);
+    refused_key("item:image/ba=tch", tier);
+    refused_key("item:image/" + std::string(65, 't'), tier);
+    refused_key("item:image+1000/batch", band);
+    refused_key("item:image+0", band);
+    refused_key("item:image+0100", band);
+    refused_key("item:image+", band);
+    refused_key("item:image+1x", band);
+    refused_key("item:image+1000+2000", band);
+    refused_key("item:image+12345678901234567890", band);
+    // Other keys keep the rule they had: a unit token, even one pricing reads as no unit.
+    CHECK(catalogue(R"([{"id":"vendor/model","pricing":{"input/":"1","input+0":"1","input+x":"1","items":"1","item_image":"1",)"
+                    R"("ceiling_item:image":"1","tool:x":"1","image":"1"}}])") != nullptr);
+    refused_as(R"([{"id":"vendor/model","pricing":{"input,x":"1"}}])", "/models/0/pricing/input,x", "price unit token");
+    refused_as(R"([{"id":"vendor/model","pricing":{"input]":"1"}}])", "/models/0/pricing/input]", "price unit token");
+}
+
+// Layers replace an item row by its exact key, as any other unit, and the diff and the digest see item rows as any
+// other price. A catalogue without item units keeps its text and digest.
+void item_units_merge_and_diff() {
+    using Prices = std::vector<std::pair<std::string, std::string>>;
+    const auto base = catalogue(R"([{"id":"vendor/model","pricing":{"input":"0.000001","item:image":"0.04","item:image[quality=high]":"0.08",)"
+                                R"("item:image[quality=high]/batch":"0.04"}}])");
+    const auto host = catalogue(R"([{"id":"vendor/model","pricing":{"item:image[quality=high]":"0.06","item:image[quality=low]":"0.02"}}])");
+    const auto same = catalogue(R"([{"id":"vendor/model","pricing":{"item:image[quality=high]":"0.08"}}])");
+    if (!base || !host || !same) return;
+    const CatalogueSnapshot layers[]{base, host};
+    auto merged = merge_catalogues(layers);
+    CHECK(std::holds_alternative<CatalogueSnapshot>(merged));
+    if (!std::holds_alternative<CatalogueSnapshot>(merged)) return;
+    const auto& c = std::get<CatalogueSnapshot>(merged);
+    CHECK(c->entry("vendor/model")->pricing == (Prices{{"input", "0.000001"}, {"item:image", "0.04"}, {"item:image[quality=high]", "0.06"},
+                                                       {"item:image[quality=high]/batch", "0.04"}, {"item:image[quality=low]", "0.02"}}));
+    const auto diff = diff_catalogues(*base, *c);
+    CHECK(diff.changed == std::vector<std::string>{"vendor/model"} && diff.added.empty() && diff.removed.empty());
+    CHECK(diff_catalogues(*c, *c).empty());
+    auto again = load_catalogue(c->to_json());
+    CHECK(std::holds_alternative<CatalogueSnapshot>(again) && std::get<CatalogueSnapshot>(again)->digest() == c->digest());
+    // A layer that states a row again changes nothing.
+    const CatalogueSnapshot restated[]{base, same};
+    auto unchanged = merge_catalogues(restated);
+    CHECK(std::holds_alternative<CatalogueSnapshot>(unchanged) && std::get<CatalogueSnapshot>(unchanged)->digest() == base->digest() &&
+          diff_catalogues(*base, *std::get<CatalogueSnapshot>(unchanged)).empty());
+    // Without item units: tiers, bands, a tool fee, a route ceiling and a listed unit nothing reads, in these bytes.
+    const auto plain = catalogue(R"([{"id":"vendor/model","pricing":{"prompt":"0.000001","completion":"0.000002","input/flex":"0.0000005",)"
+                                 R"("prompt+200000":"0.000002","tool:web_search":"0.01","ceiling_input":"0.000003","image":"0.04","output/batch+1000":"0.000001"}}])");
+    if (!plain) return;
+    CHECK(plain->to_json() == R"({"version":1,"models":[{"id":"vendor/model","pricing":{"ceiling_input":"0.000003","completion":"0.000002",)"
+                              R"("image":"0.04","input/flex":"0.0000005","output/batch+1000":"0.000001","prompt":"0.000001","prompt+200000":"0.000002",)"
+                              R"("tool:web_search":"0.01"}}]})");
+    CHECK(plain->digest_hex() == "8185bd8c7a0b473bea215247c71dd5abfe83d127d4a03d6613161954fa7f51b7");
+}
+
+// A models listing never puts a price in the item namespace: a key that starts with `item:` or `ceiling_item:` is a
+// skipped price, in the base prices and in overrides, and the entry is the one the listing gives without it.
+void listing_gives_no_item_units() {
+    using Prices = std::vector<std::pair<std::string, std::string>>;
+    const auto page = [](std::string_view pricing) {
+        auto parsed = parse_listing(Listing::OpenRouter, std::string(R"({"data":[{"id":"vendor/model","pricing":)") + std::string(pricing) + "}]}",
+                                    "https://openrouter.ai");
+        return std::get<ListingPage>(std::move(parsed));
+    };
+    const auto plain = page(R"({"prompt":"0.000001","completion":"0.000002","overrides":[{"min_prompt_tokens":1000,"prompt":"0.000002"}]})");
+    const auto items = page(R"({"prompt":"0.000001","completion":"0.000002","item:image":"0.04","item:image[size=1]":"0.05","ceiling_item:image":"0.06",)"
+                            R"("overrides":[{"min_prompt_tokens":1000,"prompt":"0.000002","item:image":"0.08","ceiling_item:image":"0.09"}]})");
+    CHECK(plain.entries.size() == 1 && items.entries.size() == 1);
+    if (plain.entries.size() != 1 || items.entries.size() != 1) return;
+    CHECK(plain.skipped_prices == 0 && items.skipped_prices == 5);
+    CHECK(items.entries[0].pricing == (Prices{{"completion", "0.000002"}, {"prompt", "0.000001"}, {"prompt+1000", "0.000002"}}));
+    CHECK(items.entries[0].pricing == plain.entries[0].pricing && items.withheld == plain.withheld &&
+          items.skipped_override_prices == plain.skipped_override_prices && items.window_prices_at_dearest == plain.window_prices_at_dearest);
+    auto a = make_catalogue(plain.entries), b = make_catalogue(items.entries);
+    CHECK(std::holds_alternative<CatalogueSnapshot>(a) && std::holds_alternative<CatalogueSnapshot>(b));
+    if (std::holds_alternative<CatalogueSnapshot>(a) && std::holds_alternative<CatalogueSnapshot>(b))
+        CHECK(std::get<CatalogueSnapshot>(a)->to_json() == std::get<CatalogueSnapshot>(b)->to_json() &&
+              std::get<CatalogueSnapshot>(a)->digest() == std::get<CatalogueSnapshot>(b)->digest());
+}
+
 void catalogue_files() {
     std::filesystem::path dir;
     std::random_device entropy;
@@ -698,6 +908,10 @@ int main() {
         origins_scope_the_whole_entry();
         bundle_carries_the_catalogue();
         listed_override_bounds();
+        item_units_load();
+        item_units_refused();
+        item_units_merge_and_diff();
+        listing_gives_no_item_units();
         catalogue_files();
     } catch (const std::exception& error) {
         std::fprintf(stderr, "catalogue test threw: %s\n", error.what());
