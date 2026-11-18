@@ -1,6 +1,7 @@
 #include "core/native.h"
 #include "core/interface_contract.h"
 #include "core/native_archive_custody_internal.h"
+#include "core/native_testing.h"
 #include "crypto/crypto.h"
 #include "json/json.h"
 #include <algorithm>
@@ -662,6 +663,19 @@ bool append_prefix(Digest& prefix, const Digest& content, size_t index, std::str
   return hash.finish(prefix);
 }
 } // namespace
+namespace native_testing {
+std::optional<Digest> origin_digest_of(const descriptor::ValidatedDescriptor& descriptor) {
+  Digest digest{};
+  if (!origin_digest(descriptor, digest)) return std::nullopt;
+  return digest;
+}
+std::optional<Digest> chat_configuration_digest_of(const descriptor::ValidatedDescriptor& descriptor, const chat::Request& request,
+                                                   const descriptor::EffectiveChoices& choices) {
+  Digest digest{};
+  if (!configuration_digest(descriptor, request, choices, digest)) return std::nullopt;
+  return digest;
+}
+} // namespace native_testing
 NativeContext::NativeContext(Family family, std::string model, std::string route, size_t prefix_count, descriptor::PolicySnapshot policy)
     : family_(family), model_(std::move(model)), route_(std::move(route)), prefix_count_(prefix_count), policy_(std::move(policy)) {}
 std::shared_ptr<const NativeContext> NativeContext::decoding_only() const {
