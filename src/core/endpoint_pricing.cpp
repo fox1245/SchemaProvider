@@ -221,11 +221,21 @@ EndpointBound endpoint_worst_case(const EndpointWorstCaseInput& in, const descri
   }
   if (!out.unbounded.empty()) return out;
   // The input length that picks the bands: every band when it is not stated.
-  std::optional<std::uint64_t> stated_input;
-  bool unstated_input = false, image_tokens = false;
+  std::optional<std::uint64_t> stated_input, stated_images = 0;
+  bool has_input = false, unstated_input = false, image_tokens = false;
   for (std::size_t i = 0; i < quantities.size(); ++i) {
-    if (quantities[i].unit == image_token_units[0] && (!counts[i] || *counts[i] > 0)) image_tokens = true;
+    if (quantities[i].unit == image_token_units[0]) {
+      if (!counts[i] || *counts[i] > 0) image_tokens = true;
+      std::uint64_t sum = 0;
+      if (!counts[i]) stated_images.reset();
+      else if (stated_images && !checked_add(*stated_images, *counts[i], sum)) {
+        block(UnboundedBy::Overflow, quantities[i].unit, "the image tokens do not fit 64 bits");
+        return out;
+      } else if (stated_images) stated_images = sum;
+      continue;
+    }
     if (quantities[i].unit != input_units[0]) continue;
+    has_input = true;
     if (!counts[i]) {
       unstated_input = true;
       continue;
@@ -238,6 +248,10 @@ EndpointBound endpoint_worst_case(const EndpointWorstCaseInput& in, const descri
     stated_input = sum;
   }
   const std::uint64_t length = stated_input && !unstated_input ? *stated_input : every_band;
+  // The image tokens of the input are among its input tokens, which the input quantities count: image tokens that can
+  // be above zero need an input quantity, and one that holds them when both counts are stated.
+  if (image_tokens && (!has_input || (stated_input && !unstated_input && stated_images && *stated_images > *stated_input)))
+    block(UnboundedBy::Unmodeled, std::string(image_token_units[0]), "the image tokens are not counted by the call's input tokens");
 
   Wide sum;  // nano-USD x 1e6
   const auto charge = [&](std::string_view unit, std::string_view row, std::uint64_t quantity, std::uint64_t rate) {

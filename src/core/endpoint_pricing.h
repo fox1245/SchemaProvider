@@ -89,8 +89,9 @@ struct EndpointBound {
 //   - The input length is the `input` quantity: rows above an input band apply when the call may exceed the band, and
 //     every band applies when the length is not stated.
 //   - `input` is priced at the dearest input rate (`input`, `cache_read`, `cache_write`, `cache_write_1h`,
-//     `input_audio`, `input_image`), which needs an `input` rate; an `input_image` quantity that is not zero (the
-//     image tokens of the input, which `input` counts) needs an `input_image` rate as well. `output` is priced at the
+//     `input_audio`, `input_image`), which needs an `input` rate. An `input_image` quantity counts image tokens of
+//     the input: one that can be above zero needs an `input_image` rate, and an `input` quantity whose count, when
+//     both counts are stated, is at least its own; otherwise `Unmodeled`, subject `input_image`. `output` is priced at the
 //     dearest output rate (`output`, `reasoning`, `output_image`, `output_audio`), which needs an `output` rate. The
 //     request fee (`request`) is charged once when the entry lists it.
 //   - An `item:<kind>` quantity is priced at dearest_item_price for the call's dimensions.

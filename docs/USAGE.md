@@ -479,7 +479,7 @@ else for (const auto& why : bound.unbounded) log(sp::pricing::to_string(why.by),
 **Dimensions.** The call offers its `dimensions` and its operation (`operation=<operation>`), so a row qualified by another operation does not apply. A dimension the call leaves unset is offered by no value, so only a row without a qualifier prices it.
 
 **Prices.**
-- **Input.** `input` bills at the dearest input rate: `input`, `cache_read`, `cache_write`, `cache_write_1h`, `input_audio` or `input_image`. An `input` rate is needed. A non-zero `input_image` quantity, the image tokens the input count includes, needs an `input_image` rate as well.
+- **Input.** `input` bills at the dearest input rate: `input`, `cache_read`, `cache_write`, `cache_write_1h`, `input_audio` or `input_image`. An `input` rate is needed. An `input_image` quantity counts image tokens of the input: one that can be above zero needs an `input_image` rate, and an `input` quantity whose count, when both are stated, is at least its own.
 - **Output.** `output` bills at the dearest output rate: `output`, `reasoning`, `output_image` or `output_audio`. An `output` rate is needed.
 - **Request fee.** `request` is charged once when the entry lists it.
 - **Items.** An `item:<kind>` quantity bills at `dearest_item_price` for the offered dimensions.
@@ -498,7 +498,7 @@ else for (const auto& why : bound.unbounded) log(sp::pricing::to_string(why.by),
 |---|---|---|
 | `Billing` | `<endpoint>/<operation>` | the policy does not state whether the provider bills the operation |
 | `Unmodeled` | `<endpoint>/<operation>` | the call bills the requests it carries (a batch submit) |
-| `Unmodeled` | the endpoint, `dimensions`, a unit or a price key | the call names no operation; its dimensions are unsorted, repeat a key or name another operation; a quantity of a unit the bound does not price; a row that applies to the call, is not a declared zero, and is of an item kind none of the quantities count, such as output seconds of a speech model |
+| `Unmodeled` | the endpoint, `dimensions`, a unit or a price key | the call names no operation; its dimensions are unsorted, repeat a key or name another operation; image tokens (`input_image`) without an `input` quantity, or more of them than its stated count; a quantity of a unit the bound does not price; a row that applies to the call, is not a declared zero, and is of an item kind none of the quantities count, such as output seconds of a speech model |
 | `ModelPrice` | model | no entry, or an entry without prices |
 | `ModelPrice` | unit | no rate for a quantity that can be above zero, or a variable price on a row that applies; an item unit is named with the offered dimensions, such as `item:image[operation=generate,quality=high]` |
 | `RouteCeiling` | model | a routing gateway: no route ceiling or pin covers an endpoint call's prices; or an entry with a route ceiling at an origin that is not a gateway |
