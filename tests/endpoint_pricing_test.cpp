@@ -380,6 +380,43 @@ void zeros() {
   std::cout << "case passed: zero rates and absent units\n";
 }
 
+// The image tokens of the input are among its input tokens: an image quantity the input quantities cannot hold refuses.
+void image_tokens() {
+  constexpr std::uint64_t input = 1'000'000'000, image = 3'000'000'000;
+  const auto c = entry({{"input", usd(input)}, {"input_image", usd(image)}, {"output", "0"}});
+  const auto no_image_rate = entry({{"input", usd(input)}, {"output", "0"}});
+  // 1000 input tokens, 400 of them image tokens: one input line of 1000 at the dearest input rate.
+  Call call{facts("images", "edit", {quantity("input", 1000), quantity("input_image", 400), quantity("output", 0)})};
+  auto b = bound(call, *c);
+  CHECK(totals(b, rounded(1000 * image)) && b.lines.size() == 1 && line(b, "input", "input_image", 1000, image));
+  call.facts = facts("images", "edit", {quantity("input", 400), quantity("input_image", 400)});
+  CHECK(totals(bound(call, *c), rounded(400 * image)));
+  // A stated input with an unstated image count: the image tokens are among the stated input.
+  call.facts = facts("images", "edit", {quantity("input", 1000), quantity("input_image", std::nullopt)});
+  CHECK(totals(bound(call, *c), rounded(1000 * image)));
+  // Image tokens and no input quantity, with the image rate and without it, stated and unstated.
+  call.facts = facts("images", "edit", {quantity("input_image", 1'000'000)});
+  CHECK(only(bound(call, *c), UnboundedBy::Unmodeled, "input_image"));
+  CHECK(only(bound(call, *no_image_rate), UnboundedBy::Unmodeled, "input_image"));
+  call.facts = facts("images", "edit", {quantity("input_image", std::nullopt)});
+  CHECK(only(bound(call, *c), UnboundedBy::Unmodeled, "input_image"));
+  // More image tokens than input tokens, and image tokens beside an input of none.
+  call.facts = facts("images", "edit", {quantity("input", 100), quantity("input_image", 1'000'000)});
+  CHECK(only(bound(call, *c), UnboundedBy::Unmodeled, "input_image"));
+  call.facts = facts("images", "edit", {quantity("input", 0), quantity("input_image", 5)});
+  CHECK(only(bound(call, *c), UnboundedBy::Unmodeled, "input_image"));
+  // No image tokens need no input.
+  call.facts = facts("images", "edit", {quantity("input_image", 0)});
+  CHECK(totals(bound(call, *no_image_rate), 0));
+  // An unstated input keeps its rule: it needs a count unless every rate is a declared zero, and then the image rate
+  // must still be listed.
+  call.facts = facts("images", "edit", {quantity("input", std::nullopt, Source::InputLimit), quantity("input_image", 5)});
+  CHECK(totals(bound(call, *entry({{"input", "0"}, {"input_image", "0"}, {"output", "0"}})), 0));
+  CHECK(refuses(bound(call, *entry({{"input", "0"}, {"output", "0"}})), UnboundedBy::ModelPrice, "input_image"));
+  CHECK(only(bound(call, *c), UnboundedBy::InputBound, "input"));
+  std::cout << "case passed: image tokens are among the input tokens\n";
+}
+
 // Bands: a row above `+<tokens>` applies to a call with strictly more input tokens.
 void bands() {
   constexpr std::uint64_t input = 1'000'000'000, long_input = 2'000'000'000, image = 1 * cent, long_image = 2 * cent;
@@ -531,6 +568,11 @@ struct Oracle {
       if (q.unit == "input_image" && (!q.at_most || *q.at_most > 0)) image_tokens = true;
     }
     length = has_input && input_count ? *input_count : most;
+    // Image tokens are among the input tokens.
+    std::optional<std::uint64_t> image_count = 0;
+    for (const auto& q : g.facts.quantities)
+      if (q.unit == "input_image") image_count = count(q) && image_count ? std::optional<std::uint64_t>(*image_count + *count(q)) : std::nullopt;
+    if (image_tokens && (!has_input || (input_count && image_count && *image_count > *input_count))) refuse(UnboundedBy::Unmodeled, "input_image");
     std::uint64_t sum = 0;
     // A token unit: the dearest fixed rate of its rows that apply; whether one of them is variable; whether `base` has one.
     auto token = [&](const std::vector<std::string>& units, std::string_view base, std::optional<std::uint64_t> n, UnboundedBy unknown,
@@ -803,7 +845,7 @@ int main() {
   try {
     bound_covers_every_consistent_result();
     images(); decisions(); embeddings(); rerank(); speech(); transcription(); videos();
-    billing(); refusals(); zeros(); bands(); attempts(); overflow();
+    billing(); refusals(); zeros(); image_tokens(); bands(); attempts(); overflow();
     std::cout << "endpoint pricing properties passed\n";
     return 0;
   } catch (const std::exception& error) {
