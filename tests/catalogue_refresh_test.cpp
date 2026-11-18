@@ -58,8 +58,9 @@ Seen seen(Peer& peer, std::string_view scenario) {
 }
 void passed(std::string_view name) { std::cout << "case passed: " << name << std::endl; }
 
-// What a refresh of the `openrouter` listing generated before a refresh could read route ceilings. A refresh that
-// asks for no ceilings still generates exactly these bytes, and sends the listing request only.
+// What a refresh of the `openrouter` listing generated before a refresh could read route ceilings or price overrides,
+// which is what it generates from that listing without its override (scenario `openrouter-bare`). A refresh that asks
+// for no ceilings still generates exactly these bytes from it, and sends the listing request only.
 constexpr std::string_view openrouter_generated_text =
     R"({"version":1,"models":[{"id":"vendor/image-model","origins":["https://openrouter.ai"],"source":"openrouter",)"
     R"("input_modalities":["text"],"output_modalities":["image"],"pricing":{"image":"0.04"}},{"id":"vendor/retiring",)"
@@ -72,20 +73,191 @@ constexpr std::string_view openrouter_generated_text =
     R"("families":["anthropic.messages","openai.chat","openai.responses"],"origins":["https://openrouter.ai"],)"
     R"("alias_of":"vendor/text-model","source":"openrouter","output_modalities":["text"]}]})";
 constexpr std::string_view openrouter_generated_sha256 = "c84eb4466ae281d479ca1735b88fc9c0c31c2f9fc48e55a1109f58488164c406";
+// The `openrouter` listing itself: the override of vendor/text-model names no condition and a prompt price above the
+// base one, so it may apply to any request and the entry leaves `prompt` out. Nothing else changes.
+constexpr std::string_view openrouter_override_text =
+    R"({"version":1,"models":[{"id":"vendor/image-model","origins":["https://openrouter.ai"],"source":"openrouter",)"
+    R"("input_modalities":["text"],"output_modalities":["image"],"pricing":{"image":"0.04"}},{"id":"vendor/retiring",)"
+    R"("families":["anthropic.messages","openai.chat","openai.responses"],"origins":["https://openrouter.ai"],)"
+    R"("retires_at":"2026-11-01","source":"openrouter","output_modalities":["text"]},{"id":"vendor/text-model",)"
+    R"("families":["anthropic.messages","openai.chat","openai.responses"],"origins":["https://openrouter.ai"],)"
+    R"("served_as":["vendor/text-model-20261001"],"name":"Vendor: Text Model","source":"openrouter","context_window":128000,)"
+    R"("output_limit":8192,"input_modalities":["image","text"],"output_modalities":["text"],"parameters":["temperature","tools"],)"
+    R"("pricing":{"completion":"0.0000004"}},{"id":"~vendor/text-latest",)"
+    R"("families":["anthropic.messages","openai.chat","openai.responses"],"origins":["https://openrouter.ai"],)"
+    R"("alias_of":"vendor/text-model","source":"openrouter","output_modalities":["text"]}]})";
+constexpr std::string_view openrouter_override_sha256 = "03a2a2917ab168def107afc530c38a87374d2fe9b958f41f2c7c2bb750a27801";
 void no_ceilings_change_nothing(transport::Transport& transport, Peer& peer) {
+  const auto pinned = [&](std::string_view scenario, std::string_view expected_text, std::string_view expected_sha256) {
+    transport::RefreshRequest request;
+    request.sources = {source(Listing::OpenRouter, base(peer, scenario))};
+    const auto result = refreshed(transport, request);
+    require(result.sources.size() == 1 && result.sources[0].ok && result.sources[0].pages == 1, "the pinned listing refreshed");
+    const auto text = result.generated->to_json();
+    require(text == expected_text, "a refresh without ceilings generates the pinned text, not " + text);
+    require(result.generated->digest_hex() == expected_sha256,
+            "a refresh without ceilings generates the pinned digest, not " + result.generated->digest_hex());
+    const auto requests = seen(peer, scenario);
+    require(requests.total == 1 && requests.endpoints.empty(), "a refresh without ceilings sends the listing request only");
+    require(result.sources[0].ceiling_requests == 0 && result.sources[0].ceilings == 0 && result.sources[0].ceiling_gaps.empty(),
+            "a refresh without ceilings reports none");
+  };
+  pinned("openrouter-bare", openrouter_generated_text, openrouter_generated_sha256);
+  pinned("openrouter-pinned", openrouter_override_text, openrouter_override_sha256);
+  passed("no ceilings asked: the listing request only, and the pinned text and digest, with and without the override");
+}
+
+// An entry's prices as "unit=price ...", in the entry's order.
+std::string pricing_text(const descriptor::CatalogueEntry* entry) {
+  if (!entry) return "(no entry)";
+  std::string out;
+  for (const auto& [unit, price] : entry->pricing) out += (out.empty() ? "" : " ") + unit + "=" + price;
+  return out;
+}
+Usage usage_of(std::uint64_t input, std::uint64_t output) {
+  Usage usage;
+  usage.input_total = Count{input, Evidence::Reported};
+  usage.output_total = Count{output, Evidence::Reported};
+  return usage;
+}
+
+// The long-context overrides of OpenRouter's models listing become input bands. An override the price grammar cannot
+// hold changes nothing when each price it lists is at most the entry's price for that key under every condition, and
+// otherwise leaves the unit out (scenario `overrides`, one case per model).
+void overrides_become_bands(transport::Transport& transport, Peer& peer) {
   transport::RefreshRequest request;
-  request.sources = {source(Listing::OpenRouter, base(peer, "openrouter-pinned"))};
+  request.sources = {source(Listing::OpenRouter, base(peer, "overrides"))};
   const auto result = refreshed(transport, request);
-  require(result.sources.size() == 1 && result.sources[0].ok && result.sources[0].pages == 1, "the pinned listing refreshed");
-  const auto text = result.generated->to_json();
-  require(text == openrouter_generated_text, "a refresh without ceilings generates the pinned text, not " + text);
-  require(result.generated->digest_hex() == openrouter_generated_sha256,
-          "a refresh without ceilings generates the pinned digest, not " + result.generated->digest_hex());
-  const auto requests = seen(peer, "openrouter-pinned");
-  require(requests.total == 1 && requests.endpoints.empty(), "a refresh without ceilings sends the listing request only");
-  require(result.sources[0].ceiling_requests == 0 && result.sources[0].ceilings == 0 && result.sources[0].ceiling_gaps.empty(),
-          "a refresh without ceilings reports none");
-  passed("no ceilings asked: the listing request only, and the pinned text and digest");
+  const auto& report = result.sources[0];
+  require(report.ok && report.models == 26 && report.skipped_prices == 0, "the overrides listing refreshed");
+  const auto& c = *result.generated;
+  // 62 bands fill an entry beside its two base prices.
+  std::vector<std::pair<std::string, std::string>> full{{"completion", "0.000002"}, {"prompt", "0.000001"}};
+  for (int i = 1; i <= 62; ++i) full.emplace_back("prompt+" + std::to_string(i * 1000), "0.000002");
+  std::sort(full.begin(), full.end());
+  std::string full_bands;
+  for (const auto& [unit, price] : full) full_bands += (full_bands.empty() ? "" : " ") + unit + "=" + price;
+  const std::vector<std::pair<std::string, std::string>> expected{
+      // The example: each price of the override is the band of its key at the threshold.
+      {"vendor/long", "completion=0.00004 completion+272000=0.00006 input_cache_read+272000=0.0000008 input_cache_write+272000=0.00002 "
+                      "prompt=0.000008 prompt+272000=0.000016"},
+      {"vendor/two-bands", "completion=0.000002 completion+100000=0.000003 completion+200000=0.000004 prompt=0.000001 "
+                           "prompt+100000=0.000002 prompt+200000=0.000003"},
+      // A key the override leaves out has no band: it keeps the base price.
+      {"vendor/some-keys", "completion=0.000002 input_cache_read=0.0000001 prompt=0.000001 prompt+1000=0.000002"},
+      {"vendor/hour-cache", "completion=0.000015 input_cache_write=0.00000375 input_cache_write_1h=0.000006 "
+                            "input_cache_write_1h+200000=0.000012 prompt=0.000003 prompt+200000=0.000006"},
+      // A band below the base price is a band; but where a later override leaves its key out, which may be read as
+      // billing the base price again, it is not, and the key keeps its base price.
+      {"vendor/cheap-band", "completion=0.000002 prompt=0.000001 prompt+1000=0.0000005"},
+      {"vendor/cheap-carried", "completion=0.000002 completion+2000=0.000003 prompt=0.000001"},
+      // A time window: at most the base prices changes nothing; above one of them leaves that unit out.
+      {"vendor/window-cheap", "completion=0.000008 prompt=0.000002"},
+      {"vendor/window-dear", "completion=0.000008"},
+      // A cache read the entry leaves out would be priced at the prompt price, and a request fee at nothing, so those go too.
+      {"vendor/window-cache", "completion=0.000008"},
+      {"vendor/window-fee", "image=0.01"},
+      // Other conditions, alone or with a threshold, and none at all.
+      {"vendor/unknown-condition", "completion=0.000002"},
+      {"vendor/combined", "prompt=0.000001"},
+      {"vendor/no-condition", "completion=0.000002"},
+      // Thresholds of one key out of listing order; the other key's single band is held.
+      {"vendor/out-of-order", "completion=0.000002 completion+100000=0.000003"},
+      // Thresholds that are not a count of input tokens above zero, a price that is not decimal text (the cheaper one
+      // beside it changes nothing), a price written as a number, and a discount.
+      {"vendor/fraction-threshold", "completion=0.000002"},
+      {"vendor/zero-threshold", "completion=0.000002"},
+      {"vendor/text-threshold", "completion=0.000002"},
+      {"vendor/bad-price", "completion=0.000002"},
+      {"vendor/number-price", "completion=0.000002"},
+      {"vendor/discount", "completion=0.000002"},
+      // A discount that may raise every price, and an override that is not an object, leave every unit out.
+      {"vendor/raising-discount", ""},
+      {"vendor/malformed", ""},
+      {"vendor/full-bands", full_bands},
+      {"vendor/too-many-bands", "completion=0.000002"},
+      {"vendor/too-many", "completion=0.000002"},
+      {"vendor/null-overrides", "completion=0.000002 prompt=0.000001"}};
+  std::string wrong;
+  for (const auto& [id, text] : expected)
+    if (pricing_text(c.entry(id)) != text) wrong += "\n  " + id + ": " + pricing_text(c.entry(id)) + "\n    expected: " + text;
+  if (!wrong.empty()) throw std::runtime_error("the generated prices are not the expected ones:" + wrong);
+  // Every override price not held as a band is counted once, and every member left out is named, by model.
+  require(report.skipped_override_prices == 154, "override prices not held as bands: " + std::to_string(report.skipped_override_prices));
+  const std::vector<std::string> left_out{
+      "vendor/bad-price|prompt", "vendor/combined|completion", "vendor/discount|prompt", "vendor/fraction-threshold|prompt",
+      "vendor/malformed|", "vendor/no-condition|prompt", "vendor/number-price|prompt", "vendor/out-of-order|prompt",
+      "vendor/raising-discount|", "vendor/text-threshold|prompt", "vendor/too-many|prompt", "vendor/too-many-bands|prompt",
+      "vendor/unknown-condition|prompt", "vendor/window-cache|input_cache_read", "vendor/window-cache|prompt",
+      "vendor/window-dear|prompt", "vendor/window-fee|completion", "vendor/window-fee|prompt", "vendor/window-fee|request",
+      "vendor/zero-threshold|prompt"};
+  std::vector<std::string> named;
+  for (const auto& unit : report.withheld) named.push_back(unit.model + "|" + unit.unit);
+  if (named != left_out) {
+    std::string all;
+    for (const auto& line : named) all += "\n  " + line;
+    throw std::runtime_error("the members left out are not the expected ones:" + all);
+  }
+
+  // Money from the generated entries. vendor/long: at the threshold the base prices, one token above it the band's.
+  const auto& long_context = *c.entry("vendor/long");
+  const auto at = pricing::price_of(long_context, {}, 272'000), above = pricing::price_of(long_context, {}, 272'001);
+  require(at.input == 8'000'000'000u && at.output == 40'000'000'000u && !at.cache_read && !at.cache_write, "at the threshold: the base prices");
+  require(above.input == 16'000'000'000u && above.output == 60'000'000'000u && above.cache_read == 800'000'000u &&
+          above.cache_write == 20'000'000'000u, "one token above the threshold: the band's prices");
+  const ServedModel long_model{"vendor/long", "vendor/long", ServedRelation::Exact};
+  const auto cost = [&](const ServedModel& model, const Usage& usage) {
+    const auto e = pricing::estimate(c, "openai.chat", "https://openrouter.ai", model, usage);
+    return e.total ? e.total->nano_usd : 0;
+  };
+  // 100'000, 272'000 and 272'001 input tokens and 1'000 output tokens, in nano-USD: 100'000 x 8'000 + 1'000 x 40'000,
+  // 272'000 x 8'000 + 1'000 x 40'000, and 272'001 x 16'000 + 1'000 x 60'000.
+  require(cost(long_model, usage_of(100'000, 1'000)) == 840'000'000u, "below the threshold: the base prices");
+  require(cost(long_model, usage_of(272'000, 1'000)) == 2'216'000'000u, "exactly at the threshold: the base prices");
+  require(cost(long_model, usage_of(272'001, 1'000)) == 4'412'016'000u, "one token above the threshold: the band's prices");
+  // The bound: up to 272'000 input tokens the base rates; one more and the band's dearest input rate (its cache write,
+  // 2e-5 USD) and output rate.
+  const auto bound_at = pricing::upper_bound(long_context, {}, {272'000, 1'000, false, {}});
+  const auto bound_above = pricing::upper_bound(long_context, {}, {272'001, 1'000, false, {}});
+  require(bound_at.total && bound_at.total->nano_usd == 2'216'000'000u, "the bound at the threshold");
+  require(bound_above.total && bound_above.total->nano_usd == 5'500'020'000u, "the bound one token above the threshold");
+  // The highest band the call is above wins.
+  const auto& two = *c.entry("vendor/two-bands");
+  require(pricing::price_of(two, {}, 150'000).input == 2'000'000'000u && pricing::price_of(two, {}, 200'000).input == 2'000'000'000u &&
+          pricing::price_of(two, {}, 200'001).input == 3'000'000'000u && pricing::price_of(two, {}, 200'001).output == 4'000'000'000u,
+          "the highest band wins");
+  // A key the override leaves out keeps its base price above the threshold.
+  const auto some = pricing::price_of(*c.entry("vendor/some-keys"), {}, 5'000);
+  require(some.input == 2'000'000'000u && some.output == 2'000'000'000u && some.cache_read == 100'000'000u, "a key the override leaves out stays at the base");
+  // A one-hour cache write is priced at OpenRouter's input_cache_write_1h: 700 uncached at 3e-6, 100 five-minute writes
+  // at 3.75e-6, 200 one-hour writes at 6e-6 and 10 output tokens at 1.5e-5 USD.
+  const auto hour = pricing::price_of(*c.entry("vendor/hour-cache"));
+  require(hour.cache_write == 3'750'000'000u && hour.cache_write_1h == 6'000'000'000u &&
+          pricing::price_of(*c.entry("vendor/hour-cache"), {}, 200'001).cache_write_1h == 12'000'000'000u, "the one-hour cache write price is read");
+  auto split = usage_of(1'000, 10);
+  split.cache_write = Count{300, Evidence::Reported};
+  split.extra["cache_creation.ephemeral_5m_input_tokens"] = Count{100, Evidence::Reported};
+  split.extra["cache_creation.ephemeral_1h_input_tokens"] = Count{200, Evidence::Reported};
+  const auto hour_cost = pricing::estimate(c, "anthropic.messages", "https://openrouter.ai",
+                                           ServedModel{"vendor/hour-cache", "vendor/hour-cache", ServedRelation::Exact}, split);
+  require(hour_cost.total && hour_cost.total->nano_usd == 3'825'000u && hour_cost.assumptions.empty(), "one-hour cache writes at the one-hour price");
+  // A unit left out is unpriced: the bound and the estimate refuse a call that bills it.
+  const auto& dear = *c.entry("vendor/window-dear");
+  const auto dear_bound = pricing::upper_bound(dear, {}, {1'000, 100, false, {}});
+  require(!dear_bound.total && dear_bound.unpriced == std::vector<std::string>{"input"}, "the bound reports the unit left out as unpriced");
+  const auto dear_cost = pricing::estimate(c, "openai.chat", "https://openrouter.ai",
+                                           ServedModel{"vendor/window-dear", "vendor/window-dear", ServedRelation::Exact}, usage_of(1'000, 100));
+  require(!dear_cost.total && dear_cost.unpriced == std::vector<std::string>{"input"}, "the estimate reports the unit left out as not priced");
+  require(pricing::price_of(dear).output == 8'000'000'000u, "the other units are kept");
+  auto reads = usage_of(1'000, 0);
+  reads.cache_read = Count{1'000, Evidence::Reported};
+  const auto read_cost = pricing::estimate(c, "openai.chat", "https://openrouter.ai",
+                                           ServedModel{"vendor/window-cache", "vendor/window-cache", ServedRelation::Exact}, reads);
+  require(!read_cost.total && read_cost.unpriced == std::vector<std::string>{"cache_read"}, "cache reads are not priced at the prompt price");
+  require(pricing::upper_bound(*c.entry("vendor/window-fee"), {}, {1, 1, false, {}}).unpriced == (std::vector<std::string>{"input", "output"}),
+          "a request fee left out leaves the call unpriced");
+  require(pricing::price_of(*c.entry("vendor/window-cheap")).input == 2'000'000'000u, "a cheaper time window changes nothing");
+  passed("price overrides: long-context bands, time windows, malformed and unbounded overrides, and their prices");
 }
 
 void all_four_listings(transport::Transport& transport, Peer& peer, descriptor::CatalogueSnapshot& generated) {
@@ -105,6 +277,9 @@ void all_four_listings(transport::Transport& transport, Peer& peer, descriptor::
   }
   require(result.sources[0].skipped == 1 && result.sources[1].skipped == 1, "ids that are not model names are skipped");
   require(result.sources[0].skipped_prices == 1 && result.sources[1].skipped_prices == 0, "a price written 1e-2 is counted, a structured override is not");
+  require(result.sources[0].skipped_override_prices == 1 && result.sources[0].withheld.size() == 1 &&
+          result.sources[0].withheld[0] == descriptor::WithheldUnit{"vendor/text-model", "prompt"},
+          "the override's price is counted apart, and the prompt price it may raise is named as left out");
   require(result.sources[0].origin == "https://openrouter.ai" && result.sources[2].origin == "https://api.anthropic.com",
           "entries are scoped to the provider origin, not the listing URL");
 
@@ -117,8 +292,8 @@ void all_four_listings(transport::Transport& transport, Peer& peer, descriptor::
           "OpenRouter limits and canonical slug");
   require(has(text->families, "openai.chat") && has(text->families, "anthropic.messages") && has(text->input_modalities, "image"),
           "OpenRouter text model families and modalities");
-  require(text->pricing == (std::vector<std::pair<std::string, std::string>>{{"completion", "0.0000004"}, {"prompt", "0.0000001"}}),
-          "string prices kept, structured overrides left out");
+  require(text->pricing == (std::vector<std::pair<std::string, std::string>>{{"completion", "0.0000004"}}),
+          "string prices kept, and the prompt price an override without a condition may raise left out");
   require(text->parameters == std::vector<std::string>{"temperature", "tools"}, "a parameter the catalogue cannot hold is left out");
   require(c.entry("vendor/image-model")->families.empty(), "an image-only model lists no chat family");
   require(c.entry("~vendor/text-latest")->alias_of == std::optional<std::string>("vendor/text-model"), "alias target");
@@ -809,6 +984,38 @@ void ceilings_bound_every_endpoint(transport::Transport& transport, Peer& peer) 
   std::cout << "case passed: route ceilings bound every endpoint (" << models << " models, " << comparisons << " estimate comparisons)" << std::endl;
 }
 
+// The listed prices a ceiling is never below include the entry's input bands. A side whose listed price the entry
+// leaves out for an override the catalogue cannot hold gets no ceiling, and conditional prices that cannot be read
+// at all give none.
+void ceilings_count_listed_bands(transport::Transport& transport, Peer& peer) {
+  peer.command(R"({"set":"ceilings-bands","models":{"vendor/band-floor":[{"prompt":"0.000001","completion":"0.000002"}],)"
+               R"("vendor/withheld-floor":[{"prompt":"0.000001","completion":"0.000002"}],"vendor/unread-floor":[{"prompt":"0.000001","completion":"0.000002"}]},)"
+               R"("listed":{"vendor/band-floor":{"prompt":"0.0000001","completion":"0.0000001",)"
+               R"("overrides":[{"min_prompt_tokens":100000,"prompt":"0.000005","completion":"0.000007"}]},)"
+               R"("vendor/withheld-floor":{"prompt":"0.0000001","completion":"0.0000001","overrides":[{"utc_start":0,"utc_end":600,"prompt":"0.000009"}]},)"
+               R"("vendor/unread-floor":{"prompt":"0.0000001","completion":"0.0000001","overrides":["long context"]}}})");
+  transport::RefreshRequest request;
+  request.sources = {ceiling_source(peer, "ceilings-bands", {"vendor/band-floor", "vendor/withheld-floor", "vendor/unread-floor"})};
+  const auto result = refreshed(transport, request);
+  const auto& report = result.sources[0];
+  require(report.ok, "the listing refreshed");
+  const auto& c = *result.generated;
+  require(ceiling_of(c.entry("vendor/band-floor")) == "0.000005 0.000007 -",
+          "a listed band above every endpoint's price is the ceiling of its side, not " + ceiling_of(c.entry("vendor/band-floor")));
+  require(ceiling_of(c.entry("vendor/withheld-floor")) == "- 0.000002 -",
+          "a side whose listed price is left out gets no ceiling, not " + ceiling_of(c.entry("vendor/withheld-floor")));
+  require(ceiling_of(c.entry("vendor/unread-floor")) == "- - -", "conditional prices that cannot be read give no ceiling");
+  const std::vector<std::string> gaps{"vendor/unread-floor|||conditional prices in the listing cannot be read",
+                                      "vendor/withheld-floor|ceiling_input|prompt|price in the listing left out for a conditional price"};
+  if (gap_lines(report) != gaps) {
+    std::string all;
+    for (const auto& line : gap_lines(report)) all += "\n  " + line;
+    throw std::runtime_error("the ceiling gaps are not the expected ones:" + all);
+  }
+  fixed_text_only(report);
+  passed("route ceilings: listed bands count, and listed prices left out leave out their side");
+}
+
 #ifndef _WIN32
 // sp_catalogue_refresh --ceiling reads the route ceilings of the models it names and prints what it could not.
 void the_tool_reads_route_ceilings(Peer& peer, const std::string& tool) {
@@ -853,6 +1060,7 @@ int main(int argc, char** argv) {
     transport::Transport transport;
     descriptor::CatalogueSnapshot generated;
     no_ceilings_change_nothing(transport, peer);
+    overrides_become_bands(transport, peer);
     all_four_listings(transport, peer, generated);
     failures_keep_previous_entries(transport, peer, generated);
     empty_and_partial_listings_fail_their_source(transport, peer, generated);
@@ -870,6 +1078,7 @@ int main(int argc, char** argv) {
     failed_endpoints_keep_previous_ceilings(transport, peer, ceilings);
     ceiling_requests_are_checked(transport, peer);
     ceilings_bound_every_endpoint(transport, peer);
+    ceilings_count_listed_bands(transport, peer);
 #ifndef _WIN32
     if (argc == 4) the_tool_reads_route_ceilings(peer, argv[3]);
 #endif

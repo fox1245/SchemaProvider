@@ -7,9 +7,14 @@
 #include <charconv>
 #include <cmath>
 #include <fstream>
+#include <limits>
 #include <map>
+#include <set>
 #include <stdexcept>
+#include <string>
 #include <tuple>
+#include <utility>
+#include <vector>
 
 namespace sp::descriptor {
 namespace {
@@ -23,6 +28,8 @@ constexpr std::size_t max_list = 256;
 constexpr std::size_t max_name_bytes = 256;
 constexpr std::size_t max_token_bytes = 64;
 constexpr std::size_t max_control_values = 16;
+// The prices one entry holds.
+constexpr std::size_t max_prices = 64;
 
 constexpr std::string_view families_known[]{"openai.chat", "anthropic.messages", "openai.responses",
                                             "google.generate", "google.interactions"};
@@ -214,7 +221,7 @@ CatalogueEntry parse_entry(Value value, const std::string& pointer) {
     entry.temperature = t.as_bool();
   }
   if (const auto pricing = value.get("pricing"); present(pricing)) {
-    if (!pricing.is_object() || pricing.size() > 64) fail(at(pointer, "pricing"), "bounded object");
+    if (!pricing.is_object() || pricing.size() > max_prices) fail(at(pointer, "pricing"), "bounded object");
     for (auto member : pricing.members()) {
       const auto where = at(at(pointer, "pricing"), member.key);
       if (!token(member.key)) fail(where, "price unit token");
@@ -598,6 +605,60 @@ CatalogueDiff diff_catalogues(const ModelCatalogue& before, const ModelCatalogue
 bool valid_model_name(std::string_view id) noexcept { return model_name(id); }
 bool valid_price_text(std::string_view price) noexcept { return decimal(price); }
 
+std::optional<std::uint64_t> price_per_million(std::string_view text) noexcept {
+  // nano-USD per million units is USD x 1e15.
+  constexpr std::size_t rate_digits = 15;
+  constexpr auto most = std::numeric_limits<std::uint64_t>::max();
+  if (text.empty() || text.front() == '-') return std::nullopt;
+  const auto dot = text.find('.');
+  const auto whole = text.substr(0, dot);
+  const auto fraction = dot == std::string_view::npos ? std::string_view{} : text.substr(dot + 1);
+  std::uint64_t value = 0;
+  // value x 10 + the digit, unless the character is not a digit or the amount leaves 64 bits. The amount only grows,
+  // so one that leaves 64 bits never returns.
+  const auto shift = [&value](char c) {
+    if (c < '0' || c > '9') return false;
+    const auto digit = static_cast<std::uint64_t>(c - '0');
+    if (value > (most - digit) / 10) return false;
+    value = value * 10 + digit;
+    return true;
+  };
+  for (const char c : whole)
+    if (!shift(c)) return std::nullopt;
+  for (std::size_t i = 0; i < rate_digits; ++i)
+    if (!shift(i < fraction.size() ? fraction[i] : '0')) return std::nullopt;
+  bool remainder = false;
+  for (std::size_t i = rate_digits; i < fraction.size(); ++i) {
+    if (fraction[i] < '0' || fraction[i] > '9') return std::nullopt;
+    remainder = remainder || fraction[i] != '0';
+  }
+  if (remainder) {
+    if (value == most) return std::nullopt;
+    ++value;
+  }
+  return value;
+}
+
+std::string_view plain_price_unit(std::string_view name) noexcept {
+  constexpr std::pair<std::string_view, std::string_view> names[]{
+      {"prompt", "input"},          {"completion", "output"},
+      {"input_cache_read", "cache_read"}, {"input_cache_write", "cache_write"},
+      {"input_cache_write_1h", "cache_write_1h"}, {"internal_reasoning", "reasoning"},
+      {"audio", "input_audio"},     {"audio_output", "output_audio"}};
+  for (const auto& [listed, plain] : names)
+    if (name == listed) return plain;
+  return name;
+}
+
+std::string_view unbanded_unit(std::string_view unit) noexcept {
+  const auto plus = unit.rfind('+');
+  if (plus == std::string_view::npos) return unit;
+  const auto digits = unit.substr(plus + 1);
+  if (digits.empty() || digits.size() > max_band_digits || !std::all_of(digits.begin(), digits.end(), [](char c) { return c >= '0' && c <= '9'; }))
+    return unit;
+  return unit.substr(0, plus);
+}
+
 std::string_view listing_name(Listing listing) noexcept {
   switch (listing) {
     case Listing::OpenRouter: return "openrouter";
@@ -636,6 +697,221 @@ bool page_token(std::string_view value) noexcept {
 bool supported(Value capabilities, std::string_view name) {
   const auto capability = capabilities.get(name);
   return capability.is_object() && capability.get("supported").is_bool() && capability.get("supported").as_bool();
+}
+
+// How pricing (core/pricing.h) bills the tokens of a unit it reads, by plain unit name: at the input or the output price
+// of the call; as a part of the input or of the output, at the input or output price where the part has none; as a
+// cache write, whose 5-minute and 1-hour prices also stand in for each other; or as the request fee, which nothing
+// stands in for. A unit left out takes with it the units its tokens would otherwise be billed at, so that a bound or an
+// estimate of a call that bills it finds no price rather than a lower one.
+enum class Bills : std::uint8_t { Input, InputPart, CacheWrite, Output, OutputPart, Request };
+constexpr std::pair<std::string_view, Bills> billed_units[]{
+    {"input", Bills::Input},             {"cache_read", Bills::InputPart},      {"input_audio", Bills::InputPart},
+    {"cache_write", Bills::CacheWrite},  {"cache_write_1h", Bills::CacheWrite}, {"output", Bills::Output},
+    {"reasoning", Bills::OutputPart},    {"output_image", Bills::OutputPart},   {"output_audio", Bills::OutputPart},
+    {"request", Bills::Request}};
+// The plain names of the units left out with `unit`.
+std::vector<std::string_view> left_out_with(std::string_view unit) {
+  const auto plain = plain_price_unit(unit);
+  const auto found = std::find_if(std::begin(billed_units), std::end(billed_units), [&](const auto& item) { return item.first == plain; });
+  if (found == std::end(billed_units)) return {plain};
+  switch (found->second) {
+    case Bills::Input: return {"input"};
+    case Bills::InputPart: return {plain, "input"};
+    case Bills::CacheWrite: return {"cache_write", "cache_write_1h", "input"};
+    case Bills::Output: return {"output"};
+    case Bills::OutputPart: return {plain, "output"};
+    case Bills::Request: return {"request", "input", "output"};
+  }
+  return {plain};
+}
+// Leaves the listed price member `unit` out of the entry, its base price and its bands, together with the units its
+// tokens would be billed at instead, and records each member left out. An empty `unit` leaves out every price.
+void leave_out(CatalogueEntry& entry, std::string_view unit, std::vector<WithheldUnit>& withheld) {
+  withheld.push_back({entry.id, std::string(unit)});
+  if (unit.empty()) {
+    entry.pricing.clear();
+    return;
+  }
+  const auto names = left_out_with(unit);
+  std::vector<std::pair<std::string, std::string>> kept;
+  for (auto& price : entry.pricing) {
+    const auto listed = unbanded_unit(price.first);
+    if (std::find(names.begin(), names.end(), plain_price_unit(listed)) == names.end()) kept.push_back(std::move(price));
+    else withheld.push_back({entry.id, std::string(listed)});
+  }
+  entry.pricing = std::move(kept);
+}
+// The unit of a key's band: it prices requests with strictly more than `above` input tokens, as `min_prompt_tokens`
+// does.
+std::string unit_with_band(std::string_view key, std::uint64_t above) { return std::string(key) + '+' + std::to_string(above); }
+
+// A price an override lists: its member name and text, and its amount when an entry can hold it as a price.
+struct ConditionalPrice {
+  std::string key, text;
+  std::optional<std::uint64_t> rate;
+};
+// One entry of OpenRouter's `pricing.overrides`, as the price grammar reads it.
+struct PriceOverride {
+  // `min_prompt_tokens`, when it is a count a band can hold.
+  std::optional<std::uint64_t> above;
+  // A condition other than `min_prompt_tokens`, a discount, or a member that is not price text.
+  bool other = false;
+  std::vector<ConditionalPrice> prices;  // the members that are text
+  std::vector<std::string> unread;       // the other members that are not text
+  std::vector<std::string> members;      // every member with a value, sorted
+  // The override prices requests above `above` input tokens and nothing else, at prices an entry can hold.
+  bool band() const {
+    return above && !other && std::all_of(prices.begin(), prices.end(), [](const ConditionalPrice& price) { return price.rate.has_value(); });
+  }
+  bool lists(const std::string& key) const { return std::binary_search(members.begin(), members.end(), key); }
+};
+PriceOverride read_override(Value element, bool& every_unit, ListingPage& page) {
+  PriceOverride out;
+  for (auto member : element.members()) {
+    if (!present(member.value)) continue;
+    out.members.emplace_back(member.key);
+    if (member.key == "min_prompt_tokens") {
+      // Strictly more input tokens than this: the band `+<tokens>`, a count above zero of at most max_band_digits
+      // digits. A band of zero is the unit without a band.
+      const auto& value = member.value;
+      if (value.is_uint() && value.as_uint() > 0 && std::to_string(value.as_uint()).size() <= max_band_digits) out.above = value.as_uint();
+      else out.other = true;
+    } else if (member.key == "discount") {
+      // The listing multiplies the override's prices by (1 - discount). A discount from 0 to 1 keeps each at most the
+      // price listed; any other may raise every price, the ones the override inherits included.
+      out.other = true;
+      if (!(member.value.is_number() && member.value.as_double() >= 0 && member.value.as_double() <= 1)) {
+        every_unit = true;
+        ++page.skipped_override_prices;
+      }
+    } else if (member.value.is_string()) {
+      ConditionalPrice price{std::string(member.key), std::string(member.value.as_string()), std::nullopt};
+      // A unit an entry can hold, without a band of its own, at a price it can read.
+      if (token(price.key) && price.key.find('+') == std::string::npos && decimal(price.text)) price.rate = price_per_million(price.text);
+      out.prices.push_back(std::move(price));
+    } else {
+      out.other = true;
+      out.unread.emplace_back(member.key);
+    }
+  }
+  std::sort(out.members.begin(), out.members.end());
+  return out;
+}
+// The input bands of `pricing.overrides`, `<unit>+<tokens>` for each price of an override with `min_prompt_tokens`
+// alone, and the units an override the grammar cannot hold leaves out (USAGE.md, refreshing the catalogue).
+void read_overrides(Value overrides, CatalogueEntry& e, ListingPage& page) {
+  bool every_unit = false;
+  std::vector<PriceOverride> listed;
+  if (!overrides.is_array()) {
+    every_unit = true;
+    ++page.skipped_override_prices;
+  } else {
+    for (auto element : overrides.elements()) {
+      if (!element.is_object()) {
+        every_unit = true;
+        ++page.skipped_override_prices;
+        continue;
+      }
+      listed.push_back(read_override(element, every_unit, page));
+    }
+  }
+  const auto has_unit = [&e](const std::string& unit) {
+    return std::any_of(e.pricing.begin(), e.pricing.end(), [&](const auto& price) { return price.first == unit; });
+  };
+  const auto base_rate = [&e](const std::string& key) -> std::optional<std::uint64_t> {
+    for (const auto& [unit, text] : e.pricing)
+      if (unit == key) return price_per_million(text);
+    return std::nullopt;
+  };
+  // More overrides than an entry holds prices are not bands.
+  const bool may_band = listed.size() <= max_prices;
+  const auto is_band = [&](std::size_t i) { return may_band && listed[i].band(); };
+  struct Candidate {
+    std::size_t index;
+    std::uint64_t above;
+    const ConditionalPrice* price;
+  };
+  std::map<std::string, std::vector<Candidate>> by_key;  // in listing order
+  for (std::size_t i = 0; i < listed.size(); ++i)
+    if (is_band(i))
+      for (const auto& price : listed[i].prices) by_key[price.key].push_back({i, *listed[i].above, &price});
+  std::vector<std::pair<std::string, std::string>> bands;
+  std::map<std::string, std::uint64_t> lowest_band;  // by key, the lowest price of the bands held
+  // The entry's lowest price for a key under any condition: its base price and each band it holds. None where the
+  // base price is missing or cannot be read.
+  const auto lowest = [&](const std::string& key) -> std::optional<std::uint64_t> {
+    auto rate = base_rate(key);
+    if (!rate) return std::nullopt;
+    if (const auto found = lowest_band.find(key); found != lowest_band.end() && found->second < *rate) rate = found->second;
+    return rate;
+  };
+  // A conditional price the entry does not hold as a band changes nothing when it is at most that price, and otherwise
+  // leaves its unit out: the entry never claims a price that may be too low, and never a guessed one. Each is decided
+  // once the bands of its key are.
+  std::set<std::string> dearer;
+  const auto not_held = [&](const std::string& key, const std::optional<std::uint64_t>& rate) {
+    ++page.skipped_override_prices;
+    if (const auto floor = lowest(key); !rate || !floor || *rate > *floor) dearer.insert(key);
+  };
+  auto room = max_prices - e.pricing.size();
+  for (const auto& item : by_key) {
+    const auto& key = item.first;
+    const auto& candidates = item.second;
+    const auto base = base_rate(key);
+    bool hold = candidates.size() <= room;
+    for (std::size_t n = 0; hold && n < candidates.size(); ++n) {
+      const auto& candidate = candidates[n];
+      const auto unit = unit_with_band(key, candidate.above);
+      // "Later entries win per key" and "the highest band wins" agree only when the thresholds increase in listing order.
+      if (n && candidate.above <= candidates[n - 1].above) hold = false;
+      // A unit name an entry can hold, and not one it already has.
+      else if (!token(unit) || has_unit(unit)) hold = false;
+      // A later override that leaves the key out may be read as billing it at the base price again, so a band below
+      // the base price is held only where none does.
+      else if ((!base || *candidate.price->rate < *base) &&
+               std::any_of(listed.begin() + static_cast<std::ptrdiff_t>(candidate.index) + 1, listed.end(),
+                           [&](const PriceOverride& later) { return !later.lists(key); }))
+        hold = false;
+    }
+    if (!hold) {
+      // The key has no band, so its lowest price is its base price.
+      for (const auto& candidate : candidates) not_held(key, candidate.price->rate);
+      continue;
+    }
+    room -= candidates.size();
+    for (const auto& candidate : candidates) {
+      bands.emplace_back(unit_with_band(key, candidate.above), candidate.price->text);
+      const auto [found, inserted] = lowest_band.try_emplace(key, *candidate.price->rate);
+      if (!inserted && *candidate.price->rate < found->second) found->second = *candidate.price->rate;
+    }
+  }
+  for (std::size_t i = 0; i < listed.size(); ++i) {
+    if (is_band(i)) continue;
+    for (const auto& price : listed[i].prices) not_held(price.key, price.rate);
+    // A member that is not text is a price only where the entry has that unit, and then one that cannot be read.
+    for (const auto& key : listed[i].unread)
+      if (has_unit(key) || lowest_band.count(key)) not_held(key, std::nullopt);
+  }
+  e.pricing.insert(e.pricing.end(), bands.begin(), bands.end());
+  if (every_unit) {
+    leave_out(e, {}, page.withheld);
+    return;
+  }
+  for (const auto& key : dearer) leave_out(e, key, page.withheld);
+}
+// OpenRouter's `pricing` of one model: its text prices, then the bands and left-out units of its `overrides`.
+void read_pricing(Value pricing, CatalogueEntry& e, ListingPage& page) {
+  for (auto member : pricing.members()) {
+    if (member.key == "overrides") continue;
+    // A member that is neither text nor a number is no price.
+    if (!member.value.is_string() && !member.value.is_number()) continue;
+    if (e.pricing.size() < max_prices && token(member.key) && member.value.is_string() && decimal(member.value.as_string()))
+      e.pricing.emplace_back(std::string(member.key), std::string(member.value.as_string()));
+    else ++page.skipped_prices;
+  }
+  if (const auto overrides = pricing.get("overrides"); present(overrides)) read_overrides(overrides, e, page);
+  std::sort(e.pricing.begin(), e.pricing.end());
 }
 } // namespace
 
@@ -697,15 +973,7 @@ ListingResult parse_listing(Listing listing, std::string_view body, std::string_
           e->output_modalities = listed_tokens(model.get("architecture").get("output_modalities"));
           e->parameters = listed_tokens(model.get("supported_parameters"));
           e->retires_at = listed_text(model.get("expiration_date"), date);
-          if (const auto pricing = model.get("pricing"); pricing.is_object())
-            for (auto member : pricing.members()) {
-              // A member that is neither text nor a number (a structured override) is no price.
-              if (!member.value.is_string() && !member.value.is_number()) continue;
-              if (e->pricing.size() < 64 && token(member.key) && member.value.is_string() && decimal(member.value.as_string()))
-                e->pricing.emplace_back(std::string(member.key), std::string(member.value.as_string()));
-              else ++page.skipped_prices;
-            }
-          std::sort(e->pricing.begin(), e->pricing.end());
+          if (const auto pricing = model.get("pricing"); pricing.is_object()) read_pricing(pricing, *e, page);
           // OpenRouter serves its text models on all three of its API families.
           if (contains(e->output_modalities, "text")) e->families = {"anthropic.messages", "openai.chat", "openai.responses"};
           break;
@@ -741,6 +1009,12 @@ ListingResult parse_listing(Listing listing, std::string_view body, std::string_
       else merge_entry(unique[found->second], entry);
     }
     page.entries = std::move(unique);
+    // An id listed twice keeps out every unit an override of either listing left out.
+    const auto withheld = page.withheld;
+    for (const auto& unit : withheld) leave_out(page.entries[seen.at(unit.model)], unit.unit, page.withheld);
+    std::sort(page.withheld.begin(), page.withheld.end(),
+              [](const WithheldUnit& a, const WithheldUnit& b) { return std::tie(a.model, a.unit) < std::tie(b.model, b.unit); });
+    page.withheld.erase(std::unique(page.withheld.begin(), page.withheld.end()), page.withheld.end());
     if (listing == Listing::Anthropic && root.get("has_more").is_bool() && root.get("has_more").as_bool()) {
       const auto last = root.get("last_id");
       if (!last.is_string() || !page_token(last.as_string())) fail("/last_id", "the id that continues the listing");
