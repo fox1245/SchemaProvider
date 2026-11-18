@@ -14,6 +14,7 @@
 #include <vector>
 
 namespace sp::descriptor {
+struct EffectiveChoices;
 // Decoded-byte ceilings per media kind are the *_decoded_bytes members, in sp::MediaKind order
 // (image, audio, video, document).
 struct CodecResources {
@@ -253,8 +254,9 @@ class DescriptorPolicy final {
   std::string content_digest_hex() const;
   // Whether the family's typed request carries `control`, from the family's `controls`. nullopt when the family is
   // not in the policy or its `controls` are not declared (a policy written before they existed): the policy then
-  // says nothing, and a host sends the control and lets the encoder answer. The list can only narrow what the
-  // encoder writes.
+  // says nothing, and a host sends the control and lets the encoder answer. The request checks (validate_choices) read
+  // the same list, and a family without one has the embedded policy's there. The list can only narrow what the encoder
+  // writes.
   std::optional<bool> control_admitted(std::string_view family, Control control) const noexcept;
   // The service tier a catalogue prices `tier` under at the family: empty for a tier that bills at the standard
   // rates (`standard_service_tiers`, so "default" at Chat and "standard" at Interactions), `tier` itself for any
@@ -332,6 +334,26 @@ class DescriptorPolicy final {
   // The values the policy takes from the embedded policy because it does not state them, in the form the content
   // digest mixes in; empty when it takes none.
   std::string borrowed_;
+  // What the request checks of a family read (check): the controls its typed request carries, as a bit set of
+  // Control, and the rules that bind a request's members to each other. A family that states no `controls` has the
+  // embedded policy's here, while control_admitted still answers "undeclared" for it. A rule a family does not state
+  // is the embedded policy's for that family, and off where the embedded policy states none.
+  struct ValidationFacts {
+    std::uint32_t controls = 0;
+    // The largest output cap the typed request can carry, when it has a bound.
+    std::optional<std::uint64_t> output_cap_maximum;
+    // The thinking budget must be below the output cap (otherwise it may equal it).
+    bool thinking_budget_below_cap = false;
+    // A thinking budget and a thinking level may not both be set.
+    bool thinking_budget_excludes_level = false;
+    // A thinking budget excludes a temperature and a top_p below the family's `thinking_top_p_minimum`.
+    bool thinking_budget_excludes_temperature = false;
+  };
+  std::vector<std::pair<std::string, ValidationFacts>> validation_;  // family, facts
+  const ValidationFacts* validation(std::string_view family) const noexcept;
+  static std::optional<std::string> check(const FamilyPolicy&, const ValidationFacts&, const EffectiveChoices&,
+                                          std::optional<std::uint64_t> limit, bool require_cap);
+  friend std::optional<std::string> validate_choices(const ValidatedDescriptor&, std::string_view, const EffectiveChoices&);
   friend class PolicyLoader;
 };
 // Without a catalogue argument, a policy uses builtin_catalogue().

@@ -4,6 +4,7 @@
 #include "codecs/messages.h"
 #include "codecs/interactions_request.h"
 #include "codecs/messages_request.h"
+#include "codecs/reason.h"
 #include "codecs/responses_request.h"
 #include "codecs/generations.h"
 #include "core/enum_names.h"
@@ -189,7 +190,9 @@ void controls_match_the_encoders() {
   const std::string chat_controls = R"("controls":["max_output_tokens","temperature","top_p","reasoning_effort","service_tier","tool_choice"])";
   CHECK(!controls_agree(load(replaced(text, chat_controls, R"("controls":["max_output_tokens","temperature","reasoning_effort","service_tier","tool_choice"])"))));
   CHECK(!controls_agree(load(replaced(text, chat_controls, R"("controls":["max_output_tokens","temperature","top_p","reasoning_effort","service_tier","tool_choice","store"])"))));
-  CHECK(!controls_agree(load(replaced(text, chat_controls, R"("controls":["max_output_tokens","temperature","top_p","service_tier","tool_choice"])"))));
+  // The request checks read the list, so a nested member the list leaves out is refused and agrees; the comparison with
+  // the request members is what fails for a member the typed request has or lacks.
+  CHECK(controls_agree(load(replaced(text, chat_controls, R"("controls":["max_output_tokens","temperature","top_p","service_tier","tool_choice"])"))));
   for (const auto control : all_controls) {
     const auto name = descriptor::control_name(control);
     CHECK(!name.empty() && descriptor::control_from_name(name) == control);
@@ -243,6 +246,410 @@ void controls_data() {
   for (const auto family : families)
     for (const auto control : all_controls) CHECK(!before->control_admitted(family, control));
   CHECK(before->billing_tier("openai.chat", "default") == "default");
+}
+
+// ---- request checks by family -----------------------------------------------------------------------------------
+
+// The answer of the policy-level request checks (validate_choices) for one family and one set of effective controls,
+// with the text of the refusal and the reason code it carries; empty text for a request they admit. Each case starts
+// from a 4096-token output cap and changes it.
+using Choices = descriptor::EffectiveChoices;
+struct ChoiceCase {
+  std::string_view family, what;
+  void (*change)(Choices&);
+  std::string_view refusal;
+};
+constexpr std::string_view cap_required = "positive output cap required";
+constexpr std::string_view int32_cap = "output cap is not representable as int32";
+constexpr std::string_view out_of_range = "sampling parameter outside admitted range";
+constexpr std::string_view budget_vs_cap = "thinking budget incompatible with output cap";
+constexpr std::string_view budget_and_level = "thinking budget and level are mutually exclusive";
+constexpr std::string_view manual_thinking = "manual thinking sampling parameters are incompatible";
+constexpr std::string_view sampling = "sampling control unsupported by typed request";
+constexpr std::string_view top_p_text = "top_p unsupported by typed Generate request";
+constexpr std::string_view semantic = "unsupported typed semantic control";
+constexpr std::string_view reasoning_object = "reasoning object unsupported for family";
+constexpr std::string_view reasoning_options = "complete effective reasoning options required";
+constexpr std::string_view include_thoughts_text = "includeThoughts unsupported for family";
+constexpr std::string_view thinking_summaries_text = "thinking summaries unsupported for family";
+constexpr std::string_view budget_text = "thinking budget unsupported for family";
+
+const ChoiceCase choice_cases[] = {
+    // ---- Messages: the output cap is required, a budget is strictly below the cap, a manual budget excludes sampling.
+    {"anthropic.messages", "cap alone", [](Choices&) {}, ""},
+    {"anthropic.messages", "no cap", [](Choices& c) { c.max_output_tokens.reset(); }, cap_required},
+    {"anthropic.messages", "zero cap", [](Choices& c) { c.max_output_tokens = 0; }, cap_required},
+    {"anthropic.messages", "cap above int32", [](Choices& c) { c.max_output_tokens = 2147483648ULL; }, ""},
+    {"anthropic.messages", "temperature", [](Choices& c) { c.temperature = 0.5; }, ""},
+    {"anthropic.messages", "temperature at the top of its range", [](Choices& c) { c.temperature = 1.0; }, ""},
+    {"anthropic.messages", "temperature above its range", [](Choices& c) { c.temperature = 1.01; }, out_of_range},
+    {"anthropic.messages", "top_p", [](Choices& c) { c.top_p = 0.5; }, ""},
+    {"anthropic.messages", "top_p above its range", [](Choices& c) { c.top_p = 1.5; }, out_of_range},
+    {"anthropic.messages", "budget one below the minimum", [](Choices& c) { c.thinking_budget = 1023; }, budget_vs_cap},
+    {"anthropic.messages", "budget at the minimum", [](Choices& c) { c.thinking_budget = 1024; }, ""},
+    {"anthropic.messages", "budget one below the cap", [](Choices& c) { c.thinking_budget = 4095; }, ""},
+    {"anthropic.messages", "budget equal to the cap", [](Choices& c) { c.thinking_budget = 4096; }, budget_vs_cap},
+    {"anthropic.messages", "budget one above the cap", [](Choices& c) { c.thinking_budget = 4097; }, budget_vs_cap},
+    {"anthropic.messages", "budget with temperature", [](Choices& c) { c.thinking_budget = 2048; c.temperature = 0.5; }, manual_thinking},
+    {"anthropic.messages", "budget with top_p below the minimum", [](Choices& c) { c.thinking_budget = 2048; c.top_p = 0.94; }, manual_thinking},
+    {"anthropic.messages", "budget with top_p at the minimum", [](Choices& c) { c.thinking_budget = 2048; c.top_p = 0.95; }, ""},
+    {"anthropic.messages", "budget with top_p of one", [](Choices& c) { c.thinking_budget = 2048; c.top_p = 1.0; }, ""},
+    {"anthropic.messages", "budget above the cap with temperature", [](Choices& c) { c.thinking_budget = 4097; c.temperature = 0.5; }, budget_vs_cap},
+    {"anthropic.messages", "budget below the minimum with temperature", [](Choices& c) { c.thinking_budget = 1023; c.temperature = 0.5; }, budget_vs_cap},
+    {"anthropic.messages", "budget with temperature out of range", [](Choices& c) { c.thinking_budget = 2048; c.temperature = 1.5; }, out_of_range},
+    {"anthropic.messages", "include_thoughts", [](Choices& c) { c.include_thoughts = true; }, include_thoughts_text},
+    {"anthropic.messages", "thinking_summaries", [](Choices& c) { c.thinking_summaries = true; }, thinking_summaries_text},
+    {"anthropic.messages", "reasoning_effort", [](Choices& c) { c.reasoning_effort = "low"; }, semantic},
+    {"anthropic.messages", "reasoning_summary", [](Choices& c) { c.reasoning_summary = "auto"; }, semantic},
+    {"anthropic.messages", "thinking_level", [](Choices& c) { c.thinking_level = "low"; }, semantic},
+    {"anthropic.messages", "service_tier", [](Choices& c) { c.service_tier = "default"; }, semantic},
+    {"anthropic.messages", "reasoning object", [](Choices& c) { c.reasoning_enabled = true; }, reasoning_object},
+    // ---- Chat: no rule binds the members; reasoning effort and a service tier are carried, a thinking budget is not.
+    {"openai.chat", "cap alone", [](Choices&) {}, ""},
+    {"openai.chat", "no cap", [](Choices& c) { c.max_output_tokens.reset(); }, ""},
+    {"openai.chat", "zero cap", [](Choices& c) { c.max_output_tokens = 0; }, cap_required},
+    {"openai.chat", "cap above int32", [](Choices& c) { c.max_output_tokens = 2147483648ULL; }, ""},
+    {"openai.chat", "temperature at the top of its range", [](Choices& c) { c.temperature = 2.0; }, ""},
+    {"openai.chat", "temperature above its range", [](Choices& c) { c.temperature = 2.01; }, out_of_range},
+    {"openai.chat", "temperature below its range", [](Choices& c) { c.temperature = -0.1; }, out_of_range},
+    {"openai.chat", "top_p", [](Choices& c) { c.top_p = 1.0; }, ""},
+    {"openai.chat", "top_p above its range", [](Choices& c) { c.top_p = 1.01; }, out_of_range},
+    {"openai.chat", "reasoning_effort", [](Choices& c) { c.reasoning_effort = "xhigh"; }, ""},
+    {"openai.chat", "reasoning_effort outside the list", [](Choices& c) { c.reasoning_effort = "bogus"; }, semantic},
+    {"openai.chat", "service_tier", [](Choices& c) { c.service_tier = "flex"; }, ""},
+    {"openai.chat", "service_tier outside the list", [](Choices& c) { c.service_tier = "standard"; }, semantic},
+    {"openai.chat", "reasoning_summary", [](Choices& c) { c.reasoning_summary = "auto"; }, semantic},
+    {"openai.chat", "thinking_level", [](Choices& c) { c.thinking_level = "low"; }, semantic},
+    {"openai.chat", "budget below the cap", [](Choices& c) { c.thinking_budget = 100; }, budget_text},
+    {"openai.chat", "budget equal to the cap", [](Choices& c) { c.thinking_budget = 4096; }, budget_text},
+    {"openai.chat", "budget one above the cap", [](Choices& c) { c.thinking_budget = 4097; }, budget_vs_cap},
+    {"openai.chat", "budget with temperature", [](Choices& c) { c.thinking_budget = 100; c.temperature = 0.5; }, budget_text},
+    {"openai.chat", "budget with a thinking level", [](Choices& c) { c.thinking_budget = 100; c.thinking_level = "low"; }, semantic},
+    {"openai.chat", "include_thoughts", [](Choices& c) { c.include_thoughts = true; }, include_thoughts_text},
+    {"openai.chat", "thinking_summaries", [](Choices& c) { c.thinking_summaries = true; }, thinking_summaries_text},
+    {"openai.chat", "reasoning object", [](Choices& c) { c.reasoning_enabled = true; }, reasoning_object},
+    {"openai.chat", "reasoning object with options", [](Choices& c) { c.reasoning_enabled = true; c.reasoning_effort = "low"; c.reasoning_summary = "auto"; }, semantic},
+    // ---- Responses: the reasoning object needs an effort and a summary.
+    {"openai.responses", "cap alone", [](Choices&) {}, ""},
+    {"openai.responses", "no cap", [](Choices& c) { c.max_output_tokens.reset(); }, ""},
+    {"openai.responses", "cap above int32", [](Choices& c) { c.max_output_tokens = 2147483648ULL; }, ""},
+    {"openai.responses", "temperature at the top of its range", [](Choices& c) { c.temperature = 2.0; }, ""},
+    {"openai.responses", "top_p", [](Choices& c) { c.top_p = 0.5; }, ""},
+    {"openai.responses", "top_p above its range", [](Choices& c) { c.top_p = 1.5; }, out_of_range},
+    {"openai.responses", "reasoning_effort", [](Choices& c) { c.reasoning_effort = "high"; }, ""},
+    {"openai.responses", "reasoning_summary", [](Choices& c) { c.reasoning_summary = "detailed"; }, ""},
+    {"openai.responses", "reasoning_summary outside the list", [](Choices& c) { c.reasoning_summary = "bogus"; }, semantic},
+    {"openai.responses", "service_tier", [](Choices& c) { c.service_tier = "priority"; }, ""},
+    {"openai.responses", "thinking_level", [](Choices& c) { c.thinking_level = "low"; }, semantic},
+    {"openai.responses", "reasoning object alone", [](Choices& c) { c.reasoning_enabled = true; }, reasoning_options},
+    {"openai.responses", "reasoning object with an effort", [](Choices& c) { c.reasoning_enabled = true; c.reasoning_effort = "low"; }, reasoning_options},
+    {"openai.responses", "reasoning object with a summary", [](Choices& c) { c.reasoning_enabled = true; c.reasoning_summary = "auto"; }, reasoning_options},
+    {"openai.responses", "reasoning object with both", [](Choices& c) { c.reasoning_enabled = true; c.reasoning_effort = "low"; c.reasoning_summary = "auto"; }, ""},
+    {"openai.responses", "budget below the cap", [](Choices& c) { c.thinking_budget = 100; }, budget_text},
+    {"openai.responses", "budget one above the cap", [](Choices& c) { c.thinking_budget = 4097; }, budget_vs_cap},
+    {"openai.responses", "include_thoughts", [](Choices& c) { c.include_thoughts = true; }, include_thoughts_text},
+    {"openai.responses", "thinking_summaries", [](Choices& c) { c.thinking_summaries = true; }, thinking_summaries_text},
+    // ---- Generate: a budget may equal the cap and excludes a level; top_p is not carried.
+    {"google.generate", "cap alone", [](Choices&) {}, ""},
+    {"google.generate", "no cap", [](Choices& c) { c.max_output_tokens.reset(); }, ""},
+    {"google.generate", "cap above int32", [](Choices& c) { c.max_output_tokens = 2147483648ULL; }, ""},
+    {"google.generate", "temperature at the top of its range", [](Choices& c) { c.temperature = 2.0; }, ""},
+    {"google.generate", "temperature above its range", [](Choices& c) { c.temperature = 2.1; }, out_of_range},
+    {"google.generate", "top_p", [](Choices& c) { c.top_p = 0.5; }, top_p_text},
+    {"google.generate", "top_p above its range", [](Choices& c) { c.top_p = 1.5; }, out_of_range},
+    {"google.generate", "top_p with temperature", [](Choices& c) { c.temperature = 0.5; c.top_p = 0.5; }, top_p_text},
+    {"google.generate", "budget below the cap", [](Choices& c) { c.thinking_budget = 100; }, ""},
+    {"google.generate", "budget equal to the cap", [](Choices& c) { c.thinking_budget = 4096; }, ""},
+    {"google.generate", "budget one above the cap", [](Choices& c) { c.thinking_budget = 4097; }, budget_vs_cap},
+    {"google.generate", "budget with a level", [](Choices& c) { c.thinking_budget = 100; c.thinking_level = "low"; }, budget_and_level},
+    {"google.generate", "level", [](Choices& c) { c.thinking_level = "high"; }, ""},
+    {"google.generate", "top level", [](Choices& c) { c.thinking_level = "xhigh"; }, ""},
+    {"google.generate", "level outside the list", [](Choices& c) { c.thinking_level = "extreme"; }, semantic},
+    {"google.generate", "budget with temperature", [](Choices& c) { c.thinking_budget = 100; c.temperature = 0.5; }, ""},
+    {"google.generate", "budget above the cap with a level", [](Choices& c) { c.thinking_budget = 4097; c.thinking_level = "low"; }, budget_vs_cap},
+    {"google.generate", "budget with a level and top_p", [](Choices& c) { c.thinking_budget = 100; c.thinking_level = "low"; c.top_p = 0.5; }, budget_and_level},
+    {"google.generate", "budget with top_p", [](Choices& c) { c.thinking_budget = 100; c.top_p = 0.5; }, top_p_text},
+    {"google.generate", "level outside the list with top_p", [](Choices& c) { c.thinking_level = "extreme"; c.top_p = 0.5; }, top_p_text},
+    {"google.generate", "include_thoughts", [](Choices& c) { c.include_thoughts = true; }, ""},
+    {"google.generate", "thinking_summaries", [](Choices& c) { c.thinking_summaries = true; }, thinking_summaries_text},
+    {"google.generate", "reasoning_effort", [](Choices& c) { c.reasoning_effort = "low"; }, semantic},
+    {"google.generate", "reasoning_summary", [](Choices& c) { c.reasoning_summary = "auto"; }, semantic},
+    {"google.generate", "service_tier", [](Choices& c) { c.service_tier = "default"; }, semantic},
+    {"google.generate", "reasoning object", [](Choices& c) { c.reasoning_enabled = true; }, reasoning_object},
+    // ---- Interactions: the output cap fits 32 bits; neither sampling control is carried; a budget is not carried.
+    {"google.interactions", "cap alone", [](Choices&) {}, ""},
+    {"google.interactions", "no cap", [](Choices& c) { c.max_output_tokens.reset(); }, ""},
+    {"google.interactions", "zero cap", [](Choices& c) { c.max_output_tokens = 0; }, cap_required},
+    {"google.interactions", "cap at the largest 32-bit value", [](Choices& c) { c.max_output_tokens = 2147483647ULL; }, ""},
+    {"google.interactions", "cap one above the largest 32-bit value", [](Choices& c) { c.max_output_tokens = 2147483648ULL; }, int32_cap},
+    {"google.interactions", "cap above 32 bits with temperature out of range", [](Choices& c) { c.max_output_tokens = 2147483648ULL; c.temperature = 2.5; }, int32_cap},
+    {"google.interactions", "temperature", [](Choices& c) { c.temperature = 0.5; }, sampling},
+    {"google.interactions", "top_p", [](Choices& c) { c.top_p = 0.5; }, sampling},
+    {"google.interactions", "temperature and top_p", [](Choices& c) { c.temperature = 0.5; c.top_p = 0.5; }, sampling},
+    {"google.interactions", "temperature out of range", [](Choices& c) { c.temperature = 2.5; }, out_of_range},
+    {"google.interactions", "top_p out of range", [](Choices& c) { c.top_p = 1.5; }, out_of_range},
+    {"google.interactions", "temperature with a service tier outside the list", [](Choices& c) { c.temperature = 0.5; c.service_tier = "flex"; }, sampling},
+    {"google.interactions", "level", [](Choices& c) { c.thinking_level = "high"; }, ""},
+    {"google.interactions", "level outside the list", [](Choices& c) { c.thinking_level = "extreme"; }, semantic},
+    {"google.interactions", "thinking_summaries", [](Choices& c) { c.thinking_summaries = true; }, ""},
+    {"google.interactions", "service_tier", [](Choices& c) { c.service_tier = "standard"; }, ""},
+    {"google.interactions", "service_tier outside the list", [](Choices& c) { c.service_tier = "flex"; }, semantic},
+    {"google.interactions", "budget below the cap", [](Choices& c) { c.thinking_budget = 100; }, budget_text},
+    {"google.interactions", "budget equal to the cap", [](Choices& c) { c.thinking_budget = 4096; }, budget_text},
+    {"google.interactions", "budget one above the cap", [](Choices& c) { c.thinking_budget = 4097; }, budget_vs_cap},
+    {"google.interactions", "budget with a level", [](Choices& c) { c.thinking_budget = 100; c.thinking_level = "low"; }, budget_text},
+    {"google.interactions", "include_thoughts", [](Choices& c) { c.include_thoughts = true; }, include_thoughts_text},
+    {"google.interactions", "reasoning_effort", [](Choices& c) { c.reasoning_effort = "low"; }, semantic},
+    {"google.interactions", "reasoning object", [](Choices& c) { c.reasoning_enabled = true; }, reasoning_object},
+};
+// The reason code of each refusal text the cases above produce, as the shared request table gives it.
+const std::pair<std::string_view, std::string_view> choice_codes[] = {
+    {cap_required, "request.choice.positive_output_cap_required"},
+    {int32_cap, "request.choice.output_cap_is_not_representable_as_int32"},
+    {out_of_range, "request.choice.sampling_parameter_outside_admitted_range"},
+    {budget_vs_cap, "request.choice.thinking_budget_incompatible_with_output_cap"},
+    {budget_and_level, "request.choice.thinking_budget_and_level_are_mutually"},
+    {manual_thinking, "request.choice.manual_thinking_sampling_parameters_are"},
+    {sampling, "request.choice.sampling_control_unsupported_by_typed_request"},
+    {top_p_text, "request.choice.top_p_unsupported_by_typed_generate_request"},
+    {semantic, "request.choice.unsupported_typed_semantic_control"},
+    {reasoning_object, "request.choice.reasoning_object_unsupported_for_family"},
+    {reasoning_options, "request.choice.complete_effective_reasoning_options_required"},
+    {include_thoughts_text, "request.choice.includethoughts_unsupported_for_family"},
+    {thinking_summaries_text, "request.choice.thinking_summaries_unsupported_for_family"},
+    {budget_text, "request.choice.thinking_budget_unsupported_for_family"},
+};
+
+// The cases whose answer differs from the expected one under `policy`, one line each; empty when all agree.
+std::string choice_mismatches(const descriptor::PolicySnapshot& policy) {
+  std::string out;
+  for (const auto& entry : choice_cases) {
+    const auto d = descriptor_of(entry.family, policy);
+    Choices choices{};
+    choices.max_output_tokens = 4096;
+    entry.change(choices);
+    const auto refusal = descriptor::validate_choices(d, "probe-model", choices);
+    const std::string got = refusal ? *refusal : std::string();
+    if (got != entry.refusal) out += std::string(entry.family) + " " + std::string(entry.what) + ": expected \"" + std::string(entry.refusal) + "\" got \"" + got + "\"\n";
+  }
+  return out;
+}
+// Every family's request checks answer as they always did, with the built-in policy and with a policy written before
+// `controls` and the rule members: the same refusal text, the same reason code, in the same order of checks.
+void request_checks_by_family() {
+  const auto mismatches = choice_mismatches(descriptor::builtin_policy());
+  if (!mismatches.empty()) throw std::runtime_error("built-in policy:\n" + mismatches);
+  for (const auto& [text, code] : choice_codes) CHECK(reason::code(reason::Source::SharedRequest, text) == code);
+  for (const auto& entry : choice_cases)
+    if (!entry.refusal.empty()) {
+      bool known = false;
+      for (const auto& [text, code] : choice_codes) known = known || text == entry.refusal;
+      CHECK(known);
+    }
+}
+
+// The embedded policy text with `key` of the family set to `raw` (the family's own member is replaced, or added), or
+// removed when `raw` is empty; an empty `family` edits every family.
+std::string edited(std::string_view text, std::string_view family, std::string_view key, std::string_view raw) {
+  auto parsed = json::parse(text);
+  const auto root = std::get<json::Document>(parsed).root();
+  auto with_key = [&](json::Value entry) {
+    std::string out = "{";
+    bool present = false;
+    for (auto member : entry.members()) {
+      if (member.key == key) {
+        present = true;
+        if (raw.empty()) continue;
+      }
+      if (out.size() > 1) out += ',';
+      out += json::quote(member.key) + ':' + (member.key == key ? std::string(raw) : member.value.dump());
+    }
+    if (!present && !raw.empty()) out += std::string(out.size() > 1 ? "," : "") + json::quote(key) + ':' + std::string(raw);
+    return out + '}';
+  };
+  std::string families = "[";
+  for (auto entry : root.get("families").elements()) {
+    if (families.size() > 1) families += ',';
+    families += family.empty() || entry.get("family").as_string() == family ? with_key(entry) : entry.dump();
+  }
+  families += ']';
+  std::string out = "{";
+  for (auto member : root.members()) {
+    if (out.size() > 1) out += ',';
+    out += json::quote(member.key) + ':' + (member.key == "families" ? families : member.value.dump());
+  }
+  return out + '}';
+}
+constexpr std::string_view rule_members[]{"output_cap_maximum", "thinking_budget_below_cap", "thinking_budget_excludes_level",
+                                          "thinking_budget_excludes_temperature"};
+// A policy written before `controls` and the rule members.
+std::string without_request_rules(std::string text) {
+  text = edited(text, "", "controls", "");
+  for (const auto key : rule_members) text = edited(text, "", key, "");
+  return text;
+}
+std::string refusal_of(const descriptor::PolicySnapshot& policy, std::string_view family, void (*change)(Choices&)) {
+  Choices choices{};
+  choices.max_output_tokens = 4096;
+  change(choices);
+  const auto refusal = descriptor::validate_choices(descriptor_of(family, policy), "probe-model", choices);
+  return refusal ? *refusal : std::string();
+}
+
+// A policy whose data differs from the built-in one is answered by its data: a control a family does not list is
+// refused, one it lists is admitted, and a rule that is stated is the rule in force. The replay identity does not move.
+void request_checks_follow_the_data() {
+  const auto text = policy_text();
+  const auto builtin = descriptor::builtin_policy();
+  // Controls: removed from Chat, added to Interactions, removed from Messages.
+  const auto no_top_p = load(edited(text, "openai.chat", "controls", R"(["max_output_tokens","temperature","reasoning_effort","service_tier","tool_choice"])"));
+  CHECK(refusal_of(no_top_p, "openai.chat", [](Choices& c) { c.top_p = 0.5; }) == top_p_text);
+  CHECK(refusal_of(no_top_p, "openai.chat", [](Choices& c) { c.temperature = 0.5; }).empty());
+  CHECK(refusal_of(builtin, "openai.chat", [](Choices& c) { c.top_p = 0.5; }).empty());
+  const auto no_effort = load(edited(text, "openai.chat", "controls", R"(["max_output_tokens","temperature","top_p","service_tier","tool_choice"])"));
+  CHECK(refusal_of(no_effort, "openai.chat", [](Choices& c) { c.reasoning_effort = "low"; }) == "reasoning effort unsupported for family");
+  const auto no_tier = load(edited(text, "openai.responses", "controls", R"(["max_output_tokens","temperature","top_p","reasoning_effort","reasoning_summary","required_tool","store","max_tool_calls","tool_choice"])"));
+  CHECK(refusal_of(no_tier, "openai.responses", [](Choices& c) { c.service_tier = "flex"; }) == "service tier unsupported for family");
+  CHECK(refusal_of(no_tier, "openai.responses", [](Choices& c) { c.reasoning_summary = "auto"; }).empty());
+  // The family's own defaults are checked against its list: Responses defaults a reasoning summary.
+  CHECK(refused(edited(text, "openai.responses", "controls", R"(["max_output_tokens","temperature","top_p","reasoning_effort","service_tier","required_tool","store","max_tool_calls","tool_choice"])"), "/defaults"));
+  CHECK(refusal_of(builtin, "openai.responses", [](Choices& c) { c.reasoning_enabled = true; c.reasoning_effort = "low"; c.reasoning_summary = "auto"; }).empty());
+  const auto sampling_interactions = load(edited(text, "google.interactions", "controls", R"(["max_output_tokens","temperature","top_p","thinking_level","thinking_summaries","service_tier","required_tool","store","tool_choice"])"));
+  CHECK(refusal_of(sampling_interactions, "google.interactions", [](Choices& c) { c.temperature = 0.5; c.top_p = 0.5; }).empty());
+  CHECK(refusal_of(builtin, "google.interactions", [](Choices& c) { c.temperature = 0.5; }) == sampling);
+  // The temperature rule is about the budget too, so a family that drops the budget drops the rule.
+  const auto no_budget = load(edited(edited(text, "anthropic.messages", "controls", R"(["max_output_tokens","temperature","top_p","tool_choice"])"),
+                                     "anthropic.messages", "thinking_budget_excludes_temperature", "false"));
+  CHECK(refusal_of(no_budget, "anthropic.messages", [](Choices& c) { c.thinking_budget = 2048; }) == budget_text);
+  CHECK(refusal_of(builtin, "anthropic.messages", [](Choices& c) { c.thinking_budget = 2048; }).empty());
+  // A catalogue entry's defaults are checked against the family's list too.
+  CHECK(refused(edited(text, "google.generate", "controls", R"(["max_output_tokens","temperature","thinking_budget","thinking_level","required_tool","tool_choice"])"),
+                "/model_catalogue/models/gemini-2.5-flash-lite/defaults/google.generate"));
+  // A family that carries neither sampling control refuses either; one that carries top_p only refuses temperature.
+  const auto top_p_only = load(edited(text, "openai.chat", "controls", R"(["max_output_tokens","top_p","reasoning_effort","service_tier","tool_choice"])"));
+  CHECK(refusal_of(top_p_only, "openai.chat", [](Choices& c) { c.temperature = 0.5; }) == sampling);
+  CHECK(refusal_of(top_p_only, "openai.chat", [](Choices& c) { c.top_p = 0.5; }).empty());
+  const auto neither = load(edited(text, "openai.chat", "controls", R"(["max_output_tokens","reasoning_effort","service_tier","tool_choice"])"));
+  CHECK(refusal_of(neither, "openai.chat", [](Choices& c) { c.top_p = 0.5; }) == sampling);
+  // Rules: each is the rule in force when stated, and turning one off changes the answer.
+  const auto loose_budget = load(edited(text, "anthropic.messages", "thinking_budget_below_cap", "false"));
+  CHECK(refusal_of(loose_budget, "anthropic.messages", [](Choices& c) { c.thinking_budget = 4096; }).empty());
+  CHECK(refusal_of(loose_budget, "anthropic.messages", [](Choices& c) { c.thinking_budget = 4097; }) == budget_vs_cap);
+  CHECK(refusal_of(builtin, "anthropic.messages", [](Choices& c) { c.thinking_budget = 4096; }) == budget_vs_cap);
+  const auto strict_budget = load(edited(text, "google.generate", "thinking_budget_below_cap", "true"));
+  CHECK(refusal_of(strict_budget, "google.generate", [](Choices& c) { c.thinking_budget = 4096; }) == budget_vs_cap);
+  CHECK(refusal_of(strict_budget, "google.generate", [](Choices& c) { c.thinking_budget = 4095; }).empty());
+  const auto free_sampling = load(edited(text, "anthropic.messages", "thinking_budget_excludes_temperature", "false"));
+  CHECK(refusal_of(free_sampling, "anthropic.messages", [](Choices& c) { c.thinking_budget = 2048; c.temperature = 0.5; c.top_p = 0.5; }).empty());
+  const auto level_and_budget = load(edited(text, "google.generate", "thinking_budget_excludes_level", "false"));
+  CHECK(refusal_of(level_and_budget, "google.generate", [](Choices& c) { c.thinking_budget = 100; c.thinking_level = "low"; }).empty());
+  const auto interactions_budget = edited(text, "google.interactions", "controls", R"(["max_output_tokens","thinking_budget","thinking_level","thinking_summaries","service_tier","required_tool","store","tool_choice"])");
+  const auto exclusive_level = load(interactions_budget);
+  const auto exclusive = load(edited(interactions_budget, "google.interactions", "thinking_budget_excludes_level", "true"));
+  CHECK(refusal_of(exclusive_level, "google.interactions", [](Choices& c) { c.thinking_budget = 100; c.thinking_level = "low"; }).empty());
+  CHECK(refusal_of(exclusive, "google.interactions", [](Choices& c) { c.thinking_budget = 100; c.thinking_level = "low"; }) == budget_and_level);
+  const auto chat_budget = edited(text, "openai.chat", "controls", R"(["max_output_tokens","temperature","top_p","thinking_budget","reasoning_effort","service_tier","tool_choice"])");
+  const auto sampling_budget = load(chat_budget);
+  const auto sampling_rule = load(edited(chat_budget, "openai.chat", "thinking_budget_excludes_temperature", "true"));
+  CHECK(refusal_of(sampling_budget, "openai.chat", [](Choices& c) { c.thinking_budget = 100; c.temperature = 0.5; }).empty());
+  CHECK(refusal_of(sampling_rule, "openai.chat", [](Choices& c) { c.thinking_budget = 100; c.temperature = 0.5; }) == manual_thinking);
+  CHECK(refusal_of(sampling_rule, "openai.chat", [](Choices& c) { c.thinking_budget = 100; c.top_p = 0.9; }).empty());
+  // The output cap bound is a number: the largest cap a request may carry.
+  const auto wide_cap = load(edited(text, "google.interactions", "output_cap_maximum", "4294967295"));
+  CHECK(refusal_of(wide_cap, "google.interactions", [](Choices& c) { c.max_output_tokens = 2147483648ULL; }).empty());
+  CHECK(refusal_of(wide_cap, "google.interactions", [](Choices& c) { c.max_output_tokens = 4294967296ULL; }) == int32_cap);
+  const auto narrow_cap = load(edited(text, "openai.chat", "output_cap_maximum", "4096"));
+  CHECK(refusal_of(narrow_cap, "openai.chat", [](Choices& c) { c.max_output_tokens = 4096; }).empty());
+  CHECK(refusal_of(narrow_cap, "openai.chat", [](Choices& c) { c.max_output_tokens = 4097; }) == int32_cap);
+  // The data is admission data: the replay identity is the built-in one and the content digest is another.
+  for (const auto& policy : {no_top_p, loose_budget, level_and_budget, wide_cap}) {
+    CHECK(policy->identity_hex() == builtin->identity_hex());
+    CHECK(policy->content_digest_hex() != builtin->content_digest_hex());
+  }
+  // The family's defaults are checked against its own controls when the policy loads.
+  CHECK(refused(edited(text, "google.interactions", "controls", R"(["max_output_tokens","thinking_level","thinking_summaries","required_tool","store","tool_choice"])"), "/defaults"));
+}
+
+// A policy written before `controls` and the rule members answers every case as the built-in policy does: a family
+// without them has the embedded policy's, and a member left out is the embedded one for that family.
+void older_policies_keep_the_checks() {
+  const auto text = policy_text();
+  const auto builtin = descriptor::builtin_policy();
+  const auto bare = load(without_request_rules(text));
+  for (const auto family : families)
+    for (const auto control : all_controls) CHECK(!bare->control_admitted(family, control));
+  const auto bare_mismatches = choice_mismatches(bare);
+  if (!bare_mismatches.empty()) throw std::runtime_error("policy without controls and rules:\n" + bare_mismatches);
+  CHECK(bare->identity_hex() == builtin->identity_hex());
+  // What it takes from the embedded policy is part of its content digest.
+  CHECK(bare->content_digest_hex() != builtin->content_digest_hex());
+  // Each member alone, left out of its family, is the embedded one.
+  for (const auto key : rule_members) {
+    const auto without = load(edited(text, "", key, ""));
+    const auto mismatches = choice_mismatches(without);
+    if (!mismatches.empty()) throw std::runtime_error("policy without " + std::string(key) + ":\n" + mismatches);
+  }
+  const auto without_controls = load(edited(text, "", "controls", ""));
+  const auto control_mismatches = choice_mismatches(without_controls);
+  if (!control_mismatches.empty()) throw std::runtime_error("policy without controls:\n" + control_mismatches);
+  // A policy that states the built-in rules itself answers the same and borrows nothing: it has the built-in digest.
+  CHECK(load(text)->content_digest_hex() == builtin->content_digest_hex());
+  // A member that is stated beats the embedded one, in a policy that states others.
+  const auto mixed = load(edited(without_request_rules(text), "anthropic.messages", "thinking_budget_below_cap", "false"));
+  CHECK(refusal_of(mixed, "anthropic.messages", [](Choices& c) { c.thinking_budget = 4096; }).empty());
+  CHECK(refusal_of(mixed, "anthropic.messages", [](Choices& c) { c.thinking_budget = 2048; c.temperature = 0.5; }) == manual_thinking);
+  CHECK(refusal_of(mixed, "google.interactions", [](Choices& c) { c.max_output_tokens = 2147483648ULL; }) == int32_cap);
+}
+
+// The embedded policy states the controls of every family, and each rule member for the families it applies to;
+// a policy that leaves them out has them from here.
+void embedded_policy_states_the_request_rules() {
+  auto parsed = json::parse(policy_text());
+  const auto root = std::get<json::Document>(parsed).root();
+  std::size_t seen = 0;
+  for (auto entry : root.get("families").elements()) {
+    const auto family = entry.get("family").as_string();
+    CHECK(entry.get("controls").valid());
+    const auto stated = [&](std::string_view key) { return entry.get(key).valid(); };
+    CHECK(stated("output_cap_maximum") == (family == "google.interactions"));
+    CHECK(stated("thinking_budget_below_cap") == (family == "anthropic.messages"));
+    CHECK(stated("thinking_budget_excludes_level") == (family == "google.generate"));
+    CHECK(stated("thinking_budget_excludes_temperature") == (family == "anthropic.messages"));
+    if (family == "google.interactions") CHECK(entry.get("output_cap_maximum").as_uint() == 2147483647ULL);
+    if (stated("thinking_budget_below_cap")) CHECK(entry.get("thinking_budget_below_cap").as_bool());
+    if (stated("thinking_budget_excludes_level")) CHECK(entry.get("thinking_budget_excludes_level").as_bool());
+    if (stated("thinking_budget_excludes_temperature")) CHECK(entry.get("thinking_budget_excludes_temperature").as_bool());
+    ++seen;
+  }
+  CHECK(seen == std::size(families));
+}
+
+// A member that is malformed is refused with a pointer to it.
+void request_rules_are_validated() {
+  const auto text = policy_text();
+  CHECK(refused(edited(text, "openai.chat", "output_cap_maximum", "0"), "/output_cap_maximum"));
+  CHECK(refused(edited(text, "openai.chat", "output_cap_maximum", R"("big")"), "/output_cap_maximum"));
+  CHECK(refused(edited(text, "openai.chat", "output_cap_maximum", "-1"), "/output_cap_maximum"));
+  CHECK(refused(edited(text, "openai.chat", "output_cap_maximum", "1.5"), "/output_cap_maximum"));
+  CHECK(refused(edited(text, "openai.chat", "output_cap_maximum", "9223372036854775808"), "/output_cap_maximum"));
+  CHECK(!refused(edited(text, "openai.chat", "output_cap_maximum", "9223372036854775807"), "/output_cap_maximum"));
+  CHECK(load(edited(text, "openai.chat", "output_cap_maximum", "9223372036854775807")) != nullptr);
+  for (const auto key : {"thinking_budget_below_cap", "thinking_budget_excludes_level", "thinking_budget_excludes_temperature"}) {
+    CHECK(refused(edited(text, "openai.chat", key, "1"), std::string("/") + key));
+    CHECK(refused(edited(text, "openai.chat", key, R"("true")"), std::string("/") + key));
+    CHECK(refused(edited(text, "openai.chat", key, "null"), std::string("/") + key));
+  }
+  // The temperature rule is about two controls the family must list.
+  CHECK(refused(edited(text, "openai.chat", "thinking_budget_excludes_temperature", "true"), "/thinking_budget_excludes_temperature"));
+  CHECK(refused(edited(text, "google.interactions", "thinking_budget_excludes_temperature", "true"), "/thinking_budget_excludes_temperature"));
+  CHECK(load(edited(text, "google.generate", "thinking_budget_excludes_temperature", "true")) != nullptr);
+  CHECK(load(edited(text, "openai.chat", "thinking_budget_excludes_temperature", "false")) != nullptr);
+  const auto no_temperature = edited(text, "anthropic.messages", "controls", R"(["max_output_tokens","top_p","thinking_budget","tool_choice"])");
+  CHECK(refused(edited(no_temperature, "anthropic.messages", "thinking_budget_excludes_temperature", "true"), "/thinking_budget_excludes_temperature"));
+  // The same policy without the member takes the embedded one and loads.
+  CHECK(load(edited(no_temperature, "anthropic.messages", "thinking_budget_excludes_temperature", "")) != nullptr);
+  // A member the policy does not know is still refused.
+  CHECK(refused(edited(text, "openai.chat", "thinking_budget_requires_level", "true"), "/families"));
 }
 
 void billing_tiers() {
@@ -1365,7 +1772,7 @@ void decoded_usage() {
 int main() {
   try {
     enum_names();
-    controls_match_the_encoders(); controls_data(); billing_tiers(); routing_and_tools(); synthetic_policy();
+    controls_match_the_encoders(); controls_data(); request_checks_by_family(); request_checks_follow_the_data(); older_policies_keep_the_checks(); embedded_policy_states_the_request_rules(); request_rules_are_validated(); billing_tiers(); routing_and_tools(); synthetic_policy();
     refusal_predicate(); facts_of_prepared_requests();
     worst_case_tokens(); worst_case_unbounded(); worst_case_tools(); worst_case_tiers_and_fallbacks(); worst_case_route_ceiling();
     worst_case_covers_usage(); worst_case_synthetic_policy(); worst_case_shadowed_profile();
