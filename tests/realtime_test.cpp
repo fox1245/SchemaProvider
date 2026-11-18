@@ -224,6 +224,27 @@ void openai_realtime() {
   CHECK(std::get<Error>(codec->decode(false, "not json")).reason == "realtime.message.invalid");
 }
 
+// An OpenAI response.done ends the turn by its status: completed is EndTurn and incomplete MaxTokens. Any other status,
+// one the codec does not know or a failure, is Unknown with the status as its raw value, never EndTurn.
+void response_statuses() {
+  const auto d = descriptor::presets::openai_chat();
+  const auto turn_of = [&](std::string_view status, std::size_t errors = 0) {
+    auto codec = realtime::make_codec(d);
+    CHECK(std::get<std::vector<realtime::Event>>(codec->decode(false, R"({"type":"response.output_text.delta","delta":"hi"})")).size() == 1);
+    const auto events = std::get<std::vector<realtime::Event>>(
+        codec->decode(false, R"({"type":"response.done","response":{"id":"r","status":)" + json::quote(status) + "}}"));
+    const auto turns = all<realtime::TurnCommitted>(events);
+    CHECK(turns.size() == 1 && turns[0]->turn.joined_text() == "hi" && all<realtime::ProviderError>(events).size() == errors);
+    return turns[0]->turn.stop;
+  };
+  const auto completed = turn_of("completed"), incomplete = turn_of("incomplete");
+  CHECK(completed.kind == StopKind::EndTurn && completed.raw == "completed");
+  CHECK(incomplete.kind == StopKind::MaxTokens && incomplete.raw == "incomplete");
+  const auto unexpected = turn_of("unexpected");
+  CHECK(unexpected.kind == StopKind::Unknown && unexpected.raw == "unexpected");
+  const auto failed = turn_of("failed", 1);
+  CHECK(failed.kind == StopKind::Unknown && failed.raw == "failed");
+}
 // A turn's usage keeps what the provider reports beside the totals.
 void usage_details() {
   {
@@ -507,7 +528,7 @@ int main(int argc, char** argv) {
   try {
     if (argc != 2) throw std::runtime_error("usage: sp_realtime_tests <fixture directory>");
     fixtures = argv[1];
-    google_live(); openai_realtime(); usage_details(); tool_turn_usage(); audio_formats(); policy_facts(); transcription();
+    google_live(); openai_realtime(); response_statuses(); usage_details(); tool_turn_usage(); audio_formats(); policy_facts(); transcription();
     std::cout << "realtime properties passed\n";
     return 0;
   } catch (const std::exception& error) { std::cerr << "realtime test failed: " << error.what() << '\n'; return 1; }

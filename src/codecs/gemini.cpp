@@ -2,6 +2,7 @@
 #include "codecs/served_model.h"
 #include "codecs/media_output.h"
 #include "codecs/reason.h"
+#include "codecs/stop_table.h"
 #include "core/native.h"
 #include "crypto/crypto.h"
 #include "descriptor/descriptor.h"
@@ -25,14 +26,11 @@ bool envelope_unique(json::Value v, bool function_call = false) {
   } else if (v.is_array()) for (auto p : v.elements()) if (!envelope_unique(p)) return false;
   return true;
 }
-// The google.generate stop_reasons policy table restates this mapping (STOP as its call-free
-// EndTurn); the codec does not consult it. gemini_semantic_test checks that the two agree.
-StopKind stop_kind(std::string_view reason, bool call) {
-  if (reason == "STOP") return call ? StopKind::ToolUse : StopKind::EndTurn;
-  if (reason == "MAX_TOKENS") return StopKind::MaxTokens;
-  if (reason == "MALFORMED_FUNCTION_CALL" || reason == "UNEXPECTED_TOOL_CALL" || reason == "TOO_MANY_TOOL_CALLS") return StopKind::MalformedCall;
-  if (reason == "SAFETY" || reason == "RECITATION" || reason == "BLOCKLIST" || reason == "PROHIBITED_CONTENT" || reason == "SPII" || reason == "IMAGE_SAFETY" || reason == "IMAGE_PROHIBITED_CONTENT" || reason == "IMAGE_RECITATION" || reason == "ESCALATION" || reason == "PUP_LIMITED_DISABLED") return StopKind::ContentFilter;
-  return StopKind::Unknown;
+// The kind of a finishReason: the descriptor's stop table decides it, and a function call in a candidate that ended
+// with EndTurn makes it ToolUse.
+StopKind stop_kind(const descriptor::ValidatedDescriptor& descriptor, std::string_view reason, bool call) {
+  const auto kind = table_stop(descriptor, reason);
+  return kind == StopKind::EndTurn && call ? StopKind::ToolUse : kind;
 }
 }
 namespace {
@@ -198,12 +196,14 @@ bool Codec::candidate(json::Value c) {
   unknown(c, {"index", "content", "finishReason", "finishMessage", "safetyRatings", "citationMetadata", "tokenCount", "groundingAttributions", "groundingMetadata", "avgLogprobs", "logprobsResult", "urlContextMetadata"});
   if (terminal) {
     auto details = own(c); if (!details) return false;
-    stop_ = StopReason{stop_kind(raw, has_call_), std::string(raw), {}, std::move(details)};
+    stop_ = StopReason{stop_kind(descriptor_, raw, has_call_), std::string(raw), {}, std::move(details)};
     stopped_ = true;
     if (run_.open && !close_run()) return false;
     if (!emit(Stop{*stop_})) return false;
     for (auto local : pending_seals_) if (!emit(PartSeal{local, {}, {}})) return false;
     pending_seals_.clear();
+    // A blocked candidate (whatever value the table gives ContentFilter) and the two values that report a rejected
+    // request end the call; a failure is decided in code, not by the table.
     if (stop_->kind == StopKind::ContentFilter || raw == "MISSING_THOUGHT_SIGNATURE" || raw == "MALFORMED_RESPONSE")
       return fail(ErrorKind::RemoteFailure, "Gemini generation blocked or rejected", raw);
   }

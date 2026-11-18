@@ -1,6 +1,7 @@
 #include "codecs/gemini.h"
 #include "codecs/gemini_request.h"
 #include "codecs/reason.h"
+#include "core/enum_names.h"
 #include "core/native.h"
 #include "descriptor/descriptor.h"
 #include "descriptor/policy.h"
@@ -162,46 +163,62 @@ void uncached_input_rule() {
   auto o = buffered(body(R"([{"text":"hello"}])", "STOP", R"({"promptTokenCount":21,"candidatesTokenCount":1,"totalTokenCount":22,"promptTokensDetails":[{"modality":"TEXT","tokenCount":21}],"serviceTier":"standard"})"));
   CHECK(complete(o).usage.input_total->value == 21 && !complete(o).usage.cache_read && !complete(o).usage.input_uncached);
 }
-StopKind policy_kind(descriptor::StopKind kind) {
-  switch (kind) {
-    case descriptor::StopKind::EndTurn: return StopKind::EndTurn;
-    case descriptor::StopKind::MaxTokens: return StopKind::MaxTokens;
-    case descriptor::StopKind::ToolUse: return StopKind::ToolUse;
-    case descriptor::StopKind::ContentFilter: return StopKind::ContentFilter;
-    case descriptor::StopKind::Refusal: return StopKind::Refusal;
-    case descriptor::StopKind::PauseTurn: return StopKind::PauseTurn;
-    case descriptor::StopKind::ContextLimit: return StopKind::ContextLimit;
-    case descriptor::StopKind::StopSequence: return StopKind::StopSequence;
-    case descriptor::StopKind::MalformedCall: return StopKind::MalformedCall;
-    case descriptor::StopKind::Compaction: return StopKind::Compaction;
-    case descriptor::StopKind::Unknown: return StopKind::Unknown;
-  }
-  return StopKind::Unknown;
+// What a candidate's finishReason became: the stop, and whether the call ended as blocked.
+struct SeenStop { StopKind kind; std::string raw; bool blocked; };
+SeenStop stop_of(const descriptor::ValidatedDescriptor& d, std::string_view reason, bool streaming,
+                 std::string_view parts = R"([{"text":"hello"}])") {
+  auto encoded = gemini::encode(d, request(), streaming);
+  CHECK(std::holds_alternative<gemini::EncodedRequest>(encoded));
+  Accumulator a;
+  gemini::Codec c(d, streaming ? gemini::Mode::Sse : gemini::Mode::Buffered, a, std::get<gemini::EncodedRequest>(encoded).context);
+  if (streaming) { c.frame({}, body(parts, reason)); c.finish({}); }
+  else c.buffered(body(parts, reason), {});
+  CHECK(a.outcome());
+  if (const auto* done = std::get_if<Completion>(&*a.outcome())) return {done->stop.kind, done->stop.raw, false};
+  const auto& f = std::get<Failure>(*a.outcome());
+  CHECK(f.error.kind == ErrorKind::RemoteFailure && f.partial.stop);
+  return {f.partial.stop->kind, f.partial.stop->raw, true};
 }
-// The codec maps finishReason with a compiled table; the google.generate policy stop_reasons table
-// restates it (STOP is listed with its call-free meaning) and must not drift from it.
-void stop_kinds_match_policy_table() {
-  const auto stop_of = [](std::string_view reason, std::string_view parts = R"([{"text":"hello"}])") {
-    const auto o = buffered(body(parts, reason));
-    if (const auto* c = std::get_if<Completion>(&o)) return c->stop.kind;
-    const auto& f = std::get<Failure>(o);
-    CHECK(f.error.kind == ErrorKind::RemoteFailure && f.partial.stop);
-    return f.partial.stop->kind;
-  };
-  const std::pair<std::string_view, StopKind> expected[]{
-      {"STOP", StopKind::EndTurn}, {"MAX_TOKENS", StopKind::MaxTokens}, {"SAFETY", StopKind::ContentFilter},
-      {"IMAGE_SAFETY", StopKind::ContentFilter}, {"MALFORMED_FUNCTION_CALL", StopKind::MalformedCall}, {"OTHER", StopKind::Unknown}};
-  for (const auto& [reason, kind] : expected) CHECK(stop_of(reason) == kind);
-  CHECK(stop_of("STOP", R"([{"functionCall":{"id":"owned","name":"lookup","args":{"x":1}}}])") == StopKind::ToolUse);
-  const std::string_view reasons[]{"STOP", "MAX_TOKENS", "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII",
-      "IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT", "IMAGE_RECITATION", "ESCALATION", "PUP_LIMITED_DISABLED",
-      "MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL", "TOO_MANY_TOOL_CALLS", "OTHER", "LANGUAGE", "NO_IMAGE", "IMAGE_OTHER"};
-  for (const auto reason : reasons) CHECK(policy_kind(desc().stop_kind(reason)) == stop_of(reason));
-  for (const auto& [raw, kind] : desc().stop_mappings()) {
-    CHECK(std::find(std::begin(reasons), std::end(reasons), raw) != std::end(reasons));
-    CHECK(policy_kind(kind) == stop_of(raw));
+// The codec reads finishReason from the descriptor's stop table, the policy's rows with the descriptor's additions. A
+// value the table lists has the kind it lists (STOP with a function call is ToolUse); a value it does not list is
+// Unknown, delivered with the value kept. ContentFilter ends the call as blocked, whichever value the table gives it.
+void stop_kinds_come_from_the_table() {
+  CHECK(!desc().stop_mappings().empty());
+  for (const auto& [raw, kind] : desc().stop_mappings())
+    for (const bool streaming : {false, true}) {
+      const auto seen = stop_of(desc(), raw, streaming);
+      CHECK(to_string(seen.kind) == descriptor::to_string(kind) && seen.raw == raw);
+      CHECK(seen.blocked == (kind == descriptor::StopKind::ContentFilter));
+    }
+  CHECK(stop_of(desc(), "STOP", false, R"([{"functionCall":{"id":"owned","name":"lookup","args":{"x":1}}}])").kind == StopKind::ToolUse);
+  for (const std::string_view reason : {"OTHER", "LANGUAGE", "NO_IMAGE", "IMAGE_OTHER", "FUTURE_FINISH_REASON"})
+    for (const bool streaming : {false, true}) {
+      const auto seen = stop_of(desc(), reason, streaming);
+      CHECK(seen.kind == StopKind::Unknown && seen.raw == reason && !seen.blocked);
+    }
+  // The two values that report a rejected request end the call whatever the table says.
+  for (const std::string_view reason : {"MISSING_THOUGHT_SIGNATURE", "MALFORMED_RESPONSE"}) CHECK(stop_of(desc(), reason, false).blocked);
+  // A row a policy adds takes effect: OTHER as ContentFilter is blocked.
+  std::string grown(config_defaults::descriptor_policy_json);
+  const std::string anchor = "\"BLOCKLIST\":\"ContentFilter\"";
+  const auto row = grown.find(anchor); CHECK(row != std::string::npos);
+  grown.insert(row + anchor.size(), ",\"OTHER\":\"ContentFilter\"");
+  auto grown_policy = descriptor::load_policy(grown, config_defaults::codec_defaults_json);
+  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(grown_policy));
+  const auto under_policy = descriptor::load(descriptor_source, std::get<descriptor::PolicySnapshot>(grown_policy));
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(under_policy));
+  // And so does a row a descriptor adds.
+  std::string added(descriptor_source);
+  added.insert(added.size() - 1, R"(,"stop_reasons":{"FUTURE_FINISH_REASON":"MaxTokens"})");
+  const auto with_row = descriptor::load(added);
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(with_row));
+  for (const bool streaming : {false, true}) {
+    const auto blocked = stop_of(std::get<descriptor::ValidatedDescriptor>(under_policy), "OTHER", streaming);
+    CHECK(blocked.blocked && blocked.kind == StopKind::ContentFilter && blocked.raw == "OTHER");
+    const auto capped = stop_of(std::get<descriptor::ValidatedDescriptor>(with_row), "FUTURE_FINISH_REASON", streaming);
+    CHECK(!capped.blocked && capped.kind == StopKind::MaxTokens && capped.raw == "FUTURE_FINISH_REASON");
   }
-  // A policy snapshot may restate the compiled mapping but cannot rewrite it.
+  // A policy snapshot may restate a row of the embedded table but cannot rewrite it.
   std::string policy(config_defaults::descriptor_policy_json);
   const std::string fact = "\"IMAGE_SAFETY\":\"ContentFilter\"";
   const auto at = policy.find(fact); CHECK(at != std::string::npos);
@@ -902,6 +919,6 @@ void streamed_chunks_continue_their_part() {
 }
 }
 int main() {
-  try { http_error_envelope_in_an_array_is_retained(); output_total_without_thoughts(); total_proves_zero_thoughts(); total_without_candidates_bounds_the_output(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); tool_result_helper_needs_a_json_object(); successive_unidentified_calls(); local_ids_carry_a_random_token_per_response(); native_group_and_replay(); nullable_usage(); uncached_input_rule(); stop_kinds_match_policy_table(); invalid_model_calls(); errors_and_terminals(); loaded_routes_encode_for_their_model(); empty_text_delta_is_withheld(); streamed_chunks_continue_their_part(); one_descriptor_serves_every_model(); served_model_is_recorded(); failure_reasons(); std::cout << "Gemini semantic invariants passed\n"; }
+  try { http_error_envelope_in_an_array_is_retained(); output_total_without_thoughts(); total_proves_zero_thoughts(); total_without_candidates_bounds_the_output(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); tool_result_helper_needs_a_json_object(); successive_unidentified_calls(); local_ids_carry_a_random_token_per_response(); native_group_and_replay(); nullable_usage(); uncached_input_rule(); stop_kinds_come_from_the_table(); invalid_model_calls(); errors_and_terminals(); loaded_routes_encode_for_their_model(); empty_text_delta_is_withheld(); streamed_chunks_continue_their_part(); one_descriptor_serves_every_model(); served_model_is_recorded(); failure_reasons(); std::cout << "Gemini semantic invariants passed\n"; }
   catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

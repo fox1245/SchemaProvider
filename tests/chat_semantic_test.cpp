@@ -3,6 +3,7 @@
 #include "codecs/interactions_request.h"
 #include "codecs/messages_request.h"
 #include "codecs/responses_request.h"
+#include "core/enum_names.h"
 #include "core/native.h"
 #include "descriptor/descriptor.h"
 #include "descriptor/policy.h"
@@ -513,6 +514,25 @@ void failure_reasons() {
   // A close the transport reports is the transport's: its kind stays, and no codec check is named.
   const auto cut = frames({chunk(R"({"role":"assistant","content":"x"})")}, false);
   CHECK(failed(cut, ErrorKind::Truncated).error.reason.empty() && failed(cut, ErrorKind::Truncated).error.safe_message == "abnormal response close");
+}
+// finish_reason is read from the descriptor's stop table: a value it lists has the kind it lists, and a value it does
+// not list is Unknown, delivered with the value kept. Buffered and streamed alike.
+void finish_reasons_from_the_table() {
+  const auto answers = [](std::string_view reason) {
+    const auto quoted = json::quote(reason);
+    return std::vector<Outcome>{buffered(body(R"({"role":"assistant","content":"hello"})", quoted)),
+                                frames({chunk(R"({"role":"assistant","content":"hello"})"), chunk("{}", quoted), "[DONE]"})};
+  };
+  CHECK(!descriptor_value().stop_mappings().empty());
+  for (const auto& [raw, kind] : descriptor_value().stop_mappings())
+    for (const auto& outcome : answers(raw)) {
+      const auto& c = completed(outcome);
+      CHECK(to_string(c.stop.kind) == descriptor::to_string(kind) && c.stop.raw == raw && text_of(c.messages) == "hello");
+    }
+  for (const auto& outcome : answers("future_finish_reason")) {
+    const auto& c = completed(outcome);
+    CHECK(c.stop.kind == StopKind::Unknown && c.stop.raw == "future_finish_reason" && text_of(c.messages) == "hello");
+  }
 }
 void required_usage_and_unknown_cache() {
   const std::vector<std::string> names{"prompt_tokens", "completion_tokens", "total_tokens"};
@@ -1586,7 +1606,7 @@ int main() {
     owned_raw_observations(); raw_failure_evidence();
     chunk_partition_invariant(); no_terminal_no_success(); transport_projection_parity(); known_corrupt_never_ignored();
     invalid_tools_and_compatibility(); usage_knowledge(); accumulator_transitions_and_seals(); typed_request_encoding();
-    required_metadata_and_identity(); per_chunk_creation_clock(); omitted_open_finish_reason(); empty_text_delta_is_withheld(); failure_reasons(); required_usage_and_unknown_cache(); unindexed_tool_order_and_optional_function(); buffered_close_precedence();
+    required_metadata_and_identity(); per_chunk_creation_clock(); omitted_open_finish_reason(); empty_text_delta_is_withheld(); failure_reasons(); finish_reasons_from_the_table(); required_usage_and_unknown_cache(); unindexed_tool_order_and_optional_function(); buffered_close_precedence();
     accumulator_interleaved_ordering(); accumulator_order_uniqueness_and_limits();
     tool_history_and_escaped_arguments(); one_tool_message_with_several_results(); output_cap_member_by_origin(); quoted_json_and_request_bounds();
     gateway_request_controls(); gateway_max_price(); gateway_plugins_and_citations();

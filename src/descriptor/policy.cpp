@@ -1,5 +1,6 @@
 #include "descriptor/policy.h"
 #include "descriptor/owned_keys.h"
+#include "descriptor/stop_facts.h"
 #include "crypto/crypto.h"
 #include "sp/config_defaults.h"
 #include <algorithm>
@@ -122,39 +123,14 @@ RequestDefaults defaults(Value v) {
   closed(v,{"max_output_tokens","thinking_budget","include_thoughts","thinking_summaries","reasoning_enabled","reasoning_effort","reasoning_summary","thinking_level","service_tier","temperature","top_p","strict_tools"},path);
   return {optional_integer(v.get("max_output_tokens"),path),optional_integer(v.get("thinking_budget"),path),optional_bool(v.get("include_thoughts"),path),optional_bool(v.get("thinking_summaries"),path),optional_bool(v.get("strict_tools"),path),boolean(v.get("reasoning_enabled"),path),optional_text(v.get("reasoning_effort"),path),optional_text(v.get("reasoning_summary"),path),optional_text(v.get("thinking_level"),path),optional_text(v.get("service_tier"),path),optional_number(v.get("temperature"),path),optional_number(v.get("top_p"),path)};
 }
-StopKind stop(Value v) {
-  const auto s=text(v,"/stop_reasons");
-  if (s == "Unknown") return StopKind::Unknown;
-  if (s == "EndTurn") return StopKind::EndTurn;
-  if (s == "MaxTokens") return StopKind::MaxTokens;
-  if (s == "ToolUse") return StopKind::ToolUse;
-  if (s == "ContentFilter") return StopKind::ContentFilter;
-  if (s == "Refusal") return StopKind::Refusal;
-  if (s == "PauseTurn") return StopKind::PauseTurn;
-  if (s == "ContextLimit") return StopKind::ContextLimit;
-  if (s == "StopSequence") return StopKind::StopSequence;
-  if (s == "MalformedCall") return StopKind::MalformedCall;
-  if (s == "Compaction") return StopKind::Compaction;
-  fail("/stop_reasons","typed StopKind");
-}
-// Stop safety remains compiled; policy may add facts, never rewrite standard causality.
-bool safe_stop(std::string_view family, std::string_view raw, StopKind kind) {
-  if(raw=="error" || raw=="failed" || raw=="cancelled" || raw=="incomplete") return false;
-  struct Rule { std::string_view family, raw; StopKind kind; };
-  static constexpr Rule rules[]{
-    {"openai.chat","stop",StopKind::EndTurn},{"openai.chat","length",StopKind::MaxTokens},{"openai.chat","tool_calls",StopKind::ToolUse},{"openai.chat","content_filter",StopKind::ContentFilter},
-    {"anthropic.messages","end_turn",StopKind::EndTurn},{"anthropic.messages","max_tokens",StopKind::MaxTokens},{"anthropic.messages","tool_use",StopKind::ToolUse},{"anthropic.messages","pause_turn",StopKind::PauseTurn},{"anthropic.messages","compaction",StopKind::Compaction},{"anthropic.messages","refusal",StopKind::Refusal},{"anthropic.messages","stop_sequence",StopKind::StopSequence},{"anthropic.messages","model_context_window_exceeded",StopKind::ContextLimit},
-    {"openai.responses","completed",StopKind::EndTurn},{"openai.responses","max_output_tokens",StopKind::MaxTokens},{"openai.responses","content_filter",StopKind::ContentFilter},
-    // google.generate mirrors the Gemini codec's compiled finishReason mapping (codecs/gemini.cpp).
-    {"google.generate","STOP",StopKind::EndTurn},{"google.generate","MAX_TOKENS",StopKind::MaxTokens},
-    {"google.generate","SAFETY",StopKind::ContentFilter},{"google.generate","RECITATION",StopKind::ContentFilter},{"google.generate","BLOCKLIST",StopKind::ContentFilter},
-    {"google.generate","PROHIBITED_CONTENT",StopKind::ContentFilter},{"google.generate","SPII",StopKind::ContentFilter},{"google.generate","IMAGE_SAFETY",StopKind::ContentFilter},
-    {"google.generate","IMAGE_PROHIBITED_CONTENT",StopKind::ContentFilter},{"google.generate","IMAGE_RECITATION",StopKind::ContentFilter},
-    {"google.generate","ESCALATION",StopKind::ContentFilter},{"google.generate","PUP_LIMITED_DISABLED",StopKind::ContentFilter},
-    {"google.generate","MALFORMED_FUNCTION_CALL",StopKind::MalformedCall},{"google.generate","UNEXPECTED_TOOL_CALL",StopKind::MalformedCall},{"google.generate","TOO_MANY_TOOL_CALLS",StopKind::MalformedCall},
-    {"google.interactions","completed",StopKind::EndTurn},{"google.interactions","requires_action",StopKind::ToolUse},{"google.interactions","max_output_tokens",StopKind::MaxTokens}};
-  for (const auto& r:rules) if(r.family==family && r.raw==raw) return r.kind==kind;
-  return true;
+// A policy's stop row: a value only a failure carries is refused (failures are decided in code), and so is a row that
+// gives a value the embedded policy lists another kind. A policy may add rows.
+std::pair<std::string, StopKind> stop_row(std::string_view family, const json::Member& row) {
+  const auto kind = stop_kind_from_name(text(row.value, "/stop_reasons"));
+  if (!kind) fail("/stop_reasons", "typed StopKind");
+  if (row.key.empty() || row.key.size() > 128 || failure_stop(row.key) || contradicts(embedded_stops(family), row.key, *kind))
+    fail("/stop_reasons", "unchanged standard causality");
+  return {std::string(row.key), *kind};
 }
 std::array<double,2> range(Value v) { if(!v.is_array() || v.size()!=2)fail("/range","two finite bounds"); auto a=number(v.at(0),"/range"), b=number(v.at(1),"/range"); if(a>b)fail("/range","ordered bounds"); return {a,b}; }
 EffectiveChoices choices(const RequestDefaults& d) {
@@ -221,6 +197,30 @@ bool within_depth(Value v, std::size_t remaining) {
   return true;
 }
 } // namespace
+const StopRows& embedded_stops(std::string_view family) {
+  // Parsed once from the embedded text. It never goes through builtin_policy(): this runs while that policy loads.
+  static const auto tables = [] {
+    std::vector<std::pair<std::string, StopRows>> parsed_tables;
+    auto parsed = json::parse(config_defaults::descriptor_policy_json,
+                              {config_defaults::codec_admission_policy_bytes, config_defaults::codec_admission_policy_depth});
+    const auto* document = std::get_if<json::Document>(&parsed);
+    if (!document) throw std::logic_error("the embedded descriptor policy is not admissible JSON");
+    for (auto entry : document->root().get("families").elements()) {
+      StopRows rows;
+      for (auto row : entry.get("stop_reasons").members()) {
+        const auto kind = row.value.is_string() ? stop_kind_from_name(row.value.as_string()) : std::nullopt;
+        if (!kind) throw std::logic_error("the embedded descriptor policy names an unknown stop kind");
+        rows.emplace_back(std::string(row.key), *kind);
+      }
+      parsed_tables.emplace_back(std::string(entry.get("family").as_string()), std::move(rows));
+    }
+    return parsed_tables;
+  }();
+  for (const auto& [name, rows] : tables)
+    if (name == family) return rows;
+  static const StopRows none;
+  return none;
+}
 class PolicyLoader {
  public:
   PolicyResult run(std::string_view source,std::string_view resources,CatalogueSnapshot catalogue) {
@@ -253,7 +253,7 @@ class PolicyLoader {
         auto b=v.get("bindings"); closed(b,{"model","messages","stream","max_output_tokens","usage"},"/bindings");
         f.model_member=text(b.get("model"),"/bindings"); f.messages_member=text(b.get("messages"),"/bindings"); f.stream_member=text(b.get("stream"),"/bindings"); f.cap_member=text(b.get("max_output_tokens"),"/bindings"); f.usage_path=strings(b.get("usage"),"/bindings/usage",true);
         auto stops=v.get("stop_reasons"); if(!stops.is_object() || stops.size()>64)fail("/stop_reasons","bounded stop facts");
-        for(auto s:stops.members()){auto kind=stop(s.value); if(s.key.empty() || s.key.size()>128 || !safe_stop(f.family,s.key,kind))fail("/stop_reasons","unchanged standard causality"); f.stops.emplace_back(s.key,kind);}
+        for(auto s:stops.members()) f.stops.push_back(stop_row(f.family, s));
         f.defaults=::sp::descriptor::defaults(v.get("defaults")); f.required_output_cap=boolean(v.get("required_output_cap"),"/required_output_cap");
         if(f.required_output_cap!=(f.family=="anthropic.messages"))fail("/required_output_cap","protocol output requirement");
         f.temperature_range=range(v.get("temperature_range")); f.top_p_range=range(v.get("top_p_range")); f.thinking_minimum=integer(v.get("thinking_minimum"),"/thinking_minimum"); f.thinking_top_p_minimum=number(v.get("thinking_top_p_minimum"),"/thinking_top_p_minimum");

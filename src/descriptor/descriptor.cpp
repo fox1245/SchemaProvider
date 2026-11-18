@@ -1,5 +1,6 @@
 #include "descriptor/descriptor.h"
 #include "descriptor/policy.h"
+#include "descriptor/stop_facts.h"
 #include "json/json.h"
 
 #include <algorithm>
@@ -10,6 +11,7 @@
 #include <optional>
 #include <span>
 #include <unordered_set>
+#include <utility>
 
 namespace sp::descriptor {
 namespace {
@@ -206,6 +208,22 @@ bool date(std::string_view s) {
     if (!year || !month || month > 12 || !day) return false;
     return day <= days[month-1] + (month == 2 && year % 4 == 0 && (year % 100 != 0 || year % 400 == 0));
 }
+}
+
+std::optional<StopKind> stop_kind_from_name(std::string_view name) noexcept {
+    static constexpr std::pair<std::string_view, StopKind> names[]{
+        {"Unknown", StopKind::Unknown}, {"EndTurn", StopKind::EndTurn}, {"MaxTokens", StopKind::MaxTokens},
+        {"ToolUse", StopKind::ToolUse}, {"ContentFilter", StopKind::ContentFilter}, {"Refusal", StopKind::Refusal},
+        {"PauseTurn", StopKind::PauseTurn}, {"ContextLimit", StopKind::ContextLimit}, {"StopSequence", StopKind::StopSequence},
+        {"MalformedCall", StopKind::MalformedCall}, {"Compaction", StopKind::Compaction}};
+    for (const auto& [spelled, kind] : names) if (spelled == name) return kind;
+    return std::nullopt;
+}
+bool failure_stop(std::string_view raw) noexcept {
+    return raw == "error" || raw == "failed" || raw == "cancelled" || raw == "incomplete";
+}
+bool contradicts(const StopRows& rows, std::string_view raw, StopKind kind) noexcept {
+    return std::any_of(rows.begin(), rows.end(), [&](const auto& row) { return row.first == raw && row.second != kind; });
 }
 
 class Loader {
@@ -406,32 +424,21 @@ private:
                 fail("/bindings/usage", "usage root disjoint from Google response fields", "response path collision");
         }
     }
+    // A descriptor adds raw stop values to its family's table. In every family it never gives a value another kind
+    // than its policy or the embedded policy gives it, and never lists a value only a failure carries.
     void stops(Value item) {
         if (!item.is_object() || item.size() > 64) fail("/stop_reasons", "object with at most 64 stop mappings");
         const std::string pointer = "/stop_reasons";
         for (auto member : item.members()) {
             if (member.key.empty() || member.key.size() > 128 || control(member.key)) fail(pointer, "bounded raw stop string");
-            if (member.key == "error" || member.key == "failed" || member.key == "cancelled" || member.key == "incomplete") fail(pointer, "non-failure stop reason");
-            auto mapped = string(member.value, pointer, 32);
-            StopKind kind;
-            if (mapped == "Unknown") kind = StopKind::Unknown;
-            else if (mapped == "EndTurn") kind = StopKind::EndTurn;
-            else if (mapped == "MaxTokens") kind = StopKind::MaxTokens;
-            else if (mapped == "ToolUse") kind = StopKind::ToolUse;
-            else if (mapped == "ContentFilter") kind = StopKind::ContentFilter;
-            else if (mapped == "Refusal") kind = StopKind::Refusal;
-            else if (mapped == "PauseTurn") kind = StopKind::PauseTurn;
-            else if (mapped == "ContextLimit") kind = StopKind::ContextLimit;
-            else if (mapped == "StopSequence") kind = StopKind::StopSequence;
-            else if (mapped == "MalformedCall") kind = StopKind::MalformedCall;
-            else if (mapped == "Compaction") kind = StopKind::Compaction;
-            else fail(pointer, "existing StopKind");
-            auto found = std::find_if(value_.stop_reasons_.begin(), value_.stop_reasons_.end(), [&](const auto& entry) { return entry.first == member.key; });
-            if ((value_.family_ == "anthropic.messages" || value_.family_ == "openai.responses") &&
-                found != value_.stop_reasons_.end() && found->second != kind)
+            if (failure_stop(member.key)) fail(pointer, "non-failure stop reason");
+            const auto kind = stop_kind_from_name(string(member.value, pointer, 32));
+            if (!kind) fail(pointer, "existing StopKind");
+            if (contradicts(value_.stop_reasons_, member.key, *kind) || contradicts(embedded_stops(value_.family_), member.key, *kind))
                 fail(pointer, "unchanged standard family stop meaning");
-            if (found == value_.stop_reasons_.end()) value_.stop_reasons_.emplace_back(member.key, kind);
-            else found->second = kind;
+            // A restated row keeps its place, so the table and the bindings that hash it stay as they were.
+            if (std::none_of(value_.stop_reasons_.begin(), value_.stop_reasons_.end(), [&](const auto& entry) { return entry.first == member.key; }))
+                value_.stop_reasons_.emplace_back(member.key, *kind);
         }
     }
 };

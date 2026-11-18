@@ -3,6 +3,7 @@
 #include "codecs/provider_cost.h"
 #include "codecs/reason.h"
 #include "codecs/served_model.h"
+#include "codecs/stop_table.h"
 #include "core/native.h"
 #include "descriptor/descriptor.h"
 #include "descriptor/policy.h"
@@ -372,8 +373,11 @@ bool Codec::response(json::Value v, std::string_view event, bool streaming) {
   if (state == "incomplete") {
     if (!details.is_object() || !nonempty(details.get("reason"))) return fail(ErrorKind::ProtocolCorrupt, "incomplete reason required");
     const auto reason = details.get("reason").as_string();
-    if (reason != "max_output_tokens" && reason != "content_filter") return fail(ErrorKind::Unsupported, "unsupported incomplete reason");
-    stop = {reason == "max_output_tokens" ? StopKind::MaxTokens : StopKind::ContentFilter, std::string(reason)};
+    // The stop table gives the reason's kind, and a reason it does not list is Unknown. An incomplete response never
+    // takes a kind that would seal it as a finished turn (EndTurn, ToolUse, Refusal); such a row reads as Unknown.
+    const auto kind = table_stop(descriptor_, reason);
+    const bool finished = kind == StopKind::EndTurn || kind == StopKind::ToolUse || kind == StopKind::Refusal;
+    stop = {finished ? StopKind::Unknown : kind, std::string(reason)};
     stop.details = own(details); if (!stop.details) return false;
   }
   if (!begun_) {
@@ -413,7 +417,9 @@ bool Codec::response(json::Value v, std::string_view event, bool streaming) {
       auto item_state = item.done->root().get("status");
       if (!opaque(item.type) && item_state.is_string() && item_state.as_string() != "completed") return fail(ErrorKind::ProtocolCorrupt, "completed response contains incomplete item");
     }
-    stop = {function_seen_ ? StopKind::ToolUse : refusal_seen_ ? StopKind::Refusal : StopKind::EndTurn, "completed"};
+    // The stop table gives the kind of a completed response; under EndTurn its content decides a call or a refusal.
+    const auto kind = table_stop(descriptor_, state);
+    stop = {kind != StopKind::EndTurn ? kind : function_seen_ ? StopKind::ToolUse : refusal_seen_ ? StopKind::Refusal : kind, std::string(state)};
   }
   auto captured = streaming ? own_completed_output() : own(output); if (!captured) return false;
   if (!emit(Stop{std::move(stop)}) || !emit(MessageSeal{{0}, std::move(captured)})) return false;

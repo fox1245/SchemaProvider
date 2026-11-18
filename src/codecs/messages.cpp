@@ -3,6 +3,7 @@
 #include "codecs/provider_cost.h"
 #include "codecs/reason.h"
 #include "codecs/served_model.h"
+#include "codecs/stop_table.h"
 #include "core/native.h"
 #include "descriptor/descriptor.h"
 #include "descriptor/policy.h"
@@ -32,22 +33,6 @@ Citation citation_of(json::Value citation) {
   auto parsed = json::parse(citation.dump());
   if (std::holds_alternative<json::Document>(parsed)) cited.raw = std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
   return cited;
-}
-StopKind mapped(descriptor::StopKind k) {
-  switch (k) {
-    case descriptor::StopKind::EndTurn: return StopKind::EndTurn;
-    case descriptor::StopKind::MaxTokens: return StopKind::MaxTokens;
-    case descriptor::StopKind::ToolUse: return StopKind::ToolUse;
-    case descriptor::StopKind::ContentFilter: return StopKind::ContentFilter;
-    case descriptor::StopKind::Refusal: return StopKind::Refusal;
-    case descriptor::StopKind::PauseTurn: return StopKind::PauseTurn;
-    case descriptor::StopKind::ContextLimit: return StopKind::ContextLimit;
-    case descriptor::StopKind::StopSequence: return StopKind::StopSequence;
-    case descriptor::StopKind::MalformedCall: return StopKind::MalformedCall;
-    case descriptor::StopKind::Compaction: return StopKind::Compaction;
-    case descriptor::StopKind::Unknown: return StopKind::Unknown;
-  }
-  return StopKind::Unknown;
 }
 // A server tool's result block is named after the tool: <tool>_tool_result answers a call named <tool>, or one of
 // its variants named <tool>_<variant> (tool_search_tool_regex). A tool the service adds needs no SDK release.
@@ -263,7 +248,7 @@ bool Codec::terminal(json::Value v, bool initial) {
     return true;
   }
   if (reason.as_string() == "error") return fail(ErrorKind::RemoteFailure, "remote failure stop");
-  StopReason next{mapped(descriptor_.stop_kind(reason.as_string())), std::string(reason.as_string())};
+  StopReason next{table_stop(descriptor_, reason.as_string()), std::string(reason.as_string())};
   if (sequence.is_string()) next.sequence = std::string(sequence.as_string());
   if (details.is_object()) next.details = own(details);
   if ((next.kind == StopKind::StopSequence) != next.sequence.has_value() || (next.details && next.kind != StopKind::Refusal)) return fail(ErrorKind::ProtocolCorrupt, "contradictory stop metadata");

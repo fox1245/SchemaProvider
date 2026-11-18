@@ -3,6 +3,7 @@
 #include "codecs/media_output.h"
 #include "codecs/provider_cost.h"
 #include "codecs/reason.h"
+#include "codecs/stop_table.h"
 #include "core/native.h"
 #include "descriptor/descriptor.h"
 #include "json/json.h"
@@ -27,22 +28,6 @@ bool empty_choice(json::Value choice) {
 }
 bool unsigned_count(json::Value v) { return v.is_uint() || (v.is_int() && v.as_int() >= 0); }
 uint64_t uint_value(json::Value v) { return v.is_uint() ? v.as_uint() : static_cast<uint64_t>(v.as_int()); }
-StopKind stop_kind(descriptor::StopKind kind) {
-  switch (kind) {
-    case descriptor::StopKind::EndTurn: return StopKind::EndTurn;
-    case descriptor::StopKind::MaxTokens: return StopKind::MaxTokens;
-    case descriptor::StopKind::ToolUse: return StopKind::ToolUse;
-    case descriptor::StopKind::ContentFilter: return StopKind::ContentFilter;
-    case descriptor::StopKind::Refusal: return StopKind::Refusal;
-    case descriptor::StopKind::PauseTurn: return StopKind::PauseTurn;
-    case descriptor::StopKind::ContextLimit: return StopKind::ContextLimit;
-    case descriptor::StopKind::StopSequence: return StopKind::StopSequence;
-    case descriptor::StopKind::MalformedCall: return StopKind::MalformedCall;
-    case descriptor::StopKind::Compaction: return StopKind::Compaction;
-    case descriptor::StopKind::Unknown: return StopKind::Unknown;
-  }
-  return StopKind::Unknown;
-}
 // Chat does not state the audio format of a reply; it is the one the request asked for.
 std::string_view audio_mime(std::string_view format) {
   if (format == "wav") return "audio/wav";
@@ -254,7 +239,7 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
     if (reason.is_string() && !terminal_tail) {
       if (reason.as_string().empty()) return fail(ErrorKind::ProtocolCorrupt, "empty finish reason");
       if (reason.as_string() == "error") return fail(ErrorKind::RemoteFailure, "remote failure terminal");
-      auto kind = stop_kind(descriptor_.stop_kind(reason.as_string()));
+      const auto kind = table_stop(descriptor_, reason.as_string());
       if (streaming && (!finish_reasoning_details() || !finish_audio())) return false;
       if (!emit(Stop{{kind, std::string(reason.as_string())}})) return false;
       stopped_ = true;

@@ -309,6 +309,14 @@ void stop_classes() {
   }
   failed(buffered(body("[]", "\"stop_sequence\"")), ErrorKind::ProtocolCorrupt);
   failed(buffered(body("[]", "\"error\"")), ErrorKind::RemoteFailure);
+  // A value the stop table does not list is Unknown, delivered with the value kept.
+  const std::string content = R"([{"type":"text","text":"kept"}])";
+  const auto b = buffered(body(content, "\"future_stop_reason\"", initial_usage));
+  const auto s = stream({start(), block(0, R"({"type":"text","text":"kept"})"), end(0), stop("\"future_stop_reason\"", R"({"output_tokens":1})"), done});
+  for (const auto* o : {&b, &s}) {
+    const auto& c = completed(*o);
+    CHECK(c.stop.kind == StopKind::Unknown && c.stop.raw == "future_stop_reason" && text(c.messages) == "kept");
+  }
 }
 void corruption_matrix() {
   const std::vector<std::vector<Frame>> invalid{

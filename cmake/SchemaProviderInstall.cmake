@@ -31,7 +31,9 @@ install(DIRECTORY
   PATTERN "io_thread.h" EXCLUDE
   PATTERN "native_testing.h" EXCLUDE
   PATTERN "reason.h" EXCLUDE
-  PATTERN "served_model.h" EXCLUDE)
+  PATTERN "served_model.h" EXCLUDE
+  PATTERN "stop_facts.h" EXCLUDE
+  PATTERN "stop_table.h" EXCLUDE)
 install(FILES
   "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/client.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/host.h"
