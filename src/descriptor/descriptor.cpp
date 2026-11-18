@@ -219,9 +219,14 @@ std::optional<StopKind> stop_kind_from_name(std::string_view name) noexcept {
     for (const auto& [spelled, kind] : names) if (spelled == name) return kind;
     return std::nullopt;
 }
-bool failure_stop(std::string_view raw) noexcept {
-    return raw == "error" || raw == "failed" || raw == "cancelled" || raw == "incomplete";
+std::optional<FailureStop> failure_stop_class(std::string_view raw) noexcept {
+    static constexpr std::pair<std::string_view, FailureStop> words[]{
+        {"error", FailureStop::Failed}, {"failed", FailureStop::Failed},
+        {"cancelled", FailureStop::Cancelled}, {"incomplete", FailureStop::Incomplete}};
+    for (const auto& [word, failure] : words) if (word == raw) return failure;
+    return std::nullopt;
 }
+bool failure_stop(std::string_view raw) noexcept { return failure_stop_class(raw).has_value(); }
 bool contradicts(const StopRows& rows, std::string_view raw, StopKind kind) noexcept {
     return std::any_of(rows.begin(), rows.end(), [&](const auto& row) { return row.first == raw && row.second != kind; });
 }

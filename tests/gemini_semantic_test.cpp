@@ -276,6 +276,53 @@ void rejected_values_fail_before_the_table() {
         for (const auto& p : m.parts) CHECK(!std::holds_alternative<ToolCall>(p));
     }
 }
+// A finishReason that is a failure-class word (`error`, `failed`, `cancelled`, `incomplete`) is a failure, decided before
+// the stop table is read, as the two values that report a rejected request are. Buffered and streamed, with text, with
+// no content and with a call, the only stop is Unknown with the word as its raw value, nothing is sealed and no call is
+// executable. A buffered candidate reads none of its parts; a stream keeps what it delivered, unsealed. Matching is
+// exact: another letter case of a word, like any value no table lists, is Unknown.
+void failure_words_fail_before_the_table() {
+  struct Word { std::string_view raw; ErrorKind kind; std::string_view message, code; };
+  const Word words[]{{"error", ErrorKind::RemoteFailure, "Gemini failure finish reason", "gemini.finish_reason.failure"},
+                     {"failed", ErrorKind::RemoteFailure, "Gemini failure finish reason", "gemini.finish_reason.failure"},
+                     {"cancelled", ErrorKind::Cancelled, "Gemini cancelled finish reason", "gemini.finish_reason.cancelled"},
+                     {"incomplete", ErrorKind::Unsupported, "unsupported Gemini finish reason", "gemini.finish_reason.unsupported"}};
+  struct Content { std::string_view name, parts; };
+  const Content contents[]{{"text", R"([{"text":"hello"}])"}, {"none", "[]"},
+                           {"call", R"([{"functionCall":{"id":"owned","name":"lookup","args":{"x":1}}}])"}};
+  for (const auto& word : words)
+    for (const auto& content : contents)
+      for (const bool streaming : {false, true}) {
+        std::size_t seals = 0;
+        std::vector<StopKind> stops;
+        Accumulator a({}, [&](const Event& event) {
+          if (std::holds_alternative<PartSeal>(event) || std::holds_alternative<MessageSeal>(event)) ++seals;
+          if (const auto* stop = std::get_if<Stop>(&event)) stops.push_back(stop->reason.kind);
+        });
+        gemini::Codec c(desc(), streaming ? gemini::Mode::Sse : gemini::Mode::Buffered, a, context(streaming));
+        if (streaming) {
+          // The content arrives before the chunk that carries the finish reason.
+          for (const auto& chunk : {body(content.parts, ""), body("[]", word.raw)}) if (!c.frame({}, chunk)) break;
+          c.finish({});
+        } else c.buffered(body(content.parts, word.raw), {});
+        CHECK(a.outcome());
+        const auto& f = failure(*a.outcome(), word.kind);
+        CHECK(f.error.safe_message == word.message && f.error.reason == word.code);
+        CHECK(seals == 0 && stops.size() == 1 && stops[0] == StopKind::Unknown);
+        CHECK(f.partial.stop && f.partial.stop->kind == StopKind::Unknown && f.partial.stop->raw == word.raw);
+        CHECK(f.partial.executable_tool_calls().empty() && f.partial.joined_text() == (streaming && content.name == "text" ? "hello" : ""));
+        CHECK(f.partial.invalid_tool_calls().size() == (streaming && content.name == "call" ? 1u : 0u));
+      }
+  for (const std::string_view raw : {"CANCELLED", "FUTURE_FINISH_REASON"}) {
+    CHECK(desc().stop_kind(raw) == descriptor::StopKind::Unknown);
+    const auto b = buffered(body(R"([{"text":"hello"}])", raw));
+    const auto s = stream({body(R"([{"text":"hello"}])", raw)});
+    for (const auto* o : {&b, &s}) {
+      const auto& c = complete(*o);
+      CHECK(c.stop.kind == StopKind::Unknown && c.stop.raw == raw && c.joined_text() == "hello");
+    }
+  }
+}
 void invalid_model_calls() {
   for (auto args : {"[]", "null", "1", R"({"x":1,"x":2})"}) {
     auto o = buffered(body("[{\"functionCall\":{\"id\":\"owned\",\"name\":\"lookup\",\"args\":" + std::string(args) + "}}]"));
@@ -969,6 +1016,6 @@ void streamed_chunks_continue_their_part() {
 }
 }
 int main() {
-  try { http_error_envelope_in_an_array_is_retained(); output_total_without_thoughts(); total_proves_zero_thoughts(); total_without_candidates_bounds_the_output(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); tool_result_helper_needs_a_json_object(); successive_unidentified_calls(); local_ids_carry_a_random_token_per_response(); native_group_and_replay(); nullable_usage(); uncached_input_rule(); stop_kinds_come_from_the_table(); embedded_rows_survive_a_custom_policy(); rejected_values_fail_before_the_table(); invalid_model_calls(); errors_and_terminals(); loaded_routes_encode_for_their_model(); empty_text_delta_is_withheld(); streamed_chunks_continue_their_part(); one_descriptor_serves_every_model(); served_model_is_recorded(); failure_reasons(); std::cout << "Gemini semantic invariants passed\n"; }
+  try { http_error_envelope_in_an_array_is_retained(); output_total_without_thoughts(); total_proves_zero_thoughts(); total_without_candidates_bounds_the_output(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); tool_result_helper_needs_a_json_object(); successive_unidentified_calls(); local_ids_carry_a_random_token_per_response(); native_group_and_replay(); nullable_usage(); uncached_input_rule(); stop_kinds_come_from_the_table(); embedded_rows_survive_a_custom_policy(); rejected_values_fail_before_the_table(); failure_words_fail_before_the_table(); invalid_model_calls(); errors_and_terminals(); loaded_routes_encode_for_their_model(); empty_text_delta_is_withheld(); streamed_chunks_continue_their_part(); one_descriptor_serves_every_model(); served_model_is_recorded(); failure_reasons(); std::cout << "Gemini semantic invariants passed\n"; }
   catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }
