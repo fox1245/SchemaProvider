@@ -178,7 +178,7 @@ A scheme says which header carries the API key:
 | `x-api-key` | `x-api-key: <key>` |
 | `x-goog-api-key` | `x-goog-api-key: <key>` |
 
-There is no other scheme, and no request signing. A chat call uses the descriptor's `connection.auth` when it states one, else the first of its family's `auth` facts in the descriptor policy that matches the descriptor's origin. The key goes only to the descriptor's own origin, whichever scheme sends it. A descriptor for the Messages or Generate shape at a host that takes a bearer token states it:
+There is no other scheme, and no request signing. A chat call uses the descriptor's `connection.auth` when it states one, else the first of its family's `auth` facts in the descriptor policy that matches the descriptor's origin. The key goes only to the descriptor's own origin, whichever scheme sends it. With a key set, a call whose scheme names no header is refused before it is sent (`InvalidConfig`, reason `credential.scheme.no_header`) rather than sent without it; the loaders admit only these three schemes, so policy and descriptor data do not reach that refusal. A descriptor for the Messages or Generate shape at a host that takes a bearer token states it:
 
 ```json
 {
@@ -190,7 +190,7 @@ There is no other scheme, and no request signing. A chat call uses the descripto
 
 Each call of a `Client` with this descriptor and a key sends `Authorization: Bearer <key>` and no `x-api-key`. `connection.auth` admits `bearer`, `x-api-key` and `x-goog-api-key` at any origin, and any other value is a `ConfigError` at `/connection/auth`. It replaces the family policy's scheme for the descriptor's chat calls only: an [endpoint call](#non-chat-endpoints) and a [realtime session](#realtime-sessions) send the header of their endpoint fact's `auth`. It is not a header, so it is not part of the native origin identity or the archive binding, and history sealed under one scheme continues under another. `ValidatedDescriptor::auth()` returns the stated scheme (empty when there is none), and `descriptor::auth_scheme(descriptor)` the one its chat calls use.
 
-Each family of the descriptor policy states its schemes in `auth`, an array of facts tried in order. A fact names its `scheme` and may list `origins` (canonical origins without a path, each in one fact); the last fact has no `origins` and applies at every other origin, and it is the only one without. The built-in policy states `[{"scheme": "bearer"}]` for Chat and Responses, `[{"scheme": "x-api-key"}]` for Messages and `[{"scheme": "x-goog-api-key"}]` for Generate and Interactions. A custom policy may name another scheme for an origin:
+Each family of the descriptor policy states its schemes in `auth`, an array of facts tried in order. A fact names its `scheme` and may list `origins` (canonical origins without a path, each in one fact); the last fact has no `origins` and applies at every other origin, and it is the only one without. An origin matches the descriptor's `base_url` byte for byte, as the gateway and cache origins do. The built-in policy states `[{"scheme": "bearer"}]` for Chat and Responses, `[{"scheme": "x-api-key"}]` for Messages and `[{"scheme": "x-goog-api-key"}]` for Generate and Interactions. A custom policy may name another scheme for an origin:
 
 ```json
 "auth": [{"origins": ["https://llm.example.com"], "scheme": "bearer"}, {"scheme": "x-api-key"}]

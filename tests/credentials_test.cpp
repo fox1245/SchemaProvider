@@ -4,6 +4,7 @@
 // origin, and never twice.
 #include "codecs/chat.h"
 #include "codecs/embeddings.h"
+#include "codecs/endpoint.h"
 #include "codecs/files.h"
 #include "codecs/gemini_request.h"
 #include "codecs/interactions_request.h"
@@ -11,6 +12,8 @@
 #include "codecs/realtime.h"
 #include "codecs/rerank.h"
 #include "codecs/responses_request.h"
+#include "core/native_archive_custody_internal.h"
+#include "core/native_testing.h"
 #include "crypto/crypto.h"
 #include "descriptor/descriptor.h"
 #include "descriptor/policy.h"
@@ -20,6 +23,7 @@
 #include "sp/config_defaults.h"
 #include "support/endpoint_fakes.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <optional>
 #include <string>
@@ -503,6 +507,99 @@ void queries() {
   const auto old = loaded_policy(edited({}, "auth", {}));
   CHECK(old && old->auth_scheme("anthropic.messages", custom) == "x-api-key" && old->auth_scheme("openai.chat", custom) == "bearer");
 }
+
+// With a key, a scheme that names no header refuses the call before it is sent, with a fixed text and a reason;
+// without a key no credential is sent and nothing is refused.
+void key_never_dropped() {
+  for (const std::string_view scheme : {"", "basic", "Bearer", "authorization"}) {
+    const auto refused = endpoints::credential(scheme, key);
+    const auto* error = std::get_if<Error>(&refused);
+    CHECK(error && error->kind == ErrorKind::InvalidConfig && error->reason == "credential.scheme.no_header");
+    if (error) {
+      clean(*error);
+      CHECK(scheme.empty() || error->safe_message.find(scheme) == std::string::npos);
+    }
+    const auto keyless = endpoints::credential(scheme, "");
+    CHECK(std::holds_alternative<std::optional<Header>>(keyless) && !std::get<std::optional<Header>>(keyless));
+  }
+  for (const auto scheme : schemes) {
+    const auto header = endpoints::credential(scheme, key);
+    CHECK(std::holds_alternative<std::optional<Header>>(header) && std::get<std::optional<Header>>(header) == expected(scheme));
+    const auto keyless = endpoints::credential(scheme, "");
+    CHECK(std::holds_alternative<std::optional<Header>>(keyless) && !std::get<std::optional<Header>>(keyless));
+  }
+}
+
+// An endpoint call sends its endpoint fact's header even where the family's `auth` facts name another scheme for the
+// descriptor's origin.
+void endpoint_fact_over_family_facts() {
+  const auto messages = loaded_policy(edited("anthropic.messages", "auth", R"([{"origins":["https://api.anthropic.com"],"scheme":"bearer"},{"scheme":"x-api-key"}])"));
+  CHECK(messages != nullptr);
+  if (messages) {
+    const auto anthropic = descriptor::presets::anthropic_messages({.policy = messages});
+    CHECK(sends_chat(anthropic, "bearer"));
+    CHECK(sends(sent(anthropic, files::Get{"file_a"}), "x-api-key", anthropic.base_url()));
+  }
+  const auto chat = loaded_policy(edited("openai.chat", "auth", R"([{"origins":["https://api.openai.com"],"scheme":"x-goog-api-key"},{"scheme":"bearer"}])"));
+  CHECK(chat != nullptr);
+  if (chat) {
+    const auto openai = descriptor::presets::openai_chat({.policy = chat});
+    CHECK(sends_chat(openai, "x-goog-api-key"));
+    CHECK(sends(sent(openai, files::Get{"file-a"}), "bearer", openai.base_url()));
+    CHECK(sends(sent(openai, embeddings::Request{"text-embedding-3-small", {{"a"}}}), "bearer", openai.base_url()));
+  }
+}
+
+// `connection.auth` is not part of what sealed history binds: the native origin digest and the archive binding of a
+// descriptor that states a scheme are those of the same descriptor without it.
+std::string bound(const descriptor::ValidatedDescriptor& d) {
+  const auto origin = native_testing::origin_digest_of(d);
+  CHECK(origin.has_value());
+  std::string out = origin ? archive_internal::hex(*origin) : std::string();
+  try {
+    const auto limits = archive_internal::resolve_custody_limits({}, d).archive;
+    out += "/" + archive_internal::hex(archive_internal::descriptor_binding_digest(d, limits));
+  } catch (const archive_fs::Rejected&) {
+    CHECK(false);
+  }
+  return out;
+}
+void scheme_is_not_bound() {
+  for (const auto& f : families)
+    for (const auto origin : {loopback, custom})
+      for (const auto scheme : schemes) {
+        const auto plain = admitted(descriptor_json(f, origin));
+        const auto stated = admitted(descriptor_json(f, origin, R"(,"auth":)" + json::quote(scheme)));
+        CHECK(plain && stated && bound(*plain) == bound(*stated));
+      }
+  const auto preset = admitted(descriptor_json(families[2], "https://api.anthropic.com"));
+  const auto preset_bearer = admitted(descriptor_json(families[2], "https://api.anthropic.com", R"(,"auth":"bearer")"));
+  CHECK(preset && preset_bearer && bound(*preset) == bound(*preset_bearer));
+}
+
+// Each call carries exactly one header of its scheme's name, Authorization included, and none of the other two, in
+// any letter case, in every family, whether the scheme is the policy's or the descriptor's.
+void one_header_per_name() {
+  const auto count = [](const Sent& call, std::string_view name) {
+    return std::count_if(call.credentials.begin(), call.credentials.end(), [&](const Header& header) { return lower(header.first) == lower(name); });
+  };
+  for (const auto& f : families) {
+    const auto policy_scheme = admitted(descriptor_json(f, loopback));
+    CHECK(policy_scheme.has_value());
+    if (policy_scheme) {
+      const auto call = sent(*policy_scheme, request_for(f.family));
+      for (const auto other : schemes) CHECK(count(call, expected(other).first) == (other == f.scheme ? 1 : 0));
+    }
+    for (const auto scheme : schemes) {
+      const auto stated = admitted(descriptor_json(f, loopback, R"(,"auth":)" + json::quote(scheme)));
+      CHECK(stated.has_value());
+      if (!stated) continue;
+      const auto call = sent(*stated, request_for(f.family));
+      CHECK(call.reached);
+      for (const auto other : schemes) CHECK(count(call, expected(other).first) == (other == scheme ? 1 : 0));
+    }
+  }
+}
 }  // namespace
 
 int main() {
@@ -515,6 +612,10 @@ int main() {
   literal_credential_headers();
   endpoint_and_realtime_headers();
   queries();
+  key_never_dropped();
+  endpoint_fact_over_family_facts();
+  scheme_is_not_bound();
+  one_header_per_name();
   if (failures) { std::fprintf(stderr, "%d credential checks failed\n", failures); return 1; }
   std::puts("credential headers passed");
   return 0;

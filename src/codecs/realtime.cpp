@@ -539,15 +539,16 @@ std::variant<Connection, Error> connect(const descriptor::ValidatedDescriptor& d
     if (!setup.extensions->root().is_object() || descriptor::check_value(*fact->options, setup.extensions->root()))
       return bad("realtime setup options do not match the policy's schema");
   }
+  // The endpoint fact's scheme: a descriptor's connection.auth is for its chat calls.
+  auto credential = endpoints::credential(fact->auth, api_key);
+  if (auto* refused = std::get_if<Error>(&credential)) return std::move(*refused);
   std::string origin(descriptor.base_url());
   if (origin.starts_with("https://")) origin.replace(0, 5, "wss");
   else if (origin.starts_with("http://")) origin.replace(0, 4, "ws");
   Connection connection{origin + std::string(*path)};
   // An OpenAI transcription session names its model in the session update.
   if (fact->shape == "openai") connection.url += setup.output.empty() ? std::string("?intent=transcription") : "?model=" + setup.model;
-  // The endpoint fact's scheme: a descriptor's connection.auth is for its chat calls.
-  if (!api_key.empty())
-    if (auto credential = descriptor::credential_header(fact->auth, api_key)) connection.headers.push_back(std::move(*credential));
+  if (auto& header = std::get<0>(credential)) connection.headers.push_back(std::move(*header));
   for (const auto& header : fact->headers) connection.headers.push_back(header);
   return connection;
 }

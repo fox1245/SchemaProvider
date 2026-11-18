@@ -1554,6 +1554,12 @@ PreparedRequest Client::prepare(Request request, RunOptions options) {
         return;
       }
       auto& value = std::get<0>(encoded);
+      // The descriptor's scheme, else its family policy's for its origin.
+      auto credential = endpoints::credential(descriptor::auth_scheme(client->descriptor), client->options.api_key);
+      if (auto* refused = std::get_if<Error>(&credential)) {
+        error = std::move(*refused);
+        return;
+      }
       auto& wire = operation->request;
       wire.method = std::move(value.method);
       wire.url = std::string(client->descriptor.base_url()) + value.path;
@@ -1564,10 +1570,7 @@ PreparedRequest Client::prepare(Request request, RunOptions options) {
       operation->prepared_cache_marks = value.cache_marks;
       wire.headers.reserve(value.headers.size() + (client->options.api_key.empty() ? 0 : 1));
       for (auto& header : value.headers) wire.headers.push_back({std::move(header.first), std::move(header.second)});
-      // The descriptor's scheme, else its family policy's for its origin.
-      if (!client->options.api_key.empty())
-        if (auto credential = descriptor::credential_header(descriptor::auth_scheme(client->descriptor), client->options.api_key))
-          wire.headers.push_back({std::move(credential->first), std::move(credential->second)});
+      if (auto& header = std::get<0>(credential)) wire.headers.push_back({std::move(header->first), std::move(header->second)});
       operation->native_context = std::move(value.context);
     }, request);
   });
@@ -1608,6 +1611,12 @@ PreparedRequest Client::prepare_endpoint(RunOptions options, std::string_view en
       return;
     }
     auto& value = std::get<Encoded>(encoded);
+    // The endpoint fact's scheme: a descriptor's connection.auth is for its chat calls.
+    auto credential = endpoints::credential(value.auth, client->options.api_key);
+    if (auto* refused = std::get_if<Error>(&credential)) {
+      error = std::move(*refused);
+      return;
+    }
     operation.family = detail::OperationState::Family::Endpoint;
     operation.endpoint = std::string(endpoint);
     {
@@ -1648,10 +1657,7 @@ PreparedRequest Client::prepare_endpoint(RunOptions options, std::string_view en
                                           [&](const auto& header) { return detail::equal_ascii(header.first, name); });
       if (!overridden) wire.headers.push_back({std::move(name), std::move(text)});
     }
-    // The endpoint fact's scheme: a descriptor's connection.auth is for its chat calls.
-    if (!client->options.api_key.empty())
-      if (auto credential = descriptor::credential_header(value.auth, client->options.api_key))
-        wire.headers.push_back({std::move(credential->first), std::move(credential->second)});
+    if (auto& header = std::get<0>(credential)) wire.headers.push_back({std::move(header->first), std::move(header->second)});
   });
 }
 PreparedEndpoint<images::Outcome> Client::prepare(images::Request request, RunOptions options) {
