@@ -820,8 +820,8 @@ void model_facts() {
   other.thinking_level = "medium";
   prepared_ok(client, other);
 
-  // An entry's own defaults, over each family it lists or over every family, must take a value it admits. The
-  // family's default counts: Interactions bills at "standard" and Responses reasons at "low" by default.
+  // An entry's defaults, over each family, must take a value the deciding list admits. The family's default counts:
+  // Responses summarizes at "auto" and reasons at "low" by default.
   auto pointer = [&](std::string_view models) {
     const auto loaded = policy->with_catalogue(catalogue_of(std::string(R"({"version":1,"models":[)") + std::string(models) + "]}"));
     const auto* error = std::get_if<descriptor::ConfigError>(&loaded);
@@ -829,24 +829,28 @@ void model_facts() {
   };
   CHECK(pointer(R"({"id":"x-model","families":["google.interactions"],"control_values":{"thinking_level":["low","high"]},"defaults":{"google.interactions":{"thinking_level":"medium"}}})") ==
         "/model_catalogue/models/x-model/defaults/google.interactions");
+  CHECK(pointer(R"({"id":"x-model","families":["openai.responses"],"control_values":{"reasoning_summary":["concise"]}})") ==
+        "/model_catalogue/models/x-model/defaults/openai.responses");
+  // A list that shares no value with a family that lists values for the control.
   CHECK(pointer(R"({"id":"x-model","families":["google.interactions"],"control_values":{"service_tier":["flex"]}})") ==
-        "/model_catalogue/models/x-model/defaults/google.interactions");
+        "/model_catalogue/models/x-model/control_values/service_tier");
   CHECK(pointer(R"({"id":"x-model","control_values":{"reasoning_effort":["high"]}})") == "/model_catalogue/models/x-model/defaults/openai.responses");
   CHECK(pointer(R"({"id":"x-model","control_values":{"reasoning_effort":["high"]},"defaults":{"openai.responses":{"reasoning_effort":"high"}}})") == "attached");
   CHECK(pointer(R"({"id":"x-model","families":["openai.chat"],"control_values":{"reasoning_effort":["high"]}})") == "attached");
-  // Across entries nothing is checked at attach: a profile's values that contradict an exact entry's default refuse
-  // the request that inherits it.
-  const auto across = catalogue_of(R"({"version":1,"models":[
-    {"id":"x-","match":"prefix","families":["google.interactions"],"control_values":{"thinking_level":["low"]}},
-    {"id":"x-model","families":["google.interactions"],"defaults":{"google.interactions":{"thinking_level":"high"}}}]})");
-  auto inherited = policy->with_catalogue(across);
+  // Across entries: a profile's list that leaves out an exact entry's default is refused when attached; with the
+  // default inside the list the request that inherits it is sent, and an explicit value outside it is refused.
+  const std::string profile = R"({"id":"x-","match":"prefix","families":["google.interactions"],"control_values":{"thinking_level":["low"]}})";
+  CHECK(pointer(profile + R"(,{"id":"x-model","families":["google.interactions"],"defaults":{"google.interactions":{"thinking_level":"high"}}})") ==
+        "/model_catalogue/models/x-model/defaults/google.interactions");
+  auto inherited = policy->with_catalogue(catalogue_of(R"({"version":1,"models":[)" + profile +
+      R"(,{"id":"x-model","families":["google.interactions"],"defaults":{"google.interactions":{"thinking_level":"low"}}}]})"));
   CHECK(std::holds_alternative<descriptor::PolicySnapshot>(inherited));
   auto inheriting = client_of(descriptor_of("google.interactions", std::get<descriptor::PolicySnapshot>(inherited)));
-  auto prepared = inheriting.prepare(interactions::Request::simple("x-model", "hi", 1000), run_with(1));
-  CHECK(prepared.error() && prepared.error()->reason == "request.choice.control_value_not_admitted_for_the_model");
+  prepared_ok(inheriting, interactions::Request::simple("x-model", "hi", 1000));
   auto explicit_level = interactions::Request::simple("x-model", "hi", 1000);
-  explicit_level.thinking_level = "low";
-  prepared_ok(inheriting, explicit_level);
+  explicit_level.thinking_level = "high";
+  auto prepared = inheriting.prepare(explicit_level, run_with(1));
+  CHECK(prepared.error() && prepared.error()->reason == "request.choice.control_value_not_admitted_for_the_model");
 }
 
 // The embedded temperature profiles take part in the lookup that prices a call. A host's shorter profile with prices,

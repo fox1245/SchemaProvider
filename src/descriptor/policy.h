@@ -260,6 +260,9 @@ class DescriptorPolicy final {
   const std::vector<EndpointFact>& endpoints() const noexcept { return endpoints_; }
  private:
   DescriptorPolicy() = default;
+  // The first entry, in lookup order, whose `control_values` name `control` (ModelCatalogue::for_each_match).
+  static const CatalogueEntry* naming(const ModelCatalogue& catalogue, std::string_view family, std::string_view origin,
+                                      std::string_view model, std::string_view control, bool profiles_only) noexcept;
   // New facts are kept here, after the members above, so the installed FamilyPolicy layout stays as it was.
   CodecResources resources_{};
   std::vector<FamilyPolicy> families_;

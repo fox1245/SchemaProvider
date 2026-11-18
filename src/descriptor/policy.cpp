@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <stdexcept>
 #include <unordered_set>
@@ -787,12 +788,25 @@ class PolicyLoader {
     if (!catalogue) fail("/model_catalogue", "model catalogue");
     policy.resolved_.clear();
     const auto& entries = catalogue->entries();
+    // Each control some entry's `control_values` name, with the origins of the scoped entries that name it.
+    std::vector<std::pair<std::string_view, std::vector<std::string_view>>> named;
+    for (const auto& entry : entries)
+      for (const auto& listed : entry.control_values) {
+        auto found = std::find_if(named.begin(), named.end(), [&](const auto& n) { return n.first == listed.first; });
+        if (found == named.end()) {
+          named.emplace_back(listed.first, std::vector<std::string_view>{});
+          found = std::prev(named.end());
+        }
+        for (const auto& origin : entry.origins)
+          if (std::find(found->second.begin(), found->second.end(), origin) == found->second.end()) found->second.push_back(origin);
+      }
     for (std::size_t i = 0; i < entries.size(); ++i) {
-      auto pointer_of = [&](std::string_view family) {
+      auto entry_pointer = [&] {
         std::string pointer = "/model_catalogue/models/";
         for (const char c : entries[i].id) pointer += c == '~' ? std::string("~0") : c == '/' ? std::string("~1") : std::string(1, c);
-        return pointer + "/defaults/" + std::string(family);
+        return pointer;
       };
+      auto pointer_of = [&](std::string_view family) { return entry_pointer() + "/defaults/" + std::string(family); };
       for (const auto& overlay : entries[i].defaults) {
         const auto* f = policy.family(overlay.family);
         if (!f) fail("/model_catalogue", "declared family");
@@ -802,21 +816,48 @@ class PolicyLoader {
         if (resolved.strict_tools && f->family != "openai.responses") fail(pointer + "/strict_tools", "Responses strict tools only");
         policy.resolved_.push_back({i, overlay.family, std::move(resolved)});
       }
-      // The entry's own defaults, over each family it lists (every family when it lists none), take a value its
-      // `control_values` admit. A contradiction with another entry shows at request time instead.
-      if (entries[i].control_values.empty()) continue;
+      // A list shares a value with each family the entry applies to that lists values for the control; otherwise
+      // every value would be refused for the model there.
+      for (const auto& [name, values] : entries[i].control_values)
+        for (const auto& valued : valued_controls) {
+          if (control_name(valued.control) != name) continue;
+          for (const auto& f : policy.families_) {
+            if (!entries[i].families.empty() && !contains(entries[i].families, f.family)) continue;
+            const auto& listed = f.*valued.listed;
+            if (!listed.empty() && std::none_of(values.begin(), values.end(), [&](const auto& value) { return contains(listed, value); }))
+              fail(entry_pointer() + "/control_values/" + name, "values the " + f.family + " family lists");
+          }
+        }
+      // The entry's defaults, over each family, are admitted by the list of the entry that decides the control for
+      // its models (DescriptorPolicy::control_value_admitted), at each origin where it applies.
+      if (named.empty()) continue;
       for (const auto& f : policy.families_) {
-        if (!entries[i].families.empty() && !contains(entries[i].families, f.family)) continue;
         const auto overlay = std::find_if(entries[i].defaults.begin(), entries[i].defaults.end(),
                                           [&](const auto& o) { return o.family == f.family; });
         const auto resolved = overlay == entries[i].defaults.end() ? f.defaults : over(f.defaults, *overlay);
         const auto effective = choices(resolved);
         for (const auto& valued : valued_controls) {
           const auto& chosen = effective.*valued.chosen;
-          if (!chosen) continue;
-          for (const auto& [name, values] : entries[i].control_values)
-            if (name == control_name(valued.control) && !contains(values, *chosen))
-              fail(pointer_of(f.family), "defaults the entry's control_values admit");
+          const auto name = control_name(valued.control);
+          const auto stated = std::find_if(named.begin(), named.end(), [&](const auto& n) { return n.first == name; });
+          if (!chosen || stated == named.end()) continue;
+          // An entry scoped to origins meets the entries that apply there. An unscoped one meets the scoped entries
+          // that name the control at their origins, and the unscoped ones at any other origin, which the empty
+          // origin, never an entry's, stands for.
+          std::vector<std::string_view> origins(entries[i].origins.begin(), entries[i].origins.end());
+          if (origins.empty()) {
+            origins.assign(stated->second.begin(), stated->second.end());
+            origins.emplace_back();
+          }
+          for (const auto origin : origins) {
+            const auto* decides = DescriptorPolicy::naming(*catalogue, f.family, origin, entries[i].id, name, entries[i].prefix);
+            if (!decides) continue;
+            const auto& listed = std::find_if(decides->control_values.begin(), decides->control_values.end(),
+                                              [&](const auto& c) { return c.first == name; })->second;
+            if (!contains(listed, *chosen))
+              fail(pointer_of(f.family), "a default " + std::string(name) + " that " + (decides->prefix ? "prefix profile " : "entry ") +
+                                             decides->id + " admits in control_values");
+          }
         }
       }
     }
@@ -1036,17 +1077,18 @@ std::optional<bool> DescriptorPolicy::control_value_admitted(std::string_view fa
                                                              Control control, std::string_view value) const noexcept {
   if (!catalogue_ || !control_takes_values(control)) return std::nullopt;
   const auto name = control_name(control);
-  auto values_of = [](const CatalogueEntry& e, std::string_view wanted) -> const std::vector<std::string>* {
-    for (const auto& [listed, values] : e.control_values)
-      if (listed == wanted) return &values;
-    return nullptr;
-  };
-  const auto* entry = catalogue_->for_each_match(family, origin, model, [](const CatalogueEntry& e, const void* context) noexcept {
+  const auto* entry = naming(*catalogue_, family, origin, model, name, false);
+  if (!entry) return std::nullopt;
+  for (const auto& [listed, values] : entry->control_values)
+    if (listed == name) return contains(values, value);
+  return std::nullopt;
+}
+const CatalogueEntry* DescriptorPolicy::naming(const ModelCatalogue& catalogue, std::string_view family, std::string_view origin,
+                                               std::string_view model, std::string_view control, bool profiles_only) noexcept {
+  return catalogue.for_each_match(family, origin, model, [](const CatalogueEntry& e, const void* context) noexcept {
     const auto wanted = *static_cast<const std::string_view*>(context);
     return std::any_of(e.control_values.begin(), e.control_values.end(), [&](const auto& listed) { return listed.first == wanted; });
-  }, &name);
-  if (!entry) return std::nullopt;
-  return contains(*values_of(*entry, name), value);
+  }, &control, profiles_only);
 }
 namespace {
 constexpr std::string_view control_names[control_count]{

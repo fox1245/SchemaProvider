@@ -406,14 +406,15 @@ ModelMatch ModelCatalogue::find(std::string_view family, std::string_view origin
 }
 
 const CatalogueEntry* ModelCatalogue::for_each_match(std::string_view family, std::string_view origin, std::string_view model,
-                                                     MatchVisitor visit, const void* context) const noexcept {
+                                                     MatchVisitor visit, const void* context, bool profiles_only) const noexcept {
   auto applies = [&](const CatalogueEntry& e) {
     return (e.origins.empty() || contains(e.origins, origin)) && (e.families.empty() || contains(e.families, family));
   };
-  const auto first = std::lower_bound(names_.begin(), names_.end(), model,
-                                      [](const auto& item, std::string_view name) { return item.first < name; });
+  auto first = std::lower_bound(names_.begin(), names_.end(), model,
+                                [](const auto& item, std::string_view name) { return item.first < name; });
   auto last = first;
   while (last != names_.end() && last->first == model) ++last;
+  if (profiles_only) first = last;
   for (auto it = first; it != last; ++it) {
     const auto& e = entries_[it->second];
     if (e.id == model && applies(e) && visit(e, context)) return &e;
