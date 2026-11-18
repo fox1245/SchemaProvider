@@ -62,12 +62,6 @@ bool unique_envelope(json::Value v, bool root = false, bool block = false) {
   } else if (v.is_array()) for (auto item : v.elements()) if (!unique_envelope(item)) return false;
   return true;
 }
-// Whether the block at `index` is a call the client executes (a `tool_use` block).
-template <class Calls> bool client_call(const Calls& calls, uint64_t index) {
-  return std::any_of(calls.begin(), calls.end(), [&](const auto& call) {
-    return call.second.index == index && call.second.kind == ToolCallKind::ClientExecuted;
-  });
-}
 }
 Codec::Codec(const descriptor::ValidatedDescriptor& descriptor, Mode mode, Accumulator& accumulator,
              std::shared_ptr<const NativeContext> context, SemanticLimits limits)
@@ -258,8 +252,7 @@ bool Codec::terminal(json::Value v, bool initial) {
     if (sequence.is_string() || details.is_object()) return fail(ErrorKind::ProtocolCorrupt, "stop metadata without reason");
     return true;
   }
-  // A failure-class word (no stop table may list one) fails the call before a stop is emitted. A streamed client call is
-  // sealed only with a stop below, so none of this answer is executable.
+  // A failure-class word (no stop table may list one) fails the call before a stop is emitted.
   if (const auto failure = descriptor::failure_stop_class(reason.as_string())) {
     if (*failure == descriptor::FailureStop::Cancelled) return fail(ErrorKind::Cancelled, "cancelled stop reason");
     if (*failure == descriptor::FailureStop::Incomplete) return fail(ErrorKind::Unsupported, "unsupported stop reason");
@@ -274,12 +267,7 @@ bool Codec::terminal(json::Value v, bool initial) {
     return true;
   }
   if (!emit(Stop{next})) return false;
-  stop_ = std::move(next); stopped_ = true;
-  // The stream's client calls, whose blocks have all stopped, are sealed now that the stop value is known.
-  if (mode_ == Mode::Sse)
-    for (const auto& [index, b] : blocks_)
-      if (client_call(calls_, index) && !emit(PartSeal{b.local, {}})) return false;
-  return true;
+  stop_ = std::move(next); stopped_ = true; return true;
 }
 bool Codec::caller(json::Value v) {
   if (!v.valid()) return true;
@@ -455,9 +443,6 @@ bool Codec::end_block(uint64_t index) {
   // that never received actual JSON bytes (empty delta strings do not count).
   if (mode_ == Mode::Sse && b.kind == PartKind::ToolCall && !b.initial_input && !b.argument_bytes)
     if (!emit(PartDelta{b.local, {b.kind, "{}"}})) return false;
-  // A streamed client call is sealed with the stop value (terminal()): a stream that fails, or ends without one, leaves
-  // it unsealed, so it never becomes executable.
-  if (mode_ == Mode::Sse && client_call(calls_, index)) { b.closed = true; return true; }
   std::shared_ptr<const json::Document> kept;
   if (b.kept_changed) {
     std::string text = "{";
