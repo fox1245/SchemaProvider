@@ -105,12 +105,14 @@ class ModelCatalogue final {
   ModelCatalogue() = default;
   // The entries that apply to `model` at `origin` for `family`, in lookup order, until `visit`
   // returns true for one, which is returned (nullptr when it never does): the exact entry, the
-  // entries that have the model as an alias, then the prefix profiles from the longest. Within one
-  // rank an entry scoped to `origin` comes before an unscoped one, as in find(). An entry scoped to
-  // other origins, or one that lists other families only, is skipped.
+  // entries that have the model as an alias (those scoped to `origin` first, as in find()), then the
+  // prefix profiles from the longest. The exact and prefix ranks hold at most one entry each, since
+  // a catalogue has one entry per id and match. An entry scoped to other origins, or one that lists
+  // other families only, is skipped. `profiles_only` starts at the prefix profiles, for the ids a
+  // profile with the id `model` covers.
   using MatchVisitor = bool (*)(const CatalogueEntry&, const void* context) noexcept;
   const CatalogueEntry* for_each_match(std::string_view family, std::string_view origin, std::string_view model,
-                                       MatchVisitor visit, const void* context) const noexcept;
+                                       MatchVisitor visit, const void* context, bool profiles_only = false) const noexcept;
   std::vector<CatalogueEntry> entries_;
   // Indices into entries_: exact entries by id and alias, sorted by name; prefix profiles by
   // decreasing id length.

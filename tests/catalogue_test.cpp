@@ -131,6 +131,7 @@ void loader_is_closed_and_bounded() {
     refused(R"([{"id":"x","defaults":{"openai.chat":{"reasoning_enabled":null}}}])", "/models/0/defaults/openai.chat/reasoning_enabled");
     refused(R"([{"id":"x","temperature":"no"}])", "/models/0/temperature");
     refused(R"([{"id":"x"},{"id":"x"}])", "/models");
+    refused(R"([{"id":"x","match":"prefix"},{"id":"x","match":"prefix"}])", "/models");
     // An exact entry and a profile may share an id; listed nulls mean not set.
     CHECK(catalogue(R"([{"id":"x"},{"id":"x","match":"prefix"},{"id":"y","name":null,"output_limit":null,"pricing":{"prompt":"-1","image":"0.04"}}])") != nullptr);
     std::string many = "[";
@@ -387,6 +388,46 @@ void listed_parameters_state_temperature() {
           std::get<PolicySnapshot>(attached)->temperature_admitted("openai.chat", gateway, "vendor/listed-model") == true);
 }
 
+// Attaching a catalogue checks its control values. Each entry's defaults, over every family, must be admitted by the
+// list of the entry that decides the control for the entry's models at each origin where it applies, whichever entry
+// that is; and an entry's list must share a value with each family it applies to that lists values for the control.
+void control_values_meet_defaults_and_families() {
+    auto attach = [](const std::string& models) {
+        const auto c = catalogue(models);
+        if (!c) return std::string("catalogue refused");
+        auto attached = builtin_policy()->with_catalogue(c);
+        if (const auto* error = std::get_if<ConfigError>(&attached)) return error->pointer + " | " + error->expected;
+        return std::string("attached");
+    };
+    auto pointer_of = [&](const std::string& models) { const auto text = attach(models); return text.substr(0, text.find(" | ")); };
+    // Another entry's list decides: the profile's list leaves out the exact entry's default.
+    const std::string profile = R"({"id":"x-","match":"prefix","families":["google.interactions"],"control_values":{"thinking_level":["low"]}})";
+    const auto refused_default = attach("[" + profile + R"(,{"id":"x-model","families":["google.interactions"],"defaults":{"google.interactions":{"thinking_level":"high"}}}])");
+    if (refused_default.rfind("/model_catalogue/models/x-model/", 0) != 0) std::fprintf(stderr, "  attach gave: %s\n", refused_default.c_str());
+    CHECK(refused_default == "/model_catalogue/models/x-model/defaults/google.interactions | a default thinking_level that prefix profile x- admits in control_values");
+    CHECK(attach("[" + profile + R"(,{"id":"x-model","families":["google.interactions"],"defaults":{"google.interactions":{"thinking_level":"low"}}}])") == "attached");
+    // Origins: a profile scoped to one origin meets an unscoped entry there, and not an entry scoped to another origin.
+    const std::string scoped = R"({"id":"x-","match":"prefix","origins":["https://a.example.test"],"control_values":{"thinking_level":["low"]}})";
+    CHECK(pointer_of("[" + scoped + R"(,{"id":"x-model","defaults":{"google.interactions":{"thinking_level":"high"}}}])") ==
+          "/model_catalogue/models/x-model/defaults/google.interactions");
+    CHECK(attach("[" + scoped + R"(,{"id":"x-model","origins":["https://b.example.test"],"defaults":{"google.interactions":{"thinking_level":"high"}}}])") == "attached");
+    // A profile's defaults meet the shorter profiles: an exact entry with the profile's id names other models.
+    CHECK(attach(R"([{"id":"x-","match":"prefix","control_values":{"thinking_level":["low"]}},{"id":"x-model-","control_values":{"thinking_level":["high"]}},
+        {"id":"x-model-","match":"prefix","defaults":{"google.interactions":{"thinking_level":"high"}}}])") ==
+          "/model_catalogue/models/x-model-/defaults/google.interactions | a default thinking_level that prefix profile x- admits in control_values");
+    // The entry's own list decides first.
+    CHECK(attach(R"([{"id":"x-","match":"prefix","control_values":{"thinking_level":["low"]}},{"id":"x-model","control_values":{"thinking_level":["high"]},
+        "defaults":{"google.interactions":{"thinking_level":"high"}}}])") == "attached");
+
+    // A list no value of which a family lists, for a family the entry applies to that lists values for the control.
+    CHECK(attach(R"([{"id":"x-model","families":["google.interactions"],"control_values":{"thinking_level":["ultra"]}}])") ==
+          "/model_catalogue/models/x-model/control_values/thinking_level | values the google.interactions family lists");
+    CHECK(attach(R"([{"id":"x-model","families":["google.interactions"],"control_values":{"thinking_level":["ultra","low"]}}])") == "attached");
+    CHECK(attach(R"([{"id":"x-model","families":["openai.chat"],"control_values":{"thinking_level":["ultra"]}}])") == "attached");
+    CHECK(attach(R"([{"id":"x-model","control_values":{"thinking_level":["ultra"]}}])") ==
+          "/model_catalogue/models/x-model/control_values/thinking_level | values the google.generate family lists");
+}
+
 // The embedded temperature profiles reproduce the refusals of the retired family lists, each at its provider's own
 // origin and for the families that provider serves, and no embedded entry states control values.
 void embedded_temperature_profiles() {
@@ -576,6 +617,7 @@ int main() {
         embedded_temperature_profiles();
         embedded_profiles_shadow_shorter_ones();
         control_values_by_control();
+        control_values_meet_defaults_and_families();
         origins_scope_the_whole_entry();
         bundle_carries_the_catalogue();
         catalogue_files();
