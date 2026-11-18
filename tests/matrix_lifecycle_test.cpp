@@ -74,12 +74,14 @@ const char* family_id(Fam f) {
   return "?";
 }
 
-std::string descriptor_source(Fam f, const std::string& base, const std::string& model) {
+// `auth`: the descriptor's credential scheme (`connection.auth`), or empty for the family policy's.
+std::string descriptor_source(Fam f, const std::string& base, const std::string& model, std::string_view auth = {}) {
   const auto head = [&](std::string_view paths, std::string_view bindings, std::string_view extra_connection,
                         std::string_view tail) {
     return "{\"descriptor_version\":1,\"revision\":1,\"id\":\"matrix-loopback\",\"family\":" + sp::json::quote(family_id(f))
       + ",\"evidence\":{\"urls\":[\"https://example.com/spec\"],\"verified_at\":\"2026-10-01\"},\"connection\":{\"base_url\":"
-      + sp::json::quote(base) + ",\"paths\":" + std::string(paths) + std::string(extra_connection) + "},\"bindings\":"
+      + sp::json::quote(base) + ",\"paths\":" + std::string(paths) + std::string(extra_connection)
+      + (auth.empty() ? std::string() : ",\"auth\":" + sp::json::quote(auth)) + "},\"bindings\":"
       + std::string(bindings) + std::string(tail) + "}";
   };
   const auto one = [](std::string_view path) {
@@ -105,8 +107,8 @@ std::string descriptor_source(Fam f, const std::string& base, const std::string&
   }
   throw std::logic_error("family");
 }
-sp::descriptor::ValidatedDescriptor make_descriptor(Fam f, const std::string& base, const std::string& model) {
-  auto loaded = sp::descriptor::load(descriptor_source(f, base, model));
+sp::descriptor::ValidatedDescriptor make_descriptor(Fam f, const std::string& base, const std::string& model, std::string_view auth = {}) {
+  auto loaded = sp::descriptor::load(descriptor_source(f, base, model, auth));
   require(std::holds_alternative<sp::descriptor::ValidatedDescriptor>(loaded), "matrix descriptor rejected");
   return std::get<sp::descriptor::ValidatedDescriptor>(std::move(loaded));
 }
@@ -149,10 +151,12 @@ struct Lab {
     require(plain && h2c_port && tls && black && !ca.empty(), "peer info incomplete");
   }
   std::uint64_t port(const Wire& w) const { return w.tls ? tls : w.h2 ? h2c_port : plain; }
-  std::string arm(Fam f, std::string_view plan, bool streaming) {
+  // `auth`: the scheme the peer must receive the key in, or empty for the family's own.
+  std::string arm(Fam f, std::string_view plan, bool streaming, std::string_view auth = {}) {
     const auto model = "matrix-" + std::to_string(++sequence);
     peer.command("{\"arm\":" + sp::json::quote(model) + ",\"family\":" + sp::json::quote(peer_family(f))
-                 + ",\"streaming\":" + (streaming ? "true" : "false") + ",\"plan\":" + std::string(plan) + "}");
+                 + ",\"streaming\":" + (streaming ? "true" : "false") + ",\"plan\":" + std::string(plan)
+                 + (auth.empty() ? std::string() : ",\"auth\":" + sp::json::quote(auth)) + "}");
     return model;
   }
   sp::json::Document stats(const std::string& model) { return peer.stats(model); }
@@ -194,6 +198,8 @@ struct Opts {
   std::uint32_t attempts = 3;
   std::uint64_t port = 0;             // 0: the wire's listener
   bool no_ca = false;                 // TLS without the trust anchor
+  std::string_view auth{};            // the descriptor's connection.auth; empty: the family policy's scheme
+  std::string_view peer_auth{};       // the scheme the peer must receive the key in; empty: the family's own
 };
 
 const char* name(ErrorKind k) {
@@ -285,7 +291,7 @@ const sp::Failure& expect_failure(const Result& result, const Want& w) {
 class Cell {
  public:
   Cell(Lab& lab, Fam fam, std::string_view plan, Opts opts) : lab_(lab), fam_(fam), opts_(opts) {
-    model = lab.arm(fam, plan, opts.streaming);
+    model = lab.arm(fam, plan, opts.streaming, opts.peer_auth);
     sp::runtime::Options o;
     o.api_key = std::string(marker);
     o.default_timeout = 15s;
@@ -293,7 +299,7 @@ class Cell {
     o.http_version = opts.wire.version;
     if (opts.wire.tls && !opts.no_ca) o.ca_file = lab.ca;
     const auto base = std::string(opts.wire.tls ? "https" : "http") + "://127.0.0.1:" + std::to_string(opts.port ? opts.port : lab.port(opts.wire));
-    client.emplace(make_descriptor(fam, base, model), o);
+    client.emplace(make_descriptor(fam, base, model, opts.auth), o);
   }
   ~Cell() {
     stop.request_stop();
@@ -447,6 +453,15 @@ struct Matrix {
 
 void normal(Matrix& m, Wire w, bool streaming) {
   Cell c(m.lab, m.fam, R"([{"a":"ok"}])", {.wire = w, .streaming = streaming});
+  c.start();
+  succeeded(c.finish());
+  c.peer(1, 0);
+}
+
+// The key arrives once, in the header of the scheme: the family policy's when the descriptor states none, else the
+// descriptor's own (a bearer token on the Messages or Generate shape). The peer refuses any other credential header.
+void credentials(Matrix& m, std::string_view stated, std::string_view received) {
+  Cell c(m.lab, m.fam, R"([{"a":"ok"}])", {.streaming = false, .auth = stated, .peer_auth = received});
   c.start();
   succeeded(c.finish());
   c.peer(1, 0);
@@ -815,6 +830,10 @@ std::vector<Entry> build(Fam fam) {
 
   // ---- HTTP/1.1 cleartext: the full lifecycle matrix -------------------------------------------
   for (bool s : {true, false}) add(std::string("h1/ok/") + mode(s), [=](Matrix& m) { normal(m, h1, s); });
+  const auto family_scheme = fam == Fam::Messages ? "x-api-key" : fam == Fam::Gemini || fam == Fam::Interactions ? "x-goog-api-key" : "bearer";
+  add("h1/credentials/policy-scheme", [=](Matrix& m) { credentials(m, {}, family_scheme); });
+  for (const char* scheme : {"bearer", "x-api-key", "x-goog-api-key"})
+    add(std::string("h1/credentials/descriptor-") + scheme, [=](Matrix& m) { credentials(m, scheme, scheme); });
   for (bool s : {true, false}) for (int status : {400, 401, 403, 404, 429, 500, 503, 529}) {
     for (Body body : {Body::Family, Body::Empty}) {
       add("h1/status-" + std::to_string(status) + "/" + body_name(body) + "/" + mode(s), [=](Matrix& m) { http_status(m, h1, s, status, body); });

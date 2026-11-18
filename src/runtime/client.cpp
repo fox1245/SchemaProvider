@@ -299,9 +299,11 @@ void validate(const descriptor::ValidatedDescriptor& descriptor, const Options& 
       options.transport.resolver_threads > ceiling.total_threads - options.workers - options.transport.io_threads) reject("/total_threads");
   if (options.api_key.size() > ceiling.api_key_bytes) reject("/api_key");
   for (unsigned char byte : options.api_key) if (byte < 32 || byte == 127) reject("/api_key");
+  // With a key, a literal credential header of the descriptor would send a second credential: the key goes only in
+  // the header of the call's scheme.
   if (!options.api_key.empty()) {
     for (const auto& header : descriptor.headers())
-      if (equal_ascii(header.first, "authorization") || equal_ascii(header.first, "x-api-key")) reject("/api_key");
+      if (descriptor::credential_header_name(header.first)) reject("/api_key");
   }
 }
 
@@ -1562,14 +1564,10 @@ PreparedRequest Client::prepare(Request request, RunOptions options) {
       operation->prepared_cache_marks = value.cache_marks;
       wire.headers.reserve(value.headers.size() + (client->options.api_key.empty() ? 0 : 1));
       for (auto& header : value.headers) wire.headers.push_back({std::move(header.first), std::move(header.second)});
-      if (!client->options.api_key.empty()) {
-        if (operation->family == detail::OperationState::Family::Messages)
-          wire.headers.push_back({"x-api-key", client->options.api_key});
-        else if (operation->family == detail::OperationState::Family::Gemini ||
-                 operation->family == detail::OperationState::Family::Interactions)
-          wire.headers.push_back({"x-goog-api-key", client->options.api_key});
-        else wire.headers.push_back({"Authorization", "Bearer " + client->options.api_key});
-      }
+      // The descriptor's scheme, else its family policy's for its origin.
+      if (!client->options.api_key.empty())
+        if (auto credential = descriptor::credential_header(descriptor::auth_scheme(client->descriptor), client->options.api_key))
+          wire.headers.push_back({std::move(credential->first), std::move(credential->second)});
       operation->native_context = std::move(value.context);
     }, request);
   });
@@ -1650,11 +1648,10 @@ PreparedRequest Client::prepare_endpoint(RunOptions options, std::string_view en
                                           [&](const auto& header) { return detail::equal_ascii(header.first, name); });
       if (!overridden) wire.headers.push_back({std::move(name), std::move(text)});
     }
-    if (!client->options.api_key.empty()) {
-      if (value.auth == "x-api-key") wire.headers.push_back({"x-api-key", client->options.api_key});
-      else if (value.auth == "x-goog-api-key") wire.headers.push_back({"x-goog-api-key", client->options.api_key});
-      else wire.headers.push_back({"Authorization", "Bearer " + client->options.api_key});
-    }
+    // The endpoint fact's scheme: a descriptor's connection.auth is for its chat calls.
+    if (!client->options.api_key.empty())
+      if (auto credential = descriptor::credential_header(value.auth, client->options.api_key))
+        wire.headers.push_back({std::move(credential->first), std::move(credential->second)});
   });
 }
 PreparedEndpoint<images::Outcome> Client::prepare(images::Request request, RunOptions options) {

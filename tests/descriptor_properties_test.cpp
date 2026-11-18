@@ -179,8 +179,11 @@ void messages_family_boundaries() {
 void closed_inventory_and_nested_types() {
     for (auto key : {"models", "options", "usage", "errors", "constraints", "events", "terminal", "request_json", "retry_safety", "hooks"})
         rejected(descriptor(",\"" + std::string(key) + "\":{}"), "");
-    for (auto key : {"auth", "request_id", "required_env", "optional_env"})
+    for (auto key : {"request_id", "required_env", "optional_env"})
         rejected(descriptor({}, "https://api.example.test", "/chat", ",\"" + std::string(key) + "\":{}"), "/connection");
+    // `auth` names one of the credential schemes; it cannot describe how to authenticate.
+    rejected(descriptor({}, "https://api.example.test", "/chat", R"(,"auth":{})"), "/connection/auth");
+    rejected(descriptor({}, "https://api.example.test", "/chat", R"(,"auth":{"scheme":"bearer","header":"Authorization"})"), "/connection/auth");
     rejected(descriptor(R"(,"bindings":{"unknown":"SECRET"})"), "/bindings");
     rejected(descriptor(R"(,"bindings":null)"), "/bindings");
     rejected(descriptor(R"(,"bindings":{"model":42})"), "/bindings/model");
