@@ -29,6 +29,7 @@ install(DIRECTORY
   PATTERN "native_archive_custody_format.h" EXCLUDE
   PATTERN "native_archive_custody_internal.h" EXCLUDE
   PATTERN "io_thread.h" EXCLUDE
+  PATTERN "native_testing.h" EXCLUDE
   PATTERN "reason.h" EXCLUDE
   PATTERN "served_model.h" EXCLUDE)
 install(FILES
