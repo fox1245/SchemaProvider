@@ -146,6 +146,8 @@ enum class UnboundedBy : std::uint8_t {
   RouteCeiling,   // a routing gateway's route ceiling is missing or cannot be pinned
   Unmodeled,      // the request uses something the catalogue cannot price (plugins, an endpoint call)
   Overflow,       // the bound does not fit 64 bits
+  Billing,        // the policy does not state whether the provider bills an endpoint call's operation
+  Quantity,       // the request does not state a quantity of a unit the entry prices above zero
 };
 std::string_view to_string(UnboundedBy) noexcept;
 struct UnboundedReason {

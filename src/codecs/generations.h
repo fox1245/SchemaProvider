@@ -32,6 +32,9 @@ using Outcome = std::variant<Result, Failure>;
 
 using Encoded = endpoints::Encoded;
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor&, const Get&);
+// The operation of the generations fact a request performs (`get`): the encoder sends the request to that operation's
+// path, and the policy states its billing under it.
+std::string_view operation(const Get&) noexcept;
 
 using Close = endpoints::Close;
 class Codec final : public endpoints::Codec {

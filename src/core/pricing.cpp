@@ -396,6 +396,8 @@ std::string_view to_string(UnboundedBy by) noexcept {
     case UnboundedBy::RouteCeiling: return "RouteCeiling";
     case UnboundedBy::Unmodeled: return "Unmodeled";
     case UnboundedBy::Overflow: return "Overflow";
+    case UnboundedBy::Billing: return "Billing";
+    case UnboundedBy::Quantity: return "Quantity";
   }
   return {};
 }

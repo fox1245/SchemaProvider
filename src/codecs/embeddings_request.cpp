@@ -16,10 +16,11 @@ bool token(std::string_view value, bool upper_case = true) {
 }
 }  // namespace
 
+std::string_view operation(const Request&) noexcept { return "embed"; }
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
   const auto* fact = descriptor.policy()->endpoint("embeddings", descriptor.base_url());
   if (!fact) return Error{ErrorKind::Unsupported, "embedding endpoints are not admitted at this origin"};
-  const auto path = descriptor::endpoint_path(*fact, "embed");
+  const auto path = descriptor::endpoint_path(*fact, operation(request));
   if (!path) return Error{ErrorKind::Unsupported, "the embedding endpoint has no path"};
   const bool google = fact->shape == "google", openai = fact->shape == "openai";
   if (request.model.empty() || request.inputs.empty()) return bad("embeddings need a model and inputs");

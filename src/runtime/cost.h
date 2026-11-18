@@ -13,8 +13,11 @@ struct WorstCaseOptions {
 // Bounds what `prepared` can bill, with the prices of `catalogue` (a host's overlay, merged over the descriptor
 // policy's catalogue with merge_catalogues, for instance). The request supplies the rest: its output cap, the model
 // invocations and attempts it may make, its service tier, its server tools with their caps, its fallback models and
-// its routing. A request that is not prepared, a non-chat endpoint call and a request with OpenRouter plugins have no
-// bound, and say so. Free of side effects, and nothing is reserved.
+// its routing. A request that is not prepared and a request with OpenRouter plugins have no bound, and say so. A non-chat
+// endpoint call is bounded by its operation's billing (PreparedRequest::endpoint_facts): exactly zero when the policy
+// states the provider does not bill it, with no catalogue lookup; no bound (`UnboundedBy::Billing`) when the policy
+// does not state it; and no bound (`Unmodeled`) when the operation is billed. Free of side effects, and nothing is
+// reserved.
 pricing::WorstCase worst_case_cost(const PreparedRequest& prepared, const descriptor::ModelCatalogue& catalogue,
                                    const WorstCaseOptions& options = {});
 // With the catalogue of the descriptor's policy.

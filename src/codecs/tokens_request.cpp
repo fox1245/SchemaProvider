@@ -17,10 +17,11 @@ std::string lower(std::string text) {
 }
 }  // namespace
 
+std::string_view operation(const Count&) noexcept { return "count"; }
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Count& count) {
   const auto* fact = descriptor.policy()->endpoint("tokens", descriptor.base_url());
   if (!fact) return Error{ErrorKind::Unsupported, "token counting is not admitted at this origin"};
-  const auto path = descriptor::endpoint_path(*fact, "count");
+  const auto path = descriptor::endpoint_path(*fact, operation(count));
   if (!path) return Error{ErrorKind::Unsupported, "the token count endpoint has no path"};
   // The family request the shape counts, encoded as a buffered call would send it.
   const auto& shape = fact->shape;

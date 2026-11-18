@@ -8,10 +8,11 @@ namespace {
 Error bad(std::string message) { return Error{ErrorKind::InvalidRequest, std::move(message)}; }
 }  // namespace
 
+std::string_view operation(const Request&) noexcept { return "rank"; }
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
   const auto* fact = descriptor.policy()->endpoint("rerank", descriptor.base_url());
   if (!fact) return Error{ErrorKind::Unsupported, "rerank endpoints are not admitted at this origin"};
-  const auto path = descriptor::endpoint_path(*fact, "rank");
+  const auto path = descriptor::endpoint_path(*fact, operation(request));
   if (!path) return Error{ErrorKind::Unsupported, "the rerank endpoint has no path"};
   if (request.model.empty() || request.query.empty() || request.documents.empty()) return bad("a rerank needs a model, a query and documents");
   if (request.top && !*request.top) return bad("a rerank top count must be positive");

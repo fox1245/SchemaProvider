@@ -6,6 +6,7 @@
 #include "core/value.h"
 #include "descriptor/catalogue.h"
 #include "descriptor/descriptor.h"
+#include "descriptor/policy.h"
 #include <optional>
 #include <string_view>
 
@@ -27,10 +28,12 @@ std::string_view to_string(ServedRelation) noexcept;
 std::string_view to_string(ImageDetail) noexcept;
 std::string_view to_string(MediaKind) noexcept;
 std::string_view to_string(MediaSource) noexcept;
-// The descriptor layer's own stop kind (the policy's `stop_reasons` values) and a catalogue lookup's relation.
+// The descriptor layer's own stop kind (the policy's `stop_reasons` values), a catalogue lookup's relation, and how the
+// policy says an endpoint operation is billed.
 namespace descriptor {
 std::string_view to_string(StopKind) noexcept;
 std::string_view to_string(ModelRelation) noexcept;
+std::string_view to_string(EndpointBilling) noexcept;
 } // namespace descriptor
 
 // The enumerator that `to_string` spells `name`, or nullopt for any other text. Defined for every enum above:

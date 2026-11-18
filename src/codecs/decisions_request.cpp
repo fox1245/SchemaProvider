@@ -25,11 +25,12 @@ std::string_view kind_name(Kind kind, bool openai) {
 }
 }  // namespace
 
+std::string_view operation(const Request&) noexcept { return "decide"; }
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
   const auto* fact = descriptor.policy()->endpoint("decisions", descriptor.base_url());
   if (!fact) return Error{ErrorKind::Unsupported, "decision endpoints are not admitted at this origin"};
   const bool openai = fact->shape == "openai";
-  const auto path = descriptor::endpoint_path(*fact, "decide");
+  const auto path = descriptor::endpoint_path(*fact, operation(request));
   if (!path) return Error{ErrorKind::Unsupported, "the decision endpoint has no path"};
   if (request.model.empty() || request.questions.empty()) return bad("a decision needs a model and questions");
   // OpenAI takes a string or message items; OpenRouter a string, an object or an array.

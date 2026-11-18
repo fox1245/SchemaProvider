@@ -39,6 +39,9 @@ using Outcome = std::variant<Result, Failure>;
 
 using Encoded = endpoints::Encoded;
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor&, const Request&);
+// The operation of the embeddings fact a request performs (`embed`): the encoder sends the request to that operation's
+// path, and the policy states its billing under it.
+std::string_view operation(const Request&) noexcept;
 
 using Close = endpoints::Close;
 // Checks one buffered response: one vector per input, numbers only. The vectors stay in the response document.

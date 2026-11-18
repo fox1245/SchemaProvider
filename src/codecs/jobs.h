@@ -59,6 +59,10 @@ using DownloadOutcome = std::variant<Content, Failure>;
 using Encoded = endpoints::Encoded;
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor&, const Poll&);
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor&, const Download&);
+// The operation a poll and a download perform at the endpoint fact of the job (`Handle::endpoint`): `poll` and
+// `download`. The encoder sends the call to that operation's path, and the policy states its billing under it.
+std::string_view operation(const Poll&) noexcept;
+std::string_view operation(const Download&) noexcept;
 
 using Close = endpoints::Close;
 // The state of a job, from a submit's or a poll's response.

@@ -27,6 +27,9 @@ using Outcome = std::variant<Result, Failure>;
 
 using Encoded = endpoints::Encoded;
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor&, const Count&);
+// The operation of the tokens fact a request performs (`count`): the encoder sends the request to that operation's
+// path, and the policy states its billing under it.
+std::string_view operation(const Count&) noexcept;
 
 using Close = endpoints::Close;
 class Codec final : public endpoints::Codec {

@@ -130,6 +130,13 @@ std::string_view to_string(ModelRelation value) noexcept {
   }
   return {};
 }
+std::string_view to_string(EndpointBilling value) noexcept {
+  switch (value) {
+    SP_NAME(EndpointBilling, Unstated); SP_NAME(EndpointBilling, None); SP_NAME(EndpointBilling, Model);
+    SP_NAME(EndpointBilling, Carried);
+  }
+  return {};
+}
 } // namespace descriptor
 #undef SP_NAME
 
@@ -149,5 +156,6 @@ SP_FROM_STRING(UsageStage); SP_FROM_STRING(UsageQuality); SP_FROM_STRING(CostSou
 SP_FROM_STRING(CostRounding); SP_FROM_STRING(StopKind); SP_FROM_STRING(ErrorKind); SP_FROM_STRING(RetryClass);
 SP_FROM_STRING(RetrySafety); SP_FROM_STRING(ServedRelation); SP_FROM_STRING(ImageDetail); SP_FROM_STRING(MediaKind);
 SP_FROM_STRING(MediaSource); SP_FROM_STRING(descriptor::StopKind); SP_FROM_STRING(descriptor::ModelRelation);
+SP_FROM_STRING(descriptor::EndpointBilling);
 #undef SP_FROM_STRING
 } // namespace sp

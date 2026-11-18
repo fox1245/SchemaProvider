@@ -72,8 +72,18 @@ std::variant<Encoded, Error> by_id(const descriptor::ValidatedDescriptor& descri
   encoded.content_type.clear();
   return encoded;
 }
+// An Anthropic batch serves its results itself; the others leave them in a file of the origin.
+bool serves_results(const Batch& batch) { return batch.shape == "anthropic"; }
 }  // namespace
 
+std::string_view operation(const Submit&) noexcept { return "submit"; }
+std::string_view operation(const Get&) noexcept { return "get"; }
+std::string_view operation(const Cancel&) noexcept { return "cancel"; }
+std::string_view operation(const Delete&) noexcept { return "delete"; }
+std::pair<std::string_view, std::string_view> results_operation(const Results& results) noexcept {
+  if (serves_results(results.batch)) return {"batches", "results"};
+  return {"files", "content"};
+}
 std::variant<std::string, Error> jsonl(const descriptor::ValidatedDescriptor& family, const std::vector<Item>& items) {
   if (family.family() != "openai.chat" && family.family() != "openai.responses") return Error{ErrorKind::Unsupported, "an OpenAI batch file holds Chat or Responses requests"};
   if (items.empty()) return bad("a batch has items");
@@ -90,7 +100,7 @@ std::variant<std::string, Error> jsonl(const descriptor::ValidatedDescriptor& fa
 }
 
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Submit& submit) {
-  auto found = route(descriptor, "batches", "submit");
+  auto found = route(descriptor, "batches", operation(submit));
   if (auto* error = std::get_if<Error>(&found)) return *error;
   auto& [fact, path] = std::get<Route>(found);
   const auto& shape = fact->shape;
@@ -146,21 +156,22 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   return encoded;
 }
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Get& get) {
-  return by_id(descriptor, get.id, "get", "GET");
+  return by_id(descriptor, get.id, operation(get), "GET");
 }
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Cancel& cancel) {
-  return by_id(descriptor, cancel.id, "cancel", "POST");
+  return by_id(descriptor, cancel.id, operation(cancel), "POST");
 }
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Delete& del) {
-  return by_id(descriptor, del.id, "delete", "DELETE");
+  return by_id(descriptor, del.id, operation(del), "DELETE");
 }
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Results& results) {
   if (!results.max_bytes) return bad("a download needs a positive byte limit");
   const auto& batch = results.batch;
   if (batch.origin != descriptor.base_url()) return bad("a batch is reached at the origin that started it");
-  if (batch.shape == "anthropic") {
+  const auto target = results_operation(results);
+  if (serves_results(batch)) {
     if (results.errors) return Error{ErrorKind::Unsupported, "only an OpenAI batch has a separate error file"};
-    auto found = by_id(descriptor, batch.id, "results", "GET");
+    auto found = by_id(descriptor, batch.id, target.second, "GET");
     if (auto* error = std::get_if<Error>(&found)) return *error;
     auto& encoded = std::get<Encoded>(found);
     encoded.accept = "*/*";
@@ -172,9 +183,9 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   const auto& file = results.errors ? batch.error_file : batch.output_file;
   if (results.errors && batch.shape != "openai") return Error{ErrorKind::Unsupported, "only an OpenAI batch has a separate error file"};
   if (file.empty()) return bad("the batch has no results file yet");
-  const auto* fact = descriptor.policy()->endpoint("files", descriptor.base_url());
+  const auto* fact = descriptor.policy()->endpoint(target.first, descriptor.base_url());
   if (!fact) return Error{ErrorKind::Unsupported, "batch endpoints are not admitted at this origin"};
-  const auto content = descriptor::endpoint_path(*fact, "content");
+  const auto content = descriptor::endpoint_path(*fact, target.second);
   if (!content) return Error{ErrorKind::Unsupported, "the batch endpoint has no path for this operation"};
   if (fact->shape == "google" ? !(file.starts_with("files/") && token(file.substr(6))) : !token(file)) return bad("a batch results file is a file id");
   std::string path(*content);

@@ -603,8 +603,30 @@ class PolicyLoader {
           if (endpoint == "generations" && shape == "openrouter") return {"get"};
           return {};
         };
+        // What an operation's billing may be: `none` for any; `model` where the call's request names the model it bills
+        // by; `carried` for the batch submit, which bills the chat requests it carries.
+        const auto names_model = [](std::string_view endpoint, std::string_view operation) {
+          return (endpoint == "images" && (operation == "generate" || operation == "edit")) || (endpoint == "decisions" && operation == "decide") ||
+                 (endpoint == "embeddings" && operation == "embed") || (endpoint == "rerank" && operation == "rank") ||
+                 (endpoint == "moderation" && operation == "check") || (endpoint == "speech" && operation == "speak") ||
+                 (endpoint == "transcription" && (operation == "transcribe" || operation == "translate")) ||
+                 (endpoint == "videos" && operation == "submit") || (endpoint == "tokens" && operation == "count") ||
+                 (endpoint == "realtime" && operation == "connect");
+        };
+        const auto admitted = [&](std::string_view endpoint, std::string_view operation, EndpointBilling value) {
+          if (value == EndpointBilling::Model) return names_model(endpoint, operation);
+          if (value == EndpointBilling::Carried) return endpoint == "batches" && operation == "submit";
+          return value == EndpointBilling::None;
+        };
+        const auto billing_value = [](Value v) {
+          const auto name = v.is_string() ? v.as_string() : std::string_view{};
+          if (name == "none") return EndpointBilling::None;
+          if (name == "model") return EndpointBilling::Model;
+          if (name == "carried") return EndpointBilling::Carried;
+          fail("/endpoints/billing", "none, model or carried");
+        };
         for (auto e : endpoints.elements()) {
-          closed(e, {"endpoint","shape","origins","paths"}, "/endpoints", {"options","auth","charge_on_accept","headers","keep","audio","close_codes","max_response_bytes","accepted_audio","max_part_bytes"});
+          closed(e, {"endpoint","shape","origins","paths"}, "/endpoints", {"options","auth","charge_on_accept","headers","keep","audio","close_codes","max_response_bytes","accepted_audio","max_part_bytes","billing","carried_tier"});
           EndpointFact fact{text(e.get("endpoint"), "/endpoints/endpoint"), text(e.get("shape"), "/endpoints/shape"),
                             strings(e.get("origins"), "/endpoints/origins")};
           const auto operations = operations_of(fact.endpoint, fact.shape);
@@ -748,11 +770,56 @@ class PolicyLoader {
               }
             }
           }
+          // Whether the provider bills each operation: one value for every call of the endpoint (the steps of Google's
+          // resumable upload, which have no operation of their own, included), or a value per operation that names every
+          // operation of `paths`. Without the member the policy states nothing, and every operation is Unstated.
+          DescriptorPolicy::EndpointBillingFact billed;
+          if (const auto billing = e.get("billing"); billing.valid()) {
+            if (billing.is_object()) {
+              for (auto member : billing.members()) {
+                if (std::find(operations.begin(), operations.end(), member.key) == operations.end())
+                  fail("/endpoints/billing", "operations of the endpoint's shape");
+                const auto value = billing_value(member.value);
+                if (!admitted(fact.endpoint, member.key, value))
+                  fail("/endpoints/billing", "model where the request names a model, carried for a batch submit");
+                billed.operations.emplace_back(std::string(member.key), value);
+              }
+              for (const auto& [operation, path] : fact.paths)
+                if (std::none_of(billed.operations.begin(), billed.operations.end(), [&](const auto& stated) { return stated.first == operation; }))
+                  fail("/endpoints/billing", "a value for every operation of paths");
+            } else {
+              const auto value = billing_value(billing);
+              for (const auto operation : operations)
+                if (!admitted(fact.endpoint, operation, value))
+                  fail("/endpoints/billing", "a value every operation of the endpoint's shape admits");
+              billed.operations.emplace_back(std::string(), value);
+            }
+            // A fact that charges once it accepts a call bills at least one of its operations.
+            if (fact.charge_on_accept && std::none_of(billed.operations.begin(), billed.operations.end(), [](const auto& stated) {
+                  return stated.second == EndpointBilling::Model || stated.second == EndpointBilling::Carried;
+                }))
+              fail("/endpoints/billing", "a billed operation on a fact that charges once it accepts a call");
+          }
+          // The catalogue tier carried requests are priced under: required with them and refused without. A tier is the
+          // part of a price key after `/`, so it holds neither `/` nor `+`.
+          const bool carries = std::any_of(billed.operations.begin(), billed.operations.end(),
+                                           [](const auto& stated) { return stated.second == EndpointBilling::Carried; });
+          if (const auto tier = e.get("carried_tier"); tier.valid()) {
+            if (!carries) fail("/endpoints/carried_tier", "a tier only for a fact that bills carried requests");
+            billed.carried_tier = text(tier, "/endpoints/carried_tier");
+            if (billed.carried_tier.size() > 64 || !std::all_of(billed.carried_tier.begin(), billed.carried_tier.end(), [](char c) {
+                  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' || c == ':';
+                }))
+              fail("/endpoints/carried_tier", "a catalogue tier name");
+          } else if (carries) {
+            fail("/endpoints/carried_tier", "the catalogue tier carried requests are priced under");
+          }
           for (const auto& existing : policy->endpoints_)
             if (existing.endpoint == fact.endpoint)
               for (const auto& origin : fact.origins)
                 if (contains(existing.origins, origin)) fail("/endpoints/origins", "one fact per endpoint and origin");
           policy->endpoints_.push_back(std::move(fact));
+          policy->billing_.push_back(std::move(billed));
         }
       }
       {
@@ -1155,6 +1222,22 @@ const EndpointFact* DescriptorPolicy::endpoint(std::string_view endpoint, std::s
 std::optional<std::string_view> endpoint_path(const EndpointFact& fact, std::string_view operation) noexcept {
   for (const auto& [name, path] : fact.paths) if (name == operation) return path;
   return std::nullopt;
+}
+EndpointBilling DescriptorPolicy::endpoint_billing(std::string_view endpoint, std::string_view origin, std::string_view operation) const noexcept {
+  for (std::size_t i = 0; i < endpoints_.size() && i < billing_.size(); ++i) {
+    const auto& fact = endpoints_[i];
+    if (fact.endpoint != endpoint || !contains(fact.origins, origin)) continue;
+    // One value for the whole endpoint is kept under an empty operation; any other entry names its operation.
+    for (const auto& [name, value] : billing_[i].operations)
+      if (name.empty() || name == operation) return value;
+    return EndpointBilling::Unstated;
+  }
+  return EndpointBilling::Unstated;
+}
+std::string_view DescriptorPolicy::carried_tier(std::string_view endpoint, std::string_view origin) const noexcept {
+  for (std::size_t i = 0; i < endpoints_.size() && i < billing_.size(); ++i)
+    if (endpoints_[i].endpoint == endpoint && contains(endpoints_[i].origins, origin)) return billing_[i].carried_tier;
+  return {};
 }
 std::string_view DescriptorPolicy::default_output_cap_member(std::string_view family, std::string_view origin) const noexcept {
   for (const auto& [listed_family, listed_origin] : completion_cap_origins_)

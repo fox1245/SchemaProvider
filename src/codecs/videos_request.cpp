@@ -15,10 +15,11 @@ bool token(std::string_view value) {
 }
 }  // namespace
 
+std::string_view operation(const Request&) noexcept { return "submit"; }
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
   const auto* fact = descriptor.policy()->endpoint("videos", descriptor.base_url());
   if (!fact) return Error{ErrorKind::Unsupported, "video endpoints are not admitted at this origin"};
-  const auto path = descriptor::endpoint_path(*fact, "submit");
+  const auto path = descriptor::endpoint_path(*fact, operation(request));
   if (!path) return Error{ErrorKind::Unsupported, "the video endpoint has no submit path"};
   if (request.model.empty() || request.prompt.empty()) return bad("a video needs a model and a prompt");
   for (const auto* value : {&request.aspect_ratio, &request.resolution, &request.size})

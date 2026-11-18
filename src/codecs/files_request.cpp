@@ -145,8 +145,18 @@ bool upload_url(std::string_view origin, std::string_view url) {
   return true;
 }
 
+std::string_view operation(const Upload&) noexcept { return "upload"; }
+std::string_view operation(const Get&) noexcept { return "get"; }
+std::string_view operation(const List&) noexcept { return "list"; }
+std::string_view operation(const Delete&) noexcept { return "delete"; }
+std::string_view operation(const Download&) noexcept { return "content"; }
+std::string_view operation(const Start&) noexcept { return "start"; }
+std::string_view operation(const Part&) noexcept { return "part"; }
+std::string_view operation(const Complete&) noexcept { return "complete"; }
+std::string_view operation(const Query&) noexcept { return "query"; }
+std::string_view operation(const Cancel&) noexcept { return "cancel"; }
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Start& begin) {
-  auto found = route(descriptor, "start");
+  auto found = route(descriptor, operation(begin));
   if (auto* error = std::get_if<Error>(&found)) return *error;
   auto& [fact, path] = std::get<Route>(found);
   const bool google = fact->shape == "google";
@@ -177,7 +187,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   return encoded;
 }
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Part& part) {
-  auto found = session_route(descriptor, part.session, "part");
+  auto found = session_route(descriptor, part.session, operation(part));
   if (auto* error = std::get_if<Error>(&found)) return *error;
   auto& [fact, path] = std::get<Route>(found);
   const auto length = source_length(part.source);
@@ -210,7 +220,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   return encoded;
 }
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Complete& complete) {
-  auto found = session_route(descriptor, complete.session, "complete");
+  auto found = session_route(descriptor, complete.session, operation(complete));
   if (auto* error = std::get_if<Error>(&found)) return *error;
   auto& [fact, path] = std::get<Route>(found);
   if (fact->shape == "google") return Error{ErrorKind::Unsupported, "a Google upload completes with its last chunk"};
@@ -226,7 +236,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   return encoded;
 }
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Query& query) {
-  auto found = session_route(descriptor, query.session, "query");
+  auto found = session_route(descriptor, query.session, operation(query));
   if (auto* error = std::get_if<Error>(&found)) return *error;
   auto& [fact, path] = std::get<Route>(found);
   if (fact->shape != "google") return Error{ErrorKind::Unsupported, "only a Google upload says how much it holds"};
@@ -238,7 +248,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   return encoded;
 }
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Cancel& cancel) {
-  auto found = session_route(descriptor, cancel.session, "cancel");
+  auto found = session_route(descriptor, cancel.session, operation(cancel));
   if (auto* error = std::get_if<Error>(&found)) return *error;
   auto& [fact, path] = std::get<Route>(found);
   Encoded encoded{std::move(path), {}, session_document(cancel.session), false, fact->auth};
@@ -250,7 +260,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
 }
 
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Upload& upload) {
-  auto found = route(descriptor, "upload");
+  auto found = route(descriptor, operation(upload));
   if (auto* error = std::get_if<Error>(&found)) return *error;
   auto& [fact, path] = std::get<Route>(found);
   const bool google = fact->shape == "google", openai = fact->shape == "openai";
@@ -290,13 +300,13 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   return encoded;
 }
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Get& get) {
-  return by_id(descriptor, get.id, "get", "GET");
+  return by_id(descriptor, get.id, operation(get), "GET");
 }
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Delete& del) {
-  return by_id(descriptor, del.id, "delete", "DELETE");
+  return by_id(descriptor, del.id, operation(del), "DELETE");
 }
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const List& list) {
-  auto found = route(descriptor, "list");
+  auto found = route(descriptor, operation(list));
   if (auto* error = std::get_if<Error>(&found)) return *error;
   auto& [fact, path] = std::get<Route>(found);
   const bool google = fact->shape == "google", openai = fact->shape == "openai";
@@ -317,7 +327,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
 }
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Download& download) {
   if (!download.max_bytes) return bad("a download needs a positive byte limit");
-  auto found = by_id(descriptor, download.id, "content", "GET");
+  auto found = by_id(descriptor, download.id, operation(download), "GET");
   if (auto* error = std::get_if<Error>(&found)) return *error;
   auto& encoded = std::get<Encoded>(found);
   // Google serves the bytes of a file as its media.
