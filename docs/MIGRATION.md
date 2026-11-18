@@ -200,6 +200,7 @@ The catalogue prices a call:
   - `estimate` bills Messages' 1-hour cache writes and Gemini's image output tokens at their own rates, and with `route_ceiling` prices a routing gateway's call at the route ceiling.
   - Input bands (`<unit>+<tokens>`) price long-context calls. `price_of` takes the call's input length, `estimate` reads it from the usage, and `dearest_price_of` gives the prices to reserve with.
   - `upper_bound(price, BoundRequest)` bounds a call's cost before dispatch with the same arithmetic as `estimate`.
+- **Route ceilings from the refresh (#123), additive.** `transport::ListingSource` gains `ceiling_models`, the OpenRouter models whose route ceilings `refresh_catalogue` reads from their endpoints listings. `SourceReport` gains `ceiling_requests`, `ceilings` and `ceiling_gaps` (`transport::CeilingGap`). `<core/pricing.h>` adds `per_million` and `decimal_text`, and `<descriptor/catalogue.h>` adds `valid_model_name` and `valid_price_text`. The new `config/catalogue-refresh.json` holds `max_ceiling_models`. A refresh without ids sends the same requests and generates the same bytes. Both structs grow at the end, so rebuild consumers against the new headers.
 
 Values the providers extend are checked by shape, not by compiled lists:
 - **Generate.** Speech language codes, image aspect ratios and image sizes are checked as a language tag, `W:H` and a short token. Function responses take any inline document the media policy admits.

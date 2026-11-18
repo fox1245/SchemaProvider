@@ -12,6 +12,13 @@
 
 namespace sp::pricing {
 
+// Decimal USD per unit as exact nano-USD per million units (USD x 1e15), rounded up past the fifteenth fractional
+// digit: how every listed price below is read. Nothing for a negative price (a variable one), a character other
+// than a digit or one '.', or an amount that does not fit 64 bits.
+std::optional<std::uint64_t> per_million(std::string_view price);
+// The decimal USD text per unit that per_million reads as `rate`, without trailing fractional zeros ("0.000003").
+std::string decimal_text(std::uint64_t rate);
+
 // Exact nano-USD per million units: per million tokens, and for `request` per million requests. Parsed from the
 // entry's decimal USD per unit. OpenRouter's unit names (prompt, completion, input_cache_read, input_cache_write,
 // internal_reasoning, audio, audio_output) and the plain ones (input, output, cache_read, cache_write, reasoning,

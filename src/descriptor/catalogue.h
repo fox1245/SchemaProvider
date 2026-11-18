@@ -137,6 +137,12 @@ enum class Listing : std::uint8_t {
 };
 // "openrouter", "gemini", "anthropic" or "openai": the `source` of the entries a listing gives.
 std::string_view listing_name(Listing) noexcept;
+// Whether an entry can have `id`: printable ASCII without spaces, at most 256 bytes.
+bool valid_model_name(std::string_view id) noexcept;
+// Whether an entry can hold `price` as a price: digits with an optional fraction, at most 24 digits in each part,
+// after an optional '-' that marks a variable price. A listed price that is not is left out
+// (ListingPage::skipped_prices).
+bool valid_price_text(std::string_view price) noexcept;
 struct ListingPage {
   std::vector<CatalogueEntry> entries;
   // The token that asks for the next page, or empty on the last page.

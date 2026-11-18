@@ -4,6 +4,7 @@
 //   sp_catalogue_refresh --out models.json [--previous generated.json] [--overlay file]...
 //                        [--builtin-overlay] [--source openrouter|gemini|anthropic|openai]...
 //                        [--url source=url]... [--min-kept-percent n] [--allow-drop] [--write-partial]
+//                        [--ceiling openrouter-model-id]...
 //
 // Keys come from OPENROUTER_API_KEY (optional), GEMINI_API_KEY, ANTHROPIC_API_KEY and
 // OPENAI_API_KEY. Without --source, OpenRouter and every provider with a key are listed. With
@@ -13,6 +14,8 @@
 // an outage; --write-partial writes the catalogue anyway, with the previous entries of the failed
 // sources. A source whose listing names no models, or fewer than --min-kept-percent percent (default
 // 50) of the entries --previous has from it, fails; --allow-drop accepts such a listing.
+// --ceiling reads that OpenRouter model's route ceiling from its endpoints listing, and the tool prints each
+// model or unit it could not write; a model whose endpoints cannot be read is not a failed source.
 // A file is replaced whole or not at all. Keys are never printed.
 #include "descriptor/catalogue.h"
 #include "transport/catalogue_refresh.h"
@@ -74,6 +77,7 @@ int main(int argc, char** argv) {
   sp::transport::RefreshRequest request;
   std::vector<Listing> chosen;
   std::map<Listing, std::string> urls;
+  std::vector<std::string> ceilings;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     auto value = [&]() -> std::string {
@@ -94,6 +98,7 @@ int main(int argc, char** argv) {
       request.min_kept_percent = static_cast<std::uint32_t>(percent);
     }
     else if (arg == "--write-partial") write_partial = true;
+    else if (arg == "--ceiling") ceilings.push_back(value());
     else if (arg == "--source" || arg == "--url") {
       auto name = value();
       std::string url;
@@ -119,7 +124,13 @@ int main(int argc, char** argv) {
   for (const auto& [listing, variable] : keys) {
     const bool wanted = chosen.empty() ? (listing == Listing::OpenRouter || !key(variable).empty())
                                        : std::find(chosen.begin(), chosen.end(), listing) != chosen.end();
-    if (wanted) request.sources.push_back({listing, urls[listing], key(variable), {}});
+    if (wanted) request.sources.push_back({listing, urls[listing], key(variable), {}, {}});
+  }
+  if (!ceilings.empty()) {
+    const auto openrouter = std::find_if(request.sources.begin(), request.sources.end(),
+                                         [](const auto& source) { return source.listing == Listing::OpenRouter; });
+    if (openrouter == request.sources.end()) { std::cerr << "--ceiling needs the openrouter source\n"; return 2; }
+    openrouter->ceiling_models = ceilings;
   }
 
   sp::transport::Transport transport;
@@ -135,6 +146,15 @@ int main(int argc, char** argv) {
               << (report.ok ? "ok" : "failed (" + report.error + ")") << ", " << report.pages << " page(s), "
               << report.models << " model(s), " << report.skipped << " skipped, " << report.skipped_prices
               << " price(s) skipped\n";
+    if (report.ceiling_requests || report.ceilings || !report.ceiling_gaps.empty()) {
+      const auto name = sp::descriptor::listing_name(report.listing);
+      std::cout << name << " ceilings: " << report.ceiling_requests << " request(s), " << report.ceilings << " written whole, "
+                << report.ceiling_gaps.size() << " gap(s)\n";
+      for (const auto& gap : report.ceiling_gaps)
+        std::cout << name << " ceiling " << gap.model << ": " << (gap.unit.empty() ? "no ceiling" : gap.unit + " not written") << " ("
+                  << (gap.price.empty() ? "" : gap.price + ": ") << gap.reason << (gap.kept ? "; the previous ceiling is kept" : "")
+                  << ")\n";
+    }
     all_ok = all_ok && report.ok;
   }
   std::cout << "diff: " << refreshed.diff.added.size() << " added, " << refreshed.diff.removed.size() << " removed, "

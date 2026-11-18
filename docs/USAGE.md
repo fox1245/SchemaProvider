@@ -219,6 +219,7 @@ request.sources = {{sp::descriptor::Listing::OpenRouter},                       
                    {sp::descriptor::Listing::Anthropic, {}, anthropic_key},
                    {sp::descriptor::Listing::Gemini, {}, gemini_key},
                    {sp::descriptor::Listing::OpenAI, {}, openai_key}};
+request.sources[0].ceiling_models = {"vendor/model"};               // optional: route ceilings
 request.previous = last_generated;                                  // optional
 request.overlays = {sp::descriptor::builtin_catalogue(), my_catalogue};  // verified facts, then yours
 auto refreshed = sp::transport::refresh_catalogue(transport, request);
@@ -232,7 +233,7 @@ The four listings:
 
 | `Listing` | Request | Credential | Entries |
 |---|---|---|---|
-| `OpenRouter` | `GET /api/v1/models?output_modalities=all` | none needed (`authorization: Bearer` if given) | Name, context window, output limit, modalities, supported parameters, string prices, canonical slug as `served_as`, alias target and expiration date. Text models list the Chat, Responses and Messages families. |
+| `OpenRouter` | `GET /api/v1/models?output_modalities=all` | none needed (`authorization: Bearer` if given) | Name, context window, output limit, modalities, supported parameters, string prices, canonical slug as `served_as`, alias target and expiration date. Text models list the Chat, Responses and Messages families. With `ceiling_models`, the route ceilings of the named models. |
 | `Gemini` | `GET /v1beta/models?pageSize=1000`, then `pageToken` | `x-goog-api-key` | Id without `models/`, display name, input and output limits and methods. Models with `generateContent` list the Generate and Interactions families. |
 | `Anthropic` | `GET /v1/models?limit=1000`, then `after_id` | `x-api-key`, `anthropic-version: 2023-06-01` | Display name, input and output limits, lifecycle, retirement date and image or PDF input. |
 | `OpenAI` | `GET /v1/models` | `authorization: Bearer` | Ids and shutdown dates only. |
@@ -246,15 +247,36 @@ The rules of a refresh:
 - **Result.** `generated` is the provider facts alone, `catalogue` is `generated` with the overlays merged over it, and `diff` runs from `previous` to `generated`.
 - **Blocking.** The call waits for each page, so it must not run on one of the transport's I/O threads.
 
+Route ceilings are read only for the models a host names. An OpenRouter source's `ceiling_models` lists them, and the refresh reads each listed model's route ceiling (`ceiling_input`, `ceiling_output`, `ceiling_request`; see [pricing by the catalogue](#pricing-by-the-catalogue)) from `GET /api/v1/models/{author}/{slug}/endpoints` at the source's `url`, one request per model after the listing, with the source's key as `authorization: Bearer` if it has one. With no ids the refresh sends the requests it always sent and generates the same bytes.
+- **Ids.** Each id is `author/slug`. A `~` may start the author (an alias) and a `:` variant may end the slug (`vendor/model:free`). Each part starts with a letter or a digit and holds letters, digits, `-`, `.` and `_`, so an id never names another path, escapes a character or carries a query. Each id appears once, and there are at most `max_ceiling_models` of `config/catalogue-refresh.json` (256), embedded at build time. Anything else is a `ConfigError` at `/sources/<i>/ceiling_models`, before any request: an id of another shape, a repeated id, more ids than that, or ids on a listing other than OpenRouter's.
+- **Units.** A route ceiling prices every input token at `ceiling_input` and every output token at `ceiling_output`, so each is the dearest price per token of its side over every endpoint and every entry of its `overrides` (long-context and time-of-day prices):
+  - `ceiling_input`: `prompt`, `input_cache_read`, `input_cache_write`, `input_cache_write_1h`, `audio`, `input_audio_cache` and `image_token`;
+  - `ceiling_output`: `completion`, `internal_reasoning`, `audio_output` and `image_token` (the listing does not say which side an image token bills, so it counts on both);
+  - `ceiling_request`: the dearest `request` fee, written when an endpoint charges one.
+
+  Prices are read exactly, as listed prices are, and written as the shortest decimal text that reads back as the same amount. Prices per image, per output image and per web search are per item and not covered, as for listed prices. An endpoint that leaves out an optional price lists none of its own for it.
+- **Never below an endpoint.** A unit gets no ceiling when one of its prices at any endpoint is missing (`prompt` or `completion`, which every endpoint must list), negative (a variable price), not decimal text, or too large for the catalogue; the other units are still written. The whole ceiling is left out when:
+  - a `request` fee cannot be read, because a bound without `ceiling_request` charges the listed fee;
+  - a `discount` is not a number from 0 to 1, because only such a discount keeps the listed prices an upper bound;
+  - the body is not an endpoints listing: not JSON, a `data.id` of another model, an `endpoints` that is not an array, an endpoint without a `pricing` object, or `overrides` that are not an array of objects;
+  - the endpoint list is empty (an alias);
+  - the entry cannot hold more prices.
+
+  The endpoints listing has no count, so a list cut short cannot be told from a short one.
+- **Failures.** Some endpoints requests fail: they do not complete in `page_timeout`, answer another status than 200, or are not sent before `total_timeout` passes. Such a request does not fail the source, and the model keeps the ceiling `previous` had for it. A model the listing does not name gets no entry and costs no request. A source whose listing fails sends no endpoints request and keeps its previous entries, ceilings included. A model whose ceiling is not asked for again gets none, as the listing alone gives none; a missing ceiling makes a bound at the gateway refuse rather than guess.
+- **Report.** `SourceReport::ceiling_requests` counts the endpoints requests. `ceilings` counts the models written whole. `ceiling_gaps` holds a `CeilingGap` for every model or unit asked for and not written: the model, the unit (empty for the whole model), the endpoint price that left it out, a fixed reason, and whether the previous ceiling was `kept`. The gaps come by model id in order. No URL, header, credential or body is in them.
+- **Layers.** Ceilings are provider facts, part of `generated`. An overlay's ceiling unit replaces the generated one, unit by unit, as for listed prices, and `diff` lists an entry whose ceiling changed in `changed`.
+
 Listings are sometimes wrong. On 2026-10-19 the Gemini listing named `generateContent` for `gemini-omni-1.1-flash`, which answers only on Interactions. The embedded catalogue corrects that, so pass it as the first overlay.
 
 The `sp_catalogue_refresh` tool, built with the tests, runs a refresh from the command line. It reads `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` and never prints them:
 
 ```bash
 sp_catalogue_refresh --out models.json --generated generated.json --builtin-overlay [--previous generated.json] [--overlay mine.json]
+                     [--ceiling vendor/model]...
 ```
 
-If a source fails, the tool exits 3 and writes nothing, so a scheduled job keeps the file it had during an outage; `--write-partial` writes the catalogue anyway, with the failed sources' previous entries. `--min-kept-percent` sets that share and `--allow-drop` accepts a listing that names no models or fewer than it, and `--url <source>=<url>` reads a source's listing from another URL. Each file is replaced whole or not at all.
+If a source fails, the tool exits 3 and writes nothing, so a scheduled job keeps the file it had during an outage; `--write-partial` writes the catalogue anyway, with the failed sources' previous entries. `--min-kept-percent` sets that share and `--allow-drop` accepts a listing that names no models or fewer than it, and `--url <source>=<url>` reads a source's listing from another URL. `--ceiling <id>` adds an OpenRouter model to `ceiling_models`. The tool then prints the counts and one line per gap, and a gap does not change the exit status. Each file is replaced whole or not at all.
 
 ### Pricing by the catalogue
 
@@ -282,7 +304,7 @@ If a source fails, the tool exits 3 and writes nothing, so a scheduled job keeps
 
 **More units.** An entry's `pricing` may also list, in any catalogue layer a host merges:
 - `cache_write_1h` (a 1-hour cache write) and `output_image` (an image output token);
-- `ceiling_input`, `ceiling_output` and `ceiling_request`, a routing gateway's route ceiling: the dearest of the model's endpoints, which a host pins as OpenRouter's `provider.max_price`;
+- `ceiling_input`, `ceiling_output` and `ceiling_request`, a routing gateway's route ceiling: the dearest of the model's endpoints, which a host pins as OpenRouter's `provider.max_price`. A refresh writes them for the OpenRouter models a source names in `ceiling_models` ([route ceilings](#refreshing-the-catalogue-from-provider-listings)), or a host writes them in its own layer;
 - `tool:<type>`, a fee per use of a server tool (`tool:web_search_20250305`, `tool:openrouter:web_search`). A listed `"0"` is a declared zero.
 
 Any unit may carry a service tier and an input band, in that order: `<unit>[/<tier>][+<tokens>]`.

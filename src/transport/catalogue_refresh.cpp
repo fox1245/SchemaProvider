@@ -1,9 +1,16 @@
 #include "transport/catalogue_refresh.h"
+#include "core/pricing.h"
+#include "json/json.h"
+#include "sp/config_defaults.h"
 #include <algorithm>
+#include <array>
+#include <iterator>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string_view>
+#include <tuple>
 #include <utility>
 
 namespace sp::transport {
@@ -169,6 +176,221 @@ std::size_t listed_before(const CatalogueSnapshot& previous, std::string_view na
     return listed_by(entry, name) && std::find(entry.origins.begin(), entry.origins.end(), origin) != entry.origins.end();
   }));
 }
+
+// Route ceilings, from OpenRouter's endpoints listing of each model asked for.
+
+// An OpenRouter model id as its endpoints path takes it, `author/slug`: a `~` may start the author (an alias the
+// provider resolves) and a `:` variant may end the slug (`vendor/model:free`). Each part starts with a letter or a
+// digit and holds letters, digits, '-', '.' and '_' only, so an id never names another path (`.`, `..`, a third
+// segment), escapes a character or carries a query.
+bool id_part(std::string_view part, bool slug) noexcept {
+  const auto alphanumeric = [](unsigned char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'); };
+  return !part.empty() && alphanumeric(static_cast<unsigned char>(part.front())) &&
+         std::all_of(part.begin(), part.end(), [&](unsigned char c) {
+           return alphanumeric(c) || c == '-' || c == '.' || c == '_' || (slug && c == ':');
+         });
+}
+bool openrouter_model_id(std::string_view id) noexcept {
+  if (!descriptor::valid_model_name(id)) return false;
+  const auto slash = id.find('/');
+  if (slash == std::string_view::npos) return false;
+  auto author = id.substr(0, slash);
+  if (author.starts_with('~')) author.remove_prefix(1);
+  return id_part(author, false) && id_part(id.substr(slash + 1), true);
+}
+std::string endpoints_url(std::string base, std::string_view id) {
+  while (base.ends_with('/')) base.pop_back();
+  return base + "/api/v1/models/" + std::string(id) + "/endpoints";
+}
+
+enum Side : std::size_t { Input, Output, Request };
+constexpr std::string_view ceiling_units[]{"ceiling_input", "ceiling_output", "ceiling_request"};
+bool ceiling_unit(std::string_view unit) noexcept {
+  return std::find(std::begin(ceiling_units), std::end(ceiling_units), unit) != std::end(ceiling_units);
+}
+// The members of an endpoint's `pricing`, and of each entry of its `overrides`, that a route ceiling covers, by the
+// unit that covers them, as OpenRouter's endpoints listing documents them. The ceiling prices every input token at
+// `ceiling_input` and every output token at `ceiling_output` (pricing::estimate), so each is the dearest price per
+// token of its side: cache reads and writes, audio and reasoning included, not the prompt and completion prices
+// alone. `image_token` does not say which side it bills, so it counts on both. `prompt` and `completion` are
+// required; an endpoint that leaves out an optional member lists no price of its own for it, and an override that
+// leaves one out keeps the base price. The prices per image, per output image and per web search are per item, which
+// no usage counter counts, so no ceiling covers them.
+struct PriceMember {
+  std::string_view name;
+  Side side;
+  bool required;
+};
+constexpr PriceMember price_members[]{
+    {"prompt", Input, true},          {"input_cache_read", Input, false},   {"input_cache_write", Input, false},
+    {"input_cache_write_1h", Input, false}, {"audio", Input, false},      {"input_audio_cache", Input, false},
+    {"image_token", Input, false},     {"completion", Output, true},          {"internal_reasoning", Output, false},
+    {"audio_output", Output, false},   {"image_token", Output, false},        {"request", Request, false}};
+
+// Why a price cannot bound a ceiling.
+enum class Unusable : std::uint8_t { Missing, Variable, NotDecimal, TooLarge };
+constexpr std::string_view unusable_reasons[]{"price missing at an endpoint", "variable price at an endpoint",
+                                              "price at an endpoint is not decimal text",
+                                              "price at an endpoint is too large for the catalogue"};
+bool present(json::Value value) { return value.valid() && !value.is_null(); }
+// An endpoint's price, read as a listed price is: text an entry can hold (descriptor::valid_price_text), not
+// negative, and exact in nano-USD per million units (pricing::per_million).
+std::variant<std::uint64_t, Unusable> endpoint_price(json::Value value) {
+  if (!value.is_string() || !descriptor::valid_price_text(value.as_string())) return Unusable::NotDecimal;
+  if (value.as_string().front() == '-') return Unusable::Variable;
+  if (const auto rate = pricing::per_million(value.as_string())) return *rate;
+  return Unusable::TooLarge;
+}
+
+// What a model's endpoints listing says about its route ceiling.
+struct EndpointsRead {
+  enum class Shape : std::uint8_t { Listing, NotListing, OtherModel, Empty } shape = Shape::Listing;
+  // By Side: the dearest price over every endpoint and every override.
+  std::array<std::optional<std::uint64_t>, 3> dearest;
+  // The prices that cannot bound their unit: (side, index in price_members, why), in that order.
+  std::set<std::tuple<Side, std::size_t, Unusable>> unusable;
+  // An endpoint's discount is not a number from 0 to 1. The listing multiplies each price by (1 - discount), so
+  // only such a discount keeps the listed prices an upper bound.
+  bool discount = false;
+};
+EndpointsRead read_endpoints(std::string_view body, std::string_view id) {
+  using Shape = EndpointsRead::Shape;
+  EndpointsRead out;
+  const auto parsed = json::parse(body, {max_page_bytes, 64});
+  const auto* document = std::get_if<json::Document>(&parsed);
+  if (!document) { out.shape = Shape::NotListing; return out; }
+  const auto root = document->root();
+  const auto data = root.get("data");
+  const auto endpoints = data.get("endpoints");
+  if (!root.is_object() || !data.is_object() || !data.get("id").is_string() || !endpoints.is_array()) { out.shape = Shape::NotListing; return out; }
+  if (data.get("id").as_string() != id) { out.shape = Shape::OtherModel; return out; }
+  if (endpoints.size() == 0) { out.shape = Shape::Empty; return out; }
+  // Every endpoint is an object with a pricing object, and its overrides, if any, an array of objects.
+  for (const auto endpoint : endpoints.elements()) {
+    const auto prices = endpoint.get("pricing");
+    if (!endpoint.is_object() || !prices.is_object()) { out.shape = Shape::NotListing; return out; }
+    const auto overrides = prices.get("overrides");
+    if (!present(overrides)) continue;
+    if (!overrides.is_array()) { out.shape = Shape::NotListing; return out; }
+    for (const auto entry : overrides.elements())
+      if (!entry.is_object()) { out.shape = Shape::NotListing; return out; }
+  }
+  const auto read = [&](json::Value prices, bool base) {
+    for (std::size_t i = 0; i < std::size(price_members); ++i) {
+      const auto& member = price_members[i];
+      const auto value = prices.get(member.name);
+      if (!present(value)) {
+        if (base && member.required) out.unusable.emplace(member.side, i, Unusable::Missing);
+        continue;
+      }
+      const auto rate = endpoint_price(value);
+      if (const auto* why = std::get_if<Unusable>(&rate)) {
+        out.unusable.emplace(member.side, i, *why);
+        continue;
+      }
+      auto& dearest = out.dearest[member.side];
+      if (!dearest || std::get<std::uint64_t>(rate) > *dearest) dearest = std::get<std::uint64_t>(rate);
+    }
+  };
+  for (const auto endpoint : endpoints.elements()) {
+    const auto prices = endpoint.get("pricing");
+    const auto discount = prices.get("discount");
+    if (present(discount) && !(discount.is_number() && discount.as_double() >= 0 && discount.as_double() <= 1)) out.discount = true;
+    read(prices, true);
+    if (const auto overrides = prices.get("overrides"); present(overrides))
+      for (const auto entry : overrides.elements()) read(entry, false);
+  }
+  return out;
+}
+
+using PriceUnits = std::vector<std::pair<std::string, std::string>>;
+// The route ceiling `previous` has for the model at this source's origin.
+PriceUnits previous_ceiling(const CatalogueSnapshot& previous, std::string_view id, std::string_view origin) {
+  PriceUnits out;
+  const auto* entry = previous ? previous->entry(id) : nullptr;
+  if (!entry || !listed_by(*entry, descriptor::listing_name(Listing::OpenRouter)) ||
+      std::find(entry->origins.begin(), entry->origins.end(), origin) == entry->origins.end())
+    return out;
+  for (const auto& price : entry->pricing)
+    if (ceiling_unit(price.first)) out.push_back(price);
+  return out;
+}
+// Puts the units on the entry when an entry can hold them beside its other prices.
+bool hold(CatalogueEntry& entry, const PriceUnits& units) {
+  if (units.empty()) return true;
+  auto candidate = entry;
+  candidate.pricing.insert(candidate.pricing.end(), units.begin(), units.end());
+  std::sort(candidate.pricing.begin(), candidate.pricing.end());
+  std::vector<CatalogueEntry> alone;
+  alone.push_back(candidate);
+  if (std::holds_alternative<ConfigError>(descriptor::make_catalogue(std::move(alone)))) return false;
+  entry = std::move(candidate);
+  return true;
+}
+
+struct Planned {
+  ListingSource source;
+  std::string url, origin;
+  std::vector<std::string> ceilings;  // sorted
+};
+// Reads the route ceiling of each model asked for into the listed entries, in id order, one request per listed
+// model, and reports every model and unit it could not write.
+void read_ceilings(Transport& transport, const RefreshRequest& request, const Planned& plan,
+                   std::chrono::steady_clock::time_point deadline, std::vector<CatalogueEntry>& entries, SourceReport& report) {
+  for (const auto& id : plan.ceilings) {
+    const auto gap = [&](std::string_view unit, std::string_view price, std::string reason, bool kept = false) {
+      report.ceiling_gaps.push_back({id, std::string(unit), std::string(price), std::move(reason), kept});
+    };
+    const auto found = std::find_if(entries.begin(), entries.end(), [&](const CatalogueEntry& e) { return !e.prefix && e.id == id; });
+    if (found == entries.end()) { gap({}, {}, "not in the listing"); continue; }
+    auto& entry = *found;
+    // A ceiling comes from the endpoints listing only; a unit of that name in the models listing is dropped.
+    std::erase_if(entry.pricing, [](const auto& price) { return ceiling_unit(price.first); });
+    // An endpoints request that fails keeps the ceiling `previous` had for the model.
+    const auto keep_previous = [&](std::string reason) {
+      const auto units = previous_ceiling(request.previous, id, plan.origin);
+      gap({}, {}, std::move(reason), !units.empty() && hold(entry, units));
+    };
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) { keep_previous("refresh deadline passed"); continue; }
+    HttpRequest http;
+    http.method = "GET";
+    http.url = endpoints_url(plan.url, id);
+    http.headers = listing_headers(Listing::OpenRouter, plan.source.api_key);
+    http.deadline = std::min(after(now, request.page_timeout), deadline);
+    http.ca_file = request.ca_file;
+    auto page = fetch(transport, std::move(http));
+    ++report.ceiling_requests;
+    if (page.result.status != Status::Completed) {
+      keep_previous(std::chrono::steady_clock::now() >= deadline ? "refresh deadline passed" : "endpoints request did not complete");
+      continue;
+    }
+    if (page.status != 200) { keep_previous("endpoints answered HTTP " + std::to_string(page.status)); continue; }
+    if (page.too_large) { gap({}, {}, "endpoints listing exceeds 32 MiB"); continue; }
+    const auto read = read_endpoints(page.body, id);
+    if (read.shape == EndpointsRead::Shape::NotListing) { gap({}, {}, "not an endpoints listing"); continue; }
+    if (read.shape == EndpointsRead::Shape::OtherModel) { gap({}, {}, "endpoints listing names another model"); continue; }
+    if (read.shape == EndpointsRead::Shape::Empty) { gap({}, {}, "no endpoints"); continue; }
+    const auto gaps_before = report.ceiling_gaps.size();
+    bool unusable[3] = {false, false, false};
+    for (const auto& [side, member, why] : read.unusable) {
+      unusable[side] = true;
+      gap(ceiling_units[side], price_members[member].name, std::string(unusable_reasons[static_cast<std::size_t>(why)]));
+    }
+    // Without a request ceiling a bound charges the listed request fee, so a fee that cannot be read leaves out the
+    // whole ceiling rather than one that may be too low.
+    if (read.discount) gap({}, "discount", "discount at an endpoint is not from 0 to 1");
+    if (unusable[Request]) gap({}, {}, "no ceiling without every request fee");
+    if (read.discount || unusable[Request]) continue;
+    PriceUnits units;
+    for (const Side side : {Input, Output})
+      if (!unusable[side] && read.dearest[side]) units.emplace_back(ceiling_units[side], pricing::decimal_text(*read.dearest[side]));
+    if (read.dearest[Request] && *read.dearest[Request] > 0)
+      units.emplace_back(ceiling_units[Request], pricing::decimal_text(*read.dearest[Request]));
+    if (!hold(entry, units)) { gap({}, {}, "the entry cannot hold the ceiling"); continue; }
+    if (report.ceiling_gaps.size() == gaps_before) ++report.ceilings;
+  }
+}
 } // namespace
 
 std::string default_listing_url(Listing listing) {
@@ -183,7 +405,6 @@ std::string default_listing_url(Listing listing) {
 
 std::variant<RefreshResult, ConfigError> refresh_catalogue(Transport& transport, const RefreshRequest& request) {
   try {
-    struct Planned { ListingSource source; std::string url, origin; };
     std::vector<Planned> planned;
     for (std::size_t i = 0; i < request.sources.size(); ++i) {
       const auto& source = request.sources[i];
@@ -195,7 +416,22 @@ std::variant<RefreshResult, ConfigError> refresh_catalogue(Transport& transport,
         throw ConfigError{pointer + "/origin", "canonical origin without path", 0, "listing source rejected"};
       if (source.api_key.find_first_of("\r\n") != std::string::npos)
         throw ConfigError{pointer + "/api_key", "credential without line breaks", 0, "listing source rejected"};
-      planned.push_back({source, std::move(url), std::move(origin)});
+      auto ceilings = source.ceiling_models;
+      if (!ceilings.empty()) {
+        const auto at = pointer + "/ceiling_models";
+        if (source.listing != Listing::OpenRouter)
+          throw ConfigError{at, "route ceilings from an OpenRouter listing only", 0, "listing source rejected"};
+        if (ceilings.size() > config_defaults::catalogue_refresh_max_ceiling_models)
+          throw ConfigError{at, "at most " + std::to_string(config_defaults::catalogue_refresh_max_ceiling_models) + " model ids", 0,
+                            "listing source rejected"};
+        for (std::size_t j = 0; j < ceilings.size(); ++j)
+          if (!openrouter_model_id(ceilings[j]))
+            throw ConfigError{at + "/" + std::to_string(j), "OpenRouter model id author/slug", 0, "listing source rejected"};
+        std::sort(ceilings.begin(), ceilings.end());
+        if (std::adjacent_find(ceilings.begin(), ceilings.end()) != ceilings.end())
+          throw ConfigError{at, "each model id once", 0, "listing source rejected"};
+      }
+      planned.push_back({source, std::move(url), std::move(origin), std::move(ceilings)});
     }
 
     RefreshResult out;
@@ -203,7 +439,8 @@ std::variant<RefreshResult, ConfigError> refresh_catalogue(Transport& transport,
     std::vector<CatalogueSnapshot> fresh;
     Refreshed refreshed;
     out.generated = generated_from(request.previous, refreshed, fresh);
-    for (const auto& [source, url, origin] : planned) {
+    for (const auto& plan : planned) {
+      const auto& [source, url, origin, ceilings] = plan;
       SourceReport report;
       report.listing = source.listing;
       report.origin = origin;
@@ -252,6 +489,11 @@ std::variant<RefreshResult, ConfigError> refresh_catalogue(Transport& transport,
                                               static_cast<std::uint64_t>(listed_before(request.previous, name, origin)) * request.min_kept_percent)
             report.error = "listing named far fewer models than before";
           else {
+            if (!ceilings.empty()) {
+              auto entries = listed->entries();
+              read_ceilings(transport, request, plan, deadline, entries, report);
+              listed = catalogue_of(std::move(entries));
+            }
             // The catalogue has to hold this listing next to the others; if it cannot, only this source fails.
             auto with_refreshed = refreshed;
             with_refreshed.emplace_back(name, origin);
@@ -263,6 +505,13 @@ std::variant<RefreshResult, ConfigError> refresh_catalogue(Transport& transport,
           }
         } catch (ConfigError&) { report.error = "listing exceeds the catalogue limits"; }
         report.ok = report.error.empty();
+      }
+      // A source that fails keeps its previous entries whole, ceilings included.
+      if (!report.ok && !ceilings.empty()) {
+        report.ceilings = 0;
+        report.ceiling_gaps.clear();
+        for (const auto& id : ceilings)
+          report.ceiling_gaps.push_back({id, {}, {}, "listing failed", !previous_ceiling(request.previous, id, origin).empty()});
       }
       out.sources.push_back(std::move(report));
     }

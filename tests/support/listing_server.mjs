@@ -44,11 +44,18 @@ const send = (res, status, body) => {
   res.writeHead(status, { 'content-type': 'application/json' });
   res.end(typeof body === 'string' ? body : JSON.stringify(body));
 };
+// The requests each scenario received, which the test reads over the control channel: all of them, and the
+// model ids whose endpoints listing was asked for, in order.
+const seen = {};
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1');
   const [, scenario, ...rest] = url.pathname.split('/');
   const path = '/' + rest.join('/');
   const h = req.headers;
+  const counts = (seen[scenario] ??= { total: 0, endpoints: [] });
+  counts.total += 1;
+  if (path.startsWith(endpointsPrefix) && path.endsWith(endpointsSuffix)) counts.endpoints.push(path.slice(endpointsPrefix.length, -endpointsSuffix.length));
+  if (ceilings(scenario, path, url, h, res)) return;
   if (listingExtras(scenario, path, h, res)) return;
   if (scenario === 'broken') return send(res, 500, { error: { message: 'synthetic outage' } });
   if (scenario === 'notjson') return send(res, 200, 'not a listing');
@@ -80,8 +87,113 @@ const server = http.createServer((req, res) => {
   send(res, 404, {});
 });
 server.listen(0, '127.0.0.1', () => process.stdout.write(JSON.stringify({ port: server.address().port }) + '\n'));
+// Control lines on stdin, each answered with one JSON line on stdout:
+//   {"requests": scenario}             the requests that scenario received
+//   {"set": scenario, "models": {...}}  the endpoints of each model of a ceilings scenario: id -> [pricing, ...]
+let control = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  control += chunk;
+  for (let cut = control.indexOf('\n'); cut >= 0; cut = control.indexOf('\n')) {
+    const line = control.slice(0, cut);
+    control = control.slice(cut + 1);
+    let answer;
+    try {
+      const command = JSON.parse(line);
+      if (typeof command.requests === 'string') {
+        const counts = seen[command.requests] ?? { total: 0, endpoints: [] };
+        answer = { total: counts.total, endpoints: counts.endpoints };
+      } else if (typeof command.set === 'string' && command.models && typeof command.models === 'object') {
+        generated[command.set] = Object.fromEntries(Object.entries(command.models).map(([id, prices]) => [id, { endpoints: prices.map(endpoint) }]));
+        answer = { set: command.set };
+      } else answer = { error: 'unknown command' };
+    } catch {
+      answer = { error: 'malformed command' };
+    }
+    process.stdout.write(JSON.stringify(answer) + '\n');
+  }
+});
 process.stdin.on('end', () => server.close(() => process.exit(0)));
 process.stdin.resume();
+
+// OpenRouter models whose route ceilings a refresh reads from their endpoints listings
+// (GET /api/v1/models/{author}/{slug}/endpoints). Scenario `ceilings` is the first state, `ceilings-v2` changes
+// one model's prices, makes two listings fail and one malformed, and a scenario set over the control channel
+// serves generated endpoints. Every listing also names `vendor/unasked`, whose endpoints no test asks for.
+const endpointsPrefix = '/api/v1/models/';
+const endpointsSuffix = '/endpoints';
+const generated = {};
+const endpoint = (pricing) => ({
+  name: 'Provider | model', model_id: 'vendor/model-20261001', model_name: 'Model', context_length: 131072, pricing,
+  provider_name: 'Provider', tag: 'provider', service_tier: null, quantization: 'fp8', max_completion_tokens: 16384,
+  max_prompt_tokens: null, supported_parameters: ['tools'], supports_tool_choice: {}, uptime_last_30m: 99.5, status: 0,
+});
+const price = (prompt, completion, more = {}) => ({ prompt, completion, ...more });
+const ceilingDocs = (version) => ({
+  // The dearest of several endpoints, unit by unit; the third endpoint writes a trailing zero.
+  'vendor/many': { endpoints: [price('0.000001', '0.000004'), price('0.000003', '0.000002'), price('0.0000020', version === 1 ? '0.000005' : '0.000006')] },
+  // A request fee at one endpoint, a zero fee at another and none at the third.
+  'vendor/fee': version === 1
+    ? { endpoints: [price('0.000001', '0.000001', { request: '0' }), price('0.000001', '0.000001', { request: '0.0002' }), price('0.000001', '0.000001')] }
+    : { body: '<html>captive portal</html>' },
+  'vendor/zero-fee': { endpoints: [price('0.000001', '0.000002', { request: '0' }), price('0.000001', '0.000002')] },
+  // Cache, reasoning and long-context prices above the prompt and completion prices, a discount, and prices per
+  // image and per search, which no token ceiling covers.
+  'vendor/cached': { endpoints: [
+    price('0.000003', '0.000015', { input_cache_read: '0.0000003', input_cache_write: '0.00000375', input_cache_write_1h: '0.000006',
+      internal_reasoning: '0.000015', image: '0.04', web_search: '0.01', discount: 0.25 }),
+    price('0.000002', '0.00001', { internal_reasoning: '0.00002', discount: 0,
+      overrides: [{ min_prompt_tokens: 200000, prompt: '0.000004', completion: '0.000018' }, { utc_start: 100, utc_end: 400, prompt: '0.000001' }] }),
+  ] },
+  '~vendor/alias-latest': { endpoints: [] },
+  // One endpoint among usable ones with a price that cannot be read.
+  'vendor/missing-prompt': { endpoints: [price('0.000001', '0.000002'), { completion: '0.000003' }] },
+  'vendor/negative': { endpoints: [price('0.000001', '0.000002'), price('-1', '0.000001')] },
+  'vendor/not-decimal': { endpoints: [price('0.000001', 'free'), price('0.000002', '0.000001')] },
+  'vendor/number': { endpoints: [price(0.000001, '0.000002'), price('0.000002', '0.000001')] },
+  'vendor/too-large': { endpoints: [price('99999', '0.000001'), price('0.000001', '0.000001')] },
+  'vendor/bad-cache': { endpoints: [price('0.000001', '0.000002', { input_cache_write: '-1' }), price('0.000001', '0.000002')] },
+  'vendor/bad-override': { endpoints: [price('0.000001', '0.000002', { overrides: [{ min_prompt_tokens: 128000, completion: '1e-5' }] })] },
+  'vendor/bad-fee': { endpoints: [price('0.000001', '0.000002', { request: '-1' }), price('0.000001', '0.000002', { request: '0.001' })] },
+  'vendor/bad-discount': { endpoints: [price('0.000001', '0.000002', { discount: -0.5 })] },
+  // Documents that are not the documented shape.
+  'vendor/malformed': { data: { id: 'vendor/malformed', name: 'Malformed', endpoints: {} } },
+  'vendor/override-shape': { endpoints: [price('0.000001', '0.000002', { overrides: ['long context'] })] },
+  'vendor/wrong-id': { id: 'vendor/other', endpoints: [price('0.000001', '0.000002')] },
+  'vendor/not-json': { body: '<html>captive portal</html>' },
+  // Listings that fail in version 2: an outage and one slower than the test's page timeout.
+  'vendor/outage': version === 1 ? { endpoints: [price('0.000001', '0.000002', { request: '0.0001' })] } : { status: 500 },
+  'vendor/stall': version === 1 ? { endpoints: [price('0.000002', '0.000003')] } : { delay: 3000, endpoints: [price('0.000009', '0.000009')] },
+  // The listing gives this model the 64 price units an entry holds, so no ceiling fits beside them.
+  'vendor/full': { endpoints: [price('0.000001', '0.000002')] },
+});
+const listedEntry = (id) => ({
+  id, name: `Vendor: ${id}`, context_length: 131072, architecture: { input_modalities: ['text'], output_modalities: ['text'] },
+  pricing: id === 'vendor/full' ? Object.fromEntries(Array.from({ length: 64 }, (_, i) => [`unit_${i}`, '0'])) : { prompt: '0.000001', completion: '0.000002' },
+});
+function ceilings(scenario, path, url, h, res) {
+  if (!scenario.startsWith('ceilings')) return false;
+  if (h.authorization && h.authorization !== 'Bearer openrouter-test-key') return send(res, 401, {}), true;
+  const docs = generated[scenario] ?? ceilingDocs(scenario === 'ceilings-v2' ? 2 : 1);
+  if (path === '/api/v1/models') {
+    if (url.searchParams.get('output_modalities') !== 'all') return send(res, 404, {}), true;
+    return send(res, 200, { data: [...Object.keys(docs), 'vendor/unasked'].map(listedEntry) }), true;
+  }
+  if (!path.startsWith(endpointsPrefix) || !path.endsWith(endpointsSuffix) || url.search !== '') return send(res, 404, {}), true;
+  const id = path.slice(endpointsPrefix.length, -endpointsSuffix.length);
+  const doc = id === 'vendor/unasked' ? { endpoints: [endpoint(price('1', '1'))] } : docs[id];
+  if (!doc) return send(res, 404, { error: { code: 404, message: 'synthetic: no such model' } }), true;
+  if (doc.status) return send(res, doc.status, { error: { code: doc.status, message: 'synthetic outage' } }), true;
+  if (doc.body) return send(res, 200, doc.body), true;
+  const body = doc.data ? { data: doc.data } : {
+    data: { id: doc.id ?? id, name: `Vendor: ${id}`, created: 1790000000, description: 'Synthetic model',
+      architecture: { input_modalities: ['text'], output_modalities: ['text'], modality: 'text->text', tokenizer: 'Other', instruct_type: null },
+      endpoints: doc.endpoints.map((e) => (e.name ? e : endpoint(e))) },
+  };
+  if (doc.delay) setTimeout(() => send(res, 200, body), doc.delay);
+  else send(res, 200, body);
+  return true;
+}
 
 // Listings a refresh has to fail on, or to take care with: empty, shrunk, with a page token that cannot
 // continue them, too large for a catalogue, listed by two sources, or slow. Each checks its credential.

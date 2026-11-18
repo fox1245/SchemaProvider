@@ -24,6 +24,27 @@ struct ListingSource {
   std::string api_key;
   // The descriptor origin the generated entries are scoped to. Empty: the provider's API origin.
   std::string origin;
+  // OpenRouter only: the models whose route ceilings (`ceiling_input`, `ceiling_output`, `ceiling_request`) to
+  // read from their endpoints listings, GET /api/v1/models/{author}/{slug}/endpoints at `url`, one request per
+  // listed model after the listing. Each id is `author/slug`, where a `~` may start the author (an alias) and a
+  // `:` variant may end the slug, and each id appears once; at most `max_ceiling_models` of
+  // config/catalogue-refresh.json. Empty: no endpoints request, and no ceiling is written.
+  std::vector<std::string> ceiling_models;
+};
+
+// A route ceiling the refresh was asked for and did not write from the model's endpoints, for one unit or for
+// the whole model, and why.
+struct CeilingGap {
+  std::string model;  // the id as asked for
+  // "ceiling_input", "ceiling_output" or "ceiling_request"; empty when the gap is the whole model.
+  std::string unit;
+  // The member of an endpoint's pricing that left the unit out ("prompt", "input_cache_write"); empty when no one
+  // price did.
+  std::string price;
+  // Fixed text: never a URL, header, credential or response body.
+  std::string reason;
+  // The ceiling `previous` had for the model is kept, because the endpoints could not be fetched this time.
+  bool kept = false;
 };
 
 struct RefreshRequest {
@@ -57,6 +78,10 @@ struct SourceReport {
   std::size_t skipped_prices = 0;
   // Why the source failed, as fixed text: never a URL, header, credential or response body.
   std::string error;
+  // Route ceilings (ListingSource::ceiling_models): the endpoints requests sent, the models whose ceiling was
+  // written whole from their endpoints, and every model or unit asked for that was not, by model id in order.
+  std::size_t ceiling_requests = 0, ceilings = 0;
+  std::vector<CeilingGap> ceiling_gaps;
 };
 
 struct RefreshResult {
@@ -79,7 +104,12 @@ struct RefreshResult {
 // `min_kept_percent` percent of the entries it gave before (unless `allow_drop`), a page token
 // cannot continue the listing, the listing does not fit the catalogue's bounds, or the refresh's
 // deadline passes. A ConfigError means the request itself is invalid (a non-https URL, an origin
-// that is not canonical) or the overlays do not merge.
+// that is not canonical, ceiling ids that are malformed, repeated, too many or not on an OpenRouter
+// source) or the overlays do not merge.
+// With ListingSource::ceiling_models, each listed model named there gets the route ceiling its endpoints
+// listing gives, every unit at the dearest price of its side over every endpoint, or no ceiling for a unit
+// that any endpoint's prices cannot bound (USAGE.md, refreshing the catalogue). A model whose endpoints
+// request fails keeps the ceiling `previous` had and does not fail the source.
 std::variant<RefreshResult, descriptor::ConfigError> refresh_catalogue(Transport& transport, const RefreshRequest& request);
 
 // The provider's public API URL and origin for a listing.
