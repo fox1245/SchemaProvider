@@ -7,6 +7,7 @@
 #include "descriptor/policy.h"
 #include "json/json.h"
 #include "sp/config_defaults.h"
+#include "support/policy_edit.h"
 #include <algorithm>
 #include <iostream>
 #include <set>
@@ -225,6 +226,25 @@ void stop_kinds_come_from_the_table() {
   policy.replace(at, fact.size(), "\"IMAGE_SAFETY\":\"EndTurn\"");
   const auto rewritten = descriptor::load_policy(policy, config_defaults::codec_defaults_json);
   CHECK(std::holds_alternative<descriptor::ConfigError>(rewritten) && std::get<descriptor::ConfigError>(rewritten).pointer == "/stop_reasons");
+}
+// A custom policy without one of the family's embedded rows still decodes that value with the embedded kind, so SAFETY
+// stays blocked; a value neither table lists is Unknown. The descriptor's own table, which native bindings hash, does
+// not gain the row.
+void embedded_rows_survive_a_custom_policy() {
+  auto loaded = descriptor::load_policy(policy_edit::without_stop_row("google.generate", "SAFETY"), config_defaults::codec_defaults_json);
+  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(loaded));
+  const auto policy = std::get<descriptor::PolicySnapshot>(loaded);
+  CHECK(policy->family("google.generate")->stops.size() + 1 == descriptor::builtin_policy()->family("google.generate")->stops.size());
+  const auto loaded_descriptor = descriptor::load(descriptor_source, policy);
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded_descriptor));
+  const auto& d = std::get<descriptor::ValidatedDescriptor>(loaded_descriptor);
+  CHECK(std::none_of(d.stop_mappings().begin(), d.stop_mappings().end(), [](const auto& row) { return row.first == "SAFETY"; }));
+  for (const bool streaming : {false, true}) {
+    const auto blocked = stop_of(d, "SAFETY", streaming);
+    CHECK(blocked.blocked && blocked.kind == StopKind::ContentFilter && blocked.raw == "SAFETY");
+    const auto unknown = stop_of(d, "FUTURE_FINISH_REASON", streaming);
+    CHECK(!unknown.blocked && unknown.kind == StopKind::Unknown && unknown.raw == "FUTURE_FINISH_REASON");
+  }
 }
 void invalid_model_calls() {
   for (auto args : {"[]", "null", "1", R"({"x":1,"x":2})"}) {
@@ -919,6 +939,6 @@ void streamed_chunks_continue_their_part() {
 }
 }
 int main() {
-  try { http_error_envelope_in_an_array_is_retained(); output_total_without_thoughts(); total_proves_zero_thoughts(); total_without_candidates_bounds_the_output(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); tool_result_helper_needs_a_json_object(); successive_unidentified_calls(); local_ids_carry_a_random_token_per_response(); native_group_and_replay(); nullable_usage(); uncached_input_rule(); stop_kinds_come_from_the_table(); invalid_model_calls(); errors_and_terminals(); loaded_routes_encode_for_their_model(); empty_text_delta_is_withheld(); streamed_chunks_continue_their_part(); one_descriptor_serves_every_model(); served_model_is_recorded(); failure_reasons(); std::cout << "Gemini semantic invariants passed\n"; }
+  try { http_error_envelope_in_an_array_is_retained(); output_total_without_thoughts(); total_proves_zero_thoughts(); total_without_candidates_bounds_the_output(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); tool_result_helper_needs_a_json_object(); successive_unidentified_calls(); local_ids_carry_a_random_token_per_response(); native_group_and_replay(); nullable_usage(); uncached_input_rule(); stop_kinds_come_from_the_table(); embedded_rows_survive_a_custom_policy(); invalid_model_calls(); errors_and_terminals(); loaded_routes_encode_for_their_model(); empty_text_delta_is_withheld(); streamed_chunks_continue_their_part(); one_descriptor_serves_every_model(); served_model_is_recorded(); failure_reasons(); std::cout << "Gemini semantic invariants passed\n"; }
   catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

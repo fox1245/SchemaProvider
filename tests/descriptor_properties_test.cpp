@@ -703,8 +703,9 @@ void stop_tables_grow_but_never_change() {
         }
     }
     CHECK(families == 5);
-    // A policy that leaves a row out decodes that value as Unknown. A descriptor under it may state the value again,
-    // but only with the kind the embedded policy gives it.
+    // A policy that leaves a row out loads, and the descriptor's own table, which native bindings hash, lacks it (the
+    // codecs fall back to the embedded row). A descriptor under it may state the value again, but only with the kind
+    // the embedded policy gives it.
     std::string without_length = "{";
     for (auto entry : root.get("families").elements()) {
         if (entry.get("family").as_string() != "openai.chat") continue;

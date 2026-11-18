@@ -3,8 +3,12 @@
 #include "core/enum_names.h"
 #include "core/native.h"
 #include "descriptor/descriptor.h"
+#include "descriptor/policy.h"
 #include "json/json.h"
+#include "sp/config_defaults.h"
+#include "support/policy_edit.h"
 
+#include <algorithm>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -570,6 +574,38 @@ void incomplete_reasons_from_the_table() {
       const auto refused = continued(c.messages[0]);
       CHECK(std::holds_alternative<Error>(refused) && std::get<Error>(refused).kind == ErrorKind::ReplayIneligible);
     }
+}
+// A custom policy without one of the family's embedded rows still decodes that value with the embedded kind; a value
+// neither table lists is Unknown. The descriptor's own table, which native bindings hash, does not gain the row.
+void embedded_rows_survive_a_custom_policy() {
+  auto loaded = descriptor::load_policy(policy_edit::without_stop_row("openai.responses", "max_output_tokens"), config_defaults::codec_defaults_json);
+  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(loaded));
+  const auto policy = std::get<descriptor::PolicySnapshot>(loaded);
+  CHECK(policy->family("openai.responses")->stops.size() + 1 == descriptor::builtin_policy()->family("openai.responses")->stops.size());
+  const auto loaded_descriptor = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"responses-semantic","family":"openai.responses","connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":"/v1/responses","streaming":"/v1/responses"}},"bindings":{"model":"model","messages":"input","stream":"stream","max_output_tokens":"max_output_tokens","usage":["usage"]}})", policy);
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded_descriptor));
+  const auto& d = std::get<descriptor::ValidatedDescriptor>(loaded_descriptor);
+  CHECK(std::none_of(d.stop_mappings().begin(), d.stop_mappings().end(), [](const auto& row) { return row.first == "max_output_tokens"; }));
+  auto encoded = responses::encode(d, request(), true);
+  CHECK(std::holds_alternative<responses::EncodedRequest>(encoded));
+  const auto context = std::get<responses::EncodedRequest>(encoded).context;
+  const auto stop_of = [&](std::string_view reason, bool streaming) -> StopReason {
+    const auto detail = "{\"reason\":" + json::quote(reason) + "}";
+    Accumulator acc; responses::Codec codec(d, streaming ? responses::Mode::Sse : responses::Mode::Buffered, acc, context);
+    if (streaming) {
+      auto frames = text_frames();
+      frames.back() = terminal("[" + message + "]", "incomplete", usage, detail);
+      for (const auto& [name, data] : frames) if (!codec.frame(name, data)) break;
+      codec.finish();
+    } else codec.buffered(body("[" + message + "]", "incomplete", usage, detail), {});
+    CHECK(acc.outcome());
+    return completed(*acc.outcome()).stop;
+  };
+  for (const bool streaming : {false, true}) {
+    const auto capped = stop_of("max_output_tokens", streaming), unknown = stop_of("future_incomplete_reason", streaming);
+    CHECK(capped.kind == StopKind::MaxTokens && capped.raw == "max_output_tokens");
+    CHECK(unknown.kind == StopKind::Unknown && unknown.raw == "future_incomplete_reason");
+  }
 }
 void unknown_hosted_item_ownership() {
   const std::string hosted = R"({"id":"hosted_1","type":"future_hosted_call","status":"completed","call_id":"provider_call","name":"lookup","arguments":{"x":2},"result":{"text":"provider result"}})";
@@ -1283,7 +1319,7 @@ void long_streams_are_one_part_per_content_part() {
   }
 }
 int main() {
-  try { empty_text_delta_is_withheld(); long_streams_are_one_part_per_content_part(); failure_reasons(); provider_money_and_snapshot_aliases(); named_error_precedence(); named_error_raw_capacity(); completed_reasoning_ciphertext_authority(); reviewed_wire_boundaries(); typed_encode(); controls_and_cursor_boundaries(); openrouter_max_price(); strict_tool_schemas(); previous_response_ownership(); grouped_native_and_owned_outcomes(); normal_close_required(); cancellation_observation_boundary(); reasoning_stream_snapshots(); tools_interleaving_and_ownership(); incomplete_and_server_items(); incomplete_reasons_from_the_table(); unknown_hosted_item_ownership(); unknown_wire_observation_boundary(); usage_boundaries(); uncached_input_rule(); corruption_and_bounds();
+  try { empty_text_delta_is_withheld(); long_streams_are_one_part_per_content_part(); failure_reasons(); provider_money_and_snapshot_aliases(); named_error_precedence(); named_error_raw_capacity(); completed_reasoning_ciphertext_authority(); reviewed_wire_boundaries(); typed_encode(); controls_and_cursor_boundaries(); openrouter_max_price(); strict_tool_schemas(); previous_response_ownership(); grouped_native_and_owned_outcomes(); normal_close_required(); cancellation_observation_boundary(); reasoning_stream_snapshots(); tools_interleaving_and_ownership(); incomplete_and_server_items(); incomplete_reasons_from_the_table(); embedded_rows_survive_a_custom_policy(); unknown_hosted_item_ownership(); unknown_wire_observation_boundary(); usage_boundaries(); uncached_input_rule(); corruption_and_bounds();
     named_includes(); hosted_tool_options(); openrouter_server_tools_and_images(); service_item_progress_events(); computer_calls_and_mcp_approvals(); plugins_and_citations();
     std::cout << "Responses semantic contracts passed\n"; return 0;
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }

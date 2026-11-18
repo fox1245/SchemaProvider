@@ -1,9 +1,11 @@
+#include "codecs/interaction_jobs.h"
 #include "codecs/interactions.h"
 #include "codecs/interactions_request.h"
 #include "codecs/reason.h"
 #include "core/native.h"
 #include "json/json.h"
 #include "sp/config_defaults.h"
+#include "support/policy_edit.h"
 #include "support/vision_fixture.h"
 #include <algorithm>
 #include <iostream>
@@ -203,6 +205,7 @@ void background_and_lifecycle() {
   failure(decode(get, resource("[" + output + "]", "cancelled")), ErrorKind::Cancelled);
   const auto deleted = decode(erase, "{}");
   CHECK(complete(deleted).stop.raw == "deleted" && complete(deleted).messages.empty());
+  CHECK(std::get<jobs::State>(jobs::interaction_state(desc(), deleted)).status == jobs::Status::Completed);
   // An agent runs instead of a model.
   auto agent = request(); agent.model.clear(); agent.agent = "deep-research-preview-04-2026"; agent.background = true; agent.store = true;
   const auto agent_wire = parse(std::get<interactions::EncodedRequest>(interactions::encode(desc(), agent, false)).body);
@@ -574,6 +577,28 @@ void unknown_statuses_are_kept() {
     return event.type == "interaction.status_update" && event.payload->root().get("status").as_string() == "paused_for_review";
   }));
 }
+// The codec maps the lifecycle statuses in code, so a custom policy without one of the family's embedded rows decodes
+// as before.
+void embedded_rows_survive_a_custom_policy() {
+  auto loaded = descriptor::load_policy(policy_edit::without_stop_row("google.interactions", "completed"), config_defaults::codec_defaults_json);
+  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(loaded));
+  const auto policy = std::get<descriptor::PolicySnapshot>(loaded);
+  CHECK(policy->family("google.interactions")->stops.size() + 1 == descriptor::builtin_policy()->family("google.interactions")->stops.size());
+  const auto loaded_descriptor = descriptor::load(descriptor_source, policy);
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded_descriptor));
+  const auto& d = std::get<descriptor::ValidatedDescriptor>(loaded_descriptor);
+  auto encoded = interactions::encode(d, request(), true);
+  CHECK(std::holds_alternative<interactions::EncodedRequest>(encoded));
+  const auto context = std::get<interactions::EncodedRequest>(encoded).context;
+  for (const bool streaming : {false, true}) {
+    Accumulator a; interactions::Codec c(d, streaming ? interactions::Mode::Sse : interactions::Mode::Buffered, a, context);
+    if (streaming) {
+      for (const auto& [event, data] : frames()) if (!c.frame(event, data)) break;
+      c.finish();
+    } else c.buffered(resource("[" + thought + "," + output + "]"), {});
+    CHECK(a.outcome() && complete(*a.outcome()).stop.kind == StopKind::EndTurn && complete(*a.outcome()).stop.raw == "completed");
+  }
+}
 // A step's text, its thought summary and its audio are one part each however many deltas make them, as in the buffered reply.
 void long_streams_are_one_part_per_step() {
   constexpr size_t chunks = 3000;
@@ -600,7 +625,7 @@ void long_streams_are_one_part_per_step() {
   CHECK(json::equal(complete(live).messages[0].wire_output->root(), complete(whole).messages[0].wire_output->root()));
 }
 int main() {
-  try { served_model_is_recorded(); long_streams_are_one_part_per_step(); service_tool_steps(); service_request_controls(); background_and_lifecycle(); failure_reasons(); unknown_statuses_are_kept(); creation_without_status_transcription(); raw_observation_ownership(); named_error_raw_ownership(); stateless_missing_resource_id(); missing_terminal_usage(); exact_steps_and_replay(); input_boundaries(); thinking_level_xhigh(); lifecycle_and_errors(); unknown_usage_and_signature(); modality_keyed_usage(); uncached_input_and_unmapped_counters();
+  try { served_model_is_recorded(); long_streams_are_one_part_per_step(); service_tool_steps(); service_request_controls(); background_and_lifecycle(); failure_reasons(); unknown_statuses_are_kept(); embedded_rows_survive_a_custom_policy(); creation_without_status_transcription(); raw_observation_ownership(); named_error_raw_ownership(); stateless_missing_resource_id(); missing_terminal_usage(); exact_steps_and_replay(); input_boundaries(); thinking_level_xhigh(); lifecycle_and_errors(); unknown_usage_and_signature(); modality_keyed_usage(); uncached_input_and_unmapped_counters();
     std::cout << "Interactions semantic contracts passed\n"; return 0;
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }
