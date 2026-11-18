@@ -89,7 +89,8 @@ const server = http.createServer((req, res) => {
 server.listen(0, '127.0.0.1', () => process.stdout.write(JSON.stringify({ port: server.address().port }) + '\n'));
 // Control lines on stdin, each answered with one JSON line on stdout:
 //   {"requests": scenario}             the requests that scenario received
-//   {"set": scenario, "models": {...}}  the endpoints of each model of a ceilings scenario: id -> [pricing, ...]
+//   {"set": scenario, "models": {...}}  the endpoints of each model of a ceilings scenario: id -> [pricing, ...],
+//                                      and with "listed": {...} the prices its models listing gives: id -> pricing
 let control = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => {
@@ -105,6 +106,7 @@ process.stdin.on('data', (chunk) => {
         answer = { total: counts.total, endpoints: counts.endpoints };
       } else if (typeof command.set === 'string' && command.models && typeof command.models === 'object') {
         generated[command.set] = Object.fromEntries(Object.entries(command.models).map(([id, prices]) => [id, { endpoints: prices.map(endpoint) }]));
+        if (command.listed && typeof command.listed === 'object') generatedListed[command.set] = command.listed;
         answer = { set: command.set };
       } else answer = { error: 'unknown command' };
     } catch {
@@ -123,6 +125,7 @@ process.stdin.resume();
 const endpointsPrefix = '/api/v1/models/';
 const endpointsSuffix = '/endpoints';
 const generated = {};
+const generatedListed = {};
 const endpoint = (pricing) => ({
   name: 'Provider | model', model_id: 'vendor/model-20261001', model_name: 'Model', context_length: 131072, pricing,
   provider_name: 'Provider', tag: 'provider', service_tier: null, quantization: 'fp8', max_completion_tokens: 16384,
@@ -167,10 +170,27 @@ const ceilingDocs = (version) => ({
   'vendor/stall': version === 1 ? { endpoints: [price('0.000002', '0.000003')] } : { delay: 3000, endpoints: [price('0.000009', '0.000009')] },
   // The listing gives this model the 64 price units an entry holds, so no ceiling fits beside them.
   'vendor/full': { endpoints: [price('0.000001', '0.000002')] },
+  // A request fee only an override lists, at one endpoint and at every endpoint.
+  'vendor/override-fee': { endpoints: [price('0.000001', '0.000002', { overrides: [{ min_prompt_tokens: 100000, request: '0.001' }] }), price('0.000001', '0.000002')] },
+  'vendor/override-fees': { endpoints: [
+    price('0.000001', '0.000002', { overrides: [{ min_prompt_tokens: 100000, request: '0.001' }] }),
+    price('0.000001', '0.000002', { overrides: [{ utc_start: 100, utc_end: 400, request: '0.002', discount: 0.5 }] }),
+  ] },
+  // An override's discount that raises its prices.
+  'vendor/override-discount': { endpoints: [price('0.000001', '0.000002', { overrides: [{ min_prompt_tokens: 100000, prompt: '0.000002', discount: 1.5 }] })] },
+  // The models listing gives these prices above every endpoint's, and a variable one.
+  'vendor/listed-dear': { endpoints: [price('0.000001', '0.000005'), price('0.000002', '0.000004')] },
+  'vendor/listed-variable': { endpoints: [price('0.000001', '0.000002')] },
 });
-const listedEntry = (id) => ({
+// The prices the models listing gives: below every endpoint's unless a model says otherwise.
+const listedPrices = {
+  'vendor/full': Object.fromEntries(Array.from({ length: 64 }, (_, i) => [`unit_${i}`, '0'])),
+  'vendor/listed-dear': { prompt: '0.00001', completion: '0.0000001', input_cache_write: '0.00002' },
+  'vendor/listed-variable': { prompt: '-1', completion: '0.0000001' },
+};
+const listedEntry = (scenario) => (id) => ({
   id, name: `Vendor: ${id}`, context_length: 131072, architecture: { input_modalities: ['text'], output_modalities: ['text'] },
-  pricing: id === 'vendor/full' ? Object.fromEntries(Array.from({ length: 64 }, (_, i) => [`unit_${i}`, '0'])) : { prompt: '0.000001', completion: '0.000002' },
+  pricing: generatedListed[scenario]?.[id] ?? listedPrices[id] ?? { prompt: '0.0000001', completion: '0.0000001' },
 });
 function ceilings(scenario, path, url, h, res) {
   if (!scenario.startsWith('ceilings')) return false;
@@ -178,7 +198,7 @@ function ceilings(scenario, path, url, h, res) {
   const docs = generated[scenario] ?? ceilingDocs(scenario === 'ceilings-v2' ? 2 : 1);
   if (path === '/api/v1/models') {
     if (url.searchParams.get('output_modalities') !== 'all') return send(res, 404, {}), true;
-    return send(res, 200, { data: [...Object.keys(docs), 'vendor/unasked'].map(listedEntry) }), true;
+    return send(res, 200, { data: [...Object.keys(docs), 'vendor/unasked'].map(listedEntry(scenario)) }), true;
   }
   if (!path.startsWith(endpointsPrefix) || !path.endsWith(endpointsSuffix) || url.search !== '') return send(res, 404, {}), true;
   const id = path.slice(endpointsPrefix.length, -endpointsSuffix.length);

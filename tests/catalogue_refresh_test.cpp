@@ -450,7 +450,8 @@ const std::vector<std::string> asked_ceilings{
     "vendor/stall", "vendor/many", "vendor/fee", "vendor/zero-fee", "vendor/cached", "~vendor/alias-latest", "vendor/missing-prompt",
     "vendor/negative", "vendor/not-decimal", "vendor/number", "vendor/too-large", "vendor/bad-cache", "vendor/bad-override",
     "vendor/bad-fee", "vendor/bad-discount", "vendor/malformed", "vendor/override-shape", "vendor/wrong-id", "vendor/not-json",
-    "vendor/outage", "vendor/full", "vendor/missing-fee", "vendor/absent"};
+    "vendor/outage", "vendor/full", "vendor/missing-fee", "vendor/override-fee", "vendor/override-fees", "vendor/override-discount",
+    "vendor/listed-dear", "vendor/listed-variable", "vendor/absent"};
 std::vector<std::string> listed_asked() {
   std::vector<std::string> out;
   for (const auto& id : asked_ceilings) if (id != "vendor/absent") out.push_back(id);
@@ -493,12 +494,19 @@ void ceilings_from_the_endpoints_listings(transport::Transport& transport, Peer&
   // list, leaves out the whole ceiling.
   require(ceiling_of(c.entry("vendor/bad-fee")) == "- - -", "an unusable request fee leaves out every unit");
   require(ceiling_of(c.entry("vendor/missing-fee")) == "- - -", "a request fee only some endpoints list leaves out every unit");
+  // A fee an override lists is a listed fee: at one endpoint of two it leaves out the ceiling, at both it is written.
+  require(ceiling_of(c.entry("vendor/override-fee")) == "- - -", "a request fee only one endpoint's override lists leaves out every unit");
+  require(ceiling_of(c.entry("vendor/override-fees")) == "0.000001 0.000002 0.002", "request fees every endpoint's overrides list give the ceiling");
+  require(ceiling_of(c.entry("vendor/override-discount")) == "- - -", "an override's discount that raises its prices leaves out every unit");
+  // A ceiling is never below a price the models listing gives for the model in the same refresh.
+  require(ceiling_of(c.entry("vendor/listed-dear")) == "0.00002 0.000005 -", "a listed price above every endpoint's is the ceiling of its side");
+  require(ceiling_of(c.entry("vendor/listed-variable")) == "- 0.000002 -", "a variable listed price leaves out the ceiling of its side");
   require(ceiling_of(c.entry("vendor/bad-discount")) == "- - -", "a discount that raises the price leaves out every unit");
   for (const char* id : {"~vendor/alias-latest", "vendor/malformed", "vendor/override-shape", "vendor/wrong-id", "vendor/not-json", "vendor/full", "vendor/unasked"})
     require(c.entry(id) && ceiling_of(c.entry(id)) == "- - -", "no ceiling for an alias, a malformed listing, a full entry or a model not asked for");
   require(!c.entry("vendor/absent"), "an id the listing does not name gets no entry");
   require(c.entry("vendor/full")->pricing.size() == 64, "the full entry keeps its listed prices");
-  require(unit_price(c.entry("vendor/many"), "prompt") == std::optional<std::string>("0.000001"), "listed prices stay beside the ceiling");
+  require(unit_price(c.entry("vendor/many"), "prompt") == std::optional<std::string>("0.0000001"), "listed prices stay beside the ceiling");
 
   // Every gap is named, by model id in order, with fixed text.
   const std::vector<std::string> gaps{
@@ -509,6 +517,7 @@ void ceilings_from_the_endpoints_listings(transport::Transport& transport, Peer&
       "vendor/bad-fee|||no ceiling without every request fee",
       "vendor/bad-override|ceiling_output|completion|price at an endpoint is not decimal text",
       "vendor/full|||the entry cannot hold the ceiling",
+      "vendor/listed-variable|ceiling_input|prompt|variable price in the listing",
       "vendor/malformed|||not an endpoints listing",
       "vendor/missing-fee|ceiling_request|request|price missing at an endpoint",
       "vendor/missing-fee|||no ceiling without every request fee",
@@ -517,6 +526,9 @@ void ceilings_from_the_endpoints_listings(transport::Transport& transport, Peer&
       "vendor/not-decimal|ceiling_output|completion|price at an endpoint is not decimal text",
       "vendor/not-json|||not an endpoints listing",
       "vendor/number|ceiling_input|prompt|price at an endpoint is not decimal text",
+      "vendor/override-discount||discount|discount at an endpoint is not from 0 to 1",
+      "vendor/override-fee|ceiling_request|request|price missing at an endpoint",
+      "vendor/override-fee|||no ceiling without every request fee",
       "vendor/override-shape|||not an endpoints listing",
       "vendor/too-large|ceiling_input|prompt|price at an endpoint is too large for the catalogue",
       "vendor/wrong-id|||endpoints listing names another model",
@@ -527,7 +539,7 @@ void ceilings_from_the_endpoints_listings(transport::Transport& transport, Peer&
     for (const auto& line : lines) all += "\n  " + line;
     throw std::runtime_error("the ceiling gaps are not the expected ones:" + all);
   }
-  require(report.ceilings == 6 && report.ceiling_requests == 22, "six ceilings written whole from 22 endpoints requests");
+  require(report.ceilings == 8 && report.ceiling_requests == 27, "eight ceilings written whole from 27 endpoints requests");
   // One request per listed id asked for, in id order, and none for an id the listing does not name or one not asked for.
   require(seen(peer, "ceilings").endpoints == listed_asked(), "the endpoints of each listed model asked for, once, in order");
   fixed_text_only(report);
@@ -557,7 +569,7 @@ void failed_endpoints_keep_previous_ceilings(transport::Transport& transport, Pe
   request.sources = {ceiling_source(peer, "ceilings-v2", asked_ceilings)};
   const auto result = refreshed(transport, request);
   const auto& report = result.sources[0];
-  require(report.ok && report.ceiling_requests == 22, "a failed endpoints request does not fail the listing");
+  require(report.ok && report.ceiling_requests == 27, "a failed endpoints request does not fail the listing");
   fixed_text_only(report);
   const auto& c = *result.generated;
   require(ceiling_of(c.entry("vendor/outage")) == "0.000001 0.000002 0.0001", "an outage keeps the previous ceiling");
@@ -567,7 +579,7 @@ void failed_endpoints_keep_previous_ceilings(transport::Transport& transport, Pe
   const auto lines = gap_lines(report);
   require(has(lines, "vendor/outage|||endpoints answered HTTP 500|kept") && has(lines, "vendor/stall|||endpoints request did not complete|kept") &&
           has(lines, "vendor/fee|||not an endpoints listing"), "the failed models are named, and whether the previous ceiling was kept");
-  require(report.ceilings == 3, "vendor/many, vendor/zero-fee and vendor/cached are written whole; the kept and the dropped ones are not");
+  require(report.ceilings == 5, "vendor/many, vendor/zero-fee, vendor/cached, vendor/override-fees and vendor/listed-dear are written whole");
   // The diff reports a changed ceiling the way it reports a changed price.
   require(result.diff.changed == (std::vector<std::string>{"vendor/fee", "vendor/many"}) && result.diff.added.empty() && result.diff.removed.empty(),
           "the diff names the entries whose ceiling changed, and only those");
@@ -680,6 +692,7 @@ void ceilings_bound_every_endpoint(transport::Transport& transport, Peer& peer) 
   for (int round = 0; round < 6; ++round) {
     const auto scenario = "ceilings-prop-" + std::to_string(round);
     std::map<std::string, std::vector<Endpoint>> generated;
+    std::map<std::string, Prices> listed;  // what the models listing gives for each model
     std::string command = "{\"set\":" + json::quote(scenario) + ",\"models\":{";
     for (int m = 0; m < 24; ++m) {
       const auto id = "prop/m-" + std::to_string(round) + "-" + std::to_string(m);
@@ -687,6 +700,10 @@ void ceilings_bound_every_endpoint(transport::Transport& transport, Peer& peer) 
       command += (m ? "," : "") + json::quote(id) + ":[";
       const auto count = 1 + pick(6);
       const bool fees = pick(2) == 0;  // every endpoint lists a request fee, or none does
+      auto& prices_listed = listed[id];
+      prices_listed = {{"prompt", price()}, {"completion", price()}};
+      for (const auto& member : members)
+        if (member.side != 2 && prices_listed.count(member.name) == 0 && pick(4) == 0) prices_listed[member.name] = price();
       for (std::uint64_t e = 0; e < count; ++e) {
         Endpoint endpoint;
         endpoint.base = {{"prompt", price()}, {"completion", price()}};
@@ -713,6 +730,9 @@ void ceilings_bound_every_endpoint(transport::Transport& transport, Peer& peer) 
       }
       command += "]";
     }
+    command += "},\"listed\":{";
+    for (auto item = listed.begin(); item != listed.end(); ++item)
+      command += (item == listed.begin() ? "" : ",") + json::quote(item->first) + ":{" + object(item->second) + "}";
     peer.command(command + "}}");
     std::vector<std::string> ids;
     for (const auto& item : generated) ids.push_back(item.first);
@@ -732,7 +752,8 @@ void ceilings_bound_every_endpoint(transport::Transport& transport, Peer& peer) 
       require(ceiling[0] && ceiling[1], "input and output ceilings are written");
       // Each side's ceiling is the dearest price of that side over every endpoint and override.
       std::uint64_t dearest[3] = {0, 0, 0};
-      std::vector<Prices> conditions;  // every price set one endpoint can bill under
+      std::vector<Prices> conditions;  // every price set one endpoint can bill under, and the listed prices
+      conditions.push_back(listed[id]);
       for (const auto& endpoint : item.second) {
         conditions.push_back(endpoint.base);
         for (const auto& changed : endpoint.overrides) {
@@ -746,7 +767,7 @@ void ceilings_bound_every_endpoint(transport::Transport& transport, Peer& peer) 
           if (const auto found = condition.find(member.name); found != condition.end()) {
             const auto rate = pricing::per_million(found->second);
             require(rate.has_value(), "a generated price reads");
-            require(member.side == 2 || *ceiling[member.side] >= *rate, "a ceiling is never below an endpoint's price");
+            require(member.side == 2 || *ceiling[member.side] >= *rate, "a ceiling is never below an endpoint's or a listed price");
             dearest[member.side] = std::max(dearest[member.side], *rate);
           }
       require(*ceiling[0] == dearest[0] && *ceiling[1] == dearest[1], "the ceiling is the dearest price, not more");
