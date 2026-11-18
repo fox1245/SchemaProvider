@@ -999,6 +999,32 @@ void endpoint_billing_refusals() {
   CHECK(refused(one_fact(batches_fact, R"(,"carried_tier":"batch")"), tier));
   for (const auto value : {R"("")", R"("a/b")", R"("a+b")", R"("a b")", "7", "null"})
     CHECK(refused(one_fact(batches_fact, std::string(R"(,"billing":{"submit":"carried","get":"none"},"carried_tier":)") + value), tier));
+  // An empty tier is refused by the text check every policy string passes: a tier is 1 to 64 bytes.
+  const auto empty_tier = descriptor::load_policy(one_fact(batches_fact, R"(,"billing":{"submit":"carried","get":"none"},"carried_tier":"")"),
+                                                  config_defaults::codec_defaults_json);
+  CHECK(std::holds_alternative<descriptor::ConfigError>(empty_tier) && std::get<descriptor::ConfigError>(empty_tier).pointer == tier &&
+        std::get<descriptor::ConfigError>(empty_tier).expected == "bounded nonempty string");
+  CHECK(load(one_fact(batches_fact, R"(,"billing":{"submit":"carried","get":"none"},"carried_tier":"b")"))->carried_tier("batches", anthropic) == "b");
+  CHECK(refused(one_fact(batches_fact, R"(,"billing":{"submit":"carried","get":"none"},"carried_tier":")" + std::string(65, 'b') + "\""), tier));
+  // A statement that names an operation twice never reaches the loader: the JSON reader refuses a repeated member,
+  // so the policy fails to load as a whole.
+  const auto repeated = one_fact(batches_fact, R"(,"billing":{"submit":"none","submit":"carried"},"carried_tier":"batch")");
+  {
+    const auto parsed = json::parse(repeated);
+    const auto* error = std::get_if<json::ParseError>(&parsed);
+    CHECK(error && error->code == json::ParseCode::DuplicateKey && error->pointer == "/endpoints/0/billing/submit");
+    const auto loaded = descriptor::load_policy(repeated, config_defaults::codec_defaults_json);
+    CHECK(std::holds_alternative<descriptor::ConfigError>(loaded) && std::get<descriptor::ConfigError>(loaded).pointer.empty() &&
+          std::get<descriptor::ConfigError>(loaded).expected == "strict bounded JSON policy");
+  }
+  // A fact whose endpoint or shape has no operation table cannot load, with or without a statement, so no value is kept
+  // for it.
+  for (const auto& unknown : {std::string(R"({"endpoint":"zz","shape":"openai","origins":["https://api.openai.com"],"paths":{"check":"/v1/zz"})"),
+                              std::string(R"({"endpoint":"moderation","shape":"google","origins":["https://api.openai.com"],"paths":{"check":"/v1/moderations"})")}) {
+    CHECK(refused(one_fact(unknown), "/endpoints/shape"));
+    CHECK(refused(one_fact(unknown, R"(,"billing":"none")"), "/endpoints/shape"));
+    CHECK(refused(one_fact(unknown, R"(,"billing":{"check":"none"})"), "/endpoints/shape"));
+  }
 }
 
 // What the built-in policy states, per endpoint, shape and operation. Every operation of every fact's `paths` is here,
