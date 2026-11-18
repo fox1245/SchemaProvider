@@ -323,10 +323,10 @@ void stop_classes() {
   }
 }
 // A stop_reason that is a failure-class word (`error`, `failed`, `cancelled`, `incomplete`) is a failure, buffered and
-// streamed, with text, with no content and with a tool call: no stop is emitted and no tool call is executable. A
-// buffered answer seals none of its blocks. A stream seals a client call with the stop value, so a call it carried stays
-// unsealed, and it keeps a text block it closed before the stop value. Matching is exact: another letter case of a word,
-// like any value no table lists, is Unknown.
+// streamed, with text, with no content and with a tool call, and no stop is emitted for it. A buffered answer is failed
+// before any block is sealed. A stream keeps the blocks it sealed before the stop value arrived, a completed call among
+// them, as every streamed failure does, and emits nothing after the failure. Matching is exact: another letter case of
+// a word, like any value no table lists, is Unknown.
 void failure_words_are_failures() {
   struct Word { std::string_view raw; ErrorKind kind; std::string_view message, code; };
   const Word words[]{{"error", ErrorKind::RemoteFailure, "remote failure stop", "messages.remote.failure_stop"},
@@ -367,24 +367,30 @@ void failure_words_are_failures() {
         const auto observed = seen(streaming, frames, body(content.blocks, quoted));
         const auto& f = failed(observed.outcome, word.kind);
         CHECK(f.error.safe_message == word.message && f.error.reason == word.code);
-        CHECK(observed.stops.empty() && !f.partial.stop && f.partial.executable_tool_calls().empty());
-        const bool streamed_text = streaming && content.name == "text";
-        CHECK(observed.seals == (streamed_text ? 1u : 0u) && text(f.partial.messages) == (streamed_text ? "hello" : ""));
-        CHECK(f.partial.invalid_tool_calls().size() == (streaming && content.name == "tool call" ? 1u : 0u));
+        CHECK(observed.stops.empty() && !f.partial.stop);
+        CHECK(observed.seals == (streaming && content.name != "none" ? 1u : 0u));
+        CHECK(text(f.partial.messages) == (streaming && content.name == "text" ? "hello" : ""));
+        CHECK(f.partial.executable_tool_calls().size() == (streaming && content.name == "tool call" ? 1u : 0u));
       }
-  // A streamed client call that ends with a stop value is sealed after its Stop, and is executable.
-  std::string order;
-  Accumulator acc({}, [&](const Event& event) {
-    if (std::holds_alternative<PartSeal>(event)) order += "[seal]";
-    if (std::holds_alternative<Stop>(event)) order += "[stop]";
-  });
-  messages::Codec codec(descriptor_value(), messages::Mode::Sse, acc, context());
-  for (const auto& [event, data] : std::vector<Frame>{start(), contents[2].frames[0], contents[2].frames[1], contents[2].frames[2], stop("\"tool_use\""), done})
-    CHECK(codec.frame(event, data));
-  codec.finish();
-  CHECK(acc.outcome() && order == "[stop][seal]");
-  const auto& answered = completed(*acc.outcome());
-  CHECK(answered.stop.kind == StopKind::ToolUse && answered.executable_tool_calls().size() == 1);
+  // After the failure nothing more is emitted: a later message_delta with a stop value of the table, a message_stop and
+  // the close are refused, and the outcome stays the failure.
+  for (const auto& word : words) {
+    bool failure_seen = false;
+    std::size_t after = 0;
+    Accumulator acc({}, [&](const Event& event) {
+      if (failure_seen) ++after;
+      if (std::holds_alternative<Fail>(event)) failure_seen = true;
+    });
+    messages::Codec codec(descriptor_value(), messages::Mode::Sse, acc, context());
+    for (const auto& [event, data] : std::vector<Frame>{start(), contents[2].frames[0], contents[2].frames[1], contents[2].frames[2]})
+      CHECK(codec.frame(event, data));
+    CHECK(!codec.frame("message_delta", stop(json::quote(word.raw)).second));
+    CHECK(!codec.frame("message_delta", stop("\"end_turn\"").second) && !codec.frame(done.first, done.second));
+    codec.finish();
+    CHECK(failure_seen && after == 0 && acc.outcome());
+    const auto& f = failed(*acc.outcome(), word.kind);
+    CHECK(f.error.reason == word.code && !f.partial.stop);
+  }
   for (const std::string_view raw : {"Failed", "future_stop_reason"}) {
     CHECK(descriptor_value().stop_kind(raw) == descriptor::StopKind::Unknown);
     const auto quoted = json::quote(raw);

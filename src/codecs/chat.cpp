@@ -244,8 +244,10 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
           return fail(ErrorKind::ProtocolCorrupt, "data after finish reason");
       }
     } else if (!streaming && failure_word) {
-      // A buffered choice seals its content as it reads it, so the word is checked before it; a stream seals nothing
-      // before its end, and keeps the deltas it delivered.
+      // A buffered choice seals its content as it reads it, so the word is checked before it. The body's usage is still
+      // read, so that the failure reports what was billed. A stream seals nothing before its end, and keeps the deltas
+      // it delivered.
+      if (usage_value.valid() && !usage_value.is_null() && !usage(usage_value)) return false;
       return failure_reason();
     } else if (!item(delta, streaming)) return false;
     if (reason.is_string() && !terminal_tail) {

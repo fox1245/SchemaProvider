@@ -588,6 +588,12 @@ void failure_words_are_failures() {
         CHECK(text_of(f.partial.messages) == (streaming && content.name == "text" ? "hello" : ""));
         CHECK(f.partial.invalid_tool_calls().size() == (streaming && content.name == "tool call" ? 1u : 0u));
       }
+    // A buffered body with content, a tool call and usage: the failure reports the usage the body states.
+    const auto billed = observed({body(R"({"role":"assistant","content":"hello","tool_calls":[)" + call + "]}", quoted, full_usage)}, false);
+    const auto& usage = failed(billed.outcome, word.kind).partial.usage;
+    CHECK(usage.stage == UsageStage::Partial && usage.input_total && usage.input_total->value == 10);
+    CHECK(usage.output_total && usage.output_total->value == 4 && usage.total && usage.total->value == 14);
+    CHECK(billed.seals == 0 && billed.stops.empty());
     // A usage tail after a finish reason: the stop of the earlier chunk was emitted, the word still fails the call and
     // seals nothing.
     auto tail = chunk("{}", quoted);
