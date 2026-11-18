@@ -123,8 +123,8 @@ RequestDefaults defaults(Value v) {
   closed(v,{"max_output_tokens","thinking_budget","include_thoughts","thinking_summaries","reasoning_enabled","reasoning_effort","reasoning_summary","thinking_level","service_tier","temperature","top_p","strict_tools"},path);
   return {optional_integer(v.get("max_output_tokens"),path),optional_integer(v.get("thinking_budget"),path),optional_bool(v.get("include_thoughts"),path),optional_bool(v.get("thinking_summaries"),path),optional_bool(v.get("strict_tools"),path),boolean(v.get("reasoning_enabled"),path),optional_text(v.get("reasoning_effort"),path),optional_text(v.get("reasoning_summary"),path),optional_text(v.get("thinking_level"),path),optional_text(v.get("service_tier"),path),optional_number(v.get("temperature"),path),optional_number(v.get("top_p"),path)};
 }
-// A policy's stop row: a value only a failure carries is refused (failures are decided in code), and so is a row that
-// gives a value the embedded policy lists another kind. A policy may add rows.
+// A policy's stop row: a value whose meaning the codecs decide in code is refused, and so is a row that gives a value
+// the embedded policy lists another kind. A policy may add rows.
 std::pair<std::string, StopKind> stop_row(std::string_view family, const json::Member& row) {
   const auto kind = stop_kind_from_name(text(row.value, "/stop_reasons"));
   if (!kind) fail("/stop_reasons", "typed StopKind");
