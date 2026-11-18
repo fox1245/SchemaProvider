@@ -218,8 +218,9 @@ bool ceiling_unit(std::string_view unit) noexcept {
 // the base price. `request` is the exception: nothing says what a fee left out costs, so a fee that some endpoints
 // list, in their base pricing or in an override, and others leave out is missing where the others have it. The
 // prices per image, per output image and per web search are per item, which no usage counter counts, so no ceiling
-// covers them. The prices the models listing gives for the model on a side count too, so a ceiling is never below a
-// price the same refresh lists.
+// covers them. The prices the models listing gives for the model on a side count too, its input bands included, so a
+// ceiling is never below a price the same refresh lists; a side with a listed price the entry leaves out for an
+// override it cannot hold (descriptor::ListingPage::withheld) has no known floor and gets no ceiling.
 struct PriceMember {
   std::string_view name;
   Side side;
@@ -232,12 +233,13 @@ constexpr PriceMember price_members[]{
     {"audio_output", Output, false},   {"image_token", Output, false},        {"request", Request, false}};
 
 // Why a price cannot bound a ceiling: one of an endpoint, or one the models listing gives.
-enum class Unusable : std::uint8_t { Missing, Variable, NotDecimal, TooLarge, ListedVariable, ListedTooLarge };
+enum class Unusable : std::uint8_t { Missing, Variable, NotDecimal, TooLarge, ListedVariable, ListedTooLarge, ListedLeftOut };
 constexpr std::string_view unusable_reasons[]{"price missing at an endpoint", "variable price at an endpoint",
                                               "price at an endpoint is not decimal text",
                                               "price at an endpoint is too large for the catalogue",
                                               "variable price in the listing",
-                                              "price in the listing is too large for the catalogue"};
+                                              "price in the listing is too large for the catalogue",
+                                              "price in the listing left out for a conditional price"};
 bool present(json::Value value) { return value.valid() && !value.is_null(); }
 // An endpoint's price, read as a listed price is: text an entry can hold (descriptor::valid_price_text), not
 // negative, and exact in nano-USD per million units (pricing::per_million).
@@ -370,6 +372,15 @@ void read_ceilings(Transport& transport, const RefreshRequest& request, const Pl
     auto& entry = *found;
     // A ceiling comes from the endpoints listing only; a unit of that name in the models listing is dropped.
     std::erase_if(entry.pricing, [](const auto& price) { return ceiling_unit(price.first); });
+    // The listed price members the entry left out for overrides it cannot hold. Conditional prices that cannot be read
+    // at all (an empty member) leave no side a known floor.
+    std::vector<std::string_view> left_out;
+    for (const auto& unit : report.withheld)
+      if (unit.model == id) left_out.push_back(unit.unit);
+    if (std::find(left_out.begin(), left_out.end(), std::string_view{}) != left_out.end()) {
+      gap({}, {}, "conditional prices in the listing cannot be read");
+      continue;
+    }
     // An endpoints request that fails keeps the ceiling `previous` had for the model.
     const auto keep_previous = [&](std::string reason) {
       const auto units = previous_ceiling(request.previous, id, plan.origin);
@@ -395,12 +406,14 @@ void read_ceilings(Transport& transport, const RefreshRequest& request, const Pl
     if (read.shape == EndpointsRead::Shape::NotListing) { gap({}, {}, "not an endpoints listing"); continue; }
     if (read.shape == EndpointsRead::Shape::OtherModel) { gap({}, {}, "endpoints listing names another model"); continue; }
     if (read.shape == EndpointsRead::Shape::Empty) { gap({}, {}, "no endpoints"); continue; }
-    // The prices the models listing gives for the model bound each token side from below, as the endpoints do.
+    // The prices the models listing gives for the model bound each token side from below, as the endpoints do, its
+    // input bands included. A listed price the entry left out is a price of no known amount.
     for (std::size_t i = 0; i < std::size(price_members); ++i) {
       const auto& member = price_members[i];
       if (member.side == Request) continue;
+      if (std::find(left_out.begin(), left_out.end(), member.name) != left_out.end()) read.unusable.emplace(member.side, i, Unusable::ListedLeftOut);
       for (const auto& [unit, text] : entry.pricing) {
-        if (unit != member.name) continue;
+        if (descriptor::unbanded_unit(unit) != member.name) continue;
         const auto rate = pricing::per_million(text);
         if (!rate) {
           read.unusable.emplace(member.side, i, text.starts_with('-') ? Unusable::ListedVariable : Unusable::ListedTooLarge);
@@ -509,6 +522,8 @@ std::variant<RefreshResult, ConfigError> refresh_catalogue(Transport& transport,
         auto& listed = std::get<descriptor::ListingPage>(parsed);
         report.skipped += listed.skipped;
         report.skipped_prices += listed.skipped_prices;
+        report.skipped_override_prices += listed.skipped_override_prices;
+        report.withheld.insert(report.withheld.end(), listed.withheld.begin(), listed.withheld.end());
         try {
           pages.push_back(catalogue_of(std::move(listed.entries)));
         } catch (ConfigError&) { report.error = "listing exceeds the catalogue limits"; break; }

@@ -145,7 +145,11 @@ int main(int argc, char** argv) {
     std::cout << sp::descriptor::listing_name(report.listing) << ": "
               << (report.ok ? "ok" : "failed (" + report.error + ")") << ", " << report.pages << " page(s), "
               << report.models << " model(s), " << report.skipped << " skipped, " << report.skipped_prices
-              << " price(s) skipped\n";
+              << " price(s) skipped, " << report.skipped_override_prices << " override price(s) not held as bands\n";
+    for (const auto& unit : report.withheld)
+      std::cout << sp::descriptor::listing_name(report.listing) << " left out " << unit.model << ": "
+                << (unit.unit.empty() ? "every price (conditional prices that cannot be read)" : unit.unit + " (for a conditional price the catalogue cannot hold)")
+                << '\n';
     if (report.ceiling_requests || report.ceilings || !report.ceiling_gaps.empty()) {
       const auto name = sp::descriptor::listing_name(report.listing);
       std::cout << name << " ceilings: " << report.ceiling_requests << " request(s), " << report.ceilings << " written whole, "

@@ -1,8 +1,14 @@
 #include "core/pricing.h"
 #include "descriptor/catalogue.h"
+#include <algorithm>
 #include <iostream>
+#include <iterator>
+#include <map>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <variant>
+#include <vector>
 
 namespace {
 using namespace sp;
@@ -387,9 +393,175 @@ void skipped_prices() {
   const auto* page = std::get_if<descriptor::ListingPage>(&parsed);
   CHECK(page && page->entries.size() == 1);
   // Kept: completion, audio and 62 of the units (64 in all). Left out: "1e-7", the number, the unit named "bad unit"
-  // and the 8 units past 64; the structured override is no price.
+  // and the 8 units past 64; the structured override is not counted among them.
   CHECK(page->entries[0].pricing.size() == 64);
   CHECK(page->skipped_prices == 3 + 8 && page->skipped == 0);
+  // The override names no condition: its price is counted apart, and the prompt price it may set is left out (the
+  // entry has none to keep).
+  CHECK(page->skipped_override_prices == 1 && (page->withheld == std::vector<descriptor::WithheldUnit>{{"vendor/m", "prompt"}}));
+}
+
+// OpenRouter's `input_cache_write_1h` is the 1-hour cache write, as `cache_write_1h` is, and the plain name wins.
+void hour_cache_writes() {
+  const auto c = catalogue(R"({"version":1,"models":[
+    {"id":"vendor/listed","pricing":{"prompt":"0.000003","completion":"0.000015","input_cache_write":"0.00000375","input_cache_write_1h":"0.000006"}},
+    {"id":"vendor/both","pricing":{"input":"0.000003","output":"0.000015","cache_write_1h":"0.000005","input_cache_write_1h":"0.000006"}}]})");
+  const auto listed = pricing::price_of(*c->entry("vendor/listed"));
+  CHECK(listed.cache_write == 3'750'000'000u && listed.cache_write_1h == 6'000'000'000u);
+  CHECK(pricing::price_of(*c->entry("vendor/both")).cache_write_1h == 5'000'000'000u);
+  const ServedModel model{"vendor/listed", "vendor/listed", ServedRelation::Exact};
+  // 700 uncached at 3e-6, 100 five-minute writes at 3.75e-6, 200 one-hour writes at 6e-6 and 10 output tokens at
+  // 1.5e-5 USD: 2'100'000 + 375'000 + 1'200'000 + 150'000 nano-USD.
+  auto split = usage(1'000, 10, 0, 300);
+  split.extra["cache_creation.ephemeral_5m_input_tokens"] = Count{100, Evidence::Reported};
+  split.extra["cache_creation.ephemeral_1h_input_tokens"] = Count{200, Evidence::Reported};
+  auto e = pricing::estimate(*c, "anthropic.messages", "", model, split);
+  CHECK(e.total && e.total->nano_usd == 3'825'000u && e.assumptions.empty());
+  // Without the split, every write at the 1-hour price; the bound prices every input token at it.
+  e = pricing::estimate(*c, "anthropic.messages", "", model, usage(1'000, 10, 0, 300));
+  CHECK(e.total && e.total->nano_usd == 2'100'000u + 1'800'000u + 150'000u &&
+        e.assumptions == std::vector<std::string>({"cache_write at cache_write_1h"}));
+  const auto bound = pricing::upper_bound(*c->entry("vendor/listed"), {}, {1'000, 10, false, {}});
+  CHECK(bound.total && bound.total->nano_usd == 6'000'000u + 150'000u);
+}
+
+// The one model of an OpenRouter listing page, read as a refresh reads it, scoped to the listing's origin.
+constexpr std::string_view listing_origin = "https://openrouter.ai";
+descriptor::CatalogueSnapshot listed_model(const std::string& pricing_json) {
+  const auto parsed = descriptor::parse_listing(descriptor::Listing::OpenRouter, R"({"data":[{"id":"vendor/m","pricing":)" + pricing_json + "}]}",
+                                                listing_origin);
+  const auto* page = std::get_if<descriptor::ListingPage>(&parsed);
+  if (!page || page->entries.size() != 1) throw std::runtime_error("the listing page was not read");
+  auto made = descriptor::make_catalogue(page->entries);
+  if (const auto* error = std::get_if<descriptor::ConfigError>(&made)) throw std::runtime_error("the listed entry was refused at " + error->pointer);
+  return std::get<descriptor::CatalogueSnapshot>(std::move(made));
+}
+bool has_unit(const descriptor::CatalogueEntry& entry, std::string_view name) {
+  return std::any_of(entry.pricing.begin(), entry.pricing.end(), [&](const auto& price) {
+    return price.first == name || (price.first.size() > name.size() && price.first.starts_with(name) && price.first[name.size()] == '+');
+  });
+}
+
+// A time-of-day override that may bill a unit above the entry's price leaves the unit out, and with it the units its
+// tokens would otherwise be priced at, so that the bound and the estimate of a call that bills it refuse.
+void left_out_units_refuse() {
+  const std::string base = R"("prompt":"0.000001","completion":"0.000002","input_cache_read":"0.0000001","input_cache_write":"0.00000125",)"
+                           R"("input_cache_write_1h":"0.000002","internal_reasoning":"0.000002","audio":"0.000004","audio_output":"0.000008",)"
+                           R"("request":"0.001")";
+  auto with = [](Usage u, std::initializer_list<std::pair<const char*, std::uint64_t>> extra) {
+    for (const auto& [key, value] : extra) u.extra[key] = Count{value, Evidence::Reported};
+    return u;
+  };
+  struct Case { const char* member; pricing::BoundRequest bound; Usage usage; const char* kept; };
+  const Case cases[]{
+      {"prompt", {1'000, 0, false, {}}, usage(1'000, 0), "completion"},
+      {"completion", {0, 1'000, false, {}}, usage(0, 1'000), "prompt"},
+      {"input_cache_read", {1'000, 0, false, {}}, usage(1'000, 0, 1'000), "completion"},
+      {"input_cache_write", {1'000, 0, false, {}},
+       with(usage(1'000, 0, 0, 1'000), {{"cache_creation.ephemeral_5m_input_tokens", 1'000}, {"cache_creation.ephemeral_1h_input_tokens", 0}}), "completion"},
+      {"input_cache_write_1h", {1'000, 0, false, {}},
+       with(usage(1'000, 0, 0, 1'000), {{"cache_creation.ephemeral_5m_input_tokens", 0}, {"cache_creation.ephemeral_1h_input_tokens", 1'000}}), "completion"},
+      {"internal_reasoning", {0, 1'000, false, {}}, usage(0, 1'000, 0, 0, 1'000), "prompt"},
+      {"audio", {1'000, 0, false, {}}, with(usage(1'000, 0), {{"input_audio", 1'000}}), "completion"},
+      {"audio_output", {0, 1'000, false, {}}, with(usage(0, 1'000), {{"audio_tokens", 1'000}}), "prompt"},
+      {"request", {1, 1, false, {}}, usage(1, 1), "input_cache_read"}};
+  const ServedModel model{"vendor/m", "vendor/m", ServedRelation::Exact};
+  const auto plain = listed_model("{" + base + "}");
+  for (const auto& test : cases) {
+    // Every call here has a price without the override.
+    CHECK(pricing::upper_bound(*plain->entry("vendor/m"), {}, test.bound).total);
+    CHECK(pricing::estimate(*plain, "anthropic.messages", listing_origin, model, test.usage).total);
+    const auto c = listed_model("{" + base + R"(,"overrides":[{"utc_start":0,"utc_end":600,")" + test.member + R"(":"1"}]})");
+    const auto& entry = *c->entry("vendor/m");
+    if (has_unit(entry, test.member) || !has_unit(entry, test.kept))
+      throw std::runtime_error(std::string("left out for ") + test.member + ": the wrong units");
+    if (pricing::upper_bound(entry, {}, test.bound).total) throw std::runtime_error(std::string("the bound priced a call that bills ") + test.member);
+    if (pricing::estimate(*c, "anthropic.messages", listing_origin, model, test.usage).total)
+      throw std::runtime_error(std::string("the estimate priced a call that bills ") + test.member);
+  }
+  std::cout << "case passed: a unit left out for an override leaves every call that bills it unpriced (" << std::size(cases) << " units)\n";
+}
+
+// For generated listings with long-context and time-of-day overrides, neither the bound nor the estimate from the
+// generated entry is below the price the listing's own rule gives: the base prices; an override applying when the
+// input is strictly above its `min_prompt_tokens` and, with a time window, in that window; and of the overrides that
+// apply, the later one in the listing winning for each key. Whether a later override that leaves a key out wins with
+// the base price it inherits, or yields to an earlier one that lists the key, is not stated, so both are checked.
+void listed_overrides_bound_every_call() {
+  std::uint64_t seed = 20261119;
+  auto next = [&](std::uint64_t limit) { seed = seed * 6364136223846793005u + 1442695040888963407u; return (seed >> 33) % (limit + 1); };
+  // A price of k x 1e-7 USD per token: its text, and k x 1e8 nano-USD per million tokens.
+  auto text = [](std::uint64_t k) { auto digits = std::to_string(k); return "0." + std::string(7 - digits.size(), '0') + digits; };
+  struct Override { std::optional<std::uint64_t> above; bool window = false; std::map<std::string, std::uint64_t> prices; };
+  const std::string keys[]{"prompt", "completion"};
+  std::size_t listings = 0, checked = 0, exact = 0, refused = 0;
+  for (int round = 0; round < 3000; ++round) {
+    std::map<std::string, std::uint64_t> base{{"prompt", 1 + next(98)}, {"completion", 1 + next(98)}};
+    std::vector<Override> overrides(next(4));
+    bool plain = true;  // thresholds alone, increasing for each key, no price below the base: the bands are exact
+    std::map<std::string, std::uint64_t> last_above;
+    for (auto& o : overrides) {
+      const auto kind = next(5);
+      if (kind != 4) o.above = 1'000 * (1 + next(9));
+      o.window = kind >= 3;
+      for (const auto& key : keys)
+        if (next(2)) o.prices[key] = 1 + next(98);
+      plain = plain && !o.window;
+      for (const auto& [key, k] : o.prices) {
+        plain = plain && k >= base[key] && (!last_above.count(key) || *o.above > last_above[key]);
+        if (o.above) last_above[key] = *o.above;
+      }
+    }
+    std::string json = R"({"prompt":")" + text(base["prompt"]) + R"(","completion":")" + text(base["completion"]) + R"(","overrides":[)";
+    for (std::size_t i = 0; i < overrides.size(); ++i) {
+      std::string members;
+      if (overrides[i].above) members += R"("min_prompt_tokens":)" + std::to_string(*overrides[i].above);
+      if (overrides[i].window) members += std::string(members.empty() ? "" : ",") + R"("utc_start":2200,"utc_end":600)";
+      for (const auto& [key, k] : overrides[i].prices) members += std::string(members.empty() ? "" : ",") + "\"" + key + "\":\"" + text(k) + "\"";
+      json += (i ? ",{" : "{") + members + "}";
+    }
+    const auto c = listed_model(json + "]}");
+    const auto& entry = *c->entry("vendor/m");
+    ++listings;
+    // The listing's own price for a key, under each reading, at an input length and in or out of the window.
+    auto price = [&](const std::string& key, std::uint64_t input, bool in_window, bool inherited) {
+      for (auto o = overrides.rbegin(); o != overrides.rend(); ++o) {
+        if ((o->above && input <= *o->above) || (o->window && !in_window)) continue;
+        if (o->prices.count(key)) return o->prices.at(key);
+        if (inherited) return base[key];
+      }
+      return base[key];
+    };
+    std::vector<std::uint64_t> lengths{0, 1, 999, 12'000, next(12'000)};
+    for (const auto& o : overrides)
+      if (o.above) lengths.insert(lengths.end(), {*o.above, *o.above + 1});
+    for (const auto input : lengths) {
+      const auto output = next(5'000);
+      std::uint64_t dearest = 0, at_rule = 0;
+      for (const bool in_window : {false, true})
+        for (const bool inherited : {false, true}) {
+          // Rates are k x 1e8 nano-USD per million tokens: k x 100 nano-USD per token.
+          const auto cost = (input * price("prompt", input, in_window, inherited) + output * price("completion", input, in_window, inherited)) * 100;
+          dearest = std::max(dearest, cost);
+          if (!in_window && !inherited) at_rule = cost;
+        }
+      const bool left_out = !has_unit(entry, "prompt") || !has_unit(entry, "completion");
+      const auto bound = pricing::upper_bound(entry, {}, {input, output, false, {}});
+      const auto e = pricing::estimate(*c, "openai.chat", listing_origin, ServedModel{"vendor/m", "vendor/m", ServedRelation::Exact}, usage(input, output));
+      if (bound.total) CHECK(bound.total->nano_usd >= dearest);
+      else CHECK(left_out);
+      if (e.total) CHECK(e.total->nano_usd >= dearest);
+      else { CHECK(left_out); ++refused; }
+      if (plain) {
+        CHECK(e.total && e.total->nano_usd == at_rule);
+        ++exact;
+      }
+      ++checked;
+    }
+  }
+  CHECK(listings == 3000 && checked > 15'000 && exact > 3'000 && refused > 500);
+  std::cout << "case passed: listed overrides never price below the listing's rule (" << listings << " listings, " << checked
+            << " calls, " << exact << " exact, " << refused << " refused)\n";
 }
 } // namespace
 
@@ -397,6 +569,7 @@ int main() {
   try {
     prices_from_entries(); estimates(); wide_products(); bounds(); bands(); dearer_rates();
     unpriced_usage(); zero_rates(); tier_reasons(); usage_stage(); reservation_from_entry(); skipped_prices();
+    hour_cache_writes(); left_out_units_refuse(); listed_overrides_bound_every_call();
     std::cout << "pricing properties passed\n"; return 0;
   }
   catch (const std::exception& error) { std::cerr << "pricing test failed: " << error.what() << '\n'; return 1; }

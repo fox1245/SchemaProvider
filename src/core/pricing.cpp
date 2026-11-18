@@ -34,15 +34,6 @@ struct Wide {
     return *this;
   }
   Wide& operator+=(std::uint64_t value) { return *this += Wide{0, value, false}; }
-  // value * 10 + digit
-  Wide shifted(unsigned digit) const {
-    auto result = product(low, 10);
-    const auto top = product(high, 10);
-    result.overflow = overflow || top.high != 0 || result.high > std::numeric_limits<std::uint64_t>::max() - top.low;
-    result.high += top.low;
-    result += digit;
-    return result;
-  }
   bool fits() const { return !overflow && high == 0; }
   // The quotient by a divisor below 2^32, by 32-bit long division.
   Wide divided(std::uint32_t divisor) const {
@@ -61,32 +52,8 @@ struct Wide {
 constexpr unsigned rate_digits = 15;
 } // namespace
 
-std::optional<std::uint64_t> per_million(std::string_view text) {
-  if (text.empty() || text.front() == '-') return std::nullopt;
-  const auto dot = text.find('.');
-  const auto whole = text.substr(0, dot);
-  const auto fraction = dot == std::string_view::npos ? std::string_view{} : text.substr(dot + 1);
-  constexpr unsigned scale = rate_digits;
-  Wide value;
-  for (const char c : whole) {
-    if (c < '0' || c > '9') return std::nullopt;
-    value = value.shifted(static_cast<unsigned>(c - '0'));
-    if (!value.fits()) return std::nullopt;
-  }
-  bool remainder = false;
-  for (unsigned i = 0; i < scale; ++i) {
-    const char c = i < fraction.size() ? fraction[i] : '0';
-    if (c < '0' || c > '9') return std::nullopt;
-    value = value.shifted(static_cast<unsigned>(c - '0'));
-  }
-  for (std::size_t i = scale; i < fraction.size(); ++i) {
-    if (fraction[i] < '0' || fraction[i] > '9') return std::nullopt;
-    remainder = remainder || fraction[i] != '0';
-  }
-  if (remainder) value += 1;
-  if (!value.fits()) return std::nullopt;
-  return value.low;
-}
+// The catalogue reads listed prices the same way (descriptor::price_per_million), so one reader decides what a price is.
+std::optional<std::uint64_t> per_million(std::string_view text) { return descriptor::price_per_million(text); }
 
 std::string decimal_text(std::uint64_t rate) {
   std::string fraction(rate_digits, '0');
@@ -107,7 +74,7 @@ std::optional<Unit> parse_unit(std::string_view unit) {
   Unit out;
   if (const auto plus = unit.rfind('+'); plus != std::string_view::npos) {
     const auto digits = unit.substr(plus + 1);
-    if (digits.empty() || digits.size() > 19) return std::nullopt;
+    if (digits.empty() || digits.size() > descriptor::max_band_digits) return std::nullopt;
     for (const char c : digits) {
       if (c < '0' || c > '9') return std::nullopt;
       out.above = out.above * 10 + static_cast<std::uint64_t>(c - '0');
@@ -122,17 +89,8 @@ std::optional<Unit> parse_unit(std::string_view unit) {
   out.name = unit;
   return out;
 }
-// The plain name of a unit OpenRouter names otherwise.
-std::string_view canonical(std::string_view name) {
-  if (name == "prompt") return "input";
-  if (name == "completion") return "output";
-  if (name == "input_cache_read") return "cache_read";
-  if (name == "input_cache_write") return "cache_write";
-  if (name == "internal_reasoning") return "reasoning";
-  if (name == "audio") return "input_audio";
-  if (name == "audio_output") return "output_audio";
-  return name;
-}
+// The plain name of a unit OpenRouter names otherwise, as the catalogue reads it.
+std::string_view canonical(std::string_view name) { return descriptor::plain_price_unit(name); }
 // The entry's prices for a request in `service_tier` with `input_tokens` input tokens. Exact: each unit's price from
 // the highest band the request is above. Dearest: each unit's highest price over every band the request may reach.
 ModelPrice select(const descriptor::CatalogueEntry& entry, std::string_view service_tier, std::uint64_t input_tokens,

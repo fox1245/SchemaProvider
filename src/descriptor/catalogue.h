@@ -164,6 +164,24 @@ bool valid_model_name(std::string_view id) noexcept;
 // after an optional '-' that marks a variable price. A listed price that is not is left out
 // (ListingPage::skipped_prices).
 bool valid_price_text(std::string_view price) noexcept;
+// A price as exact nano-USD per million units (USD x 1e15), rounded up past the fifteenth fractional digit: how every
+// price of an entry is read (pricing::per_million). Nothing for a negative price (a variable one), a character other
+// than a digit or one '.', or an amount that does not fit 64 bits.
+std::optional<std::uint64_t> price_per_million(std::string_view price) noexcept;
+// The plain name of a price unit that OpenRouter names otherwise (`prompt` is `input`, `input_cache_write_1h` is
+// `cache_write_1h`); any other name is its own. Pricing reads both names as the same unit.
+std::string_view plain_price_unit(std::string_view name) noexcept;
+// The most digits of the input band of a price unit, `<unit>+<tokens>`.
+inline constexpr std::size_t max_band_digits = 19;
+// The unit a price unit names without its input band: `prompt` for `prompt+272000`; a unit without a band is itself.
+std::string_view unbanded_unit(std::string_view unit) noexcept;
+// A listed price member an entry leaves out (ListingPage::withheld): `pricing.overrides` may bill it above every price
+// the entry could claim for it, or bill the tokens of a unit left out that would otherwise be priced at it. An empty
+// `unit` is every price of the model: conditional prices that cannot be read at all.
+struct WithheldUnit {
+  std::string model, unit;
+  bool operator==(const WithheldUnit&) const = default;
+};
 struct ListingPage {
   std::vector<CatalogueEntry> entries;
   // The token that asks for the next page, or empty on the last page.
@@ -173,6 +191,14 @@ struct ListingPage {
   // Listed prices left out because the catalogue cannot hold them: a unit that is a number or text that is not a
   // plain decimal ("1e-7"), or one past the 64 a model keeps.
   std::size_t skipped_prices = 0;
+  // Prices of OpenRouter's `pricing.overrides` that are not input bands of the entry, each once (USAGE.md, refreshing
+  // the catalogue): a price of an override with a condition other than `min_prompt_tokens` alone, with a discount, or
+  // with a price the catalogue cannot read; a key whose thresholds do not increase in listing order, that does not fit
+  // the 64 prices of an entry, or whose band is below the base price while a later override leaves the key out; an
+  // override that is not an object, `overrides` that is not an array, and a discount that is not from 0 to 1.
+  std::size_t skipped_override_prices = 0;
+  // The price members left out of the entries for those overrides, by model and member, sorted.
+  std::vector<WithheldUnit> withheld;
 };
 using ListingResult = std::variant<ListingPage, ConfigError>;
 // Reads one page of a listing. Every entry gets the listing's `source` and `origins = {origin}`.

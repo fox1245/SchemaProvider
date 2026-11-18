@@ -580,6 +580,64 @@ void bundle_carries_the_catalogue() {
     CHECK(std::holds_alternative<ConfigError>(load_policy_bundle(with("[]"))));
 }
 
+// The price reader, the unit names and the bounds the listing reader shares with pricing, and the shapes of
+// `pricing.overrides` it reads.
+void listed_override_bounds() {
+    // 2^64 - 1 nano-USD per million units is the largest amount; past the fifteenth fractional digit it rounds up.
+    CHECK(price_per_million("18446.744073709551615") == std::optional<std::uint64_t>(18446744073709551615u));
+    CHECK(!price_per_million("18446.744073709551616"));
+    CHECK(price_per_million("18446.7440737095516141") == std::optional<std::uint64_t>(18446744073709551615u));
+    CHECK(!price_per_million("18446.7440737095516151"));
+    CHECK(price_per_million("0.0000000000000011") == std::optional<std::uint64_t>(2u));
+    CHECK(price_per_million("0.000003") == std::optional<std::uint64_t>(3'000'000'000u) && price_per_million("5") == std::optional<std::uint64_t>(5'000'000'000'000'000u));
+    CHECK(!price_per_million("-1") && !price_per_million("1e-7") && !price_per_million("1.2.3") && !price_per_million("") && !price_per_million(" 1"));
+    CHECK(plain_price_unit("input_cache_write_1h") == "cache_write_1h" && plain_price_unit("input_cache_write") == "cache_write" &&
+          plain_price_unit("prompt") == "input" && plain_price_unit("image") == "image");
+    CHECK(unbanded_unit("prompt+272000") == "prompt" && unbanded_unit("prompt") == "prompt" && unbanded_unit("prompt+x") == "prompt+x" &&
+          unbanded_unit("prompt+") == "prompt+" && unbanded_unit("prompt+12345678901234567890") == "prompt+12345678901234567890");
+    using Prices = std::vector<std::pair<std::string, std::string>>;
+    const auto page = [](std::string_view pricing) {
+        auto parsed = parse_listing(Listing::OpenRouter, std::string(R"({"data":[{"id":"vendor/m","pricing":)") + std::string(pricing) + "}]}",
+                                    "https://openrouter.ai");
+        return std::get<ListingPage>(std::move(parsed));
+    };
+    const auto threshold = [&](std::string_view tokens) {
+        return page(std::string(R"({"prompt":"0.000001","completion":"0.000002","overrides":[{"min_prompt_tokens":)") + std::string(tokens) +
+                    R"(,"prompt":"0.000002","completion":null}]})");
+    };
+    // A threshold is a count of input tokens from 1 to the largest band of 19 digits.
+    const auto widest = threshold("9999999999999999999");
+    CHECK(widest.entries[0].pricing == (Prices{{"completion", "0.000002"}, {"prompt", "0.000001"}, {"prompt+9999999999999999999", "0.000002"}}));
+    CHECK(widest.skipped_override_prices == 0 && widest.withheld.empty());
+    CHECK(threshold("1").entries[0].pricing == (Prices{{"completion", "0.000002"}, {"prompt", "0.000001"}, {"prompt+1", "0.000002"}}));
+    for (const char* tokens : {"10000000000000000000", "0", "-1", "1.5", "1e3", "\"1000\"", "true", "null"}) {
+        const auto read = threshold(tokens);
+        CHECK(read.entries[0].pricing == (Prices{{"completion", "0.000002"}}));
+        CHECK(read.skipped_override_prices == 1 && (read.withheld == std::vector<WithheldUnit>{{"vendor/m", "prompt"}}));
+    }
+    // A band the entry already lists, and one whose unit name is too long to hold, are not held.
+    CHECK(page(R"({"prompt":"0.000001","prompt+1000":"0.000005","completion":"0.000002","overrides":[{"min_prompt_tokens":1000,"prompt":"0.000002"}]})")
+              .entries[0].pricing == (Prices{{"completion", "0.000002"}}));
+    const std::string wide(60, 'x');
+    CHECK(page(R"({")" + wide + R"(":"0.000001","completion":"0.000002","overrides":[{"min_prompt_tokens":1000,")" + wide + R"(":"0.000002"}]})")
+              .entries[0].pricing == (Prices{{"completion", "0.000002"}}));
+    // Overrides that are not an array, or an entry that is not an object, cannot be read: every price is left out.
+    for (const char* overrides : {R"({"min_prompt_tokens":1000})", R"("0.1")", R"([{"min_prompt_tokens":1000,"prompt":"0.000002"},7])"}) {
+        const auto read = page(std::string(R"({"prompt":"0.000001","completion":"0.000002","overrides":)") + overrides + "}");
+        CHECK(read.entries[0].pricing.empty() && read.skipped_override_prices == 1 && (read.withheld == std::vector<WithheldUnit>{{"vendor/m", ""}}));
+    }
+    // An id listed twice keeps out what an override of either listing left out: here the cache read and the prompt
+    // price its tokens would otherwise be billed at.
+    auto twice = parse_listing(Listing::OpenRouter, R"({"data":[{"id":"vendor/m","pricing":{"prompt":"0.000001",)"
+        R"("overrides":[{"utc_start":0,"utc_end":600,"input_cache_read":"0.00001"}]}},)"
+        R"({"id":"vendor/m","pricing":{"prompt":"0.000001","completion":"0.000002","input_cache_read":"0.0000001"}}]})", "https://openrouter.ai");
+    const auto& merged = std::get<ListingPage>(twice);
+    CHECK(merged.entries.size() == 1 && merged.entries[0].pricing == (Prices{{"completion", "0.000002"}}));
+    CHECK((merged.withheld == std::vector<WithheldUnit>{{"vendor/m", "input_cache_read"}, {"vendor/m", "prompt"}}));
+    // The generated entries load as a catalogue.
+    CHECK(std::holds_alternative<CatalogueSnapshot>(make_catalogue(widest.entries)));
+}
+
 void catalogue_files() {
     std::filesystem::path dir;
     std::random_device entropy;
@@ -620,6 +678,7 @@ int main() {
         control_values_meet_defaults_and_families();
         origins_scope_the_whole_entry();
         bundle_carries_the_catalogue();
+        listed_override_bounds();
         catalogue_files();
     } catch (const std::exception& error) {
         std::fprintf(stderr, "catalogue test threw: %s\n", error.what());

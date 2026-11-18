@@ -4,13 +4,14 @@
 import http from 'node:http';
 
 const keys = { gemini: 'gemini-test-key', anthropic: 'anthropic-test-key', openai: 'openai-test-key' };
-const openrouter = (version) => ({
+// Scenario `openrouter-bare` is the same listing without the override of vendor/text-model.
+const openrouter = (version, override = true) => ({
   data: [
     {
       id: 'vendor/text-model', canonical_slug: 'vendor/text-model-20261001', name: 'Vendor: Text Model',
       context_length: 128000, top_provider: { context_length: 128000, max_completion_tokens: version === 1 ? 8192 : 16384 },
       architecture: { input_modalities: ['text', 'image'], output_modalities: ['text'] },
-      pricing: { prompt: '0.0000001', completion: '0.0000004', overrides: [{ prompt: '0.0000002' }] },
+      pricing: { prompt: '0.0000001', completion: '0.0000004', ...(override ? { overrides: [{ prompt: '0.0000002' }] } : {}) },
       supported_parameters: ['temperature', 'tools', 'bad token!'],
       benchmarks: { nested: { deeper: [1, 2, 3] } },
     },
@@ -59,10 +60,11 @@ const server = http.createServer((req, res) => {
   if (listingExtras(scenario, path, h, res)) return;
   if (scenario === 'broken') return send(res, 500, { error: { message: 'synthetic outage' } });
   if (scenario === 'notjson') return send(res, 200, 'not a listing');
-  if (scenario.startsWith('openrouter')) {
+  if (scenario.startsWith('openrouter') || scenario === 'overrides') {
     if (path !== '/api/v1/models' || url.searchParams.get('output_modalities') !== 'all') return send(res, 404, {});
     if (h.authorization && h.authorization !== 'Bearer openrouter-test-key') return send(res, 401, {});
-    return send(res, 200, openrouter(scenario === 'openrouter-v2' ? 2 : 1));
+    if (scenario === 'overrides') return send(res, 200, overridesListing);
+    return send(res, 200, openrouter(scenario === 'openrouter-v2' ? 2 : 1, scenario !== 'openrouter-bare'));
   }
   if (scenario === 'gemini' || scenario === 'gemini-loop') {
     if (path !== '/v1beta/models' || url.searchParams.get('pageSize') !== '1000') return send(res, 404, {});
@@ -256,3 +258,43 @@ function listingExtras(scenario, path, h, res) {
   else send(res, 200, extra.body());
   return true;
 }
+
+// Scenario `overrides`: an OpenRouter models listing whose `pricing.overrides` give long-context prices (an entry with
+// `min_prompt_tokens`) and time-of-day prices (`utc_start`, `utc_end`), one case per model.
+const band = (min_prompt_tokens, more = {}) => ({ min_prompt_tokens, ...more });
+const utcWindow = (utc_start, utc_end, more = {}) => ({ utc_start, utc_end, ...more });
+const priced = (id, pricing) => ({ id, name: `Vendor: ${id}`, architecture: { input_modalities: ['text'], output_modalities: ['text'] }, pricing });
+const basePrices = (more = {}) => ({ prompt: '0.000001', completion: '0.000002', ...more });
+const bands = (count) => Array.from({ length: count }, (_, i) => band(1000 * (i + 1), { prompt: '0.000002' }));
+const overridesListing = { data: [
+  priced('vendor/long', { prompt: '0.000008', completion: '0.00004',
+    overrides: [band(272000, { prompt: '0.000016', completion: '0.00006', input_cache_read: '0.0000008', input_cache_write: '0.00002' })] }),
+  priced('vendor/two-bands', basePrices({ overrides: [band(100000, { prompt: '0.000002', completion: '0.000003' }), band(200000, { prompt: '0.000003', completion: '0.000004' })] })),
+  priced('vendor/some-keys', basePrices({ input_cache_read: '0.0000001', overrides: [band(1000, { prompt: '0.000002' })] })),
+  priced('vendor/hour-cache', { prompt: '0.000003', completion: '0.000015', input_cache_write: '0.00000375', input_cache_write_1h: '0.000006',
+    overrides: [band(200000, { prompt: '0.000006', input_cache_write_1h: '0.000012' })] }),
+  priced('vendor/cheap-band', basePrices({ overrides: [band(1000, { prompt: '0.0000005' })] })),
+  priced('vendor/cheap-carried', basePrices({ overrides: [band(1000, { prompt: '0.0000005' }), band(2000, { completion: '0.000003' })] })),
+  priced('vendor/window-cheap', { prompt: '0.000002', completion: '0.000008', overrides: [utcWindow(100, 400, { prompt: '0.000001', completion: '0.000004' })] }),
+  priced('vendor/window-dear', { prompt: '0.000002', completion: '0.000008', overrides: [utcWindow(2200, 600, { prompt: '0.000003', completion: '0.000004' })] }),
+  priced('vendor/window-cache', { prompt: '0.000002', completion: '0.000008', input_cache_read: '0.0000002', overrides: [utcWindow(0, 600, { input_cache_read: '0.000005' })] }),
+  priced('vendor/window-fee', basePrices({ request: '0.001', image: '0.01', overrides: [utcWindow(0, 600, { request: '0.002' })] })),
+  priced('vendor/unknown-condition', basePrices({ overrides: [{ new_condition: 1, prompt: '0.000002' }] })),
+  priced('vendor/combined', basePrices({ overrides: [band(1000, { utc_start: 0, utc_end: 600, completion: '0.000003' })] })),
+  priced('vendor/no-condition', basePrices({ overrides: [{ prompt: '0.000002' }] })),
+  priced('vendor/out-of-order', basePrices({ overrides: [band(200000, { prompt: '0.000003' }), band(100000, { prompt: '0.000002', completion: '0.000003' })] })),
+  priced('vendor/fraction-threshold', basePrices({ overrides: [band(1000.5, { prompt: '0.000002' })] })),
+  priced('vendor/zero-threshold', basePrices({ overrides: [band(0, { prompt: '0.000002' })] })),
+  priced('vendor/text-threshold', basePrices({ overrides: [band('1000', { prompt: '0.000002' })] })),
+  priced('vendor/bad-price', basePrices({ overrides: [band(1000, { prompt: '1e-5', completion: '0.000001' })] })),
+  priced('vendor/number-price', basePrices({ overrides: [utcWindow(0, 600, { prompt: 0.000002 })] })),
+  priced('vendor/discount', basePrices({ overrides: [band(1000, { prompt: '0.000002', discount: 0.5 })] })),
+  priced('vendor/raising-discount', basePrices({ overrides: [utcWindow(0, 600, { discount: -0.5 })] })),
+  priced('vendor/malformed', basePrices({ overrides: ['long context'] })),
+  // 62 bands fill the 64 prices an entry holds beside the two base prices; 63 do not fit; 70 are more overrides than
+  // an entry holds prices.
+  priced('vendor/full-bands', basePrices({ overrides: bands(62) })),
+  priced('vendor/too-many-bands', basePrices({ overrides: bands(63) })),
+  priced('vendor/too-many', basePrices({ overrides: bands(70) })),
+  priced('vendor/null-overrides', basePrices({ overrides: null })),
+] };
