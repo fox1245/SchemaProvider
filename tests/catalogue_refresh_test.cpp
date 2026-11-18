@@ -428,6 +428,13 @@ std::vector<std::string> gap_lines(const transport::SourceReport& report) {
     out.push_back(gap.model + "|" + gap.unit + "|" + gap.price + "|" + gap.reason + (gap.kept ? "|kept" : ""));
   return out;
 }
+// A report holds no URL, header, credential or body text.
+void fixed_text_only(const transport::SourceReport& report) {
+  for (const auto& gap : report.ceiling_gaps)
+    for (const auto* text : {&gap.model, &gap.unit, &gap.price, &gap.reason})
+      for (const std::string_view banned : {"127.0.0.1", "http", "Bearer", "openrouter-test-key", "synthetic", "captive", "<html>", "/api/"})
+        require(text->find(banned) == std::string::npos, "a ceiling gap carries fixed text only");
+}
 descriptor::CatalogueSnapshot catalogue_text(std::string_view json) {
   auto loaded = descriptor::load_catalogue(json);
   require(std::holds_alternative<descriptor::CatalogueSnapshot>(loaded), "test catalogue loads");
@@ -443,7 +450,7 @@ const std::vector<std::string> asked_ceilings{
     "vendor/stall", "vendor/many", "vendor/fee", "vendor/zero-fee", "vendor/cached", "~vendor/alias-latest", "vendor/missing-prompt",
     "vendor/negative", "vendor/not-decimal", "vendor/number", "vendor/too-large", "vendor/bad-cache", "vendor/bad-override",
     "vendor/bad-fee", "vendor/bad-discount", "vendor/malformed", "vendor/override-shape", "vendor/wrong-id", "vendor/not-json",
-    "vendor/outage", "vendor/full", "vendor/absent"};
+    "vendor/outage", "vendor/full", "vendor/missing-fee", "vendor/absent"};
 std::vector<std::string> listed_asked() {
   std::vector<std::string> out;
   for (const auto& id : asked_ceilings) if (id != "vendor/absent") out.push_back(id);
@@ -468,8 +475,8 @@ void ceilings_from_the_endpoints_listings(transport::Transport& transport, Peer&
   // The dearest price of each unit over every endpoint, and the request fee only where an endpoint charges one.
   require(ceiling_of(c.entry("vendor/many")) == "0.000003 0.000005 -",
           "the dearest prompt and completion over three endpoints, not " + ceiling_of(c.entry("vendor/many")) + "; " + described());
-  require(ceiling_of(c.entry("vendor/fee")) == "0.000001 0.000001 0.0002", "the dearest request fee, beside a zero fee and none");
-  require(ceiling_of(c.entry("vendor/zero-fee")) == "0.000001 0.000002 -", "no request fee where no endpoint charges one");
+  require(ceiling_of(c.entry("vendor/fee")) == "0.000001 0.000001 0.0002", "the dearest request fee, beside a zero fee and a lower one");
+  require(ceiling_of(c.entry("vendor/zero-fee")) == "0.000001 0.000002 -", "no request ceiling where no endpoint charges a fee");
   require(ceiling_of(c.entry("vendor/outage")) == "0.000001 0.000002 0.0001" && ceiling_of(c.entry("vendor/stall")) == "0.000002 0.000003 -",
           "the models whose endpoints fail later");
   // Cache and reasoning prices above the prompt and completion prices, and a dearer long-context override.
@@ -482,8 +489,10 @@ void ceilings_from_the_endpoints_listings(transport::Transport& transport, Peer&
   require(ceiling_of(c.entry("vendor/too-large")) == "- 0.000001 -", "a price too large for the catalogue leaves out its ceiling");
   require(ceiling_of(c.entry("vendor/bad-cache")) == "- 0.000002 -", "a variable cache price leaves out the input ceiling");
   require(ceiling_of(c.entry("vendor/bad-override")) == "0.000001 - -", "an override's unreadable price leaves out its ceiling");
-  // A missing request ceiling would bound the fee at the listed one, so an unusable fee leaves out the whole ceiling.
+  // A missing request ceiling would bound the fee at the listed one, so an unusable fee, or one only some endpoints
+  // list, leaves out the whole ceiling.
   require(ceiling_of(c.entry("vendor/bad-fee")) == "- - -", "an unusable request fee leaves out every unit");
+  require(ceiling_of(c.entry("vendor/missing-fee")) == "- - -", "a request fee only some endpoints list leaves out every unit");
   require(ceiling_of(c.entry("vendor/bad-discount")) == "- - -", "a discount that raises the price leaves out every unit");
   for (const char* id : {"~vendor/alias-latest", "vendor/malformed", "vendor/override-shape", "vendor/wrong-id", "vendor/not-json", "vendor/full", "vendor/unasked"})
     require(c.entry(id) && ceiling_of(c.entry(id)) == "- - -", "no ceiling for an alias, a malformed listing, a full entry or a model not asked for");
@@ -501,6 +510,8 @@ void ceilings_from_the_endpoints_listings(transport::Transport& transport, Peer&
       "vendor/bad-override|ceiling_output|completion|price at an endpoint is not decimal text",
       "vendor/full|||the entry cannot hold the ceiling",
       "vendor/malformed|||not an endpoints listing",
+      "vendor/missing-fee|ceiling_request|request|price missing at an endpoint",
+      "vendor/missing-fee|||no ceiling without every request fee",
       "vendor/missing-prompt|ceiling_input|prompt|price missing at an endpoint",
       "vendor/negative|ceiling_input|prompt|variable price at an endpoint",
       "vendor/not-decimal|ceiling_output|completion|price at an endpoint is not decimal text",
@@ -516,14 +527,10 @@ void ceilings_from_the_endpoints_listings(transport::Transport& transport, Peer&
     for (const auto& line : lines) all += "\n  " + line;
     throw std::runtime_error("the ceiling gaps are not the expected ones:" + all);
   }
-  require(report.ceilings == 6 && report.ceiling_requests == 21, "six ceilings written whole from 21 endpoints requests");
+  require(report.ceilings == 6 && report.ceiling_requests == 22, "six ceilings written whole from 22 endpoints requests");
   // One request per listed id asked for, in id order, and none for an id the listing does not name or one not asked for.
   require(seen(peer, "ceilings").endpoints == listed_asked(), "the endpoints of each listed model asked for, once, in order");
-  // The report holds no URL, header, credential or body text.
-  for (const auto& gap : report.ceiling_gaps)
-    for (const auto* text : {&gap.model, &gap.unit, &gap.price, &gap.reason})
-      for (const std::string_view banned : {"127.0.0.1", "http", "Bearer", "openrouter-test-key", "synthetic", "captive", "<html>", "/api/"})
-        require(text->find(banned) == std::string::npos, "a ceiling gap carries fixed text only");
+  fixed_text_only(report);
 
   // The overlay wins over the generated ceiling, unit by unit.
   require(ceiling_of(result.catalogue->entry("vendor/many")) == "0.00001 0.000005 -", "an overlay's ceiling unit replaces the generated one");
@@ -550,7 +557,8 @@ void failed_endpoints_keep_previous_ceilings(transport::Transport& transport, Pe
   request.sources = {ceiling_source(peer, "ceilings-v2", asked_ceilings)};
   const auto result = refreshed(transport, request);
   const auto& report = result.sources[0];
-  require(report.ok && report.ceiling_requests == 21, "a failed endpoints request does not fail the listing");
+  require(report.ok && report.ceiling_requests == 22, "a failed endpoints request does not fail the listing");
+  fixed_text_only(report);
   const auto& c = *result.generated;
   require(ceiling_of(c.entry("vendor/outage")) == "0.000001 0.000002 0.0001", "an outage keeps the previous ceiling");
   require(ceiling_of(c.entry("vendor/stall")) == "0.000002 0.000003 -", "a timeout keeps the previous ceiling");
@@ -678,11 +686,12 @@ void ceilings_bound_every_endpoint(transport::Transport& transport, Peer& peer) 
       auto& endpoints = generated[id];
       command += (m ? "," : "") + json::quote(id) + ":[";
       const auto count = 1 + pick(6);
+      const bool fees = pick(2) == 0;  // every endpoint lists a request fee, or none does
       for (std::uint64_t e = 0; e < count; ++e) {
         Endpoint endpoint;
         endpoint.base = {{"prompt", price()}, {"completion", price()}};
         for (const auto& member : members)
-          if (member.side != 2 ? endpoint.base.count(member.name) == 0 && pick(3) == 0 : pick(2) == 0) endpoint.base[member.name] = price();
+          if (member.side != 2 ? endpoint.base.count(member.name) == 0 && pick(3) == 0 : fees) endpoint.base[member.name] = price();
         for (auto o = pick(3); o; --o) {
           Prices changed;
           for (const char* key : {"prompt", "completion", "input_cache_read", "input_cache_write", "internal_reasoning"})
