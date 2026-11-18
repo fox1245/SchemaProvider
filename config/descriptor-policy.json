@@ -469,7 +469,7 @@
       "thinking_top_p_minimum": 0,
       "reasoning_efforts": [],
       "reasoning_summaries": [],
-      "thinking_levels": ["minimal", "low", "medium", "high"],
+      "thinking_levels": ["minimal", "low", "medium", "high", "xhigh"],
       "service_tiers": [],
       "header_versions": [],
       "header_version": null,
@@ -537,7 +537,8 @@
         "minimal",
         "low",
         "medium",
-        "high"
+        "high",
+        "xhigh"
       ],
       "service_tiers": [
         "standard"

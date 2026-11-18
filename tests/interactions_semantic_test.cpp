@@ -1,7 +1,9 @@
 #include "codecs/interactions.h"
 #include "codecs/interactions_request.h"
+#include "codecs/reason.h"
 #include "core/native.h"
 #include "json/json.h"
+#include "sp/config_defaults.h"
 #include "support/vision_fixture.h"
 #include <iostream>
 #include <map>
@@ -13,8 +15,23 @@ using namespace sp;
 using Frame = std::pair<std::string, std::string>;
 json::Document parse(std::string_view bytes) { auto p = json::parse(bytes); CHECK(std::holds_alternative<json::Document>(p)); return std::get<json::Document>(std::move(p)); }
 std::shared_ptr<const json::Document> own(std::string_view bytes) { return std::make_shared<const json::Document>(parse(bytes)); }
+constexpr const char* descriptor_source = R"({"descriptor_version":1,"revision":1,"id":"interactions-test","family":"google.interactions","connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":"/v1beta/interactions","streaming":"/v1beta/interactions"}},"bindings":{"model":"model","messages":"input","stream":"stream","max_output_tokens":"max_output_tokens","usage":["usage"]}})";
 const descriptor::ValidatedDescriptor& desc() {
-  static auto d = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"interactions-test","family":"google.interactions","connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":"/v1beta/interactions","streaming":"/v1beta/interactions"}},"bindings":{"model":"model","messages":"input","stream":"stream","max_output_tokens":"max_output_tokens","usage":["usage"]}})");
+  static auto d = descriptor::load(descriptor_source);
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(d)); return std::get<descriptor::ValidatedDescriptor>(d);
+}
+// The built-in policy with `xhigh` left out of every thinking level list that carries it.
+descriptor::PolicySnapshot policy_without_xhigh() {
+  std::string text(config_defaults::descriptor_policy_json);
+  const std::string listed = "\"thinking_levels\":[\"minimal\",\"low\",\"medium\",\"high\",\"xhigh\"]", narrowed = "\"thinking_levels\":[\"minimal\",\"low\",\"medium\",\"high\"]";
+  std::size_t replaced = 0;
+  for (auto at = text.find(listed); at != std::string::npos; at = text.find(listed, at + narrowed.size())) { text.replace(at, listed.size(), narrowed); ++replaced; }
+  CHECK(replaced == 2);
+  auto loaded = descriptor::load_policy(text, config_defaults::codec_defaults_json);
+  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(loaded)); return std::get<descriptor::PolicySnapshot>(std::move(loaded));
+}
+const descriptor::ValidatedDescriptor& desc_without_xhigh() {
+  static auto d = descriptor::load(descriptor_source, policy_without_xhigh());
   CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(d)); return std::get<descriptor::ValidatedDescriptor>(d);
 }
 interactions::Request request() {
@@ -242,6 +259,17 @@ void input_boundaries() {
   r = request(); std::get<Media>(r.messages[0].parts[1]).data = std::make_shared<const std::string>("not base64"); CHECK(std::holds_alternative<Error>(interactions::encode(desc(), r, false)));
   r = request(); r.required_tool = "missing"; CHECK(std::holds_alternative<Error>(interactions::encode(desc(), r, false)));
   r = request(); r.messages.push_back(Message{"", Role::Tool, {ToolResult{"orphan", "one"}}}); CHECK(std::holds_alternative<Error>(interactions::encode(desc(), r, false)));
+}
+// `xhigh` is a listed Interactions level: it is encoded as given, and a policy that does not list it refuses it before dispatch.
+void thinking_level_xhigh() {
+  auto r = request(); r.thinking_level = "xhigh";
+  const auto e = interactions::encode(desc(), r, false); CHECK(std::holds_alternative<interactions::EncodedRequest>(e));
+  const auto wire = parse(std::get<interactions::EncodedRequest>(e).body);
+  CHECK(wire.root().get("generation_config").get("thinking_level").as_string() == "xhigh");
+  const auto unlisted = interactions::encode(desc_without_xhigh(), r, false);
+  CHECK(std::holds_alternative<Error>(unlisted) && std::get<Error>(unlisted).kind == ErrorKind::InvalidRequest);
+  CHECK(reason::request_code(reason::Source::InteractionsRequest, std::get<Error>(unlisted).safe_message) == "request.choice.unsupported_typed_semantic_control");
+  r.thinking_level = "high"; CHECK(std::holds_alternative<interactions::EncodedRequest>(interactions::encode(desc_without_xhigh(), r, false)));
 }
 void lifecycle_and_errors() {
   for (auto [status, kind] : std::vector<std::pair<std::string, ErrorKind>>{{"failed", ErrorKind::RemoteFailure}, {"cancelled", ErrorKind::Cancelled}, {"in_progress", ErrorKind::Unsupported}, {"queued", ErrorKind::Unsupported}}) {
@@ -547,7 +575,7 @@ void long_streams_are_one_part_per_step() {
   CHECK(json::equal(complete(live).messages[0].wire_output->root(), complete(whole).messages[0].wire_output->root()));
 }
 int main() {
-  try { served_model_is_recorded(); long_streams_are_one_part_per_step(); service_tool_steps(); service_request_controls(); background_and_lifecycle(); failure_reasons(); creation_without_status_transcription(); raw_observation_ownership(); named_error_raw_ownership(); stateless_missing_resource_id(); missing_terminal_usage(); exact_steps_and_replay(); input_boundaries(); lifecycle_and_errors(); unknown_usage_and_signature(); modality_keyed_usage(); uncached_input_and_unmapped_counters();
+  try { served_model_is_recorded(); long_streams_are_one_part_per_step(); service_tool_steps(); service_request_controls(); background_and_lifecycle(); failure_reasons(); creation_without_status_transcription(); raw_observation_ownership(); named_error_raw_ownership(); stateless_missing_resource_id(); missing_terminal_usage(); exact_steps_and_replay(); input_boundaries(); thinking_level_xhigh(); lifecycle_and_errors(); unknown_usage_and_signature(); modality_keyed_usage(); uncached_input_and_unmapped_counters();
     std::cout << "Interactions semantic contracts passed\n"; return 0;
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

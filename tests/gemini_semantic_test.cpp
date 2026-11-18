@@ -1,9 +1,11 @@
 #include "codecs/gemini.h"
 #include "codecs/gemini_request.h"
+#include "codecs/reason.h"
 #include "core/native.h"
 #include "descriptor/descriptor.h"
 #include "descriptor/policy.h"
 #include "json/json.h"
+#include "sp/config_defaults.h"
 #include <algorithm>
 #include <iostream>
 #include <set>
@@ -16,8 +18,23 @@ std::shared_ptr<const json::Document> owned(std::string_view bytes) {
   auto p = json::parse(bytes); CHECK(std::holds_alternative<json::Document>(p));
   return std::make_shared<const json::Document>(std::move(std::get<json::Document>(p)));
 }
+constexpr const char* descriptor_source = R"({"descriptor_version":1,"revision":1,"id":"gemini-semantic","family":"google.generate","connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":"/v1beta/models/fixture-model:generateContent","streaming":"/v1beta/models/fixture-model:streamGenerateContent?alt=sse"}},"bindings":{"model":"model","messages":"contents","stream":"stream","max_output_tokens":"maxOutputTokens","usage":["usageMetadata"]}})";
 const descriptor::ValidatedDescriptor& desc() {
-  static auto d = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"gemini-semantic","family":"google.generate","connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":"/v1beta/models/fixture-model:generateContent","streaming":"/v1beta/models/fixture-model:streamGenerateContent?alt=sse"}},"bindings":{"model":"model","messages":"contents","stream":"stream","max_output_tokens":"maxOutputTokens","usage":["usageMetadata"]}})");
+  static auto d = descriptor::load(descriptor_source);
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(d)); return std::get<descriptor::ValidatedDescriptor>(d);
+}
+// The built-in policy with `xhigh` left out of every thinking level list that carries it.
+descriptor::PolicySnapshot policy_without_xhigh() {
+  std::string text(config_defaults::descriptor_policy_json);
+  const std::string listed = "\"thinking_levels\":[\"minimal\",\"low\",\"medium\",\"high\",\"xhigh\"]", narrowed = "\"thinking_levels\":[\"minimal\",\"low\",\"medium\",\"high\"]";
+  std::size_t replaced = 0;
+  for (auto at = text.find(listed); at != std::string::npos; at = text.find(listed, at + narrowed.size())) { text.replace(at, listed.size(), narrowed); ++replaced; }
+  CHECK(replaced == 2);
+  auto loaded = descriptor::load_policy(text, config_defaults::codec_defaults_json);
+  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(loaded)); return std::get<descriptor::PolicySnapshot>(std::move(loaded));
+}
+const descriptor::ValidatedDescriptor& desc_without_xhigh() {
+  static auto d = descriptor::load(descriptor_source, policy_without_xhigh());
   CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(d)); return std::get<descriptor::ValidatedDescriptor>(d);
 }
 gemini::Request request() {
@@ -447,7 +464,7 @@ void typed_generation_controls() {
       {gemini::SafetyCategory::CivicIntegrity, gemini::SafetyThreshold::Off}};
   const auto expected = owned(R"([{"category":"HARM_CATEGORY_HARASSMENT","threshold":"BLOCK_NONE"},{"category":"HARM_CATEGORY_HATE_SPEECH","threshold":"BLOCK_ONLY_HIGH"},{"category":"HARM_CATEGORY_SEXUALLY_EXPLICIT","threshold":"BLOCK_MEDIUM_AND_ABOVE"},{"category":"HARM_CATEGORY_DANGEROUS_CONTENT","threshold":"BLOCK_LOW_AND_ABOVE"},{"category":"HARM_CATEGORY_CIVIC_INTEGRITY","threshold":"OFF"}])");
   for (auto [level, name] : {std::pair{gemini::ThinkingLevel::Minimal, "minimal"}, {gemini::ThinkingLevel::Low, "low"},
-      {gemini::ThinkingLevel::Medium, "medium"}, {gemini::ThinkingLevel::High, "high"}}) {
+      {gemini::ThinkingLevel::Medium, "medium"}, {gemini::ThinkingLevel::High, "high"}, {gemini::ThinkingLevel::XHigh, "xhigh"}}) {
     r.thinking_level = level;
     auto e = gemini::encode(desc(), r, false); CHECK(std::holds_alternative<gemini::EncodedRequest>(e));
     const auto wire = owned(std::get<gemini::EncodedRequest>(e).body);
@@ -481,6 +498,12 @@ void typed_generation_controls() {
   auto bad = r; bad.thinking_budget = 0; refuse(bad);
   bad = r; bad.history_mode = static_cast<gemini::HistoryMode>(99); refuse(bad);
   bad = r; bad.thinking_level = static_cast<gemini::ThinkingLevel>(99); refuse(bad);
+  // A policy that does not list a level refuses it before anything is sent; the levels it lists still encode.
+  bad = r; bad.thinking_level = gemini::ThinkingLevel::XHigh;
+  const auto unlisted = gemini::encode(desc_without_xhigh(), bad, false);
+  CHECK(std::holds_alternative<Error>(unlisted) && std::get<Error>(unlisted).kind == ErrorKind::InvalidRequest);
+  CHECK(reason::request_code(reason::Source::GeminiRequest, std::get<Error>(unlisted).safe_message) == "request.choice.unsupported_typed_semantic_control");
+  bad.thinking_level = gemini::ThinkingLevel::High; CHECK(std::holds_alternative<gemini::EncodedRequest>(gemini::encode(desc_without_xhigh(), bad, false)));
   bad = r; bad.temperature = 3; refuse(bad);
   bad = r; bad.safety_settings.push_back(bad.safety_settings[0]); refuse(bad);
   bad = r; bad.safety_settings[0].category = static_cast<gemini::SafetyCategory>(99); refuse(bad);

@@ -77,6 +77,7 @@ std::string_view thinking_level_name(ThinkingLevel level) {
     case ThinkingLevel::Low: return "low";
     case ThinkingLevel::Medium: return "medium";
     case ThinkingLevel::High: return "high";
+    case ThinkingLevel::XHigh: return "xhigh";
   }
   return {};
 }

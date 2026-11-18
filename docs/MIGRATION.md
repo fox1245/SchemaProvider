@@ -210,6 +210,7 @@ Values the providers extend are checked by shape, not by compiled lists:
   - A server tool's result block decodes for any `<tool>_tool_result` that answers a call to `<tool>` or `<tool>_<variant>`.
   - A server caller is any server tool type the policy admits.
   - A result shape the SDK does not know is kept and counted in the diagnostics. The fixed list and the refusal codes `messages.server_result.*_unknown` are gone.
+- **Generate and Interactions.** `gemini::ThinkingLevel` gains `XHigh` (`xhigh`), added last, and the `thinking_levels` of both families list `xhigh`. Which model accepts a level is the provider's answer.
 - **Responses.** `Request::include_names` adds include selections by name.
 - **Policy data.** The Chat reasoning efforts gain `minimal` and the Responses ones `max`. The policy's content digest changes.
 - **Reason codes.** The refusal reason codes of these checks are renamed after their shape rules.
