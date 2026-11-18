@@ -725,6 +725,14 @@ std::vector<std::string_view> left_out_with(std::string_view unit) {
   }
   return {plain};
 }
+// Whether pricing bills the tokens of `unit` at another unit where `unit` has no price: a part of the input or the
+// output, or a cache write.
+bool falls_back(std::string_view unit) {
+  const auto plain = plain_price_unit(unit);
+  const auto found = std::find_if(std::begin(billed_units), std::end(billed_units), [&](const auto& item) { return item.first == plain; });
+  return found != std::end(billed_units) &&
+         (found->second == Bills::InputPart || found->second == Bills::CacheWrite || found->second == Bills::OutputPart);
+}
 // Leaves the listed price member `unit` out of the entry, its base price and its bands, together with the units its
 // tokens would be billed at instead, and records each member left out. An empty `unit` leaves out every price.
 void leave_out(CatalogueEntry& entry, std::string_view unit, std::vector<WithheldUnit>& withheld) {
@@ -753,19 +761,30 @@ struct ConditionalPrice {
 };
 // One entry of OpenRouter's `pricing.overrides`, as the price grammar reads it.
 struct PriceOverride {
-  // `min_prompt_tokens`, when it is a count a band can hold.
+  // `min_prompt_tokens` is listed, and `above` is it when it is a count a band can hold.
+  bool threshold = false;
   std::optional<std::uint64_t> above;
-  // A condition other than `min_prompt_tokens`, a discount, or a member that is not price text.
+  // `utc_start` or `utc_end` is listed, and `start` and `end` are them when they are clock times.
+  bool window = false;
+  std::optional<std::uint64_t> start, end;
+  // A condition the grammar cannot read, a discount, or a member that is not price text.
   bool other = false;
   std::vector<ConditionalPrice> prices;  // the members that are text
   std::vector<std::string> unread;       // the other members that are not text
   std::vector<std::string> members;      // every member with a value, sorted
-  // The override prices requests above `above` input tokens and nothing else, at prices an entry can hold.
-  bool band() const {
-    return above && !other && std::all_of(prices.begin(), prices.end(), [](const ConditionalPrice& price) { return price.rate.has_value(); });
+  bool readable() const {
+    return std::all_of(prices.begin(), prices.end(), [](const ConditionalPrice& price) { return price.rate.has_value(); });
   }
+  // The override prices requests above `above` input tokens and nothing else, at prices an entry can hold.
+  bool band() const { return above && !window && !other && readable(); }
+  // The override prices a daily time window and nothing else, at prices an entry can hold.
+  bool time_window() const { return start && end && !threshold && !other && readable(); }
   bool lists(const std::string& key) const { return std::binary_search(members.begin(), members.end(), key); }
 };
+// A clock time as the listing writes it, HHMM from 0000 to 2359.
+bool clock_time(Value value) {
+  return value.is_uint() && value.as_uint() <= 2359 && value.as_uint() % 100 < 60;
+}
 PriceOverride read_override(Value element, bool& every_unit, ListingPage& page) {
   PriceOverride out;
   for (auto member : element.members()) {
@@ -774,9 +793,15 @@ PriceOverride read_override(Value element, bool& every_unit, ListingPage& page) 
     if (member.key == "min_prompt_tokens") {
       // Strictly more input tokens than this: the band `+<tokens>`, a count above zero of at most max_band_digits
       // digits. A band of zero is the unit without a band.
+      out.threshold = true;
       const auto& value = member.value;
       if (value.is_uint() && value.as_uint() > 0 && std::to_string(value.as_uint()).size() <= max_band_digits) out.above = value.as_uint();
       else out.other = true;
+    } else if (member.key == "utc_start" || member.key == "utc_end") {
+      // A daily window from its start up to, not including, its end, in UTC.
+      out.window = true;
+      if (!clock_time(member.value)) out.other = true;
+      else (member.key == "utc_start" ? out.start : out.end) = member.value.as_uint();
     } else if (member.key == "discount") {
       // The listing multiplies the override's prices by (1 - discount). A discount from 0 to 1 keeps each at most the
       // price listed; any other may raise every price, the ones the override inherits included.
@@ -836,6 +861,15 @@ void read_overrides(Value overrides, CatalogueEntry& e, ListingPage& page) {
   for (std::size_t i = 0; i < listed.size(); ++i)
     if (is_band(i))
       for (const auto& price : listed[i].prices) by_key[price.key].push_back({i, *listed[i].above, &price});
+  // The prices of the overrides that are a time window alone, by key, in listing order.
+  std::map<std::string, std::vector<const ConditionalPrice*>> by_window;
+  for (const auto& o : listed)
+    if (o.time_window())
+      for (const auto& price : o.prices) by_window[price.key].push_back(&price);
+  // A key with both a threshold and a time window has no one price the windows can be held at.
+  const auto mixed = [&](const std::string& key) {
+    return by_window.count(key) && std::any_of(listed.begin(), listed.end(), [&](const PriceOverride& o) { return o.threshold && o.lists(key); });
+  };
   std::vector<std::pair<std::string, std::string>> bands;
   std::map<std::string, std::uint64_t> lowest_band;  // by key, the lowest price of the bands held
   // The entry's lowest price for a key under any condition: its base price and each band it holds. None where the
@@ -854,10 +888,18 @@ void read_overrides(Value overrides, CatalogueEntry& e, ListingPage& page) {
     ++page.skipped_override_prices;
     if (const auto floor = lowest(key); !rate || !floor || *rate > *floor) dearer.insert(key);
   };
+  const auto left_out = [&](const std::string& key) {
+    ++page.skipped_override_prices;
+    dearer.insert(key);
+  };
   auto room = max_prices - e.pricing.size();
   for (const auto& item : by_key) {
     const auto& key = item.first;
     const auto& candidates = item.second;
+    if (mixed(key)) {
+      for (std::size_t n = 0; n < candidates.size(); ++n) left_out(key);
+      continue;
+    }
     const auto base = base_rate(key);
     bool hold = candidates.size() <= room;
     for (std::size_t n = 0; hold && n < candidates.size(); ++n) {
@@ -886,8 +928,37 @@ void read_overrides(Value overrides, CatalogueEntry& e, ListingPage& page) {
       if (!inserted && *candidate.price->rate < found->second) found->second = *candidate.price->rate;
     }
   }
+  // A key that time windows alone list is held at the dearest of its base price and their prices, in the text of the
+  // dearest window where one is dearest: whichever window is current when the listing is fetched or a call is billed,
+  // the entry is the same and not below it. A unit whose tokens are billed at another unit where it has no price (a
+  // cache read, reasoning) is left out instead when the base or a window does not list it, since in that window's hours
+  // the dearest of the others bounds nothing.
+  for (const auto& item : by_window) {
+    const auto& key = item.first;
+    const auto& prices = item.second;
+    const auto at = std::find_if(e.pricing.begin(), e.pricing.end(), [&](const auto& price) { return price.first == key; });
+    const auto listed_base = at != e.pricing.end();
+    const auto base = listed_base ? price_per_million(at->second) : std::nullopt;
+    const bool partial = falls_back(key) && (!listed_base || std::any_of(listed.begin(), listed.end(), [&](const PriceOverride& o) {
+                                                return o.time_window() && !o.lists(key);
+                                              }));
+    if (mixed(key) || (listed_base && !base) || partial || (!listed_base && room == 0)) {
+      for (std::size_t n = 0; n < prices.size(); ++n) left_out(key);
+      continue;
+    }
+    const ConditionalPrice* dearest = nullptr;
+    for (const auto* price : prices)
+      if (!dearest || *price->rate > *dearest->rate) dearest = price;
+    page.window_prices_at_dearest += prices.size();
+    if (!listed_base) {
+      e.pricing.emplace_back(key, dearest->text);
+      --room;
+    } else if (*dearest->rate >= *base) {
+      at->second = dearest->text;
+    }
+  }
   for (std::size_t i = 0; i < listed.size(); ++i) {
-    if (is_band(i)) continue;
+    if (is_band(i) || listed[i].time_window()) continue;
     for (const auto& price : listed[i].prices) not_held(price.key, price.rate);
     // A member that is not text is a price only where the entry has that unit, and then one that cannot be read.
     for (const auto& key : listed[i].unread)

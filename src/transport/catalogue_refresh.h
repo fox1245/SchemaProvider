@@ -76,9 +76,11 @@ struct SourceReport {
   std::size_t pages = 0, models = 0, skipped = 0;
   // Listed prices the catalogue could not hold and left out (ListingPage::skipped_prices).
   std::size_t skipped_prices = 0;
-  // Prices of OpenRouter's `pricing.overrides` that are not input bands (ListingPage::skipped_override_prices), and
-  // the price members left out of the entries for them (ListingPage::withheld), page by page.
+  // Prices of OpenRouter's `pricing.overrides` skipped or left out (ListingPage::skipped_override_prices), time-window
+  // prices held at the dearest of the windows (ListingPage::window_prices_at_dearest), and the price members left out
+  // of the entries (ListingPage::withheld), page by page.
   std::size_t skipped_override_prices = 0;
+  std::size_t window_prices_at_dearest = 0;
   std::vector<descriptor::WithheldUnit> withheld;
   // Why the source failed, as fixed text: never a URL, header, credential or response body.
   std::string error;
