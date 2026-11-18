@@ -60,10 +60,11 @@ const server = http.createServer((req, res) => {
   if (listingExtras(scenario, path, h, res)) return;
   if (scenario === 'broken') return send(res, 500, { error: { message: 'synthetic outage' } });
   if (scenario === 'notjson') return send(res, 200, 'not a listing');
-  if (scenario.startsWith('openrouter') || scenario === 'overrides') {
+  if (scenario.startsWith('openrouter') || scenario === 'overrides' || scenario in windowHours) {
     if (path !== '/api/v1/models' || url.searchParams.get('output_modalities') !== 'all') return send(res, 404, {});
     if (h.authorization && h.authorization !== 'Bearer openrouter-test-key') return send(res, 401, {});
     if (scenario === 'overrides') return send(res, 200, overridesListing);
+    if (scenario in windowHours) return send(res, 200, windowHours[scenario]);
     return send(res, 200, openrouter(scenario === 'openrouter-v2' ? 2 : 1, scenario !== 'openrouter-bare'));
   }
   if (scenario === 'gemini' || scenario === 'gemini-loop') {
@@ -279,6 +280,14 @@ const overridesListing = { data: [
   priced('vendor/window-dear', { prompt: '0.000002', completion: '0.000008', overrides: [utcWindow(2200, 600, { prompt: '0.000003', completion: '0.000004' })] }),
   priced('vendor/window-cache', { prompt: '0.000002', completion: '0.000008', input_cache_read: '0.0000002', overrides: [utcWindow(0, 600, { input_cache_read: '0.000005' })] }),
   priced('vendor/window-fee', basePrices({ request: '0.001', image: '0.01', overrides: [utcWindow(0, 600, { request: '0.002' })] })),
+  priced('vendor/window-new-key', basePrices({ overrides: [utcWindow(0, 600, { input_cache_read: '0.0000001' })] })),
+  // A key with a long-context band and a time window, and windows the clock cannot read: a missing end, an end of
+  // 2400, a minute of 60 and a bound written as text.
+  priced('vendor/band-and-window', basePrices({ overrides: [band(1000, { prompt: '0.000002' }), utcWindow(0, 600, { prompt: '0.000003', completion: '0.000004' })] })),
+  priced('vendor/open-window', { prompt: '0.000002', completion: '0.000008', overrides: [{ utc_start: 2200, prompt: '0.000003', completion: '0.000004' }] }),
+  priced('vendor/late-window-cache', { prompt: '0.000002', completion: '0.000008', input_cache_read: '0.0000002', overrides: [utcWindow(0, 2400, { input_cache_read: '0.000005' })] }),
+  priced('vendor/minute-window-fee', basePrices({ request: '0.001', image: '0.01', overrides: [utcWindow(0, 660, { request: '0.002' })] })),
+  priced('vendor/text-window', basePrices({ overrides: [utcWindow('0000', 600, { prompt: '0.000002' })] })),
   priced('vendor/unknown-condition', basePrices({ overrides: [{ new_condition: 1, prompt: '0.000002' }] })),
   priced('vendor/combined', basePrices({ overrides: [band(1000, { utc_start: 0, utc_end: 600, completion: '0.000003' })] })),
   priced('vendor/no-condition', basePrices({ overrides: [{ prompt: '0.000002' }] })),
@@ -298,3 +307,16 @@ const overridesListing = { data: [
   priced('vendor/too-many', basePrices({ overrides: bands(70) })),
   priced('vendor/null-overrides', basePrices({ overrides: null })),
 ] };
+// Scenarios `windows-a` and `windows-b`: models whose two time windows cover the day, listed at an hour of each window.
+// The listing's top-level prices are those of the window current when it is fetched (window A's prompt written with a
+// trailing zero); the overrides are the same at every hour. Only window B of vendor/two-windows-part prices reasoning.
+const windowA = { prompt: '0.000002', completion: '0.000008', input_cache_read: '0.0000002' };
+const windowB = { prompt: '0.000001', completion: '0.000004', input_cache_read: '0.0000001' };
+const dayWindows = [utcWindow(600, 1800, windowA), utcWindow(1800, 600, windowB)];
+const partWindows = [utcWindow(600, 1800, windowA), utcWindow(1800, 600, { ...windowB, internal_reasoning: '0.000004' })];
+const windowHours = {
+  'windows-a': { data: [priced('vendor/two-windows', { ...windowA, prompt: '0.0000020', overrides: dayWindows }),
+    priced('vendor/two-windows-part', { ...windowA, prompt: '0.0000020', overrides: partWindows })] },
+  'windows-b': { data: [priced('vendor/two-windows', { ...windowB, overrides: dayWindows }),
+    priced('vendor/two-windows-part', { ...windowB, internal_reasoning: '0.000004', overrides: partWindows })] },
+};

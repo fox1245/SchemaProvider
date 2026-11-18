@@ -129,7 +129,7 @@ void overrides_become_bands(transport::Transport& transport, Peer& peer) {
   request.sources = {source(Listing::OpenRouter, base(peer, "overrides"))};
   const auto result = refreshed(transport, request);
   const auto& report = result.sources[0];
-  require(report.ok && report.models == 26 && report.skipped_prices == 0, "the overrides listing refreshed");
+  require(report.ok && report.models == 32 && report.skipped_prices == 0, "the overrides listing refreshed");
   const auto& c = *result.generated;
   // 62 bands fill an entry beside its two base prices.
   std::vector<std::pair<std::string, std::string>> full{{"completion", "0.000002"}, {"prompt", "0.000001"}};
@@ -151,12 +151,22 @@ void overrides_become_bands(transport::Transport& transport, Peer& peer) {
       // billing the base price again, it is not, and the key keeps its base price.
       {"vendor/cheap-band", "completion=0.000002 prompt=0.000001 prompt+1000=0.0000005"},
       {"vendor/cheap-carried", "completion=0.000002 completion+2000=0.000003 prompt=0.000001"},
-      // A time window: at most the base prices changes nothing; above one of them leaves that unit out.
+      // A time window alone: each key it lists at the dearest of the base price and the windows' prices.
       {"vendor/window-cheap", "completion=0.000008 prompt=0.000002"},
-      {"vendor/window-dear", "completion=0.000008"},
-      // A cache read the entry leaves out would be priced at the prompt price, and a request fee at nothing, so those go too.
-      {"vendor/window-cache", "completion=0.000008"},
-      {"vendor/window-fee", "image=0.01"},
+      {"vendor/window-dear", "completion=0.000008 prompt=0.000003"},
+      {"vendor/window-cache", "completion=0.000008 input_cache_read=0.000005 prompt=0.000002"},
+      {"vendor/window-fee", "completion=0.000002 image=0.01 prompt=0.000001 request=0.002"},
+      // A cache read the base does not price is billed at the prompt price outside the window, so it is left out, and
+      // the prompt price with it.
+      {"vendor/window-new-key", "completion=0.000002"},
+      // A key with a band and a window is left out; the window's other key is held.
+      {"vendor/band-and-window", "completion=0.000004"},
+      // Windows the clock cannot read stay overrides the catalogue cannot hold. A cache read the entry leaves out would
+      // be priced at the prompt price, and a request fee at nothing, so those go too.
+      {"vendor/open-window", "completion=0.000008"},
+      {"vendor/late-window-cache", "completion=0.000008"},
+      {"vendor/minute-window-fee", "image=0.01"},
+      {"vendor/text-window", "completion=0.000002"},
       // Other conditions, alone or with a threshold, and none at all.
       {"vendor/unknown-condition", "completion=0.000002"},
       {"vendor/combined", "prompt=0.000001"},
@@ -183,14 +193,16 @@ void overrides_become_bands(transport::Transport& transport, Peer& peer) {
     if (pricing_text(c.entry(id)) != text) wrong += "\n  " + id + ": " + pricing_text(c.entry(id)) + "\n    expected: " + text;
   if (!wrong.empty()) throw std::runtime_error("the generated prices are not the expected ones:" + wrong);
   // Every override price not held as a band is counted once, and every member left out is named, by model.
-  require(report.skipped_override_prices == 154, "override prices not held as bands: " + std::to_string(report.skipped_override_prices));
+  require(report.skipped_override_prices == 156, "override prices skipped or left out: " + std::to_string(report.skipped_override_prices));
+  require(report.window_prices_at_dearest == 7, "time-window prices held: " + std::to_string(report.window_prices_at_dearest));
   const std::vector<std::string> left_out{
-      "vendor/bad-price|prompt", "vendor/combined|completion", "vendor/discount|prompt", "vendor/fraction-threshold|prompt",
-      "vendor/malformed|", "vendor/no-condition|prompt", "vendor/number-price|prompt", "vendor/out-of-order|prompt",
-      "vendor/raising-discount|", "vendor/text-threshold|prompt", "vendor/too-many|prompt", "vendor/too-many-bands|prompt",
-      "vendor/unknown-condition|prompt", "vendor/window-cache|input_cache_read", "vendor/window-cache|prompt",
-      "vendor/window-dear|prompt", "vendor/window-fee|completion", "vendor/window-fee|prompt", "vendor/window-fee|request",
-      "vendor/zero-threshold|prompt"};
+      "vendor/bad-price|prompt", "vendor/band-and-window|prompt", "vendor/combined|completion", "vendor/discount|prompt",
+      "vendor/fraction-threshold|prompt", "vendor/late-window-cache|input_cache_read", "vendor/late-window-cache|prompt",
+      "vendor/malformed|", "vendor/minute-window-fee|completion", "vendor/minute-window-fee|prompt", "vendor/minute-window-fee|request",
+      "vendor/no-condition|prompt", "vendor/number-price|prompt", "vendor/open-window|prompt", "vendor/out-of-order|prompt",
+      "vendor/raising-discount|", "vendor/text-threshold|prompt", "vendor/text-window|prompt", "vendor/too-many|prompt",
+      "vendor/too-many-bands|prompt", "vendor/unknown-condition|prompt", "vendor/window-new-key|input_cache_read",
+      "vendor/window-new-key|prompt", "vendor/zero-threshold|prompt"};
   std::vector<std::string> named;
   for (const auto& unit : report.withheld) named.push_back(unit.model + "|" + unit.unit);
   if (named != left_out) {
@@ -242,22 +254,63 @@ void overrides_become_bands(transport::Transport& transport, Peer& peer) {
                                            ServedModel{"vendor/hour-cache", "vendor/hour-cache", ServedRelation::Exact}, split);
   require(hour_cost.total && hour_cost.total->nano_usd == 3'825'000u && hour_cost.assumptions.empty(), "one-hour cache writes at the one-hour price");
   // A unit left out is unpriced: the bound and the estimate refuse a call that bills it.
-  const auto& dear = *c.entry("vendor/window-dear");
-  const auto dear_bound = pricing::upper_bound(dear, {}, {1'000, 100, false, {}});
-  require(!dear_bound.total && dear_bound.unpriced == std::vector<std::string>{"input"}, "the bound reports the unit left out as unpriced");
-  const auto dear_cost = pricing::estimate(c, "openai.chat", "https://openrouter.ai",
-                                           ServedModel{"vendor/window-dear", "vendor/window-dear", ServedRelation::Exact}, usage_of(1'000, 100));
-  require(!dear_cost.total && dear_cost.unpriced == std::vector<std::string>{"input"}, "the estimate reports the unit left out as not priced");
-  require(pricing::price_of(dear).output == 8'000'000'000u, "the other units are kept");
+  const auto& open = *c.entry("vendor/open-window");
+  const auto open_bound = pricing::upper_bound(open, {}, {1'000, 100, false, {}});
+  require(!open_bound.total && open_bound.unpriced == std::vector<std::string>{"input"}, "the bound reports the unit left out as unpriced");
+  const auto open_cost = pricing::estimate(c, "openai.chat", "https://openrouter.ai",
+                                           ServedModel{"vendor/open-window", "vendor/open-window", ServedRelation::Exact}, usage_of(1'000, 100));
+  require(!open_cost.total && open_cost.unpriced == std::vector<std::string>{"input"}, "the estimate reports the unit left out as not priced");
+  require(pricing::price_of(open).output == 8'000'000'000u, "the other units are kept");
   auto reads = usage_of(1'000, 0);
   reads.cache_read = Count{1'000, Evidence::Reported};
   const auto read_cost = pricing::estimate(c, "openai.chat", "https://openrouter.ai",
-                                           ServedModel{"vendor/window-cache", "vendor/window-cache", ServedRelation::Exact}, reads);
+                                           ServedModel{"vendor/late-window-cache", "vendor/late-window-cache", ServedRelation::Exact}, reads);
   require(!read_cost.total && read_cost.unpriced == std::vector<std::string>{"cache_read"}, "cache reads are not priced at the prompt price");
-  require(pricing::upper_bound(*c.entry("vendor/window-fee"), {}, {1, 1, false, {}}).unpriced == (std::vector<std::string>{"input", "output"}),
+  require(pricing::upper_bound(*c.entry("vendor/minute-window-fee"), {}, {1, 1, false, {}}).unpriced == (std::vector<std::string>{"input", "output"}),
           "a request fee left out leaves the call unpriced");
-  require(pricing::price_of(*c.entry("vendor/window-cheap")).input == 2'000'000'000u, "a cheaper time window changes nothing");
+  // A time window is held at its dearest price at every length and every hour: 1'000 input tokens at 3e-6 and 100
+  // output tokens at 8e-6 USD, and the dearer request fee.
+  require(pricing::price_of(*c.entry("vendor/window-cheap")).input == 2'000'000'000u, "a cheaper time window keeps the base price");
+  const auto dear_cost = pricing::estimate(c, "openai.chat", "https://openrouter.ai",
+                                           ServedModel{"vendor/window-dear", "vendor/window-dear", ServedRelation::Exact}, usage_of(1'000, 100));
+  require(dear_cost.total && dear_cost.total->nano_usd == 3'800'000u, "a dearer time window is priced at its price");
+  require(pricing::price_of(*c.entry("vendor/window-fee")).request == 2'000'000'000'000u, "a dearer request fee in a window is the fee");
   passed("price overrides: long-context bands, time windows, malformed and unbounded overrides, and their prices");
+}
+
+// The listing's top-level prices are those of the time window current when it is fetched. A window's price is held at
+// the dearest of the windows, so the same listing gives the same entries at an hour of either window.
+void windows_give_one_entry_at_every_hour(transport::Transport& transport, Peer& peer) {
+  const auto at = [&](std::string_view scenario) {
+    transport::RefreshRequest request;
+    request.sources = {source(Listing::OpenRouter, base(peer, scenario))};
+    auto result = refreshed(transport, request);
+    require(result.sources[0].ok, "the listing refreshed");
+    return result;
+  };
+  const auto a = at("windows-a"), b = at("windows-b");
+  const auto text = a.generated->to_json();
+  require(text == b.generated->to_json() && a.generated->digest() == b.generated->digest(),
+          "an hour of each window gives the same entries, not\n" + text + "\nand\n" + b.generated->to_json());
+  require(pricing_text(a.generated->entry("vendor/two-windows")) == "completion=0.000008 input_cache_read=0.0000002 prompt=0.000002",
+          "each key at the dearest window, in the window's text: " + pricing_text(a.generated->entry("vendor/two-windows")));
+  // A reasoning price one window leaves out is billed at the completion price in that window, so it is left out, and
+  // the completion price with it, at either hour.
+  require(pricing_text(a.generated->entry("vendor/two-windows-part")) == "input_cache_read=0.0000002 prompt=0.000002",
+          "a refining price only one window lists is left out: " + pricing_text(a.generated->entry("vendor/two-windows-part")));
+  for (const auto* result : {&a, &b}) {
+    const auto& report = result->sources[0];
+    std::vector<std::string> named;
+    for (const auto& unit : report.withheld) named.push_back(unit.model + "|" + unit.unit);
+    require(report.skipped_override_prices == 1 && report.window_prices_at_dearest == 12 &&
+                named == (std::vector<std::string>{"vendor/two-windows-part|completion", "vendor/two-windows-part|internal_reasoning"}),
+            "the same report at either hour");
+  }
+  // 1'000 input and 100 output tokens at 2e-6 and 8e-6 USD at any hour.
+  const auto cost = pricing::estimate(*b.generated, "openai.chat", "https://openrouter.ai",
+                                      ServedModel{"vendor/two-windows", "vendor/two-windows", ServedRelation::Exact}, usage_of(1'000, 100));
+  require(cost.total && cost.total->nano_usd == 2'800'000u, "priced at the dearest window");
+  passed("time windows: the same entries at an hour of either window");
 }
 
 void all_four_listings(transport::Transport& transport, Peer& peer, descriptor::CatalogueSnapshot& generated) {
@@ -989,10 +1042,12 @@ void ceilings_bound_every_endpoint(transport::Transport& transport, Peer& peer) 
 // at all give none.
 void ceilings_count_listed_bands(transport::Transport& transport, Peer& peer) {
   peer.command(R"({"set":"ceilings-bands","models":{"vendor/band-floor":[{"prompt":"0.000001","completion":"0.000002"}],)"
-               R"("vendor/withheld-floor":[{"prompt":"0.000001","completion":"0.000002"}],"vendor/unread-floor":[{"prompt":"0.000001","completion":"0.000002"}]},)"
+               R"("vendor/withheld-floor":[{"prompt":"0.000001","completion":"0.000002"}],"vendor/unread-floor":[{"prompt":"0.000001","completion":"0.000002"}],)"
+               R"("vendor/window-floor":[{"prompt":"0.000001","completion":"0.000002"}]},)"
                R"("listed":{"vendor/band-floor":{"prompt":"0.0000001","completion":"0.0000001",)"
                R"("overrides":[{"min_prompt_tokens":100000,"prompt":"0.000005","completion":"0.000007"}]},)"
-               R"("vendor/withheld-floor":{"prompt":"0.0000001","completion":"0.0000001","overrides":[{"utc_start":0,"utc_end":600,"prompt":"0.000009"}]},)"
+               R"("vendor/withheld-floor":{"prompt":"0.0000001","completion":"0.0000001","overrides":[{"utc_start":0,"prompt":"0.000009"}]},)"
+               R"("vendor/window-floor":{"prompt":"0.0000001","completion":"0.0000001","overrides":[{"utc_start":0,"utc_end":600,"prompt":"0.000009"}]},)"
                R"("vendor/unread-floor":{"prompt":"0.0000001","completion":"0.0000001","overrides":["long context"]}}})");
   // A ceiling unit the models listing names is dropped, with its bands: a ceiling comes from the endpoints only.
   peer.command(R"({"set":"ceilings-band-unit","models":{"vendor/band-ceiling":[{"prompt":"0.000001","completion":"0.000002"}]},)"
@@ -1005,7 +1060,7 @@ void ceilings_count_listed_bands(transport::Transport& transport, Peer& peer) {
   require(pricing_text(band_ceiling) == "ceiling_input=0.000001 ceiling_output=0.000002 completion=0.0000001 prompt=0.0000001",
           "a listed ceiling band is dropped, not kept beside the ceiling: " + pricing_text(band_ceiling));
   transport::RefreshRequest request;
-  request.sources = {ceiling_source(peer, "ceilings-bands", {"vendor/band-floor", "vendor/withheld-floor", "vendor/unread-floor"})};
+  request.sources = {ceiling_source(peer, "ceilings-bands", {"vendor/band-floor", "vendor/withheld-floor", "vendor/unread-floor", "vendor/window-floor"})};
   const auto result = refreshed(transport, request);
   const auto& report = result.sources[0];
   require(report.ok, "the listing refreshed");
@@ -1015,6 +1070,8 @@ void ceilings_count_listed_bands(transport::Transport& transport, Peer& peer) {
   require(ceiling_of(c.entry("vendor/withheld-floor")) == "- 0.000002 -",
           "a side whose listed price is left out gets no ceiling, not " + ceiling_of(c.entry("vendor/withheld-floor")));
   require(ceiling_of(c.entry("vendor/unread-floor")) == "- - -", "conditional prices that cannot be read give no ceiling");
+  require(ceiling_of(c.entry("vendor/window-floor")) == "0.000009 0.000002 -",
+          "a time-window price held at its dearest is a listed price the ceiling covers, not " + ceiling_of(c.entry("vendor/window-floor")));
   const std::vector<std::string> gaps{"vendor/unread-floor|||conditional prices in the listing cannot be read",
                                       "vendor/withheld-floor|ceiling_input|prompt|price in the listing left out for a conditional price"};
   if (gap_lines(report) != gaps) {
@@ -1071,6 +1128,7 @@ int main(int argc, char** argv) {
     descriptor::CatalogueSnapshot generated;
     no_ceilings_change_nothing(transport, peer);
     overrides_become_bands(transport, peer);
+    windows_give_one_entry_at_every_hour(transport, peer);
     all_four_listings(transport, peer, generated);
     failures_keep_previous_entries(transport, peer, generated);
     empty_and_partial_listings_fail_their_source(transport, peer, generated);

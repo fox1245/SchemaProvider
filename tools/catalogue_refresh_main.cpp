@@ -145,7 +145,8 @@ int main(int argc, char** argv) {
     std::cout << sp::descriptor::listing_name(report.listing) << ": "
               << (report.ok ? "ok" : "failed (" + report.error + ")") << ", " << report.pages << " page(s), "
               << report.models << " model(s), " << report.skipped << " skipped, " << report.skipped_prices
-              << " price(s) skipped, " << report.skipped_override_prices << " override price(s) not held as bands\n";
+              << " price(s) skipped, " << report.skipped_override_prices << " override price(s) skipped or left out, "
+              << report.window_prices_at_dearest << " time-window price(s) held at the dearest window\n";
     for (const auto& unit : report.withheld)
       std::cout << sp::descriptor::listing_name(report.listing) << " left out " << unit.model << ": "
                 << (unit.unit.empty() ? "every price (conditional prices that cannot be read)" : unit.unit + " (for a conditional price the catalogue cannot hold)")

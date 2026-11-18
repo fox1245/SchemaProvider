@@ -524,6 +524,7 @@ std::variant<RefreshResult, ConfigError> refresh_catalogue(Transport& transport,
         report.skipped += listed.skipped;
         report.skipped_prices += listed.skipped_prices;
         report.skipped_override_prices += listed.skipped_override_prices;
+        report.window_prices_at_dearest += listed.window_prices_at_dearest;
         report.withheld.insert(report.withheld.end(), listed.withheld.begin(), listed.withheld.end());
         try {
           pages.push_back(catalogue_of(std::move(listed.entries)));

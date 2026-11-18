@@ -191,12 +191,16 @@ struct ListingPage {
   // Listed prices left out because the catalogue cannot hold them: a unit that is a number or text that is not a
   // plain decimal ("1e-7"), or one past the 64 a model keeps.
   std::size_t skipped_prices = 0;
-  // Prices of OpenRouter's `pricing.overrides` that are not input bands of the entry, each once (USAGE.md, refreshing
-  // the catalogue): a price of an override with a condition other than `min_prompt_tokens` alone, with a discount, or
-  // with a price the catalogue cannot read; a key whose thresholds do not increase in listing order, that does not fit
-  // the 64 prices of an entry, or whose band is below the base price while a later override leaves the key out; an
-  // override that is not an object, `overrides` that is not an array, and a discount that is not from 0 to 1.
+  // Prices of OpenRouter's `pricing.overrides` the entry skips or leaves out, each once (USAGE.md, refreshing the
+  // catalogue): a price of an override whose conditions are neither `min_prompt_tokens` alone nor a time window alone,
+  // with a discount, or with a price the catalogue cannot read; a key whose thresholds do not increase in listing
+  // order, that does not fit the 64 prices of an entry, or whose band is below the base price while a later override
+  // leaves the key out; a key with both a threshold and a time window; an override that is not an object, `overrides`
+  // that is not an array, and a discount that is not from 0 to 1.
   std::size_t skipped_override_prices = 0;
+  // Prices of overrides that are a time window alone (`utc_start` and `utc_end`), held at the dearest of the windows
+  // and the base price of their key, each once.
+  std::size_t window_prices_at_dearest = 0;
   // The price members left out of the entries for those overrides, by model and member, sorted.
   std::vector<WithheldUnit> withheld;
 };

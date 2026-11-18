@@ -442,7 +442,8 @@ bool has_unit(const descriptor::CatalogueEntry& entry, std::string_view name) {
   });
 }
 
-// A time-of-day override that may bill a unit above the entry's price leaves the unit out, and with it the units its
+// A time-of-day override without an end, which the catalogue cannot hold, that may bill a unit above the entry's
+// price leaves the unit out, and with it the units its
 // tokens would otherwise be priced at, so that the bound and the estimate of a call that bills it refuse.
 void left_out_units_refuse() {
   const std::string base = R"("prompt":"0.000001","completion":"0.000002","input_cache_read":"0.0000001","input_cache_write":"0.00000125",)"
@@ -471,7 +472,7 @@ void left_out_units_refuse() {
     // Every call here has a price without the override.
     CHECK(pricing::upper_bound(*plain->entry("vendor/m"), {}, test.bound).total);
     CHECK(pricing::estimate(*plain, "anthropic.messages", listing_origin, model, test.usage).total);
-    const auto c = listed_model("{" + base + R"(,"overrides":[{"utc_start":0,"utc_end":600,")" + test.member + R"(":"1"}]})");
+    const auto c = listed_model("{" + base + R"(,"overrides":[{"utc_start":0,")" + test.member + R"(":"1"}]})");
     const auto& entry = *c->entry("vendor/m");
     if (has_unit(entry, test.member) || !has_unit(entry, test.kept))
       throw std::runtime_error(std::string("left out for ") + test.member + ": the wrong units");
@@ -483,30 +484,40 @@ void left_out_units_refuse() {
 }
 
 // For generated listings with long-context and time-of-day overrides, neither the bound nor the estimate from the
-// generated entry is below the price the listing's own rule gives: the base prices; an override applying when the
-// input is strictly above its `min_prompt_tokens` and, with a time window, in that window; and of the overrides that
+// generated entry is below the price the listing's own rule gives at any hour of the day: the base prices; an override
+// applying when the input is strictly above its `min_prompt_tokens` and, with a time window, at a clock time from its
+// `utc_start` up to, not including, its `utc_end`, past midnight when the end comes first; and of the overrides that
 // apply, the later one in the listing winning for each key. Whether a later override that leaves a key out wins with
-// the base price it inherits, or yields to an earlier one that lists the key, is not stated, so both are checked.
+// the base price it inherits, or yields to an earlier one that lists the key, is not stated, so both are checked. A
+// window with no end may apply at any time or never.
 void listed_overrides_bound_every_call() {
   std::uint64_t seed = 20261119;
   auto next = [&](std::uint64_t limit) { seed = seed * 6364136223846793005u + 1442695040888963407u; return (seed >> 33) % (limit + 1); };
   // A price of k x 1e-7 USD per token: its text, and k x 1e8 nano-USD per million tokens.
   auto text = [](std::uint64_t k) { auto digits = std::to_string(k); return "0." + std::string(7 - digits.size(), '0') + digits; };
-  struct Override { std::optional<std::uint64_t> above; bool window = false; std::map<std::string, std::uint64_t> prices; };
+  auto clock = [&] { return next(23) * 100 + next(59); };
+  struct Override {
+    std::optional<std::uint64_t> above, start, end;
+    std::map<std::string, std::uint64_t> prices;
+  };
   const std::string keys[]{"prompt", "completion"};
-  std::size_t listings = 0, checked = 0, exact = 0, refused = 0;
+  std::size_t listings = 0, checked = 0, exact = 0, refused = 0, windows_held = 0;
   for (int round = 0; round < 3000; ++round) {
     std::map<std::string, std::uint64_t> base{{"prompt", 1 + next(98)}, {"completion", 1 + next(98)}};
     std::vector<Override> overrides(next(4));
-    bool plain = true;  // thresholds alone, increasing for each key, no price below the base: the bands are exact
+    bool plain = true;         // thresholds alone, increasing for each key, no price below the base: the bands are exact
+    bool windows_only = true;  // time windows alone, each with both bounds: every price is held
     std::map<std::string, std::uint64_t> last_above;
     for (auto& o : overrides) {
+      // 0, 1: a threshold; 2: a threshold and a window; 3, 4: a window; 5: a window without an end.
       const auto kind = next(5);
-      if (kind != 4) o.above = 1'000 * (1 + next(9));
-      o.window = kind >= 3;
+      if (kind <= 2) o.above = 1'000 * (1 + next(9));
+      if (kind >= 2) o.start = clock();
+      if (kind >= 2 && kind <= 4) o.end = clock();
       for (const auto& key : keys)
         if (next(2)) o.prices[key] = 1 + next(98);
-      plain = plain && !o.window;
+      plain = plain && !o.start;
+      windows_only = windows_only && (kind == 3 || kind == 4);
       for (const auto& [key, k] : o.prices) {
         plain = plain && k >= base[key] && (!last_above.count(key) || *o.above > last_above[key]);
         if (o.above) last_above[key] = *o.above;
@@ -514,37 +525,56 @@ void listed_overrides_bound_every_call() {
     }
     std::string json = R"({"prompt":")" + text(base["prompt"]) + R"(","completion":")" + text(base["completion"]) + R"(","overrides":[)";
     for (std::size_t i = 0; i < overrides.size(); ++i) {
+      const auto& o = overrides[i];
       std::string members;
-      if (overrides[i].above) members += R"("min_prompt_tokens":)" + std::to_string(*overrides[i].above);
-      if (overrides[i].window) members += std::string(members.empty() ? "" : ",") + R"("utc_start":2200,"utc_end":600)";
-      for (const auto& [key, k] : overrides[i].prices) members += std::string(members.empty() ? "" : ",") + "\"" + key + "\":\"" + text(k) + "\"";
+      const auto add = [&](const std::string& member) { members += (members.empty() ? "" : ",") + member; };
+      if (o.above) add(R"("min_prompt_tokens":)" + std::to_string(*o.above));
+      if (o.start) add(R"("utc_start":)" + std::to_string(*o.start));
+      if (o.end) add(R"("utc_end":)" + std::to_string(*o.end));
+      for (const auto& [key, k] : o.prices) add("\"" + key + "\":\"" + text(k) + "\"");
       json += (i ? ",{" : "{") + members + "}";
     }
     const auto c = listed_model(json + "]}");
     const auto& entry = *c->entry("vendor/m");
     ++listings;
-    // The listing's own price for a key, under each reading, at an input length and in or out of the window.
-    auto price = [&](const std::string& key, std::uint64_t input, bool in_window, bool inherited) {
+    // Whether an override applies at an input length and a clock time; a window without an end applies at any time
+    // when `loose` is set, and never otherwise.
+    auto applies = [](const Override& o, std::uint64_t input, std::uint64_t at, bool loose) {
+      if (o.above && input <= *o.above) return false;
+      if (!o.start) return true;
+      if (!o.end) return loose;
+      return *o.start <= *o.end ? *o.start <= at && at < *o.end : at >= *o.start || at < *o.end;
+    };
+    // The listing's own price for a key, under each reading.
+    auto price = [&](const std::string& key, std::uint64_t input, std::uint64_t at, bool loose, bool inherited) {
       for (auto o = overrides.rbegin(); o != overrides.rend(); ++o) {
-        if ((o->above && input <= *o->above) || (o->window && !in_window)) continue;
+        if (!applies(*o, input, at, loose)) continue;
         if (o->prices.count(key)) return o->prices.at(key);
         if (inherited) return base[key];
       }
       return base[key];
     };
+    // Every hour, and each window's first minute, last minute and end.
+    std::vector<std::uint64_t> times;
+    for (std::uint64_t hour = 0; hour < 24; ++hour) times.push_back(hour * 100);
+    for (const auto& o : overrides) {
+      if (o.start) times.push_back(*o.start);
+      if (o.end) times.insert(times.end(), {*o.end, *o.end == 0 ? 2359 : *o.end % 100 == 0 ? *o.end - 41 : *o.end - 1});
+    }
     std::vector<std::uint64_t> lengths{0, 1, 999, 12'000, next(12'000)};
     for (const auto& o : overrides)
       if (o.above) lengths.insert(lengths.end(), {*o.above, *o.above + 1});
     for (const auto input : lengths) {
       const auto output = next(5'000);
       std::uint64_t dearest = 0, at_rule = 0;
-      for (const bool in_window : {false, true})
-        for (const bool inherited : {false, true}) {
-          // Rates are k x 1e8 nano-USD per million tokens: k x 100 nano-USD per token.
-          const auto cost = (input * price("prompt", input, in_window, inherited) + output * price("completion", input, in_window, inherited)) * 100;
-          dearest = std::max(dearest, cost);
-          if (!in_window && !inherited) at_rule = cost;
-        }
+      for (const auto at : times)
+        for (const bool loose : {false, true})
+          for (const bool inherited : {false, true}) {
+            // Rates are k x 1e8 nano-USD per million tokens: k x 100 nano-USD per token.
+            const auto cost = (input * price("prompt", input, at, loose, inherited) + output * price("completion", input, at, loose, inherited)) * 100;
+            dearest = std::max(dearest, cost);
+            if (!inherited) at_rule = cost;
+          }
       const bool left_out = !has_unit(entry, "prompt") || !has_unit(entry, "completion");
       const auto bound = pricing::upper_bound(entry, {}, {input, output, false, {}});
       const auto e = pricing::estimate(*c, "openai.chat", listing_origin, ServedModel{"vendor/m", "vendor/m", ServedRelation::Exact}, usage(input, output));
@@ -552,6 +582,11 @@ void listed_overrides_bound_every_call() {
       else CHECK(left_out);
       if (e.total) CHECK(e.total->nano_usd >= dearest);
       else { CHECK(left_out); ++refused; }
+      // Without thresholds, time windows with both bounds are held: nothing is left out.
+      if (windows_only && !overrides.empty()) {
+        CHECK(e.total.has_value());
+        ++windows_held;
+      }
       if (plain) {
         CHECK(e.total && e.total->nano_usd == at_rule);
         ++exact;
@@ -559,9 +594,9 @@ void listed_overrides_bound_every_call() {
       ++checked;
     }
   }
-  CHECK(listings == 3000 && checked > 15'000 && exact > 3'000 && refused > 500);
-  std::cout << "case passed: listed overrides never price below the listing's rule (" << listings << " listings, " << checked
-            << " calls, " << exact << " exact, " << refused << " refused)\n";
+  CHECK(listings == 3000 && checked > 15'000 && exact > 2'000 && refused > 500 && windows_held > 1'000);
+  std::cout << "case passed: listed overrides never price below the listing's rule at any hour (" << listings << " listings, " << checked
+            << " calls, " << exact << " exact, " << windows_held << " with windows only, " << refused << " refused)\n";
 }
 } // namespace
 
