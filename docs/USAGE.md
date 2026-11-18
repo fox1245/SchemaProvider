@@ -99,7 +99,7 @@ The closed descriptor-version-1 root accepts only these keys:
 | `descriptor_version` | Exactly `1`; future versions are rejected, not guessed. |
 | `revision`, `id` | Positive unsigned fact revision and stable ASCII identifier. |
 | `family` | `openai.chat`, `openai.responses`, `anthropic.messages`, `google.generate` or `google.interactions`. |
-| `connection` | Origin-only `base_url`, literal `paths.buffered`/`paths.streaming`, optional non-reserved literal `headers`. |
+| `connection` | Origin-only `base_url`, literal `paths.buffered`/`paths.streaming`, optional non-reserved literal `headers`, optional `auth`: the credential scheme of the descriptor's chat calls (see [credential schemes](#credential-schemes)). |
 | `bindings` | Optional admitted model/message/stream/output-cap member names and usage path segments. Defaults come from the family's policy. The Chat output cap defaults to `max_completion_tokens` on direct OpenAI (`https://api.openai.com`), whose current models reject `max_tokens`, and to `max_tokens` on every other origin, OpenRouter and compatible endpoints included. An explicit `max_output_tokens` binding wins on any origin. |
 | `stop_reasons` | Optional raw stop values with their declared stop kinds, added to the family policy's table (`ValidatedDescriptor::stop_mappings()` lists the result, and `stop_kind(raw)` answers what the codecs decode). A descriptor may add values, but in every family it may not give a value its policy or the embedded policy lists another kind, and it may not list `error`, `failed`, `cancelled` or `incomplete`, whose meaning the codecs decide in code. Chat, Messages, Responses and Generate decode stops through the table, then through the embedded policy's row for a value the table has none for; a value neither lists is `StopKind::Unknown` with the raw value kept (see [stop reasons](#stop-reasons)). Interactions maps its statuses in code, so entries added for it change the native binding identity, not decoded stops. |
 | `evidence` | Optional HTTPS documentation URLs and verification date; metadata is not runtime qualification. |
@@ -118,7 +118,7 @@ if (const char* key = std::getenv("PROVIDER_API_KEY"))
 // Construct Client with an already admitted HTTPS descriptor and these options.
 ```
 
-The runtime sends Bearer authorization for Chat/Responses, `x-api-key` for Messages and `x-goog-api-key` for Generate/Interactions. It does not fetch or refresh credentials. An empty key is valid for credential-free loopback use; it is not a promise that a hosted service accepts unauthenticated requests. Messages API-version headers come from admitted descriptor/family facts. Do not use literal headers to smuggle credentials into configuration.
+The runtime sends the key in the header of the call's [credential scheme](#credential-schemes): with the built-in policy, Bearer authorization for Chat/Responses, `x-api-key` for Messages and `x-goog-api-key` for Generate/Interactions, at every origin. It does not fetch or refresh credentials. An empty key is valid for credential-free loopback use; it is not a promise that a hosted service accepts unauthenticated requests. Messages API-version headers come from admitted descriptor/family facts. Do not use literal headers to smuggle credentials into configuration. A literal `Authorization` header is refused when the descriptor loads, and with a key set a literal `x-api-key` or `x-goog-api-key` header, in any letter case, is refused when the client is made (a `ConfigError` at `/api_key`), so the key is never sent twice.
 
 `Client(descriptor, std::string api_key)` and `Options::with_api_key(key, runtime_policy)` are shorthand for the lines above: they set `Options::api_key` (and nothing else) and take the key by value, so move it in. The rules above are unchanged: keep the key out of descriptors, logs and encoded bodies.
 
@@ -167,6 +167,36 @@ A family's `stop_reasons` in a custom policy may add rows to the embedded policy
 A nonempty `expected_sha256_hex` must be 64 hexadecimal digits (either case) equal to the content digest, otherwise the load returns a `ConfigError` at `/content_digest`, so a malformed or wrong pin is never ignored. An empty pin means no check. The pin compares against a value you obtained out of band; it is an integrity check, not proof of who produced the file. The bundle covers the descriptor/codec pair only: runtime and error policy still load with `configuration::load_runtime_policy`.
 
 Family/model defaults are resolved before encoding. An unset request optional uses its admitted default, which may also be unset. An explicit value replaces that default; false and allowed zero values remain distinct from absence. Output caps must be positive, so explicit zero is rejected there. Caller caps are not silently clamped: an admitted model limit or representation/resource bound rejects an incompatible value. No policy snapshot or canary profile grants financial authority.
+
+### Credential schemes
+
+A scheme says which header carries the API key:
+
+| Scheme | Header |
+|---|---|
+| `bearer` | `Authorization: Bearer <key>` |
+| `x-api-key` | `x-api-key: <key>` |
+| `x-goog-api-key` | `x-goog-api-key: <key>` |
+
+There is no other scheme, and no request signing. A chat call uses the descriptor's `connection.auth` when it states one, else the first of its family's `auth` facts in the descriptor policy that matches the descriptor's origin. The key goes only to the descriptor's own origin, whichever scheme sends it. A descriptor for the Messages or Generate shape at a host that takes a bearer token states it:
+
+```json
+{
+  "descriptor_version": 1, "revision": 1, "id": "messages-gateway", "family": "anthropic.messages",
+  "connection": {"base_url": "https://llm.example.com", "paths": {"buffered": "/v1/messages", "streaming": "/v1/messages"},
+                 "auth": "bearer"}
+}
+```
+
+Each call of a `Client` with this descriptor and a key sends `Authorization: Bearer <key>` and no `x-api-key`. `connection.auth` admits `bearer`, `x-api-key` and `x-goog-api-key` at any origin, and any other value is a `ConfigError` at `/connection/auth`. It replaces the family policy's scheme for the descriptor's chat calls only: an [endpoint call](#non-chat-endpoints) and a [realtime session](#realtime-sessions) send the header of their endpoint fact's `auth`. It is not a header, so it is not part of the native origin identity or the archive binding, and history sealed under one scheme continues under another. `ValidatedDescriptor::auth()` returns the stated scheme (empty when there is none), and `descriptor::auth_scheme(descriptor)` the one its chat calls use.
+
+Each family of the descriptor policy states its schemes in `auth`, an array of facts tried in order. A fact names its `scheme` and may list `origins` (canonical origins without a path, each in one fact); the last fact has no `origins` and applies at every other origin, and it is the only one without. The built-in policy states `[{"scheme": "bearer"}]` for Chat and Responses, `[{"scheme": "x-api-key"}]` for Messages and `[{"scheme": "x-goog-api-key"}]` for Generate and Interactions. A custom policy may name another scheme for an origin:
+
+```json
+"auth": [{"origins": ["https://llm.example.com"], "scheme": "bearer"}, {"scheme": "x-api-key"}]
+```
+
+A policy written before the facts, without `auth` for a family, takes that family's facts from the embedded policy and sends what it sent before. Its content digest then covers the facts it took, so a pinned older policy needs its pin refreshed once. `DescriptorPolicy::auth_scheme(family, origin)` answers which scheme a family's chat call uses at an origin, and `descriptor::credential_header(scheme, key)` gives the header name and value a scheme sends; a host that builds its own requests per provider can ask them instead of keeping its own table.
 
 ### Model catalogue
 
@@ -965,7 +995,7 @@ if (auto* file = std::get_if<sp::files::File>(&uploaded)) {
   - `shape`, the codec's wire (`openai`, `openrouter`);
   - `paths`, the path of each operation (`generate`, `edit`; a job's `submit`, `poll` and `download`);
   - an `options` schema for the members a request may add (OpenAI `moderation`, OpenRouter `aspect_ratio`, `seed`, `provider`), never a member the codec writes;
-  - `auth` (`bearer`, `x-api-key`, `x-goog-api-key`);
+  - `auth` (`bearer`, `x-api-key`, `x-goog-api-key`), the [credential scheme](#credential-schemes) of its calls, whatever the descriptor's `connection.auth` states;
   - `charge_on_accept`;
   - `headers`, literal headers every call sends (Anthropic's `anthropic-version`). A header the descriptor sets wins, and a fact cannot name a credential or content header;
   - `keep`, for an operation that takes a chat request's body (token counting), the members of that body it keeps;
@@ -1206,6 +1236,8 @@ A host that sends to several families ends up restating what SchemaProvider alre
 **Model facts.** `DescriptorPolicy::temperature_admitted(family, origin, model)` says whether the model takes `temperature` there, and `control_value_admitted(family, origin, model, control, value)` whether it takes that value of a control with listed values (`control_takes_values(Control)`: `reasoning_effort`, `reasoning_summary`, `thinking_level`, `service_tier`). Both read the model catalogue fact by fact, as [the catalogue](#model-catalogue) describes, and answer `std::nullopt` when no entry states the fact: send the request and let the provider answer. A host that keeps its own temperature or effort reject list can ask them instead: `validate_choices` refuses a request whose `temperature`, or whose effective value of such a control, they answer `false` for.
 
 **Routing.** `family_admits_routing(FamilyPolicy)` is true when the family declares routing origins (`openrouter_origins`); `routed_gateway(descriptor)` is true when this descriptor's origin is one.
+
+**Credential scheme.** `DescriptorPolicy::auth_scheme(family, origin)` names the scheme a chat call of the family sends the key with at an origin, from the family's `auth` facts, and `descriptor::auth_scheme(descriptor)` the one a descriptor's chat calls use, its `connection.auth` first. `descriptor::credential_header(scheme, key)` gives the header that scheme sends, and `credential_header_name(name)` says whether a header name, in any letter case, is one of them (see [credential schemes](#credential-schemes)).
 
 **Service tiers.** `DescriptorPolicy::billing_tier(family, tier)` returns the tier the catalogue prices a call under: empty for a tier that bills at the standard rates (the family's `standard_service_tiers`: `default` at Chat and Responses, `standard` at Interactions), the name itself for any other. Pass the result as `price_of`'s `service_tier`.
 

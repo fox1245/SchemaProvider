@@ -55,10 +55,16 @@ public:
     // row for the family, else Unknown.
     StopKind stop_kind(std::string_view raw) const;
     const std::vector<std::pair<std::string, StopKind>>& stop_mappings() const noexcept { return stop_reasons_; }
+    // The credential scheme `connection.auth` names (`bearer`, `x-api-key` or `x-goog-api-key`), empty when the
+    // descriptor names none. descriptor::auth_scheme(descriptor) is the scheme its chat calls send the key with.
+    std::string_view auth() const noexcept;
 private:
     ValidatedDescriptor() = default;
     std::uint64_t revision_ = 0;
     bool model_routed_ = false;
+    // `connection.auth`: zero for none, else one more than the scheme's place in descriptor::credential_schemes().
+    // It takes the padding after model_routed_, so the size of the class and the offsets of its members stay.
+    std::uint8_t auth_ = 0;
     std::string id_, family_, base_url_, buffered_path_, streaming_path_;
     std::string model_member_, messages_member_, stream_member_, max_output_tokens_member_;
     std::vector<std::string> usage_path_;

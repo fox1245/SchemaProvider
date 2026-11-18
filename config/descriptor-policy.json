@@ -7,6 +7,7 @@
       "controls": ["max_output_tokens", "temperature", "top_p", "reasoning_effort", "service_tier", "tool_choice"],
       "standard_service_tiers": ["default"],
       "openrouter_origins": ["https://openrouter.ai"],
+      "auth": [{"scheme": "bearer"}],
       "cache": [
         {"origins": ["https://openrouter.ai"], "routes": ["anthropic/"], "explicit": true, "max_breakpoints": 4, "ttls": ["5m", "1h"], "write_multiplier": {"5m": 1.25, "1h": 2}, "longest_first": true},
         {"origins": ["https://openrouter.ai"], "routes": ["google/"], "explicit": true, "max_breakpoints": 1, "ttls": ["5m"]},
@@ -109,6 +110,7 @@
       "family": "anthropic.messages",
       "controls": ["max_output_tokens", "temperature", "top_p", "thinking_budget", "tool_choice"],
       "openrouter_origins": ["https://openrouter.ai"],
+      "auth": [{"scheme": "x-api-key"}],
       "cache": [
         {"origins": ["https://api.anthropic.com"], "explicit": true, "max_breakpoints": 4, "ttls": ["5m", "1h"], "write_multiplier": {"5m": 1.25, "1h": 2}, "longest_first": true},
         {"explicit": true, "max_breakpoints": 4, "ttls": ["5m", "1h"], "longest_first": true}
@@ -282,6 +284,7 @@
       "controls": ["max_output_tokens", "temperature", "top_p", "reasoning_effort", "reasoning_summary", "service_tier", "required_tool", "store", "max_tool_calls", "tool_choice"],
       "standard_service_tiers": ["default"],
       "openrouter_origins": ["https://openrouter.ai"],
+      "auth": [{"scheme": "bearer"}],
       "cache": [{"explicit": false, "unsupported": "ignore"}],
       "media": {
         "image": {"mime": ["image/png", "image/jpeg", "image/webp", "image/gif"], "sources": ["inline", "url", "file"]},
@@ -403,6 +406,7 @@
       "family": "google.generate",
       "controls": ["max_output_tokens", "temperature", "thinking_budget", "include_thoughts", "thinking_level", "required_tool", "tool_choice"],
       "openrouter_origins": [],
+      "auth": [{"scheme": "x-goog-api-key"}],
       "cache": [{"explicit": false, "unsupported": "ignore"}],
       "media": {
         "image": {"mime": ["image/png", "image/jpeg", "image/jpg", "image/webp", "image/heic", "image/heif", "image/gif", "image/avif", "image/bmp"], "sources": ["inline", "url", "file"]},
@@ -478,6 +482,7 @@
       "controls": ["max_output_tokens", "thinking_level", "thinking_summaries", "service_tier", "required_tool", "store", "tool_choice"],
       "standard_service_tiers": ["standard"],
       "openrouter_origins": [],
+      "auth": [{"scheme": "x-goog-api-key"}],
       "cache": [{"explicit": false, "unsupported": "ignore"}],
       "media": {
         "image": {"mime": ["image/png", "image/jpeg", "image/webp", "image/heic", "image/heif", "image/gif", "image/bmp"], "sources": ["inline", "url", "file"]},

@@ -25,6 +25,9 @@ constexpr ValuedControl valued_controls[]{
     {Control::ReasoningSummary, &FamilyPolicy::reasoning_summaries, &EffectiveChoices::reasoning_summary},
     {Control::ThinkingLevel, &FamilyPolicy::thinking_levels, &EffectiveChoices::thinking_level},
     {Control::ServiceTier, &FamilyPolicy::service_tiers, &EffectiveChoices::service_tier}};
+// The one mapping from a credential scheme to the header that carries the key.
+constexpr std::array<CredentialScheme, credential_scheme_count> scheme_table{{
+    {"bearer", "Authorization", "Bearer "}, {"x-api-key", "x-api-key", ""}, {"x-goog-api-key", "x-goog-api-key", ""}}};
 // A bundle may carry a refreshed catalogue, which load_catalogue bounds to 8 MiB.
 constexpr std::size_t bundle_catalogue_bytes = 8u * 1024u * 1024u;
 [[noreturn]] void fail(std::string_view path, std::string_view expected) {
@@ -225,6 +228,8 @@ class PolicyLoader {
  public:
   PolicyResult run(std::string_view source,std::string_view resources,CatalogueSnapshot catalogue) {
     std::uint64_t revision = 0;
+    // The members a family takes from the embedded policy, by family and member, with their canonical JSON.
+    std::vector<std::pair<std::pair<std::string, std::string>, std::string>> borrowed;
     try {
       auto p=json::parse(source,{config_defaults::codec_admission_policy_bytes,config_defaults::codec_admission_policy_depth});
       auto r=json::parse(resources,{config_defaults::codec_admission_policy_bytes,config_defaults::codec_admission_policy_depth});
@@ -246,7 +251,7 @@ class PolicyLoader {
         fail("", "configured policy depth limit");
       auto families=root.get("families"); if(!families.is_array() || families.size()!=5)fail("/families","all five typed families");
       for(auto v:families.elements()) {
-        closed(v,{"family","bindings","stop_reasons","defaults","required_output_cap","temperature_range","top_p_range","thinking_minimum","thinking_top_p_minimum","reasoning_efforts","reasoning_summaries","thinking_levels","service_tiers","header_versions","header_version","server_tools","openrouter_origins","media","openrouter_media"},"/families",{"temperature_forbidden_model_prefixes","temperature_forbidden_generations","max_completion_tokens_origins","unreplayable_parts","extensions","openrouter_plugins","openrouter_server_tools","betas","response_blocks","input_blocks","controls","standard_service_tiers","cache"});
+        closed(v,{"family","bindings","stop_reasons","defaults","required_output_cap","temperature_range","top_p_range","thinking_minimum","thinking_top_p_minimum","reasoning_efforts","reasoning_summaries","thinking_levels","service_tiers","header_versions","header_version","server_tools","openrouter_origins","media","openrouter_media"},"/families",{"temperature_forbidden_model_prefixes","temperature_forbidden_generations","max_completion_tokens_origins","unreplayable_parts","extensions","openrouter_plugins","openrouter_server_tools","betas","response_blocks","input_blocks","controls","standard_service_tiers","cache","auth"});
         FamilyPolicy f; f.family=text(v.get("family"),"/families");
         if(f.family!="openai.chat" && f.family!="anthropic.messages" && f.family!="openai.responses" && f.family!="google.generate" && f.family!="google.interactions")fail("/families","typed family");
         if(policy->family(f.family))fail("/families","unique families");
@@ -545,6 +550,15 @@ class PolicyLoader {
             f.cache.push_back(std::move(fact));
           }
         }
+        // How a chat call sends the API key. A policy written before the facts has the embedded policy's for the
+        // family, and its content digest covers them (borrowed_).
+        if (auto facts = v.get("auth"); facts.valid()) policy->auth_.emplace_back(f.family, auth_facts(facts));
+        else {
+          const auto* embedded = embedded_auth(f.family);
+          if (!embedded) fail("/auth", "credential facts for the family in the embedded policy");
+          policy->auth_.emplace_back(f.family, embedded->facts);
+          borrowed.push_back({{f.family, "auth"}, embedded->json});
+        }
         if(auto error=validate(f,choices(f.defaults),{},false))fail("/defaults",*error);
         if(f.defaults.strict_tools && f.family!="openai.responses") fail("/defaults/strict_tools","Responses strict tools only");
         policy->families_.push_back(std::move(f));
@@ -655,8 +669,7 @@ class PolicyLoader {
           }
           if (e.get("auth").valid()) {
             fact.auth = text(e.get("auth"), "/endpoints/auth");
-            if (fact.auth != "bearer" && fact.auth != "x-api-key" && fact.auth != "x-goog-api-key")
-              fail("/endpoints/auth", "bearer, x-api-key or x-goog-api-key");
+            if (!credential_scheme(fact.auth)) fail("/endpoints/auth", credential_scheme_names());
           }
           if (e.get("charge_on_accept").valid()) fact.charge_on_accept = boolean(e.get("charge_on_accept"), "/endpoints/charge_on_accept");
           if (e.get("max_response_bytes").valid()) {
@@ -706,13 +719,14 @@ class PolicyLoader {
             for (auto member : headers.members()) {
               std::string name(member.key);
               std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-              // The opening handshake of a WebSocket endpoint sets the last five itself.
-              constexpr std::string_view reserved[]{"authorization", "x-api-key", "x-goog-api-key", "proxy-authorization", "cookie", "host",
+              // A credential header carries the key, which only the call's scheme writes. The opening handshake of a
+              // WebSocket endpoint sets the last five itself.
+              constexpr std::string_view reserved[]{"proxy-authorization", "cookie", "host",
                                                     "connection", "content-type", "content-length", "accept", "transfer-encoding", "expect",
                                                     "upgrade", "sec-websocket-key", "sec-websocket-version", "sec-websocket-extensions",
                                                     "sec-websocket-protocol", "sec-websocket-accept"};
               if (name.empty() || name.size() > 64 || !std::all_of(name.begin(), name.end(), [](char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-'; }) ||
-                  std::find(std::begin(reserved), std::end(reserved), name) != std::end(reserved))
+                  credential_header_name(name) || std::find(std::begin(reserved), std::end(reserved), name) != std::end(reserved))
                 fail("/endpoints/headers", "a non-reserved ASCII header name");
               const auto value = text(member.value, "/endpoints/headers");
               if (value.empty() || value.size() > 256 || !std::all_of(value.begin(), value.end(), [](unsigned char c) { return c >= 0x20 && c < 0x7f; }))
@@ -822,6 +836,11 @@ class PolicyLoader {
           policy->billing_.push_back(std::move(billed));
         }
       }
+      // In family and member order, each text with its length, so the form does not depend on the file's order.
+      std::sort(borrowed.begin(), borrowed.end());
+      for (const auto& [where, value] : borrowed)
+        for (const std::string_view text : {std::string_view(where.first), std::string_view(where.second), std::string_view(value)})
+          policy->borrowed_ += std::to_string(text.size()) + ":" + std::string(text);
       {
         crypto::Sha256 hash;
         hash.update(pd->root().dump());
@@ -932,9 +951,59 @@ class PolicyLoader {
     hash.update("sp.descriptor-policy.content.v2\n");
     hash.update(policy.pair_digest_);
     hash.update(catalogue->digest());
+    // What the policy takes from the embedded policy, so a pin covers it too. A policy that takes nothing keeps the
+    // digest it had before.
+    if (!policy.borrowed_.empty()) {
+      hash.update("sp.descriptor-policy.borrowed.v1\n");
+      hash.update(policy.borrowed_);
+    }
     const auto digest = hash.finish();
     policy.content_digest_.assign(reinterpret_cast<const char*>(digest.data()), digest.size());
     policy.catalogue_ = std::move(catalogue);
+  }
+  // A family's `auth` facts: the scheme a chat call sends the key with at the listed origins, the first match winning,
+  // and a last fact without origins for every other origin. Origins follow the rules of the cache facts.
+  static std::vector<DescriptorPolicy::AuthFact> auth_facts(Value list) {
+    if (!list.is_array() || !list.size() || list.size() > 16) fail("/auth", "array of 1 to 16 credential facts");
+    std::vector<DescriptorPolicy::AuthFact> facts;
+    for (auto item : list.elements()) {
+      closed(item, {"scheme"}, "/auth", {"origins"});
+      if (!facts.empty() && facts.back().origins.empty()) fail("/auth", "no fact after the one for every origin");
+      DescriptorPolicy::AuthFact fact;
+      const auto scheme = item.get("scheme");
+      if (!scheme.is_string() || !credential_scheme(scheme.as_string())) fail("/auth/scheme", credential_scheme_names());
+      fact.scheme = std::string(scheme.as_string());
+      if (item.get("origins").valid()) {
+        fact.origins = strings(item.get("origins"), "/auth/origins", true);
+        for (const auto& origin : fact.origins) {
+          if (!valid_origin(origin) || origin.ends_with('/')) fail("/auth/origins", "canonical origins without path");
+          for (const auto& earlier : facts)
+            if (contains(earlier.origins, origin)) fail("/auth/origins", "each origin in one fact");
+        }
+      }
+      facts.push_back(std::move(fact));
+    }
+    if (!facts.back().origins.empty()) fail("/auth", "a last fact for every origin");
+    return facts;
+  }
+  struct EmbeddedAuth { std::vector<DescriptorPolicy::AuthFact> facts; std::string json; };
+  // The embedded policy's `auth` facts of a family, with their canonical JSON, or null when it states none. Parsed
+  // once from the embedded text; it never goes through builtin_policy(), which runs this loader.
+  static const EmbeddedAuth* embedded_auth(std::string_view family) {
+    static const auto tables = [] {
+      std::vector<std::pair<std::string, EmbeddedAuth>> parsed_tables;
+      auto parsed = json::parse(config_defaults::descriptor_policy_json,
+                                {config_defaults::codec_admission_policy_bytes, config_defaults::codec_admission_policy_depth});
+      const auto* document = std::get_if<json::Document>(&parsed);
+      if (!document) throw std::logic_error("the embedded descriptor policy is not admissible JSON");
+      for (auto entry : document->root().get("families").elements())
+        if (const auto facts = entry.get("auth"); facts.valid() && entry.get("family").is_string())
+          parsed_tables.emplace_back(std::string(entry.get("family").as_string()), EmbeddedAuth{auth_facts(facts), facts.dump()});
+      return parsed_tables;
+    }();
+    for (const auto& [name, auth] : tables)
+      if (name == family) return &auth;
+    return nullptr;
   }
   static RequestDefaults over(const RequestDefaults& base, const DefaultsOverlay& o) {
     RequestDefaults r = base;
@@ -1213,6 +1282,45 @@ std::optional<CacheCapabilities> DescriptorPolicy::cache_capabilities(std::strin
     return fact.capabilities;
   }
   return std::nullopt;
+}
+std::string_view DescriptorPolicy::auth_scheme(std::string_view family, std::string_view origin) const noexcept {
+  for (const auto& [name, facts] : auth_)
+    if (name == family)
+      for (const auto& fact : facts)
+        if (fact.origins.empty() || contains(fact.origins, origin)) return fact.scheme;
+  return {};
+}
+std::string_view auth_scheme(const ValidatedDescriptor& d) noexcept {
+  if (const auto stated = d.auth(); !stated.empty()) return stated;
+  return d.policy()->auth_scheme(d.family(), d.base_url());
+}
+const std::array<CredentialScheme, credential_scheme_count>& credential_schemes() noexcept { return scheme_table; }
+const CredentialScheme* credential_scheme(std::string_view scheme) noexcept {
+  for (const auto& known : scheme_table)
+    if (known.scheme == scheme) return &known;
+  return nullptr;
+}
+std::string credential_scheme_names() {
+  std::string names;
+  for (std::size_t i = 0; i < scheme_table.size(); ++i) {
+    if (i) names += i + 1 == scheme_table.size() ? " or " : ", ";
+    names += scheme_table[i].scheme;
+  }
+  return names;
+}
+std::optional<std::pair<std::string, std::string>> credential_header(std::string_view scheme, std::string_view key) {
+  const auto* known = credential_scheme(scheme);
+  if (!known) return std::nullopt;
+  return std::pair<std::string, std::string>{std::string(known->header), std::string(known->prefix) + std::string(key)};
+}
+bool credential_header_name(std::string_view name) noexcept {
+  const auto fold = [](unsigned char c) { return c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c; };
+  return std::any_of(scheme_table.begin(), scheme_table.end(), [&](const CredentialScheme& known) {
+    return known.header.size() == name.size() &&
+           std::equal(name.begin(), name.end(), known.header.begin(), [&](char a, char b) {
+             return fold(static_cast<unsigned char>(a)) == fold(static_cast<unsigned char>(b));
+           });
+  });
 }
 const EndpointFact* DescriptorPolicy::endpoint(std::string_view endpoint, std::string_view origin) const noexcept {
   for (const auto& fact : endpoints_)

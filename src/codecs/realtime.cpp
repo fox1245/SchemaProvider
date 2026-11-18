@@ -545,11 +545,9 @@ std::variant<Connection, Error> connect(const descriptor::ValidatedDescriptor& d
   Connection connection{origin + std::string(*path)};
   // An OpenAI transcription session names its model in the session update.
   if (fact->shape == "openai") connection.url += setup.output.empty() ? std::string("?intent=transcription") : "?model=" + setup.model;
-  if (!api_key.empty()) {
-    if (fact->auth == "x-goog-api-key") connection.headers.emplace_back("x-goog-api-key", std::string(api_key));
-    else if (fact->auth == "x-api-key") connection.headers.emplace_back("x-api-key", std::string(api_key));
-    else connection.headers.emplace_back("Authorization", "Bearer " + std::string(api_key));
-  }
+  // The endpoint fact's scheme: a descriptor's connection.auth is for its chat calls.
+  if (!api_key.empty())
+    if (auto credential = descriptor::credential_header(fact->auth, api_key)) connection.headers.push_back(std::move(*credential));
   for (const auto& header : fact->headers) connection.headers.push_back(header);
   return connection;
 }

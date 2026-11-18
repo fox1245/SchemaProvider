@@ -139,6 +139,21 @@ enum class EndpointBilling : std::uint8_t {
   // `carried_tier`.
   Carried
 };
+// How a call sends the API key, by the scheme a policy or a descriptor names: `bearer` as `Authorization: Bearer
+// <key>`, `x-api-key` and `x-goog-api-key` as a header of that name whose value is the key. Chat calls, endpoint calls
+// and realtime sessions all take their credential header from here, and there is no other scheme.
+struct CredentialScheme { std::string_view scheme, header, prefix; };
+inline constexpr std::size_t credential_scheme_count = 3;
+// The schemes, in a fixed order.
+const std::array<CredentialScheme, credential_scheme_count>& credential_schemes() noexcept;
+// The scheme of that name, or null for a name that is not one.
+const CredentialScheme* credential_scheme(std::string_view scheme) noexcept;
+// The names of the schemes as a refusal lists them: `bearer, x-api-key or x-goog-api-key`.
+std::string credential_scheme_names();
+// The header that carries `key` under `scheme`, or nullopt for a name that is not a scheme, and then none is sent.
+std::optional<std::pair<std::string, std::string>> credential_header(std::string_view scheme, std::string_view key);
+// True when `name`, in any letter case, is the header of a scheme (`authorization`, `x-api-key`, `x-goog-api-key`).
+bool credential_header_name(std::string_view name) noexcept;
 // What an origin does with a cache mark (sp::CacheControl, core/cache_control.h), as the policy states it. A mark's
 // lifetime is its TTL, or the provider's default of five minutes when it has none; core/cache_marks.h reads the
 // fact for a TTL.
@@ -279,6 +294,11 @@ class DescriptorPolicy final {
   // The catalogue tier carried requests are priced under (a batch submit's `carried_tier`), empty when the fact carries
   // none.
   std::string_view carried_tier(std::string_view endpoint, std::string_view origin) const noexcept;
+  // The credential scheme a chat call of `family` at `origin` sends the API key with: the first of the family's
+  // `auth` facts that lists `origin`, else its last fact, which is for every origin. A policy that does not state
+  // the facts for a family has the embedded policy's. Empty for a family the policy does not have. A descriptor's
+  // `connection.auth` wins over it (descriptor::auth_scheme).
+  std::string_view auth_scheme(std::string_view family, std::string_view origin) const noexcept;
  private:
   DescriptorPolicy() = default;
   // The first entry, in lookup order, whose `control_values` name `control` (ModelCatalogue::for_each_match).
@@ -305,6 +325,13 @@ class DescriptorPolicy final {
     std::string carried_tier;
   };
   std::vector<EndpointBillingFact> billing_;
+  // Members added after the ones above, so the offsets the inline accessors read stay as they were.
+  // A family's `auth` facts in order: the origins a fact applies at (none: every origin) and its scheme.
+  struct AuthFact { std::vector<std::string> origins; std::string scheme; };
+  std::vector<std::pair<std::string, std::vector<AuthFact>>> auth_;  // family, facts
+  // The values the policy takes from the embedded policy because it does not state them, in the form the content
+  // digest mixes in; empty when it takes none.
+  std::string borrowed_;
   friend class PolicyLoader;
 };
 // Without a catalogue argument, a policy uses builtin_catalogue().
@@ -346,6 +373,9 @@ std::optional<std::string> validate_choices(const ValidatedDescriptor&, std::str
 const MediaPolicy& media_policy(const ValidatedDescriptor&) noexcept;
 // What this descriptor's family does with a cache mark at its origin for `model` (DescriptorPolicy::cache_capabilities).
 std::optional<CacheCapabilities> cache_capabilities(const ValidatedDescriptor&, std::string_view model) noexcept;
+// The credential scheme this descriptor's chat calls send the API key with: its `connection.auth`, else its policy's
+// auth_scheme for its family and origin. Endpoint calls and realtime sessions use their endpoint fact's `auth`.
+std::string_view auth_scheme(const ValidatedDescriptor&) noexcept;
 // True when this descriptor targets an origin its family policy declares as a routing gateway
 // (openrouter_origins). Such a gateway may serve a different concrete model than the one requested.
 bool routed_gateway(const ValidatedDescriptor&) noexcept;

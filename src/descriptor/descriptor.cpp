@@ -29,7 +29,7 @@ std::string lower(std::string_view s) {
 }
 std::span<const std::string_view> schema_keys(std::string_view pointer) {
     static constexpr std::string_view root[]{"descriptor_version", "revision", "id", "family", "evidence", "connection", "bindings", "stop_reasons"};
-    static constexpr std::string_view connection[]{"base_url", "paths", "headers"};
+    static constexpr std::string_view connection[]{"base_url", "paths", "headers", "auth"};
     static constexpr std::string_view paths[]{"buffered", "streaming"};
     static constexpr std::string_view evidence[]{"urls", "verified_at"};
     static constexpr std::string_view bindings[]{"model", "messages", "stream", "max_output_tokens", "usage"};
@@ -325,6 +325,12 @@ private:
             if (value_.streaming_path_ != std::string(generate_root) + std::string(model) + std::string(generate_streaming))
                 fail("/connection/paths/streaming", "/v1beta/models/<model>:streamGenerateContent?alt=sse for the model of the buffered path");
         }
+        // The scheme this descriptor's chat calls send the key with, in place of its family policy's.
+        if (auto auth = item.get("auth"); auth.valid()) {
+            const auto* scheme = auth.is_string() ? credential_scheme(auth.as_string()) : nullptr;
+            if (!scheme) fail("/connection/auth", credential_scheme_names());
+            value_.auth_ = static_cast<std::uint8_t>(scheme - credential_schemes().data() + 1);
+        }
         auto headers = item.get("headers");
         if (!headers.valid()) return;
         if (!headers.is_object() || headers.size() > 32) fail("/connection/headers", "object with at most 32 literal headers");
@@ -456,6 +462,9 @@ StopKind ValidatedDescriptor::stop_kind(std::string_view raw) const {
     return StopKind::Unknown;
 }
 const FamilyPolicy& ValidatedDescriptor::family_policy() const noexcept { return *policy_->family(family_); }
+std::string_view ValidatedDescriptor::auth() const noexcept {
+    return auth_ ? credential_schemes()[auth_ - 1].scheme : std::string_view{};
+}
 LoadResult load(std::string_view source, PolicySnapshot policy) { return Loader{std::move(policy)}.run(source); }
 LoadResult load(std::string_view source) { return load(source, builtin_policy()); }
 

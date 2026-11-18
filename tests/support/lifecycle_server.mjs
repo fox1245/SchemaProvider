@@ -9,6 +9,7 @@
 //
 // Control (one JSON object per line on stdin, one reply per line on stdout):
 //   {"arm":<model>,"plan":[{"a":<action>,...},...]}   -> {"armed":true}
+//     optional "auth": the scheme the key must arrive in (bearer, x-api-key, x-goog-api-key); the family's otherwise
 //   {"info":true}                                     -> listener ports and the CA file
 //   {"model":<m>,"wait":{<counter>:<min>}}            -> blocks (<=12 s) until counters reach minima
 //   {"model":<m>,"release":true}                      -> closes every held response
@@ -166,9 +167,14 @@ function identify(req) {
   const m = /^\/v1beta\/models\/([^/:?]+):(generateContent|streamGenerateContent\?alt=sse)$/.exec(req.url);
   return m ? { family: 'gemini', model: m[1], stream: m[2] !== 'generateContent' } : undefined;
 }
-const authorized = (family, h) => family === 'messages' ? h['x-api-key'] === key
-  : family === 'gemini' || family === 'interactions' ? h['x-goog-api-key'] === key && !h.authorization
-    : h.authorization === `Bearer ${key}`;
+// The key arrives once, in the header of the scheme the case was armed with (else the family's own), and no other
+// credential header is present.
+const schemes = { bearer: ['authorization', `Bearer ${key}`], 'x-api-key': ['x-api-key', key], 'x-goog-api-key': ['x-goog-api-key', key] };
+const familySchemes = { chat: 'bearer', responses: 'bearer', messages: 'x-api-key', gemini: 'x-goog-api-key', interactions: 'x-goog-api-key' };
+const authorized = (family, h, scheme) => {
+  const [name, value] = schemes[scheme ?? familySchemes[family]];
+  return h[name] === value && Object.values(schemes).every(([other]) => other === name || h[other] === undefined);
+};
 async function readBody(req) {
   const chunks = []; let size = 0;
   for await (const chunk of req) { size += chunk.length; if (size > (1 << 20)) throw new Error('request bound'); chunks.push(chunk); }
@@ -288,7 +294,7 @@ async function handle(req, res, tls) {
     if (!ids.has(connection)) ids.set(connection, ++nextId);
     if (c.conns.has(ids.get(connection))) ++c.reused;
     c.conns.add(ids.get(connection));
-    if (req.method !== 'POST' || known.family !== c.family || !authorized(known.family, req.headers)
+    if (req.method !== 'POST' || known.family !== c.family || !authorized(known.family, req.headers, c.auth)
         || body === undefined || typeof stream !== 'boolean' || stream !== c.streaming) ++c.invalid;
     res.on('close', () => { ++c.closed; c.held.delete(res); notify(); });
     notify();
@@ -355,8 +361,8 @@ control.on('line', async line => {
     }
     if (command.arm) {
       if (cases.has(command.arm) || !Array.isArray(command.plan) || command.plan.length === 0
-          || typeof command.streaming !== 'boolean') throw new Error('bad arm');
-      cases.set(command.arm, { family: command.family, streaming: command.streaming, plan: command.plan, count: 0, times: [], held: new Map(), closed: 0,
+          || typeof command.streaming !== 'boolean' || (command.auth !== undefined && !Object.hasOwn(schemes, command.auth))) throw new Error('bad arm');
+      cases.set(command.arm, { family: command.family, streaming: command.streaming, plan: command.plan, auth: command.auth, count: 0, times: [], held: new Map(), closed: 0,
         faults: 0, invalid: 0, bytes: 0, h2: 0, tls: 0, conns: new Set(), reused: 0 });
       reply({ armed: true }); return;
     }
