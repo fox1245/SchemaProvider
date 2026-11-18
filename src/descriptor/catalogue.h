@@ -173,6 +173,9 @@ std::optional<std::uint64_t> price_per_million(std::string_view price) noexcept;
 std::string_view plain_price_unit(std::string_view name) noexcept;
 // The most digits of the input band of a price unit, `<unit>+<tokens>`.
 inline constexpr std::size_t max_band_digits = 19;
+// The units of a routing gateway's route ceiling, which a refresh writes from an endpoints listing
+// (transport/catalogue_refresh.h) and a models listing never gives.
+inline constexpr std::string_view route_ceiling_units[]{"ceiling_input", "ceiling_output", "ceiling_request"};
 // The unit a price unit names without its input band: `prompt` for `prompt+272000`; a unit without a band is itself.
 std::string_view unbanded_unit(std::string_view unit) noexcept;
 // A listed price member an entry leaves out (ListingPage::withheld): `pricing.overrides` may bill it above every price

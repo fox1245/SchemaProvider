@@ -615,9 +615,17 @@ void listed_override_bounds() {
         CHECK(read.entries[0].pricing == (Prices{{"completion", "0.000002"}}));
         CHECK(read.skipped_override_prices == 1 && (read.withheld == std::vector<WithheldUnit>{{"vendor/m", "prompt"}}));
     }
-    // A band the entry already lists, and one whose unit name is too long to hold, are not held.
-    CHECK(page(R"({"prompt":"0.000001","prompt+1000":"0.000005","completion":"0.000002","overrides":[{"min_prompt_tokens":1000,"prompt":"0.000002"}]})")
-              .entries[0].pricing == (Prices{{"completion", "0.000002"}}));
+    // A listed price key is a unit name in the provider's words: a tier or a band of the grammar, a route ceiling and a
+    // tool fee are skipped prices, in the base prices and in overrides. A listed band is skipped, and an override at
+    // that threshold gives its own band.
+    const auto listed_band = page(R"({"prompt":"10","prompt+128000":"2","overrides":[{"min_prompt_tokens":128000,"prompt":"8"}]})");
+    CHECK(listed_band.entries[0].pricing == (Prices{{"prompt", "10"}, {"prompt+128000", "8"}}) && listed_band.skipped_prices == 1);
+    const auto reserved = page(R"({"prompt":"0.000001","completion":"0.000002","prompt/flex":"0.1","ceiling_input":"0.000001",)"
+                               R"("tool:web_search":"0.01","overrides":[{"utc_start":0,"utc_end":600,"ceiling_output":"0.1","tool:x":"1",)"
+                               R"("prompt/flex":"2","prompt+1000":"3","prompt":"0.000003"}]})");
+    CHECK(reserved.entries[0].pricing == (Prices{{"completion", "0.000002"}, {"prompt", "0.000003"}}));
+    CHECK(reserved.skipped_prices == 3 + 4 && reserved.skipped_override_prices == 0 && reserved.window_prices_at_dearest == 1 && reserved.withheld.empty());
+    // A band whose unit name is too long to hold is not held.
     const std::string wide(60, 'x');
     CHECK(page(R"({")" + wide + R"(":"0.000001","completion":"0.000002","overrides":[{"min_prompt_tokens":1000,")" + wide + R"(":"0.000002"}]})")
               .entries[0].pricing == (Prices{{"completion", "0.000002"}}));
@@ -627,13 +635,24 @@ void listed_override_bounds() {
         CHECK(read.entries[0].pricing.empty() && read.skipped_override_prices == 1 && (read.withheld == std::vector<WithheldUnit>{{"vendor/m", ""}}));
     }
     // An id listed twice keeps out what an override of either listing left out: here the cache read and the prompt
-    // price its tokens would otherwise be billed at.
+    // price its tokens would otherwise be billed at. A unit only one copy prices is not claimed either.
     auto twice = parse_listing(Listing::OpenRouter, R"({"data":[{"id":"vendor/m","pricing":{"prompt":"0.000001",)"
         R"("overrides":[{"utc_start":0,"utc_end":600,"input_cache_read":"0.00001"}]}},)"
         R"({"id":"vendor/m","pricing":{"prompt":"0.000001","completion":"0.000002","input_cache_read":"0.0000001"}}]})", "https://openrouter.ai");
     const auto& merged = std::get<ListingPage>(twice);
-    CHECK(merged.entries.size() == 1 && merged.entries[0].pricing == (Prices{{"completion", "0.000002"}}));
-    CHECK((merged.withheld == std::vector<WithheldUnit>{{"vendor/m", "input_cache_read"}, {"vendor/m", "prompt"}}));
+    CHECK(merged.entries.size() == 1 && merged.entries[0].pricing.empty());
+    CHECK((merged.withheld == std::vector<WithheldUnit>{{"vendor/m", "completion"}, {"vendor/m", "input_cache_read"}, {"vendor/m", "prompt"}}));
+    // Two copies of an id that price a unit with the same bands keep the dearer price of each; a unit whose bands differ
+    // between the copies, or that one copy leaves out, is not claimed (with the units its tokens would be billed at).
+    auto copies = parse_listing(Listing::OpenRouter, R"({"data":[)"
+        R"({"id":"vendor/m","pricing":{"prompt":"0.000002","completion":"0.000004","input_cache_read":"0.0000002","image":"0.01",)"
+        R"("overrides":[{"min_prompt_tokens":1000,"prompt":"0.000003"}]}},)"
+        R"({"id":"vendor/m","pricing":{"prompt":"0.000001","completion":"0.000005","input_cache_read":"0.0000002",)"
+        R"("overrides":[{"min_prompt_tokens":1000,"prompt":"0.000004"},{"min_prompt_tokens":2000,"completion":"0.000006"}]}}]})", "https://openrouter.ai");
+    const auto& dearer = std::get<ListingPage>(copies);
+    CHECK(dearer.entries.size() == 1 &&
+          dearer.entries[0].pricing == (Prices{{"input_cache_read", "0.0000002"}, {"prompt", "0.000002"}, {"prompt+1000", "0.000004"}}));
+    CHECK((dearer.withheld == std::vector<WithheldUnit>{{"vendor/m", "completion"}, {"vendor/m", "image"}}));
     // The generated entries load as a catalogue.
     CHECK(std::holds_alternative<CatalogueSnapshot>(make_catalogue(widest.entries)));
 }

@@ -204,7 +204,7 @@ std::string endpoints_url(std::string base, std::string_view id) {
 }
 
 enum Side : std::size_t { Input, Output, Request };
-constexpr std::string_view ceiling_units[]{"ceiling_input", "ceiling_output", "ceiling_request"};
+constexpr const auto& ceiling_units = descriptor::route_ceiling_units;
 bool ceiling_unit(std::string_view unit) noexcept {
   return std::find(std::begin(ceiling_units), std::end(ceiling_units), unit) != std::end(ceiling_units);
 }
@@ -412,9 +412,12 @@ void read_ceilings(Transport& transport, const RefreshRequest& request, const Pl
     for (std::size_t i = 0; i < std::size(price_members); ++i) {
       const auto& member = price_members[i];
       if (member.side == Request) continue;
-      if (std::find(left_out.begin(), left_out.end(), member.name) != left_out.end()) read.unusable.emplace(member.side, i, Unusable::ListedLeftOut);
+      // A unit counts under either of its names (descriptor::plain_price_unit).
+      const auto plain = descriptor::plain_price_unit(member.name);
+      if (std::any_of(left_out.begin(), left_out.end(), [&](std::string_view unit) { return descriptor::plain_price_unit(unit) == plain; }))
+        read.unusable.emplace(member.side, i, Unusable::ListedLeftOut);
       for (const auto& [unit, text] : entry.pricing) {
-        if (descriptor::unbanded_unit(unit) != member.name) continue;
+        if (descriptor::plain_price_unit(descriptor::unbanded_unit(unit)) != plain) continue;
         const auto rate = pricing::per_million(text);
         if (!rate) {
           read.unusable.emplace(member.side, i, text.starts_with('-') ? Unusable::ListedVariable : Unusable::ListedTooLarge);

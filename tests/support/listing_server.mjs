@@ -60,10 +60,11 @@ const server = http.createServer((req, res) => {
   if (listingExtras(scenario, path, h, res)) return;
   if (scenario === 'broken') return send(res, 500, { error: { message: 'synthetic outage' } });
   if (scenario === 'notjson') return send(res, 200, 'not a listing');
-  if (scenario.startsWith('openrouter') || scenario === 'overrides' || scenario in windowHours) {
+  if (scenario.startsWith('openrouter') || scenario === 'overrides' || scenario === 'overrides-keys' || scenario in windowHours) {
     if (path !== '/api/v1/models' || url.searchParams.get('output_modalities') !== 'all') return send(res, 404, {});
     if (h.authorization && h.authorization !== 'Bearer openrouter-test-key') return send(res, 401, {});
     if (scenario === 'overrides') return send(res, 200, overridesListing);
+    if (scenario === 'overrides-keys') return send(res, 200, oddKeysListing);
     if (scenario in windowHours) return send(res, 200, windowHours[scenario]);
     return send(res, 200, openrouter(scenario === 'openrouter-v2' ? 2 : 1, scenario !== 'openrouter-bare'));
   }
@@ -306,6 +307,14 @@ const overridesListing = { data: [
   priced('vendor/too-many-bands', basePrices({ overrides: bands(63) })),
   priced('vendor/too-many', basePrices({ overrides: bands(70) })),
   priced('vendor/null-overrides', basePrices({ overrides: null })),
+] };
+// Scenario `overrides-keys`: price keys that are not unit names a listing gives, among them a URL with a credential,
+// and a listed band beside an override at the same threshold.
+const secretKey = 'https://example.test/user:secret-token';
+const oddKeysListing = { data: [
+  priced('vendor/odd-keys', basePrices({ [secretKey]: '0.1', 'tool:web_search': '0.01', ceiling_input: '0.000001', 'prompt/flex': '0.1',
+    'prompt+128000': '0.000002', overrides: [{ utc_start: 0, [secretKey]: '0.2', 'pass@secret-token.example.test': '0.3', prompt: '0.000003' }] })),
+  priced('vendor/listed-band', { prompt: '10', completion: '10', 'prompt+128000': '2', overrides: [band(128000, { prompt: '8' })] }),
 ] };
 // Scenarios `windows-a` and `windows-b`: models whose two time windows cover the day, listed at an hour of each window.
 // The listing's top-level prices are those of the window current when it is fetched (window A's prompt written with a
