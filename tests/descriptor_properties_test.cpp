@@ -4,6 +4,7 @@
 #include "json/json.h"
 #include "sp/config_defaults.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -132,10 +133,10 @@ void accepted_configuration_is_typed() {
     CHECK(value.stop_kind("stop") == StopKind::EndTurn);
     CHECK(value.stop_kind("undocumented") == StopKind::Unknown);
     CHECK(value.evidence().verified_at == "2024-02-29");
-    auto overrides = load(descriptor(R"(,"stop_reasons":{"refusal":"Unknown","pause":"PauseTurn","context":"ContextLimit","sequence":"StopSequence","bad-call":"MalformedCall","declined":"Refusal"})"));
+    auto overrides = load(descriptor(R"(,"stop_reasons":{"withheld":"Unknown","pause":"PauseTurn","context":"ContextLimit","sequence":"StopSequence","bad-call":"MalformedCall","declined":"Refusal"})"));
     CHECK(std::holds_alternative<ValidatedDescriptor>(overrides));
     if (auto* configured = std::get_if<ValidatedDescriptor>(&overrides)) {
-        CHECK(configured->stop_kind("refusal") == StopKind::Unknown);
+        CHECK(configured->stop_kind("withheld") == StopKind::Unknown);
         CHECK(configured->stop_kind("pause") == StopKind::PauseTurn);
         CHECK(configured->stop_kind("context") == StopKind::ContextLimit);
         CHECK(configured->stop_kind("sequence") == StopKind::StopSequence);
@@ -635,6 +636,94 @@ void replay_identity_covers_wire_facts_only() {
         if (policy) CHECK(policy->identity() != builtin->identity());
     }
 }
+// A family's stop table may grow, but a raw value keeps the kind the embedded policy gives it. A custom policy may add
+// rows and may not give an embedded row another kind; a descriptor may add rows and may not give a row of its policy,
+// or of the embedded policy, another kind. A value only a failure carries is refused in both, in every family.
+void stop_tables_grow_but_never_change() {
+    using namespace sp::descriptor;
+    using sp::json::quote;
+    const auto builtin = builtin_policy();
+    auto parsed = sp::json::parse(sp::config_defaults::descriptor_policy_json);
+    const auto root = std::get<sp::json::Document>(parsed).root();
+    // A kind other than `name`, which a table may not give the same raw value.
+    const auto other = [](std::string_view name) { return std::string(name == "EndTurn" ? "MaxTokens" : "EndTurn"); };
+    const auto policy_error = [](const std::string& text) {
+        auto loaded = load_policy(text, sp::config_defaults::codec_defaults_json);
+        const auto* error = std::get_if<ConfigError>(&loaded);
+        return error ? error->pointer : std::string("loaded");
+    };
+    // A descriptor of `family` whose `stop_reasons` is `table`.
+    const auto source = [](const std::string& family, std::string_view table) {
+        const bool generate = family == "google.generate";
+        return "{\"descriptor_version\":1,\"revision\":7,\"id\":\"stop-table\",\"family\":" + quote(family) +
+               ",\"connection\":{\"base_url\":\"https://api.example.test\",\"paths\":{\"buffered\":" +
+               quote(generate ? "/v1beta/models/stop-table:generateContent" : "/v1/stop-table") + ",\"streaming\":" +
+               quote(generate ? "/v1beta/models/stop-table:streamGenerateContent?alt=sse" : "/v1/stop-table") +
+               "}},\"stop_reasons\":" + std::string(table) + "}";
+    };
+    std::size_t families = 0;
+    for (auto entry : root.get("families").elements()) {
+        const std::string family(entry.get("family").as_string());
+        const auto stops = entry.get("stop_reasons");
+        const auto* listed = builtin->family(family);
+        CHECK(listed && stops.size() > 0 && listed->stops.size() == stops.size());
+        if (!listed) continue;
+        ++families;
+        // Added values decode as declared and follow the policy's rows, which keep their order.
+        auto added = load(source(family, R"({"vendor_new_stop":"MaxTokens","vendor_other_stop":"Unknown"})"));
+        CHECK(std::holds_alternative<ValidatedDescriptor>(added));
+        if (const auto* value = std::get_if<ValidatedDescriptor>(&added)) {
+            CHECK(value->stop_kind("vendor_new_stop") == StopKind::MaxTokens && value->stop_kind("vendor_other_stop") == StopKind::Unknown);
+            CHECK(value->stop_mappings().size() == listed->stops.size() + 2);
+            CHECK(std::equal(listed->stops.begin(), listed->stops.end(), value->stop_mappings().begin()));
+        }
+        for (auto row : stops.members()) {
+            const std::string raw(row.key), name(row.value.as_string());
+            // Restating a row changes nothing.
+            auto restated = load(source(family, "{" + quote(raw) + ":" + quote(name) + "}"));
+            CHECK(std::holds_alternative<ValidatedDescriptor>(restated));
+            if (const auto* value = std::get_if<ValidatedDescriptor>(&restated)) CHECK(value->stop_mappings() == listed->stops);
+            // Any other kind is a change, Unknown included.
+            rejected(source(family, "{" + quote(raw) + ":" + quote(other(name)) + "}"), "/stop_reasons");
+            rejected(source(family, "{" + quote(raw) + ":\"Unknown\"}"), "/stop_reasons");
+            CHECK(policy_error(with_family_member(family, "stop_reasons", with_member(stops, raw, quote(other(name))))) == "/stop_reasons");
+        }
+        for (const std::string raw : {"error", "failed", "cancelled", "incomplete"}) {
+            rejected(source(family, "{" + quote(raw) + ":\"Unknown\"}"), "/stop_reasons");
+            CHECK(policy_error(with_family_member(family, "stop_reasons", with_member(stops, raw, "\"Unknown\""))) == "/stop_reasons");
+        }
+        // A policy may add a row. Stop facts are wire facts, so the replay identity moves.
+        auto grown = load_policy(with_family_member(family, "stop_reasons", with_member(stops, "vendor_new_stop", "\"MaxTokens\"")),
+                                 sp::config_defaults::codec_defaults_json);
+        CHECK(std::holds_alternative<PolicySnapshot>(grown));
+        if (const auto* policy = std::get_if<PolicySnapshot>(&grown)) {
+            CHECK((*policy)->identity() != builtin->identity());
+            CHECK((*policy)->family(family) && (*policy)->family(family)->stops.size() == listed->stops.size() + 1);
+        }
+    }
+    CHECK(families == 5);
+    // A policy that leaves a row out decodes that value as Unknown. A descriptor under it may state the value again,
+    // but only with the kind the embedded policy gives it.
+    std::string without_length = "{";
+    for (auto entry : root.get("families").elements()) {
+        if (entry.get("family").as_string() != "openai.chat") continue;
+        for (auto row : entry.get("stop_reasons").members()) {
+            if (row.key == "length") continue;
+            if (without_length.size() > 1) without_length += ',';
+            without_length += quote(row.key) + ':' + row.value.dump();
+        }
+    }
+    auto dropped = load_policy(with_family_member("openai.chat", "stop_reasons", without_length + '}'), sp::config_defaults::codec_defaults_json);
+    CHECK(std::holds_alternative<PolicySnapshot>(dropped));
+    if (const auto* policy = std::get_if<PolicySnapshot>(&dropped)) {
+        auto plain = load(source("openai.chat", "{}"), *policy);
+        CHECK(std::holds_alternative<ValidatedDescriptor>(plain) && std::get<ValidatedDescriptor>(plain).stop_kind("length") == StopKind::Unknown);
+        auto restored = load(source("openai.chat", R"({"length":"MaxTokens"})"), *policy);
+        CHECK(std::holds_alternative<ValidatedDescriptor>(restored) && std::get<ValidatedDescriptor>(restored).stop_kind("length") == StopKind::MaxTokens);
+        auto remapped = load(source("openai.chat", R"({"length":"EndTurn"})"), *policy);
+        CHECK(std::holds_alternative<ConfigError>(remapped) && std::get<ConfigError>(remapped).pointer == "/stop_reasons");
+    }
+}
 void policy_bundle_and_identity_pinning() {
     using namespace sp::descriptor;
     const auto def = builtin_policy();
@@ -715,6 +804,7 @@ int main() {
     preset_builders_and_validation();
     policy_bundle_and_identity_pinning();
     replay_identity_covers_wire_facts_only();
+    stop_tables_grow_but_never_change();
     if (failures) std::fprintf(stderr, "%d descriptor/JSON checks failed\n", failures);
     else std::puts("descriptor/JSON properties passed");
     return failures ? 1 : 0;

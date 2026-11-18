@@ -1,5 +1,6 @@
 #include "codecs/responses.h"
 #include "codecs/responses_request.h"
+#include "core/enum_names.h"
 #include "core/native.h"
 #include "descriptor/descriptor.h"
 #include "json/json.h"
@@ -531,6 +532,44 @@ void incomplete_and_server_items() {
   const auto& parts = completed(opaque).messages[0].parts; CHECK(std::holds_alternative<Opaque>(parts[0]));
   CHECK(json::equal(std::get<Opaque>(parts[0]).wire_metadata->root(), parse(server).root()));
   for (const auto& p : parts) CHECK(!std::holds_alternative<ToolCall>(p));
+}
+// The reason of an incomplete response is read from the stop table. A reason the table does not list is delivered with
+// an Unknown stop, the reason as its raw value and the details kept. An incomplete response never takes a kind that
+// would seal it (a row giving the reason EndTurn), so it gains no native seal and a continuation that replays it is
+// refused.
+void incomplete_reasons_from_the_table() {
+  const auto answers = [](std::string_view status, std::string_view detail) {
+    auto frames = text_frames();
+    frames.back() = terminal("[" + message + "]", status, usage, detail);
+    return std::vector<Outcome>{buffered(body("[" + message + "]", status, usage, detail)), stream(frames)};
+  };
+  const auto continued = [](const Message& answer) {
+    auto r = request(); r.messages.push_back(answer); r.messages.push_back(Message{"", Role::User, {Text{"Go on"}}});
+    return responses::encode(desc(), r, false);
+  };
+  // The same answer completed is sealed and continues.
+  for (const auto& outcome : answers("completed", "null")) {
+    const auto& c = completed(outcome);
+    CHECK(c.stop.kind == StopKind::EndTurn && c.stop.raw == "completed" && c.messages[0].native && c.messages[0].native->complete());
+    CHECK(std::holds_alternative<responses::EncodedRequest>(continued(c.messages[0])));
+  }
+  CHECK(!desc().stop_mappings().empty());
+  for (const auto& [raw, kind] : desc().stop_mappings()) {
+    const bool seals = kind == descriptor::StopKind::EndTurn || kind == descriptor::StopKind::ToolUse || kind == descriptor::StopKind::Refusal;
+    for (const auto& outcome : answers("incomplete", "{\"reason\":" + json::quote(raw) + "}")) {
+      const auto& c = completed(outcome);
+      CHECK(to_string(c.stop.kind) == (seals ? std::string_view("Unknown") : descriptor::to_string(kind)) && c.stop.raw == raw);
+    }
+  }
+  for (const std::string reason : {"future_incomplete_reason", "completed"})
+    for (const auto& outcome : answers("incomplete", "{\"reason\":" + json::quote(reason) + ",\"note\":\"kept\"}")) {
+      const auto& c = completed(outcome);
+      CHECK(c.stop.kind == StopKind::Unknown && c.stop.raw == reason && text(c.messages) == "hello");
+      CHECK(c.stop.details && c.stop.details->root().get("note").as_string() == "kept");
+      CHECK(!c.messages[0].native || !c.messages[0].native->complete());
+      const auto refused = continued(c.messages[0]);
+      CHECK(std::holds_alternative<Error>(refused) && std::get<Error>(refused).kind == ErrorKind::ReplayIneligible);
+    }
 }
 void unknown_hosted_item_ownership() {
   const std::string hosted = R"({"id":"hosted_1","type":"future_hosted_call","status":"completed","call_id":"provider_call","name":"lookup","arguments":{"x":2},"result":{"text":"provider result"}})";
@@ -1244,7 +1283,7 @@ void long_streams_are_one_part_per_content_part() {
   }
 }
 int main() {
-  try { empty_text_delta_is_withheld(); long_streams_are_one_part_per_content_part(); failure_reasons(); provider_money_and_snapshot_aliases(); named_error_precedence(); named_error_raw_capacity(); completed_reasoning_ciphertext_authority(); reviewed_wire_boundaries(); typed_encode(); controls_and_cursor_boundaries(); openrouter_max_price(); strict_tool_schemas(); previous_response_ownership(); grouped_native_and_owned_outcomes(); normal_close_required(); cancellation_observation_boundary(); reasoning_stream_snapshots(); tools_interleaving_and_ownership(); incomplete_and_server_items(); unknown_hosted_item_ownership(); unknown_wire_observation_boundary(); usage_boundaries(); uncached_input_rule(); corruption_and_bounds();
+  try { empty_text_delta_is_withheld(); long_streams_are_one_part_per_content_part(); failure_reasons(); provider_money_and_snapshot_aliases(); named_error_precedence(); named_error_raw_capacity(); completed_reasoning_ciphertext_authority(); reviewed_wire_boundaries(); typed_encode(); controls_and_cursor_boundaries(); openrouter_max_price(); strict_tool_schemas(); previous_response_ownership(); grouped_native_and_owned_outcomes(); normal_close_required(); cancellation_observation_boundary(); reasoning_stream_snapshots(); tools_interleaving_and_ownership(); incomplete_and_server_items(); incomplete_reasons_from_the_table(); unknown_hosted_item_ownership(); unknown_wire_observation_boundary(); usage_boundaries(); uncached_input_rule(); corruption_and_bounds();
     named_includes(); hosted_tool_options(); openrouter_server_tools_and_images(); service_item_progress_events(); computer_calls_and_mcp_approvals(); plugins_and_citations();
     std::cout << "Responses semantic contracts passed\n"; return 0;
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }

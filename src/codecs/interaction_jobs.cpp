@@ -37,8 +37,11 @@ Outcome interaction_state(const descriptor::ValidatedDescriptor& descriptor, con
   const auto& completion = std::get<Completion>(outcome);
   if (auto handle = from_interaction(descriptor, completion)) state.handle = std::move(*handle);
   state.raw_status = completion.stop.raw;
+  // An Unknown stop other than a cancellation carries a status the SDK does not know: the job did not reach a state
+  // it can name.
   state.status = completion.stop.kind == StopKind::Pending ? (completion.stop.raw == "queued" ? Status::Pending : Status::Running)
-               : completion.stop.raw == "cancelled" ? Status::Cancelled : Status::Completed;
+               : completion.stop.raw == "cancelled" ? Status::Cancelled
+               : completion.stop.kind == StopKind::Unknown ? Status::Unknown : Status::Completed;
   state.usage = completion.usage;
   state.model = completion.model;
   state.attempt = completion.attempt;

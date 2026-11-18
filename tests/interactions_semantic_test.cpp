@@ -5,6 +5,7 @@
 #include "json/json.h"
 #include "sp/config_defaults.h"
 #include "support/vision_fixture.h"
+#include <algorithm>
 #include <iostream>
 #include <map>
 #include <stdexcept>
@@ -543,11 +544,35 @@ void failure_reasons() {
   auto unnamed = frames();
   unnamed[0] = frame("interaction.created", R"(,"interaction":{"id":"i1","status":"in_progress","model":""})");
   check(stream(unnamed), ErrorKind::ProtocolCorrupt, "invalid interaction model", "interactions.model.invalid");
-  check(buffered(resource("[" + output + "]", secret)), ErrorKind::Unsupported, "unsupported terminal interaction status", "interactions.terminal.status_unsupported");
+  check(stream({created(), start(0, output), stop(0), end("[" + output + "]", "in_progress")}), ErrorKind::Unsupported,
+        "unsupported terminal interaction status", "interactions.terminal.status_unsupported");
   auto truncated = frames(); truncated.resize(4);
   check(stream(truncated), ErrorKind::Truncated, "interaction lacks terminal resource", "interactions.terminal.missing");
   const auto cut = stream(truncated, {false, ErrorKind::Transport});
   CHECK(failure(cut, ErrorKind::Transport).error.reason.empty());
+}
+// A status the codec does not know is delivered. A terminal resource that carries one completes with an Unknown stop
+// whose raw value is the status, and gains no native seal. A streamed status update that carries one changes nothing
+// and stays in the raw events.
+void unknown_statuses_are_kept() {
+  const auto sealed = buffered(resource("[" + thought + "," + output + "]"));
+  CHECK(complete(sealed).stop.kind == StopKind::EndTurn && complete(sealed).messages.at(0).native && complete(sealed).messages[0].native->complete());
+  const std::string status = "paused_for_review";
+  const auto kept = buffered(resource("[" + thought + "," + output + "]", status));
+  const auto streamed = stream({created(), start(0, output), stop(0), end("[" + output + "]", status)});
+  for (const auto* outcome : {&kept, &streamed}) {
+    const auto& c = complete(*outcome);
+    CHECK(c.stop.kind == StopKind::Unknown && c.stop.raw == status && c.joined_text() == "answer");
+    CHECK(!c.messages.at(0).native || !c.messages[0].native->complete());
+  }
+  auto updated = frames();
+  updated.insert(updated.begin() + 1, frame("interaction.status_update", R"(,"interaction_id":"i1","status":"paused_for_review")"));
+  const auto finished = stream(updated);
+  const auto& c = complete(finished);
+  CHECK(c.stop.kind == StopKind::EndTurn && c.stop.raw == "completed" && c.joined_text() == "answer");
+  CHECK(std::any_of(c.raw_events.begin(), c.raw_events.end(), [](const RawWire& event) {
+    return event.type == "interaction.status_update" && event.payload->root().get("status").as_string() == "paused_for_review";
+  }));
 }
 // A step's text, its thought summary and its audio are one part each however many deltas make them, as in the buffered reply.
 void long_streams_are_one_part_per_step() {
@@ -575,7 +600,7 @@ void long_streams_are_one_part_per_step() {
   CHECK(json::equal(complete(live).messages[0].wire_output->root(), complete(whole).messages[0].wire_output->root()));
 }
 int main() {
-  try { served_model_is_recorded(); long_streams_are_one_part_per_step(); service_tool_steps(); service_request_controls(); background_and_lifecycle(); failure_reasons(); creation_without_status_transcription(); raw_observation_ownership(); named_error_raw_ownership(); stateless_missing_resource_id(); missing_terminal_usage(); exact_steps_and_replay(); input_boundaries(); thinking_level_xhigh(); lifecycle_and_errors(); unknown_usage_and_signature(); modality_keyed_usage(); uncached_input_and_unmapped_counters();
+  try { served_model_is_recorded(); long_streams_are_one_part_per_step(); service_tool_steps(); service_request_controls(); background_and_lifecycle(); failure_reasons(); unknown_statuses_are_kept(); creation_without_status_transcription(); raw_observation_ownership(); named_error_raw_ownership(); stateless_missing_resource_id(); missing_terminal_usage(); exact_steps_and_replay(); input_boundaries(); thinking_level_xhigh(); lifecycle_and_errors(); unknown_usage_and_signature(); modality_keyed_usage(); uncached_input_and_unmapped_counters();
     std::cout << "Interactions semantic contracts passed\n"; return 0;
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

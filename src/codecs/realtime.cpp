@@ -469,7 +469,9 @@ class OpenAICodec final : public FormatCodec {
       if (const auto usage = response.get("usage"); usage.is_object()) turn_.usage(openai_usage(usage));
       if (status == "cancelled") events.push_back(TurnAborted{});
       if (status == "failed") events.push_back(ProviderError{reject(ErrorKind::RemoteFailure, "the provider reported an error in the session")});
-      const auto kind = status == "cancelled" ? StopKind::Unknown : status == "incomplete" ? StopKind::MaxTokens : StopKind::EndTurn;
+      // A realtime response has no stop table: its lifecycle statuses are mapped here. Any other status, a failure or
+      // one the codec does not know, is Unknown with the status as its raw value, never EndTurn.
+      const auto kind = status == "completed" ? StopKind::EndTurn : status == "incomplete" ? StopKind::MaxTokens : StopKind::Unknown;
       if (turn_.active() || status == "completed") {
         auto turn = turn_.commit(text_of(response.get("id")), StopReason{kind, status == "cancelled" ? "interrupted" : status}, limits_);
         if (auto* error = std::get_if<Error>(&turn)) return *error;
