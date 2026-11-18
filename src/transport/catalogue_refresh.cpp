@@ -216,8 +216,10 @@ bool ceiling_unit(std::string_view unit) noexcept {
 // required. An endpoint that leaves out an optional token price is read as billing those tokens at its prompt or
 // completion price, as pricing::estimate does for an entry without them, and an override that leaves one out keeps
 // the base price. `request` is the exception: nothing says what a fee left out costs, so a fee that some endpoints
-// list and others leave out is missing where the others have it. The prices per image, per output image and per web
-// search are per item, which no usage counter counts, so no ceiling covers them.
+// list, in their base pricing or in an override, and others leave out is missing where the others have it. The
+// prices per image, per output image and per web search are per item, which no usage counter counts, so no ceiling
+// covers them. The prices the models listing gives for the model on a side count too, so a ceiling is never below a
+// price the same refresh lists.
 struct PriceMember {
   std::string_view name;
   Side side;
@@ -229,11 +231,13 @@ constexpr PriceMember price_members[]{
     {"image_token", Input, false},     {"completion", Output, true},          {"internal_reasoning", Output, false},
     {"audio_output", Output, false},   {"image_token", Output, false},        {"request", Request, false}};
 
-// Why a price cannot bound a ceiling.
-enum class Unusable : std::uint8_t { Missing, Variable, NotDecimal, TooLarge };
+// Why a price cannot bound a ceiling: one of an endpoint, or one the models listing gives.
+enum class Unusable : std::uint8_t { Missing, Variable, NotDecimal, TooLarge, ListedVariable, ListedTooLarge };
 constexpr std::string_view unusable_reasons[]{"price missing at an endpoint", "variable price at an endpoint",
                                               "price at an endpoint is not decimal text",
-                                              "price at an endpoint is too large for the catalogue"};
+                                              "price at an endpoint is too large for the catalogue",
+                                              "variable price in the listing",
+                                              "price in the listing is too large for the catalogue"};
 bool present(json::Value value) { return value.valid() && !value.is_null(); }
 // An endpoint's price, read as a listed price is: text an entry can hold (descriptor::valid_price_text), not
 // negative, and exact in nano-USD per million units (pricing::per_million).
@@ -251,8 +255,8 @@ struct EndpointsRead {
   std::array<std::optional<std::uint64_t>, 3> dearest;
   // The prices that cannot bound their unit: (side, index in price_members, why), in that order.
   std::set<std::tuple<Side, std::size_t, Unusable>> unusable;
-  // An endpoint's discount is not a number from 0 to 1. The listing multiplies each price by (1 - discount), so
-  // only such a discount keeps the listed prices an upper bound.
+  // A discount of an endpoint or of one of its overrides is not a number from 0 to 1. The listing multiplies each
+  // price by (1 - discount), so only such a discount keeps the listed prices an upper bound.
   bool discount = false;
 };
 EndpointsRead read_endpoints(std::string_view body, std::string_view id) {
@@ -294,16 +298,28 @@ EndpointsRead read_endpoints(std::string_view body, std::string_view id) {
       if (!dearest || std::get<std::uint64_t>(rate) > *dearest) dearest = std::get<std::uint64_t>(rate);
     }
   };
+  const auto discounted = [&](json::Value prices) {
+    const auto discount = prices.get("discount");
+    if (present(discount) && !(discount.is_number() && discount.as_double() >= 0 && discount.as_double() <= 1)) out.discount = true;
+  };
+  const auto lists_fee = [](json::Value prices) {
+    return std::any_of(std::begin(price_members), std::end(price_members),
+                       [&](const PriceMember& member) { return member.side == Request && present(prices.get(member.name)); });
+  };
+  // The endpoints that list a request fee, in their base pricing or in any of their overrides.
   std::size_t with_fee = 0;
   for (const auto endpoint : endpoints.elements()) {
     const auto prices = endpoint.get("pricing");
-    const auto discount = prices.get("discount");
-    if (present(discount) && !(discount.is_number() && discount.as_double() >= 0 && discount.as_double() <= 1)) out.discount = true;
+    discounted(prices);
     read(prices, true);
+    bool fee = lists_fee(prices);
     if (const auto overrides = prices.get("overrides"); present(overrides))
-      for (const auto entry : overrides.elements()) read(entry, false);
-    for (const auto& member : price_members)
-      if (member.side == Request && present(prices.get(member.name))) ++with_fee;
+      for (const auto entry : overrides.elements()) {
+        discounted(entry);
+        read(entry, false);
+        fee = fee || lists_fee(entry);
+      }
+    if (fee) ++with_fee;
   }
   if (with_fee != 0 && with_fee != endpoints.size())
     for (std::size_t i = 0; i < std::size(price_members); ++i)
@@ -375,10 +391,25 @@ void read_ceilings(Transport& transport, const RefreshRequest& request, const Pl
     }
     if (page.status != 200) { keep_previous("endpoints answered HTTP " + std::to_string(page.status)); continue; }
     if (page.too_large) { gap({}, {}, "endpoints listing exceeds 32 MiB"); continue; }
-    const auto read = read_endpoints(page.body, id);
+    auto read = read_endpoints(page.body, id);
     if (read.shape == EndpointsRead::Shape::NotListing) { gap({}, {}, "not an endpoints listing"); continue; }
     if (read.shape == EndpointsRead::Shape::OtherModel) { gap({}, {}, "endpoints listing names another model"); continue; }
     if (read.shape == EndpointsRead::Shape::Empty) { gap({}, {}, "no endpoints"); continue; }
+    // The prices the models listing gives for the model bound each token side from below, as the endpoints do.
+    for (std::size_t i = 0; i < std::size(price_members); ++i) {
+      const auto& member = price_members[i];
+      if (member.side == Request) continue;
+      for (const auto& [unit, text] : entry.pricing) {
+        if (unit != member.name) continue;
+        const auto rate = pricing::per_million(text);
+        if (!rate) {
+          read.unusable.emplace(member.side, i, text.starts_with('-') ? Unusable::ListedVariable : Unusable::ListedTooLarge);
+          continue;
+        }
+        auto& dearest = read.dearest[member.side];
+        if (!dearest || *rate > *dearest) dearest = rate;
+      }
+    }
     const auto gaps_before = report.ceiling_gaps.size();
     bool unusable[3] = {false, false, false};
     for (const auto& [side, member, why] : read.unusable) {

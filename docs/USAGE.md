@@ -254,15 +254,18 @@ Route ceilings are read only for the models a host names. An OpenRouter source's
   - `ceiling_output`: `completion`, `internal_reasoning`, `audio_output` and `image_token` (the listing does not say which side an image token bills, so it counts on both);
   - `ceiling_request`: the dearest `request` fee, written when an endpoint charges one.
 
-  Prices are read exactly, as listed prices are, and written as the shortest decimal text that reads back as the same amount. Prices per image, per output image and per web search are per item and not covered, as for listed prices. An endpoint that leaves out an optional token price is read as billing those tokens at its prompt or completion price, as `estimate` does for an entry without them, and those prices are in the ceiling. A request fee is the exception: nothing says what a fee left out costs.
-- **Never below an endpoint.** A unit gets no ceiling when one of its prices at any endpoint is missing (`prompt` or `completion`, which every endpoint must list), negative (a variable price), not decimal text, or too large for the catalogue; the other units are still written. The whole ceiling is left out when:
-  - a `request` fee cannot be read, or some endpoints list one and others do not, because a bound without `ceiling_request` charges the listed fee;
-  - a `discount` is not a number from 0 to 1, because only such a discount keeps the listed prices an upper bound;
+  Prices are read exactly, as listed prices are, and written as the shortest decimal text that reads back as the same amount. The prices the models listing gives for the model on a side count too, so a ceiling is never below a price the same refresh lists; they never stand in for endpoints that could not be read. An endpoint that leaves out an optional token price is read as billing those tokens at its prompt or completion price, as `estimate` does for an entry without them, and those prices are in the ceiling. A request fee is the exception: nothing says what a fee left out costs.
+- **What a ceiling covers.**
+  - A ceiling bounds the token prices the endpoints listing showed at that refresh. A kept ceiling (after a failed endpoints request) is as old as the refresh that wrote it.
+  - Prices per item (per image, per output image, per web search) are not covered by a ceiling.
+  - An override that leaves a price key out inherits the base price, as the provider's reference states, and the ceiling reads it so.
+  - The listing gives no count of a model's endpoints, so a shortened list cannot be detected.
+- **Never below an endpoint.** A unit gets no ceiling when one of its prices at any endpoint is missing (`prompt` or `completion`, which every endpoint must list), negative (a variable price), not decimal text, or too large for the catalogue, and when the models listing gives a variable price on its side; the other units are still written. The whole ceiling is left out when:
+  - a `request` fee cannot be read, or some endpoints list one, in their base pricing or in an override, and others do not, because a bound without `ceiling_request` charges the listed fee;
+  - a `discount` of an endpoint or of one of its overrides is not a number from 0 to 1, because only such a discount keeps the listed prices an upper bound;
   - the body is not an endpoints listing: not JSON, a `data.id` of another model, an `endpoints` that is not an array, an endpoint without a `pricing` object, or `overrides` that are not an array of objects;
   - the endpoint list is empty (an alias);
   - the entry cannot hold more prices.
-
-  The endpoints listing has no count, so a list cut short cannot be told from a short one.
 - **Failures.** Some endpoints requests fail: they do not complete in `page_timeout`, answer another status than 200, or are not sent before `total_timeout` passes. Such a request does not fail the source, and the model keeps the ceiling `previous` had for it. A model the listing does not name gets no entry and costs no request. A source whose listing fails sends no endpoints request and keeps its previous entries, ceilings included. A model whose ceiling is not asked for again gets none, as the listing alone gives none; a missing ceiling makes a bound at the gateway refuse rather than guess.
 - **Report.** `SourceReport::ceiling_requests` counts the endpoints requests. `ceilings` counts the models written whole. `ceiling_gaps` holds a `CeilingGap` for every model or unit asked for and not written: the model, the unit (empty for the whole model), the endpoint price that left it out, a fixed reason, and whether the previous ceiling was `kept`. The gaps come by model id in order. No URL, header, credential or body is in them.
 - **Layers.** Ceilings are provider facts, part of `generated`. An overlay's ceiling unit replaces the generated one, unit by unit, as for listed prices, and `diff` lists an entry whose ceiling changed in `changed`.
