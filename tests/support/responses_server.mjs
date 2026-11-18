@@ -143,6 +143,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (!valid(req, body)) ++c.invalid;
     if (c.scenario === 'forced' && !isDeepStrictEqual(body.tool_choice, { type: 'function', name: 'lookup' })) ++c.invalid;
+    if (c.scenario === 'chosen' && !isDeepStrictEqual(body.tool_choice, { type: 'allowed_tools', mode: 'required', tools: [{ type: 'function', name: 'lookup' }] })) ++c.invalid;
     if (c.count === 1) c.prefix = body.input[0];
     if (c.count === 2 && (c.scenario === 'grouped' || c.scenario === 'replay-rejected')) {
       if (!replay(body) || !isDeepStrictEqual(body.input[0], c.prefix)) ++c.invalid;
@@ -163,7 +164,7 @@ const server = http.createServer(async (req, res) => {
     const failed = c.scenario.startsWith('failed-image');
     const status = c.scenario === 'incomplete' ? 'incomplete' : failed ? 'failed' : 'completed';
     const error = failed ? { code: c.scenario.endsWith('-quota') ? 'insufficient_quota' : 'server_error', message: key + cipher } : null;
-    const output = c.scenario === 'grouped' || c.scenario === 'replay-rejected' || c.scenario === 'forced'
+    const output = c.scenario === 'grouped' || c.scenario === 'replay-rejected' || c.scenario === 'forced' || c.scenario === 'chosen'
       ? (c.count === 1 ? grouped() : [reasoning(), message('answer one')])
       : c.scenario === 'incomplete' ? [reasoning(), { ...call(), status: 'incomplete', arguments: '{"x":' }]
       : c.scenario === 'opaque' ? [{ id: 'ws_1', type: 'web_search_call', status: 'completed', action: { type: 'search', query: 'x' } }, message('hello')]

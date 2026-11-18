@@ -106,6 +106,15 @@ void write_media(json::BoundedWriter& body, const Media& media) {
   if (!media.name.empty()) body.raw(",\"name\":").quoted(media.name);
   body.raw("}");
 }
+std::string_view tool_choice_name(ToolChoiceMode mode) {
+  switch (mode) {
+    case ToolChoiceMode::Auto: return "auto";
+    case ToolChoiceMode::Any: return "any";
+    case ToolChoiceMode::None: return "none";
+    case ToolChoiceMode::Validated: return "validated";
+  }
+  return {};
+}
 }
 EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request, bool streaming) {
   auto bad = [](std::string label) -> EncodeResult { return Error{ErrorKind::InvalidRequest, std::move(label)}; };
@@ -273,6 +282,20 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     if (!function_name(tool.name) || !names.insert(tool.name).second || !tool.parameters ||
         !tool.parameters->root().is_object()) return bad("unique valid functions and object parameters required");
   }
+  if (request.tool_choice) {
+    // The names a choice allows are functions the request declares.
+    const auto& choice = *request.tool_choice;
+    if (request.required_tool) return bad("tool choice and required tool are mutually exclusive");
+    if (tool_choice_name(choice.mode).empty()) return bad("invalid tool choice mode");
+    if (choice.allowed) {
+      if (choice.allowed->empty()) return bad("allowed tools require at least one function");
+      std::set<std::string_view> seen;
+      for (const auto& allowed : *choice.allowed) {
+        if (!names.contains(allowed)) return bad("allowed tools must be declared functions");
+        if (!seen.insert(allowed).second) return bad("allowed tools must name each function once");
+      }
+    }
+  }
   // Over the size limit, a request with media is a resource limit; one of text alone is invalid.
   const bool has_media = media_input::carries_media(request.messages);
   const auto limit_error = [&] {
@@ -372,6 +395,16 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       if (!names.contains(*request.required_tool)) return invalid("required tool must name a declared function");
       if (generation_comma) body.raw(",");
       body.raw("\"tool_choice\":{\"allowed_tools\":{\"mode\":\"any\",\"tools\":[").quoted(*request.required_tool).raw("]}}");
+    } else if (request.tool_choice) {
+      const auto& choice = *request.tool_choice;
+      if (generation_comma) body.raw(",");
+      body.raw("\"tool_choice\":");
+      if (!choice.allowed) body.quoted(tool_choice_name(choice.mode));
+      else {
+        body.raw("{\"allowed_tools\":{\"mode\":").quoted(tool_choice_name(choice.mode)).raw(",\"tools\":");
+        write_strings(body, *choice.allowed);
+        body.raw("}}");
+      }
     }
     body.raw("},").quoted(descriptor.request_messages_member()).raw(":["); bool comma = false;
     auto separator = [&] { if (comma) body.raw(","); comma = true; };

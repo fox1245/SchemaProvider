@@ -310,6 +310,7 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
     hash.number(image.output_compression.has_value());
     if (image.output_compression) hash.number(*image.output_compression);
   }
+  // tool_choice is a per-turn choice, not continuation lineage.
   hash.number(request.tools.size());
   for (const auto& tool : request.tools) {
     hash.text(tool.name); hash.text(tool.description); hash.document(tool.parameters);
@@ -461,7 +462,7 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
       }
     }, hosted);
   }
-  // Per-turn tool selection can be cleared after the forced client call.
+  // Per-turn tool selection (required_tool, tool_choice) can be cleared after the forced client call.
   hash.number(request.tools.size());
   for (const auto& tool : request.tools) {
     const auto& defaults = descriptor::model_defaults(descriptor, request.model);
@@ -583,7 +584,7 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
   Hash hash(descriptor.policy()->resources()); hash.text("sp.interactions.configuration.v1");
   effective_digest(hash, choices);
   hash.text(request.model); hash.text(request.account_scope); hash.text(request.system);
-  // required_tool is deliberately excluded just as in Responses.
+  // required_tool and tool_choice are deliberately excluded just as in Responses.
   hash.number(request.tools.size());
   for (const auto& tool : request.tools) {
     hash.text(tool.name); hash.text(tool.description); hash.document(tool.parameters);
@@ -922,7 +923,7 @@ InterfaceContract core_interface_contract() noexcept {
       capability::All5Native | capability::TrustedArchive | capability::OrderedWireEvents |
       capability::OpenRouterRoutingMaxPrice | capability::ErrorReason | capability::PolicyAdmittedExtensions |
       capability::CompletionSecret | capability::PartCacheMarks | capability::ServedByUpstream |
-      capability::TransportConnectionCache | capability::ModelControlFacts;
+      capability::TransportConnectionCache | capability::ModelControlFacts | capability::TypedToolChoice;
   if (json::retained_size_contract() == 1) capabilities |= capability::RetainedJsonSize;
   if (custody_ops::available()) capabilities |= capability::HostArchiveCustody;
 #if defined(__unix__) || defined(__APPLE__) || defined(_WIN32)

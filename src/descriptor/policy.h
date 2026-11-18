@@ -51,12 +51,13 @@ struct ServerToolFact {
   bool client = false; std::string beta{}; bool container = false;
 };
 // A typed request control: the request member of that name (`reasoning_effort` is Chat's member and the `effort` of
-// Responses' `reasoning`). A family's policy lists the ones its typed request carries, in `controls`.
+// Responses' `reasoning`). A family's policy lists the ones its typed request carries, in `controls`. New values go
+// at the end.
 enum class Control : std::uint8_t {
   MaxOutputTokens, Temperature, TopP, ThinkingBudget, IncludeThoughts, ReasoningEffort, ReasoningSummary,
-  ThinkingLevel, ThinkingSummaries, ServiceTier, RequiredTool, Store, MaxToolCalls
+  ThinkingLevel, ThinkingSummaries, ServiceTier, RequiredTool, Store, MaxToolCalls, ToolChoice
 };
-inline constexpr std::size_t control_count = 13;
+inline constexpr std::size_t control_count = 14;
 // The policy's spelling of a control: `max_output_tokens`, `top_p`, `service_tier`.
 std::string_view control_name(Control) noexcept;
 std::optional<Control> control_from_name(std::string_view) noexcept;

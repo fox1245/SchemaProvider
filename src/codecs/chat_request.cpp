@@ -67,6 +67,53 @@ bool config_token(std::string_view text, std::size_t maximum = 64) noexcept {
           c == '_' || c == '-' || c == '/')) return false;
   return true;
 }
+std::string_view tool_choice_name(ToolChoiceMode mode) noexcept {
+  switch (mode) {
+    case ToolChoiceMode::Auto: return "auto";
+    case ToolChoiceMode::Required: return "required";
+    case ToolChoiceMode::None: return "none";
+    default: return {};
+  }
+}
+// Everything a tool choice names is a function the request declares.
+std::optional<std::string> validate_tool_choice(const Request& request) {
+  const auto& choice = *request.tool_choice;
+  std::set<std::string_view> functions;
+  for (const auto& tool : request.tools) functions.insert(tool.name);
+  switch (choice.mode) {
+    case ToolChoiceMode::Auto: case ToolChoiceMode::Required: case ToolChoiceMode::None:
+      if (!choice.name.empty()) return "only a function tool choice takes a name";
+      break;
+    case ToolChoiceMode::Function:
+      if (!functions.contains(choice.name)) return "a function tool choice must name a declared function";
+      break;
+    default: return "invalid tool choice mode";
+  }
+  if (!choice.allowed) return std::nullopt;
+  if (choice.mode != ToolChoiceMode::Auto && choice.mode != ToolChoiceMode::Required)
+    return "allowed functions require the auto or required mode";
+  if (choice.allowed->empty()) return "allowed functions require at least one function";
+  std::set<std::string_view> seen;
+  for (const auto& name : *choice.allowed) {
+    if (!functions.contains(name)) return "allowed functions must be declared functions";
+    if (!seen.insert(name).second) return "allowed functions must name each function once";
+  }
+  return std::nullopt;
+}
+void write_tool_choice(json::BoundedWriter& body, const ToolChoice& choice) {
+  const auto function = [&](std::string_view name) {
+    body.raw("{\"type\":\"function\",\"function\":{\"name\":").quoted(name).raw("}}");
+  };
+  if (choice.allowed) {
+    body.raw("{\"type\":\"allowed_tools\",\"allowed_tools\":{\"mode\":").quoted(tool_choice_name(choice.mode)).raw(",\"tools\":[");
+    for (std::size_t i = 0; i < choice.allowed->size(); ++i) {
+      if (i) body.raw(",");
+      function((*choice.allowed)[i]);
+    }
+    body.raw("]}}");
+  } else if (choice.mode == ToolChoiceMode::Function) function(choice.name);
+  else body.quoted(tool_choice_name(choice.mode));
+}
 // Output media controls: modalities, the OpenAI audio parameters and the OpenRouter image_config.
 std::optional<std::string> validate_output(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
   unsigned mask = 0;
@@ -145,6 +192,8 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (auto error = validate_output(descriptor, request)) return bad(std::move(*error));
   if (std::max(request.messages.size(), request.canonical_messages.size()) > resources.request_messages || request.tools.size() > resources.request_tools)
     return bad("request count limit exceeded");
+  if (request.tool_choice)
+    if (auto error = validate_tool_choice(request)) return bad(std::move(*error));
   bool has_media = false;
   const bool router = descriptor::contains(descriptor.family_policy().openrouter_origins, descriptor.base_url());
   for (const auto& message : request.messages) {
@@ -453,6 +502,10 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         if (!body.ok()) return limit_error();
       }
       body.raw("]");
+    }
+    if (request.tool_choice) {
+      body.raw(",\"tool_choice\":");
+      write_tool_choice(body, *request.tool_choice);
     }
     auto number = [&](std::string_view key, double value) {
       char bytes[64]; const auto converted = std::to_chars(bytes, bytes + sizeof bytes, value);

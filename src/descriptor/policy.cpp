@@ -1094,7 +1094,7 @@ namespace {
 constexpr std::string_view control_names[control_count]{
     "max_output_tokens", "temperature", "top_p", "thinking_budget", "include_thoughts", "reasoning_effort",
     "reasoning_summary", "thinking_level", "thinking_summaries", "service_tier", "required_tool", "store",
-    "max_tool_calls"};
+    "max_tool_calls", "tool_choice"};
 } // namespace
 std::string_view control_name(Control control) noexcept {
   const auto index = static_cast<std::size_t>(control);

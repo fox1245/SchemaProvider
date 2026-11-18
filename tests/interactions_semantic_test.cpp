@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <iostream>
 #include <map>
+#include <source_location>
 #include <stdexcept>
 
 namespace {
@@ -644,8 +645,80 @@ void long_streams_are_one_part_per_step() {
   }
   CHECK(json::equal(complete(live).messages[0].wire_output->root(), complete(whole).messages[0].wire_output->root()));
 }
+// A body the encoder writes, compared byte for byte with the one it wrote before tool choices existed.
+void same_bytes(const std::string& actual, std::string_view expected) {
+  if (actual != expected) throw std::runtime_error("encoded bytes moved: " + actual);
+}
+// generation_config.tool_choice in every form, the checks that refuse it before anything is sent, and native replay
+// that ignores it.
+void typed_tool_choice() {
+  using interactions::ToolChoice; using interactions::ToolChoiceMode;
+  const auto encoded = [](const interactions::Request& value) {
+    auto result = interactions::encode(desc(), value, false);
+    CHECK(std::holds_alternative<interactions::EncodedRequest>(result)); return std::move(std::get<interactions::EncodedRequest>(result));
+  };
+  // required_tool keeps its bytes, a request without a choice keeps its own, and Any with that one function is
+  // required_tool's choice.
+  interactions::Request plain; plain.model = "fixture-model"; plain.max_output_tokens = 16;
+  plain.tools.push_back({"lookup", "Find", own(R"({"type":"object"})")});
+  plain.messages.push_back(Message{"", Role::User, {Text{"Hello"}}});
+  auto forced = plain; forced.required_tool = "lookup";
+  same_bytes(encoded(forced).body, R"({"model":"fixture-model","store":false,"stream":false,"service_tier":"standard","tools":[{"type":"function","name":"lookup","description":"Find","parameters":{"type":"object"}}],"generation_config":{"max_output_tokens":16,"tool_choice":{"allowed_tools":{"mode":"any","tools":["lookup"]}}},"input":[{"type":"user_input","content":[{"type":"text","text":"Hello"}]}]})");
+  same_bytes(encoded(plain).body, R"({"model":"fixture-model","store":false,"stream":false,"service_tier":"standard","tools":[{"type":"function","name":"lookup","description":"Find","parameters":{"type":"object"}}],"generation_config":{"max_output_tokens":16},"input":[{"type":"user_input","content":[{"type":"text","text":"Hello"}]}]})");
+  auto any = plain; any.tool_choice = ToolChoice{ToolChoiceMode::Any, std::vector<std::string>{"lookup"}};
+  CHECK(encoded(any).body == encoded(forced).body);
+
+  auto r = request(); r.tools.push_back({"fetch", "Fetch", own(R"({"type":"object"})")});
+  const auto sent = [&](ToolChoice value) { auto q = r; q.tool_choice = std::move(value); return parse(encoded(q).body); };
+  for (const auto& [mode, name] : std::vector<std::pair<ToolChoiceMode, std::string>>{
+      {ToolChoiceMode::Auto, "auto"}, {ToolChoiceMode::Any, "any"}, {ToolChoiceMode::None, "none"}, {ToolChoiceMode::Validated, "validated"}}) {
+    // A mode alone is the string form.
+    const auto alone = sent(ToolChoice{mode, {}});
+    const auto value = alone.root().get("generation_config").get("tool_choice");
+    CHECK(value.is_string() && value.as_string() == name);
+    // A mode with names is the object form.
+    const auto limited = sent(ToolChoice{mode, std::vector<std::string>{"fetch", "lookup"}});
+    CHECK(json::equal(limited.root().get("generation_config").get("tool_choice"),
+                      parse(R"({"allowed_tools":{"mode":")" + name + R"(","tools":["fetch","lookup"]}})").root()));
+  }
+  // A refusal names the line of the case that was not refused.
+  const auto refuse = [&](ToolChoice value, std::source_location at = std::source_location::current()) {
+    auto q = r; q.tool_choice = std::move(value);
+    auto result = interactions::encode(desc(), q, false);
+    if (!std::holds_alternative<Error>(result) || std::get<Error>(result).kind != ErrorKind::InvalidRequest)
+      throw std::runtime_error("tool choice not refused at line " + std::to_string(at.line()));
+  };
+  refuse(ToolChoice{static_cast<ToolChoiceMode>(99), {}});
+  refuse(ToolChoice{static_cast<ToolChoiceMode>(99), std::vector<std::string>{"lookup"}});
+  refuse(ToolChoice{ToolChoiceMode::Any, std::vector<std::string>{}});
+  refuse(ToolChoice{ToolChoiceMode::Validated, std::vector<std::string>{"lookup", "lookup"}});
+  refuse(ToolChoice{ToolChoiceMode::Auto, std::vector<std::string>{"missing"}});
+  // A built-in tool has no name to allow.
+  auto searched = r; searched.builtin_tools = {interactions::GoogleSearchTool{}};
+  searched.tool_choice = ToolChoice{ToolChoiceMode::Any, std::vector<std::string>{"google_search"}};
+  CHECK(std::holds_alternative<Error>(interactions::encode(desc(), searched, false)));
+  auto both = r; both.required_tool = "lookup"; both.tool_choice = ToolChoice{ToolChoiceMode::Any, std::vector<std::string>{"lookup"}};
+  CHECK(std::holds_alternative<Error>(interactions::encode(desc(), both, false)));
+
+  // A choice is not bound into native replay, as required_tool is not: the next turn may choose differently.
+  auto first = r; first.tool_choice = ToolChoice{ToolChoiceMode::Validated, std::vector<std::string>{"lookup"}};
+  auto opened = encoded(first);
+  Accumulator a; interactions::Codec c(desc(), interactions::Mode::Buffered, a, opened.context);
+  c.buffered(resource("[" + thought + "," + call + "]", "requires_action"), {}); CHECK(a.outcome());
+  const auto& m = complete(*a.outcome()).messages.at(0); CHECK(m.native && m.native->complete());
+  auto next = first; next.messages.push_back(m); next.messages.push_back(Message{"", Role::Tool, {ToolResult{"call1", "one"}}});
+  for (auto value : {ToolChoice{ToolChoiceMode::None, {}}, ToolChoice{ToolChoiceMode::Any, std::vector<std::string>{"fetch"}}}) {
+    next.tool_choice = value; encoded(next);
+  }
+  next.tool_choice.reset(); encoded(next);
+  next.required_tool = "fetch"; encoded(next);
+  next.thinking_level = "high";
+  auto changed = interactions::encode(desc(), next, false);
+  CHECK(std::holds_alternative<Error>(changed) && std::get<Error>(changed).kind == ErrorKind::ReplayIneligible);
+}
 int main() {
   try { served_model_is_recorded(); long_streams_are_one_part_per_step(); service_tool_steps(); service_request_controls(); background_and_lifecycle(); failure_reasons(); unknown_statuses_are_kept(); embedded_rows_survive_a_custom_policy(); creation_without_status_transcription(); raw_observation_ownership(); named_error_raw_ownership(); stateless_missing_resource_id(); missing_terminal_usage(); exact_steps_and_replay(); input_boundaries(); thinking_level_xhigh(); lifecycle_and_errors(); unknown_usage_and_signature(); modality_keyed_usage(); uncached_input_and_unmapped_counters();
+    typed_tool_choice();
     std::cout << "Interactions semantic contracts passed\n"; return 0;
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

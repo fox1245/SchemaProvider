@@ -74,6 +74,7 @@ void interface_contract_capabilities() {
   static_assert((RequiredProvider & ServedByUpstream) == ServedByUpstream);
   static_assert((RequiredProvider & TransportConnectionCache) == TransportConnectionCache);
   static_assert((RequiredProvider & ModelControlFacts) == ModelControlFacts);
+  static_assert((RequiredProvider & TypedToolChoice) == TypedToolChoice);
   const auto linked = sp::runtime::interface_contract();
   require(linked.revision == sp::EXPECTED_INTERFACE_REVISION, "linked interface revision differs");
   require((linked.capabilities & RequiredProvider) == RequiredProvider, "required capabilities are not advertised");
@@ -84,6 +85,7 @@ void interface_contract_capabilities() {
   require((sp::core_interface_contract().capabilities & ServedByUpstream) != 0, "core omits ServedModel::served_by");
   require((sp::core_interface_contract().capabilities & TransportConnectionCache) != 0, "core omits TransportOptions::connection_cache_size");
   require((sp::core_interface_contract().capabilities & ModelControlFacts) != 0, "core omits CatalogueEntry::control_values");
+  require((sp::core_interface_contract().capabilities & TypedToolChoice) != 0, "core omits the typed tool choice");
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, OpenRouterRoutingMaxPrice);
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, ErrorReason);
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, CompletionSecret);
@@ -91,6 +93,7 @@ void interface_contract_capabilities() {
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, ServedByUpstream);
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, TransportConnectionCache);
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, ModelControlFacts);
+  sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, TypedToolChoice);
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, RequiredProvider);
   constexpr std::uint64_t ungranted = 1ULL << 63;
   require((linked.capabilities & ungranted) == 0, "test capability bit is granted");
@@ -346,6 +349,29 @@ void preserved_messages_controls_and_headers(Peer& peer) {
     bad.thinking_mode = sp::messages::ThinkingMode::Adaptive; bad.thinking_budget = 1024;
     failure(client.complete(bad, run(streaming)), sp::ErrorKind::InvalidRequest);
     peer.count(invalid, 0);
+  }
+}
+// A Chat tool choice reaches the peer as written, and a choice that names an undeclared function never leaves.
+void chat_tool_choice(Peer& peer) {
+  Client client(descriptor(peer, false), options());
+  auto schema = sp::json::parse(R"({"type":"object"})");
+  require(std::holds_alternative<sp::json::Document>(schema), "local tool schema rejected");
+  auto owned_schema = std::make_shared<const sp::json::Document>(std::move(std::get<sp::json::Document>(schema)));
+  for (bool streaming : {false, true}) {
+    const auto model = peer.arm("tool-choice");
+    auto value = std::get<sp::chat::Request>(request(model));
+    value.tools.push_back({"lookup", "Find a value", owned_schema});
+    value.tool_choice = sp::chat::ToolChoice{sp::chat::ToolChoiceMode::Auto, {}, std::vector<std::string>{"lookup"}};
+    success(client.complete(value, run(streaming)));
+    peer.count(model, 1);
+    const auto refused = peer.arm("tool-choice");
+    auto bad = std::get<sp::chat::Request>(request(refused));
+    bad.tools = value.tools;
+    bad.tool_choice = sp::chat::ToolChoice{sp::chat::ToolChoiceMode::Required, {}, std::vector<std::string>{"missing"}};
+    const auto outcome = client.complete(bad, run(streaming));
+    const auto& error = failure(outcome, sp::ErrorKind::InvalidRequest).error;
+    require(error.reason == "request.chat.allowed_functions_must_be_declared", "a refused tool choice lost its reason");
+    peer.count(refused, 0);
   }
 }
 void native_generation_cap_ladder(Peer& peer) {
@@ -1084,6 +1110,7 @@ int main(int argc, char** argv) {
     check("quota abnormal close", [&] { quota_abnormal_close(peer); });
     check("family modes", [&] { family_modes(peer); });
     check("preserved Messages controls and headers", [&] { preserved_messages_controls_and_headers(peer); });
+    check("Chat tool choice", [&] { chat_tool_choice(peer); });
     check("native generation cap ladder", [&] { native_generation_cap_ladder(peer); });
     check("retry policy", [&] { retry_policy(peer); });
     check("safe connect retry", [&] { safe_connect_retry(); });

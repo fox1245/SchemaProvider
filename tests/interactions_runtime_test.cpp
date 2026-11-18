@@ -118,6 +118,19 @@ void terminals_nullable_and_errors(Peer& peer) {
     model = peer.arm("short-close"); failure(client.complete(request(model), run(streaming))); peer.count(model, 1, 1);
     model = peer.arm("forced"); auto forced = request(model); forced.required_tool = "observe_scene"; auto first = client.complete(forced, run(streaming)); check_group(first, vision_test::scene_a());
     auto next = continuation(model, vision_test::scene_a(), first); auto second = client.complete(next, run(!streaming)); require(text(completion(second).messages) == vision_test::scene_a().answer(), "forced-tool choice unnecessarily bound continuation"); peer.count(model, 2);
+    // A typed tool choice reaches the peer as written, and the next turn may choose differently.
+    model = peer.arm("chosen"); auto chosen = request(model);
+    chosen.tool_choice = sp::interactions::ToolChoice{sp::interactions::ToolChoiceMode::Validated, std::vector<std::string>{"observe_scene"}};
+    auto opened = client.complete(chosen, run(streaming)); check_group(opened, vision_test::scene_a());
+    auto after = continuation(model, vision_test::scene_a(), opened); after.tool_choice = sp::interactions::ToolChoice{sp::interactions::ToolChoiceMode::Auto, {}};
+    auto answered = client.complete(after, run(!streaming)); require(text(completion(answered).messages) == vision_test::scene_a().answer(), "a tool choice bound the continuation"); peer.count(model, 2);
+    // One that names an undeclared function never leaves.
+    model = peer.arm("chosen"); auto undeclared = request(model);
+    undeclared.tool_choice = sp::interactions::ToolChoice{sp::interactions::ToolChoiceMode::Any, std::vector<std::string>{"missing"}};
+    const auto outcome = client.complete(undeclared, run(streaming));
+    const auto& refused = failure(outcome, sp::ErrorKind::InvalidRequest).error;
+    require(refused.reason == "request.interactions.allowed_tools_must_be_declared", "a refused tool choice lost its reason");
+    peer.count(model, 0);
   }
   for (auto [scenario, kind] : std::vector<std::pair<std::string, sp::ErrorKind>>{{"terminal-error", sp::ErrorKind::RemoteFailure}, {"partial-error", sp::ErrorKind::RemoteFailure}, {"status-only", sp::ErrorKind::Truncated}}) {
     const auto model = peer.arm(scenario); const auto result = client.complete(request(model), run(true));

@@ -152,6 +152,51 @@ std::optional<Error> admit(const descriptor::ValidatedDescriptor& descriptor, co
     return Error{ErrorKind::Unsupported, "Responses input_audio has no format name for this MIME type"};
   return std::nullopt;
 }
+std::string_view tool_choice_name(ToolChoiceMode mode) {
+  switch (mode) {
+    case ToolChoiceMode::Auto: return "auto";
+    case ToolChoiceMode::Required: return "required";
+    case ToolChoiceMode::None: return "none";
+    default: return {};
+  }
+}
+// One tool a choice names, in the shape of its kind. An MCP server is written with the type of its declared tool.
+void write_chosen(json::BoundedWriter& body, AllowedToolKind kind, std::string_view name, const std::vector<HostedTool>& tools) {
+  switch (kind) {
+    case AllowedToolKind::Function: body.raw("{\"type\":\"function\",\"name\":").quoted(name); break;
+    case AllowedToolKind::Hosted: body.raw("{\"type\":").quoted(name); break;
+    case AllowedToolKind::Mcp:
+      for (const auto& tool : tools)
+        if (const auto* server = std::get_if<McpTool>(&tool); server && server->server_label == name) {
+          body.raw("{\"type\":").quoted(tool_type(tool)).raw(",\"server_label\":").quoted(name);
+          break;
+        }
+      break;
+  }
+}
+void write_tool_choice(json::BoundedWriter& body, const ToolChoice& choice, const std::vector<HostedTool>& tools) {
+  if (choice.allowed) {
+    body.raw("{\"type\":\"allowed_tools\",\"mode\":").quoted(tool_choice_name(choice.mode)).raw(",\"tools\":[");
+    for (std::size_t i = 0; i < choice.allowed->size(); ++i) {
+      const auto& tool = (*choice.allowed)[i];
+      if (i) body.raw(",");
+      write_chosen(body, tool.kind, tool.name, tools);
+      body.raw("}");
+    }
+    body.raw("]}");
+    return;
+  }
+  switch (choice.mode) {
+    case ToolChoiceMode::Function: write_chosen(body, AllowedToolKind::Function, choice.name, tools); break;
+    case ToolChoiceMode::Hosted: write_chosen(body, AllowedToolKind::Hosted, choice.name, tools); break;
+    case ToolChoiceMode::Mcp:
+      write_chosen(body, AllowedToolKind::Mcp, choice.name, tools);
+      if (choice.mcp_tool) body.raw(",\"name\":").quoted(*choice.mcp_tool);
+      break;
+    default: body.quoted(tool_choice_name(choice.mode)); return;
+  }
+  body.raw("}");
+}
 } // namespace
 EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request, bool streaming) {
   auto bad = [](std::string message) -> EncodeResult { return Error{ErrorKind::InvalidRequest, std::move(message)}; };
@@ -339,6 +384,52 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     return bad("deferred functions require tool_search");
   if (hosted_types.contains("tool_search") && !deferred)
     return bad("tool_search requires a deferred function definition");
+  if (request.tool_choice) {
+    // Everything a choice names is declared by this request: a function, an MCP server by its label, or a hosted tool
+    // by its type, which the policy's server-tool facts admitted above.
+    const auto& choice = *request.tool_choice;
+    if (request.required_tool) return bad("tool choice and required_tool are mutually exclusive");
+    std::set<std::string_view> functions;
+    for (const auto& tool : request.tools) functions.insert(tool.name);
+    const auto hosted = [&](std::string_view type) {
+      const auto facts = descriptor::tool_facts(descriptor.family_policy(), type);
+      return hosted_types.contains(type) && facts.known && !facts.client;
+    };
+    switch (choice.mode) {
+      case ToolChoiceMode::Auto: case ToolChoiceMode::Required: case ToolChoiceMode::None:
+        if (!choice.name.empty()) return bad("only a named tool choice takes a name");
+        break;
+      case ToolChoiceMode::Function:
+        if (!functions.contains(choice.name)) return bad("a function tool choice must name a declared function");
+        break;
+      case ToolChoiceMode::Hosted:
+        if (!hosted(choice.name)) return bad("a hosted tool choice must name a declared hosted tool");
+        break;
+      case ToolChoiceMode::Mcp:
+        if (!mcp_labels.contains(choice.name)) return bad("an MCP tool choice must name a declared MCP server");
+        break;
+      default: return bad("invalid tool choice mode");
+    }
+    if (choice.mcp_tool && (choice.mode != ToolChoiceMode::Mcp || !request_controls::bounded_text(*choice.mcp_tool, 256)))
+      return bad("only an MCP tool choice names one tool of its server");
+    if (choice.allowed) {
+      if (choice.mode != ToolChoiceMode::Auto && choice.mode != ToolChoiceMode::Required)
+        return bad("allowed tools require the auto or required mode");
+      if (choice.allowed->empty()) return bad("allowed tools require at least one tool");
+      std::set<std::pair<AllowedToolKind, std::string_view>> seen;
+      for (const auto& tool : *choice.allowed) {
+        bool declared = false;
+        switch (tool.kind) {
+          case AllowedToolKind::Function: declared = functions.contains(tool.name); break;
+          case AllowedToolKind::Mcp: declared = mcp_labels.contains(tool.name); break;
+          case AllowedToolKind::Hosted: declared = hosted(tool.name); break;
+          default: return bad("invalid allowed tool kind");
+        }
+        if (!declared) return bad("allowed tools must be declared tools");
+        if (!seen.emplace(tool.kind, tool.name).second) return bad("allowed tools must name each tool once");
+      }
+    }
+  }
   // Captured groups never degrade to caller-imported assistant history when their
   // seal or original items are removed. Only plain input and tool results are imports.
   bool captured_history = false;
@@ -612,6 +703,9 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     if (request.required_tool) {
       if (!tool_names.contains(*request.required_tool)) return invalid("required_tool must name a declared client function");
       body.raw(",\"tool_choice\":{\"type\":\"function\",\"name\":").quoted(*request.required_tool).raw("}");
+    } else if (request.tool_choice) {
+      body.raw(",\"tool_choice\":");
+      write_tool_choice(body, *request.tool_choice, request.hosted_tools);
     }
     body.raw(",").quoted(descriptor.request_messages_member()).raw(":[");
     std::set<std::string_view> item_ids, call_ids, pending, computer_pending, approval_requests;

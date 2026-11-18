@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <iostream>
+#include <source_location>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -1313,6 +1314,95 @@ void empty_text_delta_is_withheld() {
   CHECK(trace == "[begin][delta:hel][delta:lo][seal]");
   CHECK(text(completed(*acc.outcome()).messages) == "hello" && completed(*acc.outcome()).messages[0].parts.size() == 1);
 }
+// A body the encoder writes, compared byte for byte with the one it wrote before tool choices existed.
+void same_bytes(const std::string& actual, std::string_view expected) {
+  if (actual != expected) throw std::runtime_error("encoded bytes moved: " + actual);
+}
+// tool_choice in every form, the checks that refuse it before anything is sent, and native replay that ignores it.
+void typed_tool_choice() {
+  using responses::AllowedTool; using responses::AllowedToolKind; using responses::ToolChoice; using responses::ToolChoiceMode;
+  // required_tool keeps its bytes, a request without a choice keeps its own, and a Function choice is required_tool's.
+  responses::Request plain; plain.model = "fixture-model"; plain.max_output_tokens = 16;
+  plain.tools.push_back({"lookup", "Find a value", owned(R"({"type":"object"})"), {}, {}});
+  plain.messages.push_back(Message{"", Role::User, {Text{"Hello"}}});
+  auto forced = plain; forced.required_tool = "lookup";
+  same_bytes(encoded_ok(desc(), forced).body, R"({"model":"fixture-model","stream":false,"store":false,"include":["reasoning.encrypted_content"],"max_output_tokens":16,"tools":[{"type":"function","name":"lookup","description":"Find a value","parameters":{"type":"object"},"strict":false}],"tool_choice":{"type":"function","name":"lookup"},"input":[{"role":"user","content":[{"type":"input_text","text":"Hello"}]}]})");
+  same_bytes(encoded_ok(desc(), plain).body, R"({"model":"fixture-model","stream":false,"store":false,"include":["reasoning.encrypted_content"],"max_output_tokens":16,"tools":[{"type":"function","name":"lookup","description":"Find a value","parameters":{"type":"object"},"strict":false}],"input":[{"role":"user","content":[{"type":"input_text","text":"Hello"}]}]})");
+  auto function = plain; function.tool_choice = ToolChoice{ToolChoiceMode::Function, "lookup", {}, {}};
+  CHECK(encoded_ok(desc(), function).body == encoded_ok(desc(), forced).body);
+
+  auto r = request();
+  r.tools.push_back({"fetch", "Fetch a page", owned(R"({"type":"object"})"), {}, {}});
+  responses::McpTool docs; docs.server_label = "docs"; docs.server_url = "https://mcp.example.test/mcp";
+  r.hosted_tools = {responses::WebSearchTool{}, docs};
+  const auto sent = [&](ToolChoice value) { auto q = r; q.tool_choice = std::move(value); return parse(encoded_ok(desc(), q).body); };
+  const auto expect = [&](ToolChoice value, std::string_view wire) {
+    const auto doc = sent(std::move(value));
+    CHECK(json::equal(doc.root().get("tool_choice"), parse(wire).root()));
+  };
+  for (const auto& [mode, name] : std::vector<std::pair<ToolChoiceMode, std::string>>{
+      {ToolChoiceMode::Auto, "auto"}, {ToolChoiceMode::Required, "required"}, {ToolChoiceMode::None, "none"}}) {
+    const auto doc = sent(ToolChoice{mode, {}, {}, {}});
+    CHECK(doc.root().get("tool_choice").is_string() && doc.root().get("tool_choice").as_string() == name);
+  }
+  expect(ToolChoice{ToolChoiceMode::Function, "fetch", {}, {}}, R"({"type":"function","name":"fetch"})");
+  expect(ToolChoice{ToolChoiceMode::Hosted, "web_search", {}, {}}, R"({"type":"web_search"})");
+  expect(ToolChoice{ToolChoiceMode::Mcp, "docs", {}, {}}, R"({"type":"mcp","server_label":"docs"})");
+  expect(ToolChoice{ToolChoiceMode::Mcp, "docs", std::string("search"), {}}, R"({"type":"mcp","server_label":"docs","name":"search"})");
+  expect(ToolChoice{ToolChoiceMode::Auto, {}, {}, std::vector<AllowedTool>{{AllowedToolKind::Function, "lookup"}, {AllowedToolKind::Mcp, "docs"}, {AllowedToolKind::Hosted, "web_search"}}},
+         R"({"type":"allowed_tools","mode":"auto","tools":[{"type":"function","name":"lookup"},{"type":"mcp","server_label":"docs"},{"type":"web_search"}]})");
+  expect(ToolChoice{ToolChoiceMode::Required, {}, {}, std::vector<AllowedTool>{{AllowedToolKind::Function, "fetch"}}},
+         R"({"type":"allowed_tools","mode":"required","tools":[{"type":"function","name":"fetch"}]})");
+  // A gateway's own server tool is a hosted tool of its origin, chosen by its type like any other.
+  static const auto gateway = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"gateway-choice","family":"openai.responses","connection":{"base_url":"https://openrouter.ai","paths":{"buffered":"/api/v1/responses","streaming":"/api/v1/responses"}}})");
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(gateway));
+  auto routed = request(); routed.hosted_tools = {responses::OpenRouterServerTool{"openrouter:datetime", {}}};
+  routed.tool_choice = ToolChoice{ToolChoiceMode::Hosted, "openrouter:datetime", {}, {}};
+  CHECK(json::equal(parse(encoded_ok(std::get<descriptor::ValidatedDescriptor>(gateway), routed).body).root().get("tool_choice"), parse(R"({"type":"openrouter:datetime"})").root()));
+
+  // A refusal names the line of the case that was not refused.
+  const auto refuse = [&](ToolChoice value, std::source_location at = std::source_location::current()) {
+    auto q = r; q.tool_choice = std::move(value);
+    const auto result = responses::encode(desc(), q, false);
+    if (!std::holds_alternative<Error>(result) || std::get<Error>(result).kind != ErrorKind::InvalidRequest)
+      throw std::runtime_error("tool choice not refused at line " + std::to_string(at.line()));
+  };
+  refuse(ToolChoice{ToolChoiceMode::Function, "missing", {}, {}});
+  refuse(ToolChoice{ToolChoiceMode::Function, {}, {}, {}});
+  // The policy lists file_search, but the request does not declare it; the other two are no hosted tool here.
+  refuse(ToolChoice{ToolChoiceMode::Hosted, "file_search", {}, {}});
+  refuse(ToolChoice{ToolChoiceMode::Hosted, "zz_unlisted_tool", {}, {}});
+  refuse(ToolChoice{ToolChoiceMode::Hosted, "mcp", {}, {}});
+  refuse(ToolChoice{ToolChoiceMode::Mcp, "other", {}, {}});
+  refuse(ToolChoice{static_cast<ToolChoiceMode>(99), {}, {}, {}});
+  refuse(ToolChoice{ToolChoiceMode::Auto, "lookup", {}, {}});
+  refuse(ToolChoice{ToolChoiceMode::Function, "lookup", std::string("search"), {}});
+  refuse(ToolChoice{ToolChoiceMode::Mcp, "docs", std::string(), {}});
+  refuse(ToolChoice{ToolChoiceMode::None, {}, {}, std::vector<AllowedTool>{{AllowedToolKind::Function, "lookup"}}});
+  refuse(ToolChoice{ToolChoiceMode::Function, "lookup", {}, std::vector<AllowedTool>{{AllowedToolKind::Function, "lookup"}}});
+  refuse(ToolChoice{ToolChoiceMode::Auto, {}, {}, std::vector<AllowedTool>{}});
+  refuse(ToolChoice{ToolChoiceMode::Auto, {}, {}, std::vector<AllowedTool>{{AllowedToolKind::Function, "lookup"}, {AllowedToolKind::Function, "lookup"}}});
+  refuse(ToolChoice{ToolChoiceMode::Auto, {}, {}, std::vector<AllowedTool>{{AllowedToolKind::Function, "missing"}}});
+  refuse(ToolChoice{ToolChoiceMode::Required, {}, {}, std::vector<AllowedTool>{{AllowedToolKind::Mcp, "other"}}});
+  refuse(ToolChoice{ToolChoiceMode::Required, {}, {}, std::vector<AllowedTool>{{AllowedToolKind::Hosted, "file_search"}}});
+  refuse(ToolChoice{ToolChoiceMode::Required, {}, {}, std::vector<AllowedTool>{{static_cast<AllowedToolKind>(99), "lookup"}}});
+  auto both = r; both.required_tool = "lookup"; both.tool_choice = ToolChoice{ToolChoiceMode::Function, "lookup", {}, {}};
+  CHECK(refused(responses::encode(desc(), both, false)) == ErrorKind::InvalidRequest);
+
+  // A choice is not bound into native replay, as required_tool is not: the next turn may choose differently.
+  auto first = r; first.tool_choice = ToolChoice{ToolChoiceMode::Required, {}, {}, {}};
+  const auto opened = encoded_ok(desc(), first);
+  Accumulator acc; responses::Codec codec(desc(), responses::Mode::Buffered, acc, opened.context);
+  codec.buffered(body("[" + message + "]"), {}); CHECK(acc.outcome());
+  auto next = first; next.messages.push_back(completed(*acc.outcome()).messages[0]); next.messages.push_back(Message{"", Role::User, {Text{"again"}}});
+  for (auto value : {ToolChoice{ToolChoiceMode::None, {}, {}, {}}, ToolChoice{ToolChoiceMode::Mcp, "docs", {}, {}},
+                     ToolChoice{ToolChoiceMode::Auto, {}, {}, std::vector<AllowedTool>{{AllowedToolKind::Hosted, "web_search"}}}}) {
+    next.tool_choice = value; encoded_ok(desc(), next);
+  }
+  next.tool_choice.reset(); encoded_ok(desc(), next);
+  next.required_tool = "fetch"; encoded_ok(desc(), next);
+  next.instructions = "Answer at length"; CHECK(refused(responses::encode(desc(), next, false)) == ErrorKind::ReplayIneligible);
+}
 } // namespace
 // An output text and a reasoning summary are one part each however many deltas make them, as in the buffered reply.
 void long_streams_are_one_part_per_content_part() {
@@ -1345,6 +1435,7 @@ void long_streams_are_one_part_per_content_part() {
 int main() {
   try { empty_text_delta_is_withheld(); long_streams_are_one_part_per_content_part(); failure_reasons(); provider_money_and_snapshot_aliases(); named_error_precedence(); named_error_raw_capacity(); completed_reasoning_ciphertext_authority(); reviewed_wire_boundaries(); typed_encode(); controls_and_cursor_boundaries(); openrouter_max_price(); strict_tool_schemas(); previous_response_ownership(); grouped_native_and_owned_outcomes(); normal_close_required(); cancellation_observation_boundary(); reasoning_stream_snapshots(); tools_interleaving_and_ownership(); incomplete_and_server_items(); incomplete_reasons_from_the_table(); embedded_rows_survive_a_custom_policy(); unknown_hosted_item_ownership(); unknown_wire_observation_boundary(); usage_boundaries(); uncached_input_rule(); corruption_and_bounds();
     named_includes(); hosted_tool_options(); openrouter_server_tools_and_images(); service_item_progress_events(); computer_calls_and_mcp_approvals(); plugins_and_citations();
+    typed_tool_choice();
     std::cout << "Responses semantic contracts passed\n"; return 0;
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

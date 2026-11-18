@@ -67,7 +67,7 @@ constexpr descriptor::Control all_controls[]{
     descriptor::Control::ThinkingBudget, descriptor::Control::IncludeThoughts, descriptor::Control::ReasoningEffort,
     descriptor::Control::ReasoningSummary, descriptor::Control::ThinkingLevel, descriptor::Control::ThinkingSummaries,
     descriptor::Control::ServiceTier, descriptor::Control::RequiredTool, descriptor::Control::Store,
-    descriptor::Control::MaxToolCalls};
+    descriptor::Control::MaxToolCalls, descriptor::Control::ToolChoice};
 static_assert(std::size(all_controls) == descriptor::control_count);
 
 std::string policy_text() { return std::string(config_defaults::descriptor_policy_json); }
@@ -139,6 +139,7 @@ template <class Request> std::optional<bool> carries(descriptor::Control control
     case Control::RequiredTool: return requires(Request r) { r.required_tool; };
     case Control::Store: return requires(Request r) { r.store; };
     case Control::MaxToolCalls: return requires(Request r) { r.max_tool_calls; };
+    case Control::ToolChoice: return requires(Request r) { r.tool_choice; };
     case Control::ReasoningEffort: case Control::ReasoningSummary: return std::nullopt;
   }
   return std::nullopt;
@@ -168,7 +169,8 @@ bool controls_agree(const descriptor::PolicySnapshot& policy) {
       const auto declared = policy->control_admitted(family, control);
       if (!declared) return false;
       if (control != descriptor::Control::RequiredTool && control != descriptor::Control::Store &&
-          control != descriptor::Control::MaxToolCalls && policy_accepts(d, control) != *declared) return false;
+          control != descriptor::Control::MaxToolCalls && control != descriptor::Control::ToolChoice &&
+          policy_accepts(d, control) != *declared) return false;
       if (const auto member = structure(family, control); member && *member != *declared) return false;
     }
   }
@@ -181,10 +183,10 @@ void controls_match_the_encoders() {
   const auto policy = descriptor::builtin_policy();
   CHECK(controls_agree(policy));
   const auto text = policy_text();
-  const std::string chat_controls = R"("controls":["max_output_tokens","temperature","top_p","reasoning_effort","service_tier"])";
-  CHECK(!controls_agree(load(replaced(text, chat_controls, R"("controls":["max_output_tokens","temperature","reasoning_effort","service_tier"])"))));
-  CHECK(!controls_agree(load(replaced(text, chat_controls, R"("controls":["max_output_tokens","temperature","top_p","reasoning_effort","service_tier","store"])"))));
-  CHECK(!controls_agree(load(replaced(text, chat_controls, R"("controls":["max_output_tokens","temperature","top_p","service_tier"])"))));
+  const std::string chat_controls = R"("controls":["max_output_tokens","temperature","top_p","reasoning_effort","service_tier","tool_choice"])";
+  CHECK(!controls_agree(load(replaced(text, chat_controls, R"("controls":["max_output_tokens","temperature","reasoning_effort","service_tier","tool_choice"])"))));
+  CHECK(!controls_agree(load(replaced(text, chat_controls, R"("controls":["max_output_tokens","temperature","top_p","reasoning_effort","service_tier","tool_choice","store"])"))));
+  CHECK(!controls_agree(load(replaced(text, chat_controls, R"("controls":["max_output_tokens","temperature","top_p","service_tier","tool_choice"])"))));
   for (const auto control : all_controls) {
     const auto name = descriptor::control_name(control);
     CHECK(!name.empty() && descriptor::control_from_name(name) == control);
@@ -198,6 +200,15 @@ void controls_match_the_encoders() {
   CHECK(policy->control_admitted("anthropic.messages", descriptor::Control::ServiceTier) == false);
   CHECK(policy->control_admitted("openai.responses", descriptor::Control::MaxToolCalls) == true);
   CHECK(policy->control_admitted("openai.chat", descriptor::Control::MaxToolCalls) == false);
+  // Every family's typed request carries a tool choice; a family whose list leaves it out answers false, and the
+  // comparison with the request members fails until the data follows.
+  for (const auto family : families) CHECK(policy->control_admitted(family, descriptor::Control::ToolChoice) == true);
+  const std::string responses_controls = R"("controls":["max_output_tokens","temperature","top_p","reasoning_effort","reasoning_summary","service_tier","required_tool","store","max_tool_calls","tool_choice"])";
+  const auto without_choice = load(replaced(text, responses_controls, R"("controls":["max_output_tokens","temperature","top_p","reasoning_effort","reasoning_summary","service_tier","required_tool","store","max_tool_calls"])"));
+  CHECK(without_choice->control_admitted("openai.responses", descriptor::Control::ToolChoice) == false);
+  CHECK(without_choice->control_admitted("openai.chat", descriptor::Control::ToolChoice) == true);
+  CHECK(!controls_agree(without_choice));
+  CHECK(descriptor::control_name(descriptor::Control::ToolChoice) == "tool_choice" && !descriptor::control_takes_values(descriptor::Control::ToolChoice));
 }
 
 // Removes every member `"key":[...]` from the minified policy text, with the comma that follows it.
@@ -216,11 +227,11 @@ void controls_data() {
   const auto text = policy_text();
   // A family the policy does not have is unknown, not refused.
   CHECK(!descriptor::builtin_policy()->control_admitted("zz.unknown", descriptor::Control::Temperature));
-  const std::string chat_controls = R"("controls":["max_output_tokens","temperature","top_p","reasoning_effort","service_tier"])";
+  const std::string chat_controls = R"("controls":["max_output_tokens","temperature","top_p","reasoning_effort","service_tier","tool_choice"])";
   CHECK(refused(replaced(text, chat_controls, R"("controls":["max_tokens"])"), "/controls"));
   CHECK(refused(replaced(text, chat_controls, R"("controls":["temperature","temperature"])"), "/controls"));
   // A control that takes listed values needs values: Messages lists no reasoning efforts.
-  CHECK(refused(replaced(text, R"("controls":["max_output_tokens","temperature","top_p","thinking_budget"])", R"("controls":["reasoning_effort"])"), "/controls"));
+  CHECK(refused(replaced(text, R"("controls":["max_output_tokens","temperature","top_p","thinking_budget","tool_choice"])", R"("controls":["reasoning_effort"])"), "/controls"));
   CHECK(refused(replaced(text, R"("standard_service_tiers":["default"])", R"("standard_service_tiers":["nope"])"), "/standard_service_tiers"));
   // A policy written before the members: it loads, declares nothing, and a tier passes through.
   const auto old = without_member(without_member(text, "controls"), "standard_service_tiers");

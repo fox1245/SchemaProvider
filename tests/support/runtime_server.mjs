@@ -2,6 +2,7 @@
 import http from 'node:http';
 import readline from 'node:readline';
 import { once } from 'node:events';
+import { isDeepStrictEqual } from 'node:util';
 
 const marker = 'RUNTIME_SECRET_MARKER_62c490';
 const cases = new Map();
@@ -112,6 +113,8 @@ const server = http.createServer(async (req, res) => {
           body.tool_choice?.disable_parallel_tool_use !== true ||
           (mode === 'disabled' && body.tool_choice?.name !== 'lookup')) ++c.invalid;
     }
+    if (scenario === 'tool-choice' && (messages || !isDeepStrictEqual(body.tool_choice, { type: 'allowed_tools',
+        allowed_tools: { mode: 'auto', tools: [{ type: 'function', function: { name: 'lookup' } }] } }))) ++c.invalid;
     if (scenario === 'typeless-buffered-error') {
       if (!messages || body.stream) ++c.invalid;
       res.writeHead(200, { 'Content-Type': 'application/json', Connection: 'close' });

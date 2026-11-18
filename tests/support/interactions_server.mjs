@@ -117,10 +117,11 @@ const server = http.createServer(async (req, res) => {
       if (!isDeepStrictEqual(body.input, expected) || c.hash !== observed.hash) ++c.invalid; else ++c.replayed;
     }
     if (c.scenario === 'forced' && c.count === 1 && !isDeepStrictEqual(body.generation_config.tool_choice, { allowed_tools: { mode: 'any', tools: ['observe_scene'] } })) ++c.invalid;
+    if (c.scenario === 'chosen' && !isDeepStrictEqual(body.generation_config.tool_choice, c.count === 1 ? { allowed_tools: { mode: 'validated', tools: ['observe_scene'] } } : 'auto')) ++c.invalid;
     res.on('close', () => { ++c.closed; c.held.delete(res); notify(); }); notify();
     const fault = () => { ++c.faults; notify(); };
     if (c.scenario === 'reset') { fault(); res.socket.resetAndDestroy(); return; }
-    let status = c.count === 1 && ['grouped', 'forced'].includes(c.scenario) ? 'requires_action' : 'completed';
+    let status = c.count === 1 && ['grouped', 'forced', 'chosen'].includes(c.scenario) ? 'requires_action' : 'completed';
     let steps = status === 'requires_action' ? grouped(c) : [thought(), output(JSON.stringify(c.answer))];
     let counters = usage;
     if (c.scenario === 'incomplete') status = 'incomplete';
