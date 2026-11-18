@@ -304,6 +304,9 @@ class PolicyLoader {
           for (const auto& valued : valued_controls)
             if ((bits & (1u << static_cast<unsigned>(valued.control))) && (f.*valued.listed).empty())
               fail("/controls", "a control that takes listed values only where the family lists some");
+          // The embedded lists state what the compiled encoders write: a list may only leave controls out.
+          if (const auto embedded = embedded_member(f.family, "controls"); embedded.valid() && (bits & ~control_bits(embedded)))
+            fail("/controls", "controls of the family's embedded list; a list may only leave controls out");
           policy->controls_.emplace_back(f.family, bits);
         }
         if (auto tiers = v.get("standard_service_tiers"); tiers.valid()) {
