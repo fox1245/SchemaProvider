@@ -4,7 +4,7 @@
   "families": [
     {
       "family": "openai.chat",
-      "controls": ["max_output_tokens", "temperature", "top_p", "reasoning_effort", "service_tier"],
+      "controls": ["max_output_tokens", "temperature", "top_p", "reasoning_effort", "service_tier", "tool_choice"],
       "standard_service_tiers": ["default"],
       "openrouter_origins": ["https://openrouter.ai"],
       "cache": [
@@ -107,7 +107,7 @@
     },
     {
       "family": "anthropic.messages",
-      "controls": ["max_output_tokens", "temperature", "top_p", "thinking_budget"],
+      "controls": ["max_output_tokens", "temperature", "top_p", "thinking_budget", "tool_choice"],
       "openrouter_origins": ["https://openrouter.ai"],
       "cache": [
         {"origins": ["https://api.anthropic.com"], "explicit": true, "max_breakpoints": 4, "ttls": ["5m", "1h"], "write_multiplier": {"5m": 1.25, "1h": 2}, "longest_first": true},
@@ -279,7 +279,7 @@
     },
     {
       "family": "openai.responses",
-      "controls": ["max_output_tokens", "temperature", "top_p", "reasoning_effort", "reasoning_summary", "service_tier", "required_tool", "store", "max_tool_calls"],
+      "controls": ["max_output_tokens", "temperature", "top_p", "reasoning_effort", "reasoning_summary", "service_tier", "required_tool", "store", "max_tool_calls", "tool_choice"],
       "standard_service_tiers": ["default"],
       "openrouter_origins": ["https://openrouter.ai"],
       "cache": [{"explicit": false, "unsupported": "ignore"}],
@@ -401,7 +401,7 @@
     },
     {
       "family": "google.generate",
-      "controls": ["max_output_tokens", "temperature", "thinking_budget", "include_thoughts", "thinking_level", "required_tool"],
+      "controls": ["max_output_tokens", "temperature", "thinking_budget", "include_thoughts", "thinking_level", "required_tool", "tool_choice"],
       "openrouter_origins": [],
       "cache": [{"explicit": false, "unsupported": "ignore"}],
       "media": {
@@ -475,7 +475,7 @@
     },
     {
       "family": "google.interactions",
-      "controls": ["max_output_tokens", "thinking_level", "thinking_summaries", "service_tier", "required_tool", "store"],
+      "controls": ["max_output_tokens", "thinking_level", "thinking_summaries", "service_tier", "required_tool", "store", "tool_choice"],
       "standard_service_tiers": ["standard"],
       "openrouter_origins": [],
       "cache": [{"explicit": false, "unsupported": "ignore"}],

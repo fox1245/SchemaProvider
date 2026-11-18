@@ -84,6 +84,23 @@ using HostedTool = std::variant<WebSearchTool, ImageGenerationTool, FileSearchTo
 std::string_view tool_type(const HostedTool&) noexcept;
 // The answer to an mcp_approval_request item of an earlier response.
 struct McpApproval { std::string request_id; bool approve = false; std::optional<std::string> reason; };
+// What the model may call (`tool_choice`). Auto, Required and None stand alone, or Auto and Required come with
+// `allowed`, the declared tools the model is limited to: Auto lets it pick one of them or answer, Required makes it
+// call one. Function, Hosted and Mcp name one declared tool. New values go at the end.
+enum class ToolChoiceMode { Auto, Required, None, Function, Hosted, Mcp };
+// What an allowed tool names, always a tool the request declares: a function by its name, an MCP server by its
+// label, a hosted tool by its type. New values go at the end.
+enum class AllowedToolKind { Function, Mcp, Hosted };
+struct AllowedTool { AllowedToolKind kind = AllowedToolKind::Function; std::string name; };
+struct ToolChoice {
+  ToolChoiceMode mode = ToolChoiceMode::Auto;
+  // Function: the function's name. Hosted: the hosted tool's type. Mcp: the MCP server's label.
+  std::string name;
+  // Mcp only: one tool of that server; unset lets the model pick among the server's tools.
+  std::optional<std::string> mcp_tool;
+  // Auto and Required only: at least one tool, each named once.
+  std::optional<std::vector<AllowedTool>> allowed;
+};
 // OpenRouter image output: Image in modalities, with Text when text is wanted too.
 enum class OutputModality { Text, Image };
 enum class Verbosity { Low, Medium, High };
@@ -130,6 +147,9 @@ struct Request {
   // Sent as mcp_approval_response input items after the messages. Each answers an mcp_approval_request in the
   // captured history, or of the response that previous_response_id continues.
   std::vector<McpApproval> mcp_approvals;
+  // What the model may call. `required_tool` stays the short form of a Function choice; setting both is refused. Like
+  // `required_tool`, it is a choice of one turn and is not bound into native replay.
+  std::optional<ToolChoice> tool_choice;
 
   static Request simple(std::string model_name, std::string user_prompt,
                         std::optional<uint64_t> max_tokens = std::nullopt,

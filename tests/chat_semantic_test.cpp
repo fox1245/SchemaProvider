@@ -5,6 +5,7 @@
 #include "codecs/responses_request.h"
 #include "core/enum_names.h"
 #include "core/native.h"
+#include "core/native_testing.h"
 #include "descriptor/descriptor.h"
 #include "descriptor/policy.h"
 #include "descriptor/presets.h"
@@ -17,6 +18,7 @@
 #include <limits>
 #include <map>
 #include <optional>
+#include <source_location>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -1631,6 +1633,82 @@ void served_by_leaves_replay_identity() {
   };
   CHECK(follow_up(plain.messages.at(0)) == follow_up(named.messages.at(0)));
 }
+// tool_choice in every form, the checks that refuse it before anything is sent, and native replay that ignores it.
+void typed_tool_choice() {
+  using chat::ToolChoice; using chat::ToolChoiceMode;
+  const auto schema = [] { return std::make_shared<const json::Document>(std::get<json::Document>(json::parse(R"({"type":"object"})"))); };
+  chat::Request request; request.model = "fixture-model"; request.max_output_tokens = 16;
+  request.canonical_messages = {Message{{}, Role::User, {Text{"hello"}}}};
+  request.tools.push_back({"lookup", "Find a value", schema()});
+  request.tools.push_back({"fetch", "Fetch a page", schema()});
+  const auto encoded = [&](const chat::Request& value) {
+    auto result = chat::encode(descriptor_value(), value, false);
+    CHECK(std::holds_alternative<chat::EncodedRequest>(result)); return std::move(std::get<chat::EncodedRequest>(result));
+  };
+  const auto sent = [&](ToolChoice value) {
+    auto q = request; q.tool_choice = std::move(value);
+    return std::get<json::Document>(json::parse(encoded(q).body));
+  };
+  const auto expect = [&](ToolChoice value, std::string_view wire) {
+    const auto doc = sent(std::move(value));
+    CHECK(json::equal(doc.root().get("tool_choice"), std::get<json::Document>(json::parse(wire)).root()));
+  };
+  for (const auto& [mode, name] : std::vector<std::pair<ToolChoiceMode, std::string>>{
+      {ToolChoiceMode::Auto, "auto"}, {ToolChoiceMode::Required, "required"}, {ToolChoiceMode::None, "none"}}) {
+    const auto doc = sent(ToolChoice{mode, {}, {}});
+    CHECK(doc.root().get("tool_choice").is_string() && doc.root().get("tool_choice").as_string() == name);
+  }
+  expect(ToolChoice{ToolChoiceMode::Function, "fetch", {}}, R"({"type":"function","function":{"name":"fetch"}})");
+  expect(ToolChoice{ToolChoiceMode::Auto, {}, std::vector<std::string>{"lookup", "fetch"}},
+         R"({"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[{"type":"function","function":{"name":"lookup"}},{"type":"function","function":{"name":"fetch"}}]}})");
+  expect(ToolChoice{ToolChoiceMode::Required, {}, std::vector<std::string>{"fetch"}},
+         R"({"type":"allowed_tools","allowed_tools":{"mode":"required","tools":[{"type":"function","function":{"name":"fetch"}}]}})");
+  // The choice is all a request without one lacks.
+  auto chosen = sent(ToolChoice{ToolChoiceMode::Required, {}, {}});
+  const auto unchosen = std::get<json::Document>(json::parse(encoded(request).body));
+  CHECK(!unchosen.root().get("tool_choice").valid() && chosen.root().size() == unchosen.root().size() + 1);
+
+  // A refusal names the line of the case that was not refused.
+  const auto refuse = [&](ToolChoice value, std::source_location at = std::source_location::current()) {
+    auto q = request; q.tool_choice = std::move(value);
+    auto result = chat::encode(descriptor_value(), q, false);
+    if (!std::holds_alternative<Error>(result) || std::get<Error>(result).kind != ErrorKind::InvalidRequest)
+      throw std::runtime_error("tool choice not refused at line " + std::to_string(at.line()));
+  };
+  refuse(ToolChoice{ToolChoiceMode::Function, "missing", {}});
+  refuse(ToolChoice{ToolChoiceMode::Function, {}, {}});
+  refuse(ToolChoice{static_cast<ToolChoiceMode>(99), {}, {}});
+  refuse(ToolChoice{ToolChoiceMode::Auto, "lookup", {}});
+  refuse(ToolChoice{ToolChoiceMode::None, {}, std::vector<std::string>{"lookup"}});
+  refuse(ToolChoice{ToolChoiceMode::Function, "lookup", std::vector<std::string>{"lookup"}});
+  refuse(ToolChoice{ToolChoiceMode::Auto, {}, std::vector<std::string>{}});
+  refuse(ToolChoice{ToolChoiceMode::Auto, {}, std::vector<std::string>{"lookup", "lookup"}});
+  refuse(ToolChoice{ToolChoiceMode::Required, {}, std::vector<std::string>{"missing"}});
+  auto simple = chat::Request::simple("fixture-model", "hello", 16);
+  simple.tool_choice = ToolChoice{ToolChoiceMode::Function, "lookup", {}};
+  CHECK(std::holds_alternative<Error>(chat::encode(descriptor_value(), simple, false)));
+
+  // A choice is not bound into native replay: the configuration digest is the one without it, and a captured answer
+  // continues under another choice.
+  auto with_choice = request; with_choice.tool_choice = ToolChoice{ToolChoiceMode::Auto, {}, std::vector<std::string>{"fetch"}};
+  const auto choices = descriptor::effective_defaults(descriptor_value(), request.model);
+  const auto bare = native_testing::chat_configuration_digest_of(descriptor_value(), request, choices);
+  CHECK(bare && bare == native_testing::chat_configuration_digest_of(descriptor_value(), with_choice, choices));
+  const auto first = encoded(with_choice);
+  Accumulator accumulator; chat::Codec codec(descriptor_value(), chat::Mode::Buffered, accumulator, {}, first.context);
+  codec.buffered(body(R"({"role":"assistant","content":"answer"})"), {});
+  CHECK(accumulator.outcome() && std::holds_alternative<Completion>(*accumulator.outcome()));
+  const auto& assistant = std::get<Completion>(*accumulator.outcome()).messages.at(0);
+  CHECK(assistant.native && assistant.native->complete());
+  auto next = with_choice; next.canonical_messages.push_back(assistant); next.canonical_messages.push_back(Message{{}, Role::User, {Text{"next"}}});
+  for (auto value : {ToolChoice{ToolChoiceMode::None, {}, {}}, ToolChoice{ToolChoiceMode::Function, "lookup", {}}}) {
+    next.tool_choice = value; encoded(next);
+  }
+  next.tool_choice.reset(); encoded(next);
+  next.temperature = 0.5;
+  auto changed = chat::encode(descriptor_value(), next, false);
+  CHECK(std::holds_alternative<Error>(changed) && std::get<Error>(changed).kind == ErrorKind::ReplayIneligible);
+}
 int main() {
   try {
     idempotent_terminal_money_tail(); unlisted_usage_leaves_and_decimal_cost(); uncached_input_rule();
@@ -1643,6 +1721,7 @@ int main() {
     gateway_request_controls(); gateway_max_price(); gateway_plugins_and_citations();
     served_by_upstream(); served_by_leaves_replay_identity();
     value_builders_and_projections(); simple_requests_all_families();
+    typed_tool_choice();
     std::cout << "chat semantic properties passed\n";
     return 0;
   } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

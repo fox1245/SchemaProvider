@@ -54,6 +54,14 @@ std::string_view tool_type(const BuiltinTool&) noexcept;
 // and send no input: Get returns its current state (Pending while it runs), Cancel stops a background one and
 // returns what it produced (stop raw "cancelled"), Delete removes it (stop raw "deleted").
 enum class Lifecycle { Create, Get, Cancel, Delete };
+// generation_config.tool_choice: what the model may call. A mode alone is sent as the mode; with `allowed` it is the
+// allowed_tools object, which limits the model to those declared functions under the mode. New values go at the end.
+enum class ToolChoiceMode { Auto, Any, None, Validated };
+struct ToolChoice {
+  ToolChoiceMode mode = ToolChoiceMode::Auto;
+  // The names of declared functions, at least one, each named once.
+  std::optional<std::vector<std::string>> allowed;
+};
 struct Request {
   std::string model, account_scope, system;
   std::vector<Message> messages;
@@ -84,6 +92,9 @@ struct Request {
   // Top-level members the policy admits for this origin (#32), sent as given after the typed ones. Creating
   // requests only.
   std::shared_ptr<const json::Document> extensions;
+  // What the model may call. `required_tool` stays the short form of Any with one function; setting both is refused.
+  // Like `required_tool`, it is a choice of one turn and is not bound into native replay.
+  std::optional<ToolChoice> tool_choice;
 
   static Request simple(std::string model_name, std::string user_prompt,
                         std::optional<uint64_t> max_tokens = std::nullopt,

@@ -69,10 +69,14 @@ inline constexpr std::uint64_t HostArchiveCustody = 1ULL << 17;
 // model catalogue. A library built before them has a smaller CatalogueEntry, which a consumer built with this header
 // would read past, so it lacks this bit and a require_interface_contract call with RequiredProvider refuses it.
 inline constexpr std::uint64_t ModelControlFacts = 1ULL << 18;
+// Chat, Responses and Interactions requests carry `tool_choice`, the typed choice of what the model may call. A library
+// built before the member has smaller requests and would send no choice, so it lacks this bit and a
+// require_interface_contract call with RequiredProvider refuses it.
+inline constexpr std::uint64_t TypedToolChoice = 1ULL << 19;
 inline constexpr std::uint64_t RequiredProvider = TypedRuntime | PreparedAdmission |
     NullableUsage | All5Native | TrustedArchive | OrderedWireEvents | NativeSocketRuntime |
     RetainedJsonSize | CompleteAttemptEvidence | OpenRouterRoutingMaxPrice | ErrorReason | PolicyAdmittedExtensions |
-    CompletionSecret | PartCacheMarks | ServedByUpstream | TransportConnectionCache | ModelControlFacts;
+    CompletionSecret | PartCacheMarks | ServedByUpstream | TransportConnectionCache | ModelControlFacts | TypedToolChoice;
 }
 InterfaceContract core_interface_contract() noexcept;
 std::uint32_t codec_interface_revision() noexcept;

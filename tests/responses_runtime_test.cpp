@@ -376,6 +376,17 @@ void incomplete_and_opaque(Peer& peer) {
   for (bool streaming : {false, true}) {
     const auto forced = peer.arm("forced"); auto typed = request(forced); typed.required_tool = "lookup";
     check_group(client.complete(typed, run(streaming))); peer.count(forced, 1);
+    // A typed tool choice reaches the peer as written, and one that names an undeclared tool never leaves.
+    const auto chosen = peer.arm("chosen"); auto limited = request(chosen);
+    limited.tool_choice = sp::responses::ToolChoice{sp::responses::ToolChoiceMode::Required, {}, {},
+        std::vector<sp::responses::AllowedTool>{{sp::responses::AllowedToolKind::Function, "lookup"}}};
+    check_group(client.complete(limited, run(streaming))); peer.count(chosen, 1);
+    const auto unsent = peer.arm("chosen"); auto undeclared = request(unsent);
+    undeclared.tool_choice = sp::responses::ToolChoice{sp::responses::ToolChoiceMode::Hosted, "web_search", {}, {}};
+    const auto outcome = client.complete(undeclared, run(streaming));
+    const auto& refused = failure(outcome, sp::ErrorKind::InvalidRequest).error;
+    require(refused.reason == "request.responses.hosted_tool_choice_must_be_declared", "a refused tool choice lost its reason");
+    peer.count(unsent, 0);
     const auto model = peer.arm("incomplete"); auto first = client.complete(request(model), run(streaming)); const auto& c = completion(first);
     require(c.stop.kind == sp::StopKind::MaxTokens && std::holds_alternative<sp::InvalidToolCall>(c.messages[0].parts[1]), "incomplete tools were executable or stop fabricated"); incomplete_native(c.messages);
     auto next = request(model); next.messages.push_back(c.messages[0]); ineligible(client.complete(next, run(streaming))); peer.count(model, 1);

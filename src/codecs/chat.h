@@ -30,6 +30,17 @@ enum class OutputModality { Text, Audio, Image };
 struct AudioOutput { std::string voice, format; };
 // OpenRouter image_config. Every present field is sent as given.
 using ImageOutput = sp::OpenRouterImageConfig;
+// What the model may call (`tool_choice`). Auto, Required and None stand alone, or Auto and Required come with
+// `allowed`, the declared functions the model is limited to: Auto lets it pick one of them or answer, Required makes it
+// call one. Function names one declared function. New values go at the end.
+enum class ToolChoiceMode { Auto, Required, None, Function };
+struct ToolChoice {
+  ToolChoiceMode mode = ToolChoiceMode::Auto;
+  // Function only: the function's name.
+  std::string name;
+  // Auto and Required only: the names of declared functions, at least one, each named once.
+  std::optional<std::vector<std::string>> allowed;
+};
 struct Request {
   std::string model;
   std::vector<InputMessage> messages;
@@ -54,6 +65,8 @@ struct Request {
   std::vector<OutputModality> modalities{};
   std::optional<AudioOutput> audio{};
   std::optional<ImageOutput> image_config{};
+  // What the model may call. A choice of one turn: it is not bound into native replay.
+  std::optional<ToolChoice> tool_choice{};
 
   static Request simple(std::string model_name, std::string user_prompt,
                         std::optional<uint64_t> max_tokens = std::nullopt,
