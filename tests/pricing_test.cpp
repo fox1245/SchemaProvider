@@ -483,6 +483,62 @@ void left_out_units_refuse() {
   std::cout << "case passed: a unit left out for an override leaves every call that bills it unpriced (" << std::size(cases) << " units)\n";
 }
 
+// A listing names a unit the provider's way (`prompt`) or the plain way (`input`); an override's key and the base
+// prices are the same unit either way. The unit keeps the spelling of its base price, and where the base lists both
+// spellings, the plain name's price is the one pricing reads and the one an override is compared with.
+void override_keys_are_units() {
+  using Prices = std::vector<std::pair<std::string, std::string>>;
+  const auto window = listed_model(R"({"prompt":"0.000010","completion":"0.000010","overrides":[{"utc_start":0,"utc_end":800,"input":"0.000001","output":"0.000001"}]})");
+  const auto& held = *window->entry("vendor/m");
+  CHECK((held.pricing == Prices{{"completion", "0.000010"}, {"prompt", "0.000010"}}));
+  CHECK(pricing::price_of(held).input == 10'000'000'000u && pricing::price_of(held).output == 10'000'000'000u);
+  // A threshold override cheaper than the base is a band of the same unit, held as the cheap-band rule allows: a later
+  // override that lists the unit under the other spelling does not leave it out.
+  const auto banded = listed_model(R"({"prompt":"0.000010","completion":"0.000010","overrides":[{"min_prompt_tokens":200000,"input":"0.000001"},)"
+                                   R"({"min_prompt_tokens":300000,"prompt":"0.000012"}]})");
+  const auto& bands = *banded->entry("vendor/m");
+  CHECK((bands.pricing == Prices{{"completion", "0.000010"}, {"prompt", "0.000010"}, {"prompt+200000", "0.000001"}, {"prompt+300000", "0.000012"}}));
+  CHECK(pricing::price_of(bands, {}, 200'000).input == 10'000'000'000u && pricing::price_of(bands, {}, 200'001).input == 1'000'000'000u &&
+        pricing::price_of(bands, {}, 300'001).input == 12'000'000'000u);
+  // A later override that leaves the unit out under both spellings does leave the cheap band out.
+  const auto carried = listed_model(R"({"prompt":"0.000010","completion":"0.000010","overrides":[{"min_prompt_tokens":200000,"input":"0.000001"},)"
+                                    R"({"min_prompt_tokens":300000,"output":"0.000012"}]})");
+  CHECK(pricing::price_of(*carried->entry("vendor/m"), {}, 200'001).input == 10'000'000'000u);
+  const auto both = listed_model(R"({"prompt":"0.000010","input":"0.000005","completion":"0.000010","overrides":[{"utc_start":0,"utc_end":800,"prompt":"0.000008"}]})");
+  CHECK(pricing::price_of(*both->entry("vendor/m")).input == 8'000'000'000u);
+  std::cout << "case passed: override keys are units under either spelling\n";
+}
+
+// The band of a call is chosen by all of its input tokens, cache reads, cache writes and audio included.
+void bands_count_every_input_token() {
+  const auto c = listed_model(R"({"prompt":"0.000001","completion":"0.000002","input_cache_read":"0.0000001","input_cache_write":"0.00000125",)"
+                              R"("audio":"0.000004","overrides":[{"min_prompt_tokens":200000,"prompt":"0.000002","completion":"0.000004",)"
+                              R"("input_cache_read":"0.0000002","input_cache_write":"0.0000025","audio":"0.000008"}]})");
+  const auto& entry = *c->entry("vendor/m");
+  const ServedModel model{"vendor/m", "vendor/m", ServedRelation::Exact};
+  const auto band = pricing::price_of(entry, {}, 200'100);
+  CHECK(band.input == 2'000'000'000u && band.output == 4'000'000'000u && band.cache_read == 200'000'000u && band.cache_write == 2'500'000'000u &&
+        band.input_audio == 8'000'000'000u);
+  // 100 uncached and 200'000 cache-read tokens and 10 output tokens: 100 x 2'000 + 200'000 x 200 + 10 x 4'000 nano-USD.
+  auto e = pricing::estimate(*c, "openai.chat", listing_origin, model, usage(200'100, 10, 200'000));
+  CHECK(e.total && e.total->nano_usd == 200'000u + 40'000'000u + 40'000u);
+  // 100 uncached and 200'000 cache-write tokens: 100 x 2'000 + 200'000 x 2'500 + 10 x 4'000.
+  e = pricing::estimate(*c, "openai.chat", listing_origin, model, usage(200'100, 10, 0, 200'000));
+  CHECK(e.total && e.total->nano_usd == 200'000u + 500'000'000u + 40'000u);
+  // 100 text and 200'000 audio tokens: 100 x 2'000 + 200'000 x 8'000 + 10 x 4'000.
+  auto audio = usage(200'100, 10);
+  audio.extra["input_audio"] = Count{200'000, Evidence::Reported};
+  e = pricing::estimate(*c, "openai.chat", listing_origin, model, audio);
+  CHECK(e.total && e.total->nano_usd == 200'000u + 1'600'000'000u + 40'000u);
+  // At 200'000 input tokens in all, the base prices: 100 x 1'000 + 199'900 x 100 + 10 x 2'000.
+  e = pricing::estimate(*c, "openai.chat", listing_origin, model, usage(200'000, 10, 199'900));
+  CHECK(e.total && e.total->nano_usd == 100'000u + 19'990'000u + 20'000u);
+  // A bound for up to 200'100 input tokens prices each at the band's dearest input rate, the audio one.
+  const auto bound = pricing::upper_bound(entry, {}, {200'100, 10, false, {}});
+  CHECK(bound.total && bound.total->nano_usd == 200'100u * 8'000u + 40'000u);
+  std::cout << "case passed: the band counts every input token\n";
+}
+
 // For generated listings with long-context and time-of-day overrides, neither the bound nor the estimate from the
 // generated entry is below the price the listing's own rule gives at any hour of the day: the base prices; an override
 // applying when the input is strictly above its `min_prompt_tokens` and, with a time window, at a clock time from its
@@ -604,7 +660,7 @@ int main() {
   try {
     prices_from_entries(); estimates(); wide_products(); bounds(); bands(); dearer_rates();
     unpriced_usage(); zero_rates(); tier_reasons(); usage_stage(); reservation_from_entry(); skipped_prices();
-    hour_cache_writes(); left_out_units_refuse(); listed_overrides_bound_every_call();
+    hour_cache_writes(); left_out_units_refuse(); override_keys_are_units(); bands_count_every_input_token(); listed_overrides_bound_every_call();
     std::cout << "pricing properties passed\n"; return 0;
   }
   catch (const std::exception& error) { std::cerr << "pricing test failed: " << error.what() << '\n'; return 1; }

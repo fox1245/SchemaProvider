@@ -694,6 +694,14 @@ bool page_token(std::string_view value) noexcept {
   return !value.empty() && value.size() <= 1024 &&
          std::all_of(value.begin(), value.end(), [](unsigned char c) { return c > 0x20 && c < 0x7f; });
 }
+// A price member a models listing names in the provider's words: a unit token without the grammar's tier (`/`) or band
+// (`+`), and not a unit only the catalogue writes, a route ceiling or a tool fee. Any other key is a skipped price, and
+// its text reaches no report.
+bool listed_unit(std::string_view key) {
+  return token(key) && key.find('/') == std::string_view::npos && key.find('+') == std::string_view::npos &&
+         !key.starts_with(tool_fee_prefix) &&
+         std::find(std::begin(route_ceiling_units), std::end(route_ceiling_units), key) == std::end(route_ceiling_units);
+}
 bool supported(Value capabilities, std::string_view name) {
   const auto capability = capabilities.get(name);
   return capability.is_object() && capability.get("supported").is_bool() && capability.get("supported").as_bool();
@@ -754,9 +762,10 @@ void leave_out(CatalogueEntry& entry, std::string_view unit, std::vector<Withhel
 // does.
 std::string unit_with_band(std::string_view key, std::uint64_t above) { return std::string(key) + '+' + std::to_string(above); }
 
-// A price an override lists: its member name and text, and its amount when an entry can hold it as a price.
+// A price an override lists: its unit by plain name (plain_price_unit), the member name it was listed under, its text,
+// and its amount when an entry can hold it as a price.
 struct ConditionalPrice {
-  std::string key, text;
+  std::string key, spelling, text;
   std::optional<std::uint64_t> rate;
 };
 // One entry of OpenRouter's `pricing.overrides`, as the price grammar reads it.
@@ -769,9 +778,9 @@ struct PriceOverride {
   std::optional<std::uint64_t> start, end;
   // A condition the grammar cannot read, a discount, or a member that is not price text.
   bool other = false;
-  std::vector<ConditionalPrice> prices;  // the members that are text
-  std::vector<std::string> unread;       // the other members that are not text
-  std::vector<std::string> members;      // every member with a value, sorted
+  std::vector<ConditionalPrice> prices;  // the unit members that are text
+  std::vector<std::string> unread;       // the other unit members, which are not text, by plain name
+  std::vector<std::string> members;      // the units it lists, by plain name, sorted
   bool readable() const {
     return std::all_of(prices.begin(), prices.end(), [](const ConditionalPrice& price) { return price.rate.has_value(); });
   }
@@ -789,7 +798,6 @@ PriceOverride read_override(Value element, bool& every_unit, ListingPage& page) 
   PriceOverride out;
   for (auto member : element.members()) {
     if (!present(member.value)) continue;
-    out.members.emplace_back(member.key);
     if (member.key == "min_prompt_tokens") {
       // Strictly more input tokens than this: the band `+<tokens>`, a count above zero of at most max_band_digits
       // digits. A band of zero is the unit without a band.
@@ -811,13 +819,22 @@ PriceOverride read_override(Value element, bool& every_unit, ListingPage& page) 
         ++page.skipped_override_prices;
       }
     } else if (member.value.is_string()) {
-      ConditionalPrice price{std::string(member.key), std::string(member.value.as_string()), std::nullopt};
-      // A unit an entry can hold, without a band of its own, at a price it can read.
-      if (token(price.key) && price.key.find('+') == std::string::npos && decimal(price.text)) price.rate = price_per_million(price.text);
+      // A key that is not a unit a listing names is a skipped price.
+      if (!listed_unit(member.key)) {
+        ++page.skipped_prices;
+        continue;
+      }
+      ConditionalPrice price{std::string(plain_price_unit(member.key)), std::string(member.key), std::string(member.value.as_string()), std::nullopt};
+      if (decimal(price.text)) price.rate = price_per_million(price.text);
+      out.members.push_back(price.key);
       out.prices.push_back(std::move(price));
     } else {
+      // Another condition, or a price that is not text.
       out.other = true;
-      out.unread.emplace_back(member.key);
+      if (listed_unit(member.key)) {
+        out.unread.emplace_back(plain_price_unit(member.key));
+        out.members.push_back(out.unread.back());
+      }
     }
   }
   std::sort(out.members.begin(), out.members.end());
@@ -844,10 +861,27 @@ void read_overrides(Value overrides, CatalogueEntry& e, ListingPage& page) {
   const auto has_unit = [&e](const std::string& unit) {
     return std::any_of(e.pricing.begin(), e.pricing.end(), [&](const auto& price) { return price.first == unit; });
   };
-  const auto base_rate = [&e](const std::string& key) -> std::optional<std::uint64_t> {
-    for (const auto& [unit, text] : e.pricing)
-      if (unit == key) return price_per_million(text);
-    return std::nullopt;
+  // Keys are units by plain name. The base price of one is the member that spells it, and where the base lists both
+  // spellings, the plain one, as pricing reads them.
+  const auto base_unit = [&e](const std::string& key) {
+    auto found = e.pricing.end();
+    for (auto price = e.pricing.begin(); price != e.pricing.end(); ++price)
+      if (plain_price_unit(price->first) == key && (found == e.pricing.end() || price->first == key)) found = price;
+    return found;
+  };
+  const auto base_rate = [&](const std::string& key) -> std::optional<std::uint64_t> {
+    const auto found = base_unit(key);
+    if (found == e.pricing.end()) return std::nullopt;
+    return price_per_million(found->second);
+  };
+  // The member name a unit is written under: its base price's, else the first an override lists.
+  std::map<std::string, std::string> first_spelling;
+  for (const auto& o : listed)
+    for (const auto& price : o.prices) first_spelling.try_emplace(price.key, price.spelling);
+  const auto spelling = [&](const std::string& key) -> std::string {
+    if (const auto found = base_unit(key); found != e.pricing.end()) return found->first;
+    if (const auto found = first_spelling.find(key); found != first_spelling.end()) return found->second;
+    return key;
   };
   // More overrides than an entry holds prices are not bands.
   const bool may_band = listed.size() <= max_prices;
@@ -904,7 +938,7 @@ void read_overrides(Value overrides, CatalogueEntry& e, ListingPage& page) {
     bool hold = candidates.size() <= room;
     for (std::size_t n = 0; hold && n < candidates.size(); ++n) {
       const auto& candidate = candidates[n];
-      const auto unit = unit_with_band(key, candidate.above);
+      const auto unit = unit_with_band(spelling(key), candidate.above);
       // "Later entries win per key" and "the highest band wins" agree only when the thresholds increase in listing order.
       if (n && candidate.above <= candidates[n - 1].above) hold = false;
       // A unit name an entry can hold, and not one it already has.
@@ -923,7 +957,7 @@ void read_overrides(Value overrides, CatalogueEntry& e, ListingPage& page) {
     }
     room -= candidates.size();
     for (const auto& candidate : candidates) {
-      bands.emplace_back(unit_with_band(key, candidate.above), candidate.price->text);
+      bands.emplace_back(unit_with_band(spelling(key), candidate.above), candidate.price->text);
       const auto [found, inserted] = lowest_band.try_emplace(key, *candidate.price->rate);
       if (!inserted && *candidate.price->rate < found->second) found->second = *candidate.price->rate;
     }
@@ -936,7 +970,7 @@ void read_overrides(Value overrides, CatalogueEntry& e, ListingPage& page) {
   for (const auto& item : by_window) {
     const auto& key = item.first;
     const auto& prices = item.second;
-    const auto at = std::find_if(e.pricing.begin(), e.pricing.end(), [&](const auto& price) { return price.first == key; });
+    const auto at = base_unit(key);
     const auto listed_base = at != e.pricing.end();
     const auto base = listed_base ? price_per_million(at->second) : std::nullopt;
     const bool partial = falls_back(key) && (!listed_base || std::any_of(listed.begin(), listed.end(), [&](const PriceOverride& o) {
@@ -951,7 +985,7 @@ void read_overrides(Value overrides, CatalogueEntry& e, ListingPage& page) {
       if (!dearest || *price->rate > *dearest->rate) dearest = price;
     page.window_prices_at_dearest += prices.size();
     if (!listed_base) {
-      e.pricing.emplace_back(key, dearest->text);
+      e.pricing.emplace_back(spelling(key), dearest->text);
       --room;
     } else if (*dearest->rate >= *base) {
       at->second = dearest->text;
@@ -962,14 +996,55 @@ void read_overrides(Value overrides, CatalogueEntry& e, ListingPage& page) {
     for (const auto& price : listed[i].prices) not_held(price.key, price.rate);
     // A member that is not text is a price only where the entry has that unit, and then one that cannot be read.
     for (const auto& key : listed[i].unread)
-      if (has_unit(key) || lowest_band.count(key)) not_held(key, std::nullopt);
+      if (base_unit(key) != e.pricing.end() || lowest_band.count(key)) not_held(key, std::nullopt);
   }
   e.pricing.insert(e.pricing.end(), bands.begin(), bands.end());
   if (every_unit) {
     leave_out(e, {}, page.withheld);
     return;
   }
-  for (const auto& key : dearer) leave_out(e, key, page.withheld);
+  // Named by the member the listing gives the unit under.
+  for (const auto& key : dearer) leave_out(e, spelling(key), page.withheld);
+}
+// A later copy of an id in the same listing page. Its other members merge as a later layer's do (merge_entry). A unit
+// both copies price under the same units, base price and bands alike, keeps the dearer price of each; a unit one copy
+// prices and the other does not, that the copies band differently, or whose differing prices cannot both be read, is
+// left out with the units its tokens would be billed at, since the entry cannot tell which copy bills a call.
+void merge_listed_copy(CatalogueEntry& into, const CatalogueEntry& from, std::vector<WithheldUnit>& withheld) {
+  using Prices = std::vector<std::pair<std::string, std::string>>;
+  const auto by_unit = [](const Prices& pricing) {
+    std::map<std::string, Prices> out;
+    for (const auto& price : pricing) out[std::string(plain_price_unit(unbanded_unit(price.first)))].push_back(price);
+    for (auto& item : out) std::sort(item.second.begin(), item.second.end());
+    return out;
+  };
+  const auto mine = by_unit(into.pricing), theirs = by_unit(from.pricing);
+  std::set<std::string> keys;
+  for (const auto& item : mine) keys.insert(item.first);
+  for (const auto& item : theirs) keys.insert(item.first);
+  Prices merged;
+  std::vector<std::string> disagree;  // by the member name a copy lists the unit under
+  for (const auto& key : keys) {
+    const auto a = mine.find(key), b = theirs.find(key);
+    const auto& named = a != mine.end() ? a->second : b->second;
+    bool same = a != mine.end() && b != theirs.end() && a->second.size() == b->second.size();
+    Prices dearer;
+    for (std::size_t i = 0; same && i < a->second.size(); ++i) {
+      const auto& mine_price = a->second[i];
+      const auto& their_price = b->second[i];
+      if (mine_price.first != their_price.first) same = false;
+      else if (mine_price.second == their_price.second) dearer.push_back(mine_price);
+      else if (const auto mine_rate = price_per_million(mine_price.second), their_rate = price_per_million(their_price.second); !mine_rate || !their_rate)
+        same = false;
+      else dearer.push_back(*mine_rate >= *their_rate ? mine_price : their_price);
+    }
+    if (same) merged.insert(merged.end(), dearer.begin(), dearer.end());
+    else disagree.emplace_back(unbanded_unit(named.front().first));
+  }
+  merge_entry(into, from);
+  std::sort(merged.begin(), merged.end());
+  into.pricing = std::move(merged);
+  for (const auto& unit : disagree) leave_out(into, unit, withheld);
 }
 // OpenRouter's `pricing` of one model: its text prices, then the bands and left-out units of its `overrides`.
 void read_pricing(Value pricing, CatalogueEntry& e, ListingPage& page) {
@@ -977,7 +1052,7 @@ void read_pricing(Value pricing, CatalogueEntry& e, ListingPage& page) {
     if (member.key == "overrides") continue;
     // A member that is neither text nor a number is no price.
     if (!member.value.is_string() && !member.value.is_number()) continue;
-    if (e.pricing.size() < max_prices && token(member.key) && member.value.is_string() && decimal(member.value.as_string()))
+    if (e.pricing.size() < max_prices && listed_unit(member.key) && member.value.is_string() && decimal(member.value.as_string()))
       e.pricing.emplace_back(std::string(member.key), std::string(member.value.as_string()));
     else ++page.skipped_prices;
   }
@@ -1071,13 +1146,13 @@ ListingResult parse_listing(Listing listing, std::string_view body, std::string_
       }
     }
     }
-    // A listing that names one id twice gives one entry, merged in listing order.
+    // A listing that names one id twice gives one entry, merged in listing order (merge_listed_copy).
     std::vector<CatalogueEntry> unique;
     std::map<std::string, std::size_t> seen;
     for (auto& entry : page.entries) {
       const auto [found, inserted] = seen.try_emplace(entry.id, unique.size());
       if (inserted) unique.push_back(std::move(entry));
-      else merge_entry(unique[found->second], entry);
+      else merge_listed_copy(unique[found->second], entry, page.withheld);
     }
     page.entries = std::move(unique);
     // An id listed twice keeps out every unit an override of either listing left out.

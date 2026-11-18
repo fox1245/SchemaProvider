@@ -278,6 +278,32 @@ void overrides_become_bands(transport::Transport& transport, Peer& peer) {
   passed("price overrides: long-context bands, time windows, malformed and unbounded overrides, and their prices");
 }
 
+// A price key that is not a unit name a listing gives (a tier or a band of the grammar, a route ceiling, a tool fee,
+// text that is no unit token) is skipped and counted, in the base prices and in overrides, and its text reaches no
+// report.
+void listing_keys_are_unit_names(transport::Transport& transport, Peer& peer) {
+  transport::RefreshRequest request;
+  request.sources = {source(Listing::OpenRouter, base(peer, "overrides-keys"))};
+  const auto result = refreshed(transport, request);
+  const auto& report = result.sources[0];
+  const auto& c = *result.generated;
+  for (const auto& unit : report.withheld)
+    for (const std::string_view banned : {"secret", "example.test", "https", "@"})
+      require(unit.model.find(banned) == std::string::npos && unit.unit.find(banned) == std::string::npos,
+              "a report holds no listed key text, not " + std::string(banned));
+  require(report.ok && report.skipped_prices == 8 && report.skipped_override_prices == 1,
+          "keys that are not unit names are skipped prices: " + std::to_string(report.skipped_prices));
+  require(pricing_text(c.entry("vendor/odd-keys")) == "completion=0.000002", "only unit names are prices: " + pricing_text(c.entry("vendor/odd-keys")));
+  // A listed band is skipped, and the override at that threshold gives its own band.
+  require(pricing_text(c.entry("vendor/listed-band")) == "completion=10 prompt=10 prompt+128000=8",
+          "the override's band, not the listed one: " + pricing_text(c.entry("vendor/listed-band")));
+  require(report.withheld == (std::vector<descriptor::WithheldUnit>{{"vendor/odd-keys", "prompt"}}), "only a unit name is named as left out");
+  for (const auto& unit : report.withheld)
+    for (const std::string_view banned : {"secret", "example.test", "https", "@"})
+      require(unit.model.find(banned) == std::string::npos && unit.unit.find(banned) == std::string::npos, "a report holds no listed key text");
+  passed("listing keys: tiers, bands, route ceilings, tool fees and other text are skipped, and no report names them");
+}
+
 // The listing's top-level prices are those of the time window current when it is fetched. A window's price is held at
 // the dearest of the windows, so the same listing gives the same entries at an hour of either window.
 void windows_give_one_entry_at_every_hour(transport::Transport& transport, Peer& peer) {
@@ -1117,6 +1143,23 @@ void the_tool_reads_route_ceilings(Peer& peer, const std::string& tool) {
   std::filesystem::remove_all(dir);
   passed("route ceilings: the command-line tool");
 }
+
+// The tool names a unit left out, and prints no listed key that is not a unit name.
+void the_tool_prints_no_listed_key_text(Peer& peer, const std::string& tool) {
+  const auto dir = std::filesystem::temp_directory_path() / ("sp_catalogue_refresh_keys_" + std::to_string(getpid()));
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir);
+  const auto out = (dir / "models.json").string(), printed = (dir / "printed.txt").string();
+  require(run_tool(tool, {"--source", "openrouter", "--url", "openrouter=" + base(peer, "overrides-keys"), "--out", out}, printed) == 0,
+          "the refresh exits 0");
+  const auto text = contents(printed);
+  require(text.find("left out vendor/odd-keys: prompt") != std::string::npos, "the tool names the unit left out:\n" + text);
+  for (const std::string_view banned : {"secret", "example.test", "https", "@"})
+    require(text.find(banned) == std::string::npos, "the tool prints no listed key text:\n" + text);
+  require(contents(out).find("secret") == std::string::npos, "the written catalogue holds no listed key text");
+  std::filesystem::remove_all(dir);
+  passed("listing keys: the command-line tool prints none of them");
+}
 #endif
 } // namespace
 
@@ -1129,6 +1172,7 @@ int main(int argc, char** argv) {
     no_ceilings_change_nothing(transport, peer);
     overrides_become_bands(transport, peer);
     windows_give_one_entry_at_every_hour(transport, peer);
+    listing_keys_are_unit_names(transport, peer);
     all_four_listings(transport, peer, generated);
     failures_keep_previous_entries(transport, peer, generated);
     empty_and_partial_listings_fail_their_source(transport, peer, generated);
@@ -1149,6 +1193,7 @@ int main(int argc, char** argv) {
     ceilings_count_listed_bands(transport, peer);
 #ifndef _WIN32
     if (argc == 4) the_tool_reads_route_ceilings(peer, argv[3]);
+    if (argc == 4) the_tool_prints_no_listed_key_text(peer, argv[3]);
 #endif
     std::cout << "catalogue refresh properties passed\n";
     return 0;
