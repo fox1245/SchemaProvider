@@ -538,6 +538,76 @@ void finish_reasons_from_the_table() {
     CHECK(c.stop.kind == StopKind::Unknown && c.stop.raw == "future_finish_reason" && text_of(c.messages) == "hello");
   }
 }
+// What a sink is shown of an answer: the seals and the stop kinds.
+struct Observed { Outcome outcome; std::size_t seals = 0; std::vector<StopKind> stops; };
+Observed observed(const std::vector<std::string>& wire, bool streaming) {
+  Observed result;
+  Accumulator accumulator({}, [&](const Event& event) {
+    if (std::holds_alternative<PartSeal>(event) || std::holds_alternative<MessageSeal>(event)) ++result.seals;
+    if (const auto* stop = std::get_if<Stop>(&event)) result.stops.push_back(stop->reason.kind);
+  });
+  chat::Codec codec(descriptor_value(), streaming ? chat::Mode::Sse : chat::Mode::Buffered, accumulator);
+  if (streaming) {
+    for (const auto& frame : wire) if (!codec.frame("message", frame)) break;
+    codec.finish();
+  } else codec.buffered(wire.front(), {});
+  CHECK(accumulator.outcome()); result.outcome = *accumulator.outcome();
+  return result;
+}
+// A finish_reason that is a failure-class word (`error`, `failed`, `cancelled`, `incomplete`) is a failure, buffered and
+// streamed, with text, with no content and with a tool call: no stop is emitted, nothing is sealed and no tool call is
+// executable. A buffered choice seals none of its content; a stream keeps the deltas it delivered before the finish
+// reason, unsealed. Matching is exact: another letter case of a word, like any value no table lists, is Unknown.
+void failure_words_are_failures() {
+  struct Word { std::string_view raw; ErrorKind kind; std::string_view message, code; };
+  const Word words[]{{"error", ErrorKind::RemoteFailure, "remote failure terminal", "chat.remote.failure_terminal"},
+                     {"failed", ErrorKind::RemoteFailure, "remote failure terminal", "chat.remote.failure_terminal"},
+                     {"cancelled", ErrorKind::Cancelled, "cancelled finish reason", "chat.finish_reason.cancelled"},
+                     {"incomplete", ErrorKind::Unsupported, "unsupported finish reason", "chat.finish_reason.unsupported"}};
+  const std::string call = R"({"id":"call","type":"function","function":{"name":"lookup","arguments":"{\"x\":1}"}})";
+  struct Content { std::string_view name; std::string message, delta; };
+  const Content contents[]{{"text", R"({"role":"assistant","content":"hello"})", R"({"role":"assistant","content":"hello"})"},
+                           {"none", R"({"role":"assistant","content":null})", ""},
+                           {"tool call", R"({"role":"assistant","content":null,"tool_calls":[)" + call + "]}", "{\"tool_calls\":[" + call + "]}"}};
+  const std::string counters = R"({"prompt_tokens":1,"completion_tokens":1,"total_tokens":2})";
+  for (const auto& word : words) {
+    const auto quoted = json::quote(word.raw);
+    for (const auto& content : contents)
+      for (const bool streaming : {false, true}) {
+        std::vector<std::string> wire;
+        if (!streaming) wire.push_back(body(content.message, quoted));
+        else {
+          if (!content.delta.empty()) wire.push_back(chunk(content.delta));
+          wire.push_back(chunk("{}", quoted));
+          wire.push_back("[DONE]");
+        }
+        const auto seen = observed(wire, streaming);
+        const auto& f = failed(seen.outcome, word.kind);
+        CHECK(f.error.safe_message == word.message && f.error.reason == word.code);
+        CHECK(seen.seals == 0 && seen.stops.empty() && !f.partial.stop && f.partial.executable_tool_calls().empty());
+        CHECK(text_of(f.partial.messages) == (streaming && content.name == "text" ? "hello" : ""));
+        CHECK(f.partial.invalid_tool_calls().size() == (streaming && content.name == "tool call" ? 1u : 0u));
+      }
+    // A usage tail after a finish reason: the stop of the earlier chunk was emitted, the word still fails the call and
+    // seals nothing.
+    auto tail = chunk("{}", quoted);
+    tail.pop_back();
+    tail += ",\"usage\":" + counters + "}";
+    const auto seen = observed({chunk(R"({"role":"assistant","content":"hello"})", "\"stop\""), tail, "[DONE]"}, true);
+    const auto& f = failed(seen.outcome, word.kind);
+    CHECK(f.error.safe_message == word.message && f.error.reason == word.code && seen.seals == 0);
+  }
+  for (const std::string_view raw : {"Cancelled", "future_finish_reason"}) {
+    CHECK(descriptor_value().stop_kind(raw) == descriptor::StopKind::Unknown);
+    const auto quoted = json::quote(raw);
+    for (const bool streaming : {false, true}) {
+      const auto seen = observed(streaming ? std::vector<std::string>{chunk(R"({"role":"assistant","content":"hello"})"), chunk("{}", quoted), "[DONE]"}
+                                           : std::vector<std::string>{body(R"({"role":"assistant","content":"hello"})", quoted)}, streaming);
+      const auto& c = completed(seen.outcome);
+      CHECK(c.stop.kind == StopKind::Unknown && c.stop.raw == raw && text_of(c.messages) == "hello");
+    }
+  }
+}
 // A custom policy without one of the family's embedded rows still decodes that value with the embedded kind; a value
 // neither table lists is Unknown. The descriptor's own table, which native bindings hash, does not gain the row.
 void embedded_rows_survive_a_custom_policy() {
@@ -1715,7 +1785,7 @@ int main() {
     owned_raw_observations(); raw_failure_evidence();
     chunk_partition_invariant(); no_terminal_no_success(); transport_projection_parity(); known_corrupt_never_ignored();
     invalid_tools_and_compatibility(); usage_knowledge(); accumulator_transitions_and_seals(); typed_request_encoding();
-    required_metadata_and_identity(); per_chunk_creation_clock(); omitted_open_finish_reason(); empty_text_delta_is_withheld(); failure_reasons(); finish_reasons_from_the_table(); embedded_rows_survive_a_custom_policy(); required_usage_and_unknown_cache(); unindexed_tool_order_and_optional_function(); buffered_close_precedence();
+    required_metadata_and_identity(); per_chunk_creation_clock(); omitted_open_finish_reason(); empty_text_delta_is_withheld(); failure_reasons(); finish_reasons_from_the_table(); failure_words_are_failures(); embedded_rows_survive_a_custom_policy(); required_usage_and_unknown_cache(); unindexed_tool_order_and_optional_function(); buffered_close_precedence();
     accumulator_interleaved_ordering(); accumulator_order_uniqueness_and_limits();
     tool_history_and_escaped_arguments(); one_tool_message_with_several_results(); output_cap_member_by_origin(); quoted_json_and_request_bounds();
     gateway_request_controls(); gateway_max_price(); gateway_plugins_and_citations();

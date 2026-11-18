@@ -322,6 +322,80 @@ void stop_classes() {
     CHECK(c.stop.kind == StopKind::Unknown && c.stop.raw == "future_stop_reason" && text(c.messages) == "kept");
   }
 }
+// A stop_reason that is a failure-class word (`error`, `failed`, `cancelled`, `incomplete`) is a failure, buffered and
+// streamed, with text, with no content and with a tool call: no stop is emitted and no tool call is executable. A
+// buffered answer seals none of its blocks. A stream seals a client call with the stop value, so a call it carried stays
+// unsealed, and it keeps a text block it closed before the stop value. Matching is exact: another letter case of a word,
+// like any value no table lists, is Unknown.
+void failure_words_are_failures() {
+  struct Word { std::string_view raw; ErrorKind kind; std::string_view message, code; };
+  const Word words[]{{"error", ErrorKind::RemoteFailure, "remote failure stop", "messages.remote.failure_stop"},
+                     {"failed", ErrorKind::RemoteFailure, "remote failure stop", "messages.remote.failure_stop"},
+                     {"cancelled", ErrorKind::Cancelled, "cancelled stop reason", "messages.stop.cancelled"},
+                     {"incomplete", ErrorKind::Unsupported, "unsupported stop reason", "messages.stop.reason_unsupported"}};
+  struct Content { std::string_view name; std::string blocks; std::vector<Frame> frames; };
+  const Content contents[]{
+      {"text", R"([{"type":"text","text":"hello"}])",
+       {block(0, R"({"type":"text","text":""})"), delta(0, R"({"type":"text_delta","text":"hello"})"), end(0)}},
+      {"none", "[]", {}},
+      {"tool call", R"([{"type":"tool_use","id":"call","name":"lookup","input":{"x":1}}])",
+       {block(0, R"({"type":"tool_use","id":"call","name":"lookup","input":{}})"),
+        delta(0, R"({"type":"input_json_delta","partial_json":"{\"x\":1}"})"), end(0)}}};
+  struct Seen { Outcome outcome; std::size_t seals = 0; std::vector<StopKind> stops; };
+  const auto seen = [](bool streaming, const std::vector<Frame>& frames, const std::string& wire) {
+    Seen result;
+    Accumulator acc({}, [&](const Event& event) {
+      if (std::holds_alternative<PartSeal>(event) || std::holds_alternative<MessageSeal>(event)) ++result.seals;
+      if (const auto* stopped = std::get_if<Stop>(&event)) result.stops.push_back(stopped->reason.kind);
+    });
+    messages::Codec codec(descriptor_value(), streaming ? messages::Mode::Sse : messages::Mode::Buffered, acc, context());
+    if (streaming) {
+      for (const auto& [event, data] : frames) if (!codec.frame(event, data)) break;
+      codec.finish();
+    } else codec.buffered(wire, {});
+    CHECK(acc.outcome()); result.outcome = *acc.outcome();
+    return result;
+  };
+  for (const auto& word : words)
+    for (const auto& content : contents)
+      for (const bool streaming : {false, true}) {
+        const auto quoted = json::quote(word.raw);
+        std::vector<Frame> frames{start()};
+        frames.insert(frames.end(), content.frames.begin(), content.frames.end());
+        frames.push_back(stop(quoted));
+        frames.push_back(done);
+        const auto observed = seen(streaming, frames, body(content.blocks, quoted));
+        const auto& f = failed(observed.outcome, word.kind);
+        CHECK(f.error.safe_message == word.message && f.error.reason == word.code);
+        CHECK(observed.stops.empty() && !f.partial.stop && f.partial.executable_tool_calls().empty());
+        const bool streamed_text = streaming && content.name == "text";
+        CHECK(observed.seals == (streamed_text ? 1u : 0u) && text(f.partial.messages) == (streamed_text ? "hello" : ""));
+        CHECK(f.partial.invalid_tool_calls().size() == (streaming && content.name == "tool call" ? 1u : 0u));
+      }
+  // A streamed client call that ends with a stop value is sealed after its Stop, and is executable.
+  std::string order;
+  Accumulator acc({}, [&](const Event& event) {
+    if (std::holds_alternative<PartSeal>(event)) order += "[seal]";
+    if (std::holds_alternative<Stop>(event)) order += "[stop]";
+  });
+  messages::Codec codec(descriptor_value(), messages::Mode::Sse, acc, context());
+  for (const auto& [event, data] : std::vector<Frame>{start(), contents[2].frames[0], contents[2].frames[1], contents[2].frames[2], stop("\"tool_use\""), done})
+    CHECK(codec.frame(event, data));
+  codec.finish();
+  CHECK(acc.outcome() && order == "[stop][seal]");
+  const auto& answered = completed(*acc.outcome());
+  CHECK(answered.stop.kind == StopKind::ToolUse && answered.executable_tool_calls().size() == 1);
+  for (const std::string_view raw : {"Failed", "future_stop_reason"}) {
+    CHECK(descriptor_value().stop_kind(raw) == descriptor::StopKind::Unknown);
+    const auto quoted = json::quote(raw);
+    const auto b = buffered(body(R"([{"type":"text","text":"hello"}])", quoted));
+    const auto s = stream({start(), block(0, R"({"type":"text","text":"hello"})"), end(0), stop(quoted), done});
+    for (const auto* o : {&b, &s}) {
+      const auto& c = completed(*o);
+      CHECK(c.stop.kind == StopKind::Unknown && c.stop.raw == raw && text(c.messages) == "hello");
+    }
+  }
+}
 // A custom policy without one of the family's embedded rows still decodes that value with the embedded kind; a value
 // neither table lists is Unknown. The descriptor's own table, which native bindings hash, does not gain the row.
 void embedded_rows_survive_a_custom_policy() {
@@ -1122,7 +1196,7 @@ int main() {
     usage_binding_precedence();
     usage_detail_forward_compatibility(); toolset_metadata_shapes();
     terminal_matrix(); text_thinking_and_order(); long_streams_are_one_part_per_block(); tool_fragments(); server_semantics(); server_result_shapes();
-    stop_classes(); embedded_rows_survive_a_custom_policy(); corruption_matrix(); usage_knowledge(); cut_stream_usage_has_no_placeholder_output(); uncached_input_rule(); limits_and_close_priority(); empty_text_delta_is_withheld(); failure_reasons(); response_metadata_is_kept();
+    stop_classes(); failure_words_are_failures(); embedded_rows_survive_a_custom_policy(); corruption_matrix(); usage_knowledge(); cut_stream_usage_has_no_placeholder_output(); uncached_input_rule(); limits_and_close_priority(); empty_text_delta_is_withheld(); failure_reasons(); response_metadata_is_kept();
     advisor_result_and_iterations(); mcp_and_kept_blocks(); compaction_blocks_and_usage();
     std::cout << "messages semantic tests passed\n";
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }

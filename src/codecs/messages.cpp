@@ -7,6 +7,7 @@
 #include "core/native.h"
 #include "descriptor/descriptor.h"
 #include "descriptor/policy.h"
+#include "descriptor/stop_facts.h"
 #include "json/json.h"
 #include <algorithm>
 #include <limits>
@@ -60,6 +61,12 @@ bool unique_envelope(json::Value v, bool root = false, bool block = false) {
     }
   } else if (v.is_array()) for (auto item : v.elements()) if (!unique_envelope(item)) return false;
   return true;
+}
+// Whether the block at `index` is a call the client executes (a `tool_use` block).
+template <class Calls> bool client_call(const Calls& calls, uint64_t index) {
+  return std::any_of(calls.begin(), calls.end(), [&](const auto& call) {
+    return call.second.index == index && call.second.kind == ToolCallKind::ClientExecuted;
+  });
 }
 }
 Codec::Codec(const descriptor::ValidatedDescriptor& descriptor, Mode mode, Accumulator& accumulator,
@@ -225,6 +232,10 @@ bool Codec::message(json::Value v, bool streaming) {
   generation_ = v.get("id").as_string(); model_ = v.get("model").as_string();
   if (!emit(Begin{generation_}) || !emit(MessageBegin{{0}, generation_, Role::Assistant, context_})) return false;
   begun_ = true;
+  // A buffered body seals each block as it reads it, so a failure-class stop value fails it before any block: the usage
+  // is kept, as for any failure, and terminal() refuses the word.
+  if (const auto reason = v.get("stop_reason"); !streaming && reason.is_string() && descriptor::failure_stop(reason.as_string()))
+    return usage(usage_at(v), true, streaming) && terminal(v, streaming);
   uint64_t index = 0;
   for (auto item : content.elements()) if (!block(item, index++, false)) return false;
   if (!usage(usage_at(v), true, streaming)) return false;
@@ -247,7 +258,13 @@ bool Codec::terminal(json::Value v, bool initial) {
     if (sequence.is_string() || details.is_object()) return fail(ErrorKind::ProtocolCorrupt, "stop metadata without reason");
     return true;
   }
-  if (reason.as_string() == "error") return fail(ErrorKind::RemoteFailure, "remote failure stop");
+  // A failure-class word (no stop table may list one) fails the call before a stop is emitted. A streamed client call is
+  // sealed only with a stop below, so none of this answer is executable.
+  if (const auto failure = descriptor::failure_stop_class(reason.as_string())) {
+    if (*failure == descriptor::FailureStop::Cancelled) return fail(ErrorKind::Cancelled, "cancelled stop reason");
+    if (*failure == descriptor::FailureStop::Incomplete) return fail(ErrorKind::Unsupported, "unsupported stop reason");
+    return fail(ErrorKind::RemoteFailure, "remote failure stop");
+  }
   StopReason next{table_stop(descriptor_, reason.as_string()), std::string(reason.as_string())};
   if (sequence.is_string()) next.sequence = std::string(sequence.as_string());
   if (details.is_object()) next.details = own(details);
@@ -257,7 +274,12 @@ bool Codec::terminal(json::Value v, bool initial) {
     return true;
   }
   if (!emit(Stop{next})) return false;
-  stop_ = std::move(next); stopped_ = true; return true;
+  stop_ = std::move(next); stopped_ = true;
+  // The stream's client calls, whose blocks have all stopped, are sealed now that the stop value is known.
+  if (mode_ == Mode::Sse)
+    for (const auto& [index, b] : blocks_)
+      if (client_call(calls_, index) && !emit(PartSeal{b.local, {}})) return false;
+  return true;
 }
 bool Codec::caller(json::Value v) {
   if (!v.valid()) return true;
@@ -433,6 +455,9 @@ bool Codec::end_block(uint64_t index) {
   // that never received actual JSON bytes (empty delta strings do not count).
   if (mode_ == Mode::Sse && b.kind == PartKind::ToolCall && !b.initial_input && !b.argument_bytes)
     if (!emit(PartDelta{b.local, {b.kind, "{}"}})) return false;
+  // A streamed client call is sealed with the stop value (terminal()): a stream that fails, or ends without one, leaves
+  // it unsealed, so it never becomes executable.
+  if (mode_ == Mode::Sse && client_call(calls_, index)) { b.closed = true; return true; }
   std::shared_ptr<const json::Document> kept;
   if (b.kept_changed) {
     std::string text = "{";

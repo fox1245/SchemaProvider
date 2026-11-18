@@ -6,6 +6,7 @@
 #include "codecs/stop_table.h"
 #include "core/native.h"
 #include "descriptor/descriptor.h"
+#include "descriptor/stop_facts.h"
 #include "json/json.h"
 #include <algorithm>
 #include <iterator>
@@ -204,9 +205,16 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
     if ((!reason.valid() && !omitted_expiry_reason && !omitted_open_reason) ||
         (reason.valid() && !reason.is_null() && !reason.is_string()))
       return fail(ErrorKind::ProtocolCorrupt, "invalid finish reason");
+    // A failure-class word (no stop table may list one) fails the call: no stop is emitted and nothing of the choice is
+    // sealed, so no tool call of it is executable.
+    const auto failure_word = reason.is_string() ? descriptor::failure_stop_class(reason.as_string()) : std::nullopt;
+    const auto failure_reason = [&] {
+      if (*failure_word == descriptor::FailureStop::Cancelled) return fail(ErrorKind::Cancelled, "cancelled finish reason");
+      if (*failure_word == descriptor::FailureStop::Incomplete) return fail(ErrorKind::Unsupported, "unsupported finish reason");
+      return fail(ErrorKind::RemoteFailure, "remote failure terminal");
+    };
     if (terminal_tail) {
-      if (reason.is_string() && reason.as_string() == "error")
-        return fail(ErrorKind::RemoteFailure, "remote failure terminal");
+      if (failure_word) return failure_reason();
       const bool expiry_tail = delta.get("audio").is_object();
       const bool same_reason = reason.is_string() && !finish_reason_.empty() && reason.as_string() == finish_reason_;
       if (!streaming || !delta.is_object() || (!usage_value.is_object() && !expiry_tail) ||
@@ -235,10 +243,14 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
         if (!text_channel || (!member.value.is_null() && (!member.value.is_string() || !member.value.as_string().empty())))
           return fail(ErrorKind::ProtocolCorrupt, "data after finish reason");
       }
+    } else if (!streaming && failure_word) {
+      // A buffered choice seals its content as it reads it, so the word is checked before it; a stream seals nothing
+      // before its end, and keeps the deltas it delivered.
+      return failure_reason();
     } else if (!item(delta, streaming)) return false;
     if (reason.is_string() && !terminal_tail) {
       if (reason.as_string().empty()) return fail(ErrorKind::ProtocolCorrupt, "empty finish reason");
-      if (reason.as_string() == "error") return fail(ErrorKind::RemoteFailure, "remote failure terminal");
+      if (failure_word) return failure_reason();
       const auto kind = table_stop(descriptor_, reason.as_string());
       if (streaming && (!finish_reasoning_details() || !finish_audio())) return false;
       if (!emit(Stop{{kind, std::string(reason.as_string())}})) return false;

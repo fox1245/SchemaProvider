@@ -6,6 +6,7 @@
 #include "core/native.h"
 #include "crypto/crypto.h"
 #include "descriptor/descriptor.h"
+#include "descriptor/stop_facts.h"
 #include "json/json.h"
 #include <algorithm>
 #include <limits>
@@ -185,6 +186,21 @@ bool Codec::candidate(json::Value c) {
   const bool terminal = reason.is_string() && !reason.as_string().empty() && reason.as_string() != "FINISH_REASON_UNSPECIFIED";
   if (stopped_) return fail(ErrorKind::ProtocolCorrupt, "Gemini candidate after finish reason");
   const auto raw = terminal ? reason.as_string() : std::string_view{};
+  // A failure-class word (which no stop table may list) ends the call before the stop table is read, as the two values
+  // below do: the stop stays Unknown and nothing the candidate carried is sealed, so no call becomes executable.
+  const auto failure_word = descriptor::failure_stop_class(raw);
+  const auto failure_reason = [&] {
+    auto details = own(c); if (!details) return false;
+    stop_ = StopReason{StopKind::Unknown, std::string(raw), {}, std::move(details)};
+    stopped_ = true;
+    if (!emit(Stop{*stop_})) return false;
+    if (*failure_word == descriptor::FailureStop::Cancelled) return fail(ErrorKind::Cancelled, "Gemini cancelled finish reason");
+    if (*failure_word == descriptor::FailureStop::Incomplete) return fail(ErrorKind::Unsupported, "unsupported Gemini finish reason");
+    return fail(ErrorKind::RemoteFailure, "Gemini failure finish reason");
+  };
+  // A buffered candidate seals a part as it reads it, so there the word is decided before the parts. A stream decides it
+  // with the finish reason below and keeps what it delivered; a client call is sealed only with a stop it reaches.
+  if (failure_word && mode_ == Mode::Buffered) return failure_reason();
   if (auto content = c.get("content"); content.valid()) {
     if (!content.is_object()) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini candidate content");
     if (auto role = content.get("role"); role.valid() && (!role.is_string() || role.as_string() != "model")) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini output role");
@@ -195,6 +211,7 @@ bool Codec::candidate(json::Value c) {
   }
   unknown(c, {"index", "content", "finishReason", "finishMessage", "safetyRatings", "citationMetadata", "tokenCount", "groundingAttributions", "groundingMetadata", "avgLogprobs", "logprobsResult", "urlContextMetadata"});
   if (terminal) {
+    if (failure_word) return failure_reason();
     auto details = own(c); if (!details) return false;
     // The two values that report a rejected request end the call before the stop table is read: whatever row gives
     // them a kind, the stop stays Unknown and nothing the candidate carried is sealed, so no call becomes executable.
