@@ -254,9 +254,9 @@ Route ceilings are read only for the models a host names. An OpenRouter source's
   - `ceiling_output`: `completion`, `internal_reasoning`, `audio_output` and `image_token` (the listing does not say which side an image token bills, so it counts on both);
   - `ceiling_request`: the dearest `request` fee, written when an endpoint charges one.
 
-  Prices are read exactly, as listed prices are, and written as the shortest decimal text that reads back as the same amount. Prices per image, per output image and per web search are per item and not covered, as for listed prices. An endpoint that leaves out an optional price lists none of its own for it.
+  Prices are read exactly, as listed prices are, and written as the shortest decimal text that reads back as the same amount. Prices per image, per output image and per web search are per item and not covered, as for listed prices. An endpoint that leaves out an optional token price is read as billing those tokens at its prompt or completion price, as `estimate` does for an entry without them, and those prices are in the ceiling. A request fee is the exception: nothing says what a fee left out costs.
 - **Never below an endpoint.** A unit gets no ceiling when one of its prices at any endpoint is missing (`prompt` or `completion`, which every endpoint must list), negative (a variable price), not decimal text, or too large for the catalogue; the other units are still written. The whole ceiling is left out when:
-  - a `request` fee cannot be read, because a bound without `ceiling_request` charges the listed fee;
+  - a `request` fee cannot be read, or some endpoints list one and others do not, because a bound without `ceiling_request` charges the listed fee;
   - a `discount` is not a number from 0 to 1, because only such a discount keeps the listed prices an upper bound;
   - the body is not an endpoints listing: not JSON, a `data.id` of another model, an `endpoints` that is not an array, an endpoint without a `pricing` object, or `overrides` that are not an array of objects;
   - the endpoint list is empty (an alias);

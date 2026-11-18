@@ -213,9 +213,11 @@ bool ceiling_unit(std::string_view unit) noexcept {
 // `ceiling_input` and every output token at `ceiling_output` (pricing::estimate), so each is the dearest price per
 // token of its side: cache reads and writes, audio and reasoning included, not the prompt and completion prices
 // alone. `image_token` does not say which side it bills, so it counts on both. `prompt` and `completion` are
-// required; an endpoint that leaves out an optional member lists no price of its own for it, and an override that
-// leaves one out keeps the base price. The prices per image, per output image and per web search are per item, which
-// no usage counter counts, so no ceiling covers them.
+// required. An endpoint that leaves out an optional token price is read as billing those tokens at its prompt or
+// completion price, as pricing::estimate does for an entry without them, and an override that leaves one out keeps
+// the base price. `request` is the exception: nothing says what a fee left out costs, so a fee that some endpoints
+// list and others leave out is missing where the others have it. The prices per image, per output image and per web
+// search are per item, which no usage counter counts, so no ceiling covers them.
 struct PriceMember {
   std::string_view name;
   Side side;
@@ -292,6 +294,7 @@ EndpointsRead read_endpoints(std::string_view body, std::string_view id) {
       if (!dearest || std::get<std::uint64_t>(rate) > *dearest) dearest = std::get<std::uint64_t>(rate);
     }
   };
+  std::size_t with_fee = 0;
   for (const auto endpoint : endpoints.elements()) {
     const auto prices = endpoint.get("pricing");
     const auto discount = prices.get("discount");
@@ -299,7 +302,12 @@ EndpointsRead read_endpoints(std::string_view body, std::string_view id) {
     read(prices, true);
     if (const auto overrides = prices.get("overrides"); present(overrides))
       for (const auto entry : overrides.elements()) read(entry, false);
+    for (const auto& member : price_members)
+      if (member.side == Request && present(prices.get(member.name))) ++with_fee;
   }
+  if (with_fee != 0 && with_fee != endpoints.size())
+    for (std::size_t i = 0; i < std::size(price_members); ++i)
+      if (price_members[i].side == Request) out.unusable.emplace(Request, i, Unusable::Missing);
   return out;
 }
 

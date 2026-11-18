@@ -132,11 +132,12 @@ const price = (prompt, completion, more = {}) => ({ prompt, completion, ...more 
 const ceilingDocs = (version) => ({
   // The dearest of several endpoints, unit by unit; the third endpoint writes a trailing zero.
   'vendor/many': { endpoints: [price('0.000001', '0.000004'), price('0.000003', '0.000002'), price('0.0000020', version === 1 ? '0.000005' : '0.000006')] },
-  // A request fee at one endpoint, a zero fee at another and none at the third.
+  // Request fees at every endpoint, one of them zero; zero fees only; and a fee only some endpoints list.
   'vendor/fee': version === 1
-    ? { endpoints: [price('0.000001', '0.000001', { request: '0' }), price('0.000001', '0.000001', { request: '0.0002' }), price('0.000001', '0.000001')] }
+    ? { endpoints: [price('0.000001', '0.000001', { request: '0' }), price('0.000001', '0.000001', { request: '0.0002' }), price('0.000001', '0.000001', { request: '0.0001' })] }
     : { body: '<html>captive portal</html>' },
-  'vendor/zero-fee': { endpoints: [price('0.000001', '0.000002', { request: '0' }), price('0.000001', '0.000002')] },
+  'vendor/zero-fee': { endpoints: [price('0.000001', '0.000002', { request: '0' }), price('0.000001', '0.000002', { request: '0' })] },
+  'vendor/missing-fee': { endpoints: [price('0.000001', '0.000002', { request: '0.001' }), price('0.000001', '0.000002')] },
   // Cache, reasoning and long-context prices above the prompt and completion prices, a discount, and prices per
   // image and per search, which no token ceiling covers.
   'vendor/cached': { endpoints: [
