@@ -8,7 +8,7 @@ struct ToolDefinition {
   std::shared_ptr<const json::Document> parameters;
 };
 enum class HistoryMode { NativeOnly, PortableForeign };
-enum class ThinkingLevel { Minimal, Low, Medium, High };
+enum class ThinkingLevel { Minimal, Low, Medium, High, XHigh };
 enum class SafetyCategory { Harassment, HateSpeech, SexuallyExplicit, DangerousContent, CivicIntegrity };
 enum class SafetyThreshold { BlockNone, BlockOnlyHigh, BlockMediumAndAbove, BlockLowAndAbove, Off };
 struct SafetySetting {
