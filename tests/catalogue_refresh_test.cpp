@@ -994,6 +994,16 @@ void ceilings_count_listed_bands(transport::Transport& transport, Peer& peer) {
                R"("overrides":[{"min_prompt_tokens":100000,"prompt":"0.000005","completion":"0.000007"}]},)"
                R"("vendor/withheld-floor":{"prompt":"0.0000001","completion":"0.0000001","overrides":[{"utc_start":0,"utc_end":600,"prompt":"0.000009"}]},)"
                R"("vendor/unread-floor":{"prompt":"0.0000001","completion":"0.0000001","overrides":["long context"]}}})");
+  // A ceiling unit the models listing names is dropped, with its bands: a ceiling comes from the endpoints only.
+  peer.command(R"({"set":"ceilings-band-unit","models":{"vendor/band-ceiling":[{"prompt":"0.000001","completion":"0.000002"}]},)"
+               R"("listed":{"vendor/band-ceiling":{"prompt":"0.0000001","completion":"0.0000001",)"
+               R"("overrides":[{"min_prompt_tokens":1000,"ceiling_input":"0.0000000001","ceiling_output":"0.0000000001"}]}}})");
+  transport::RefreshRequest named;
+  named.sources = {ceiling_source(peer, "ceilings-band-unit", {"vendor/band-ceiling"})};
+  const auto named_result = refreshed(transport, named);
+  const auto* band_ceiling = named_result.generated->entry("vendor/band-ceiling");
+  require(pricing_text(band_ceiling) == "ceiling_input=0.000001 ceiling_output=0.000002 completion=0.0000001 prompt=0.0000001",
+          "a listed ceiling band is dropped, not kept beside the ceiling: " + pricing_text(band_ceiling));
   transport::RefreshRequest request;
   request.sources = {ceiling_source(peer, "ceilings-bands", {"vendor/band-floor", "vendor/withheld-floor", "vendor/unread-floor"})};
   const auto result = refreshed(transport, request);

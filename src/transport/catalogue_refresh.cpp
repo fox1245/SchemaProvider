@@ -370,8 +370,9 @@ void read_ceilings(Transport& transport, const RefreshRequest& request, const Pl
     const auto found = std::find_if(entries.begin(), entries.end(), [&](const CatalogueEntry& e) { return !e.prefix && e.id == id; });
     if (found == entries.end()) { gap({}, {}, "not in the listing"); continue; }
     auto& entry = *found;
-    // A ceiling comes from the endpoints listing only; a unit of that name in the models listing is dropped.
-    std::erase_if(entry.pricing, [](const auto& price) { return ceiling_unit(price.first); });
+    // A ceiling comes from the endpoints listing only; a unit of that name in the models listing is dropped, and so are
+    // its input bands.
+    std::erase_if(entry.pricing, [](const auto& price) { return ceiling_unit(descriptor::unbanded_unit(price.first)); });
     // The listed price members the entry left out for overrides it cannot hold. Conditional prices that cannot be read
     // at all (an empty member) leave no side a known floor.
     std::vector<std::string_view> left_out;
