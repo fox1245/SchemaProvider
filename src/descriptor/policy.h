@@ -268,6 +268,7 @@ class DescriptorPolicy final {
   std::string identity_, content_digest_, pair_digest_;
   CatalogueSnapshot catalogue_;
   std::vector<ResolvedDefaults> resolved_;
+  std::vector<std::string> retired_;  // Unused: holds the place of a retired member, so the installed layout of interface 7 is unchanged.
   std::vector<std::pair<std::string, std::string>> completion_cap_origins_;  // family, origin
   std::vector<EndpointFact> endpoints_;
   std::vector<std::pair<std::string, std::uint32_t>> controls_;  // family, bit set of Control
