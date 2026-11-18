@@ -58,6 +58,8 @@ The paid baseline recorded 293/300 pairs: Chat/Responses/Messages 60/60 each, Ge
 
 Remote mixed-gRPC TSan limits belong to the NeoGraph integrated cohort and are not a race-freedom claim. Earlier SDK, sanitizer and installed-consumer observations retain their original dates/counts; future verification must record a new cohort rather than relabel old outputs current.
 
+Not scheduled, with the scope unchanged: the realtime translation, Lyria RealTime and GPT-Live sessions ([D8](decisions/D8-realtime-sessions.md)), and the provider-side stores: provider-held caches, file search stores, vector stores, conversations and voices ([D7](decisions/D7-files-batches.md)). Each gets its own issue when work on it starts.
+
 ## Explicitly outside the current SDK
 
 - Responses WebSocket, automatic server-state transcript retrieval/backfill and transparent cursor-failure resend; implemented previous_response_id state is a distinct bounded path.
