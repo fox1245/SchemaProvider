@@ -17,7 +17,7 @@ std::optional<Handle> from_interaction(const descriptor::ValidatedDescriptor&, c
 interactions::Request interaction_poll(const Handle&);
 // An Interactions outcome as a job state: Pending while queued, Running while in progress, Cancelled or Failed when
 // the interaction ended that way, Unknown for a status the SDK does not know (an Unknown stop; `raw_status` keeps the
-// status), and Completed once it stopped for any other reason. Other failures (the transport, the deadline) stay
+// status), and Completed once it stopped for any other reason, a delete (`deleted`) included. Other failures (the transport, the deadline) stay
 // failures. The state's raw events are the outcome's.
 Outcome interaction_state(const descriptor::ValidatedDescriptor&, const sp::Outcome&);
 }  // namespace sp::jobs

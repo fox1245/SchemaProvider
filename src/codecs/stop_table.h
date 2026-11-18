@@ -1,9 +1,10 @@
 #pragma once
 // How a codec reads a provider's stop value. The descriptor's stop table (the family policy's `stop_reasons` with the
-// descriptor's additions) gives the kind; a value the table does not list is Unknown, and the codec keeps the value as
-// StopReason::raw. Not installed: it is not part of the public interface.
+// descriptor's additions), then the embedded policy's row, gives the kind; a value neither lists is Unknown, and the
+// codec keeps the value as StopReason::raw. Not installed: it is not part of the public interface.
 #include "core/value.h"
 #include "descriptor/descriptor.h"
+#include "descriptor/stop_facts.h"
 #include <string_view>
 
 namespace sp {
@@ -25,8 +26,14 @@ constexpr StopKind stop_kind_of(descriptor::StopKind kind) noexcept {
   }
   return StopKind::Unknown;
 }
-// The kind the descriptor's stop table gives `raw`: Unknown for a value the table does not list.
-inline StopKind table_stop(const descriptor::ValidatedDescriptor& descriptor, std::string_view raw) {
-  return stop_kind_of(descriptor.stop_kind(raw));
+// The kind the descriptor's stop table gives `raw`. A value the table has no row for takes the row the embedded policy
+// gives the family, so a custom policy that leaves an embedded row out does not change how the value decodes; only a
+// value neither table lists is Unknown. The descriptor's table itself, which native bindings hash, stays as it is.
+inline StopKind table_stop(const descriptor::ValidatedDescriptor& owner, std::string_view raw) {
+  for (const auto& [value, kind] : owner.stop_mappings())
+    if (value == raw) return stop_kind_of(kind);
+  for (const auto& [value, kind] : descriptor::embedded_stops(owner.family()))
+    if (value == raw) return stop_kind_of(kind);
+  return StopKind::Unknown;
 }
 } // namespace sp

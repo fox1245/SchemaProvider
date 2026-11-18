@@ -164,6 +164,9 @@ void interaction_jobs() {
   CHECK(std::get<jobs::State>(state(done)).status == jobs::Status::Completed);
   auto cancelled = pending; cancelled.stop = StopReason{StopKind::Unknown, "cancelled"};
   CHECK(std::get<jobs::State>(state(cancelled)).status == jobs::Status::Cancelled);
+  // A delete is answered with the codec's `deleted` stop: the job is done.
+  Completion deleted; deleted.stop = StopReason{StopKind::Unknown, "deleted"};
+  CHECK(std::get<jobs::State>(state(deleted)).status == jobs::Status::Completed && std::get<jobs::State>(state(deleted)).raw_status == "deleted");
   // A status the SDK does not know is not a finished job; the status word is kept.
   auto unknown = pending; unknown.stop = StopReason{StopKind::Unknown, "paused_for_review"};
   CHECK(std::get<jobs::State>(state(unknown)).status == jobs::Status::Unknown && std::get<jobs::State>(state(unknown)).raw_status == "paused_for_review");

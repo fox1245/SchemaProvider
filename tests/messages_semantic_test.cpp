@@ -2,7 +2,11 @@
 #include "codecs/messages_request.h"
 #include "core/native.h"
 #include "descriptor/descriptor.h"
+#include "descriptor/policy.h"
 #include "json/json.h"
+#include "sp/config_defaults.h"
+#include "support/policy_edit.h"
+#include <algorithm>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
@@ -316,6 +320,38 @@ void stop_classes() {
   for (const auto* o : {&b, &s}) {
     const auto& c = completed(*o);
     CHECK(c.stop.kind == StopKind::Unknown && c.stop.raw == "future_stop_reason" && text(c.messages) == "kept");
+  }
+}
+// A custom policy without one of the family's embedded rows still decodes that value with the embedded kind; a value
+// neither table lists is Unknown. The descriptor's own table, which native bindings hash, does not gain the row.
+void embedded_rows_survive_a_custom_policy() {
+  auto loaded = descriptor::load_policy(policy_edit::without_stop_row("anthropic.messages", "max_tokens"), config_defaults::codec_defaults_json);
+  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(loaded));
+  const auto policy = std::get<descriptor::PolicySnapshot>(loaded);
+  CHECK(policy->family("anthropic.messages")->stops.size() + 1 == descriptor::builtin_policy()->family("anthropic.messages")->stops.size());
+  const auto loaded_descriptor = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"synthetic-messages","family":"anthropic.messages","connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":"/v1/messages","streaming":"/v1/messages"}}})", policy);
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded_descriptor));
+  const auto& d = std::get<descriptor::ValidatedDescriptor>(loaded_descriptor);
+  CHECK(std::none_of(d.stop_mappings().begin(), d.stop_mappings().end(), [](const auto& row) { return row.first == "max_tokens"; }));
+  messages::Request request; request.model = "fixture-model"; request.account_scope = "fixture-account";
+  request.messages.push_back(Message{"", Role::User, {Text{"Hello"}}});
+  auto encoded = messages::encode(d, request, true);
+  CHECK(std::holds_alternative<messages::EncodedRequest>(encoded));
+  const auto context = std::get<messages::EncodedRequest>(encoded).context;
+  const auto stop_of = [&](std::string_view reason, bool streaming) -> StopReason {
+    Accumulator acc; messages::Codec codec(d, streaming ? messages::Mode::Sse : messages::Mode::Buffered, acc, context);
+    if (streaming) {
+      for (const auto& [event, data] : std::vector<Frame>{start(), stop(json::quote(reason), R"({"output_tokens":0})"), done})
+        if (!codec.frame(event, data)) break;
+      codec.finish();
+    } else codec.buffered(body("[]", json::quote(reason), initial_usage), {});
+    CHECK(acc.outcome());
+    return completed(*acc.outcome()).stop;
+  };
+  for (const bool streaming : {false, true}) {
+    const auto capped = stop_of("max_tokens", streaming), unknown = stop_of("future_stop_reason", streaming);
+    CHECK(capped.kind == StopKind::MaxTokens && capped.raw == "max_tokens");
+    CHECK(unknown.kind == StopKind::Unknown && unknown.raw == "future_stop_reason");
   }
 }
 void corruption_matrix() {
@@ -1086,7 +1122,7 @@ int main() {
     usage_binding_precedence();
     usage_detail_forward_compatibility(); toolset_metadata_shapes();
     terminal_matrix(); text_thinking_and_order(); long_streams_are_one_part_per_block(); tool_fragments(); server_semantics(); server_result_shapes();
-    stop_classes(); corruption_matrix(); usage_knowledge(); cut_stream_usage_has_no_placeholder_output(); uncached_input_rule(); limits_and_close_priority(); empty_text_delta_is_withheld(); failure_reasons(); response_metadata_is_kept();
+    stop_classes(); embedded_rows_survive_a_custom_policy(); corruption_matrix(); usage_knowledge(); cut_stream_usage_has_no_placeholder_output(); uncached_input_rule(); limits_and_close_priority(); empty_text_delta_is_withheld(); failure_reasons(); response_metadata_is_kept();
     advisor_result_and_iterations(); mcp_and_kept_blocks(); compaction_blocks_and_usage();
     std::cout << "messages semantic tests passed\n";
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }

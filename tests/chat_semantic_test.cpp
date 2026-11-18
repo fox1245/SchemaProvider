@@ -11,6 +11,8 @@
 #include "json/json.h"
 #include "sp/config_defaults.h"
 #include "transport/sse_framer.h"
+#include "support/policy_edit.h"
+#include <algorithm>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -532,6 +534,35 @@ void finish_reasons_from_the_table() {
   for (const auto& outcome : answers("future_finish_reason")) {
     const auto& c = completed(outcome);
     CHECK(c.stop.kind == StopKind::Unknown && c.stop.raw == "future_finish_reason" && text_of(c.messages) == "hello");
+  }
+}
+// A custom policy without one of the family's embedded rows still decodes that value with the embedded kind; a value
+// neither table lists is Unknown. The descriptor's own table, which native bindings hash, does not gain the row.
+void embedded_rows_survive_a_custom_policy() {
+  auto loaded = descriptor::load_policy(policy_edit::without_stop_row("openai.chat", "length"), config_defaults::codec_defaults_json);
+  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(loaded));
+  const auto policy = std::get<descriptor::PolicySnapshot>(loaded);
+  CHECK(policy->family("openai.chat")->stops.size() + 1 == descriptor::builtin_policy()->family("openai.chat")->stops.size());
+  const auto loaded_descriptor = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"synthetic-chat","family":"openai.chat","connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":"/v1/chat/completions","streaming":"/v1/chat/completions"}}})", policy);
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded_descriptor));
+  const auto& d = std::get<descriptor::ValidatedDescriptor>(loaded_descriptor);
+  CHECK(std::none_of(d.stop_mappings().begin(), d.stop_mappings().end(), [](const auto& row) { return row.first == "length"; }));
+  const auto stop_of = [&](std::string_view reason, bool streaming) -> StopReason {
+    Accumulator accumulator;
+    chat::Codec codec(d, streaming ? chat::Mode::Sse : chat::Mode::Buffered, accumulator);
+    const auto quoted = json::quote(reason);
+    if (streaming) {
+      for (const auto& frame : {chunk(R"({"role":"assistant","content":"hello"})"), chunk("{}", quoted), std::string("[DONE]")})
+        if (!codec.frame("message", frame)) break;
+      codec.finish();
+    } else codec.buffered(body(R"({"role":"assistant","content":"hello"})", quoted), {});
+    CHECK(accumulator.outcome());
+    return completed(*accumulator.outcome()).stop;
+  };
+  for (const bool streaming : {false, true}) {
+    const auto capped = stop_of("length", streaming), unknown = stop_of("future_finish_reason", streaming);
+    CHECK(capped.kind == StopKind::MaxTokens && capped.raw == "length");
+    CHECK(unknown.kind == StopKind::Unknown && unknown.raw == "future_finish_reason");
   }
 }
 void required_usage_and_unknown_cache() {
@@ -1606,7 +1637,7 @@ int main() {
     owned_raw_observations(); raw_failure_evidence();
     chunk_partition_invariant(); no_terminal_no_success(); transport_projection_parity(); known_corrupt_never_ignored();
     invalid_tools_and_compatibility(); usage_knowledge(); accumulator_transitions_and_seals(); typed_request_encoding();
-    required_metadata_and_identity(); per_chunk_creation_clock(); omitted_open_finish_reason(); empty_text_delta_is_withheld(); failure_reasons(); finish_reasons_from_the_table(); required_usage_and_unknown_cache(); unindexed_tool_order_and_optional_function(); buffered_close_precedence();
+    required_metadata_and_identity(); per_chunk_creation_clock(); omitted_open_finish_reason(); empty_text_delta_is_withheld(); failure_reasons(); finish_reasons_from_the_table(); embedded_rows_survive_a_custom_policy(); required_usage_and_unknown_cache(); unindexed_tool_order_and_optional_function(); buffered_close_precedence();
     accumulator_interleaved_ordering(); accumulator_order_uniqueness_and_limits();
     tool_history_and_escaped_arguments(); one_tool_message_with_several_results(); output_cap_member_by_origin(); quoted_json_and_request_bounds();
     gateway_request_controls(); gateway_max_price(); gateway_plugins_and_citations();
