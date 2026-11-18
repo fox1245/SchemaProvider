@@ -539,6 +539,9 @@ CatalogueDiff diff_catalogues(const ModelCatalogue& before, const ModelCatalogue
   return diff;
 }
 
+bool valid_model_name(std::string_view id) noexcept { return model_name(id); }
+bool valid_price_text(std::string_view price) noexcept { return decimal(price); }
+
 std::string_view listing_name(Listing listing) noexcept {
   switch (listing) {
     case Listing::OpenRouter: return "openrouter";

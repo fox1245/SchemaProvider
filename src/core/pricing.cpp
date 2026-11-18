@@ -57,13 +57,16 @@ struct Wide {
   }
 };
 
-// Decimal USD per unit as nano-USD per million units (USD x 1e15), rounded up past the fifteenth fractional digit.
+// The fractional digits of a rate: nano-USD per million units is USD x 1e15.
+constexpr unsigned rate_digits = 15;
+} // namespace
+
 std::optional<std::uint64_t> per_million(std::string_view text) {
   if (text.empty() || text.front() == '-') return std::nullopt;
   const auto dot = text.find('.');
   const auto whole = text.substr(0, dot);
   const auto fraction = dot == std::string_view::npos ? std::string_view{} : text.substr(dot + 1);
-  constexpr unsigned scale = 15;
+  constexpr unsigned scale = rate_digits;
   Wide value;
   for (const char c : whole) {
     if (c < '0' || c > '9') return std::nullopt;
@@ -84,7 +87,14 @@ std::optional<std::uint64_t> per_million(std::string_view text) {
   if (!value.fits()) return std::nullopt;
   return value.low;
 }
-} // namespace
+
+std::string decimal_text(std::uint64_t rate) {
+  std::string fraction(rate_digits, '0');
+  for (auto digit = fraction.rbegin(); digit != fraction.rend(); ++digit, rate /= 10) *digit = static_cast<char>('0' + rate % 10);
+  while (!fraction.empty() && fraction.back() == '0') fraction.pop_back();
+  const auto whole = std::to_string(rate);
+  return fraction.empty() ? whole : whole + '.' + fraction;
+}
 
 namespace {
 // A price unit: its name (`input`, `tool:web_search`), its service tier (`/flex`) and the input length above which
