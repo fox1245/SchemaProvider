@@ -425,7 +425,7 @@ private:
         }
     }
     // A descriptor adds raw stop values to its family's table. In every family it never gives a value another kind
-    // than its policy or the embedded policy gives it, and never lists a value only a failure carries.
+    // than its policy or the embedded policy gives it, and never lists a value whose meaning the codecs decide in code.
     void stops(Value item) {
         if (!item.is_object() || item.size() > 64) fail("/stop_reasons", "object with at most 64 stop mappings");
         const std::string pointer = "/stop_reasons";

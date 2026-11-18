@@ -244,6 +244,17 @@ void response_statuses() {
   CHECK(unexpected.kind == StopKind::Unknown && unexpected.raw == "unexpected");
   const auto failed = turn_of("failed", 1);
   CHECK(failed.kind == StopKind::Unknown && failed.raw == "failed");
+  // Without content as well, a status the codec cannot name ends a turn, so the status is delivered. An empty
+  // cancelled or failed response commits none, as before.
+  const auto bare = [&](std::string_view status) {
+    auto codec = realtime::make_codec(d);
+    return std::get<std::vector<realtime::Event>>(
+        codec->decode(false, R"({"type":"response.done","response":{"id":"r","status":)" + json::quote(status) + "}}"));
+  };
+  const auto unnamed = all<realtime::TurnCommitted>(bare("unexpected"));
+  CHECK(unnamed.size() == 1 && unnamed[0]->turn.stop.kind == StopKind::Unknown && unnamed[0]->turn.stop.raw == "unexpected");
+  CHECK(all<realtime::TurnCommitted>(bare("cancelled")).empty() && all<realtime::TurnAborted>(bare("cancelled")).size() == 1);
+  CHECK(all<realtime::TurnCommitted>(bare("failed")).empty() && all<realtime::ProviderError>(bare("failed")).size() == 1);
 }
 // A turn's usage keeps what the provider reports beside the totals.
 void usage_details() {

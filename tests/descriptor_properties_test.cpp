@@ -638,7 +638,8 @@ void replay_identity_covers_wire_facts_only() {
 }
 // A family's stop table may grow, but a raw value keeps the kind the embedded policy gives it. A custom policy may add
 // rows and may not give an embedded row another kind; a descriptor may add rows and may not give a row of its policy,
-// or of the embedded policy, another kind. A value only a failure carries is refused in both, in every family.
+// or of the embedded policy, another kind. A value whose meaning the codecs decide in code is refused in both, in
+// every family.
 void stop_tables_grow_but_never_change() {
     using namespace sp::descriptor;
     using sp::json::quote;

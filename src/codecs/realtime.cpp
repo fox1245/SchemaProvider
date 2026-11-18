@@ -472,7 +472,9 @@ class OpenAICodec final : public FormatCodec {
       // A realtime response has no stop table: its lifecycle statuses are mapped here. Any other status, a failure or
       // one the codec does not know, is Unknown with the status as its raw value, never EndTurn.
       const auto kind = status == "completed" ? StopKind::EndTurn : status == "incomplete" ? StopKind::MaxTokens : StopKind::Unknown;
-      if (turn_.active() || status == "completed") {
+      // A status the codec cannot name ends a turn even without content, so that the status is delivered.
+      const bool unnamed = kind == StopKind::Unknown && !status.empty() && status != "cancelled" && status != "failed";
+      if (turn_.active() || status == "completed" || unnamed) {
         auto turn = turn_.commit(text_of(response.get("id")), StopReason{kind, status == "cancelled" ? "interrupted" : status}, limits_);
         if (auto* error = std::get_if<Error>(&turn)) return *error;
         events.push_back(TurnCommitted{std::move(std::get<Completion>(turn))});
