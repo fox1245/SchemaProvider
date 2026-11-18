@@ -246,6 +246,36 @@ void embedded_rows_survive_a_custom_policy() {
     CHECK(!unknown.blocked && unknown.kind == StopKind::Unknown && unknown.raw == "FUTURE_FINISH_REASON");
   }
 }
+// The two values that report a rejected request end the call before the stop table is read: whatever row a
+// descriptor gives them, no stop of that kind and no seal is emitted, and nothing the candidate carried is executable.
+void rejected_values_fail_before_the_table() {
+  std::string source(descriptor_source);
+  source.insert(source.size() - 1, R"(,"stop_reasons":{"MISSING_THOUGHT_SIGNATURE":"EndTurn","MALFORMED_RESPONSE":"ToolUse"})");
+  const auto loaded = descriptor::load(source);
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
+  const auto& d = std::get<descriptor::ValidatedDescriptor>(loaded);
+  for (const std::string_view reason : {"MISSING_THOUGHT_SIGNATURE", "MALFORMED_RESPONSE"})
+    for (const bool streaming : {false, true}) {
+      auto encoded = gemini::encode(d, request(), streaming);
+      CHECK(std::holds_alternative<gemini::EncodedRequest>(encoded));
+      std::size_t seals = 0;
+      std::vector<StopKind> stops;
+      Accumulator a({}, [&](const Event& event) {
+        if (std::holds_alternative<PartSeal>(event) || std::holds_alternative<MessageSeal>(event)) ++seals;
+        if (const auto* stop = std::get_if<Stop>(&event)) stops.push_back(stop->reason.kind);
+      });
+      gemini::Codec c(d, streaming ? gemini::Mode::Sse : gemini::Mode::Buffered, a, std::get<gemini::EncodedRequest>(encoded).context);
+      const auto wire = body(R"([{"functionCall":{"id":"owned","name":"lookup","args":{"x":1}}}])", reason);
+      if (streaming) { c.frame({}, wire); c.finish({}); }
+      else c.buffered(wire, {});
+      CHECK(a.outcome());
+      const auto& f = failure(*a.outcome(), ErrorKind::RemoteFailure);
+      CHECK(f.error.vendor_code == reason && seals == 0);
+      CHECK(std::all_of(stops.begin(), stops.end(), [](StopKind kind) { return kind == StopKind::Unknown; }));
+      for (const auto& m : f.partial.messages)
+        for (const auto& p : m.parts) CHECK(!std::holds_alternative<ToolCall>(p));
+    }
+}
 void invalid_model_calls() {
   for (auto args : {"[]", "null", "1", R"({"x":1,"x":2})"}) {
     auto o = buffered(body("[{\"functionCall\":{\"id\":\"owned\",\"name\":\"lookup\",\"args\":" + std::string(args) + "}}]"));
@@ -939,6 +969,6 @@ void streamed_chunks_continue_their_part() {
 }
 }
 int main() {
-  try { http_error_envelope_in_an_array_is_retained(); output_total_without_thoughts(); total_proves_zero_thoughts(); total_without_candidates_bounds_the_output(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); tool_result_helper_needs_a_json_object(); successive_unidentified_calls(); local_ids_carry_a_random_token_per_response(); native_group_and_replay(); nullable_usage(); uncached_input_rule(); stop_kinds_come_from_the_table(); embedded_rows_survive_a_custom_policy(); invalid_model_calls(); errors_and_terminals(); loaded_routes_encode_for_their_model(); empty_text_delta_is_withheld(); streamed_chunks_continue_their_part(); one_descriptor_serves_every_model(); served_model_is_recorded(); failure_reasons(); std::cout << "Gemini semantic invariants passed\n"; }
+  try { http_error_envelope_in_an_array_is_retained(); output_total_without_thoughts(); total_proves_zero_thoughts(); total_without_candidates_bounds_the_output(); portable_foreign_history(); typed_generation_controls(); raw_observation_ownership(); named_error_raw_ownership(); terminal_with_omitted_parts(); tool_result_helper_needs_a_json_object(); successive_unidentified_calls(); local_ids_carry_a_random_token_per_response(); native_group_and_replay(); nullable_usage(); uncached_input_rule(); stop_kinds_come_from_the_table(); embedded_rows_survive_a_custom_policy(); rejected_values_fail_before_the_table(); invalid_model_calls(); errors_and_terminals(); loaded_routes_encode_for_their_model(); empty_text_delta_is_withheld(); streamed_chunks_continue_their_part(); one_descriptor_serves_every_model(); served_model_is_recorded(); failure_reasons(); std::cout << "Gemini semantic invariants passed\n"; }
   catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

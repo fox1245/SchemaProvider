@@ -574,6 +574,30 @@ void incomplete_reasons_from_the_table() {
       const auto refused = continued(c.messages[0]);
       CHECK(std::holds_alternative<Error>(refused) && std::get<Error>(refused).kind == ErrorKind::ReplayIneligible);
     }
+  // The answer's one MessageSeal ends its message, as every Completion needs; it carries no native replay authority.
+  for (const bool streaming : {false, true}) {
+    std::size_t seals = 0;
+    Accumulator acc({}, [&](const Event& event) { if (std::holds_alternative<MessageSeal>(event)) ++seals; });
+    responses::Codec codec(desc(), streaming ? responses::Mode::Sse : responses::Mode::Buffered, acc, context());
+    const std::string detail = R"({"reason":"future_incomplete_reason"})";
+    if (streaming) {
+      auto frames = text_frames();
+      frames.back() = terminal("[" + message + "]", "incomplete", usage, detail);
+      for (const auto& [name, data] : frames) if (!codec.frame(name, data)) break;
+      codec.finish();
+    } else codec.buffered(body("[" + message + "]", "incomplete", usage, detail), {});
+    CHECK(acc.outcome());
+    const auto& c = completed(*acc.outcome());
+    CHECK(seals == 1 && c.stop.kind == StopKind::Unknown && c.messages.size() == 1);
+    CHECK(!c.messages[0].native || !c.messages[0].native->complete());
+  }
+  // A reason that is a failure-class word is not an unknown reason: the call fails as it always did. Another spelling
+  // of the word is an unknown reason.
+  for (const std::string reason : {"error", "failed", "cancelled"})
+    for (const auto& outcome : answers("incomplete", "{\"reason\":" + json::quote(reason) + "}"))
+      CHECK(failed(outcome, ErrorKind::Unsupported).error.reason == "responses.incomplete.reason_unsupported");
+  for (const auto& outcome : answers("incomplete", R"({"reason":"Error"})"))
+    CHECK(completed(outcome).stop.kind == StopKind::Unknown && completed(outcome).stop.raw == "Error");
 }
 // A custom policy without one of the family's embedded rows still decodes that value with the embedded kind; a value
 // neither table lists is Unknown. The descriptor's own table, which native bindings hash, does not gain the row.

@@ -4,6 +4,7 @@
 #include "codecs/reason.h"
 #include "core/native.h"
 #include "descriptor/descriptor.h"
+#include "descriptor/stop_facts.h"
 #include "json/json.h"
 #include <algorithm>
 #include <limits>
@@ -170,11 +171,13 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
     if (!nonempty(root.get("status")) || (id.valid() && !id.is_null() && !id.is_string()) ||
         (!generation_.empty() && id.is_string() && id.as_string() != generation_))
       return fail(ErrorKind::ProtocolCorrupt, "invalid interaction status update");
-    // An update is not a terminal: only a failure status ends the stream. Any other status, one the codec does not
-    // know included, changes nothing and stays in the raw events; the terminal resource decides the stop.
+    // An update is not a terminal: only a failure-class status ends the stream (`incomplete` is a status of the
+    // lifecycle). Any other status, one the codec does not know included, changes nothing and stays in the raw
+    // events; the terminal resource decides the stop.
     auto status = root.get("status").as_string();
     if (status == "failed") return fail(ErrorKind::RemoteFailure, "interaction failure status");
     if (status == "cancelled") return fail(ErrorKind::Cancelled, "interaction cancelled status");
+    if (status != "incomplete" && descriptor::failure_stop(status)) return fail(ErrorKind::Unsupported, "unsupported interaction status update");
     return true;
   }
   if (name == "interaction.completed") { unknown(root, {"event_type", "event_id", "interaction"}); return terminal(root.get("interaction"), true); }
@@ -655,11 +658,13 @@ bool Codec::terminal(json::Value resource, bool streaming) {
   else if (status == "requires_action") kind = StopKind::ToolUse;
   else if (status == "incomplete") kind = StopKind::MaxTokens;
   // A background interaction that is still running: what it produced so far, and its id to retrieve it by. A stream
-  // does not end on a running interaction.
+  // does not end on a running interaction, and no terminal ends on a failure-class word (`cancelled` answers a cancel
+  // request here).
   else if (status == "in_progress" || status == "queued") {
     if (streaming) return fail(ErrorKind::Unsupported, "unsupported terminal interaction status");
     kind = StopKind::Pending;
-  }
+  } else if (status != "cancelled" && descriptor::failure_stop(status))
+    return fail(ErrorKind::Unsupported, "unsupported terminal interaction status");
   if ((kind == StopKind::ToolUse && calls_.empty()) || (kind == StopKind::EndTurn && !calls_.empty()))
     return fail(ErrorKind::ProtocolCorrupt, "terminal status disagrees with client action");
   // The echoed input of a stored interaction is not output, as above.
