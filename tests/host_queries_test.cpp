@@ -189,7 +189,8 @@ void controls_match_the_encoders() {
   const auto text = policy_text();
   const std::string chat_controls = R"("controls":["max_output_tokens","temperature","top_p","reasoning_effort","service_tier","tool_choice"])";
   CHECK(!controls_agree(load(replaced(text, chat_controls, R"("controls":["max_output_tokens","temperature","reasoning_effort","service_tier","tool_choice"])"))));
-  CHECK(!controls_agree(load(replaced(text, chat_controls, R"("controls":["max_output_tokens","temperature","top_p","reasoning_effort","service_tier","tool_choice","store"])"))));
+  // A list that names a control beyond the embedded list of its family does not load (controls_may_only_be_left_out).
+  CHECK(refused(replaced(text, chat_controls, R"("controls":["max_output_tokens","temperature","top_p","reasoning_effort","service_tier","tool_choice","store"])"), "/controls"));
   // The request checks read the list, so a nested member the list leaves out is refused and agrees; the comparison with
   // the request members is what fails for a member the typed request has or lacks.
   CHECK(controls_agree(load(replaced(text, chat_controls, R"("controls":["max_output_tokens","temperature","top_p","service_tier","tool_choice"])"))));
@@ -496,12 +497,35 @@ std::string refusal_of(const descriptor::PolicySnapshot& policy, std::string_vie
   return refusal ? *refusal : std::string();
 }
 
+// What a policy's load says about a document: the pointer and the expected text of its refusal, empty when it loads.
+std::string load_outcome(const std::string& family_json) {
+  const auto loaded = descriptor::load_policy(family_json, config_defaults::codec_defaults_json);
+  if (const auto* error = std::get_if<descriptor::ConfigError>(&loaded)) return error->pointer + " " + error->expected;
+  return {};
+}
+// The embedded lists state what the encoders write, so a list may only leave controls out: a control beyond the
+// embedded list of its family is refused at load.
+void controls_may_only_be_left_out() {
+  const auto text = policy_text();
+  const std::string widened = "/controls controls of the family's embedded list; a list may only leave controls out";
+  // The embedded policy loads, and so does every narrowing of a list.
+  CHECK(load_outcome(text).empty());
+  CHECK(load_outcome(edited(text, "openai.chat", "controls", R"(["max_output_tokens","temperature","tool_choice"])")).empty());
+  CHECK(load_outcome(edited(text, "google.interactions", "controls", R"(["max_output_tokens","thinking_level","thinking_summaries","service_tier","required_tool","tool_choice"])")).empty());
+  // A control the embedded list of the family does not name is refused, whatever the family.
+  CHECK(load_outcome(edited(text, "google.interactions", "controls", R"(["max_output_tokens","temperature","thinking_level","thinking_summaries","service_tier","required_tool","store","tool_choice"])")) == widened);
+  CHECK(load_outcome(edited(text, "google.generate", "controls", R"(["max_output_tokens","temperature","top_p","thinking_budget","include_thoughts","thinking_level","required_tool","tool_choice"])")) == widened);
+  CHECK(load_outcome(edited(text, "openai.chat", "controls", R"(["max_output_tokens","temperature","top_p","reasoning_effort","service_tier","tool_choice","store"])")) == widened);
+  // The same control in a family whose embedded list names it is not widening.
+  CHECK(load_outcome(edited(text, "openai.responses", "controls", R"(["max_output_tokens","temperature","top_p","reasoning_effort","reasoning_summary","service_tier","required_tool","store","max_tool_calls","tool_choice"])")).empty());
+}
+
 // A policy whose data differs from the built-in one is answered by its data: a control a family does not list is
 // refused, one it lists is admitted, and a rule that is stated is the rule in force. The replay identity does not move.
 void request_checks_follow_the_data() {
   const auto text = policy_text();
   const auto builtin = descriptor::builtin_policy();
-  // Controls: removed from Chat, added to Interactions, removed from Messages.
+  // Controls: removed from Chat, Responses and Messages.
   const auto no_top_p = load(edited(text, "openai.chat", "controls", R"(["max_output_tokens","temperature","reasoning_effort","service_tier","tool_choice"])"));
   CHECK(refusal_of(no_top_p, "openai.chat", [](Choices& c) { c.top_p = 0.5; }) == top_p_text);
   CHECK(refusal_of(no_top_p, "openai.chat", [](Choices& c) { c.temperature = 0.5; }).empty());
@@ -514,8 +538,6 @@ void request_checks_follow_the_data() {
   // The family's own defaults are checked against its list: Responses defaults a reasoning summary.
   CHECK(refused(edited(text, "openai.responses", "controls", R"(["max_output_tokens","temperature","top_p","reasoning_effort","service_tier","required_tool","store","max_tool_calls","tool_choice"])"), "/defaults"));
   CHECK(refusal_of(builtin, "openai.responses", [](Choices& c) { c.reasoning_enabled = true; c.reasoning_effort = "low"; c.reasoning_summary = "auto"; }).empty());
-  const auto sampling_interactions = load(edited(text, "google.interactions", "controls", R"(["max_output_tokens","temperature","top_p","thinking_level","thinking_summaries","service_tier","required_tool","store","tool_choice"])"));
-  CHECK(refusal_of(sampling_interactions, "google.interactions", [](Choices& c) { c.temperature = 0.5; c.top_p = 0.5; }).empty());
   CHECK(refusal_of(builtin, "google.interactions", [](Choices& c) { c.temperature = 0.5; }) == sampling);
   // The temperature rule is about the budget too, so a family that drops the budget drops the rule.
   const auto no_budget = load(edited(edited(text, "anthropic.messages", "controls", R"(["max_output_tokens","temperature","top_p","tool_choice"])"),
@@ -543,17 +565,10 @@ void request_checks_follow_the_data() {
   CHECK(refusal_of(free_sampling, "anthropic.messages", [](Choices& c) { c.thinking_budget = 2048; c.temperature = 0.5; c.top_p = 0.5; }).empty());
   const auto level_and_budget = load(edited(text, "google.generate", "thinking_budget_excludes_level", "false"));
   CHECK(refusal_of(level_and_budget, "google.generate", [](Choices& c) { c.thinking_budget = 100; c.thinking_level = "low"; }).empty());
-  const auto interactions_budget = edited(text, "google.interactions", "controls", R"(["max_output_tokens","thinking_budget","thinking_level","thinking_summaries","service_tier","required_tool","store","tool_choice"])");
-  const auto exclusive_level = load(interactions_budget);
-  const auto exclusive = load(edited(interactions_budget, "google.interactions", "thinking_budget_excludes_level", "true"));
-  CHECK(refusal_of(exclusive_level, "google.interactions", [](Choices& c) { c.thinking_budget = 100; c.thinking_level = "low"; }).empty());
-  CHECK(refusal_of(exclusive, "google.interactions", [](Choices& c) { c.thinking_budget = 100; c.thinking_level = "low"; }) == budget_and_level);
-  const auto chat_budget = edited(text, "openai.chat", "controls", R"(["max_output_tokens","temperature","top_p","thinking_budget","reasoning_effort","service_tier","tool_choice"])");
-  const auto sampling_budget = load(chat_budget);
-  const auto sampling_rule = load(edited(chat_budget, "openai.chat", "thinking_budget_excludes_temperature", "true"));
-  CHECK(refusal_of(sampling_budget, "openai.chat", [](Choices& c) { c.thinking_budget = 100; c.temperature = 0.5; }).empty());
-  CHECK(refusal_of(sampling_rule, "openai.chat", [](Choices& c) { c.thinking_budget = 100; c.temperature = 0.5; }) == manual_thinking);
-  CHECK(refusal_of(sampling_rule, "openai.chat", [](Choices& c) { c.thinking_budget = 100; c.top_p = 0.9; }).empty());
+  // The temperature rule, stated for a family that lists both controls it is about.
+  const auto generate_sampling = load(edited(text, "google.generate", "thinking_budget_excludes_temperature", "true"));
+  CHECK(refusal_of(generate_sampling, "google.generate", [](Choices& c) { c.thinking_budget = 100; c.temperature = 0.5; }) == manual_thinking);
+  CHECK(refusal_of(builtin, "google.generate", [](Choices& c) { c.thinking_budget = 100; c.temperature = 0.5; }).empty());
   // The output cap bound is a number: the largest cap a request may carry.
   const auto wide_cap = load(edited(text, "google.interactions", "output_cap_maximum", "4294967295"));
   CHECK(refusal_of(wide_cap, "google.interactions", [](Choices& c) { c.max_output_tokens = 2147483648ULL; }).empty());
@@ -1772,7 +1787,7 @@ void decoded_usage() {
 int main() {
   try {
     enum_names();
-    controls_match_the_encoders(); controls_data(); request_checks_by_family(); request_checks_follow_the_data(); older_policies_keep_the_checks(); embedded_policy_states_the_request_rules(); request_rules_are_validated(); billing_tiers(); routing_and_tools(); synthetic_policy();
+    controls_match_the_encoders(); controls_data(); controls_may_only_be_left_out(); request_checks_by_family(); request_checks_follow_the_data(); older_policies_keep_the_checks(); embedded_policy_states_the_request_rules(); request_rules_are_validated(); billing_tiers(); routing_and_tools(); synthetic_policy();
     refusal_predicate(); facts_of_prepared_requests();
     worst_case_tokens(); worst_case_unbounded(); worst_case_tools(); worst_case_tiers_and_fallbacks(); worst_case_route_ceiling();
     worst_case_covers_usage(); worst_case_synthetic_policy(); worst_case_shadowed_profile();

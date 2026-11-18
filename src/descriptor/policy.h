@@ -256,7 +256,7 @@ class DescriptorPolicy final {
   // not in the policy or its `controls` are not declared (a policy written before they existed): the policy then
   // says nothing, and a host sends the control and lets the encoder answer. The request checks (validate_choices) read
   // the same list, and a family without one has the embedded policy's there. The list can only narrow what the encoder
-  // writes.
+  // writes: the loader refuses one that names more than the embedded list of the family.
   std::optional<bool> control_admitted(std::string_view family, Control control) const noexcept;
   // The service tier a catalogue prices `tier` under at the family: empty for a tier that bills at the standard
   // rates (`standard_service_tiers`, so "default" at Chat and "standard" at Interactions), `tier` itself for any
