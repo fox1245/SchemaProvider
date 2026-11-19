@@ -149,6 +149,21 @@ There are two independent immutable policy snapshots:
 
 Both loaders return a variant of snapshot or `descriptor::ConfigError`. Embedded snapshots are the default; they are generated during SDK configuration. External loads are explicit and bounded. An admission ceiling larger than the target's `std::size_t` (the shipped "no bound" ceilings are `INT64_MAX`, and `std::size_t` is 32 bits on WebAssembly) is admitted as the largest `std::size_t` instead of rejecting the snapshot, and `RuntimePolicy::clamps()` lists each one with the value the document stated; the list is empty on a 64-bit target. A default above its clamped ceiling is still rejected. Files are source inputs, not files that every installed process must discover. Existing clients/descriptors retain their admitted policy; loading a replacement affects only newly constructed values.
 
+The runtime file also states the tunables of [realtime sessions](#realtime-sessions) and of the WebSocket transport, each as a default with an admission ceiling, all unsigned integers:
+
+| Key | Default | Ceiling | Value it sets |
+|---|---|---|---|
+| `realtime_max_duration_ms` | 900000 | 86400000 | `realtime::Options::max_duration`, the longest a session runs. |
+| `realtime_media_bytes` | 64000 | 1073741824 | `realtime::Options::media_bytes`, the outbound audio ring (about 2 s at 16 kHz). |
+| `realtime_lead_ms` | 200 | 60000 | `realtime::Options::lead`, how far ahead of real time audio reaches the socket. |
+| `realtime_inbound_media_bytes` | 33554432 | 1073741824 | `realtime::Options::inbound_media_bytes`, queued model audio. |
+| `realtime_inbound_event_bytes` | 67108864 | 1073741824 | `realtime::Options::inbound_event_bytes`, the other queued events. |
+| `realtime_pump_interval_ms` | 20 | 1000 | How often `next_event` wakes to move queued audio while it waits. |
+| `ws_max_message_bytes` | 67108864 | 1073741824 | `transport::WsLimits::max_message_bytes`, a reassembled message and one frame's payload. |
+| `ws_close_timeout_ms` | 5000 | 600000 | `transport::WsRequest::close_timeout`, how long `close()` waits for the server's Close frame. |
+
+The default-constructed `realtime::Options`, `transport::WsLimits` and `transport::WsRequest` hold the embedded defaults, and the pump interval is the embedded one. A runtime file you load states its own values in `RuntimePolicy::defaults()` and `admission()`, which a host that sizes its own audio ring or timeouts reads instead of copying the numbers, and sets on the option structs it passes. These eight members are optional in a runtime file: a file written before they existed, or one that leaves some out, takes the embedded value (default or ceiling) of each member it leaves out. A member that is present must be an unsigned integer that fits its ceiling, else `load_runtime_policy` returns a `ConfigError` at `/defaults/<key>` or `/admission/<key>`. Every member except the lead needs a positive default and a positive ceiling (a size, a duration or an interval of zero would end the session or spin); a lead of zero sends audio as it arrives. A byte ceiling above the target's `std::size_t` is clamped and listed in `RuntimePolicy::clamps()` like the older size ceilings, and a duration ceiling must fit the clock type that holds it. A default left out of a file whose own ceiling is below the embedded default is refused at `/defaults/<key>`. The library advertises these members as `sp::capability::RealtimeRuntimeDefaults` (bit 21), which `RequiredProvider` includes.
+
 A descriptor/codec snapshot can also be loaded from files, from one bundle, and against an expected content digest, so a vendor fact (a model rule, a header version) can be updated without rebuilding the SDK:
 
 | Function | Reads |

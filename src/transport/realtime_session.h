@@ -18,6 +18,7 @@
 //    session is a new `open`.
 #include "codecs/realtime.h"
 #include "configuration/runtime_policy.h"
+#include "sp/config_defaults.h"
 #include "runtime/host.h"
 #include "transport/ws_transport.h"
 #include <chrono>
@@ -33,16 +34,17 @@ enum class MediaPolicy { DropOldest, Refuse };
 struct Options {
   // The end of the whole session, from the handshake to the close. Unset: `max_duration` after the call to `open`.
   std::optional<std::chrono::steady_clock::time_point> deadline{};
-  std::chrono::steady_clock::duration max_duration = std::chrono::minutes(15);
-  // The outbound audio ring, in bytes (about 2 s at 16 kHz), and how far ahead of real time audio reaches the socket.
-  std::size_t media_bytes = 64000;
+  std::chrono::steady_clock::duration max_duration = std::chrono::milliseconds{config_defaults::defaults_realtime_max_duration_ms};
+  // The outbound audio ring, in bytes, and how far ahead of real time audio reaches the socket. The defaults are the
+  // runtime defaults file's `realtime_media_bytes` (about 2 s at 16 kHz) and `realtime_lead_ms`.
+  std::size_t media_bytes = config_defaults::defaults_realtime_media_bytes;
   MediaPolicy media_policy = MediaPolicy::DropOldest;
-  std::chrono::milliseconds lead{200};
+  std::chrono::milliseconds lead{config_defaults::defaults_realtime_lead_ms};
   // Queued inbound model audio, in bytes.
-  std::size_t inbound_media_bytes = std::size_t{32} << 20;
+  std::size_t inbound_media_bytes = config_defaults::defaults_realtime_inbound_media_bytes;
   // Queued inbound events other than model audio, in bytes of what they hold (a finished turn holds its audio again, in
   // base64, which is why the default is twice the audio bound).
-  std::size_t inbound_event_bytes = std::size_t{64} << 20;
+  std::size_t inbound_event_bytes = config_defaults::defaults_realtime_inbound_event_bytes;
   // Called after each committed turn with its usage; false ends the session. It runs on an I/O thread: no blocking.
   std::function<bool(const Usage&)> renew{};
   // An extra trust anchor (tests, private CAs).

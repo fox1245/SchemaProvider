@@ -1,9 +1,11 @@
 #include "configuration/runtime_policy.h"
 #include "json/json.h"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <fstream>
 #include <initializer_list>
+#include <iterator>
 #include <limits>
 #include <stdexcept>
 #include <unordered_set>
@@ -152,6 +154,53 @@ std::string file(const std::string& path) {
   if (!input.eof()) fail("", "readable configuration file");
   return result;
 }
+// The realtime and WebSocket members of the runtime file. A document written before they existed leaves them out and
+// takes the embedded value of each; the embedded document itself states all of them (the generator requires it).
+// A lead of zero sends audio as it arrives; every other member is a size, a duration or an interval and needs a
+// positive value.
+struct RealtimeMember {
+  std::string_view name;
+  std::uint64_t RuntimeValues::* value;
+  std::uint64_t AdmissionValues::* ceiling;
+  std::uint64_t embedded_default, embedded_ceiling;
+  bool zero_allowed;
+};
+constexpr RealtimeMember realtime_members[] = {
+  {"realtime_max_duration_ms", &RuntimeValues::realtime_max_duration_ms, &AdmissionValues::realtime_max_duration_ms,
+   config_defaults::defaults_realtime_max_duration_ms, config_defaults::admission_realtime_max_duration_ms, false},
+  {"realtime_media_bytes", &RuntimeValues::realtime_media_bytes, &AdmissionValues::realtime_media_bytes,
+   config_defaults::defaults_realtime_media_bytes, config_defaults::admission_realtime_media_bytes, false},
+  {"realtime_lead_ms", &RuntimeValues::realtime_lead_ms, &AdmissionValues::realtime_lead_ms,
+   config_defaults::defaults_realtime_lead_ms, config_defaults::admission_realtime_lead_ms, true},
+  {"realtime_inbound_media_bytes", &RuntimeValues::realtime_inbound_media_bytes, &AdmissionValues::realtime_inbound_media_bytes,
+   config_defaults::defaults_realtime_inbound_media_bytes, config_defaults::admission_realtime_inbound_media_bytes, false},
+  {"realtime_inbound_event_bytes", &RuntimeValues::realtime_inbound_event_bytes, &AdmissionValues::realtime_inbound_event_bytes,
+   config_defaults::defaults_realtime_inbound_event_bytes, config_defaults::admission_realtime_inbound_event_bytes, false},
+  {"realtime_pump_interval_ms", &RuntimeValues::realtime_pump_interval_ms, &AdmissionValues::realtime_pump_interval_ms,
+   config_defaults::defaults_realtime_pump_interval_ms, config_defaults::admission_realtime_pump_interval_ms, false},
+  {"ws_max_message_bytes", &RuntimeValues::ws_max_message_bytes, &AdmissionValues::ws_max_message_bytes,
+   config_defaults::defaults_ws_max_message_bytes, config_defaults::admission_ws_max_message_bytes, false},
+  {"ws_close_timeout_ms", &RuntimeValues::ws_close_timeout_ms, &AdmissionValues::ws_close_timeout_ms,
+   config_defaults::defaults_ws_close_timeout_ms, config_defaults::admission_ws_close_timeout_ms, false},
+};
+// Like closed(), for an object whose realtime members may be left out: every required member is there, every member is a
+// required or a realtime one, and the parser has already refused a repeated key.
+void closed_with_realtime(Value value, std::initializer_list<std::string_view> required, const std::string& pointer) {
+  const auto realtime = [](std::string_view key) {
+    return std::any_of(std::begin(realtime_members), std::end(realtime_members), [&](const RealtimeMember& m) { return m.name == key; });
+  };
+  if (!value.is_object() || value.size() < required.size() || value.size() > required.size() + std::size(realtime_members))
+    fail(pointer, "closed object with required fields");
+  for (const auto& member : value.members())
+    if (std::find(required.begin(), required.end(), member.key) == required.end() && !realtime(member.key))
+      fail(pointer, "closed object with required fields");
+  for (auto key : required) if (!value.get(key).valid()) fail(pointer, "closed object with required fields");
+}
+// A member a document written before it existed leaves out: it takes the embedded value.
+std::uint64_t optional_integer(Value object, std::string_view key, const std::string& section, std::uint64_t embedded) {
+  const auto value = object.get(key);
+  return value.valid() ? integer(value, section + "/" + std::string(key)) : embedded;
+}
 // The admission ceilings that become a std::size_t, a thread count or a duration in a Client's options. A ceiling the
 // document states above the target's largest std::size_t is admitted as that value (see CeilingClamp).
 struct SizedCeiling { const char* pointer; std::uint64_t AdmissionValues::* member; };
@@ -184,6 +233,10 @@ constexpr SizedCeiling sized_ceilings[] = {
   {"/admission/configuration_bytes", &AdmissionValues::configuration_bytes},
   {"/admission/configuration_depth", &AdmissionValues::configuration_depth},
   {"/admission/error_json_depth", &AdmissionValues::error_json_depth},
+  {"/admission/realtime_media_bytes", &AdmissionValues::realtime_media_bytes},
+  {"/admission/realtime_inbound_media_bytes", &AdmissionValues::realtime_inbound_media_bytes},
+  {"/admission/realtime_inbound_event_bytes", &AdmissionValues::realtime_inbound_event_bytes},
+  {"/admission/ws_max_message_bytes", &AdmissionValues::ws_max_message_bytes},
 };
 } // namespace
 namespace detail {
@@ -197,8 +250,8 @@ PolicyResult load_runtime_policy_for_size(std::string_view runtime_json, std::st
     auto policy = std::shared_ptr<RuntimePolicy>(new RuntimePolicy);
     auto d = root.get("defaults");
     auto a = root.get("admission");
-    closed(d, {"workers", "io_threads", "resolver_threads", "max_host_connections", "max_head_bytes", "dns_ttl_seconds", "max_operations", "queued_body_chunks", "queued_body_bytes", "max_response_bytes", "max_error_bytes", "semantic_max_parts", "semantic_max_content_bytes", "semantic_max_tool_bytes", "semantic_max_json_depth", "sse_max_line_bytes", "sse_max_event_bytes", "sse_max_total_bytes", "default_timeout_ms", "slow_callback_threshold_ms", "retry_tokens", "retry_tokens_per_second", "retry_enabled", "retry_allow_duplicate_billing_risk", "retry_max_attempts", "retry_base_delay_ms", "retry_max_delay_ms"}, "/defaults");
-    closed(a, {"workers", "io_threads", "resolver_threads", "max_host_connections", "max_head_bytes", "dns_ttl_seconds", "max_operations", "queued_body_chunks", "queued_body_bytes", "max_response_bytes", "max_error_bytes", "semantic_max_parts", "semantic_max_content_bytes", "semantic_max_tool_bytes", "semantic_max_json_depth", "sse_max_line_bytes", "sse_max_event_bytes", "sse_max_total_bytes", "default_timeout_ms", "slow_callback_threshold_ms", "retry_tokens", "retry_tokens_per_second", "retry_max_attempts", "retry_base_delay_ms", "retry_max_delay_ms", "total_threads", "api_key_bytes", "configuration_bytes", "configuration_depth", "error_json_depth"}, "/admission");
+    closed_with_realtime(d, {"workers", "io_threads", "resolver_threads", "max_host_connections", "max_head_bytes", "dns_ttl_seconds", "max_operations", "queued_body_chunks", "queued_body_bytes", "max_response_bytes", "max_error_bytes", "semantic_max_parts", "semantic_max_content_bytes", "semantic_max_tool_bytes", "semantic_max_json_depth", "sse_max_line_bytes", "sse_max_event_bytes", "sse_max_total_bytes", "default_timeout_ms", "slow_callback_threshold_ms", "retry_tokens", "retry_tokens_per_second", "retry_enabled", "retry_allow_duplicate_billing_risk", "retry_max_attempts", "retry_base_delay_ms", "retry_max_delay_ms"}, "/defaults");
+    closed_with_realtime(a, {"workers", "io_threads", "resolver_threads", "max_host_connections", "max_head_bytes", "dns_ttl_seconds", "max_operations", "queued_body_chunks", "queued_body_bytes", "max_response_bytes", "max_error_bytes", "semantic_max_parts", "semantic_max_content_bytes", "semantic_max_tool_bytes", "semantic_max_json_depth", "sse_max_line_bytes", "sse_max_event_bytes", "sse_max_total_bytes", "default_timeout_ms", "slow_callback_threshold_ms", "retry_tokens", "retry_tokens_per_second", "retry_max_attempts", "retry_base_delay_ms", "retry_max_delay_ms", "total_threads", "api_key_bytes", "configuration_bytes", "configuration_depth", "error_json_depth"}, "/admission");
     policy->defaults_.workers = integer(d.get("workers"), "/defaults/workers");
     policy->defaults_.io_threads = integer(d.get("io_threads"), "/defaults/io_threads");
     policy->defaults_.resolver_threads = integer(d.get("resolver_threads"), "/defaults/resolver_threads");
@@ -256,6 +309,10 @@ PolicyResult load_runtime_policy_for_size(std::string_view runtime_json, std::st
     policy->admission_.configuration_bytes = integer(a.get("configuration_bytes"), "/admission/configuration_bytes");
     policy->admission_.configuration_depth = integer(a.get("configuration_depth"), "/admission/configuration_depth");
     policy->admission_.error_json_depth = integer(a.get("error_json_depth"), "/admission/error_json_depth");
+    for (const auto& member : realtime_members) {
+      policy->defaults_.*member.value = optional_integer(d, member.name, "/defaults", member.embedded_default);
+      policy->admission_.*member.ceiling = optional_integer(a, member.name, "/admission", member.embedded_ceiling);
+    }
     for (const auto& ceiling : sized_ceilings) {
       auto& value = policy->admission_.*ceiling.member;
       if (value > size_max) {
@@ -288,6 +345,8 @@ PolicyResult load_runtime_policy_for_size(std::string_view runtime_json, std::st
     if (limits.configuration_bytes <= 0) fail("/admission/configuration_bytes", "positive admission ceiling");
     if (limits.configuration_depth <= 0) fail("/admission/configuration_depth", "positive admission ceiling");
     if (limits.error_json_depth <= 0) fail("/admission/error_json_depth", "positive admission ceiling");
+    for (const auto& member : realtime_members)
+      if (!member.zero_allowed && limits.*member.ceiling == 0) fail("/admission/" + std::string(member.name), "positive admission ceiling");
     if (values.workers > limits.workers) fail("/defaults/workers", "value within admission ceiling");
     if (values.workers == 0) fail("/defaults/workers", "positive operational value");
     if (values.io_threads > limits.io_threads) fail("/defaults/io_threads", "value within admission ceiling");
@@ -331,6 +390,11 @@ PolicyResult load_runtime_policy_for_size(std::string_view runtime_json, std::st
     if (values.retry_max_attempts == 0) fail("/defaults/retry_max_attempts", "positive operational value");
     if (values.retry_base_delay_ms > limits.retry_base_delay_ms) fail("/defaults/retry_base_delay_ms", "value within admission ceiling");
     if (values.retry_max_delay_ms > limits.retry_max_delay_ms) fail("/defaults/retry_max_delay_ms", "value within admission ceiling");
+    for (const auto& member : realtime_members) {
+      const auto pointer = "/defaults/" + std::string(member.name);
+      if (values.*member.value > limits.*member.ceiling) fail(pointer, "value within admission ceiling");
+      if (!member.zero_allowed && values.*member.value == 0) fail(pointer, "positive operational value");
+    }
     if (limits.io_threads > std::numeric_limits<unsigned>::max() || limits.resolver_threads > std::numeric_limits<unsigned>::max() ||
         limits.retry_max_attempts > std::numeric_limits<std::uint32_t>::max()) fail("/admission", "representable typed ceiling");
     if (values.workers > limits.total_threads || values.io_threads > limits.total_threads - values.workers ||
@@ -341,7 +405,12 @@ PolicyResult load_runtime_policy_for_size(std::string_view runtime_json, std::st
         limits.default_timeout_ms > static_cast<std::uint64_t>(std::chrono::milliseconds::max().count()) ||
         limits.slow_callback_threshold_ms > static_cast<std::uint64_t>(std::chrono::milliseconds::max().count()) ||
         limits.retry_base_delay_ms > static_cast<std::uint64_t>(std::chrono::milliseconds::max().count()) ||
-        limits.retry_max_delay_ms > static_cast<std::uint64_t>(std::chrono::milliseconds::max().count()))
+        limits.retry_max_delay_ms > static_cast<std::uint64_t>(std::chrono::milliseconds::max().count()) ||
+        limits.realtime_lead_ms > static_cast<std::uint64_t>(std::chrono::milliseconds::max().count()) ||
+        limits.realtime_pump_interval_ms > static_cast<std::uint64_t>(std::chrono::milliseconds::max().count()) ||
+        limits.ws_close_timeout_ms > static_cast<std::uint64_t>(std::chrono::milliseconds::max().count()) ||
+        limits.realtime_max_duration_ms > static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::duration::max()).count()))
       fail("/admission", "representable operational duration or connection ceiling");
     if (runtime_json.size() > limits.configuration_bytes || error_json.size() > limits.configuration_bytes)
       fail("", "configuration within admitted byte limit");

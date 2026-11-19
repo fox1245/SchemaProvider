@@ -214,8 +214,8 @@ std::optional<Event> Session::next_event(std::chrono::milliseconds timeout) {
     if (s.done) return std::nullopt;
     const auto now = std::chrono::steady_clock::now();
     if (now >= until) return std::nullopt;
-    // Wake at least every 20 ms while audio is queued, to keep it moving.
-    const auto wait = s.ring.empty() ? until - now : std::min<std::chrono::steady_clock::duration>(until - now, std::chrono::milliseconds(20));
+    // Wake at least every pump interval while audio is queued, to keep it moving.
+    const auto wait = s.ring.empty() ? until - now : std::min<std::chrono::steady_clock::duration>(until - now, std::chrono::milliseconds(config_defaults::defaults_realtime_pump_interval_ms));
     s.changed.wait_for(lock, wait);
   }
 }
