@@ -653,7 +653,7 @@ A host that sends to several families would otherwise restate provider facts in 
 - **What is charged once.** A request fee and a tool's use are charged once per attempt, not once per invocation: the provider bills a request, and a tool's cap bounds its uses in the request. Tokens are charged on every invocation. The attempts multiply the whole, because a retried attempt is a request.
 - **A gateway's price is a ceiling the request must carry.** The router may serve any endpoint, so the bound uses the entry's route ceiling and reports the `max_price` that makes it true; the host pins it or does not send.
 
-When a figure is missing the result is unbounded, never zero or a guess: each missing cap, price, fee, limit or ceiling is a named reason with its subject, and a thing the catalogue cannot price at all (plugins, an endpoint call) is `Unmodeled`. A synthetic policy and catalogue with a model and a tool the shipped data does not list go through the same functions in the tests. The invariant `estimate(usage within the caps) <= bound` is tested.
+When a figure is missing the result is unbounded, never zero or a guess: each missing cap, price, fee, limit or ceiling is a named reason with its subject, and a thing the catalogue cannot price at all (plugins, the requests a batch carries) is `Unmodeled`. A synthetic policy and catalogue with a model and a tool the shipped data does not list go through the same functions in the tests. The invariant `estimate(usage within the caps) <= bound` is tested.
 
 ### 5.9 Cache marks
 

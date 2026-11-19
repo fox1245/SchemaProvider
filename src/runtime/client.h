@@ -197,9 +197,10 @@ class PreparedRequest {
   // reads the answer, which a job's poll shares with its submit; endpoint_facts() names the policy fact and operation.
   std::string_view endpoint() const noexcept;
   // What a prepared endpoint call bills by: the policy fact and operation it reaches (`videos` and `poll`), whether the
-  // policy says the provider bills that operation, the model the request names, and the client's family, origin and
-  // whether that origin is a routing gateway. Empty for a chat request, for a call that did not prepare and for a
-  // default-constructed handle.
+  // policy says the provider bills that operation, the model the request names, the client's family, origin and
+  // whether that origin is a routing gateway, and for an operation that bills its model the quantities and dimensions
+  // of its request (runtime::endpoint_worst_case_cost prices them). Empty for a chat request, for a call that did not
+  // prepare and for a default-constructed handle.
   const EndpointFacts& endpoint_facts() const noexcept;
   // The HTTP method and URL the call sends. With the body, they identify a call whose body is empty or read from a
   // file (`GET .../files/{id}`, a part of an upload). Like encoded_body, the URL may be secret: a resumable upload's
@@ -411,10 +412,10 @@ class Client {
   // The admission and option checks every call shares; `encode` fills the operation's wire request and model.
   PreparedRequest prepare_call(RunOptions, const std::function<void(detail::OperationState&, std::optional<Error>&)>& encode);
   // An endpoint call's wire request from its encoder's result (D6). `endpoint` names the codec that reads the answer;
-  // `fact`, `operation` and `model` are what endpoint_facts() reports once the call encoded.
+  // `facts` gives what endpoint_facts() reports once the call encoded.
   template <class Encoded> PreparedRequest prepare_endpoint(RunOptions, std::string_view endpoint, int reason_source,
                                                            const std::function<std::variant<Encoded, Error>()>& encode,
-                                                           std::string_view fact, std::string_view operation, std::string_view model);
+                                                           const std::function<EndpointFacts()>& facts);
   // `complete` and `start` for a prepared endpoint call of any typed outcome.
   template <class Outcome> Outcome complete_endpoint(PreparedEndpoint<Outcome>);
   template <class Outcome> EndpointCall<Outcome> start_endpoint(PreparedEndpoint<Outcome>, std::function<void(Outcome)>);

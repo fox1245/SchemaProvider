@@ -432,7 +432,8 @@ The fees and the tool uses are charged once per attempt, the tokens on every inv
 **Endpoint calls.** For a prepared [non-chat endpoint](#non-chat-endpoints) call, the bound follows what the policy states about the operation the call performs (`PreparedRequest::endpoint_facts().billing`):
 - **Not billed** (`EndpointBilling::None`: moderation, token counting, file calls, a job's poll and download, a batch's get, cancel, deletion and results, generation statistics). `total` is exactly zero (`Evidence::Derived`, `CostRounding::CeilingCatalogueProduct`) and nothing is unbounded. The catalogue is not consulted, so the model needs no entry. The usage a poll's or a generation read's answer reports is the cost of another call, the job or the generation it describes, and is not this call's.
 - **Not stated** (`Unstated`: a policy without the fact's `billing`, or a per-operation statement that does not name the operation). No total, and the reason is `Billing` with the subject `<endpoint>/<operation>` (`moderation/check`). A missing statement never reads as not billed.
-- **Billed** (`Model`, `Carried`: images, decisions, embeddings, rerank, speech, transcription, a video submit, a batch submit). No total, and the reason is `Unmodeled` with the endpoint as its subject, as before: a prepared call does not state its quantities yet. A host that holds them bounds the call with [`pricing::endpoint_worst_case`](#the-bound-of-an-endpoint-call).
+- **Billed by its model** (`Model`: images, decisions, embeddings, rerank, speech, transcription, a video submit). The bound is [`endpoint_worst_case_cost`](#the-bound-of-a-prepared-endpoint-call), given `WorstCaseOptions::measured_input_tokens` and no audio length, as a `WorstCase`: its `total`, `unbounded`, `entry`, `model` and `attempts`; its token lines as `input_tokens` (and `invocation_input_tokens`) and `output_tokens`; one invocation; no route ceiling and no pin. The item lines (images, seconds, characters) are only in `EndpointBound`. A transcription whose model prices seconds above zero needs the audio's length, which only `endpoint_worst_case_cost` takes, so here it has no total (`Quantity`, subject `item:second`).
+- **Carried** (a batch submit). No total, and the reason is `Unmodeled` with the endpoint (`batches`) as its subject: the requests it carries are not priced yet.
 
 **No bound.** `total` is unset and `unbounded` lists every reason, each with a kind, the subject and a phrase:
 
@@ -446,10 +447,12 @@ The fees and the tool uses are charged once per attempt, the tokens on every inv
 | `ToolFee` | tool type | the entry lists no `tool:<type>` fee |
 | `ToolCap` | tool type | the tool's uses are uncapped: the request sets none, the policy admits none (code execution takes no `max_uses`), or the family has none (Google's built-in tools) |
 | `RouteCeiling` | model | a gateway entry without a ceiling, a ceiling at an origin that is not a gateway, or one above the largest `max_price` |
-| `Unmodeled` | what | OpenRouter plugins, a billed endpoint call or a request that did not prepare |
+| `Unmodeled` | what | OpenRouter plugins, a batch submit or a request that did not prepare |
 | `Overflow` | | the bound does not fit 64 bits |
 | `Billing` | endpoint/operation | the policy does not state whether the provider bills the endpoint call's operation |
-| `Quantity` | unit | the request does not state a quantity of a unit the entry prices above zero ([endpoint bound](#the-bound-of-an-endpoint-call) only) |
+| `Quantity` | unit | the request does not state a quantity of a unit the entry prices above zero (an endpoint call) |
+
+An endpoint call billed by its model has the reasons, with the subjects, of [its bound](#the-bound-of-an-endpoint-call).
 
 **Not bounded.** Messages compaction iterations and Gemini's tool-use prompt tokens bill outside the counters, as for `upper_bound`. A request that names no service tier is priced at the standard rates, because neither the request nor the policy states another; an account that bills it at a dearer tier is not covered, so name the tier to bound it. A model whose entry lists no `cache_write` rate is bounded with its other input rates, so cache writes that bill above them are not covered. For usage within the caps, `estimate` never exceeds the bound less the tool fees it does not price. The bound is for a reservation, not for settlement: settle on the usage and the provider's reported cost.
 
@@ -527,7 +530,68 @@ else for (const auto& why : bound.unbounded) log(sp::pricing::to_string(why.by),
 | `Invocations` | | `attempts` is zero |
 | `Overflow` | | the bound, or the bound over the attempts, does not fit 64 bits; with a unit as subject, a count that does not |
 
-`runtime::worst_case_cost` does not call it yet: a prepared endpoint call's facts carry no dimensions or quantities, so a billed operation still answers `Unmodeled` there.
+### The bound of a prepared endpoint call
+
+`sp::runtime::endpoint_worst_case_cost(prepared, catalogue, options)` (`<runtime/cost.h>`) is `pricing::endpoint_worst_case` over the facts of a prepared endpoint call. The client states them when it prepares the call (`PreparedRequest::endpoint_facts()`), from the typed request alone, and looks nothing up in a catalogue to do so. The function is stateless: nothing is fetched, reserved or recorded. Without `catalogue` it uses the descriptor policy's own. `runtime::worst_case_cost` answers with it for an operation that bills its model ([worst-case cost](#worst-case-cost-of-a-prepared-request)).
+
+```cpp
+#include <runtime/cost.h>
+
+auto call = client.prepare(std::move(image_request), run);
+sp::runtime::EndpointCostOptions options;
+options.measured_input_tokens = counted_input_tokens;   // optional; must not understate the input
+auto bound = sp::runtime::endpoint_worst_case_cost(call.prepared(), *catalogue, options);
+if (bound.total) hold(bound.total->nano_usd);   // with bound.lines: each unit, the price key, the count and the rate
+else for (const auto& why : bound.unbounded) log(sp::pricing::to_string(why.by), why.subject, why.detail);
+```
+
+**What it takes.** `EndpointCostOptions` holds:
+- `measured_input_tokens`: the host's count of the call's input. It must not understate it, and it is capped at the model's input limit (times the inputs, where the limit counts per input).
+- `audio_seconds`: a transcription's audio length in whole seconds, rounded up. It must not understate it.
+- `measured_carried_input_tokens`: read by no bound yet.
+
+The prepared call supplies the rest:
+- **Tier.** The standard rates: an endpoint request names no service tier.
+- **Attempts.** The retry policy's `max_attempts`, or one when retry is off.
+- **Charge on acceptance.** A billed operation of an endpoint fact with `charge_on_accept` is bounded at one attempt, since the runtime sends such a call again only when the provider did not accept it. Any other billed operation is bounded at every attempt the retry policy allows. Every billed endpoint call of the built-in policy is charged on acceptance.
+
+**What each request states.** The quantities, each a unit with where its count comes from, and the dimensions, each a typed member of the request under its typed name when it is set:
+
+| Endpoint (operation) | Quantities | Dimensions |
+|---|---|---|
+| images (`generate`; `edit` at OpenAI when the request has references) | `item:image`: `count`. `item:input_image`: the references. `input`: the input limit. `input_image`: the input limit, when there are references. `output`: the output limit | `background`, `output_compression`, `output_format`, `quality`, `size` |
+| decisions (`decide`) | `input`: the input limit. `output`: the output limit | |
+| embeddings (`embed`) | `input`: the input limit for each input. `input_image`: the same, when an input has media | `dimensions`, `task` |
+| rerank (`rank`) | `item:document`: the documents. `item:search_unit`: not stated. `input`: the input limit for each document | `top` |
+| speech (`speak`) | `item:character`: the bytes of `input` in UTF-8. `input`: the input limit. `output`: the output limit | `format`, `voice` |
+| transcription (`transcribe`, `translate`) | `item:second`: `audio_seconds`. `input`: the input limit. `output`: the output limit | `language` |
+| videos (`submit`) | `item:second`: `duration`. `item:input_image`: the references. `input`: the input limit. `input_image`: the input limit, when there are references. `output`: the output limit | `aspect_ratio`, `audio` (`true` or `false`), `resolution`, `size` |
+
+- **Limits.** The input limit is the model entry's (the smaller of `input_limit` and `context_window`), or the measured count capped at it. The output limit is the entry's `output_limit`, once per call. `input_image` counts the image tokens among the input tokens, so its rate is needed only when the request has images.
+- **Characters.** The UTF-8 bytes of a text are at least as many as its characters by any count (code points, UTF-16 units, grapheme clusters), so they bound the count a provider bills.
+- **Extensions.** Each member of the request's `extensions` is a dimension under its own name when its value is a string, a boolean (`true`, `false`) or an unsigned integer (in decimal), such as OpenRouter's image `aspect_ratio` and `resolution`.
+- **Unset and other values.** A member that is unset, or whose key or value is outside the qualifier grammar (`descriptor::valid_dimension_key` and `valid_dimension_value`: an object, a number with a fraction, text with a space), is offered by no dimension, so only a row without a qualifier prices the call.
+- **A key twice.** An extension named like a typed dimension (a video extension `audio`) offers the key twice, and the bound refuses the call (`Unmodeled`, subject `dimensions`) rather than choose one.
+- **Operation.** The bound also offers `operation=<operation>`, so `item:image[operation=edit]` prices only an edit.
+- **No quantities.** Moderation, token counting, files, a job's poll and download, batches and generation statistics state none. A policy that bills moderation or token counting by its model gives such a call no bound (`Unmodeled`, subject `<endpoint>/<operation>`), never its request fee alone.
+
+**When a request has no bound.** `unbounded` names each reason, with the subjects of [the endpoint bound](#the-bound-of-an-endpoint-call). The ones a request leads to:
+
+| Request | Reason | Subject |
+|---|---|---|
+| images without `count`, at an image price above zero (the provider's default count is not known; a `"0"` price needs no count) | `Quantity` | `item:image` |
+| images with references, and an entry without an `input_image` rate | `ModelPrice` | `input_image` |
+| transcription without `audio_seconds`, at a price per second above zero | `Quantity` | `item:second`, naming `EndpointCostOptions::audio_seconds` |
+| videos without `duration`, at a price per second above zero | `Quantity` | `item:second` |
+| rerank whose entry prices `item:search_unit` above zero: nothing in a request bounds search units | `Quantity` | `item:search_unit` |
+| a model whose entry has no `output_limit`, at an output rate above zero | `OutputCap` | `output` |
+| a quantity whose unit the entry does not list; an item unit is named with the offered dimensions | `ModelPrice` | the unit |
+| a call at a routing gateway (rerank and videos are admitted only at OpenRouter in the built-in policy) | `RouteCeiling` | the model |
+| a chat request, or a call that did not prepare | `Unmodeled` | `request` |
+
+**Not covered.** The bound reads the request as it is sent. A provider that rounds a duration or an audio length up to a coarser increment, or bills a minimum per call, can bill above it. The output limit bounds the output once per call, whatever the number of images. Speech `speed` is not a dimension. Input that a request adds beside its main text (speech `instructions`, a transcription `prompt`, references, media) is covered by the input limit only.
+
+**Capability.** `sp::capability::EndpointCostBounds` (bit 20) in the runtime's interface contract says that the loaded library bounds endpoint calls this way; a library without it answers `Unmodeled` for every billed endpoint call. A host that admits endpoint calls by their bound requires it with `require_interface_contract(EXPECTED_INTERFACE_REVISION, capability::EndpointCostBounds)`. It is not part of `RequiredProvider`.
 
 ### Served model identity and routing gateways
 
@@ -1110,7 +1174,7 @@ if (auto* file = std::get_if<sp::files::File>(&uploaded)) {
   A path may hold `{model}`, which the request's model fills, and a job's path `{id}`, which the handle's id fills. An origin without a fact is `Unsupported` at prepare, with no I/O.
 - **Money.** A call whose fact sets `charge_on_accept` is attempted again only when it provably never reached the provider, or when the provider refused it before accepting it with a complete 429 or 503 answer. That needs retry enabled, not the duplicate-billing opt-in, and a refused call's `retry_safety` is `RejectedBeforeOutput`. Any other failure after the request may have arrived is reported after one attempt, even when the retry policy allows duplicate billing risk.
 
-  Before a host sends an endpoint call, it can ask what the call bills by instead of restating it. `PreparedRequest::endpoint_facts()` (`<core/endpoint_facts.h>`) holds the policy fact and operation the call reaches, `billing` (`descriptor::EndpointBilling`: `None`, `Model`, `Carried`, or `Unstated` when the policy does not say), for a `Carried` call (a batch submit) the tier its requests are priced under in `carried_tier`, the model the request names (empty for a file, batch or generation read; the job's model for a poll and a download), and the client's family, origin and whether that origin is a routing gateway. `runtime::worst_case_cost(prepared)` then holds exactly zero for a call the policy states is not billed, and no total for any other ([worst-case cost](#worst-case-cost-of-a-prepared-request)): `Billing` when the policy does not state the operation's billing, `Unmodeled` when the operation is billed. A host that admits a call only with a bound therefore sends the reads and the free calls, and refuses a billed or unstated call or prices it itself. `DescriptorPolicy::endpoint_billing(endpoint, origin, operation)` and `carried_tier(endpoint, origin)` answer the same from the policy alone.
+  Before a host sends an endpoint call, it can ask what the call bills by instead of restating it. `PreparedRequest::endpoint_facts()` (`<core/endpoint_facts.h>`) holds the policy fact and operation the call reaches, `billing` (`descriptor::EndpointBilling`: `None`, `Model`, `Carried`, or `Unstated` when the policy does not say), for a `Carried` call (a batch submit) the tier its requests are priced under in `carried_tier`, the model the request names (empty for a file, batch or generation read; the job's model for a poll and a download), and the client's family, origin and whether that origin is a routing gateway. For an operation that bills its model the facts also hold the quantities and dimensions of the request ([the bound of a prepared endpoint call](#the-bound-of-a-prepared-endpoint-call)). `runtime::worst_case_cost(prepared)` then holds exactly zero for a call the policy states is not billed, a bound from those quantities and the catalogue's prices for a call that bills its model, and no total otherwise ([worst-case cost](#worst-case-cost-of-a-prepared-request)): `Billing` when the policy does not state the operation's billing, `Unmodeled` for a batch submit. A host that admits a call only with a bound therefore sends the reads, the free calls and the billed calls its catalogue prices, and refuses an unstated call or a batch submit or prices it itself. `DescriptorPolicy::endpoint_billing(endpoint, origin, operation)` and `carried_tier(endpoint, origin)` answer the same from the policy alone.
 
   The built-in policy states `none` for the calls this page says are not charged: moderation, token counting at the three providers, every file call, a job's poll and download, a batch's get, cancel, deletion and results, and generation statistics. It states `model` for images, decisions, embeddings, rerank, speech, transcription and the video submit, `carried` under the tier `batch` for the batch submit at the three providers, and `model` for the realtime connection. A custom policy states its own; one that leaves `billing` out leaves every operation `Unstated`.
 - **Video.** OpenRouter's video models run as jobs (above). Veo is not ported: its preview models end on 2026-10-22. Use Gemini Omni through Interactions (`video_config`, background jobs).

@@ -45,6 +45,15 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor&, cons
 // otherwise `generate`. The encoder sends the request to that operation's path, and the policy states its billing
 // under it.
 std::string_view operation(const descriptor::EndpointFact& fact, const Request&) noexcept;
+// What a request bills by (core/endpoint_facts.h): the images fact and the operation above, with the quantities
+// - `item:image`: `count`, and not stated when it is unset, since the provider's default count is not known;
+// - `item:input_image`: the references, as many as there are;
+// - `input`: the input tokens, up to the model's input limit or the host's measured count; and `input_image`, the image
+//   tokens among them, bounded the same way, when the request has references;
+// - `output`: the output tokens, up to the model's output limit;
+// and the dimensions `background`, `output_compression`, `output_format`, `quality` and `size` when they are set, with
+// the request's extensions (endpoints::dimensions).
+EndpointFacts endpoint_facts(const descriptor::ValidatedDescriptor&, const Request&);
 
 using Close = endpoints::Close;
 // Decodes one buffered response into accumulator events: one assistant message with a Media part per image.

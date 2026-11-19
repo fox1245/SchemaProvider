@@ -2,9 +2,12 @@
 // The decoder side every non-chat endpoint shares (D6): one buffered response document becomes accumulator events,
 // which the endpoint's `typed()` turns into its own result.
 #include "codecs/accumulator.h"
+#include "core/endpoint_facts.h"
 #include "descriptor/descriptor.h"
 #include "descriptor/policy.h"
+#include "json/json.h"
 #include <cstdint>
+#include <initializer_list>
 #include <memory>
 #include <optional>
 #include <string>
@@ -74,6 +77,31 @@ inline void add_fact_headers(Encoded& encoded, const descriptor::EndpointFact& f
   for (const auto& header : fact.headers) encoded.headers.push_back(header);
   encoded.max_response_bytes = fact.max_response_bytes;
 }
+// What every endpoint call states about what it bills by (core/endpoint_facts.h): the policy fact `fact` and the
+// operation the call performs there, how the policy says the provider bills that operation (and the tier of the
+// requests it carries), the descriptor's family and origin, whether that origin is a routing gateway, and the model
+// the request names. A request type whose call bills its model adds its quantities and dimensions
+// (`images::endpoint_facts`, ...); the other calls state none.
+EndpointFacts call_facts(const descriptor::ValidatedDescriptor&, std::string_view fact, std::string_view operation, std::string_view model);
+// The dimensions a call offers (EndpointFacts::dimensions), sorted by key: each typed member of the request in `typed`
+// that is set, under its typed name, and each member of `extensions` whose value is a string, a boolean (`true` or
+// `false`) or an unsigned integer (in decimal), under its own name. A key or value outside the qualifier grammar
+// (descriptor::valid_dimension_key and valid_dimension_value) is offered by no dimension, so no row that names it
+// applies. A key offered twice (an extension named like a typed member) stays twice, and the bound refuses the call
+// rather than choose one of them.
+std::vector<std::pair<std::string, std::string>> dimensions(
+    std::initializer_list<std::pair<std::string_view, std::optional<std::string>>> typed, const std::shared_ptr<const json::Document>& extensions);
+// A typed member as a dimension's value: an unsigned count in decimal, a boolean as `true` or `false`.
+std::optional<std::string> decimal(std::optional<std::uint64_t>);
+std::optional<std::string> boolean(std::optional<bool>);
+// A quantity the request states: `count` when it is set, and then `exact` when the request fixes it; not stated when it
+// is unset, so a bound that needs it refuses.
+EndpointQuantity requested(std::string unit, std::optional<std::uint64_t> count, bool exact = false);
+// Tokens of `unit` (`input`, or `input_image` for the image tokens among them) bounded by the model's input limit,
+// which counts per input `per` times, or by the host's measured input; and output tokens bounded by the model's output
+// limit.
+EndpointQuantity input_limited(std::string unit, std::uint64_t per = 1);
+EndpointQuantity output_limited();
 class Codec {
  public:
   virtual ~Codec() = default;

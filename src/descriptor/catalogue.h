@@ -212,6 +212,11 @@ std::optional<ItemPriceKey> item_price_key(std::string_view unit) noexcept;
 // Whether a call that offers `dimensions` offers every dimension `qualifier` names, each with a byte-equal value. An
 // empty qualifier names none and matches every call; a dimension the call does not offer matches no value.
 bool qualifier_offered(std::string_view qualifier, std::span<const std::pair<std::string, std::string>> dimensions) noexcept;
+// Whether a call can offer the dimension `key=value` in the qualifier grammar: a key of 1 to 64 lower-case letters,
+// digits or '_', and a value of 1 to 64 letters, digits, ':', '.', '_' or '-'. Only such a dimension can match a row
+// that names it.
+bool valid_dimension_key(std::string_view key) noexcept;
+bool valid_dimension_value(std::string_view value) noexcept;
 // A listed price member an entry leaves out (ListingPage::withheld): `pricing.overrides` may bill it above every price
 // the entry could claim for it, or bill the tokens of a unit left out that would otherwise be priced at it. An empty
 // `unit` is every price of the model: conditional prices that cannot be read at all.

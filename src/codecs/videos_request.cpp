@@ -16,6 +16,18 @@ bool token(std::string_view value) {
 }  // namespace
 
 std::string_view operation(const Request&) noexcept { return "submit"; }
+EndpointFacts endpoint_facts(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
+  auto facts = endpoints::call_facts(descriptor, "videos", operation(request), request.model);
+  facts.dimensions = endpoints::dimensions({{"aspect_ratio", request.aspect_ratio}, {"audio", endpoints::boolean(request.audio)},
+                                            {"resolution", request.resolution}, {"size", request.size}},
+                                           request.extensions);
+  facts.quantities.push_back(endpoints::requested("item:second", request.duration));
+  facts.quantities.push_back(endpoints::requested("item:input_image", request.references.size(), true));
+  facts.quantities.push_back(endpoints::input_limited("input"));
+  if (!request.references.empty()) facts.quantities.push_back(endpoints::input_limited("input_image"));
+  facts.quantities.push_back(endpoints::output_limited());
+  return facts;
+}
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
   const auto* fact = descriptor.policy()->endpoint("videos", descriptor.base_url());
   if (!fact) return Error{ErrorKind::Unsupported, "video endpoints are not admitted at this origin"};

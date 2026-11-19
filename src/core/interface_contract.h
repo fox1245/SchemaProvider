@@ -73,6 +73,12 @@ inline constexpr std::uint64_t ModelControlFacts = 1ULL << 18;
 // built before the member has smaller requests and would send no choice, so it lacks this bit and a
 // require_interface_contract call with RequiredProvider refuses it.
 inline constexpr std::uint64_t TypedToolChoice = 1ULL << 19;
+// runtime::worst_case_cost bounds a non-chat endpoint call that bills its model from the quantities and dimensions its
+// prepared facts state (PreparedRequest::endpoint_facts), and runtime::endpoint_worst_case_cost returns that bound with
+// its lines. A library built before them answers `Unmodeled` for every billed endpoint call, so a host that admits
+// endpoint calls by their bound requires this bit itself; the bit is not part of RequiredProvider, which a host that
+// refuses endpoint calls keeps meeting.
+inline constexpr std::uint64_t EndpointCostBounds = 1ULL << 20;
 inline constexpr std::uint64_t RequiredProvider = TypedRuntime | PreparedAdmission |
     NullableUsage | All5Native | TrustedArchive | OrderedWireEvents | NativeSocketRuntime |
     RetainedJsonSize | CompleteAttemptEvidence | OpenRouterRoutingMaxPrice | ErrorReason | PolicyAdmittedExtensions |
