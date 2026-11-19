@@ -143,6 +143,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     return bad("model and messages are required");
   if (!request.messages.empty() && !request.canonical_messages.empty())
     return bad("choose one message representation");
+  if (auto refusal = descriptor::route_refusal(descriptor, request.model)) return bad(std::move(*refusal));
   const auto& resources = descriptor.policy()->resources();
   auto effective = descriptor::effective_defaults(descriptor, request.model);
   if (request.max_output_tokens) effective.max_output_tokens = request.max_output_tokens;
@@ -572,7 +573,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   };
   json::BoundedWriter measure(limits);
   if (auto error = build(measure, true)) return std::move(*error);
-  EncodedRequest result{"POST", std::string(descriptor.path(streaming)), descriptor.headers(), {}};
+  EncodedRequest result{"POST", descriptor.resolved_path(streaming, request.model), descriptor.headers(), {}};
   result.headers.emplace_back("Content-Type", "application/json");
   result.headers.emplace_back("Accept", streaming ? "text/event-stream" : "application/json");
   result.body.reserve(measure.size());

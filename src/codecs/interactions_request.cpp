@@ -119,8 +119,10 @@ std::string_view tool_choice_name(ToolChoiceMode mode) {
 EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request, bool streaming) {
   auto bad = [](std::string label) -> EncodeResult { return Error{ErrorKind::InvalidRequest, std::move(label)}; };
   auto replay_bad = []() -> EncodeResult { return Error{ErrorKind::ReplayIneligible, "native replay provenance, binding or content mismatch"}; };
-  if (descriptor.family() != "google.interactions" || descriptor.path(false) != "/v1beta/interactions" ||
-      descriptor.path(true) != "/v1beta/interactions") return Error{ErrorKind::InvalidConfig, "Interactions requires the model interaction endpoint"};
+  // The paths are the route fact of the descriptor's origin, which the policy states (descriptor::route_admitted).
+  if (descriptor.family() != "google.interactions" || !descriptor::route_admitted(descriptor))
+    return Error{ErrorKind::InvalidConfig, "Interactions requires the model interaction endpoint"};
+  if (auto refusal = descriptor::route_refusal(descriptor, request.model)) return bad(std::move(*refusal));
   const auto& resources = descriptor.policy()->resources();
   auto effective = descriptor::effective_defaults(descriptor, request.model);
   if (request.max_output_tokens) effective.max_output_tokens = request.max_output_tokens;
@@ -145,7 +147,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     if (!context->valid_) return Error{ErrorKind::ResourceLimit, "native binding could not be captured"};
     const auto cancel = request.lifecycle == Lifecycle::Cancel;
     EncodedRequest result{request.lifecycle == Lifecycle::Get ? "GET" : cancel ? "POST" : "DELETE",
-                          std::string(descriptor.path(false)) + "/" + request.interaction_id + (cancel ? "/cancel" : ""), {}, {}, {}};
+                          descriptor.resolved_path(false, request.model) + "/" + request.interaction_id + (cancel ? "/cancel" : ""), {}, {}, {}};
     for (const auto& header : descriptor.headers()) {
       auto key = lower(header.first);
       if (key != "accept" && key != "content-type") result.headers.push_back(header);
@@ -269,7 +271,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (!context->history_valid_) return replay_bad();
   if (!context->valid_) return Error{ErrorKind::ResourceLimit, "native binding could not be captured"};
   if (tool_error) return *tool_error;
-  EncodedRequest result{"POST", std::string(descriptor.path(streaming)), {}, {}, {}};
+  EncodedRequest result{"POST", descriptor.resolved_path(streaming, request.model), {}, {}, {}};
   for (const auto& header : descriptor.headers()) {
     auto key = lower(header.first);
     if (key != "accept" && key != "content-type") result.headers.push_back(header);

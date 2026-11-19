@@ -167,20 +167,18 @@ bool origin(std::string_view url, bool https_only = false) {
     }
     return secure || loopback;
 }
-bool relative_path(std::string_view path, bool google_generate = false) {
+constexpr std::string_view placeholder = "{model}";
+bool segment_char(char c) { return ascii_alpha(c) || digit(c) || c == '-' || c == '_' || c == '.' || c == '~' || c == ':'; }
+bool query_char(char c) { return ascii_alpha(c) || digit(c) || c == '-' || c == '_' || c == '.' || c == '~'; }
+bool names_model(std::string_view path) { return path.find(placeholder) != std::string_view::npos; }
+// An origin-relative path without a query: no authority, no traversal, no URL escapes. `{model}` may stand once in
+// it where `placeholder_allowed` is set; a second one, or any other brace, is refused.
+bool relative_path(std::string_view path, bool placeholder_allowed) noexcept {
     if (path.empty() || path.front() != '/' || path.starts_with("//") || path.size() > 2048) return false;
-    if (google_generate && path.ends_with("?alt=sse")) path.remove_suffix(8);
-    // A google.generate route may name the request's model with one `{model}` segment (checked below).
-    std::string checked;
-    if (google_generate) {
-        if (const auto at = path.find("{model}"); at != std::string_view::npos) {
-            checked = std::string(path);
-            checked.replace(at, 7, "m");
-            path = checked;
-        }
-    }
-    for (unsigned char c : path) {
-        if (!(ascii_alpha(static_cast<char>(c)) || digit(static_cast<char>(c)) || c == '/' || c == '-' || c == '_' || c == '.' || c == '~' || (google_generate && c == ':'))) return false;
+    const auto at = placeholder_allowed ? path.find(placeholder) : std::string_view::npos;
+    for (std::size_t i = 0; i < path.size(); ++i) {
+        if (i == at) { i += placeholder.size() - 1; continue; }
+        if (path[i] != '/' && !segment_char(path[i])) return false;
     }
     path.remove_prefix(1);
     while (!path.empty()) {
@@ -192,12 +190,45 @@ bool relative_path(std::string_view path, bool google_generate = false) {
     }
     return true;
 }
-// A google.generate route names its model. Both paths name the same model of characters the encoder accepts, or both
-// name `{model}`, and then one descriptor serves every model of the origin. The encoder (codecs/gemini_request.cpp)
-// sends a literal route only for its own model and refuses every other request with InvalidConfig.
-constexpr std::string_view generate_root = "/v1beta/models/", generate_buffered = ":generateContent", generate_streaming = ":streamGenerateContent?alt=sse";
-bool generate_model(std::string_view model) {
-    return !model.empty() && model.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._") == std::string_view::npos;
+// The query a route template may end in: `?` and name=value pairs joined by `&`.
+bool route_query(std::string_view query) noexcept {
+    if (!query.starts_with('?')) return false;
+    query.remove_prefix(1);
+    while (true) {
+        const auto amp = query.find('&');
+        const auto pair = query.substr(0, amp);
+        const auto equals = pair.find('=');
+        if (equals == std::string_view::npos || !equals || equals + 1 == pair.size()) return false;
+        if (!std::all_of(pair.begin(), pair.begin() + equals, query_char) || !std::all_of(pair.begin() + equals + 1, pair.end(), query_char)) return false;
+        if (amp == std::string_view::npos) return true;
+        query.remove_prefix(amp + 1);
+    }
+}
+// A path a descriptor or a route template states: an origin-relative path in which `{model}` may stand once, then a
+// query where `queried` is set. A descriptor's path has a query only where a route fact applies, and then the pair
+// must be the fact's (Loader::routes), so a query is never the descriptor's own.
+bool stated_path(std::string_view path, bool queried) noexcept {
+    const auto at = path.find('?');
+    return relative_path(path.substr(0, at), true) && (at == std::string_view::npos || (queried && route_query(path.substr(at))));
+}
+// What `path` puts in the place of `{model}` in the template `pattern`: nullopt when the path is not the template
+// filled; an empty view when the template has no placeholder and the path is the template; the placeholder itself
+// when the path is the template as it is; otherwise a model name (route_model_name).
+std::optional<std::string_view> filling(std::string_view path, std::string_view pattern) noexcept {
+    const auto at = pattern.find(placeholder);
+    if (at == std::string_view::npos) return path == pattern ? std::optional<std::string_view>(std::string_view{}) : std::nullopt;
+    const auto prefix = pattern.substr(0, at), suffix = pattern.substr(at + placeholder.size());
+    if (path.size() <= prefix.size() + suffix.size() || !path.starts_with(prefix) || !path.ends_with(suffix)) return std::nullopt;
+    const auto model = path.substr(prefix.size(), path.size() - prefix.size() - suffix.size());
+    if (model == placeholder || route_model_name(model)) return model;
+    return std::nullopt;
+}
+// What a pair of paths fills a route fact with: the buffered path's filling when the streaming path is the
+// streaming template filled the same way, otherwise nullopt.
+std::optional<std::string_view> filling(std::string_view buffered, std::string_view streaming, const RouteFact& route) noexcept {
+    const auto model = filling(buffered, route.buffered);
+    if (!model || filling(streaming, route.streaming) != model) return std::nullopt;
+    return model;
 }
 bool date(std::string_view s) {
     if (s.size() != 10 || s[4] != '-' || s[7] != '-') return false;
@@ -311,20 +342,7 @@ private:
         object(paths, "/connection/paths");
         value_.buffered_path_ = string(paths.get("buffered"), "/connection/paths/buffered", 2048);
         value_.streaming_path_ = string(paths.get("streaming"), "/connection/paths/streaming", 2048);
-        const bool generate = value_.family_ == "google.generate";
-        if (!relative_path(value_.buffered_path_, generate)) fail("/connection/paths/buffered", "origin-relative literal path without traversal or URL escapes");
-        if (!relative_path(value_.streaming_path_, generate)) fail("/connection/paths/streaming", "origin-relative literal path without traversal or URL escapes");
-        if (generate) {
-            const std::string_view buffered = value_.buffered_path_;
-            const auto model = buffered.starts_with(generate_root) && buffered.ends_with(generate_buffered) &&
-                buffered.size() >= generate_root.size() + generate_buffered.size()
-                ? buffered.substr(generate_root.size(), buffered.size() - generate_root.size() - generate_buffered.size()) : std::string_view{};
-            value_.model_routed_ = model == "{model}";
-            if (!value_.model_routed_ && !generate_model(model))
-                fail("/connection/paths/buffered", "/v1beta/models/<model>:generateContent with a literal model name or {model}");
-            if (value_.streaming_path_ != std::string(generate_root) + std::string(model) + std::string(generate_streaming))
-                fail("/connection/paths/streaming", "/v1beta/models/<model>:streamGenerateContent?alt=sse for the model of the buffered path");
-        }
+        routes();
         // The scheme this descriptor's chat calls send the key with, in place of its family policy's.
         if (auto auth = item.get("auth"); auth.valid()) {
             const auto* scheme = auth.is_string() ? credential_scheme(auth.as_string()) : nullptr;
@@ -347,6 +365,36 @@ private:
                 !contains(value_.family_policy().header_versions, value_.headers_.back().second))
                 fail(pointer, "admitted Messages API version");
         }
+    }
+    // The paths as the family's route fact for the origin (DescriptorPolicy::route) has them. Where a fact applies,
+    // the pair is its templates, or both with one model name in place of `{model}`, and only then may a path carry
+    // a query. Where none applies, `{model}` stands in both paths or in neither.
+    void routes() {
+        const std::string buffered_pointer = "/connection/paths/buffered", streaming_pointer = "/connection/paths/streaming";
+        const std::string_view buffered = value_.buffered_path_, streaming = value_.streaming_path_;
+        const auto* route = value_.policy_->route(value_.family_, value_.base_url_);
+        if (!stated_path(buffered, route != nullptr)) fail(buffered_pointer, "origin-relative literal path without traversal or URL escapes");
+        if (!stated_path(streaming, route != nullptr)) fail(streaming_pointer, "origin-relative literal path without traversal or URL escapes");
+        if (route) {
+            // An Interactions descriptor whose literal paths are not its origin's loads as it always has; its encoder
+            // refuses it (route_admitted).
+            const bool kept = value_.family_ == "google.interactions" && !names_model(buffered) && !names_model(streaming) &&
+                buffered.find('?') == std::string_view::npos && streaming.find('?') == std::string_view::npos;
+            if (const auto model = filling(buffered, route->buffered); !model) {
+                if (!kept) fail(buffered_pointer, "a path of the route fact for the descriptor's origin");
+            } else if (filling(streaming, route->streaming) != model) {
+                if (!kept) fail(streaming_pointer, "the route fact's streaming path for the model of the buffered path");
+            } else {
+                value_.model_routed_ = *model == placeholder;
+            }
+        } else {
+            if (names_model(buffered) != names_model(streaming)) fail(streaming_pointer, "{model} in both paths or in neither");
+            value_.model_routed_ = names_model(buffered);
+        }
+        // A Generate request carries its model in the path alone, so a literal route needs a route fact that says
+        // where in the path the model is.
+        if (value_.family_ == "google.generate" && !value_.model_routed_ && value_.route_model().empty())
+            fail(buffered_pointer, "a literal Generate route needs a route fact naming where its model is");
     }
     void evidence(Value item) {
         object(item, "/evidence");
@@ -566,10 +614,31 @@ LoadResult load_with_environment_headers(
 
 namespace sp::descriptor {
 bool valid_origin(std::string_view url) { return origin(url); }
+bool valid_path(std::string_view path) noexcept { return relative_path(path, false); }
+bool valid_route_template(std::string_view path) noexcept { return path.size() <= 2048 && stated_path(path, true); }
+bool route_model_name(std::string_view model) noexcept {
+    return !model.empty() && model.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._") == std::string_view::npos;
+}
+bool route_model_substitute(std::string_view model) noexcept {
+    return route_model_name(model) && model != "." && model.find("..") == std::string_view::npos;
+}
 std::string ValidatedDescriptor::resolved_path(bool streaming, std::string_view model) const {
     std::string resolved(path(streaming));
     if (!model_routed_) return resolved;
-    if (const auto at = resolved.find("{model}"); at != std::string::npos) resolved.replace(at, 7, model);
+    if (const auto at = resolved.find(placeholder); at != std::string::npos) resolved.replace(at, placeholder.size(), model);
     return resolved;
+}
+std::string_view ValidatedDescriptor::route_model() const noexcept {
+    // Read from the stored paths and the policy each time, so it holds for any copy of the descriptor.
+    if (model_routed_ || !policy_) return {};
+    const auto* route = policy_->route(family_, base_url_);
+    if (!route) return {};
+    const auto model = filling(buffered_path_, streaming_path_, *route);
+    if (!model || *model == placeholder) return {};
+    return *model;
+}
+bool route_admitted(const ValidatedDescriptor& descriptor) noexcept {
+    const auto* route = descriptor.policy() ? descriptor.policy()->route(descriptor.family(), descriptor.base_url()) : nullptr;
+    return !route || filling(descriptor.path(false), descriptor.path(true), *route).has_value();
 }
 }

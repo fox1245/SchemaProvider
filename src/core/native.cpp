@@ -724,7 +724,7 @@ static size_t history_start(const descriptor::ValidatedDescriptor& descriptor, c
   return 0;
 }
 NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, const messages::Request& request, const descriptor::EffectiveChoices& choices, bool streaming)
-    : family_(Family::Messages), model_(request.model), route_(descriptor.path(streaming)),
+    : family_(Family::Messages), model_(request.model), route_(descriptor.resolved_path(streaming, request.model)),
       prefix_count_(request.messages.size() - history_start(descriptor, request.messages)), policy_(descriptor.policy()) {
   valid_ = descriptor.family() == "anthropic.messages" && origin_digest(descriptor, origin_) && configuration_digest(descriptor, request, choices, prefix_);
   if (!request_controls::extensions_replay_eligible(descriptor, request.extensions)) replay_eligible_ = false;
@@ -732,7 +732,7 @@ NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, 
   if (valid_) bind_history(request.messages, false, history_start(descriptor, request.messages));
 }
 NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, const responses::Request& request, const descriptor::EffectiveChoices& choices, bool streaming)
-    : family_(Family::Responses), model_(request.model), route_(descriptor.path(streaming)), prefix_count_(request.messages.size()), policy_(descriptor.policy()) {
+    : family_(Family::Responses), model_(request.model), route_(descriptor.resolved_path(streaming, request.model)), prefix_count_(request.messages.size()), policy_(descriptor.policy()) {
   valid_ = descriptor.family() == "openai.responses" && origin_digest(descriptor, origin_) && configuration_digest(descriptor, request, choices, prefix_);
   if (!request_controls::extensions_replay_eligible(descriptor, request.extensions)) replay_eligible_ = false;
   if (!valid_) return;
@@ -785,7 +785,7 @@ NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, 
   }
 }
 NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, const interactions::Request& request, const descriptor::EffectiveChoices& choices, bool streaming)
-    : family_(Family::Interactions), model_(request.model), route_(descriptor.path(streaming)), prefix_count_(request.messages.size()), policy_(descriptor.policy()) {
+    : family_(Family::Interactions), model_(request.model), route_(descriptor.resolved_path(streaming, request.model)), prefix_count_(request.messages.size()), policy_(descriptor.policy()) {
   valid_ = descriptor.family() == family_name(family_) && origin_digest(descriptor, origin_) && configuration_digest(descriptor, request, choices, prefix_);
   if (!request_controls::extensions_replay_eligible(descriptor, request.extensions)) replay_eligible_ = false;
   // A continued interaction's history is held by the service, so its output has no client-held replay authority;
@@ -800,7 +800,7 @@ NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, 
   }
 }
 NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, const chat::Request& request, const descriptor::EffectiveChoices& choices, bool streaming)
-    : family_(Family::Chat), model_(request.model), route_(descriptor.path(streaming)),
+    : family_(Family::Chat), model_(request.model), route_(descriptor.resolved_path(streaming, request.model)),
       prefix_count_(request.canonical_messages.empty() ? request.messages.size() : request.canonical_messages.size()), policy_(descriptor.policy()) {
   valid_ = descriptor.family() == family_name(family_) && origin_digest(descriptor, origin_) && configuration_digest(descriptor, request, choices, prefix_);
   if (!request_controls::extensions_replay_eligible(descriptor, request.extensions)) replay_eligible_ = false;
@@ -888,7 +888,7 @@ void NativeContext::bind_history(const std::vector<Message>& messages, bool port
 }
 bool NativeContext::matches_descriptor(const descriptor::ValidatedDescriptor& descriptor) const {
   Digest digest{};
-  // The route binds the model on a model-routed Generate descriptor, so a seal never replays to another model.
+  // The route binds the model on a model-routed descriptor, so a seal never replays to another model.
   return valid_ && (route_ == descriptor.resolved_path(false, model_) || route_ == descriptor.resolved_path(true, model_)) &&
          origin_digest(descriptor, digest) && digest == origin_;
 }

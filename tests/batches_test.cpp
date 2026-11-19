@@ -82,6 +82,21 @@ void requests() {
   CHECK(document(encoded(openai_chat(), metadata).body)->root().get("metadata").get("run").as_string() == "7");
   CHECK(refused(openai_chat(), batches::Submit{{{"o-1", responses_item("x")}}, "file-9", "/v1/responses"}) == ErrorKind::InvalidRequest);
   CHECK(refused(openai_chat(), batches::Submit{{}, "file-9", "v1/responses"}) == ErrorKind::InvalidRequest);
+  // The path the lines call is any origin-relative path a descriptor may have, not one under /v1/.
+  CHECK(document(encoded(openai_chat(), batches::Submit{{}, "file-9", "/openai/v1/Responses:batch"}).body)->root().get("endpoint").as_string() ==
+        "/openai/v1/Responses:batch");
+  for (const auto* path : {"/v1/../responses", "/v1/./responses", "/v1//responses", "/v1/%2e%2e/responses", "/v1/responses?x=1", "/v1/responses#x",
+                           "//evil.example/v1/responses", "https://evil.example/v1/responses", "/v1/{model}/responses", "/v1/responses x", ""})
+    CHECK(refused(openai_chat(), batches::Submit{{}, "file-9", path}) == ErrorKind::InvalidRequest);
+  // A line of a descriptor whose path names `{model}` calls its item's model path.
+  {
+    auto loaded = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"routed-chat","family":"openai.chat","connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":"/v1/models/{model}/chat","streaming":"/v1/models/{model}/chat"}}})");
+    CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
+    const auto& routed = std::get<descriptor::ValidatedDescriptor>(loaded);
+    const auto lines = batches::jsonl(routed, {{"c-1", chat::Request::simple("gpt-x", "Say: alpha", 16)}});
+    CHECK(std::holds_alternative<std::string>(lines));
+    CHECK(document(std::get<std::string>(lines).substr(0, std::get<std::string>(lines).find('\n')))->root().get("url").as_string() == "/v1/models/gpt-x/chat");
+  }
   // Anthropic: the items inline, each as the Messages body it would send.
   const auto inline_submit = encoded(anthropic(), batches::Submit{{{"a-1", messages::Request::simple("claude-haiku-4-5", "Say: alpha", 16)},
                                                                     {"a-2", messages::Request::simple("claude-haiku-4-5", "Say: beta", 16)}}});

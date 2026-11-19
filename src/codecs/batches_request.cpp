@@ -114,8 +114,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   if (shape == "openai") {
     if (!submit.items.empty()) return bad("an OpenAI batch reads its items from an uploaded file");
     if (!token(submit.input_file)) return bad("an OpenAI batch names its uploaded input file");
-    if (!submit.endpoint.starts_with("/v1/") || !std::all_of(submit.endpoint.begin(), submit.endpoint.end(), [](char c) { return c == '/' || c == '_' || c == '-' || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'); }))
-      return bad("an OpenAI batch names the path its lines call");
+    if (!descriptor::valid_path(submit.endpoint)) return bad("an OpenAI batch names the path its lines call");
     body = "{\"input_file_id\":" + json::quote(submit.input_file) + ",\"endpoint\":" + json::quote(submit.endpoint) + ",\"completion_window\":\"24h\"";
   } else if (shape == "anthropic") {
     if (auto error = check_items<messages::Request>(submit.items)) return *error;

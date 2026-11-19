@@ -954,8 +954,31 @@ void served_by_leaves_replay_identity() {
   CHECK(replayed == follow_up(named.messages.at(0)));
   CHECK(replayed.find("SECRET_SIGNATURE") != std::string::npos && replayed.find("Amazon Bedrock") == std::string::npos);
 }
+// A Messages descriptor whose path names `{model}` (a Vertex-style route at loopback): each request goes to its own
+// model's path, and its captured answer replays on the next turn for that model only.
+void model_routed_path() {
+  const std::string root = "/v1/projects/p/locations/l/publishers/anthropic/models/";
+  const auto descriptor = descriptor_value("http://127.0.0.1:18080", root + "{model}:rawPredict");
+  CHECK(descriptor.model_routed());
+  auto request = base_request();
+  for (const bool stream : {false, true}) {
+    const auto wire = encoded(descriptor, request, stream);
+    CHECK(wire.path == root + "fixture-model:rawPredict" && wire.context->matches_descriptor(descriptor));
+  }
+  request.messages.push_back(capture(descriptor, request, R"([{"type":"text","text":"Answer"}])"));
+  request.messages.push_back(user("Continue"));
+  const auto next = encoded(descriptor, request);
+  CHECK(next.path == root + "fixture-model:rawPredict");
+  CHECK(document(next.body)->root().get("messages").size() == 3);
+  CHECK(document(next.body)->root().get("messages").at(1).get("content").at(0).get("text").as_string() == "Answer");
+  // The route binds the model: the same history in a request for another model is not replayed.
+  auto other = request;
+  other.model = "other-model";
+  rejected(descriptor, other);
+}
 int main() {
   try {
+    model_routed_path();
     server_tool_options(); typed_client_tools_and_betas(); mcp_connector_and_replay(); compaction_and_history_roots(); input_blocks_and_skills();
     typed_wire_request(); native_retention_and_content_integrity(); prefix_and_origin_binding();
     immutable_context_and_failed_capture(); client_loop_ownership(); server_loop_ownership_and_pause(); signature_accumulation_and_limits();

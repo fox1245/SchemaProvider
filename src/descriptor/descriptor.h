@@ -36,12 +36,17 @@ public:
     std::string_view family() const { return family_; }
     std::string_view base_url() const { return base_url_; }
     std::string_view path(bool streaming) const { return streaming ? streaming_path_ : buffered_path_; }
-    // True for a google.generate descriptor whose paths name `{model}`: one descriptor serves every
+    // True for a descriptor of any family whose paths name `{model}`: one descriptor serves every
     // model of its origin, and each request's model takes the place of the placeholder.
     bool model_routed() const noexcept { return model_routed_; }
     // The path a request for `model` is sent to: path(streaming) with `{model}` replaced on a
-    // model-routed descriptor, and path(streaming) itself otherwise.
+    // model-routed descriptor, and path(streaming) itself otherwise. The encoders send a request through
+    // a model-routed descriptor only for a model that route_model_substitute admits.
     std::string resolved_path(bool streaming, std::string_view model) const;
+    // The model a literal route names: the name its paths carry where the `{model}` templates of the route
+    // fact of its origin have the placeholder (DescriptorPolicy::route). Empty on a model-routed descriptor and
+    // where the fact has no placeholder or no fact applies. A literal google.generate route serves only it.
+    std::string_view route_model() const noexcept;
     std::string_view request_model_member() const { return model_member_; }
     std::string_view request_messages_member() const { return messages_member_; }
     std::string_view request_stream_member() const { return stream_member_; }
@@ -93,5 +98,17 @@ LoadResult load_with_environment_headers(
     const std::vector<std::pair<std::string, std::string>>& overrides = {},
     PolicySnapshot policy = {});
 bool valid_origin(std::string_view url);
+// An origin-relative path as descriptor admission takes a literal one: segments of letters, digits, `-`, `_`,
+// `.`, `~` and `:`, none of them empty, `.` or `..`, and no query, URL escape or placeholder.
+bool valid_path(std::string_view path) noexcept;
+// A path template a route fact may state: a valid_path in which `{model}` may stand once, ending in an optional
+// query of `name=value` pairs joined by `&`, of letters, digits, `-`, `_`, `.` and `~`.
+bool valid_route_template(std::string_view path) noexcept;
+// A model name a route's path can carry: letters, digits, `-`, `.` and `_`. Admission reads the model of a
+// literal route with it, and the Generate encoder a request's model.
+bool route_model_name(std::string_view model) noexcept;
+// A model name that may take the place of `{model}`: a route_model_name that is not `.` and holds no `..`, so
+// the path it is put in keeps its segments, its query and its origin.
+bool route_model_substitute(std::string_view model) noexcept;
 
 } // namespace sp::descriptor
