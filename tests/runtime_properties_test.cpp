@@ -75,6 +75,7 @@ void interface_contract_capabilities() {
   static_assert((RequiredProvider & TransportConnectionCache) == TransportConnectionCache);
   static_assert((RequiredProvider & ModelControlFacts) == ModelControlFacts);
   static_assert((RequiredProvider & TypedToolChoice) == TypedToolChoice);
+  static_assert((RequiredProvider & EndpointCostBounds) == 0);
   const auto linked = sp::runtime::interface_contract();
   require(linked.revision == sp::EXPECTED_INTERFACE_REVISION, "linked interface revision differs");
   require((linked.capabilities & RequiredProvider) == RequiredProvider, "required capabilities are not advertised");
@@ -86,6 +87,7 @@ void interface_contract_capabilities() {
   require((sp::core_interface_contract().capabilities & TransportConnectionCache) != 0, "core omits TransportOptions::connection_cache_size");
   require((sp::core_interface_contract().capabilities & ModelControlFacts) != 0, "core omits CatalogueEntry::control_values");
   require((sp::core_interface_contract().capabilities & TypedToolChoice) != 0, "core omits the typed tool choice");
+  require((linked.capabilities & EndpointCostBounds) != 0, "the runtime omits endpoint cost bounds");
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, OpenRouterRoutingMaxPrice);
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, ErrorReason);
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, CompletionSecret);
@@ -94,6 +96,7 @@ void interface_contract_capabilities() {
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, TransportConnectionCache);
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, ModelControlFacts);
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, TypedToolChoice);
+  sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, EndpointCostBounds);
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, RequiredProvider);
   constexpr std::uint64_t ungranted = 1ULL << 63;
   require((linked.capabilities & ungranted) == 0, "test capability bit is granted");

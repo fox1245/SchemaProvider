@@ -26,6 +26,13 @@ std::string_view kind_name(Kind kind, bool openai) {
 }  // namespace
 
 std::string_view operation(const Request&) noexcept { return "decide"; }
+EndpointFacts endpoint_facts(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
+  auto facts = endpoints::call_facts(descriptor, "decisions", operation(request), request.model);
+  facts.dimensions = endpoints::dimensions({}, request.extensions);
+  facts.quantities.push_back(endpoints::input_limited("input"));
+  facts.quantities.push_back(endpoints::output_limited());
+  return facts;
+}
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
   const auto* fact = descriptor.policy()->endpoint("decisions", descriptor.base_url());
   if (!fact) return Error{ErrorKind::Unsupported, "decision endpoints are not admitted at this origin"};

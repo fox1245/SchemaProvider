@@ -17,6 +17,16 @@ bool token(std::string_view value) {
 }  // namespace
 
 std::string_view operation(const Request&) noexcept { return "speak"; }
+EndpointFacts endpoint_facts(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
+  auto facts = endpoints::call_facts(descriptor, "speech", operation(request), request.model);
+  std::optional<std::string> voice;
+  if (!request.voice.empty()) voice = request.voice;
+  facts.dimensions = endpoints::dimensions({{"format", request.format}, {"voice", voice}}, request.extensions);
+  facts.quantities.push_back(endpoints::requested("item:character", request.input.size(), true));
+  facts.quantities.push_back(endpoints::input_limited("input"));
+  facts.quantities.push_back(endpoints::output_limited());
+  return facts;
+}
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
   const auto* fact = descriptor.policy()->endpoint("speech", descriptor.base_url());
   if (!fact) return Error{ErrorKind::Unsupported, "speech endpoints are not admitted at this origin"};

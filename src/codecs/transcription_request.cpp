@@ -21,6 +21,16 @@ void field(std::string& body, std::string_view boundary, std::string_view name, 
 }  // namespace
 
 std::string_view operation(const Request& request) noexcept { return request.translate ? "translate" : "transcribe"; }
+EndpointFacts endpoint_facts(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
+  auto facts = endpoints::call_facts(descriptor, "transcription", operation(request), request.model);
+  facts.dimensions = endpoints::dimensions({{"language", request.language}}, request.extensions);
+  auto seconds = endpoints::requested("item:second", std::nullopt);
+  seconds.source = EndpointQuantity::Source::StatedSeconds;
+  facts.quantities.push_back(std::move(seconds));
+  facts.quantities.push_back(endpoints::input_limited("input"));
+  facts.quantities.push_back(endpoints::output_limited());
+  return facts;
+}
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
   const auto* fact = descriptor.policy()->endpoint("transcription", descriptor.base_url());
   if (!fact) return Error{ErrorKind::Unsupported, "transcription endpoints are not admitted at this origin"};

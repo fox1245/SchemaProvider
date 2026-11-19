@@ -40,6 +40,11 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor&, cons
 // The operation of the rerank fact a request performs (`rank`): the encoder sends the request to that operation's
 // path, and the policy states its billing under it.
 std::string_view operation(const Request&) noexcept;
+// What a request bills by (core/endpoint_facts.h): the rerank fact and `rank`, with the quantities `item:document`, the
+// documents, as many as there are; `item:search_unit`, which nothing in the request bounds, so it is not stated; and
+// `input`, the input tokens up to the model's input limit for each document or the host's measured count; and the
+// dimension `top` when it is set, with the request's extensions (endpoints::dimensions).
+EndpointFacts endpoint_facts(const descriptor::ValidatedDescriptor&, const Request&);
 
 using Close = endpoints::Close;
 // Checks one buffered response against the call: every result names a document of the request once, and there are as

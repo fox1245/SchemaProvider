@@ -1535,7 +1535,8 @@ void reports(const runtime::PreparedEndpoint<Outcome>& call, std::string_view en
   const auto* d = prepared.descriptor();
   if (facts.endpoint != endpoint || facts.operation != operation || facts.billing != billing || facts.model != model ||
       facts.family != d->family() || facts.origin != d->base_url() || facts.routed_gateway != descriptor::routed_gateway(*d) ||
-      facts.carried_tier != (billing == Billing::Carried ? "batch" : "") || !facts.quantities.empty() || !facts.carried.empty())
+      facts.carried_tier != (billing == Billing::Carried ? "batch" : "") || facts.quantities.empty() == (billing == Billing::Model) ||
+      !facts.carried.empty())
     throw std::runtime_error(label + " reports " + facts.endpoint + "/" + facts.operation + " " + std::string(to_string(facts.billing)) +
                              " model '" + facts.model + "' at " + facts.origin);
 }
@@ -1678,11 +1679,13 @@ void worst_case_endpoint_calls() {
   CHECK(zero(bound_of(router.prepare(jobs::Poll{job}))));
   CHECK(zero(bound_of(router.prepare(jobs::Download{job, 0}))));
   CHECK(zero(bound_of(router.prepare(generations::Get{"gen-1"}))));
-  // A billed operation keeps no bound: neither one that bills its model nor a batch that bills the requests it carries.
+  // An operation that bills its model is bounded by the quantities its request states, which these chat prices do not
+  // cover (no image price, no output limit, no entry at a routing gateway); a batch that bills the requests it carries
+  // keeps no bound.
   auto wc = bound_of(direct.prepare(images::Request{"zz-model-1", "A flat icon of a fox"}));
-  CHECK(!wc.total && has(wc, pricing::UnboundedBy::Unmodeled, "images"));
-  CHECK(has(bound_of(direct.prepare(decision("zz-model-1"))), pricing::UnboundedBy::Unmodeled, "decisions"));
-  CHECK(has(bound_of(router.prepare(videos::Request{"vendor/zz-video", "A fox in the snow."})), pricing::UnboundedBy::Unmodeled, "videos"));
+  CHECK(!wc.total && has(wc, pricing::UnboundedBy::ModelPrice, "item:image[operation=generate]"));
+  CHECK(has(bound_of(direct.prepare(decision("zz-model-1"))), pricing::UnboundedBy::OutputCap, "output"));
+  CHECK(has(bound_of(router.prepare(videos::Request{"vendor/zz-video", "A fox in the snow."})), pricing::UnboundedBy::ModelPrice, "vendor/zz-video"));
   wc = bound_of(messages_api.prepare(batches::Submit{{{"a-1", messages::Request::simple("zz-model-1", "Say: alpha", 16)}}}));
   CHECK(!wc.total && has(wc, pricing::UnboundedBy::Unmodeled, "batches"));
   // A policy that does not state the billing: no total, and the reason names the endpoint and operation.

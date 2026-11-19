@@ -9,6 +9,14 @@ Error bad(std::string message) { return Error{ErrorKind::InvalidRequest, std::mo
 }  // namespace
 
 std::string_view operation(const Request&) noexcept { return "rank"; }
+EndpointFacts endpoint_facts(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
+  auto facts = endpoints::call_facts(descriptor, "rerank", operation(request), request.model);
+  facts.dimensions = endpoints::dimensions({{"top", endpoints::decimal(request.top)}}, request.extensions);
+  facts.quantities.push_back(endpoints::requested("item:document", request.documents.size(), true));
+  facts.quantities.push_back(endpoints::requested("item:search_unit", std::nullopt));
+  facts.quantities.push_back(endpoints::input_limited("input", request.documents.size()));
+  return facts;
+}
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
   const auto* fact = descriptor.policy()->endpoint("rerank", descriptor.base_url());
   if (!fact) return Error{ErrorKind::Unsupported, "rerank endpoints are not admitted at this origin"};

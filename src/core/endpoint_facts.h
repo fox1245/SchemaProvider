@@ -44,8 +44,10 @@ struct EndpointFacts {
   std::string family, origin, model;
   // The origin is a routing gateway (descriptor::routed_gateway).
   bool routed_gateway = false;
-  // The qualifier dimensions the call offers, sorted by key; the quantities it bills; the chat requests it carries,
-  // and the uploaded file whose lines are those requests. Empty in every prepared call: the SDK does not fill them.
+  // The qualifier dimensions the call offers, sorted by key, and the quantities it bills: a prepared call that bills its
+  // model states those of its request (images::endpoint_facts, ...), and any other call states none. The chat requests
+  // it carries, and the uploaded file whose lines are those requests: empty in every prepared call, since the SDK does
+  // not fill them yet.
   std::vector<std::pair<std::string, std::string>> dimensions;
   std::vector<EndpointQuantity> quantities;
   std::vector<CarriedRequest> carried;

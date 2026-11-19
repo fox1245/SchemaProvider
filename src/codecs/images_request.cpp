@@ -19,6 +19,19 @@ bool token(std::string_view value) {
 std::string_view operation(const descriptor::EndpointFact& fact, const Request& request) noexcept {
   return fact.shape == "openai" && !request.references.empty() ? "edit" : "generate";
 }
+EndpointFacts endpoint_facts(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
+  const auto* fact = descriptor.policy()->endpoint("images", descriptor.base_url());
+  auto facts = endpoints::call_facts(descriptor, "images", fact ? operation(*fact, request) : std::string_view{}, request.model);
+  facts.dimensions = endpoints::dimensions({{"background", request.background}, {"output_compression", endpoints::decimal(request.output_compression)},
+                                            {"output_format", request.output_format}, {"quality", request.quality}, {"size", request.size}},
+                                           request.extensions);
+  facts.quantities.push_back(endpoints::requested("item:image", request.count));
+  facts.quantities.push_back(endpoints::requested("item:input_image", request.references.size(), true));
+  facts.quantities.push_back(endpoints::input_limited("input"));
+  if (!request.references.empty()) facts.quantities.push_back(endpoints::input_limited("input_image"));
+  facts.quantities.push_back(endpoints::output_limited());
+  return facts;
+}
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
   const auto* fact = descriptor.policy()->endpoint("images", descriptor.base_url());
   if (!fact) return Error{ErrorKind::Unsupported, "image endpoints are not admitted at this origin"};

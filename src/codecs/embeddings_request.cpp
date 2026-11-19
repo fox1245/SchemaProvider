@@ -17,6 +17,15 @@ bool token(std::string_view value, bool upper_case = true) {
 }  // namespace
 
 std::string_view operation(const Request&) noexcept { return "embed"; }
+EndpointFacts endpoint_facts(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
+  auto facts = endpoints::call_facts(descriptor, "embeddings", operation(request), request.model);
+  facts.dimensions = endpoints::dimensions({{"dimensions", endpoints::decimal(request.dimensions)}, {"task", request.task}}, request.extensions);
+  const std::uint64_t inputs = request.inputs.size();
+  facts.quantities.push_back(endpoints::input_limited("input", inputs));
+  if (std::any_of(request.inputs.begin(), request.inputs.end(), [](const Input& input) { return !input.media.empty(); }))
+    facts.quantities.push_back(endpoints::input_limited("input_image", inputs));
+  return facts;
+}
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
   const auto* fact = descriptor.policy()->endpoint("embeddings", descriptor.base_url());
   if (!fact) return Error{ErrorKind::Unsupported, "embedding endpoints are not admitted at this origin"};

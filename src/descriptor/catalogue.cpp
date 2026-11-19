@@ -756,6 +756,8 @@ bool qualifier_offered(std::string_view qualifier, std::span<const std::pair<std
     start = comma + 1;
   }
 }
+bool valid_dimension_key(std::string_view key) noexcept { return bounded(key, qualifier_key_character); }
+bool valid_dimension_value(std::string_view value) noexcept { return bounded(value, request_token_character); }
 
 std::string_view listing_name(Listing listing) noexcept {
   switch (listing) {

@@ -11,6 +11,8 @@
 #include "codecs/speech.h"
 #include "codecs/tokens.h"
 #include "codecs/transcription.h"
+#include "descriptor/catalogue.h"
+#include <algorithm>
 
 namespace sp::endpoints {
 std::variant<std::optional<std::pair<std::string, std::string>>, Error> credential(std::string_view scheme, std::string_view key) {
@@ -96,5 +98,64 @@ std::unique_ptr<Codec> make_codec(std::string_view name, const descriptor::Valid
     if (name == step_name) return std::make_unique<files::SessionCodec>(descriptor, accumulator, step, std::move(requested), limits, context.secret);
   if (name == "files.delete") return std::make_unique<files::Codec>(descriptor, accumulator, files::Codec::Kind::Deleted, std::move(requested), limits);
   return nullptr;
+}
+EndpointFacts call_facts(const descriptor::ValidatedDescriptor& descriptor, std::string_view fact, std::string_view operation, std::string_view model) {
+  EndpointFacts facts;
+  const auto& policy = *descriptor.policy();
+  facts.endpoint = std::string(fact);
+  facts.operation = std::string(operation);
+  facts.billing = policy.endpoint_billing(fact, descriptor.base_url(), operation);
+  if (facts.billing == descriptor::EndpointBilling::Carried) facts.carried_tier = std::string(policy.carried_tier(fact, descriptor.base_url()));
+  facts.family = std::string(descriptor.family());
+  facts.origin = std::string(descriptor.base_url());
+  facts.model = std::string(model);
+  facts.routed_gateway = descriptor::routed_gateway(descriptor);
+  return facts;
+}
+std::vector<std::pair<std::string, std::string>> dimensions(
+    std::initializer_list<std::pair<std::string_view, std::optional<std::string>>> typed, const std::shared_ptr<const json::Document>& extensions) {
+  std::vector<std::pair<std::string, std::string>> out;
+  const auto offer = [&](std::string_view key, std::string_view value) {
+    if (descriptor::valid_dimension_key(key) && descriptor::valid_dimension_value(value)) out.emplace_back(std::string(key), std::string(value));
+  };
+  for (const auto& [key, value] : typed)
+    if (value) offer(key, *value);
+  if (extensions && extensions->root().is_object())
+    for (auto member : extensions->root().members()) {
+      if (member.value.is_string()) offer(member.key, member.value.as_string());
+      else if (member.value.is_bool()) offer(member.key, *boolean(member.value.as_bool()));
+      else if (member.value.is_uint()) offer(member.key, *decimal(member.value.as_uint()));
+    }
+  // Stable, so a key offered twice stays twice and the bound sees it.
+  std::stable_sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+  return out;
+}
+std::optional<std::string> decimal(std::optional<std::uint64_t> value) {
+  if (!value) return std::nullopt;
+  return std::to_string(*value);
+}
+std::optional<std::string> boolean(std::optional<bool> value) {
+  if (!value) return std::nullopt;
+  return std::string(*value ? "true" : "false");
+}
+EndpointQuantity requested(std::string unit, std::optional<std::uint64_t> count, bool exact) {
+  EndpointQuantity quantity;
+  quantity.unit = std::move(unit);
+  quantity.at_most = count;
+  quantity.exact = exact && count.has_value();
+  return quantity;
+}
+EndpointQuantity input_limited(std::string unit, std::uint64_t per) {
+  EndpointQuantity quantity;
+  quantity.unit = std::move(unit);
+  quantity.source = EndpointQuantity::Source::InputLimit;
+  quantity.per = per;
+  return quantity;
+}
+EndpointQuantity output_limited() {
+  EndpointQuantity quantity;
+  quantity.unit = "output";
+  quantity.source = EndpointQuantity::Source::OutputLimit;
+  return quantity;
 }
 }  // namespace sp::endpoints

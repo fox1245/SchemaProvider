@@ -69,6 +69,10 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor&, cons
 // The operation of the decisions fact a request performs (`decide`): the encoder sends the request to that operation's
 // path, and the policy states its billing under it.
 std::string_view operation(const Request&) noexcept;
+// What a request bills by (core/endpoint_facts.h): the decisions fact and `decide`, with the quantities `input`, the
+// input tokens up to the model's input limit or the host's measured count, and `output`, the output tokens up to the
+// model's output limit; and the request's extensions as dimensions (endpoints::dimensions).
+EndpointFacts endpoint_facts(const descriptor::ValidatedDescriptor&, const Request&);
 
 using Close = endpoints::Close;
 // Decodes one buffered response into accumulator events: one assistant message with an Opaque part per answer.

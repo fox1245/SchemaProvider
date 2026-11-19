@@ -41,6 +41,12 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor&, cons
 // The operation of the transcription fact a request performs: `translate` with `translate`, otherwise `transcribe`.
 // The encoder sends the request to that operation's path, and the policy states its billing under it.
 std::string_view operation(const Request&) noexcept;
+// What a request bills by (core/endpoint_facts.h): the transcription fact and the operation above, with the quantities
+// `item:second`, the audio's length in whole seconds, which the request does not hold, so a bound takes it from the
+// host (EndpointQuantity::Source::StatedSeconds); `input`, the input tokens up to the model's input limit or the host's
+// measured count; and `output`, the output tokens up to the model's output limit; and the dimension `language` when it
+// is set, with the request's extensions (endpoints::dimensions).
+EndpointFacts endpoint_facts(const descriptor::ValidatedDescriptor&, const Request&);
 
 using Close = endpoints::Close;
 class Codec final : public endpoints::Codec {
