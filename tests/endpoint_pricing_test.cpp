@@ -531,6 +531,22 @@ struct Oracle {
   bool applies(const Row& r, std::uint64_t input_length) const {
     return r.tier == g.tier && (r.above == 0 || input_length > r.above) && offers(r);
   }
+  // The value the call offers for `name`: empty for a member whose value it does not state; nothing when it offers none.
+  std::optional<std::string> value_of(const std::string& name) const {
+    for (const auto& [key, value] : offered)
+      if (key == name) return value;
+    return std::nullopt;
+  }
+  // A row that names a dimension the call offers without a value may apply.
+  bool names_unstated(const Row& r) const {
+    return std::any_of(r.qualifier.begin(), r.qualifier.end(), [&](const auto& d) { const auto v = value_of(d.first); return v && v->empty(); });
+  }
+  bool may_apply(const Row& r, std::uint64_t input_length) const {
+    return r.tier == g.tier && (r.above == 0 || input_length > r.above) && std::all_of(r.qualifier.begin(), r.qualifier.end(), [&](const auto& d) {
+             const auto v = value_of(d.first);
+             return v && (v->empty() || *v == d.second);
+           });
+  }
   // The unit with the call's operation and the offered dimensions some row of the unit names: no other value is printed.
   std::string with_dimensions(const std::string& unit) const {
     std::string out = unit + "[";
@@ -538,7 +554,7 @@ struct Oracle {
       const bool read = name == "operation" || std::any_of(g.rows.begin(), g.rows.end(), [&](const auto& row) {
         return row.second.item && "item:" + row.second.name == unit && row.second.qualifier.count(name);
       });
-      if (read) out += (out.back() == '[' ? "" : ",") + name + "=" + value;
+      if (read) out += (out.back() == '[' ? "" : ",") + name + (value.empty() ? "" : "=" + value);
     }
     return out + "]";
   }
@@ -611,6 +627,14 @@ struct Oracle {
         kinds.push_back(q.unit.substr(5));
         const auto n = count(q);
         if (n && *n == 0) continue;
+        // A row of the unit in the tier, in any band, that names a member the call does not state the value of.
+        if (std::any_of(g.rows.begin(), g.rows.end(), [&](const auto& item) {
+              const auto& r = item.second;
+              return r.item && "item:" + r.name == q.unit && r.tier == g.tier && names_unstated(r);
+            })) {
+          refuse(UnboundedBy::ModelPrice, with_dimensions(q.unit));
+          continue;
+        }
         std::optional<std::uint64_t> dearest;
         bool variable = false;
         for (const auto& [key, r] : g.rows) {
@@ -633,7 +657,7 @@ struct Oracle {
     if (fee) sum += *fee;
     // Item rows of kinds no quantity counts.
     for (const auto& [key, r] : g.rows)
-      if (r.item && std::find(kinds.begin(), kinds.end(), r.name) == kinds.end() && applies(r, length) && !(r.rate && *r.rate == 0))
+      if (r.item && std::find(kinds.begin(), kinds.end(), r.name) == kinds.end() && may_apply(r, length) && !(r.rate && *r.rate == 0))
         refuse(UnboundedBy::Unmodeled, key);
     if (!out.reasons.empty()) return out;
     out.total = rounded(sum) * (g.charge_on_accept ? 1 : g.attempts);
@@ -724,8 +748,10 @@ void bound_covers_every_consistent_result() {
       Generated g;
       const std::string operation = shape.operations[next(shape.operations.size() - 1)];
       Dimensions dimensions;
-      if (next(2)) dimensions.emplace_back("quality", next(1) ? "high" : "low");
+      // A member the call has without a value it can state is offered with an empty value.
+      if (const auto quality = next(4)) dimensions.emplace_back("quality", quality == 1 ? "high" : quality == 2 ? "low" : quality == 3 ? "high" : "");
       if (next(2)) dimensions.emplace_back("size", next(1) ? "a" : "b");
+      if (next(5) == 0) dimensions.emplace_back("style", "");
       std::vector<EndpointQuantity> q;
       std::vector<std::string> used;
       auto stated = [&](std::uint64_t top) { return next(4) == 0 ? std::optional<std::uint64_t>() : std::optional<std::uint64_t>(next(top)); };
@@ -784,6 +810,7 @@ void bound_covers_every_consistent_result() {
           if (next(2) == 0) r.qualifier["quality"] = next(1) ? "high" : "low";
           if (next(2) == 0) r.qualifier["size"] = next(1) ? "a" : "b";
           if (next(3) == 0) r.qualifier["operation"] = next(1) ? operation : std::string("other");
+          if (next(5) == 0) r.qualifier["style"] = "vivid";
           g.rows[key_of(r)] = r;
         }
       }

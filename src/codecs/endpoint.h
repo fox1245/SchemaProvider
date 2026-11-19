@@ -85,17 +85,21 @@ inline void add_fact_headers(Encoded& encoded, const descriptor::EndpointFact& f
 EndpointFacts call_facts(const descriptor::ValidatedDescriptor&, std::string_view fact, std::string_view operation, std::string_view model);
 // The dimensions a call offers (EndpointFacts::dimensions), sorted by key: `operation` with the operation the call
 // performs, each typed member of the request in `typed` that is set, under its typed name, and each member of
-// `extensions` whose value is a string, a boolean (`true` or `false`) or an unsigned integer (in decimal), under its own
-// name. A key or value outside the qualifier grammar
-// (descriptor::valid_dimension_key and valid_dimension_value) is offered by no dimension, so no row that names it
-// applies. A key offered twice (an extension named like a typed member) stays twice, and the bound refuses the call
-// rather than choose one of them.
+// `extensions`, under its own name. A string in the qualifier grammar is offered with its value, and so are a boolean
+// (`true` or `false`) and an unsigned integer (in decimal). A member that is set but whose value the grammar cannot hold
+// (descriptor::valid_dimension_value: text outside it, a number with a fraction or a sign, null, an array, an object) is
+// offered with an empty value, which no row matches; a row of a priced unit that names its key leaves that unit
+// without a bound. A key outside the grammar (descriptor::valid_dimension_key) no row can name, and it is left out. A
+// key offered twice (an extension named like a typed member) stays twice, and the bound refuses the call rather than
+// choose one of them.
 std::vector<std::pair<std::string, std::string>> dimensions(
     std::string_view operation, std::initializer_list<std::pair<std::string_view, std::optional<std::string>>> typed,
     const std::shared_ptr<const json::Document>& extensions);
-// A typed member as a dimension's value: an unsigned count in decimal, a boolean as `true` or `false`.
+// A typed member as a dimension's value: an unsigned count in decimal, a boolean as `true` or `false`; and a member that
+// is set but whose value no dimension can hold (a floating-point number) as an empty value.
 std::optional<std::string> decimal(std::optional<std::uint64_t>);
 std::optional<std::string> boolean(std::optional<bool>);
+std::optional<std::string> unstated(bool set);
 // A quantity the request states: `count` when it is set, and then `exact` when the request fixes it; not stated when it
 // is unset, so a bound that needs it refuses.
 EndpointQuantity requested(std::string unit, std::optional<std::uint64_t> count, bool exact = false);

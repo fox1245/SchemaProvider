@@ -21,8 +21,10 @@ namespace sp::pricing {
 // - the call is above its input band: strictly more than its `+<tokens>` of the `input_tokens`;
 // - the call offers every dimension its qualifier names, each with a byte-equal value. A request field the call leaves
 //   unset is offered by no dimension, so only a row without a qualifier prices a call that leaves it unset.
-// Nothing when no row applies, when a row that applies has a price that is not a fixed amount (a variable price), or
-// when `dimensions` are not sorted by key with each key once.
+// A dimension offered with an empty value is a member the call has whose value no dimension can hold: it matches no
+// row, and a row that names its key may apply. Nothing when no row applies, when a row that applies has a price that is
+// not a fixed amount (a variable price), when a row of the unit under `tier`, in any band, names a dimension offered
+// with an empty value, or when `dimensions` are not sorted by key with each key once.
 
 // The dearest row that applies, over every band a call of at most `input_tokens` input tokens may fall in: the rate to
 // reserve with. Of equal rates, the first key.
@@ -94,15 +96,18 @@ struct EndpointBound {
 //     both counts are stated, is at least its own; otherwise `Unmodeled`, subject `input_image`. `output` is priced at the
 //     dearest output rate (`output`, `reasoning`, `output_image`, `output_audio`), which needs an `output` rate. The
 //     request fee (`request`) is charged once when the entry lists it.
-//   - An `item:<kind>` quantity is priced at dearest_item_price for the call's dimensions.
+//   - An `item:<kind>` quantity is priced at dearest_item_price for the call's dimensions. When a row of its unit under
+//     the tier, in any band, names a dimension the call offers with an empty value (a member whose value the call does
+//     not state), it is `ModelPrice`, subject the unit with the dimensions as below and that key without a value.
 //   - A quantity that can be above zero needs a rate, and a rate of zero is a declared zero: a unit the entry does not
 //     list is `ModelPrice` (subject the unit; an item unit with, in brackets, the call's operation and each offered
 //     dimension whose key a row of the unit in the entry names, so no other request value is printed), never free, and so
 //     is a row that applies with a variable price. A rate above zero needs the quantity: `InputBound` for `input`,
 //     `OutputCap` for `output` and `Quantity` for an item unit, each with the unit as subject. A quantity whose rates
 //     are all declared zeros needs none.
-//   - A row of an item unit that applies to the call, of a kind none of the quantities count, and that is not a
-//     declared zero: `Unmodeled`, subject the row's key.
+//   - A row of an item unit that applies to the call, or may apply because it names a dimension the call offers with an
+//     empty value, of a kind none of the quantities count, and that is not a declared zero: `Unmodeled`, subject the
+//     row's key.
 //   - A quantity of another unit: `Unmodeled`, subject the unit.
 // The lines are summed exactly and rounded up once to whole nano-USD; then multiplied by one attempt for a
 // charge-on-accept operation and by `attempts` otherwise. Zero attempts are `Invocations`, and a bound past 64 bits is
