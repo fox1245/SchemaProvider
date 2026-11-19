@@ -145,7 +145,9 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
     body += "]}}}";
     // Google names the model in the path.
     if (!token(model)) return bad("a Google batch model is a path segment");
-    if (const auto at = path.find("{model}"); at != std::string::npos) path.replace(at, 7, model);
+    // It takes the place of {model} through the check every path shares (descriptor::model_path).
+    path = descriptor::model_path(path, model);
+    if (path.empty()) return bad("a model name cannot take the place of {model} in the endpoint's path");
   }
   if (submit.extensions) for (auto member : submit.extensions->root().members()) body += "," + json::quote(member.key) + ":" + member.value.dump();
   body += "}";

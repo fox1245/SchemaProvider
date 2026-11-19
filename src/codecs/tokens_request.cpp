@@ -55,16 +55,18 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
     if (shape == "google" && member.key == "model") continue;
     members.append(members.empty() ? "" : ",").append(json::quote(member.key)).append(":").append(member.value.dump());
   }
-  std::string resolved(*path);
   std::string body;
   if (shape == "google") {
     // Google counts a whole generate request, which names its model.
     if (!token(model)) return Error{ErrorKind::InvalidRequest, "a Google model is a path segment"};
-    if (const auto at = resolved.find("{model}"); at != std::string::npos) resolved.replace(at, 7, model);
     body = "{\"generateContentRequest\":{\"model\":" + json::quote("models/" + model) + (members.empty() ? "" : ",") + members + "}}";
   } else {
     body = "{" + members + "}";
   }
+  // A model takes the place of {model} in the path, at any shape, through the check every path shares
+  // (descriptor::model_path).
+  auto resolved = descriptor::model_path(*path, model);
+  if (resolved.empty()) return Error{ErrorKind::InvalidRequest, "a model name cannot take the place of {model} in the endpoint's path"};
   if (body.size() > descriptor.policy()->resources().request_bytes) return Error{ErrorKind::ResourceLimit, "the count request exceeds the request limit"};
   Encoded encoded{std::move(resolved), std::move(body), std::move(model), fact->charge_on_accept, fact->auth};
   endpoints::add_fact_headers(encoded, *fact);
