@@ -6,7 +6,11 @@
 #include "descriptor/policy.h"
 #include <array>
 #include <optional>
+#include <string_view>
 
+namespace sp {
+class NativeContext;
+}
 namespace sp::native_testing {
 // The native origin digest of `descriptor`, computed by the function every native context uses.
 // Empty when the family has no native origin or a resource bound is exceeded.
@@ -16,4 +20,8 @@ std::optional<std::array<unsigned char, 32>> origin_digest_of(const descriptor::
 std::optional<std::array<unsigned char, 32>> chat_configuration_digest_of(const descriptor::ValidatedDescriptor& descriptor,
                                                                           const chat::Request& request,
                                                                           const descriptor::EffectiveChoices& choices);
+struct ContextAccess {
+  // The route a native context binds, which a captured answer carries and a later turn must match.
+  static std::string_view route(const NativeContext& context) noexcept;
+};
 } // namespace sp::native_testing
