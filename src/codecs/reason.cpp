@@ -972,6 +972,7 @@ constexpr Entry embeddings_table[] = {
   {"the response holds one embedding per input", "embeddings.vectors.count_mismatch"},
 };
 constexpr Entry embeddings_request_table[] = {
+  {"a model name cannot take the place of {model} in the endpoint's path", "request.embeddings.model_path"},
   {"embedding endpoints are not admitted at this origin", "request.embeddings.endpoint_not_admitted"},
   {"the embedding endpoint has no path", "request.embeddings.path_missing"},
   {"embeddings need a model and inputs", "request.embeddings.model_and_inputs_required"},
@@ -1118,6 +1119,7 @@ constexpr Entry batches_table[] = {
   {"a result line did not decode to an outcome", "batches.line.undecided"},
 };
 constexpr Entry batches_request_table[] = {
+  {"a model name cannot take the place of {model} in the endpoint's path", "request.batches.model_path"},
   {"batch endpoints are not admitted at this origin", "request.batches.endpoint_not_admitted"},
   {"the batch endpoint has no path for this operation", "request.batches.path_missing"},
   {"a batch has items", "request.batches.items_required"},
@@ -1147,6 +1149,7 @@ constexpr Entry tokens_table[] = {
   {"a token count is a number", "tokens.count.invalid"},
 };
 constexpr Entry tokens_request_table[] = {
+  {"a model name cannot take the place of {model} in the endpoint's path", "request.tokens.model_path"},
   {"token counting is not admitted at this origin", "request.tokens.endpoint_not_admitted"},
   {"the token count endpoint has no path", "request.tokens.path_missing"},
   {"this origin counts the tokens of another family's request", "request.tokens.family_mismatch"},

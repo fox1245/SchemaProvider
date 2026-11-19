@@ -1,5 +1,8 @@
 // The typed queries a host asks instead of restating provider facts, and the worst-case cost of a prepared request.
+#include "codecs/batches.h"
 #include "codecs/chat.h"
+#include "codecs/embeddings.h"
+#include "codecs/tokens.h"
 #include "codecs/gemini_request.h"
 #include "codecs/messages.h"
 #include "codecs/interactions_request.h"
@@ -2178,6 +2181,46 @@ void resolved_paths_are_checked() {
   CHECK(literal.resolved_path(true, "a/b") == "/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse");
 }
 
+// A model goes into an endpoint path through the same check as into a descriptor's path (descriptor::model_path): a
+// name that cannot take the place of `{model}` is refused before anything is sent.
+void endpoint_model_paths() {
+  namespace presets = descriptor::presets;
+  const std::vector<std::string> hostile{".", "..", "a..b", "a/b", "a?x", "a#x", ""};
+  // Token counting and embeddings at OpenAI, under a policy that puts the model in their paths.
+  const auto policy = load(replaced(replaced(policy_text(), R"("paths":{"count":"/v1/responses/input_tokens"})", R"("paths":{"count":"/v1/models/{model}/input_tokens"})"),
+                                    R"("paths":{"embed":"/v1/embeddings"})", R"("paths":{"embed":"/v1/models/{model}/embeddings"})"));
+  presets::PresetOptions options;
+  options.policy = policy;
+  const auto responses_api = presets::openai_responses(options);
+  const auto chat_api = presets::openai_chat(options);
+  CHECK(wire_path(tokens::encode(responses_api, tokens::Count{responses::Request::simple("gpt-x", "hi", 16)})) == "/v1/models/gpt-x/input_tokens");
+  CHECK(wire_path(embeddings::encode(chat_api, embeddings::Request{"emb-x", {{"a"}}})) == "/v1/models/emb-x/embeddings");
+  for (const auto& model : hostile) {
+    CHECK(refusal_kind(tokens::encode(responses_api, tokens::Count{responses::Request::simple(model, "hi", 16)})) == ErrorKind::InvalidRequest);
+    CHECK(refusal_kind(embeddings::encode(chat_api, embeddings::Request{model, {{"a"}}})) == ErrorKind::InvalidRequest);
+  }
+  const auto refused_text = std::get<Error>(tokens::encode(responses_api, tokens::Count{responses::Request::simple("a..b", "hi", 16)})).safe_message;
+  CHECK(reason::code(reason::Source::TokensRequest, refused_text) == "request.tokens.model_path");
+  CHECK(reason::code(reason::Source::EmbeddingsRequest, std::get<Error>(embeddings::encode(chat_api, embeddings::Request{"a..b", {{"a"}}})).safe_message) ==
+        "request.embeddings.model_path");
+  // Google names the model in the path of each: the built-in paths take a model and refuse the same names. A literal
+  // Generate route may name `.`, `..` or `a..b` itself, so such a model reaches the endpoint's own path.
+  const auto any = presets::google_generate();
+  CHECK(wire_path(tokens::encode(any, tokens::Count{gemini::Request::simple("gemini-x", "hi", 16)})) == "/v1beta/models/gemini-x:countTokens");
+  CHECK(wire_path(embeddings::encode(any, embeddings::Request{"gemini-embedding-x", {{"a"}}})) == "/v1beta/models/gemini-embedding-x:batchEmbedContents");
+  CHECK(wire_path(batches::encode(any, batches::Submit{{{"g-1", gemini::Request::simple("gemini-x", "hi")}}})) == "/v1beta/models/gemini-x:batchGenerateContent");
+  for (const auto& model : hostile) {
+    const bool literal = model == "." || model == ".." || model == "a..b";
+    const auto d = literal ? presets::google_generate(model) : any;
+    CHECK(refusal_kind(tokens::encode(d, tokens::Count{gemini::Request::simple(model, "hi", 16)})) == ErrorKind::InvalidRequest);
+    CHECK(refusal_kind(embeddings::encode(any, embeddings::Request{model, {{"a"}}})) == ErrorKind::InvalidRequest);
+    CHECK(refusal_kind(batches::encode(d, batches::Submit{{{"g-1", gemini::Request::simple(model, "hi")}}})) == ErrorKind::InvalidRequest);
+  }
+  CHECK(reason::code(reason::Source::BatchesRequest,
+                     std::get<Error>(batches::encode(presets::google_generate("a..b"), batches::Submit{{{"g-1", gemini::Request::simple("a..b", "hi")}}})).safe_message) ==
+        "request.batches.model_path");
+}
+
 // The fact that lists an origin applies there wherever it stands in the list.
 void scoped_fact_wins_in_any_order() {
   const auto policy = load(edited(policy_text(), "google.interactions", "routes", "[" + std::string(interactions_fact) +
@@ -2248,7 +2291,7 @@ int main() {
     interactions_route_from_policy(); generate_route_at_a_pinned_origin(); placeholder_in_every_family(); hostile_route_models();
     route_queries();
     interaction_lifecycle_routes(); interaction_ids_keep_the_path(); literal_routes_name_their_model(); route_lengths(); scoped_fact_wins_in_any_order();
-    resolved_paths_are_checked();
+    resolved_paths_are_checked(); endpoint_model_paths();
     std::cout << "host query properties passed\n"; return 0;
   }
   catch (const std::exception& error) { std::cerr << "host query test failed: " << error.what() << '\n'; return 1; }

@@ -35,6 +35,9 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   if (request.model.empty() || request.inputs.empty()) return bad("embeddings need a model and inputs");
   // Google names the model in the path.
   if (google && !token(request.model)) return bad("a Google embedding model is a path segment");
+  // A model takes the place of {model} in the path through the check every path shares (descriptor::model_path).
+  auto resolved = descriptor::model_path(*path, request.model);
+  if (resolved.empty()) return bad("a model name cannot take the place of {model} in the endpoint's path");
   if (request.dimensions && !*request.dimensions) return bad("embedding dimensions must be positive");
   if (request.task && (openai || !token(*request.task))) return openai ? Error{ErrorKind::Unsupported, "OpenAI embeddings take no task"} : bad("an embedding task is a token");
   bool media = false;
@@ -102,8 +105,6 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   if (request.extensions) for (auto member : request.extensions->root().members()) out.raw(",").quoted(member.key).raw(":").value(member.value, 1);
   out.raw("}");
   if (!out.ok()) return Error{ErrorKind::ResourceLimit, "embedding request exceeds JSON limits"};
-  std::string resolved(*path);
-  if (const auto at = resolved.find("{model}"); at != std::string::npos) resolved.replace(at, 7, request.model);
   Encoded encoded{std::move(resolved), std::move(body), request.model, fact->charge_on_accept, fact->auth};
   endpoints::add_fact_headers(encoded, *fact);
   encoded.context.inputs = request.inputs.size();
