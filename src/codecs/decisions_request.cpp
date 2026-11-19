@@ -28,7 +28,7 @@ std::string_view kind_name(Kind kind, bool openai) {
 std::string_view operation(const Request&) noexcept { return "decide"; }
 EndpointFacts endpoint_facts(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
   auto facts = endpoints::call_facts(descriptor, "decisions", operation(request), request.model);
-  facts.dimensions = endpoints::dimensions({}, request.extensions);
+  facts.dimensions = endpoints::dimensions(operation(request), {}, request.extensions);
   facts.quantities.push_back(endpoints::input_limited("input"));
   facts.quantities.push_back(endpoints::output_limited());
   return facts;

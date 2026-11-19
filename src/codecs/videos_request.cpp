@@ -18,8 +18,8 @@ bool token(std::string_view value) {
 std::string_view operation(const Request&) noexcept { return "submit"; }
 EndpointFacts endpoint_facts(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
   auto facts = endpoints::call_facts(descriptor, "videos", operation(request), request.model);
-  facts.dimensions = endpoints::dimensions({{"aspect_ratio", request.aspect_ratio}, {"audio", endpoints::boolean(request.audio)},
-                                            {"resolution", request.resolution}, {"size", request.size}},
+  facts.dimensions = endpoints::dimensions(operation(request), {{"aspect_ratio", request.aspect_ratio}, {"audio", endpoints::boolean(request.audio)},
+                                                                {"resolution", request.resolution}, {"size", request.size}},
                                            request.extensions);
   facts.quantities.push_back(endpoints::requested("item:second", request.duration));
   facts.quantities.push_back(endpoints::requested("item:input_image", request.references.size(), true));

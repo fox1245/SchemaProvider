@@ -108,10 +108,34 @@ TokenRows token_rows(const descriptor::CatalogueEntry& entry, std::span<const st
   }
   return out;
 }
-// An item unit with the dimensions a call offers, in the qualifier's spelling: `item:image[operation=generate,quality=high]`.
-std::string with_dimensions(std::string_view unit, const std::vector<std::pair<std::string, std::string>>& dimensions) {
+// Whether `qualifier` (`quality=high,size=1024x1024`) names the dimension `key`.
+bool names_key(std::string_view qualifier, std::string_view key) {
+  for (std::size_t start = 0; !qualifier.empty();) {
+    const auto comma = qualifier.find(',', start);
+    const auto dimension = qualifier.substr(start, comma == std::string_view::npos ? std::string_view::npos : comma - start);
+    if (dimension.substr(0, dimension.find('=')) == key) return true;
+    if (comma == std::string_view::npos) return false;
+    start = comma + 1;
+  }
+  return false;
+}
+// An item unit with the dimensions of a call that its rows read, in the qualifier's spelling:
+// `item:image[operation=generate,quality=high]`. A dimension is printed when it is the operation or when a row of the
+// unit in the entry names its key; any other changes no price, so the request's own text (a user or session id) never
+// reaches a reason.
+std::string with_dimensions(const descriptor::CatalogueEntry& entry, std::string_view unit,
+                            const std::vector<std::pair<std::string, std::string>>& dimensions) {
   std::string out = std::string(unit) + "[";
-  for (std::size_t i = 0; i < dimensions.size(); ++i) out += (i ? "," : "") + dimensions[i].first + "=" + dimensions[i].second;
+  bool first = true;
+  for (const auto& [key, value] : dimensions) {
+    const bool read = key == operation_dimension || std::any_of(entry.pricing.begin(), entry.pricing.end(), [&](const auto& price) {
+      const auto item = descriptor::item_price_key(price.first);
+      return item && item->unit == unit && names_key(item->qualifier, key);
+    });
+    if (!read) continue;
+    out += (first ? "" : ",") + key + "=" + value;
+    first = false;
+  }
   return out + "]";
 }
 }  // namespace
@@ -311,7 +335,7 @@ EndpointBound endpoint_worst_case(const EndpointWorstCaseInput& in, const descri
     if (counts[i] && *counts[i] == 0) continue;
     const auto rate = dearest_item_price(*entry, q.unit, offered, tier, length);
     if (!rate) {
-      block(UnboundedBy::ModelPrice, with_dimensions(q.unit, offered),
+      block(UnboundedBy::ModelPrice, with_dimensions(*entry, q.unit, offered),
             applying_rows(*entry, q.unit, offered, tier, length) ? "catalogue entry '" + entry->id + "' has no row of the unit that applies to the call"
                                                                  : "a row of the unit that applies to the call has a variable price");
       continue;

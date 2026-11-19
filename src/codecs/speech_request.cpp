@@ -21,7 +21,7 @@ EndpointFacts endpoint_facts(const descriptor::ValidatedDescriptor& descriptor, 
   auto facts = endpoints::call_facts(descriptor, "speech", operation(request), request.model);
   std::optional<std::string> voice;
   if (!request.voice.empty()) voice = request.voice;
-  facts.dimensions = endpoints::dimensions({{"format", request.format}, {"voice", voice}}, request.extensions);
+  facts.dimensions = endpoints::dimensions(operation(request), {{"format", request.format}, {"voice", voice}}, request.extensions);
   facts.quantities.push_back(endpoints::requested("item:character", request.input.size(), true));
   facts.quantities.push_back(endpoints::input_limited("input"));
   facts.quantities.push_back(endpoints::output_limited());

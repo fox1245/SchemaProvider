@@ -96,7 +96,8 @@ struct EndpointBound {
 //     request fee (`request`) is charged once when the entry lists it.
 //   - An `item:<kind>` quantity is priced at dearest_item_price for the call's dimensions.
 //   - A quantity that can be above zero needs a rate, and a rate of zero is a declared zero: a unit the entry does not
-//     list is `ModelPrice` (subject the unit; an item unit with the call's dimensions in brackets), never free, and so
+//     list is `ModelPrice` (subject the unit; an item unit with, in brackets, the call's operation and each offered
+//     dimension whose key a row of the unit in the entry names, so no other request value is printed), never free, and so
 //     is a row that applies with a variable price. A rate above zero needs the quantity: `InputBound` for `input`,
 //     `OutputCap` for `output` and `Quantity` for an item unit, each with the unit as subject. A quantity whose rates
 //     are all declared zeros needs none.
