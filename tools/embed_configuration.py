@@ -11,7 +11,9 @@ FIELDS = (
     'semantic_max_parts semantic_max_content_bytes semantic_max_tool_bytes semantic_max_json_depth '
     'sse_max_line_bytes sse_max_event_bytes sse_max_total_bytes default_timeout_ms '
     'slow_callback_threshold_ms retry_tokens retry_tokens_per_second retry_enabled '
-    'retry_allow_duplicate_billing_risk retry_max_attempts retry_base_delay_ms retry_max_delay_ms'
+    'retry_allow_duplicate_billing_risk retry_max_attempts retry_base_delay_ms retry_max_delay_ms '
+    'realtime_max_duration_ms realtime_media_bytes realtime_lead_ms realtime_inbound_media_bytes '
+    'realtime_inbound_event_bytes realtime_pump_interval_ms ws_max_message_bytes ws_close_timeout_ms'
 ).split()
 BOOLS = {'retry_enabled', 'retry_allow_duplicate_billing_risk'}
 EXTRA = {'total_threads', 'api_key_bytes', 'configuration_bytes', 'configuration_depth', 'error_json_depth'}
@@ -63,7 +65,8 @@ def validate(runtime, errors):
     for key, value in runtime['admission'].items():
         number(value, key)
     zero_allowed = {'max_host_connections', 'dns_ttl_seconds', 'slow_callback_threshold_ms',
-                    'retry_tokens', 'retry_tokens_per_second', 'retry_base_delay_ms', 'retry_max_delay_ms'}
+                    'retry_tokens', 'retry_tokens_per_second', 'retry_base_delay_ms', 'retry_max_delay_ms',
+                    'realtime_lead_ms'}
     if any(value <= 0 for key, value in runtime['defaults'].items() if key not in BOOLS | zero_allowed):
         raise ValueError('configuration positive value required')
     if any(value <= 0 for key, value in runtime['admission'].items() if key not in zero_allowed):

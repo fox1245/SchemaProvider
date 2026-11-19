@@ -3,6 +3,8 @@
 // server frames. Pure and libcurl-free like SseFramer; the WebSocket transport drives it.
 // No extension and no subprotocol is negotiated, so every reserved bit must be zero.
 
+#include "sp/config_defaults.h"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -36,8 +38,9 @@ bool ws_close_code_valid(std::uint16_t code) noexcept;
 bool ws_utf8_valid(std::string_view text) noexcept;
 
 struct WsLimits {
-  // Reassembled message bytes, and the payload of one frame; a larger one fails with TooBig.
-  std::size_t max_message_bytes = 64u * 1024u * 1024u;
+  // Reassembled message bytes, and the payload of one frame; a larger one fails with TooBig. The default is the runtime
+  // defaults file's `ws_max_message_bytes`.
+  std::size_t max_message_bytes = config_defaults::defaults_ws_max_message_bytes;
 };
 
 struct WsEvent {

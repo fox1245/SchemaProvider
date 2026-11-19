@@ -50,7 +50,7 @@ struct WsRequest {
   std::optional<std::chrono::milliseconds> handshake_timeout;
   std::optional<std::chrono::milliseconds> idle_timeout;
   // How long close() waits for the server's Close frame before the session ends uncleanly.
-  std::chrono::milliseconds close_timeout{5000};
+  std::chrono::milliseconds close_timeout{config_defaults::defaults_ws_close_timeout_ms};
   WsLimits limits;
 };
 

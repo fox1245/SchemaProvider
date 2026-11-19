@@ -1,7 +1,14 @@
 #include "runtime/policy.h"
 
+#include "json/json.h"
+
+#include <algorithm>
 #include <cstdio>
 #include <limits>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
 
 using namespace sp;
 using namespace sp::runtime;
@@ -285,6 +292,154 @@ void ceilings_above_the_target_size_are_clamped() {
   CHECK(std::get<descriptor::ConfigError>(refused).pointer == "/defaults/max_response_bytes");
 }
 
+// The tunables of realtime sessions and of the WebSocket transport are values of the runtime file. A file written
+// before they existed has none of them and takes the embedded values; a value the loader cannot use is refused at
+// its own pointer.
+struct RealtimeKey {
+  std::string_view key;
+  std::uint64_t configuration::RuntimeValues::* value;
+  std::uint64_t configuration::AdmissionValues::* ceiling;
+  std::uint64_t embedded_default, embedded_ceiling;
+  bool zero_default_allowed;
+};
+const std::vector<RealtimeKey>& realtime_keys() {
+  using configuration::AdmissionValues;
+  using configuration::RuntimeValues;
+  static const std::vector<RealtimeKey> keys = {
+    {"realtime_max_duration_ms", &RuntimeValues::realtime_max_duration_ms, &AdmissionValues::realtime_max_duration_ms,
+     config_defaults::defaults_realtime_max_duration_ms, config_defaults::admission_realtime_max_duration_ms, false},
+    {"realtime_media_bytes", &RuntimeValues::realtime_media_bytes, &AdmissionValues::realtime_media_bytes,
+     config_defaults::defaults_realtime_media_bytes, config_defaults::admission_realtime_media_bytes, false},
+    {"realtime_lead_ms", &RuntimeValues::realtime_lead_ms, &AdmissionValues::realtime_lead_ms,
+     config_defaults::defaults_realtime_lead_ms, config_defaults::admission_realtime_lead_ms, true},
+    {"realtime_inbound_media_bytes", &RuntimeValues::realtime_inbound_media_bytes, &AdmissionValues::realtime_inbound_media_bytes,
+     config_defaults::defaults_realtime_inbound_media_bytes, config_defaults::admission_realtime_inbound_media_bytes, false},
+    {"realtime_inbound_event_bytes", &RuntimeValues::realtime_inbound_event_bytes, &AdmissionValues::realtime_inbound_event_bytes,
+     config_defaults::defaults_realtime_inbound_event_bytes, config_defaults::admission_realtime_inbound_event_bytes, false},
+    {"realtime_pump_interval_ms", &RuntimeValues::realtime_pump_interval_ms, &AdmissionValues::realtime_pump_interval_ms,
+     config_defaults::defaults_realtime_pump_interval_ms, config_defaults::admission_realtime_pump_interval_ms, false},
+    {"ws_max_message_bytes", &RuntimeValues::ws_max_message_bytes, &AdmissionValues::ws_max_message_bytes,
+     config_defaults::defaults_ws_max_message_bytes, config_defaults::admission_ws_max_message_bytes, false},
+    {"ws_close_timeout_ms", &RuntimeValues::ws_close_timeout_ms, &AdmissionValues::ws_close_timeout_ms,
+     config_defaults::defaults_ws_close_timeout_ms, config_defaults::admission_ws_close_timeout_ms, false},
+  };
+  return keys;
+}
+// A change to one member of the embedded runtime file: a new value, or no value to remove the member.
+struct Change { std::string section, key; std::optional<std::string> value; };
+std::string runtime_text(const std::vector<Change>& changes) {
+  auto parsed = json::parse(config_defaults::runtime_defaults_json);
+  CHECK(std::holds_alternative<json::Document>(parsed));
+  const auto root = std::get<json::Document>(parsed).root();
+  std::string result = "{\"version\":1";
+  for (std::string_view section : {"defaults", "admission"}) {
+    result += ",\"" + std::string(section) + "\":{";
+    bool first = true;
+    const auto emit = [&](std::string_view key, const std::string& value) {
+      if (!first) result += ',';
+      first = false;
+      result += json::quote(key) + ":" + value;
+    };
+    const auto changed = [&](std::string_view key) {
+      return std::find_if(changes.begin(), changes.end(), [&](const Change& c) { return c.section == section && c.key == key; });
+    };
+    for (auto member : root.get(section).members())
+      if (changed(member.key) == changes.end()) emit(member.key, member.value.dump());
+    for (const auto& change : changes)
+      if (change.section == section && change.value) emit(change.key, *change.value);
+    result += '}';
+  }
+  return result + '}';
+}
+configuration::PolicyResult load_text(const std::string& text) {
+  return configuration::load_runtime_policy(text, config_defaults::error_policy_json);
+}
+const descriptor::ConfigError* refusal(const configuration::PolicyResult& result) {
+  return std::get_if<descriptor::ConfigError>(&result);
+}
+
+void realtime_tunables_are_optional_and_embedded() {
+  // A file from before the keys existed: none of the eight, in either section.
+  std::vector<Change> older;
+  for (const auto& key : realtime_keys()) {
+    older.push_back({"defaults", std::string(key.key), std::nullopt});
+    older.push_back({"admission", std::string(key.key), std::nullopt});
+  }
+  const auto text = runtime_text(older);
+  for (const auto& key : realtime_keys()) CHECK(text.find(key.key) == std::string::npos);
+  const auto loaded = load_text(text);
+  CHECK(std::holds_alternative<configuration::PolicySnapshot>(loaded));
+  if (const auto* snapshot = std::get_if<configuration::PolicySnapshot>(&loaded)) {
+    const auto builtin = configuration::builtin_runtime_policy();
+    for (const auto& key : realtime_keys()) {
+      CHECK(((*snapshot)->defaults().*key.value) == key.embedded_default);
+      CHECK(((*snapshot)->admission().*key.ceiling) == key.embedded_ceiling);
+      CHECK(((*snapshot)->defaults().*key.value) == (builtin->defaults().*key.value));
+      CHECK(((*snapshot)->admission().*key.ceiling) == (builtin->admission().*key.ceiling));
+    }
+    CHECK((*snapshot)->defaults().workers == builtin->defaults().workers);
+  }
+  // Each member is optional on its own, in either section.
+  for (const auto& key : realtime_keys()) {
+    for (const char* section : {"defaults", "admission"})
+      CHECK(std::holds_alternative<configuration::PolicySnapshot>(load_text(runtime_text({{section, std::string(key.key), std::nullopt}}))));
+  }
+  // A file that states a value takes it, and a ceiling that bounds it.
+  for (const auto& key : realtime_keys()) {
+    const auto stated = key.zero_default_allowed ? std::uint64_t{1} : std::uint64_t{7};
+    const auto loaded_value = load_text(runtime_text({{"defaults", std::string(key.key), std::to_string(stated)}}));
+    CHECK(std::holds_alternative<configuration::PolicySnapshot>(loaded_value));
+    if (const auto* snapshot = std::get_if<configuration::PolicySnapshot>(&loaded_value))
+      CHECK(((*snapshot)->defaults().*key.value) == stated);
+  }
+  // A member the document does not know is still refused, so the optional keys do not open the object.
+  const auto unknown = load_text(runtime_text({{"defaults", "realtime_unknown_ms", "1"}}));
+  CHECK(refusal(unknown) && refusal(unknown)->pointer == "/defaults");
+}
+
+void realtime_tunables_are_admitted() {
+  for (const auto& key : realtime_keys()) {
+    const std::string pointer = "/defaults/" + std::string(key.key);
+    // Above the ceiling.
+    const auto above = load_text(runtime_text({{"defaults", std::string(key.key), std::to_string(key.embedded_ceiling + 1)}}));
+    CHECK(refusal(above) && refusal(above)->pointer == pointer);
+    // A lowered ceiling refuses the embedded default.
+    const auto lowered = load_text(runtime_text({{"admission", std::string(key.key), std::to_string(key.embedded_default - 1)}}));
+    CHECK(refusal(lowered) && refusal(lowered)->pointer == pointer);
+    // The ceiling itself is admitted.
+    CHECK(std::holds_alternative<configuration::PolicySnapshot>(
+        load_text(runtime_text({{"defaults", std::string(key.key), std::to_string(key.embedded_ceiling)}}))));
+    // Not an unsigned integer.
+    for (const char* wrong : {"true", "\"7\"", "-1", "1.5", "null", "[1]"}) {
+      const auto bad = load_text(runtime_text({{"defaults", std::string(key.key), wrong}}));
+      CHECK(refusal(bad) && refusal(bad)->pointer == pointer);
+      const auto bad_ceiling = load_text(runtime_text({{"admission", std::string(key.key), wrong}}));
+      CHECK(refusal(bad_ceiling) && refusal(bad_ceiling)->pointer == "/admission/" + std::string(key.key));
+    }
+    // Zero: a lead of zero sends audio at once, the others are sizes, durations or intervals that need a positive value.
+    const auto zero = load_text(runtime_text({{"defaults", std::string(key.key), "0"}}));
+    if (key.zero_default_allowed) CHECK(std::holds_alternative<configuration::PolicySnapshot>(zero));
+    else CHECK(refusal(zero) && refusal(zero)->pointer == pointer);
+    const auto zero_ceiling = load_text(runtime_text({{"defaults", std::string(key.key), "0"}, {"admission", std::string(key.key), "0"}}));
+    if (key.zero_default_allowed) CHECK(std::holds_alternative<configuration::PolicySnapshot>(zero_ceiling));
+    else CHECK(refusal(zero_ceiling) && refusal(zero_ceiling)->pointer == "/admission/" + std::string(key.key));
+  }
+  // A duration the policy hands to a clock must be representable by it.
+  const auto huge = load_text(runtime_text({{"admission", "realtime_max_duration_ms", "9223372036854775807"}}));
+  CHECK(refusal(huge) && refusal(huge)->pointer == "/admission");
+  // A byte ceiling above the target's largest size is admitted as that size and listed, like the older size ceilings.
+  constexpr std::uint64_t narrow = 0xffffffffULL;
+  const auto wide_ceiling = runtime_text({{"admission", "ws_max_message_bytes", "4294967296"}});
+  const auto clamped = configuration::detail::load_runtime_policy_for_size(wide_ceiling, config_defaults::error_policy_json, narrow);
+  CHECK(std::holds_alternative<configuration::PolicySnapshot>(clamped));
+  if (const auto* snapshot = std::get_if<configuration::PolicySnapshot>(&clamped)) {
+    CHECK((*snapshot)->admission().ws_max_message_bytes == narrow);
+    bool listed = false;
+    for (const auto& clamp : (*snapshot)->clamps()) listed = listed || clamp.pointer == "/admission/ws_max_message_bytes";
+    CHECK(listed);
+  }
+}
+
 // A bad Google API key arrives as HTTP 400 INVALID_ARGUMENT; only the ErrorInfo
 // reason tells it from a malformed request. Interactions wraps the envelope in an array.
 void google_api_key_errors() {
@@ -378,6 +533,7 @@ void unsupported_parameter_is_named() {
 }  // namespace
 int main() {
   classification(); google_api_key_errors(); unsupported_parameter_is_named(); safety_and_budget(); http_4xx_is_a_definitive_rejection(); hints(); arithmetic_and_bucket(); shipped_ceilings_fit_the_narrowest_long(); ceilings_above_the_target_size_are_clamped();
+  realtime_tunables_are_optional_and_embedded(); realtime_tunables_are_admitted();
   if (failures) return 1;
   std::puts("runtime policy: classification, safety, hints, arithmetic and bucket passed");
 }

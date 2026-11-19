@@ -79,10 +79,16 @@ inline constexpr std::uint64_t TypedToolChoice = 1ULL << 19;
 // endpoint calls by their bound requires this bit itself; the bit is not part of RequiredProvider, which a host that
 // refuses endpoint calls keeps meeting.
 inline constexpr std::uint64_t EndpointCostBounds = 1ULL << 20;
+// configuration::RuntimeValues and configuration::AdmissionValues carry the realtime and WebSocket members
+// (`realtime_*` and `ws_*`), and the option structs of realtime sessions and of the WebSocket transport read their
+// defaults from them. A library built before the members has smaller value structs, which a consumer built with this
+// header would read past, so it lacks this bit and a require_interface_contract call with RequiredProvider refuses it.
+inline constexpr std::uint64_t RealtimeRuntimeDefaults = 1ULL << 21;
 inline constexpr std::uint64_t RequiredProvider = TypedRuntime | PreparedAdmission |
     NullableUsage | All5Native | TrustedArchive | OrderedWireEvents | NativeSocketRuntime |
     RetainedJsonSize | CompleteAttemptEvidence | OpenRouterRoutingMaxPrice | ErrorReason | PolicyAdmittedExtensions |
-    CompletionSecret | PartCacheMarks | ServedByUpstream | TransportConnectionCache | ModelControlFacts | TypedToolChoice;
+    CompletionSecret | PartCacheMarks | ServedByUpstream | TransportConnectionCache | ModelControlFacts | TypedToolChoice |
+    RealtimeRuntimeDefaults;
 }
 InterfaceContract core_interface_contract() noexcept;
 std::uint32_t codec_interface_revision() noexcept;

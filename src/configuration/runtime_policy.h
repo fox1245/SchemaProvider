@@ -38,6 +38,16 @@ struct RuntimeValues {
   std::uint64_t retry_max_attempts = config_defaults::defaults_retry_max_attempts;
   std::uint64_t retry_base_delay_ms = config_defaults::defaults_retry_base_delay_ms;
   std::uint64_t retry_max_delay_ms = config_defaults::defaults_retry_max_delay_ms;
+  // Realtime sessions and the WebSocket transport (see realtime::Options and transport::WsRequest). A runtime file may
+  // leave these out: it then takes the embedded value.
+  std::uint64_t realtime_max_duration_ms = config_defaults::defaults_realtime_max_duration_ms;
+  std::uint64_t realtime_media_bytes = config_defaults::defaults_realtime_media_bytes;
+  std::uint64_t realtime_lead_ms = config_defaults::defaults_realtime_lead_ms;
+  std::uint64_t realtime_inbound_media_bytes = config_defaults::defaults_realtime_inbound_media_bytes;
+  std::uint64_t realtime_inbound_event_bytes = config_defaults::defaults_realtime_inbound_event_bytes;
+  std::uint64_t realtime_pump_interval_ms = config_defaults::defaults_realtime_pump_interval_ms;
+  std::uint64_t ws_max_message_bytes = config_defaults::defaults_ws_max_message_bytes;
+  std::uint64_t ws_close_timeout_ms = config_defaults::defaults_ws_close_timeout_ms;
 };
 struct AdmissionValues {
   std::uint64_t workers = config_defaults::admission_workers;
@@ -70,6 +80,15 @@ struct AdmissionValues {
   std::uint64_t configuration_bytes = config_defaults::admission_configuration_bytes;
   std::uint64_t configuration_depth = config_defaults::admission_configuration_depth;
   std::uint64_t error_json_depth = config_defaults::admission_error_json_depth;
+  // The ceilings of the realtime and WebSocket values above; a file may leave them out too.
+  std::uint64_t realtime_max_duration_ms = config_defaults::admission_realtime_max_duration_ms;
+  std::uint64_t realtime_media_bytes = config_defaults::admission_realtime_media_bytes;
+  std::uint64_t realtime_lead_ms = config_defaults::admission_realtime_lead_ms;
+  std::uint64_t realtime_inbound_media_bytes = config_defaults::admission_realtime_inbound_media_bytes;
+  std::uint64_t realtime_inbound_event_bytes = config_defaults::admission_realtime_inbound_event_bytes;
+  std::uint64_t realtime_pump_interval_ms = config_defaults::admission_realtime_pump_interval_ms;
+  std::uint64_t ws_max_message_bytes = config_defaults::admission_ws_max_message_bytes;
+  std::uint64_t ws_close_timeout_ms = config_defaults::admission_ws_close_timeout_ms;
 };
 struct StatusRule { int status; ErrorKind kind; RetryClass retry; };
 struct CodeRule { std::string value; ErrorKind kind; RetryClass retry; };
@@ -117,7 +136,9 @@ class RuntimePolicy final {
   std::vector<CeilingClamp> clamps_;
   friend PolicyResult detail::load_runtime_policy_for_size(std::string_view, std::string_view, std::uint64_t);
 };
-// Both documents are complete, closed version-1 objects. Reload creates a new
+// Both documents are closed version-1 objects. The realtime and WebSocket members of `defaults` and `admission` (the last
+// eight of each struct) are optional: a document written before they existed loads, and each member it leaves out takes the
+// embedded value. Reload creates a new
 // snapshot; existing clients retain their admitted values and classification. An admission ceiling above the
 // target's largest std::size_t is clamped to it and listed in RuntimePolicy::clamps(); a default above its
 // (clamped) ceiling is rejected.
