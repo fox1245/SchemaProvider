@@ -344,8 +344,10 @@ void transcription_endpoint() {
 // session's setup message) are the members the endpoint writes. The table holds each of them as written, and writes none of
 // its other members.
 std::set<std::string> json_members(const std::string& body) {
+  // The document owns the bytes the member names view, so it outlives the loop; each name is copied into the result.
+  const auto parsed = document(body);
   std::set<std::string> out;
-  for (auto member : document(body)->root().members()) out.insert(std::string(member.key));
+  for (auto member : parsed->root().members()) out.insert(std::string(member.key));
   return out;
 }
 // The field names of a multipart body, a bracketed name (`expires_after[seconds]`) by its first part.
@@ -426,8 +428,9 @@ void endpoint_members_cover_encoders() {
     CHECK(std::holds_alternative<std::vector<realtime::Frame>>(opened));
     const auto& frames = std::get<std::vector<realtime::Frame>>(opened);
     CHECK(frames.size() == 1);
+    const auto message = document(frames[0].data);
     std::set<std::string> out;
-    for (auto member : document(frames[0].data)->root().get(wrapper).members()) out.insert(std::string(member.key));
+    for (auto member : message->root().get(wrapper).members()) out.insert(std::string(member.key));
     return out;
   };
   realtime::Setup session;
