@@ -210,6 +210,8 @@ const StopRows& embedded_stops(std::string_view family) {
   static const StopRows none;
   return none;
 }
+// The model name the policy's own admission check puts in place of `{model}` in a route template.
+constexpr std::string_view admission_model = "policy-admission";
 class PolicyLoader {
  public:
   PolicyResult run(std::string_view source,std::string_view resources,CatalogueSnapshot catalogue) {
@@ -893,13 +895,9 @@ class PolicyLoader {
         const auto& facts = policy->routes(family.family);
         const auto named = std::find_if(facts.begin(), facts.end(), [](const RouteFact& fact) { return fact.buffered.find("{model}") != std::string::npos; });
         const RouteFact* chosen = named != facts.end() ? &*named : facts.empty() ? nullptr : &facts.front();
-        const auto filled = [](std::string path) {
-          if (const auto at = path.find("{model}"); at != std::string::npos) path.replace(at, 7, "policy-admission");
-          return path;
-        };
         const std::string base = chosen && !chosen->origins.empty() ? chosen->origins.front() : std::string("https://policy.invalid");
-        const std::string buffered = chosen ? filled(chosen->buffered) : std::string("/policy/{model}");
-        const std::string streaming = chosen ? filled(chosen->streaming) : std::string("/policy/{model}");
+        const std::string buffered = chosen ? model_path(chosen->buffered, admission_model) : std::string("/policy/{model}");
+        const std::string streaming = chosen ? model_path(chosen->streaming, admission_model) : std::string("/policy/{model}");
         const auto descriptor_source =
             std::string("{\"descriptor_version\":1,\"revision\":1,\"id\":\"policy-admission\",\"family\":") +
             json::quote(family.family) + ",\"connection\":{\"base_url\":" + json::quote(base) + ",\"paths\":{\"buffered\":" +
@@ -1036,6 +1034,9 @@ class PolicyLoader {
     auto path = [](Value item, std::string_view pointer) {
       if (!item.is_string() || !valid_route_template(item.as_string()))
         fail(pointer, "origin-relative path template without traversal or URL escapes, with {model} once at most and a name=value query");
+      // The policy's own admission check fills the template with a model name, so the template leaves room for it.
+      if (model_path(item.as_string(), admission_model).empty())
+        fail(pointer, "path template that stays within the path limit with " + std::string(admission_model) + " in place of {model}");
       return std::string(item.as_string());
     };
     for (auto item : list.elements()) {
@@ -1120,8 +1121,14 @@ const RouteFact* DescriptorPolicy::route(std::string_view family, std::string_vi
   return nullptr;
 }
 std::optional<std::string> route_refusal(const ValidatedDescriptor& descriptor, std::string_view model) {
-  // The model takes the place of {model} in the path, so it may not add, remove or replace a segment.
-  if (descriptor.model_routed() && !route_model_substitute(model)) return "model name cannot take the place of {model} in the descriptor's paths";
+  // The model takes the place of {model} in the path, so it may not add, remove or replace a segment, and the path
+  // stays within its bound.
+  if (descriptor.model_routed() && (descriptor.resolved_path(false, model).empty() || descriptor.resolved_path(true, model).empty()))
+    return "model name cannot take the place of {model} in the descriptor's paths";
+  return std::nullopt;
+}
+std::optional<std::string> literal_route_refusal(const ValidatedDescriptor& descriptor, std::string_view model) {
+  if (const auto named = descriptor.route_model(); !named.empty() && named != model) return "the descriptor's paths name another model";
   return std::nullopt;
 }
 const DescriptorPolicy::ValidationFacts* DescriptorPolicy::validation(std::string_view name) const noexcept {

@@ -96,6 +96,11 @@ void requests() {
     const auto lines = batches::jsonl(routed, {{"c-1", chat::Request::simple("gpt-x", "Say: alpha", 16)}});
     CHECK(std::holds_alternative<std::string>(lines));
     CHECK(document(std::get<std::string>(lines).substr(0, std::get<std::string>(lines).find('\n')))->root().get("url").as_string() == "/v1/models/gpt-x/chat");
+    // An item whose model cannot take the place of `{model}` is refused, and no file is written.
+    for (const auto* model : {"..", ".", "a..b", "a/b", "a?x", "a#x"}) {
+      const auto refused_lines = batches::jsonl(routed, {{"c-1", chat::Request::simple("gpt-x", "Say: alpha", 16)}, {"c-2", chat::Request::simple(model, "Say: beta", 16)}});
+      CHECK(std::holds_alternative<Error>(refused_lines) && std::get<Error>(refused_lines).kind == ErrorKind::InvalidRequest);
+    }
   }
   // Anthropic: the items inline, each as the Messages body it would send.
   const auto inline_submit = encoded(anthropic(), batches::Submit{{{"a-1", messages::Request::simple("claude-haiku-4-5", "Say: alpha", 16)},

@@ -40,8 +40,10 @@ public:
     // model of its origin, and each request's model takes the place of the placeholder.
     bool model_routed() const noexcept { return model_routed_; }
     // The path a request for `model` is sent to: path(streaming) with `{model}` replaced on a
-    // model-routed descriptor, and path(streaming) itself otherwise. The encoders send a request through
-    // a model-routed descriptor only for a model that route_model_substitute admits.
+    // model-routed descriptor (descriptor::model_path), and path(streaming) itself otherwise. On a
+    // model-routed descriptor it is empty for a model that route_model_substitute refuses and for a path
+    // that would be longer than 2048 bytes: it never holds a model that was not checked. The encoders
+    // refuse such a request before they build anything (descriptor::route_refusal).
     std::string resolved_path(bool streaming, std::string_view model) const;
     // The model a literal route names: the name its paths carry where the `{model}` templates of the route
     // fact of its origin have the placeholder (DescriptorPolicy::route). Empty on a model-routed descriptor and
@@ -110,5 +112,9 @@ bool route_model_name(std::string_view model) noexcept;
 // A model name that may take the place of `{model}`: a route_model_name that is not `.` and holds no `..`, so
 // the path it is put in keeps its segments, its query and its origin.
 bool route_model_substitute(std::string_view model) noexcept;
+// `path` with `model` in place of its `{model}`, the one function that writes a model into a path: `path` itself when
+// it has no placeholder, and empty when route_model_substitute refuses the model or the path would be longer than
+// 2048 bytes.
+std::string model_path(std::string_view path, std::string_view model);
 
 } // namespace sp::descriptor

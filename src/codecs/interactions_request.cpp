@@ -116,6 +116,14 @@ std::string_view tool_choice_name(ToolChoiceMode mode) {
   return {};
 }
 }
+// The path of an operation on a stored interaction: the route's path with `suffix` after it, then the route's query.
+std::string operation_path(std::string_view route, std::string_view suffix) {
+  const auto query = route.find('?');
+  std::string path(route.substr(0, query));
+  path += suffix;
+  if (query != std::string_view::npos) path += route.substr(query);
+  return path;
+}
 EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request, bool streaming) {
   auto bad = [](std::string label) -> EncodeResult { return Error{ErrorKind::InvalidRequest, std::move(label)}; };
   auto replay_bad = []() -> EncodeResult { return Error{ErrorKind::ReplayIneligible, "native replay provenance, binding or content mismatch"}; };
@@ -123,6 +131,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (descriptor.family() != "google.interactions" || !descriptor::route_admitted(descriptor))
     return Error{ErrorKind::InvalidConfig, "Interactions requires the model interaction endpoint"};
   if (auto refusal = descriptor::route_refusal(descriptor, request.model)) return bad(std::move(*refusal));
+  if (auto refusal = descriptor::literal_route_refusal(descriptor, request.model)) return Error{ErrorKind::InvalidConfig, std::move(*refusal)};
   const auto& resources = descriptor.policy()->resources();
   auto effective = descriptor::effective_defaults(descriptor, request.model);
   if (request.max_output_tokens) effective.max_output_tokens = request.max_output_tokens;
@@ -140,14 +149,16 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (request.agent && !name(*request.agent, {})) return bad("invalid interaction agent");
   if (request.lifecycle != Lifecycle::Create) {
     // An operation on a stored interaction: no input, no stream, the id in the path.
-    if (!name(request.interaction_id, "=")) return bad("invalid interaction id");
+    // The id is one path segment: never `.` or `..`, and no `..` inside it.
+    if (!name(request.interaction_id, "=") || request.interaction_id == "." || request.interaction_id.find("..") != std::string::npos)
+      return bad("invalid interaction id");
     if (!request.messages.empty() || streaming) return bad("an interaction lifecycle request sends no input and is not streamed");
     if (request.extensions) return bad("an interaction lifecycle request carries no extensions");
     auto context = std::shared_ptr<const NativeContext>(new NativeContext(descriptor, request, effective, false));
     if (!context->valid_) return Error{ErrorKind::ResourceLimit, "native binding could not be captured"};
     const auto cancel = request.lifecycle == Lifecycle::Cancel;
     EncodedRequest result{request.lifecycle == Lifecycle::Get ? "GET" : cancel ? "POST" : "DELETE",
-                          descriptor.resolved_path(false, request.model) + "/" + request.interaction_id + (cancel ? "/cancel" : ""), {}, {}, {}};
+                          operation_path(descriptor.resolved_path(false, request.model), "/" + request.interaction_id + (cancel ? "/cancel" : "")), {}, {}, {}};
     for (const auto& header : descriptor.headers()) {
       auto key = lower(header.first);
       if (key != "accept" && key != "content-type") result.headers.push_back(header);

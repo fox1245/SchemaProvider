@@ -335,6 +335,12 @@ void model_routed_native_routes() {
         "fixture-model", "/v1/fixture-model/responses");
   route("loopback_messages_routed", loopback("messages-routed", "anthropic.messages", "/v1/models/{model}:rawPredict", "/v1/models/{model}:rawPredict"),
         "fixture-model", "/v1/models/fixture-model:rawPredict");
+  // With a path of its own for each mode, a model-routed descriptor binds the buffered one in both, as Generate does.
+  route("loopback_messages_routed_two_paths",
+        loopback("messages-two-paths", "anthropic.messages", "/v1/models/{model}:rawPredict", "/v1/models/{model}:streamRawPredict"),
+        "fixture-model", "/v1/models/fixture-model:rawPredict");
+  route("loopback_chat_routed_two_paths", loopback("chat-two-paths", "openai.chat", "/v1/{model}/chat", "/v1/{model}/chat:stream"),
+        "fixture-model", "/v1/fixture-model/chat");
   // Interactions where the policy states no route fact for it.
   if (const auto policy = with_routes("google.interactions", "[]"))
     route("loopback_interactions_routed",

@@ -144,6 +144,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (!request.messages.empty() && !request.canonical_messages.empty())
     return bad("choose one message representation");
   if (auto refusal = descriptor::route_refusal(descriptor, request.model)) return bad(std::move(*refusal));
+  if (auto refusal = descriptor::literal_route_refusal(descriptor, request.model)) return Error{ErrorKind::InvalidConfig, std::move(*refusal)};
   const auto& resources = descriptor.policy()->resources();
   auto effective = descriptor::effective_defaults(descriptor, request.model);
   if (request.max_output_tokens) effective.max_output_tokens = request.max_output_tokens;
