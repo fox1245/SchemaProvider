@@ -133,4 +133,35 @@ struct Selection {
 };
 // The keys point into `entry`, which must outlive the selection.
 Selection select(const descriptor::CatalogueEntry& entry, std::string_view service_tier, std::uint64_t input_tokens, bool dearest);
+
+// How usage_sum reads a usage.
+struct UsageRules {
+  // A side whose counter the usage lacks has no price: the input (input_total or input_uncached) and the output
+  // (output_total). Off for a side the call does not count; a counter the usage reports is priced either way.
+  bool input = true, output = true;
+  // Messages compaction iterations bill at the model's rates beside the top-level counters.
+  bool compaction = false;
+  // Every token at the route ceiling (estimate's `route_ceiling`).
+  bool route_ceiling = false;
+  // The image tokens among the input, when the caller counts them: carved out of the uncached input and billed at
+  // `input_image`, as audio input is at `input_audio`.
+  std::optional<std::uint64_t> input_image;
+};
+// One part of a usage's sum: tokens billed at the rate of `unit` (a plain name: `cache_read`, `ceiling_input`,
+// `request` for the fee), from the price key `key`.
+struct UsageCharge {
+  std::string_view unit, key;
+  std::uint64_t quantity = 0, rate = 0;
+};
+struct UsageSum {
+  // The exact sum, in nano-USD x 1e6, not rounded.
+  Wide sum;
+  // Every counter the usage bills has a price and a count; otherwise `unpriced` names why, and `sum` is partial.
+  bool complete = true;
+  std::vector<std::string> assumptions, unpriced;
+  std::vector<UsageCharge> charges;
+};
+// The token part and the request fee of `estimate`, with its rules, at the prices of `selection` (price_of): summed
+// exactly and not rounded, so a caller adds other parts before rounding once.
+UsageSum usage_sum(const Selection& selection, const Usage& usage, const UsageRules& rules);
 }  // namespace sp::pricing::detail

@@ -8,6 +8,7 @@
 #include "codecs/images.h"
 #include "codecs/jobs.h"
 #include "codecs/moderation.h"
+#include "codecs/provider_cost.h"
 #include "codecs/realtime.h"
 #include "codecs/rerank.h"
 #include "codecs/speech.h"
@@ -331,6 +332,41 @@ void transcription_endpoint() {
       R"({"text":"Hello there.","language":"en","duration":1.4,"usage":{"cost":0.0001,"seconds":1.4}})", "openai/gpt-4o-mini-transcribe");
   CHECK(std::get<transcription::Result>(routed_result).seconds == 1.4 && std::get<transcription::Result>(routed_result).language == "en" &&
         std::get<transcription::Result>(routed_result).usage.provider_cost.total->nano_usd == 100'000u);
+  // The usage records the reported length in whole seconds, rounded up: `duration`, else `usage.seconds`.
+  const auto seconds_of = [&](std::string_view body) -> std::optional<std::uint64_t> {
+    const auto decoded_result = decoded<transcription::Codec>(transcription::typed, router, body, "m");
+    const auto& extra = std::get<transcription::Result>(decoded_result).usage.extra;
+    const auto found = extra.find("seconds");
+    if (found == extra.end()) return std::nullopt;
+    if (found->second.evidence != Evidence::Derived) throw std::runtime_error("the seconds are derived from the reported length");
+    return found->second.value;
+  };
+  CHECK(std::get<transcription::Result>(routed_result).usage.extra.at("seconds").value == 2);
+  CHECK(seconds_of(R"({"text":"a","duration":2.0})") == 2u && seconds_of(R"({"text":"a","duration":0})") == 0u &&
+        seconds_of(R"({"text":"a","duration":0.0001})") == 1u && seconds_of(R"({"text":"a","duration":7})") == 7u &&
+        seconds_of(R"({"text":"a","duration":59.999999999})") == 60u && seconds_of(R"({"text":"a","duration":1e3})") == 1000u &&
+        seconds_of(R"({"text":"a","duration":12.5,"usage":{"seconds":30}})") == 13u && seconds_of(R"({"text":"a","usage":{"seconds":30.2}})") == 31u &&
+        seconds_of(R"({"text":"a","usage":{"seconds":4,"input_tokens":3}})") == 4u);
+  // The provider cost reader and the length reader read a reported number the same way, from its shortest decimal, and
+  // round up: whole seconds are the cost's nano-USD divided by 1e9, rounded up, on the same number.
+  const std::pair<const char*, std::optional<std::uint64_t>> numbers[]{
+      {"1", 1},     {"1.0", 1},      {"1.000001", 2}, {"0.999999", 1}, {"59.5", 60},
+      {"1e2", 100}, {"12345.678901234567", 12346},    {"0", 0},        {"-1", std::nullopt}};
+  for (const auto& [text, seconds] : numbers) {
+    const auto read = seconds_of(R"({"text":"a","duration":)" + std::string(text) + "}");
+    CHECK(read == seconds);
+    std::optional<UsdAmount> cost;
+    const auto status = codecs::usd_amount(document(text)->root(), true, cost);
+    CHECK(seconds ? status == CostStatus::Available && cost && cost->nano_usd / 1'000'000'000 + (cost->nano_usd % 1'000'000'000 ? 1 : 0) == *seconds
+                  : status == CostStatus::Malformed && !cost);
+  }
+  // A number that is not finite is no JSON number, so neither reader sees one.
+  CHECK(std::holds_alternative<json::ParseError>(json::parse("1e400")) &&
+        std::holds_alternative<Failure>(decoded<transcription::Codec>(transcription::typed, router, R"({"text":"a","duration":1e400})", "m")));
+  // A result that reports no length, or one no count can hold, records none.
+  CHECK(!seconds_of(R"({"text":"a"})") && !seconds_of(R"({"text":"a","usage":{"input_tokens":3}})") &&
+        !seconds_of(R"({"text":"a","usage":{"seconds":-1}})") && !seconds_of(R"({"text":"a","usage":{"seconds":1e30}})") &&
+        !seconds_of(R"({"text":"a","usage":{"seconds":"30"}})"));
   CHECK(std::holds_alternative<Failure>(decoded<transcription::Codec>(transcription::typed, openai, R"({"segments":[]})", "m")));
   // A translation into English: OpenAI only, and without a language.
   auto translate = request; translate.model = "whisper-1"; translate.language.reset(); translate.extensions.reset(); translate.translate = true;

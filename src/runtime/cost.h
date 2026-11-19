@@ -55,4 +55,24 @@ pricing::EndpointBound endpoint_worst_case_cost(const PreparedRequest& prepared,
                                                 const EndpointCostOptions& options = {});
 // With the catalogue of the descriptor's policy.
 pricing::EndpointBound endpoint_worst_case_cost(const PreparedRequest& prepared, const EndpointCostOptions& options = {});
+
+// What a finished endpoint call cost by the catalogue, at the standard rates: pricing::endpoint_estimate over the facts
+// of the prepared call (PreparedRequest::endpoint_facts, which a host journals with the call) and what its result
+// counted. Where the provider reports the cost (Usage::provider_cost, at OpenRouter) that figure is the cost and this
+// is a cross-check. Each result type gives:
+// - images: its usage, the image tokens of the input (`input_tokens_details.image_tokens` of the usage), and
+//   `item:image` the images it returned;
+// - decisions and embeddings: its usage;
+// - rerank: its usage, and `item:search_unit` the search units it reports (`search_units`);
+// - speech: its usage, which counts nothing;
+// - transcription: its usage, and `item:second` the audio's length it reports in whole seconds (`seconds` of the usage);
+// - a job's state (a video's poll, priced with its submit's facts): its usage, which counts no tokens; a state other
+//   than Completed has no total ("job"), since whether a job that did not complete bills is not stated.
+pricing::EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const images::Result& result, const descriptor::ModelCatalogue& catalogue);
+pricing::EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const decisions::Result& result, const descriptor::ModelCatalogue& catalogue);
+pricing::EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const embeddings::Result& result, const descriptor::ModelCatalogue& catalogue);
+pricing::EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const rerank::Result& result, const descriptor::ModelCatalogue& catalogue);
+pricing::EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const speech::Result& result, const descriptor::ModelCatalogue& catalogue);
+pricing::EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const transcription::Result& result, const descriptor::ModelCatalogue& catalogue);
+pricing::EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const jobs::State& result, const descriptor::ModelCatalogue& catalogue);
 } // namespace sp::runtime

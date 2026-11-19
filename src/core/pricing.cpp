@@ -137,12 +137,181 @@ std::optional<std::uint64_t> modality_tokens(const Usage& usage, std::span<const
 }
 }  // namespace
 
+namespace detail {
+UsageSum usage_sum(const Selection& selection, const Usage& usage, const UsageRules& rules) {
+  UsageSum out;
+  const auto& price = selection.price;
+  auto count = [](const std::optional<Count>& c) -> std::optional<std::uint64_t> { return c ? std::optional<std::uint64_t>(c->value) : std::nullopt; };
+  const auto cache_read = count(usage.cache_read).value_or(0), cache_write = count(usage.cache_write).value_or(0);
+  std::optional<std::uint64_t> uncached = count(usage.input_uncached);
+  if (!uncached && usage.input_total) {
+    const auto total = usage.input_total->value;
+    uncached = total >= cache_read + cache_write ? total - cache_read - cache_write : 0;
+  }
+  auto& sum = out.sum;  // nano-USD x 1e6
+  auto& complete = out.complete;
+  auto assume = [&](std::string_view rule) {
+    if (std::find(out.assumptions.begin(), out.assumptions.end(), rule) == out.assumptions.end()) out.assumptions.emplace_back(rule);
+  };
+  // Tokens priced at the rate of `unit`, named `name` when they have no price. `base` is the rate of the unit this one
+  // refines. A zero rate under a priced base bills those tokens as free.
+  auto charge = [&](std::string_view unit, std::uint64_t units, const std::optional<std::uint64_t>& rate, std::string_view name,
+                    const std::optional<std::uint64_t>& base = std::nullopt) {
+    if (!units) return;
+    if (!rate) { out.unpriced.emplace_back(name); complete = false; return; }
+    if (!*rate && base && *base) assume(std::string(name) + " at zero");
+    sum += Wide::product(units, *rate);
+    out.charges.push_back({unit, key_of(selection.keys, unit), units, *rate});
+  };
+  auto extra = [&](std::string_view counter) -> std::uint64_t {
+    const auto found = usage.extra.find(std::string(counter));
+    return found == usage.extra.end() ? 0 : found->second.value;
+  };
+  // The audio tokens of the input or the output: a modality breakdown, else Chat's own audio counter.
+  auto audio_of = [&](std::string_view chat_counter, std::span<const std::string_view> prefixes) {
+    const auto breakdown = modality_tokens(usage, prefixes, "audio");
+    return breakdown ? *breakdown : extra(chat_counter);
+  };
+  // Gemini bills the tool-use prompt beyond the prompt count; no price here covers it.
+  if (extra("toolUsePromptTokenCount")) { out.unpriced.emplace_back("toolUsePromptTokenCount"); complete = false; }
+  // A Messages compaction iteration is billed at the model's rates beside the top-level counters.
+  const bool compaction = rules.compaction;
+  if (rules.route_ceiling) {
+    // The served endpoint is unknown: every input token at the ceiling's input rate, every output token at its
+    // output rate.
+    if (!price.ceiling_input || !price.ceiling_output) { out.unpriced.emplace_back("ceiling"); complete = false; return out; }
+    assume("route ceiling");
+    if (!uncached) { if (rules.input) { out.unpriced.emplace_back("input"); complete = false; } }
+    else charge("ceiling_input", *uncached, price.ceiling_input, "ceiling");
+    charge("ceiling_input", cache_read, price.ceiling_input, "ceiling");
+    charge("ceiling_input", cache_write, price.ceiling_input, "ceiling");
+    if (!usage.output_total) { if (rules.output) { out.unpriced.emplace_back("output"); complete = false; } }
+    else charge("ceiling_output", usage.output_total->value, price.ceiling_output, "ceiling");
+    if (compaction) {
+      for (const auto counter : {"compaction.input_tokens", "compaction.cache_read_input_tokens", "compaction.cache_creation_input_tokens"})
+        charge("ceiling_input", extra(counter), price.ceiling_input, "ceiling");
+      charge("ceiling_output", extra("compaction.output_tokens"), price.ceiling_output, "ceiling");
+    }
+    const auto fee = std::max(price.request.value_or(0), price.ceiling_request.value_or(0));
+    if (!complete) return out;
+    // A fee of a row with a price that is not a fixed amount is not known, not zero.
+    for (const std::string_view unit : {"request", "ceiling_request"})
+      if (selection.is_variable(unit)) { out.unpriced.emplace_back(unit); complete = false; }
+    if (!complete) return out;
+    sum += fee;
+    if (fee) {
+      const std::string_view unit = price.request.value_or(0) >= price.ceiling_request.value_or(0) ? "request" : "ceiling_request";
+      out.charges.push_back({unit, key_of(selection.keys, unit), 1, fee});
+    }
+  } else {
+    // Audio input bills at its own rate, out of the uncached input. Audio the cache counters hold has no split.
+    std::uint64_t audio_in = 0;
+    if (const auto audio = audio_of("input_audio", input_breakdown); audio && uncached) {
+      if (price.input_audio && audio <= *uncached) audio_in = audio;
+      else { out.unpriced.emplace_back("input_audio"); complete = false; }
+    }
+    // The image tokens of the input, when the caller counts them, the same way at `input_image`.
+    std::uint64_t image_in = 0;
+    if (rules.input_image && *rules.input_image && uncached) {
+      if (selection.input_image && *rules.input_image <= *uncached - audio_in) image_in = *rules.input_image;
+      else { out.unpriced.emplace_back(input_image_unit); complete = false; }
+    }
+    if (!uncached) { if (rules.input) { out.unpriced.emplace_back("input"); complete = false; } }
+    else {
+      charge("input", *uncached - audio_in - image_in, price.input, "input");
+      charge("input_audio", audio_in, price.input_audio, "input_audio", price.input);
+      charge(input_image_unit, image_in, selection.input_image, input_image_unit, price.input);
+    }
+    // The rate a unit bills at, and the unit that gives it. A unit with a variable price is not billed at another
+    // unit's rate.
+    struct Rate { std::optional<std::uint64_t> value; std::string_view unit; };
+    auto fallback = [&](std::string_view unit, const std::optional<std::uint64_t>& specific, const std::optional<std::uint64_t>& general,
+                        std::string_view rule, std::uint64_t units) {
+      if (specific || !units || selection.is_variable(unit)) return Rate{specific, unit};
+      if (general) assume(rule);
+      return Rate{general, "input"};
+    };
+    const auto read_rate = fallback("cache_read", price.cache_read, price.input, "cache_read at input", cache_read);
+    charge(read_rate.unit, cache_read, read_rate.value, "cache_read", price.input);
+    // Messages splits cache writes into 5-minute and 1-hour writes; without the split, all of them bill at the
+    // dearer rate.
+    const auto write = fallback("cache_write", price.cache_write, price.input, "cache_write at input", cache_write);
+    const auto five = usage.extra.find("cache_creation.ephemeral_5m_input_tokens");
+    const auto hour = usage.extra.find("cache_creation.ephemeral_1h_input_tokens");
+    // The writes a variable write rate may price: the 5-minute or 1-hour ones by the split, else all of them.
+    const bool split = cache_write && five != usage.extra.end() && hour != usage.extra.end() && five->second.value <= cache_write &&
+                       hour->second.value == cache_write - five->second.value;
+    const bool variable_write = selection.is_variable("cache_write") && (split ? five->second.value : cache_write) > 0;
+    const bool variable_hour = selection.is_variable("cache_write_1h") && (split ? hour->second.value : cache_write) > 0;
+    if (variable_write || variable_hour) {
+      if (variable_write) { out.unpriced.emplace_back("cache_write"); complete = false; }
+      if (variable_hour) { out.unpriced.emplace_back("cache_write_1h"); complete = false; }
+    } else if (price.cache_write_1h && cache_write && five != usage.extra.end() && hour != usage.extra.end() &&
+        five->second.value <= cache_write && hour->second.value == cache_write - five->second.value) {
+      charge(write.unit, five->second.value, write.value, "cache_write", price.input);
+      charge("cache_write_1h", hour->second.value, price.cache_write_1h, "cache_write_1h", write.value);
+    } else if (price.cache_write_1h && cache_write && (!write.value || *price.cache_write_1h > *write.value)) {
+      assume("cache_write at cache_write_1h");
+      charge("cache_write_1h", cache_write, price.cache_write_1h, "cache_write_1h", write.value);
+    } else {
+      if (hour != usage.extra.end() && hour->second.value && !price.cache_write_1h) assume("cache_write_1h at cache_write");
+      charge(write.unit, cache_write, write.value, "cache_write", price.input);
+    }
+    if (!usage.output_total) { if (rules.output) { out.unpriced.emplace_back("output"); complete = false; } }
+    else {
+      const auto output = usage.output_total->value;
+      if (selection.is_variable("reasoning") && std::min(count(usage.reasoning).value_or(0), output)) { out.unpriced.emplace_back("reasoning"); complete = false; }
+      const auto reasoning = price.reasoning ? std::min(count(usage.reasoning).value_or(0), output) : 0;
+      charge("reasoning", reasoning, price.reasoning, "reasoning", price.output);
+      // Gemini reports image output tokens by modality (Generate `candidatesTokensDetails.IMAGE`, Interactions
+      // `output_tokens_by_modality.image`). Without that breakdown, all output bills at the dearer rate.
+      auto image = modality_tokens(usage, output_breakdown, "image");
+      // Without a breakdown, any output token may be an image token at the variable rate.
+      if (selection.is_variable("output_image") && !image && output > reasoning) { out.unpriced.emplace_back("output_image"); complete = false; }
+      if (!price.output_image) {
+        if (image && *image) { out.unpriced.emplace_back("output_image"); complete = false; }
+        image.reset();
+      } else if (!(output > reasoning && price.output_image != price.output)) {
+        image.reset();
+      } else if (!image && (!price.output || *price.output_image > *price.output)) {
+        assume("output at output_image");
+        image = output - reasoning;
+      }
+      const auto images = std::min(image.value_or(0), output - reasoning);
+      charge("output_image", images, price.output_image, "output_image", price.output);
+      // Audio output bills at its own rate, out of what is left.
+      std::uint64_t audio_out = 0;
+      if (const auto audio = audio_of("audio_tokens", output_breakdown)) {
+        if (price.output_audio) audio_out = std::min(audio, output - reasoning - images);
+        else { out.unpriced.emplace_back("output_audio"); complete = false; }
+      }
+      charge("output_audio", audio_out, price.output_audio, "output_audio", price.output);
+      charge("output", output - reasoning - images - audio_out, price.output, "output");
+    }
+    if (compaction) {
+      const auto read = extra("compaction.cache_read_input_tokens"), written = extra("compaction.cache_creation_input_tokens");
+      charge("input", extra("compaction.input_tokens"), price.input, "input");
+      const auto compaction_read = fallback("cache_read", price.cache_read, price.input, "cache_read at input", read);
+      charge(compaction_read.unit, read, compaction_read.value, "cache_read", price.input);
+      const auto compaction_write = fallback("cache_write", price.cache_write, price.input, "cache_write at input", written);
+      charge(compaction_write.unit, written, compaction_write.value, "cache_write", price.input);
+      charge("output", extra("compaction.output_tokens"), price.output, "output");
+    }
+    if (selection.is_variable("request")) { out.unpriced.emplace_back("request"); complete = false; }
+    else if (price.request) {
+      sum += *price.request;
+      out.charges.push_back({"request", key_of(selection.keys, "request"), 1, *price.request});
+    }
+  }
+  return out;
+}
+}  // namespace detail
+
 CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_view family, std::string_view origin,
                       const ServedModel& model, const Usage& usage, std::string_view service_tier, bool route_ceiling) {
   CostEstimate out;
   out.lower_bound = usage.stage == UsageStage::Partial || usage.quality == UsageQuality::Inconsistent;
   const descriptor::CatalogueEntry* entry = nullptr;
-  ModelPrice price;
   detail::Selection selection;
   auto count_of = [](const std::optional<Count>& c) -> std::uint64_t { return c ? c->value : 0; };
   // The input length that picks the entry's band: every input token, cache reads and writes included.
@@ -159,7 +328,7 @@ CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_v
       other_tier = other_tier || priced_in_other_tier(*match.entry, service_tier, input_length);
       return false;
     }
-    entry = match.entry; price = found.price; selection = std::move(found);
+    entry = match.entry; selection = std::move(found);
     return true;
   };
   const bool served = model.relation != ServedRelation::NotReported && !model.served.empty() && model.served != model.requested;
@@ -170,152 +339,17 @@ CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_v
   }
   out.entry = entry->id;
   out.requested_entry = served && !by_served;
-  auto count = [](const std::optional<Count>& c) -> std::optional<std::uint64_t> { return c ? std::optional<std::uint64_t>(c->value) : std::nullopt; };
-  const auto cache_read = count(usage.cache_read).value_or(0), cache_write = count(usage.cache_write).value_or(0);
-  std::optional<std::uint64_t> uncached = count(usage.input_uncached);
-  if (!uncached && usage.input_total) {
-    const auto total = usage.input_total->value;
-    uncached = total >= cache_read + cache_write ? total - cache_read - cache_write : 0;
-  }
-  Wide sum;  // nano-USD x 1e6
-  bool complete = true;
-  auto assume = [&](std::string_view rule) {
-    if (std::find(out.assumptions.begin(), out.assumptions.end(), rule) == out.assumptions.end()) out.assumptions.emplace_back(rule);
-  };
-  // `base` is the rate of the unit this one refines. A zero rate under a priced base bills those tokens as free.
-  auto charge = [&](std::uint64_t units, const std::optional<std::uint64_t>& rate, std::string_view name,
-                    const std::optional<std::uint64_t>& base = std::nullopt) {
-    if (!units) return;
-    if (!rate) { out.unpriced.emplace_back(name); complete = false; return; }
-    if (!*rate && base && *base) assume(std::string(name) + " at zero");
-    sum += Wide::product(units, *rate);
-  };
-  auto extra = [&](std::string_view counter) -> std::uint64_t {
-    const auto found = usage.extra.find(std::string(counter));
-    return found == usage.extra.end() ? 0 : found->second.value;
-  };
-  // The audio tokens of the input or the output: a modality breakdown, else Chat's own audio counter.
-  auto audio_of = [&](std::string_view chat_counter, std::span<const std::string_view> prefixes) {
-    const auto breakdown = modality_tokens(usage, prefixes, "audio");
-    return breakdown ? *breakdown : extra(chat_counter);
-  };
-  // Gemini bills the tool-use prompt beyond the prompt count; no price here covers it.
-  if (extra("toolUsePromptTokenCount")) { out.unpriced.emplace_back("toolUsePromptTokenCount"); complete = false; }
-  // A Messages compaction iteration is billed at the model's rates beside the top-level counters.
-  const bool compaction = family == "anthropic.messages";
-  if (route_ceiling) {
-    // The served endpoint is unknown: every input token at the ceiling's input rate, every output token at its
-    // output rate.
-    if (!price.ceiling_input || !price.ceiling_output) { out.unpriced.emplace_back("ceiling"); return out; }
-    assume("route ceiling");
-    if (!uncached) { out.unpriced.emplace_back("input"); complete = false; }
-    else charge(*uncached, price.ceiling_input, "ceiling");
-    charge(cache_read, price.ceiling_input, "ceiling");
-    charge(cache_write, price.ceiling_input, "ceiling");
-    if (!usage.output_total) { out.unpriced.emplace_back("output"); complete = false; }
-    else charge(usage.output_total->value, price.ceiling_output, "ceiling");
-    if (compaction) {
-      for (const auto counter : {"compaction.input_tokens", "compaction.cache_read_input_tokens", "compaction.cache_creation_input_tokens"})
-        charge(extra(counter), price.ceiling_input, "ceiling");
-      charge(extra("compaction.output_tokens"), price.ceiling_output, "ceiling");
-    }
-    const auto fee = std::max(price.request.value_or(0), price.ceiling_request.value_or(0));
-    if (!complete) return out;
-    // A fee of a row with a price that is not a fixed amount is not known, not zero.
-    for (const std::string_view unit : {"request", "ceiling_request"})
-      if (selection.is_variable(unit)) { out.unpriced.emplace_back(unit); complete = false; }
-    if (!complete) return out;
-    sum += fee;
-  } else {
-    // Audio input bills at its own rate, out of the uncached input. Audio the cache counters hold has no split.
-    std::uint64_t audio_in = 0;
-    if (const auto audio = audio_of("input_audio", input_breakdown); audio && uncached) {
-      if (price.input_audio && audio <= *uncached) audio_in = audio;
-      else { out.unpriced.emplace_back("input_audio"); complete = false; }
-    }
-    if (!uncached) { out.unpriced.emplace_back("input"); complete = false; }
-    else {
-      charge(*uncached - audio_in, price.input, "input");
-      charge(audio_in, price.input_audio, "input_audio", price.input);
-    }
-    // A unit with a variable price is not billed at another unit's rate.
-    auto fallback = [&](std::string_view unit, const std::optional<std::uint64_t>& specific, const std::optional<std::uint64_t>& general,
-                        std::string_view rule, std::uint64_t units) {
-      if (specific || !units || selection.is_variable(unit)) return specific;
-      if (general) assume(rule);
-      return general;
-    };
-    charge(cache_read, fallback("cache_read", price.cache_read, price.input, "cache_read at input", cache_read), "cache_read", price.input);
-    // Messages splits cache writes into 5-minute and 1-hour writes; without the split, all of them bill at the
-    // dearer rate.
-    const auto write = fallback("cache_write", price.cache_write, price.input, "cache_write at input", cache_write);
-    const auto five = usage.extra.find("cache_creation.ephemeral_5m_input_tokens");
-    const auto hour = usage.extra.find("cache_creation.ephemeral_1h_input_tokens");
-    // The writes a variable write rate may price: the 5-minute or 1-hour ones by the split, else all of them.
-    const bool split = cache_write && five != usage.extra.end() && hour != usage.extra.end() && five->second.value <= cache_write &&
-                       hour->second.value == cache_write - five->second.value;
-    const bool variable_write = selection.is_variable("cache_write") && (split ? five->second.value : cache_write) > 0;
-    const bool variable_hour = selection.is_variable("cache_write_1h") && (split ? hour->second.value : cache_write) > 0;
-    if (variable_write || variable_hour) {
-      if (variable_write) { out.unpriced.emplace_back("cache_write"); complete = false; }
-      if (variable_hour) { out.unpriced.emplace_back("cache_write_1h"); complete = false; }
-    } else if (price.cache_write_1h && cache_write && five != usage.extra.end() && hour != usage.extra.end() &&
-        five->second.value <= cache_write && hour->second.value == cache_write - five->second.value) {
-      charge(five->second.value, write, "cache_write", price.input);
-      charge(hour->second.value, price.cache_write_1h, "cache_write_1h", write);
-    } else if (price.cache_write_1h && cache_write && (!write || *price.cache_write_1h > *write)) {
-      assume("cache_write at cache_write_1h");
-      charge(cache_write, price.cache_write_1h, "cache_write_1h", write);
-    } else {
-      if (hour != usage.extra.end() && hour->second.value && !price.cache_write_1h) assume("cache_write_1h at cache_write");
-      charge(cache_write, write, "cache_write", price.input);
-    }
-    if (!usage.output_total) { out.unpriced.emplace_back("output"); complete = false; }
-    else {
-      const auto output = usage.output_total->value;
-      if (selection.is_variable("reasoning") && std::min(count(usage.reasoning).value_or(0), output)) { out.unpriced.emplace_back("reasoning"); complete = false; }
-      const auto reasoning = price.reasoning ? std::min(count(usage.reasoning).value_or(0), output) : 0;
-      charge(reasoning, price.reasoning, "reasoning", price.output);
-      // Gemini reports image output tokens by modality (Generate `candidatesTokensDetails.IMAGE`, Interactions
-      // `output_tokens_by_modality.image`). Without that breakdown, all output bills at the dearer rate.
-      auto image = modality_tokens(usage, output_breakdown, "image");
-      // Without a breakdown, any output token may be an image token at the variable rate.
-      if (selection.is_variable("output_image") && !image && output > reasoning) { out.unpriced.emplace_back("output_image"); complete = false; }
-      if (!price.output_image) {
-        if (image && *image) { out.unpriced.emplace_back("output_image"); complete = false; }
-        image.reset();
-      } else if (!(output > reasoning && price.output_image != price.output)) {
-        image.reset();
-      } else if (!image && (!price.output || *price.output_image > *price.output)) {
-        assume("output at output_image");
-        image = output - reasoning;
-      }
-      const auto images = std::min(image.value_or(0), output - reasoning);
-      charge(images, price.output_image, "output_image", price.output);
-      // Audio output bills at its own rate, out of what is left.
-      std::uint64_t audio_out = 0;
-      if (const auto audio = audio_of("audio_tokens", output_breakdown)) {
-        if (price.output_audio) audio_out = std::min(audio, output - reasoning - images);
-        else { out.unpriced.emplace_back("output_audio"); complete = false; }
-      }
-      charge(audio_out, price.output_audio, "output_audio", price.output);
-      charge(output - reasoning - images - audio_out, price.output, "output");
-    }
-    if (compaction) {
-      const auto read = extra("compaction.cache_read_input_tokens"), written = extra("compaction.cache_creation_input_tokens");
-      charge(extra("compaction.input_tokens"), price.input, "input");
-      charge(read, fallback("cache_read", price.cache_read, price.input, "cache_read at input", read), "cache_read", price.input);
-      charge(written, fallback("cache_write", price.cache_write, price.input, "cache_write at input", written), "cache_write", price.input);
-      charge(extra("compaction.output_tokens"), price.output, "output");
-    }
-    if (selection.is_variable("request")) { out.unpriced.emplace_back("request"); complete = false; }
-    else if (price.request) sum += *price.request;
-  }
-  if (!complete) return out;
-  sum += 999'999;
-  const auto nano = sum.divided(1'000'000);
-  if (!nano.fits()) { out.unpriced.emplace_back("overflow"); return out; }
-  out.total = UsdAmount{nano.low, Evidence::Derived, CostRounding::CeilingCatalogueProduct};
+  detail::UsageRules rules;
+  rules.compaction = family == "anthropic.messages";
+  rules.route_ceiling = route_ceiling;
+  auto summed = detail::usage_sum(selection, usage, rules);
+  out.assumptions = std::move(summed.assumptions);
+  out.unpriced = std::move(summed.unpriced);
+  if (!summed.complete) return out;
+  // Every part of the sum is rounded together, once.
+  const auto nano = detail::rounded_nano_usd(summed.sum);
+  if (!nano) { out.unpriced.emplace_back("overflow"); return out; }
+  out.total = UsdAmount{*nano, Evidence::Derived, CostRounding::CeilingCatalogueProduct};
   return out;
 }
 
