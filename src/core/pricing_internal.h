@@ -1,12 +1,17 @@
 #pragma once
 // Exact money arithmetic and the price unit reader the pricing sources share (pricing.cpp, endpoint_pricing.cpp).
 // Not installed: only the library's own sources include it.
+#include "core/pricing.h"
 #include "descriptor/policy.h"
+#include <algorithm>
 #include <cstdint>
 #include <initializer_list>
 #include <limits>
 #include <optional>
+#include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace sp::pricing::detail {
 // An unsigned 128-bit value in two 64-bit halves (MSVC has no 128-bit integer). `overflow` records a carry out of
@@ -101,4 +106,31 @@ inline std::optional<std::uint64_t> smallest_limit(std::initializer_list<std::op
     if (value && *value > 0 && (!result || *value < *result)) result = value;
   return result;
 }
+
+// Price keys by the plain name of their unit (descriptor::plain_price_unit; `tool:<type>` for a tool fee).
+using UnitKeys = std::vector<std::pair<std::string, std::string_view>>;
+inline std::string_view key_of(const UnitKeys& keys, std::string_view unit) noexcept {
+  const auto found = std::find_if(keys.begin(), keys.end(), [&](const auto& key) { return key.first == unit; });
+  return found == keys.end() ? std::string_view{} : found->second;
+}
+// The entry's prices for a request in a service tier with some input tokens, as price_of (`dearest` false) and
+// dearest_price_of (`dearest` true) read them, and what those leave out. A row applies to the request when it is of
+// the tier and the request is above its band (for `dearest`, may reach it).
+struct Selection {
+  // Each unit with a fixed price, of the highest band that applies or the dearest; a unit with a row that applies at a
+  // price that is not a fixed amount has none, whatever its other rows.
+  ModelPrice price;
+  // The same for the image tokens of an input (`input_image`), which ModelPrice does not hold.
+  std::optional<std::uint64_t> input_image;
+  // The key of the row that gave each price.
+  UnitKeys keys;
+  // Each unit with a row that applies at a price that is not a fixed amount (a variable price), with the first such row.
+  UnitKeys variable;
+  // Whether some unit ModelPrice holds has a row that applies at a fixed price: whether the entry prices the request
+  // in the tier at all.
+  bool priced = false;
+  bool is_variable(std::string_view unit) const noexcept { return !key_of(variable, unit).empty(); }
+};
+// The keys point into `entry`, which must outlive the selection.
+Selection select(const descriptor::CatalogueEntry& entry, std::string_view service_tier, std::uint64_t input_tokens, bool dearest);
 }  // namespace sp::pricing::detail
