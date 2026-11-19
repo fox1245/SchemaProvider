@@ -114,4 +114,78 @@ struct EndpointBound {
 // `Overflow`. With any reason there is no total and no lines. Nothing here is a reservation or a ledger.
 EndpointBound endpoint_worst_case(const EndpointWorstCaseInput& input, const descriptor::ModelCatalogue& catalogue);
 
+// What a finished endpoint call counted (runtime::endpoint_estimate fills it from each typed result).
+struct EndpointCounted {
+  // The result's token counters. Null, or a usage without an input, output, cache or reasoning counter, when the result
+  // reports none.
+  const Usage* usage = nullptr;
+  // What the result counted of item units, each unit once: `item:image` the images it returned, `item:search_unit`
+  // the search units, `item:second` the audio's seconds. A unit not listed was not counted.
+  std::vector<std::pair<std::string, std::uint64_t>> items;
+  // The image tokens among the input tokens the usage counts, when the result reports them.
+  std::optional<std::uint64_t> input_image_tokens;
+  // The model the response names.
+  ServedModel model;
+};
+struct EndpointEstimate {
+  // Set when every unit the call billed has a price and a count. Rounded up once, to whole nano-USD.
+  std::optional<UsdAmount> total;
+  // The catalogue entry that priced the call, and whether it is the requested model's because the served model had
+  // no priced entry.
+  std::string entry;
+  bool requested_entry = false;
+  // What was priced: `input` and `output` token lines (one per rate they were priced at, with the price key), the
+  // `request` fee, and each item unit at the price key that priced it. Empty when there is no total.
+  std::vector<EndpointLine> lines;
+  // Rules applied where the result says less than the bill: those of `estimate` for the tokens ("cache_read at
+  // input", "<unit> at zero", ...), "<unit> at the request's bound" for an item unit the result does not count and the
+  // request does not fix, priced at the most the request asks, and "listed rates" at a routing gateway, whose bound is
+  // at the route ceiling.
+  std::vector<std::string> assumptions;
+  // Why there is no total: "billing" (the policy does not state how the operation bills), "carried" (the call bills
+  // the requests it carries), "model", "tier", "operation" or "dimensions" (as the bound refuses them), a token side
+  // or counter with no price or no count ("input", "output", "cache_read", "input_image", "request", ...), an item
+  // unit with no row that applies, a row that applies at a variable price, or no count, a price key of an item unit
+  // the operation cannot count, a quantity of a unit the estimate does not price, or "overflow".
+  std::vector<std::string> unpriced;
+  // The provider may bill more than `total`: the usage was partial or inconsistent, or the result counted fewer of an
+  // item unit than the request asked for (fewer images than `count`).
+  bool lower_bound = false;
+};
+// What a finished endpoint call cost by the catalogue: the facts of the call (journaled with it when it was
+// prepared) and what its result counted, priced like the bound of the same call (endpoint_worst_case) but at the
+// result's own quantities. The provider's own figure, where it reports one (Usage::provider_cost), is the cost; this is
+// a cross-check. By the billing of the operation: `None` is exactly zero and reads nothing of the result; `Unstated`
+// is "billing"; `Carried` is "carried". For `Model`:
+// - The entry: the served model's when the response names another model and that model has an entry with a price
+//   under `service_tier`, else the requested one's (`requested_entry`); "model" when neither has one, "tier" when one
+//   prices only other tiers. At a routing gateway the entry's listed rates price the call ("listed rates").
+// - The dimensions and the operation as the bound reads them.
+// - Tokens, when the usage reports a counter: priced as `estimate` prices a usage, at the rates of the input band of
+//   the usage's input tokens (cache reads and writes included), with the same cache, reasoning and modality rules. The
+//   input's image tokens (`input_image_tokens`) are carved out of the uncached input and priced at `input_image`;
+//   more of them than the uncached input, or none of that rate, is "input_image". A side the operation counts (it
+//   states an `input` or `output` quantity) whose counter the usage lacks is unpriced. When the usage reports no
+//   counter, each side the operation counts needs every rate of the side, in every band, to be a declared zero, with a
+//   row of its first unit (`input`, `output`) without a band, and the image tokens the same of `input_image`; otherwise
+//   the side is unpriced.
+// - Items: the count the result gives; else the request's `at_most` when the request fixes it (`exact`); else the
+//   request's `at_most`, with "<unit> at the request's bound"; else none. A count of zero needs no rate, a declared
+//   zero needs no count, and a positive rate needs one. Each at the most specific row that applies (item_price).
+// - The request fee, once.
+// - Without the usage's input tokens no band can be chosen: a row in a band of a unit the estimate prices is "input".
+// - A row that applies with a price that is not a fixed amount leaves its unit unpriced, as do the rows of an item
+//   kind the operation cannot count and a quantity of another unit, as the bound refuses them.
+// Every part is summed exactly and rounded up once. Any unpriced unit leaves no total and no lines: never a partial
+// total. The estimate is never limited to the bound: a result beyond its request is priced as it came
+// (beyond_bound names what exceeds the bound). For the same facts, catalogue and tier, a result whose every counted
+// quantity is at most the bound's quantity of its unit is estimated at most at the bound.
+EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const EndpointCounted& counted, const descriptor::ModelCatalogue& catalogue,
+                                   std::string_view service_tier = {});
+// What of `estimate` exceeds `bound`: each unit whose estimated quantity (its lines summed) is above the bound's
+// quantity of it (a unit the bound has no line for has none), unless every line of the unit in both is at a rate of
+// zero, so that no quantity of it changes the cost (a declared zero the bound needs no count for has a line of none);
+// and "total" when the estimate's total is above the bound's. Empty when either has no total.
+std::vector<std::string> beyond_bound(const EndpointBound& bound, const EndpointEstimate& estimate);
+
 } // namespace sp::pricing

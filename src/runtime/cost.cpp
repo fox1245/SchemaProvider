@@ -138,4 +138,51 @@ pricing::EndpointBound endpoint_worst_case_cost(const PreparedRequest& prepared,
   if (!prepared.valid() || prepared.error() || !descriptor) return unmodeled_call("request", "the request did not prepare");
   return endpoint_worst_case_cost(prepared, *descriptor->policy()->catalogue(), options);
 }
+namespace {
+// The count a usage's `extra` holds under `counter`, when it holds one.
+std::optional<std::uint64_t> counted(const Usage& usage, std::string_view counter) {
+  const auto found = usage.extra.find(std::string(counter));
+  if (found == usage.extra.end()) return std::nullopt;
+  return found->second.value;
+}
+// What a result counted: its usage and model, and the item unit `unit` at the count `count` when it has one.
+pricing::EndpointCounted counted_by(const Usage& usage, const ServedModel& model, std::string_view unit = {},
+                                    std::optional<std::uint64_t> count = std::nullopt) {
+  pricing::EndpointCounted out;
+  out.usage = &usage;
+  out.model = model;
+  if (!unit.empty() && count) out.items.emplace_back(std::string(unit), *count);
+  return out;
+}
+} // namespace
+
+pricing::EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const images::Result& result, const descriptor::ModelCatalogue& catalogue) {
+  auto counted_result = counted_by(result.usage, result.model, "item:image", result.images.size());
+  counted_result.input_image_tokens = counted(result.usage, "input_tokens_details.image_tokens");
+  return pricing::endpoint_estimate(facts, counted_result, catalogue);
+}
+pricing::EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const decisions::Result& result, const descriptor::ModelCatalogue& catalogue) {
+  return pricing::endpoint_estimate(facts, counted_by(result.usage, result.model), catalogue);
+}
+pricing::EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const embeddings::Result& result, const descriptor::ModelCatalogue& catalogue) {
+  return pricing::endpoint_estimate(facts, counted_by(result.usage, result.model), catalogue);
+}
+pricing::EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const rerank::Result& result, const descriptor::ModelCatalogue& catalogue) {
+  return pricing::endpoint_estimate(facts, counted_by(result.usage, result.model, "item:search_unit", counted(result.usage, "search_units")), catalogue);
+}
+pricing::EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const speech::Result& result, const descriptor::ModelCatalogue& catalogue) {
+  return pricing::endpoint_estimate(facts, counted_by(result.usage, result.model), catalogue);
+}
+pricing::EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const transcription::Result& result, const descriptor::ModelCatalogue& catalogue) {
+  return pricing::endpoint_estimate(facts, counted_by(result.usage, result.model, "item:second", counted(result.usage, transcription::seconds_counter)), catalogue);
+}
+pricing::EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const jobs::State& result, const descriptor::ModelCatalogue& catalogue) {
+  // Whether a job that did not complete bills is not stated.
+  if (facts.billing == descriptor::EndpointBilling::Model && result.status != jobs::Status::Completed) {
+    pricing::EndpointEstimate out;
+    out.unpriced.emplace_back("job");
+    return out;
+  }
+  return pricing::endpoint_estimate(facts, counted_by(result.usage, result.model), catalogue);
+}
 } // namespace sp::runtime

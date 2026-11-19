@@ -413,4 +413,225 @@ EndpointBound endpoint_worst_case(const EndpointWorstCaseInput& in, const descri
   return out;
 }
 
+namespace {
+// The line an estimate's token charge belongs to, by the unit whose rate priced it: the output, the request fee, or
+// the input.
+std::string_view line_of(std::string_view unit) {
+  if (std::find(std::begin(output_units), std::end(output_units), unit) != std::end(output_units)) return output_units[0];
+  if (unit == request_units[0]) return request_units[0];
+  return input_units[0];
+}
+}  // namespace
+
+EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const EndpointCounted& counted, const descriptor::ModelCatalogue& catalogue,
+                                   std::string_view tier) {
+  EndpointEstimate out;
+  const auto refuse = [&](std::string_view name) {
+    if (std::find(out.unpriced.begin(), out.unpriced.end(), name) == out.unpriced.end()) out.unpriced.emplace_back(name);
+  };
+  const auto assume = [&](std::string rule) {
+    if (std::find(out.assumptions.begin(), out.assumptions.end(), rule) == out.assumptions.end()) out.assumptions.push_back(std::move(rule));
+  };
+  // What the policy states about the operation decides first. A call the provider does not bill reads nothing of its
+  // result: the usage a poll or a generation read reports is another call's.
+  if (facts.billing == descriptor::EndpointBilling::None) {
+    out.total = UsdAmount{0, Evidence::Derived, CostRounding::CeilingCatalogueProduct};
+    return out;
+  }
+  if (facts.billing == descriptor::EndpointBilling::Carried) {
+    refuse("carried");
+    return out;
+  }
+  if (facts.billing != descriptor::EndpointBilling::Model) {
+    refuse("billing");
+    return out;
+  }
+  const Usage* usage = counted.usage;
+  if (usage) out.lower_bound = usage->stage == UsageStage::Partial || usage->quality == UsageQuality::Inconsistent;
+
+  // The dimensions the call offers, its operation among them, as the bound reads them.
+  if (facts.operation.empty()) refuse("operation");
+  auto offered = facts.dimensions;
+  bool sorted = true;
+  for (std::size_t i = 1; i < offered.size(); ++i) sorted = sorted && offered[i - 1].first < offered[i].first;
+  if (!sorted) {
+    refuse("dimensions");
+  } else {
+    const auto at = std::lower_bound(offered.begin(), offered.end(), operation_dimension,
+                                     [](const std::pair<std::string, std::string>& dimension, std::string_view key) { return dimension.first < key; });
+    if (at == offered.end() || at->first != operation_dimension) offered.insert(at, {std::string(operation_dimension), facts.operation});
+    else if (at->second != facts.operation) refuse("dimensions");
+  }
+  if (!out.unpriced.empty()) return out;
+
+  // The entry: the served model's when the response names another model with a price in the tier, else the requested
+  // one's, as the chat estimate chooses it.
+  const descriptor::CatalogueEntry* entry = nullptr;
+  bool other_tier = false;
+  const auto priced = [&](std::string_view model) {
+    if (model.empty()) return false;
+    const auto* found = catalogue.find(facts.family, facts.origin, model).entry;
+    if (!found || found->pricing.empty()) return false;
+    if (std::none_of(found->pricing.begin(), found->pricing.end(), [&](const auto& price) {
+          const auto unit = parse_unit(price.first);
+          return unit && unit->tier == tier;
+        })) {
+      other_tier = true;
+      return false;
+    }
+    entry = found;
+    return true;
+  };
+  const auto& model = counted.model;
+  const bool served = model.relation != ServedRelation::NotReported && !model.served.empty() && model.served != facts.model;
+  const bool by_served = served && priced(model.served);
+  if (!by_served && !priced(facts.model)) {
+    refuse(other_tier ? "tier" : "model");
+    return out;
+  }
+  out.entry = entry->id;
+  out.requested_entry = served && !by_served;
+  // The bound at a routing gateway is at the route ceiling; the estimate takes the entry's listed rates.
+  if (facts.routed_gateway) assume("listed rates");
+
+  // What the operation counts: a side of tokens that can be above zero, the image tokens among the input, the item
+  // units; a quantity of another unit is not priced.
+  bool counts_input = false, counts_output = false, counts_images = false;
+  std::vector<std::string_view> kinds;
+  for (const auto& q : facts.quantities) {
+    const bool billed = !q.at_most || *q.at_most > 0;
+    if (q.unit == input_units[0]) counts_input = counts_input || billed;
+    else if (q.unit == output_units[0]) counts_output = counts_output || billed;
+    else if (q.unit == image_token_units[0]) counts_images = counts_images || billed;
+    else if (q.unit.starts_with(descriptor::item_unit_prefix)) kinds.push_back(q.unit);
+    else refuse(q.unit);
+  }
+  // The input length that picks bands: the usage's input tokens, cache reads and writes included, when it counts any
+  // token. Without it no band can be chosen, so a band of a unit priced without tokens leaves no total.
+  const bool reported = usage && (usage->input_total || usage->input_uncached || usage->cache_read || usage->cache_write || usage->output_total ||
+                                  usage->reasoning);
+  std::optional<std::uint64_t> length;
+  if (reported) {
+    const auto value = [](const std::optional<Count>& c) -> std::uint64_t { return c ? c->value : 0; };
+    length = usage->input_total ? usage->input_total->value : value(usage->input_uncached) + value(usage->cache_read) + value(usage->cache_write);
+  } else if (std::any_of(entry->pricing.begin(), entry->pricing.end(), [&](const auto& price) {
+               const auto unit = parse_unit(price.first);
+               if (!unit || unit->tier != tier || !unit->above) return false;
+               const auto item = descriptor::item_price_key(price.first);
+               return descriptor::plain_price_unit(unit->name) == request_units[0] ||
+                      (item && std::find(kinds.begin(), kinds.end(), item->unit) != kinds.end());
+             })) {
+    refuse(input_units[0]);
+  }
+  const auto band = length.value_or(0);
+
+  // The tokens and the request fee: the chat estimate's own sum, not rounded.
+  const auto selection = detail::select(*entry, tier, band, false);
+  detail::UsageRules rules;
+  rules.input = reported && counts_input;
+  rules.output = reported && counts_output;
+  rules.input_image = counted.input_image_tokens;
+  const Usage none;
+  const auto summed = detail::usage_sum(selection, reported ? *usage : none, rules);
+  for (const auto& name : summed.unpriced) refuse(name);
+  for (const auto& rule : summed.assumptions) assume(rule);
+  if (!reported) {
+    // No token counter: each side the operation counts needs every rate of the side, in every band, to be a declared
+    // zero, and a row of its first unit without a band, since the call may be above no band.
+    const auto declared_zero = [&](std::span<const std::string_view> units) {
+      const auto rows = token_rows(*entry, units, tier, every_band);
+      return rows.variable.empty() && rows.base && rows.dearest->first == 0 && token_rows(*entry, units, tier, 0).base;
+    };
+    if (counts_input && !declared_zero(input_units)) refuse(input_units[0]);
+    if (counts_images && !declared_zero(image_token_units)) refuse(image_token_units[0]);
+    if (counts_output && !declared_zero(output_units)) refuse(output_units[0]);
+  }
+  for (const auto& charge : summed.charges)
+    out.lines.push_back({std::string(line_of(charge.unit)), std::string(charge.key), charge.quantity, charge.rate});
+  Wide sum = summed.sum;  // nano-USD x 1e6
+
+  // The items, each at the most specific row that applies: the count the result gives, else what the request fixes,
+  // else the most the request asks for.
+  for (const auto& q : facts.quantities) {
+    if (!q.unit.starts_with(descriptor::item_unit_prefix)) continue;
+    const auto listed = std::count_if(counted.items.begin(), counted.items.end(), [&](const auto& item) { return item.first == q.unit; });
+    if (listed > 1) {
+      refuse(q.unit);
+      continue;
+    }
+    std::optional<std::uint64_t> count;
+    bool at_bound = false;
+    if (listed == 1) {
+      count = std::find_if(counted.items.begin(), counted.items.end(), [&](const auto& item) { return item.first == q.unit; })->second;
+      // Fewer than the request asked for: the provider may bill the ones it did not return.
+      if (q.at_most && *count < *q.at_most) out.lower_bound = true;
+    } else if (q.at_most) {
+      count = q.at_most;
+      at_bound = !q.exact;
+    }
+    if (count && *count == 0) continue;
+    const auto rate = item_price(*entry, q.unit, offered, tier, band);
+    if (!rate) {
+      refuse(q.unit);
+      continue;
+    }
+    // A declared zero needs no count, and its line keeps the count the result gives.
+    if (rate->first == 0) {
+      out.lines.push_back({q.unit, rate->second, count.value_or(0), 0});
+      continue;
+    }
+    if (!count) {
+      refuse(q.unit);
+      continue;
+    }
+    if (at_bound) assume(q.unit + " at the request's bound");
+    out.lines.push_back({q.unit, rate->second, *count, rate->first});
+    sum += Wide::product(*count, rate->first);
+  }
+  // A row of an item kind the operation cannot count, that applies to the call or may, and that is not a declared zero.
+  const auto reach = length ? *length : every_band;
+  for (const auto& [key, text] : entry->pricing) {
+    const auto item = descriptor::item_price_key(key);
+    if (!item || item->tier != tier || (item->above && reach <= item->above)) continue;
+    if (std::find(kinds.begin(), kinds.end(), item->unit) != kinds.end() || !may_apply(item->qualifier, offered)) continue;
+    if (const auto rate = per_million(text); rate && *rate == 0) continue;
+    refuse(key);
+  }
+  if (!out.unpriced.empty()) {
+    out.lines.clear();
+    return out;
+  }
+  // Every part is rounded together, once.
+  const auto nano = detail::rounded_nano_usd(sum);
+  if (!nano) {
+    refuse("overflow");
+    out.lines.clear();
+    return out;
+  }
+  out.total = UsdAmount{*nano, Evidence::Derived, CostRounding::CeilingCatalogueProduct};
+  return out;
+}
+
+std::vector<std::string> beyond_bound(const EndpointBound& bound, const EndpointEstimate& estimate) {
+  std::vector<std::string> out;
+  if (!bound.total || !estimate.total) return out;
+  // The quantity of `unit` over the lines, at most 2^64 - 1.
+  const auto quantity = [](const std::vector<EndpointLine>& lines, std::string_view unit) {
+    std::uint64_t sum = 0;
+    for (const auto& line : lines)
+      if (line.unit == unit && !checked_add(sum, line.quantity, sum)) return detail::kMax;
+    return sum;
+  };
+  // Whether a line of `unit` has a rate above zero: a unit both price at zero costs nothing at any quantity.
+  const auto billed = [](const std::vector<EndpointLine>& lines, std::string_view unit) {
+    return std::any_of(lines.begin(), lines.end(), [&](const EndpointLine& line) { return line.unit == unit && line.rate > 0; });
+  };
+  for (const auto& line : estimate.lines)
+    if (std::find(out.begin(), out.end(), line.unit) == out.end() && quantity(estimate.lines, line.unit) > quantity(bound.lines, line.unit) &&
+        (billed(estimate.lines, line.unit) || billed(bound.lines, line.unit)))
+      out.push_back(line.unit);
+  if (estimate.total->nano_usd > bound.total->nano_usd) out.emplace_back("total");
+  return out;
+}
+
 }  // namespace sp::pricing

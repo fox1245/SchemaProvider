@@ -24,6 +24,10 @@ struct Request {
   // OpenAI `response_format` is `json` unless this names `verbose_json`, as `timestamp_granularities` does.
   std::shared_ptr<const json::Document> extensions{};
 };
+// The Usage::extra counter of a result's reported audio length in whole seconds, rounded up: `duration` (OpenRouter, and
+// OpenAI in `verbose_json`), else `usage.seconds` (OpenAI). A result that reports no length, or one that is not a number
+// from 0 to 2^64 - 1, records none.
+inline constexpr std::string_view seconds_counter = "seconds";
 struct Result {
   std::string text;
   // The language and the audio's length in seconds, when the provider reports them (OpenAI does in `verbose_json`).

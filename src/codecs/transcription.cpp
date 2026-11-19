@@ -4,13 +4,53 @@
 #include "codecs/served_model.h"
 #include "descriptor/policy.h"
 #include "json/json.h"
+#include <charconv>
 #include <cmath>
+#include <cstdint>
+#include <limits>
+#include <system_error>
 
 namespace sp::transcription {
 namespace {
 std::optional<Count> counter(json::Value value) {
   if (!value.is_uint()) return std::nullopt;
   return Count{value.as_uint(), Evidence::Reported};
+}
+// A reported length in seconds as whole seconds, rounded up. The parser keeps no lexeme, so a fraction is read from the
+// shortest decimal that round-trips to the parsed number (the provider's own text whenever it had at most 17
+// significant digits), as provider costs are, and rounded up with integer arithmetic. Nothing for a negative or
+// non-finite number or one past 64 bits.
+std::optional<std::uint64_t> whole_seconds(json::Value value) {
+  if (value.is_uint()) return value.as_uint();
+  if (!value.is_number()) return std::nullopt;
+  const double number = value.as_double();
+  if (!std::isfinite(number) || number < 0) return std::nullopt;
+  if (number == 0) return 0;
+  char text[32];
+  const auto written = std::to_chars(text, text + sizeof text, number, std::chars_format::scientific);
+  if (written.ec != std::errc{}) return std::nullopt;
+  // `number` is `significand` x 10^(exponent - digits + 1).
+  std::uint64_t significand = 0;
+  int digits = 0, exponent = 0;
+  const char* cursor = text;
+  for (; cursor != written.ptr && *cursor != 'e'; ++cursor)
+    if (*cursor != '.') { significand = significand * 10 + static_cast<std::uint64_t>(*cursor - '0'); ++digits; }
+  if (cursor == written.ptr || std::from_chars(cursor + (cursor[1] == '+' ? 2 : 1), written.ptr, exponent).ec != std::errc{}) return std::nullopt;
+  const int scale = exponent - digits + 1;
+  constexpr auto most = std::numeric_limits<std::uint64_t>::max();
+  if (scale >= 0) {
+    std::uint64_t seconds = significand;
+    for (int i = 0; i < scale; ++i) {
+      if (seconds > most / 10) return std::nullopt;
+      seconds *= 10;
+    }
+    return seconds;
+  }
+  // Divided by 10^-scale, rounded up; a divisor above the significand leaves a positive fraction below one second.
+  std::uint64_t divisor = 1;
+  for (int i = 0; i < -scale && divisor <= significand; ++i) divisor *= 10;
+  if (divisor > significand) return 1;
+  return significand / divisor + (significand % divisor ? 1 : 0);
 }
 }  // namespace
 
@@ -50,6 +90,12 @@ bool Codec::buffered(std::string_view body, Close close) {
     usage.total = counter(reported.get("total_tokens"));
     usage.provider_cost = codecs::provider_cost(reported, descriptor_);
     usage.stage = UsageStage::Final;
+  }
+  // The audio's length, as Result::seconds reads it, in whole seconds rounded up.
+  for (const auto value : {root.get("duration"), root.get("usage").get("seconds")}) {
+    if (!value.is_number()) continue;
+    if (const auto seconds = whole_seconds(value)) usage.extra[std::string(seconds_counter)] = Count{*seconds, Evidence::Derived};
+    break;
   }
   return emit(UsageUpdate{std::move(usage)}) && emit(Stop{StopReason{StopKind::EndTurn, "completed"}}) &&
          emit(MessageSeal{{0}}) && emit(Commit{"transcription.text+normal_close"});

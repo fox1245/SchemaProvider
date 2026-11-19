@@ -699,6 +699,120 @@ void videos_bound() {
   auto router = client_of(openrouter_chat());
   CHECK(has(bound_of(router.prepare(video)).unbounded, UnboundedBy::RouteCeiling, "vendor/video"));
 }
+
+// ---- the estimate of a finished call, from each result type ------------------------------------------------------
+
+Usage counted(std::optional<std::uint64_t> input, std::optional<std::uint64_t> output, std::initializer_list<std::pair<const char*, std::uint64_t>> extra = {}) {
+  Usage usage;
+  if (input) usage.input_total = Count{*input, Evidence::Reported};
+  if (output) usage.output_total = Count{*output, Evidence::Reported};
+  for (const auto& [key, value] : extra) usage.extra[key] = Count{value, Evidence::Reported};
+  usage.stage = UsageStage::Final;
+  return usage;
+}
+std::string unpriced_of(const pricing::EndpointEstimate& e) {
+  std::string out;
+  for (const auto& name : e.unpriced) out += (out.empty() ? "" : ",") + name;
+  return out;
+}
+// The total of an estimate that must have one.
+std::uint64_t nano(const pricing::EndpointEstimate& e) {
+  if (!e.total) throw std::runtime_error("no estimate: " + unpriced_of(e));
+  return e.total->nano_usd;
+}
+// Entries whose token rates are declared zeros, for results that count no tokens.
+const auto items_priced = catalogue_of("{\"version\":1,\"models\":[" +
+    entry("vendor/ranker-free", limits(long_input), {{"input", 0}, {"item:document", document_rate}, {"item:search_unit", search_unit_rate}}) + "," +
+    entry("vendor/speaker-free", limits(long_input, long_output), {{"input", 0}, {"output", 0}, {"item:character", character_rate}}) + "," +
+    entry("vendor/video-free", limits(long_input, long_output),
+          {{"input", 0}, {"input_image", 0}, {"output", 0}, {"item:second", video_second_rate}, {"item:second[resolution=1080p]", video_1080p_rate},
+           {"item:input_image", reference_rate}}) + "]}");
+
+void estimates_per_result() {
+  auto direct = client_of(openai_chat());
+  // Images: two asked at high quality; 300 input tokens of which 100 are image tokens, 50 output tokens, and both images.
+  auto two = image("vendor/image", 2);
+  two.quality = "high";
+  const auto image_facts = ok(direct.prepare(two)).endpoint_facts();
+  images::Result made;
+  made.images = {Media::url(MediaKind::Image, "https://example.com/a.png", "image/png"), Media::url(MediaKind::Image, "https://example.com/b.png", "image/png")};
+  made.usage = counted(300, 50, {{"input_tokens_details.image_tokens", 100}, {"input_tokens_details.text_tokens", 200}});
+  made.model = ServedModel{"vendor/image", "", ServedRelation::NotReported};
+  auto e = runtime::endpoint_estimate(image_facts, made, *priced);
+  CHECK(nano(e) == rounded(200 * in_rate + 100 * image_token_rate + 50 * out_rate + 2 * high_rate) && !e.lower_bound && e.entry == "vendor/image");
+  const auto image_bound = bound_of(direct.prepare(two), measured(300));
+  CHECK(nano(image_bound) >= nano(e) && pricing::beyond_bound(image_bound, e).empty());
+  // One of the two returned: priced as returned, and the provider may bill the other.
+  made.images.pop_back();
+  e = runtime::endpoint_estimate(image_facts, made, *priced);
+  CHECK(nano(e) == rounded(200 * in_rate + 100 * image_token_rate + 50 * out_rate + high_rate) && e.lower_bound);
+  // Decisions and embeddings: their tokens.
+  const auto decision_facts = ok(direct.prepare(decision("vendor/decider"))).endpoint_facts();
+  decisions::Result decided;
+  decided.usage = counted(120, 30);
+  decided.model = ServedModel{"vendor/decider", "vendor/decider", ServedRelation::Exact};
+  CHECK(nano(runtime::endpoint_estimate(decision_facts, decided, *priced)) == rounded(120 * in_rate + 30 * small_out_rate));
+  const auto embed_facts = ok(direct.prepare(embeddings::Request{"vendor/embed", {{"a"}, {"b"}, {"c"}}})).endpoint_facts();
+  embeddings::Result embedded;
+  embedded.usage = counted(40, std::nullopt);
+  CHECK(nano(runtime::endpoint_estimate(embed_facts, embedded, *priced)) == rounded(40 * embed_rate));
+  embedded.usage = Usage{};
+  CHECK(unpriced_of(runtime::endpoint_estimate(embed_facts, embedded, *priced)) == "input");
+  // Rerank: the request's documents and the search units the result reports; an input rate needs an input counter.
+  auto ranker = client_of(openai_chat(direct_policy));
+  const auto rank_facts = ok(ranker.prepare(rerank::Request{"vendor/ranker-free", "fox", {"a fox", "a dog"}})).endpoint_facts();
+  rerank::Result ranked;
+  ranked.usage = counted(std::nullopt, std::nullopt, {{"search_units", 3}});
+  CHECK(nano(runtime::endpoint_estimate(rank_facts, ranked, *items_priced)) == rounded(2 * document_rate + 3 * search_unit_rate));
+  ranked.usage = Usage{};
+  CHECK(unpriced_of(runtime::endpoint_estimate(rank_facts, ranked, *items_priced)) == "item:search_unit");
+  const auto priced_rank = ok(ranker.prepare(rerank::Request{"vendor/ranker-units", "fox", {"a fox", "a dog"}})).endpoint_facts();
+  ranked.usage = counted(std::nullopt, std::nullopt, {{"search_units", 3}});
+  CHECK(unpriced_of(runtime::endpoint_estimate(priced_rank, ranked, *priced)) == "input");
+  // Speech: the request's bytes; the result counts no tokens, so a model with token rates has no estimate.
+  const std::string text = "h\xc3\xa9llo \xe4\xb8\x96\xe7\x95\x8c";
+  speech::Result spoken;
+  e = runtime::endpoint_estimate(ok(direct.prepare(speech::Request{"vendor/speaker-free", text, "alloy"})).endpoint_facts(), spoken, *items_priced);
+  CHECK(nano(e) == rounded(13 * character_rate) && e.assumptions.empty());
+  CHECK(unpriced_of(runtime::endpoint_estimate(ok(direct.prepare(speech::Request{"vendor/speaker", text, "alloy"})).endpoint_facts(), spoken, *priced)) ==
+        "input,output");
+  // Transcription: the seconds the result reports; a translation by its own row; reported seconds above the stated ones.
+  transcription::Result heard;
+  heard.usage = counted(100, 20, {{"seconds", 3}});
+  const auto transcribe_facts = ok(direct.prepare(transcript("vendor/transcriber"))).endpoint_facts();
+  e = runtime::endpoint_estimate(transcribe_facts, heard, *priced);
+  CHECK(nano(e) == rounded(3 * second_rate + 100 * in_rate + 20 * small_out_rate));
+  CHECK(nano(runtime::endpoint_estimate(ok(direct.prepare(transcript("vendor/transcriber", true))).endpoint_facts(), heard, *priced)) ==
+        rounded(3 * translate_rate + 100 * in_rate + 20 * small_out_rate));
+  const auto stated = bound_of(direct.prepare(transcript("vendor/transcriber")), seconds(2));
+  CHECK(pricing::beyond_bound(stated, e) == std::vector<std::string>{"item:second"});
+  heard.usage = counted(100, 20);
+  CHECK(unpriced_of(runtime::endpoint_estimate(transcribe_facts, heard, *priced)) == "item:second");
+  // A video's final poll, priced with its submit's facts: the duration asked for, assumed; a job not completed has none.
+  auto videos = client_of(openai_chat(direct_policy));
+  videos::Request video{"vendor/video-free", "A fox in the snow."};
+  video.duration = 5;
+  video.resolution = "1080p";
+  const auto video_facts = ok(videos.prepare(video)).endpoint_facts();
+  jobs::State state;
+  state.status = jobs::Status::Completed;
+  e = runtime::endpoint_estimate(video_facts, state, *items_priced);
+  CHECK(nano(e) == rounded(5 * video_1080p_rate) && e.assumptions == std::vector<std::string>{"item:second at the request's bound"});
+  for (const auto status : {jobs::Status::Pending, jobs::Status::Running, jobs::Status::Failed, jobs::Status::Cancelled, jobs::Status::Expired, jobs::Status::Unknown}) {
+    state.status = status;
+    e = runtime::endpoint_estimate(video_facts, state, *items_priced);
+    CHECK(!e.total && unpriced_of(e) == "job");
+  }
+  // An operation the policy states is not billed: zero, whatever its result reports.
+  auto poll_facts = video_facts;
+  poll_facts.operation = "poll";
+  poll_facts.billing = descriptor::EndpointBilling::None;
+  state.status = jobs::Status::Completed;
+  state.usage = counted(100, 100);
+  e = runtime::endpoint_estimate(poll_facts, state, *items_priced);
+  CHECK(e.total && e.total->nano_usd == 0);
+  std::cout << "case passed: the estimate of each result type\n";
+}
 }  // namespace
 
 int main() {
@@ -716,6 +830,7 @@ int main() {
     videos_bound();
     answers_per_billing();
     stated_facts();
+    estimates_per_result();
     std::cout << "endpoint cost passed\n";
     return 0;
   } catch (const std::exception& error) {
