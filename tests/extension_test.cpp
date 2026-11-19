@@ -15,8 +15,12 @@
 #include "json/json.h"
 #include "sp/config_defaults.h"
 #include <iostream>
+#include <map>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <variant>
+#include <vector>
 
 namespace {
 using namespace sp;
@@ -397,10 +401,383 @@ void admitted_options() {
   text.replace(text.find(last), last.size(), R"("type":"computer_use_preview"},{"generic":true,"max_uses":false,"name":"apply_patch","type":"apply_patch"}])");
   CHECK(std::holds_alternative<descriptor::ConfigError>(descriptor::load_policy(text, config_defaults::codec_defaults_json)));
 }
+// What each guard that names the members an encoder owns answers, for every member name any of them holds. A name
+// absent from the record below is admitted everywhere: not named by an extension, free for each of the four binding
+// slots, a free option of every endpoint and of every tool. A binding digit names the slot (1 model, 2 messages,
+// 3 stream, 4 max_output_tokens) at whose pointer the descriptor was refused; a dash admits it.
+constexpr std::string_view recorded_names[] = {
+    "access_programs", "agent", "agent_config", "allowed_callers", "allowed_domains", "aspect_ratio", "audio",
+    "background", "batch", "blocked_domains", "cache_control", "cachedContent", "cached_content", "citations",
+    "compaction", "completion_window", "container", "contents", "context_management", "conversation", "description",
+    "diagnostics", "dimensions", "documents", "duration", "encoding_format", "endpoint", "environment",
+    "expires_after", "extensions", "file", "frame_images", "function_call", "functions", "generate_audio",
+    "generationConfig", "generation_config", "image_config", "images", "include", "include_reasoning",
+    "inference_geo", "input", "inputAudioTranscription", "input_audio", "input_file_id", "input_references",
+    "input_schema", "input_type", "instructions", "language", "max_completion_tokens", "max_content_tokens",
+    "max_output_tokens", "max_tokens", "max_tool_calls", "max_uses", "mcp_servers", "messages", "metadata",
+    "modalities", "model", "models", "n", "name", "outputAudioTranscription", "output_compression", "output_config",
+    "output_format", "output_modalities", "parallel_tool_calls", "partial_images", "plugins",
+    "previous_interaction_id", "previous_response_id", "prompt", "prompt_cache_key", "provider", "purpose",
+    "quality", "query", "questions", "reasoning", "reasoning_effort", "requests", "resolution", "response_format",
+    "response_modalities", "safetySettings", "safety_settings", "serviceTier", "service_tier", "sessionResumption",
+    "size", "speed", "state", "stop", "stop_sequences", "store", "stream", "stream_format", "stream_options",
+    "system", "systemInstruction", "system_instruction", "temperature", "text", "thinking", "toolConfig",
+    "tool_choice", "tool_config", "tools", "top_k", "top_n", "top_p", "truncation", "type", "usage", "user_location",
+    "voice",
+};
+constexpr std::string_view recorded_answers[] = {
+    "openai.chat audio ext=R bind=----",
+    "openai.chat contents ext=R bind=----",
+    "openai.chat extensions ext=R bind=----",
+    "openai.chat function_call ext=R bind=----",
+    "openai.chat functions ext=R bind=----",
+    "openai.chat image_config ext=R bind=----",
+    "openai.chat include_reasoning ext=R bind=----",
+    "openai.chat input ext=R bind=----",
+    "openai.chat max_completion_tokens ext=R bind=123-",
+    "openai.chat max_output_tokens ext=R bind=----",
+    "openai.chat max_tokens ext=R bind=444-",
+    "openai.chat messages ext=R bind=2-34",
+    "openai.chat modalities ext=R bind=----",
+    "openai.chat model ext=R bind=-234",
+    "openai.chat models ext=R bind=----",
+    "openai.chat n ext=A bind=1234",
+    "openai.chat plugins ext=R bind=----",
+    "openai.chat provider ext=R bind=1234",
+    "openai.chat reasoning ext=R bind=----",
+    "openai.chat reasoning_effort ext=R bind=1234",
+    "openai.chat response_format ext=R bind=1234",
+    "openai.chat service_tier ext=R bind=1234",
+    "openai.chat stop ext=A bind=1234",
+    "openai.chat stream ext=R bind=33-4",
+    "openai.chat stream_options ext=R bind=1234",
+    "openai.chat temperature ext=R bind=1234",
+    "openai.chat tool_choice ext=R bind=1234",
+    "openai.chat tools ext=R bind=1234",
+    "openai.chat top_p ext=R bind=1234",
+    "openai.chat usage ext=R bind=----",
+    "anthropic.messages cache_control ext=R bind=----",
+    "anthropic.messages container ext=R bind=1234",
+    "anthropic.messages contents ext=R bind=----",
+    "anthropic.messages context_management ext=A bind=1234",
+    "anthropic.messages extensions ext=R bind=----",
+    "anthropic.messages input ext=R bind=----",
+    "anthropic.messages max_completion_tokens ext=R bind=1234",
+    "anthropic.messages max_output_tokens ext=R bind=----",
+    "anthropic.messages max_tokens ext=R bind=444-",
+    "anthropic.messages mcp_servers ext=R bind=1234",
+    "anthropic.messages messages ext=R bind=2-34",
+    "anthropic.messages metadata ext=R bind=1234",
+    "anthropic.messages model ext=R bind=-234",
+    "anthropic.messages n ext=A bind=1234",
+    "anthropic.messages output_config ext=R bind=1234",
+    "anthropic.messages provider ext=R bind=1234",
+    "anthropic.messages response_format ext=A bind=1234",
+    "anthropic.messages service_tier ext=A bind=1234",
+    "anthropic.messages stop ext=A bind=1234",
+    "anthropic.messages stop_sequences ext=A bind=1234",
+    "anthropic.messages stream ext=R bind=33-4",
+    "anthropic.messages stream_options ext=R bind=1234",
+    "anthropic.messages system ext=R bind=1234",
+    "anthropic.messages temperature ext=R bind=1234",
+    "anthropic.messages thinking ext=R bind=1234",
+    "anthropic.messages tool_choice ext=R bind=1234",
+    "anthropic.messages tools ext=R bind=1234",
+    "anthropic.messages top_k ext=A bind=1234",
+    "anthropic.messages top_p ext=R bind=1234",
+    "openai.responses access_programs ext=A bind=1234",
+    "openai.responses background ext=R bind=1234",
+    "openai.responses contents ext=R bind=----",
+    "openai.responses context_management ext=A bind=1234",
+    "openai.responses conversation ext=R bind=1234",
+    "openai.responses extensions ext=R bind=----",
+    "openai.responses image_config ext=R bind=----",
+    "openai.responses include ext=R bind=1234",
+    "openai.responses input ext=R bind=2-34",
+    "openai.responses instructions ext=R bind=1234",
+    "openai.responses max_completion_tokens ext=R bind=1234",
+    "openai.responses max_output_tokens ext=R bind=444-",
+    "openai.responses max_tokens ext=R bind=----",
+    "openai.responses max_tool_calls ext=R bind=1234",
+    "openai.responses messages ext=R bind=----",
+    "openai.responses metadata ext=A bind=1234",
+    "openai.responses modalities ext=R bind=----",
+    "openai.responses model ext=R bind=-234",
+    "openai.responses n ext=A bind=1234",
+    "openai.responses parallel_tool_calls ext=R bind=1234",
+    "openai.responses plugins ext=R bind=----",
+    "openai.responses previous_response_id ext=R bind=1234",
+    "openai.responses prompt ext=R bind=----",
+    "openai.responses prompt_cache_key ext=A bind=1234",
+    "openai.responses provider ext=R bind=1234",
+    "openai.responses reasoning ext=R bind=1234",
+    "openai.responses response_format ext=A bind=1234",
+    "openai.responses service_tier ext=R bind=1234",
+    "openai.responses stop ext=A bind=1234",
+    "openai.responses store ext=R bind=1234",
+    "openai.responses stream ext=R bind=33-4",
+    "openai.responses stream_options ext=R bind=1234",
+    "openai.responses temperature ext=R bind=1234",
+    "openai.responses text ext=R bind=1234",
+    "openai.responses tool_choice ext=R bind=1234",
+    "openai.responses tools ext=R bind=1234",
+    "openai.responses top_p ext=R bind=1234",
+    "openai.responses truncation ext=R bind=1234",
+    "google.generate agent ext=A bind=1234",
+    "google.generate background ext=A bind=1234",
+    "google.generate cachedContent ext=R bind=1234",
+    "google.generate cached_content ext=R bind=----",
+    "google.generate contents ext=R bind=2-34",
+    "google.generate environment ext=A bind=1234",
+    "google.generate extensions ext=R bind=----",
+    "google.generate generationConfig ext=R bind=1234",
+    "google.generate generation_config ext=R bind=1234",
+    "google.generate input ext=R bind=----",
+    "google.generate max_completion_tokens ext=R bind=1234",
+    "google.generate max_output_tokens ext=R bind=----",
+    "google.generate max_tokens ext=R bind=----",
+    "google.generate messages ext=R bind=----",
+    "google.generate model ext=R bind=-234",
+    "google.generate n ext=A bind=1234",
+    "google.generate previous_interaction_id ext=A bind=1234",
+    "google.generate provider ext=R bind=1234",
+    "google.generate response_format ext=A bind=1234",
+    "google.generate safetySettings ext=R bind=1234",
+    "google.generate safety_settings ext=R bind=1234",
+    "google.generate serviceTier ext=A bind=1234",
+    "google.generate service_tier ext=A bind=1234",
+    "google.generate stop ext=A bind=1234",
+    "google.generate store ext=A bind=1234",
+    "google.generate stream ext=R bind=33-4",
+    "google.generate stream_options ext=R bind=1234",
+    "google.generate systemInstruction ext=R bind=1234",
+    "google.generate system_instruction ext=R bind=1234",
+    "google.generate temperature ext=R bind=1234",
+    "google.generate toolConfig ext=R bind=1234",
+    "google.generate tool_choice ext=R bind=1234",
+    "google.generate tool_config ext=R bind=----",
+    "google.generate tools ext=R bind=1234",
+    "google.generate top_p ext=R bind=1234",
+    "google.interactions agent ext=R bind=1234",
+    "google.interactions agent_config ext=R bind=----",
+    "google.interactions background ext=R bind=1234",
+    "google.interactions cachedContent ext=A bind=1234",
+    "google.interactions contents ext=R bind=----",
+    "google.interactions environment ext=A bind=1234",
+    "google.interactions extensions ext=R bind=----",
+    "google.interactions generationConfig ext=A bind=1234",
+    "google.interactions generation_config ext=R bind=1234",
+    "google.interactions input ext=R bind=2-34",
+    "google.interactions max_completion_tokens ext=R bind=1234",
+    "google.interactions max_output_tokens ext=R bind=444-",
+    "google.interactions max_tokens ext=R bind=----",
+    "google.interactions messages ext=R bind=----",
+    "google.interactions model ext=R bind=-234",
+    "google.interactions n ext=A bind=1234",
+    "google.interactions previous_interaction_id ext=R bind=1234",
+    "google.interactions provider ext=R bind=1234",
+    "google.interactions response_format ext=R bind=1234",
+    "google.interactions response_modalities ext=R bind=----",
+    "google.interactions safetySettings ext=A bind=1234",
+    "google.interactions safety_settings ext=A bind=1234",
+    "google.interactions serviceTier ext=A bind=1234",
+    "google.interactions service_tier ext=R bind=1234",
+    "google.interactions stop ext=A bind=1234",
+    "google.interactions store ext=R bind=1234",
+    "google.interactions stream ext=R bind=33-4",
+    "google.interactions stream_options ext=R bind=1234",
+    "google.interactions systemInstruction ext=A bind=1234",
+    "google.interactions system_instruction ext=R bind=1234",
+    "google.interactions temperature ext=R bind=1234",
+    "google.interactions toolConfig ext=A bind=1234",
+    "google.interactions tool_choice ext=R bind=1234",
+    "google.interactions tools ext=R bind=1234",
+    "google.interactions top_p ext=R bind=1234",
+    "endpoint:images background",
+    "endpoint:images images",
+    "endpoint:images input_references",
+    "endpoint:images model",
+    "endpoint:images n",
+    "endpoint:images output_compression",
+    "endpoint:images output_format",
+    "endpoint:images partial_images",
+    "endpoint:images prompt",
+    "endpoint:images quality",
+    "endpoint:images size",
+    "endpoint:images stream",
+    "endpoint:decisions input",
+    "endpoint:decisions model",
+    "endpoint:decisions questions",
+    "endpoint:decisions state",
+    "endpoint:embeddings dimensions",
+    "endpoint:embeddings encoding_format",
+    "endpoint:embeddings input",
+    "endpoint:embeddings input_type",
+    "endpoint:embeddings model",
+    "endpoint:embeddings requests",
+    "endpoint:rerank documents",
+    "endpoint:rerank model",
+    "endpoint:rerank query",
+    "endpoint:rerank top_n",
+    "endpoint:moderation input",
+    "endpoint:moderation model",
+    "endpoint:speech input",
+    "endpoint:speech instructions",
+    "endpoint:speech model",
+    "endpoint:speech response_format",
+    "endpoint:speech speed",
+    "endpoint:speech stream_format",
+    "endpoint:speech voice",
+    "endpoint:transcription file",
+    "endpoint:transcription input_audio",
+    "endpoint:transcription language",
+    "endpoint:transcription model",
+    "endpoint:transcription prompt",
+    "endpoint:transcription stream",
+    "endpoint:videos aspect_ratio",
+    "endpoint:videos duration",
+    "endpoint:videos frame_images",
+    "endpoint:videos generate_audio",
+    "endpoint:videos input_references",
+    "endpoint:videos model",
+    "endpoint:videos prompt",
+    "endpoint:videos resolution",
+    "endpoint:videos size",
+    "endpoint:files expires_after",
+    "endpoint:files file",
+    "endpoint:files purpose",
+    "endpoint:realtime audio",
+    "endpoint:realtime generationConfig",
+    "endpoint:realtime inputAudioTranscription",
+    "endpoint:realtime instructions",
+    "endpoint:realtime model",
+    "endpoint:realtime outputAudioTranscription",
+    "endpoint:realtime output_modalities",
+    "endpoint:realtime sessionResumption",
+    "endpoint:realtime systemInstruction",
+    "endpoint:realtime tools",
+    "endpoint:realtime type",
+    "endpoint:batches batch",
+    "endpoint:batches completion_window",
+    "endpoint:batches endpoint",
+    "endpoint:batches input_file_id",
+    "endpoint:batches requests",
+    "tool:anthropic.messages allowed_callers",
+    "tool:anthropic.messages allowed_domains",
+    "tool:anthropic.messages blocked_domains",
+    "tool:anthropic.messages citations",
+    "tool:anthropic.messages description",
+    "tool:anthropic.messages input_schema",
+    "tool:anthropic.messages max_content_tokens",
+    "tool:anthropic.messages max_uses",
+    "tool:anthropic.messages name",
+    "tool:anthropic.messages type",
+    "tool:anthropic.messages user_location",
+    "tool:openai.responses description",
+    "tool:openai.responses input_schema",
+    "tool:openai.responses max_uses",
+    "tool:openai.responses name",
+    "tool:openai.responses type",
+};
+constexpr std::string_view binding_slots[] = {"model", "messages", "stream", "max_output_tokens"};
+constexpr std::string_view recorded_endpoints[] = {"images", "decisions", "embeddings", "rerank", "moderation", "speech",
+                                                   "transcription", "videos", "files", "realtime", "batches"};
+constexpr std::string_view recorded_families[] = {"openai.chat", "anthropic.messages", "openai.responses", "google.generate", "google.interactions"};
+
+// A policy refusal at `pointer` is the answer "refused"; a loaded policy is "admitted"; any other refusal is a defect of the record.
+bool refused_at_pointer(const std::variant<descriptor::PolicySnapshot, descriptor::ConfigError>& loaded, std::string_view pointer) {
+  if (const auto* error = std::get_if<descriptor::ConfigError>(&loaded)) {
+    if (error->pointer != pointer) throw std::runtime_error("policy refused at " + error->pointer + ", not " + std::string(pointer) + ": " + error->expected);
+    return true;
+  }
+  return false;
+}
+bool extension_refused(std::string_view family, std::string_view name) {
+  return refused_at_pointer(policy_with(family, R"("extensions":[{"key":)" + json::quote(name) +
+      R"(,"origins":["https://example.test"],"value":{"type":"boolean"},"replay_eligible":true}])"), "/extensions/key");
+}
+// The binding digits for `name`: each slot in turn bound to it, the others left at the family's own members.
+std::string binding_answer(std::string_view family, std::string_view name) {
+  const bool google = family.starts_with("google.");
+  const std::string origin = google ? "https://generativelanguage.googleapis.com" : "https://example.test";
+  const std::string path = family == "google.generate" ? "/v1beta/models/fixture-model:generateContent" : family == "google.interactions" ? "/v1beta/interactions" :
+      family == "anthropic.messages" ? "/v1/messages" : family == "openai.chat" ? "/v1/chat/completions" : "/v1/responses";
+  const std::string stream = family == "google.generate" ? "/v1beta/models/fixture-model:streamGenerateContent?alt=sse" : path;
+  std::string digits;
+  for (const auto slot : binding_slots) {
+    const auto loaded = descriptor::load("{\"descriptor_version\":1,\"revision\":1,\"id\":\"owned-members\",\"family\":" + json::quote(family) +
+        ",\"connection\":{\"base_url\":" + json::quote(origin) + ",\"paths\":{\"buffered\":" + json::quote(path) + ",\"streaming\":" + json::quote(stream) +
+        "}},\"bindings\":{" + json::quote(slot) + ":" + json::quote(name) + "}}", descriptor::builtin_policy());
+    const auto* error = std::get_if<descriptor::ConfigError>(&loaded);
+    if (!error) { digits += '-'; continue; }
+    std::size_t at = 0;
+    while (at < std::size(binding_slots) && error->pointer != "/bindings/" + std::string(binding_slots[at])) ++at;
+    if (at == std::size(binding_slots)) throw std::runtime_error(std::string(family) + " binding " + std::string(slot) + " to " + std::string(name) + " refused at " + error->pointer);
+    digits += static_cast<char>('1' + at);
+  }
+  return digits;
+}
+// The policy text with one endpoint fact (the first of that endpoint) alone in `endpoints`, its options naming `member`.
+struct EndpointPolicies {
+  std::vector<std::pair<std::string, std::string>> root;
+  std::map<std::string, std::string, std::less<>> facts;
+  EndpointPolicies() {
+    auto parsed = json::parse(config_defaults::descriptor_policy_json);
+    const auto document = std::get<json::Document>(std::move(parsed));
+    for (auto member : document.root().members()) if (member.key != "endpoints") root.emplace_back(std::string(member.key), member.value.dump());
+    for (auto fact : document.root().get("endpoints").elements()) {
+      const std::string endpoint(fact.get("endpoint").as_string());
+      if (facts.contains(endpoint)) continue;
+      std::string text = "{";
+      for (auto member : fact.members()) if (member.key != "options") text += json::quote(member.key) + ":" + member.value.dump() + ",";
+      facts.emplace(endpoint, text);
+    }
+  }
+  std::string with_option(std::string_view endpoint, std::string_view member) const {
+    std::string out = "{";
+    for (const auto& [key, value] : root) out += json::quote(key) + ":" + value + ",";
+    return out + "\"endpoints\":[" + facts.find(endpoint)->second + "\"options\":{\"type\":\"object\",\"properties\":{" + json::quote(member) + ":{\"type\":\"null\"}}}}]}";
+  }
+};
+bool endpoint_option_refused(const EndpointPolicies& policies, std::string_view endpoint, std::string_view name) {
+  return refused_at_pointer(descriptor::load_policy(policies.with_option(endpoint, name), config_defaults::codec_defaults_json), "/endpoints/options");
+}
+bool tool_option_refused(std::string_view family, std::string_view name) {
+  const std::string options = R"("options":{"type":"object","properties":{)" + json::quote(name) + R"(:{"type":"null"}}}})";
+  const std::string fact = family == "anthropic.messages" ? R"("server_tools":[{"type":"fixture_tool","name":"fixture","max_uses":false,)" + options + "]"
+                                                          : R"("server_tools":[{"type":"fixture_tool","name":"fixture_tool","max_uses":false,"generic":true,)" + options + "]";
+  return refused_at_pointer(policy_with(family, fact), "/server_tools/options");
+}
+std::string upper(std::string_view text) { std::string out(text); for (auto& c : out) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 32); return out; }
+
+void owned_members_recorded() {
+  std::vector<std::string> actual;
+  for (const auto family : recorded_families)
+    for (const auto name : recorded_names) {
+      const bool extension = extension_refused(family, name);
+      // The encoders and the loader ask the same question, in any letter case.
+      CHECK(extension == descriptor::request_key_owned(family, name));
+      CHECK(extension == descriptor::request_key_owned(family, upper(name)));
+      const auto digits = binding_answer(family, name);
+      if (extension || digits != "----") actual.push_back(std::string(family) + " " + std::string(name) + " ext=" + (extension ? "R" : "A") + " bind=" + digits);
+    }
+  const EndpointPolicies policies;
+  for (const auto endpoint : recorded_endpoints)
+    for (const auto name : recorded_names)
+      if (endpoint_option_refused(policies, endpoint, name)) actual.push_back("endpoint:" + std::string(endpoint) + " " + std::string(name));
+  for (const auto family : {"anthropic.messages", "openai.responses"})
+    for (const auto name : recorded_names)
+      if (tool_option_refused(family, name)) actual.push_back("tool:" + std::string(family) + " " + std::string(name));
+  const std::vector<std::string> expected(std::begin(recorded_answers), std::end(recorded_answers));
+  bool same = actual == expected;
+  for (const auto& line : actual) if (std::find(expected.begin(), expected.end(), line) == expected.end()) { std::cerr << "unrecorded: " << line << '\n'; same = false; }
+  for (const auto& line : expected) if (std::find(actual.begin(), actual.end(), line) == actual.end()) { std::cerr << "missing: " << line << '\n'; same = false; }
+  CHECK(same);
+}
 } // namespace
 
 int main() {
-  try { value_schemas(); policy_facts(); extensions_on_every_family(); extension_replay(); owned_keys_cover_encoder_output(); admitted_options();
+  try { value_schemas(); policy_facts(); extensions_on_every_family(); extension_replay(); owned_keys_cover_encoder_output(); admitted_options(); owned_members_recorded();
         std::cout << "extension properties passed\n"; return 0; }
   catch (const std::exception& error) { std::cerr << "extension test failed: " << error.what() << '\n'; return 1; }
 }
