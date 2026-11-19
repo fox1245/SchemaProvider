@@ -848,6 +848,212 @@ void item_prices_follow_the_rows() {
   CHECK(priced > calls / 4 && priced < calls);
   std::cout << "case passed: item prices follow the rows (" << calls << " calls, " << priced << " priced)\n";
 }
+
+// A row that applies to a request (its service tier, a band the request is above, or for a bound a band the request
+// may reach) and whose price is not a fixed amount leaves its unit without a price for that request, beside a fixed row
+// of the same unit: the bound has no total and names the unit, and so does the estimate. A variable row that does not
+// apply changes nothing.
+void variable_rows() {
+  const auto c = catalogue(R"({"version":1,"models":[
+    {"id":"fixed","input_limit":5000,"pricing":{"input":"0.000001","output":"0.000002","tool:web_search":"0.01"}},
+    {"id":"band","input_limit":5000,"pricing":{"input":"0.000001","input+1000":"-1","output":"0.000002","tool:web_search":"0.01","tool:web_search+1000":"-1"}},
+    {"id":"tier","input_limit":5000,"pricing":{"input":"0.000001","output":"0.000002","tool:web_search":"0.01","input/priority":"-1","output/priority":"0.000004"}},
+    {"id":"tier-band","input_limit":5000,"pricing":{"input":"0.000001","output":"0.000002","input/priority":"0.000002","output/priority":"0.000004",
+      "input/priority+1000":"-1"}},
+    {"id":"tier-cache","input_limit":5000,"pricing":{"input":"0.000001","output":"0.000002","input/priority":"0.000002","output/priority":"0.000004",
+      "cache_read/priority":"-1"}},
+    {"id":"fee","input_limit":5000,"pricing":{"input":"0.000001","output":"0.000002","request":"-1"}},
+    {"id":"reasoning","input_limit":5000,"pricing":{"input":"0.000001","output":"0.000002","reasoning":"-1"}},
+    {"id":"alias","input_limit":5000,"pricing":{"input":"0.000001","prompt":"-1","output":"0.000002"}},
+    {"id":"variable","input_limit":5000,"pricing":{"prompt":"-1","completion":"-1"}}]})");
+  const auto exact = [](std::string_view model) { return ServedModel{std::string(model), std::string(model), ServedRelation::Exact}; };
+  const auto worst = [&](std::string_view model, std::uint64_t measured, std::string_view tier = {}, const RequestFacts* facts = nullptr) {
+    pricing::WorstCaseInput in;
+    in.family = "openai.chat";
+    in.model = model;
+    in.facts = facts;
+    in.service_tier = tier;
+    in.output_tokens = 10;
+    in.measured_input_tokens = measured;
+    in.invocations = 1;
+    return pricing::worst_case(in, *c);
+  };
+  // No total, and a reason of the price that names the unit.
+  const auto names = [](const pricing::WorstCase& w, std::string_view unit) {
+    return !w.total && std::any_of(w.unbounded.begin(), w.unbounded.end(), [&](const pricing::UnboundedReason& r) {
+      return r.by == pricing::UnboundedBy::ModelPrice && r.detail.find(unit) != std::string::npos;
+    });
+  };
+  const auto same = [](const pricing::WorstCase& a, const pricing::WorstCase& b) {
+    return a.total && b.total && a.total->nano_usd == b.total->nano_usd && a.unbounded.empty() && b.unbounded.empty();
+  };
+  const auto& fixed = *c->entry("fixed");
+  using Names = std::vector<std::string>;
+  // The reasons of an estimate without a total, and the total of one with it.
+  const auto unpriced_of = [](const pricing::CostEstimate& e) { return e.total ? Names({"(a total)"}) : e.unpriced; };
+  const auto total_of = [](const pricing::CostEstimate& e) {
+    if (!e.total) throw std::runtime_error("no total where one was expected");
+    return e.total->nano_usd;
+  };
+  // A variable band beside a fixed base row: at the band and below it the base row prices the call as before; above
+  // it the unit has no price.
+  const auto& band = *c->entry("band");
+  for (const std::uint64_t input : {500u, 1000u}) {
+    CHECK(pricing::price_of(band, {}, input).input == 1'000'000'000u && pricing::dearest_price_of(band, {}, input).input == 1'000'000'000u);
+    const auto b = pricing::upper_bound(band, {}, {input, 10, false, {}});
+    CHECK(b.total && b.total->nano_usd == pricing::upper_bound(fixed, {}, {input, 10, false, {}}).total->nano_usd);
+    CHECK(same(worst("band", input), worst("fixed", input)));
+    const auto e = pricing::estimate(*c, "openai.chat", "", exact("band"), usage(input, 10));
+    CHECK(e.total && e.total->nano_usd == pricing::estimate(*c, "openai.chat", "", exact("fixed"), usage(input, 10)).total->nano_usd);
+  }
+  CHECK(!pricing::price_of(band, {}, 1001).input && !pricing::dearest_price_of(band, {}, 1001).input && pricing::price_of(band, {}, 1001).output);
+  auto b = pricing::upper_bound(band, {}, {1001, 10, false, {}});
+  CHECK(!b.total && b.unpriced == Names({"input"}));
+  CHECK(names(worst("band", 1001), "input"));
+  auto e = pricing::estimate(*c, "openai.chat", "", exact("band"), usage(1001, 10));
+  CHECK(!e.total && e.unpriced == Names({"input"}));
+  // The cache reads of a call above the band were billed at the input rate the band leaves unknown.
+  e = pricing::estimate(*c, "openai.chat", "", exact("band"), usage(1001, 10, 1001));
+  CHECK(!e.total && e.unpriced == Names({"cache_read"}));
+  // A bound for a request that may reach the band, and a tool fee in that band.
+  CHECK(!pricing::upper_bound(band, {}, {5000, 10, false, {}}).total);
+  b = pricing::upper_bound(band, {}, {1000, 10, false, {{"web_search", 1}}});
+  CHECK(b.total && b.total->nano_usd == pricing::upper_bound(fixed, {}, {1000, 10, false, {{"web_search", 1}}}).total->nano_usd);
+  b = pricing::upper_bound(pricing::dearest_price_of(band, {}, 1001), {0, 10, false, {{"web_search", 1}}});
+  CHECK(!b.total && b.unpriced == Names({"tool:web_search"}));
+  RequestFacts searching;
+  searching.tools.push_back({{"web_search"}, 2, "max_tool_calls", true});
+  CHECK(same(worst("band", 1000, {}, &searching), worst("fixed", 1000, {}, &searching)));
+  const auto searched = worst("band", 1001, {}, &searching);
+  CHECK(!searched.total && std::any_of(searched.unbounded.begin(), searched.unbounded.end(), [](const pricing::UnboundedReason& r) {
+    return r.by == pricing::UnboundedBy::ToolFee && r.subject == "web_search";
+  }));
+
+  // A variable tier row beside a fixed standard row: the standard rates price a request in no tier as before, and the
+  // tier's unit has no price.
+  const auto& tier = *c->entry("tier");
+  CHECK(pricing::price_of(tier).input == 1'000'000'000u && !pricing::price_of(tier, "priority").input);
+  CHECK(pricing::upper_bound(tier, {}, {500, 10, false, {}}).total->nano_usd == pricing::upper_bound(fixed, {}, {500, 10, false, {}}).total->nano_usd);
+  CHECK(same(worst("tier", 500), worst("fixed", 500)));
+  CHECK(pricing::estimate(*c, "openai.chat", "", exact("tier"), usage(500, 10)).total->nano_usd ==
+        pricing::estimate(*c, "openai.chat", "", exact("fixed"), usage(500, 10)).total->nano_usd);
+  b = pricing::upper_bound(tier, "priority", {500, 10, false, {}});
+  CHECK(!b.total && b.unpriced == Names({"input"}));
+  CHECK(names(worst("tier", 500, "priority"), "input"));
+  e = pricing::estimate(*c, "openai.chat", "", exact("tier"), usage(500, 10), "priority");
+  CHECK(!e.total && e.unpriced == Names({"input"}));
+  // A variable band of a tier beside the tier's fixed row: at, below and above the band.
+  const auto& tier_band = *c->entry("tier-band");
+  for (const std::uint64_t input : {500u, 1000u}) {
+    b = pricing::upper_bound(tier_band, "priority", {input, 10, false, {}});
+    CHECK(b.total && b.total->nano_usd == (input * 2'000'000'000 + 10 * std::uint64_t{4'000'000'000}) / 1'000'000);
+    CHECK(worst("tier-band", input, "priority").total->nano_usd == b.total->nano_usd);
+    e = pricing::estimate(*c, "openai.chat", "", exact("tier-band"), usage(input, 10), "priority");
+    CHECK(e.total && e.total->nano_usd == b.total->nano_usd);
+  }
+  b = pricing::upper_bound(tier_band, "priority", {1001, 10, false, {}});
+  CHECK(!b.total && b.unpriced == Names({"input"}));
+  CHECK(names(worst("tier-band", 1001, "priority"), "input"));
+  e = pricing::estimate(*c, "openai.chat", "", exact("tier-band"), usage(1001, 10), "priority");
+  CHECK(!e.total && e.unpriced == Names({"input"}));
+  // The standard rates of the same entry are not in the tier.
+  CHECK(pricing::estimate(*c, "openai.chat", "", exact("tier-band"), usage(1001, 10)).total->nano_usd ==
+        pricing::estimate(*c, "openai.chat", "", exact("fixed"), usage(1001, 10)).total->nano_usd);
+  // A variable cache-read rate of a tier: the bound reads it for every input token; the estimate for the cache reads.
+  const auto& tier_cache = *c->entry("tier-cache");
+  b = pricing::upper_bound(tier_cache, "priority", {500, 10, false, {}});
+  CHECK(!b.total && b.unpriced == Names({"cache_read"}));
+  CHECK(names(worst("tier-cache", 500, "priority"), "cache_read"));
+  CHECK(pricing::upper_bound(tier_cache, "priority", {0, 10, false, {}}).total);
+  e = pricing::estimate(*c, "openai.chat", "", exact("tier-cache"), usage(500, 10, 100), "priority");
+  CHECK(!e.total && e.unpriced == Names({"cache_read"}));
+  e = pricing::estimate(*c, "openai.chat", "", exact("tier-cache"), usage(500, 10), "priority");
+  CHECK(e.total && e.total->nano_usd == (500 * std::uint64_t{2'000'000'000} + 10 * std::uint64_t{4'000'000'000}) / 1'000'000);
+  CHECK(pricing::upper_bound(tier_cache, {}, {500, 10, false, {}}).total);
+
+  // A variable request fee is no fee of zero: every call bills it.
+  b = pricing::upper_bound(*c->entry("fee"), {}, {500, 10, false, {}});
+  CHECK(!b.total && b.unpriced == Names({"request"}));
+  CHECK(names(worst("fee", 500), "request"));
+  e = pricing::estimate(*c, "openai.chat", "", exact("fee"), usage(500, 10));
+  CHECK(!e.total && e.unpriced == Names({"request"}));
+  // A variable reasoning rate is not the output rate: reasoning tokens have no price, and the bound has none for output.
+  e = pricing::estimate(*c, "openai.chat", "", exact("reasoning"), usage(500, 10, 0, 0, 4));
+  CHECK(!e.total && e.unpriced == Names({"reasoning"}));
+  e = pricing::estimate(*c, "openai.chat", "", exact("reasoning"), usage(500, 10));
+  CHECK(e.total && e.total->nano_usd == (500 * std::uint64_t{1'000'000'000} + 10 * std::uint64_t{2'000'000'000}) / 1'000'000);
+  b = pricing::upper_bound(*c->entry("reasoning"), {}, {500, 10, false, {}});
+  CHECK(!b.total && b.unpriced == Names({"reasoning"}));
+  CHECK(pricing::upper_bound(*c->entry("reasoning"), {}, {500, 0, false, {}}).total);
+  CHECK(names(worst("reasoning", 500), "reasoning"));
+  // A variable row under the other spelling of a unit applies as well.
+  CHECK(!pricing::price_of(*c->entry("alias")).input);
+  e = pricing::estimate(*c, "openai.chat", "", exact("alias"), usage(500, 10));
+  CHECK(!e.total && e.unpriced == Names({"input"}));
+  CHECK(!pricing::upper_bound(*c->entry("alias"), {}, {500, 10, false, {}}).total);
+  // An entry whose every row is variable keeps its answers: it prices no unit.
+  CHECK(pricing::price_of(*c->entry("variable")).empty());
+  e = pricing::estimate(*c, "openai.chat", "", exact("variable"), usage(500, 10));
+  CHECK(!e.total && e.unpriced == Names({"model"}));
+  const auto all_variable = worst("variable", 500);
+  CHECK(!all_variable.total && all_variable.unbounded.size() == 1 && all_variable.unbounded[0].by == pricing::UnboundedBy::TierPrice);
+
+  // Cache writes: a variable 5-minute or 1-hour write rate prices none of the writes it may bill, by the split when the
+  // usage gives it, else all of them; neither is billed at the other rate or at the input rate.
+  const auto writes = catalogue(R"({"version":1,"models":[
+    {"id":"five","input_limit":5000,"pricing":{"input":"0.000001","output":"0.000002","cache_write":"-1","cache_write_1h":"0.000004"}},
+    {"id":"hour","input_limit":5000,"pricing":{"input":"0.000001","output":"0.000002","cache_write":"0.0000025","cache_write_1h":"-1"}},
+    {"id":"image","input_limit":5000,"pricing":{"input":"0.000001","output":"0.000002","output_image":"-1"}},
+    {"id":"vendor/routed","context_window":5000,"pricing":{"prompt":"0.0000001","completion":"0.0000004","ceiling_input":"0.0000024",
+      "ceiling_output":"0.0000096","ceiling_request":"-1"}},
+    {"id":"vendor/routed-fee","context_window":5000,"pricing":{"prompt":"0.0000001","completion":"0.0000004","ceiling_input":"0.0000024",
+      "ceiling_output":"0.0000096","request":"-1"}}]})");
+  const auto split = [](std::uint64_t five, std::uint64_t hour) {
+    auto u = usage(1'000, 10, 0, five + hour);
+    u.extra["cache_creation.ephemeral_5m_input_tokens"] = Count{five, Evidence::Reported};
+    u.extra["cache_creation.ephemeral_1h_input_tokens"] = Count{hour, Evidence::Reported};
+    return u;
+  };
+  const auto messages = [&](std::string_view model, const Usage& u) { return pricing::estimate(*writes, "anthropic.messages", "", exact(model), u); };
+  CHECK(unpriced_of(messages("five", usage(1'000, 10, 0, 300))) == Names({"cache_write"}));
+  CHECK(unpriced_of(messages("five", split(100, 200))) == Names({"cache_write"}));
+  // 700 uncached at 1e-6, 300 one-hour writes at 4e-6 and 10 output tokens at 2e-6.
+  CHECK(total_of(messages("five", split(0, 300))) == 700'000u + 1'200'000u + 20'000u);
+  CHECK(unpriced_of(messages("hour", usage(1'000, 10, 0, 300))) == Names({"cache_write_1h"}));
+  CHECK(unpriced_of(messages("hour", split(100, 200))) == Names({"cache_write_1h"}));
+  CHECK(total_of(messages("hour", split(300, 0))) == 700'000u + 750'000u + 20'000u);
+  for (const char* model : {"five", "hour"}) {
+    CHECK(!pricing::upper_bound(*writes->entry(model), {}, {1'000, 10, false, {}}).total);
+    CHECK(pricing::upper_bound(*writes->entry(model), {}, {0, 10, false, {}}).total);
+  }
+  // Image output at a variable rate: without a modality breakdown any output token may be one.
+  CHECK(unpriced_of(pricing::estimate(*writes, "openai.chat", "", exact("image"), usage(100, 10))) == Names({"output_image"}));
+  auto text_only = usage(100, 10);
+  text_only.extra["candidatesTokensDetails.TEXT"] = Count{10, Evidence::Reported};
+  text_only.extra["candidatesTokensDetails.IMAGE"] = Count{0, Evidence::Reported};
+  CHECK(total_of(pricing::estimate(*writes, "google.generate", "", exact("image"), text_only)) == 100'000u + 20'000u);
+  text_only.extra["candidatesTokensDetails.IMAGE"] = Count{4, Evidence::Reported};
+  CHECK(unpriced_of(pricing::estimate(*writes, "google.generate", "", exact("image"), text_only)) == Names({"output_image"}));
+  b = pricing::upper_bound(*writes->entry("image"), {}, {100, 10, false, {}});
+  CHECK(!b.total && b.unpriced == Names({"output_image"}));
+  // At the route ceiling, a variable fee is no fee of zero; at a gateway, the bound states no pin for it.
+  for (const auto& [model, unit] : {std::pair{"vendor/routed", "ceiling_request"}, std::pair{"vendor/routed-fee", "request"}}) {
+    CHECK(unpriced_of(pricing::estimate(*writes, "openai.chat", "", exact(model), usage(1'000, 1'000), {}, true)) == Names({unit}));
+    b = pricing::upper_bound(*writes->entry(model), {}, {1'000, 1'000, true, {}});
+    CHECK(!b.total && b.unpriced == Names({unit}));
+    pricing::WorstCaseInput routed;
+    routed.family = "openai.chat";
+    routed.model = model;
+    routed.routed_gateway = true;
+    routed.output_tokens = 10;
+    routed.measured_input_tokens = 100;
+    routed.invocations = 1;
+    const auto w = pricing::worst_case(routed, *writes);
+    CHECK(!w.total && !w.pin && w.unbounded.size() == 1 && w.unbounded[0].by == pricing::UnboundedBy::ModelPrice &&
+          w.unbounded[0].detail.find(unit) != std::string::npos);
+  }
+  std::cout << "case passed: a variable row that applies leaves its unit unpriced, and one that does not changes nothing\n";
+}
 } // namespace
 
 int main() {
@@ -855,7 +1061,7 @@ int main() {
     prices_from_entries(); estimates(); wide_products(); bounds(); bands(); dearer_rates();
     unpriced_usage(); zero_rates(); tier_reasons(); usage_stage(); reservation_from_entry(); skipped_prices();
     hour_cache_writes(); left_out_units_refuse(); override_keys_are_units(); bands_count_every_input_token(); listed_overrides_bound_every_call();
-    item_rows_change_no_token_price(); item_prices(); item_prices_follow_the_rows();
+    item_rows_change_no_token_price(); item_prices(); item_prices_follow_the_rows(); variable_rows();
     std::cout << "pricing properties passed\n"; return 0;
   }
   catch (const std::exception& error) { std::cerr << "pricing test failed: " << error.what() << '\n'; return 1; }

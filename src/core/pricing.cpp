@@ -28,68 +28,89 @@ std::string decimal_text(std::uint64_t rate) {
 
 namespace {
 using detail::parse_unit;
+using detail::select;
 // The plain name of a unit OpenRouter names otherwise, as the catalogue reads it.
 std::string_view canonical(std::string_view name) { return descriptor::plain_price_unit(name); }
-// The entry's prices for a request in `service_tier` with `input_tokens` input tokens. Exact: each unit's price from
-// the highest band the request is above. Dearest: each unit's highest price over every band the request may reach.
-ModelPrice select(const descriptor::CatalogueEntry& entry, std::string_view service_tier, std::uint64_t input_tokens,
-                  bool dearest) {
-  struct Pick { std::uint64_t above = 0; bool plain = false; std::optional<std::uint64_t> rate; };
-  std::vector<std::pair<std::string, Pick>> picks;
-  for (const auto& [text_unit, text] : entry.pricing) {
-    const auto unit = parse_unit(text_unit);
-    if (!unit || unit->tier != service_tier || (unit->above && input_tokens <= unit->above)) continue;
-    const auto rate = per_million(text);
-    if (!rate) continue;
-    const auto name = canonical(unit->name);
-    const bool plain = name == unit->name;
-    auto found = std::find_if(picks.begin(), picks.end(), [&](const auto& p) { return p.first == name; });
-    if (found == picks.end()) { picks.emplace_back(std::string(name), Pick{unit->above, plain, rate}); continue; }
-    auto& pick = found->second;
-    if (dearest) {
-      if (*rate > *pick.rate) pick = Pick{unit->above, plain, rate};
-    } else if (unit->above > pick.above || (unit->above == pick.above && plain && !pick.plain)) {
-      pick = Pick{unit->above, plain, rate};
-    }
-  }
-  ModelPrice out;
-  for (const auto& [name, pick] : picks) {
-    if (name == "input") out.input = pick.rate;
-    else if (name == "output") out.output = pick.rate;
-    else if (name == "cache_read") out.cache_read = pick.rate;
-    else if (name == "cache_write") out.cache_write = pick.rate;
-    else if (name == "reasoning") out.reasoning = pick.rate;
-    else if (name == "request") out.request = pick.rate;
-    else if (name == "cache_write_1h") out.cache_write_1h = pick.rate;
-    else if (name == "output_image") out.output_image = pick.rate;
-    else if (name == "input_audio") out.input_audio = pick.rate;
-    else if (name == "output_audio") out.output_audio = pick.rate;
-    else if (name == "ceiling_input") out.ceiling_input = pick.rate;
-    else if (name == "ceiling_output") out.ceiling_output = pick.rate;
-    else if (name == "ceiling_request") out.ceiling_request = pick.rate;
-    else if (name.starts_with(descriptor::tool_fee_prefix)) out.tool_fees.emplace_back(name.substr(descriptor::tool_fee_prefix.size()), *pick.rate);
-  }
-  std::sort(out.tool_fees.begin(), out.tool_fees.end());
-  return out;
+// The member of ModelPrice that holds the unit of plain name `name`, or none.
+std::optional<std::uint64_t> ModelPrice::* slot_of(std::string_view name) {
+  constexpr std::pair<std::string_view, std::optional<std::uint64_t> ModelPrice::*> slots[]{
+      {"input", &ModelPrice::input},           {"output", &ModelPrice::output},
+      {"cache_read", &ModelPrice::cache_read}, {"cache_write", &ModelPrice::cache_write},
+      {"reasoning", &ModelPrice::reasoning},   {"request", &ModelPrice::request},
+      {"cache_write_1h", &ModelPrice::cache_write_1h}, {"output_image", &ModelPrice::output_image},
+      {"input_audio", &ModelPrice::input_audio}, {"output_audio", &ModelPrice::output_audio},
+      {"ceiling_input", &ModelPrice::ceiling_input}, {"ceiling_output", &ModelPrice::ceiling_output},
+      {"ceiling_request", &ModelPrice::ceiling_request}};
+  for (const auto& [unit, slot] : slots)
+    if (unit == name) return slot;
+  return nullptr;
+}
+// The unit of the image tokens of an input, which only the endpoint pricing reads.
+constexpr std::string_view input_image_unit = "input_image";
+// Whether the selection reads the unit of plain name `name`.
+bool held(std::string_view name) {
+  return slot_of(name) || name.starts_with(descriptor::tool_fee_prefix) || name == input_image_unit;
 }
 }  // namespace
 
+namespace detail {
+// Exact: each unit's price from the highest band the request is above, the plain name before OpenRouter's in one band.
+// Dearest: each unit's highest price over every band the request may reach. Either way a unit with a row that applies
+// at a price that is not a fixed amount has no price, since the provider may bill that row's price.
+Selection select(const descriptor::CatalogueEntry& entry, std::string_view service_tier, std::uint64_t input_tokens, bool dearest) {
+  struct Pick { std::uint64_t above = 0; bool plain = false; std::optional<std::uint64_t> rate; std::string_view key; };
+  std::vector<std::pair<std::string, Pick>> picks;
+  Selection out;
+  for (const auto& [text_unit, text] : entry.pricing) {
+    const auto unit = parse_unit(text_unit);
+    if (!unit || unit->tier != service_tier || (unit->above && input_tokens <= unit->above)) continue;
+    const auto name = canonical(unit->name);
+    const auto rate = per_million(text);
+    if (!rate) {
+      if (held(name) && !out.is_variable(name)) out.variable.emplace_back(std::string(name), text_unit);
+      continue;
+    }
+    const bool plain = name == unit->name;
+    auto found = std::find_if(picks.begin(), picks.end(), [&](const auto& p) { return p.first == name; });
+    if (found == picks.end()) { picks.emplace_back(std::string(name), Pick{unit->above, plain, rate, text_unit}); continue; }
+    auto& pick = found->second;
+    if (dearest) {
+      if (*rate > *pick.rate) pick = Pick{unit->above, plain, rate, text_unit};
+    } else if (unit->above > pick.above || (unit->above == pick.above && plain && !pick.plain)) {
+      pick = Pick{unit->above, plain, rate, text_unit};
+    }
+  }
+  for (const auto& [name, pick] : picks) {
+    const auto slot = slot_of(name);
+    const bool tool = name.starts_with(descriptor::tool_fee_prefix);
+    out.priced = out.priced || slot || tool;
+    if (out.is_variable(name) || !held(name)) continue;
+    if (slot) out.price.*slot = pick.rate;
+    else if (tool) out.price.tool_fees.emplace_back(name.substr(descriptor::tool_fee_prefix.size()), *pick.rate);
+    else out.input_image = pick.rate;
+    out.keys.emplace_back(name, pick.key);
+  }
+  std::sort(out.price.tool_fees.begin(), out.price.tool_fees.end());
+  return out;
+}
+}  // namespace detail
+
 ModelPrice price_of(const descriptor::CatalogueEntry& entry, std::string_view service_tier, std::uint64_t input_tokens) {
-  return select(entry, service_tier, input_tokens, false);
+  return select(entry, service_tier, input_tokens, false).price;
 }
 namespace {
 // Whether the entry has prices in a service tier other than `service_tier`.
 bool priced_in_other_tier(const descriptor::CatalogueEntry& entry, std::string_view service_tier, std::uint64_t input_tokens) {
   for (const auto& [text_unit, text] : entry.pricing) {
     const auto unit = parse_unit(text_unit);
-    if (unit && unit->tier != service_tier && per_million(text) && !select(entry, unit->tier, input_tokens, false).empty()) return true;
+    if (unit && unit->tier != service_tier && per_million(text) && select(entry, unit->tier, input_tokens, false).priced) return true;
   }
   return false;
 }
 }  // namespace
 ModelPrice dearest_price_of(const descriptor::CatalogueEntry& entry, std::string_view service_tier,
                             std::uint64_t input_tokens) {
-  return select(entry, service_tier, input_tokens, true);
+  return select(entry, service_tier, input_tokens, true).price;
 }
 
 namespace {
@@ -122,6 +143,7 @@ CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_v
   out.lower_bound = usage.stage == UsageStage::Partial || usage.quality == UsageQuality::Inconsistent;
   const descriptor::CatalogueEntry* entry = nullptr;
   ModelPrice price;
+  detail::Selection selection;
   auto count_of = [](const std::optional<Count>& c) -> std::uint64_t { return c ? c->value : 0; };
   // The input length that picks the entry's band: every input token, cache reads and writes included.
   const auto input_length = usage.input_total ? usage.input_total->value
@@ -131,13 +153,13 @@ CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_v
     if (name.empty()) return false;
     const auto match = catalogue.find(family, origin, name);
     if (!match.entry) return false;
-    auto found = price_of(*match.entry, service_tier, input_length);
-    if (found.empty()) {
+    auto found = select(*match.entry, service_tier, input_length, false);
+    if (!found.priced) {
       // The entry prices the model, but not in this service tier.
       other_tier = other_tier || priced_in_other_tier(*match.entry, service_tier, input_length);
       return false;
     }
-    entry = match.entry; price = found;
+    entry = match.entry; price = found.price; selection = std::move(found);
     return true;
   };
   const bool served = model.relation != ServedRelation::NotReported && !model.served.empty() && model.served != model.requested;
@@ -199,6 +221,10 @@ CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_v
     }
     const auto fee = std::max(price.request.value_or(0), price.ceiling_request.value_or(0));
     if (!complete) return out;
+    // A fee of a row with a price that is not a fixed amount is not known, not zero.
+    for (const std::string_view unit : {"request", "ceiling_request"})
+      if (selection.is_variable(unit)) { out.unpriced.emplace_back(unit); complete = false; }
+    if (!complete) return out;
     sum += fee;
   } else {
     // Audio input bills at its own rate, out of the uncached input. Audio the cache counters hold has no split.
@@ -212,18 +238,28 @@ CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_v
       charge(*uncached - audio_in, price.input, "input");
       charge(audio_in, price.input_audio, "input_audio", price.input);
     }
-    auto fallback = [&](const std::optional<std::uint64_t>& specific, const std::optional<std::uint64_t>& general, std::string_view rule, std::uint64_t units) {
-      if (specific || !units) return specific;
+    // A unit with a variable price is not billed at another unit's rate.
+    auto fallback = [&](std::string_view unit, const std::optional<std::uint64_t>& specific, const std::optional<std::uint64_t>& general,
+                        std::string_view rule, std::uint64_t units) {
+      if (specific || !units || selection.is_variable(unit)) return specific;
       if (general) assume(rule);
       return general;
     };
-    charge(cache_read, fallback(price.cache_read, price.input, "cache_read at input", cache_read), "cache_read", price.input);
+    charge(cache_read, fallback("cache_read", price.cache_read, price.input, "cache_read at input", cache_read), "cache_read", price.input);
     // Messages splits cache writes into 5-minute and 1-hour writes; without the split, all of them bill at the
     // dearer rate.
-    const auto write = fallback(price.cache_write, price.input, "cache_write at input", cache_write);
+    const auto write = fallback("cache_write", price.cache_write, price.input, "cache_write at input", cache_write);
     const auto five = usage.extra.find("cache_creation.ephemeral_5m_input_tokens");
     const auto hour = usage.extra.find("cache_creation.ephemeral_1h_input_tokens");
-    if (price.cache_write_1h && cache_write && five != usage.extra.end() && hour != usage.extra.end() &&
+    // The writes a variable write rate may price: the 5-minute or 1-hour ones by the split, else all of them.
+    const bool split = cache_write && five != usage.extra.end() && hour != usage.extra.end() && five->second.value <= cache_write &&
+                       hour->second.value == cache_write - five->second.value;
+    const bool variable_write = selection.is_variable("cache_write") && (split ? five->second.value : cache_write) > 0;
+    const bool variable_hour = selection.is_variable("cache_write_1h") && (split ? hour->second.value : cache_write) > 0;
+    if (variable_write || variable_hour) {
+      if (variable_write) { out.unpriced.emplace_back("cache_write"); complete = false; }
+      if (variable_hour) { out.unpriced.emplace_back("cache_write_1h"); complete = false; }
+    } else if (price.cache_write_1h && cache_write && five != usage.extra.end() && hour != usage.extra.end() &&
         five->second.value <= cache_write && hour->second.value == cache_write - five->second.value) {
       charge(five->second.value, write, "cache_write", price.input);
       charge(hour->second.value, price.cache_write_1h, "cache_write_1h", write);
@@ -237,11 +273,14 @@ CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_v
     if (!usage.output_total) { out.unpriced.emplace_back("output"); complete = false; }
     else {
       const auto output = usage.output_total->value;
+      if (selection.is_variable("reasoning") && std::min(count(usage.reasoning).value_or(0), output)) { out.unpriced.emplace_back("reasoning"); complete = false; }
       const auto reasoning = price.reasoning ? std::min(count(usage.reasoning).value_or(0), output) : 0;
       charge(reasoning, price.reasoning, "reasoning", price.output);
       // Gemini reports image output tokens by modality (Generate `candidatesTokensDetails.IMAGE`, Interactions
       // `output_tokens_by_modality.image`). Without that breakdown, all output bills at the dearer rate.
       auto image = modality_tokens(usage, output_breakdown, "image");
+      // Without a breakdown, any output token may be an image token at the variable rate.
+      if (selection.is_variable("output_image") && !image && output > reasoning) { out.unpriced.emplace_back("output_image"); complete = false; }
       if (!price.output_image) {
         if (image && *image) { out.unpriced.emplace_back("output_image"); complete = false; }
         image.reset();
@@ -265,11 +304,12 @@ CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_v
     if (compaction) {
       const auto read = extra("compaction.cache_read_input_tokens"), written = extra("compaction.cache_creation_input_tokens");
       charge(extra("compaction.input_tokens"), price.input, "input");
-      charge(read, fallback(price.cache_read, price.input, "cache_read at input", read), "cache_read", price.input);
-      charge(written, fallback(price.cache_write, price.input, "cache_write at input", written), "cache_write", price.input);
+      charge(read, fallback("cache_read", price.cache_read, price.input, "cache_read at input", read), "cache_read", price.input);
+      charge(written, fallback("cache_write", price.cache_write, price.input, "cache_write at input", written), "cache_write", price.input);
       charge(extra("compaction.output_tokens"), price.output, "output");
     }
-    if (price.request) sum += *price.request;
+    if (selection.is_variable("request")) { out.unpriced.emplace_back("request"); complete = false; }
+    else if (price.request) sum += *price.request;
   }
   if (!complete) return out;
   sum += 999'999;
@@ -279,7 +319,10 @@ CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_v
   return out;
 }
 
-Bound upper_bound(const ModelPrice& price, const BoundRequest& request) {
+namespace {
+// The bound of upper_bound, where `variable` names the units of `price` that a row applies to at a price that is not a
+// fixed amount: a rate the bound reads among them is not known, and neither is the dearest of a set that holds it.
+Bound bounded(const ModelPrice& price, const detail::UnitKeys& variable, const BoundRequest& request) {
   Bound out;
   auto dearest = [](std::initializer_list<std::optional<std::uint64_t>> rates) {
     std::optional<std::uint64_t> result;
@@ -287,18 +330,27 @@ Bound upper_bound(const ModelPrice& price, const BoundRequest& request) {
       if (rate && (!result || *rate > *result)) result = rate;
     return result;
   };
+  // A unit the price leaves out for a variable row is named; the unit a set needs is named when it is left out anyway.
+  const auto name_variable = [&](std::initializer_list<std::string_view> units) {
+    for (const auto unit : units)
+      if (!detail::key_of(variable, unit).empty()) out.unpriced.emplace_back(unit);
+  };
   std::optional<std::uint64_t> input, output, fee;
   if (request.route_ceiling) {
     input = price.ceiling_input;
     output = price.ceiling_output;
     fee = dearest({price.request, price.ceiling_request});
     if (!input || !output) out.unpriced.emplace_back("ceiling");
+    name_variable({"request", "ceiling_request"});
   } else {
     input = price.input ? dearest({price.input, price.cache_read, price.cache_write, price.cache_write_1h, price.input_audio}) : std::nullopt;
     output = price.output ? dearest({price.output, price.reasoning, price.output_image, price.output_audio}) : std::nullopt;
     fee = price.request;
     if (!input && request.input_tokens) out.unpriced.emplace_back("input");
     if (!output && request.output_tokens) out.unpriced.emplace_back("output");
+    if (request.input_tokens) name_variable({"cache_read", "cache_write", "cache_write_1h", "input_audio"});
+    if (request.output_tokens) name_variable({"reasoning", "output_image", "output_audio"});
+    name_variable({"request"});
   }
   Wide sum;  // nano-USD x 1e6
   if (input) sum += Wide::product(request.input_tokens, *input);
@@ -318,9 +370,13 @@ Bound upper_bound(const ModelPrice& price, const BoundRequest& request) {
   out.total = UsdAmount{nano.low, Evidence::Derived, CostRounding::CeilingCatalogueProduct};
   return out;
 }
+}  // namespace
+
+Bound upper_bound(const ModelPrice& price, const BoundRequest& request) { return bounded(price, {}, request); }
 
 Bound upper_bound(const descriptor::CatalogueEntry& entry, std::string_view service_tier, const BoundRequest& request) {
-  return upper_bound(dearest_price_of(entry, service_tier, request.input_tokens), request);
+  const auto selected = select(entry, service_tier, request.input_tokens, true);
+  return bounded(selected.price, selected.variable, request);
 }
 
 std::string_view to_string(UnboundedBy by) noexcept {
@@ -363,6 +419,10 @@ bool same_max_price(const OpenRouterMaxPrice& left, const OpenRouterMaxPrice& ri
     if (left.*member != right.*member) return false;
   return true;
 }
+// Why a unit has no rate: a row of it that applies has a price that is not a fixed amount.
+std::string variable_rate(const descriptor::CatalogueEntry& entry, std::string_view unit, std::string_view key) {
+  return "catalogue entry '" + entry.id + "' prices " + std::string(unit) + " at a variable price (" + std::string(key) + ")";
+}
 }  // namespace
 
 WorstCase worst_case(const WorstCaseInput& in, const descriptor::ModelCatalogue& catalogue) {
@@ -393,6 +453,8 @@ WorstCase worst_case(const WorstCaseInput& in, const descriptor::ModelCatalogue&
     const descriptor::CatalogueEntry* entry = nullptr;
     std::uint64_t input = 0, invocation_input = 0;
     ModelPrice price;
+    // The units a row applies to at a price that is not a fixed amount, with that row.
+    detail::UnitKeys variable;
   };
   std::vector<Candidate> candidates;
   std::vector<std::string> models{std::string(in.model)};
@@ -412,14 +474,16 @@ WorstCase worst_case(const WorstCaseInput& in, const descriptor::ModelCatalogue&
             !first ? "no measured input and no catalogue input limit" : "later invocations need a catalogue input limit");
       continue;
     }
-    Candidate candidate{model, entry, *first, invocations > 1 ? *limit : *first, {}};
+    Candidate candidate{model, entry, *first, invocations > 1 ? *limit : *first, {}, {}};
     std::uint64_t rest = 0;
     if (invocations > 1 && (!checked_mul(invocations - 1, *limit, rest) || !checked_add(candidate.input, rest, candidate.input))) {
       block(UnboundedBy::Overflow, model, "the input tokens do not fit 64 bits");
       continue;
     }
-    candidate.price = dearest_price_of(*entry, in.service_tier, candidate.invocation_input);
-    if (candidate.price.empty()) {
+    auto selected = select(*entry, in.service_tier, candidate.invocation_input, true);
+    candidate.price = selected.price;
+    candidate.variable = std::move(selected.variable);
+    if (!selected.priced) {
       block(UnboundedBy::TierPrice, model,
             in.service_tier.empty() ? "the entry prices no unit at the standard rates"
                                     : "the entry prices no unit under service tier '" + std::string(in.service_tier) + "'");
@@ -434,6 +498,16 @@ WorstCase worst_case(const WorstCaseInput& in, const descriptor::ModelCatalogue&
     if (in.routed_gateway && (!candidate.price.ceiling_input || !candidate.price.ceiling_output)) {
       block(UnboundedBy::RouteCeiling, model, "the entry lists no route ceiling (ceiling_input, ceiling_output), so the router may pick any price");
       continue;
+    }
+    // The pin states the request fee, which a row with a price that is not a fixed amount leaves unknown.
+    if (in.routed_gateway) {
+      bool variable_fee = false;
+      for (const std::string_view unit : {"request", "ceiling_request"})
+        if (const auto key = detail::key_of(candidate.variable, unit); !key.empty()) {
+          block(UnboundedBy::ModelPrice, model, variable_rate(*entry, unit, key));
+          variable_fee = true;
+        }
+      if (variable_fee) continue;
     }
     candidates.push_back(std::move(candidate));
   }
@@ -496,7 +570,10 @@ WorstCase worst_case(const WorstCaseInput& in, const descriptor::ModelCatalogue&
         const auto found = std::find_if(candidate.price.tool_fees.begin(), candidate.price.tool_fees.end(),
                                         [&](const auto& fee) { return fee.first == type; });
         if (found == candidate.price.tool_fees.end()) {
-          block(UnboundedBy::ToolFee, type, "catalogue entry '" + candidate.entry->id + "' lists no fee (unit " + descriptor::tool_fee_unit(type) + ")");
+          const auto unit = descriptor::tool_fee_unit(type);
+          const auto key = detail::key_of(candidate.variable, unit);
+          block(UnboundedBy::ToolFee, type, key.empty() ? "catalogue entry '" + candidate.entry->id + "' lists no fee (unit " + unit + ")"
+                                                        : variable_rate(*candidate.entry, unit, key));
           priced = false;
           break;
         }
@@ -509,12 +586,14 @@ WorstCase worst_case(const WorstCaseInput& in, const descriptor::ModelCatalogue&
     }
     if (!priced) continue;
     std::sort(fees.tool_fees.begin(), fees.tool_fees.end());
-    const auto bound = upper_bound(candidate.price, {candidate.input, output, in.routed_gateway, uses});
+    const auto bound = bounded(candidate.price, candidate.variable, {candidate.input, output, in.routed_gateway, uses});
     if (!bound.total) {
       for (const auto& name : bound.unpriced) {
+        const auto variable = detail::key_of(candidate.variable, name);
         if (name == "overflow") block(UnboundedBy::Overflow, candidate.model, "the bound does not fit 64 bits");
         else if (name == "ceiling") block(UnboundedBy::RouteCeiling, candidate.model, "no route ceiling");
         else if (name.starts_with(descriptor::tool_fee_prefix)) block(UnboundedBy::ToolFee, name.substr(descriptor::tool_fee_prefix.size()), "no fee");
+        else if (!variable.empty()) block(UnboundedBy::ModelPrice, candidate.model, variable_rate(*candidate.entry, name, variable));
         else block(UnboundedBy::ModelPrice, candidate.model, "no " + name + " rate");
       }
       continue;

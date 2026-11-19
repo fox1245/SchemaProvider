@@ -24,8 +24,9 @@ std::string decimal_text(std::uint64_t rate);
 // input_cache_write_1h, internal_reasoning, audio, audio_output) and the plain ones (input, output, cache_read,
 // cache_write, cache_write_1h, reasoning, input_audio, output_audio) name the same units
 // (descriptor::plain_price_unit); the plain name wins when both are present. A negative listed price (OpenRouter's
-// "-1", a variable price) is no price. Other listed units (OpenRouter's `image`, `web_search`) are not read: nothing
-// in a usage counts them.
+// "-1", a variable price) is no price, and a unit with such a row that applies to the request has no price at all,
+// whatever its other rows (price_of). Other listed units (OpenRouter's `image`, `web_search`) are not read: nothing in a
+// usage counts them.
 struct ModelPrice {
   std::optional<std::uint64_t> input, output, cache_read, cache_write, reasoning, request;
   // The dearer rates a call may bill: a 1-hour cache write (`cache_write_1h`), an image output token
@@ -51,10 +52,13 @@ struct ModelPrice {
 //   above wins, unit by unit, over the units without one.
 // `input_tokens` defaults to 0, which is above no band: the base rates, not the long-context ones. Reserve with
 // `dearest_price_of`, or with the `upper_bound` that takes the entry.
+// A row applies to the request when it is of the tier and the request is above its band, under either spelling of its
+// unit and whether or not a higher band or the plain spelling prices the request. A unit with a row that applies at a
+// price that is not a fixed amount (a variable price) has no price, since the provider may bill that row's price.
 ModelPrice price_of(const descriptor::CatalogueEntry& entry, std::string_view service_tier = {},
                     std::uint64_t input_tokens = 0);
 // Each unit at its dearest over every band a request of at most `input_tokens` input tokens may fall in: the
-// prices to reserve with.
+// prices to reserve with. A unit with a row in any of those bands at a price that is not a fixed amount has none.
 ModelPrice dearest_price_of(const descriptor::CatalogueEntry& entry, std::string_view service_tier,
                             std::uint64_t input_tokens);
 
@@ -72,8 +76,9 @@ struct CostEstimate {
   std::vector<std::string> assumptions;
   // Why there is no total: "model" (no priced entry), "tier" (an entry priced only outside the asked service
   // tier), "ceiling" (no route ceiling), a counter the call billed with no price or no count ("input", "output",
-  // "input_audio", "output_audio", "output_image"), or a usage counter the estimate does not price
-  // ("toolUsePromptTokenCount").
+  // "input_audio", "output_audio", "output_image"), a unit with a row that applies at a variable price that the call
+  // billed ("cache_read", "cache_write", "cache_write_1h", "reasoning", "request", "ceiling_request", or one of
+  // those), or a usage counter the estimate does not price ("toolUsePromptTokenCount").
   std::vector<std::string> unpriced;
   // The usage was still arriving (UsageStage::Partial) or its counters contradict each other
   // (UsageQuality::Inconsistent): the provider may bill more than `total`.
@@ -98,6 +103,10 @@ struct CostEstimate {
 //   that rate, or more audio input than uncached input, leave no total ("input_audio", "output_audio").
 // - A zero rate for a unit whose base unit has a price is applied and named in `assumptions` ("<unit> at zero").
 // - `request` is charged once.
+// - A unit with a row that applies at a price that is not a fixed amount (price_of) prices none of the tokens it may
+//   bill, and they are not billed at another unit's rate: cache reads and writes are unpriced rather than billed at
+//   `input`, reasoning tokens rather than at `output`, cache writes the 1-hour split does not place, output tokens
+//   without a modality breakdown at a variable `output_image`, and every call at a variable `request`.
 // Server tool fees are not priced. Gemini's `toolUsePromptTokenCount` bills beyond the prompt count and is not
 // priced either: a usage that reports it has no total. With a `service_tier`, the entry's prices for that tier, and
 // the input band of the call's input tokens (`price_of`); the tier is matched exactly, so a response's `default` or
@@ -120,6 +129,7 @@ struct Bound {
   // The largest amount a call within the request can bill, rounded up once to whole nano-USD.
   std::optional<UsdAmount> total;
   // Why there is no total: "input" or "output" (no rate), "ceiling" (no route ceiling), "tool:<type>" (no fee),
+  // a unit the bound reads with a row that applies at a variable price ("cache_read", "reasoning", "request", ...),
   // or "overflow".
   std::vector<std::string> unpriced;
 };
@@ -128,9 +138,15 @@ struct Bound {
 // (output, reasoning, image output, audio output), the request fee, and each tool's fee times its uses. With
 // `route_ceiling` the ceiling rates replace the listed ones. For usage within the request, `estimate` with the same
 // prices never exceeds it. Messages compaction iterations and Gemini's tool-use prompt tokens bill outside the call's
-// counters and are not bounded here.
+// counters and are not bounded here. A price from `price_of` or `dearest_price_of` leaves out a unit with a row at a
+// variable price, which this overload cannot tell from a unit the entry does not list; the overload that takes the
+// entry refuses it.
 Bound upper_bound(const ModelPrice& price, const BoundRequest& request);
-// The bound with the entry's dearest prices over every input band the request may reach.
+// The bound with the entry's dearest prices over every input band the request may reach. A unit with a row in one of
+// them at a price that is not a fixed amount gives no total when the bound reads it: an input rate (`input`,
+// `cache_read`, `cache_write`, `cache_write_1h`, `input_audio`) when the request has input tokens, an output rate
+// (`output`, `reasoning`, `output_image`, `output_audio`) when it has output tokens, the request fee always, at the
+// route ceiling `ceiling_input`, `ceiling_output` and `ceiling_request`, and a tool's fee when it has uses.
 Bound upper_bound(const descriptor::CatalogueEntry& entry, std::string_view service_tier, const BoundRequest& request);
 
 
@@ -209,6 +225,8 @@ struct WorstCase {
 //   listed fee, is unbounded.
 // - Models: the model and each fallback model, at the dearest candidate.
 // - Gateway: at the route ceiling, the dearest over the candidates.
+// - Variable prices: a unit with a row that applies at a price that is not a fixed amount (upper_bound with the entry)
+//   is `ModelPrice` (a tool fee `ToolFee`), the detail naming the unit and the row.
 // The attempts multiply the sum. Nothing here is a reservation or a ledger.
 // A request that names no service tier is priced at the standard rates (see WorstCaseInput::service_tier).
 WorstCase worst_case(const WorstCaseInput&, const descriptor::ModelCatalogue&);
