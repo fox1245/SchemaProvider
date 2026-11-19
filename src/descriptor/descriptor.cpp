@@ -420,25 +420,38 @@ private:
         std::array slots{
             std::pair{"model", &value_.model_member_}, std::pair{"messages", &value_.messages_member_},
             std::pair{"stream", &value_.stream_member_}, std::pair{"max_output_tokens", &value_.max_output_tokens_member_}};
-        // A slot may name a member some family's policy binds to a slot of its own (a descriptor of one family may borrow
-        // another family's spelling), and this descriptor's own defaults, the origin's output cap among them. Two slots
-        // naming one member still collide below.
-        std::unordered_set<std::string> bound_by_policy;
-        for (const auto family_name : owned_member_families())
-            if (const auto* family = value_.policy_->family(family_name))
-                bound_by_policy.insert({family->model_member, family->messages_member, family->stream_member, family->cap_member});
-        for (const auto& slot : slots) bound_by_policy.insert(*slot.second);
+        // A slot may name the member some family's policy binds to that same slot (a descriptor of one family may borrow
+        // another family's spelling of a slot), this descriptor's own default for it (the origin's output cap among them)
+        // and its declared alternate. Nothing else is open to it.
+        const std::array<std::string FamilyPolicy::*, 4> policy_members{&FamilyPolicy::model_member, &FamilyPolicy::messages_member,
+                                                                         &FamilyPolicy::stream_member, &FamilyPolicy::cap_member};
+        std::array<std::unordered_set<std::string>, 4> bound_by_policy;
+        std::array<std::string, 4> defaults;
+        std::array<std::string, 4> named;
+        for (std::size_t i = 0; i < slots.size(); ++i) {
+            for (const auto family_name : owned_member_families())
+                if (const auto* family = value_.policy_->family(family_name)) bound_by_policy[i].insert(family->*policy_members[i]);
+            defaults[i] = *slots[i].second;
+            const auto field = item.get(slots[i].first);
+            named[i] = field.valid() && field.is_string() ? std::string(field.as_string()) : defaults[i];
+        }
+        const auto open = [&](std::size_t slot, const std::string& member) {
+            const auto alternate = slot_alternate(value_.family_, slots[slot].first);
+            return bound_by_policy[slot].contains(member) || member == defaults[slot] || (!alternate.empty() && member == alternate);
+        };
         // Any other member the table owns, and any key the family's policy admits as an extension, would reach the body twice.
         std::unordered_set<std::string> extension_keys;
         for (const auto& fact : value_.family_policy().extensions) extension_keys.insert(fact.key);
         std::unordered_set<std::string> taken;
-        for (auto [name, target] : slots) {
-            const std::string pointer = std::string("/bindings/") + name;
-            if (auto field = item.get(name); field.valid()) *target = string(field, pointer, 128);
+        for (std::size_t i = 0; i < slots.size(); ++i) {
+            const std::string pointer = std::string("/bindings/") + slots[i].first;
+            auto* target = slots[i].second;
+            if (auto field = item.get(slots[i].first); field.valid()) *target = string(field, pointer, 128);
             if (!member_name(*target)) fail(pointer, "literal object member identifier");
-            const auto alternate = slot_alternate(value_.family_, name);
-            const bool open = bound_by_policy.contains(*target) || (!alternate.empty() && *target == alternate);
-            if (!open && (member_role(value_.family_, *target) || extension_keys.contains(*target)))
+            // A member that another slot binds by the policy is reported as the collision it is, at the later of the two slots.
+            bool collides = false;
+            for (std::size_t j = 0; j < slots.size(); ++j) collides = collides || (j != i && named[j] == *target && bound_by_policy[j].contains(*target));
+            if (!collides && !open(i, *target) && (member_role(value_.family_, *target) || extension_keys.contains(*target)))
                 fail(pointer, "distinct non-reserved request destination", "request destination collision");
             if (!taken.insert(*target).second) fail(pointer, "distinct non-reserved request destination", "request destination collision");
         }

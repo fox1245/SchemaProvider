@@ -302,9 +302,9 @@ void generate_route_shape() {
     CHECK(std::holds_alternative<ValidatedDescriptor>(presets::try_google_generate("gemini-2.5-flash")));
 }
 // A descriptor of `family` at a fixed origin whose bindings object is `bindings` (empty for none).
-std::string family_descriptor(std::string_view family, std::string_view bindings = {}) {
+std::string family_descriptor(std::string_view family, std::string_view bindings = {}, std::string_view at = {}) {
     const bool google = family.starts_with("google.");
-    const std::string origin = google ? "https://generativelanguage.googleapis.com" : "https://example.test";
+    const std::string origin = !at.empty() ? std::string(at) : google ? "https://generativelanguage.googleapis.com" : "https://example.test";
     const std::string path = family == "google.generate" ? "/v1beta/models/fixture-model:generateContent" : family == "google.interactions" ? "/v1beta/interactions" :
         family == "anthropic.messages" ? "/v1/messages" : family == "openai.chat" ? "/v1/chat/completions" : "/v1/responses";
     const std::string streaming = family == "google.generate" ? "/v1beta/models/fixture-model:streamGenerateContent?alt=sse" : path;
@@ -343,6 +343,22 @@ void bindings_never_name_owned_members() {
              {"openai.responses", "model", "deployment"}, {"google.generate", "messages", "input"}, {"google.generate", "max_output_tokens", "maxOutputTokens"},
              {"anthropic.messages", "messages", "input"}, {"openai.chat", "model", "model"}})
         CHECK(std::holds_alternative<ValidatedDescriptor>(load(family_descriptor(family, bound(slot, member)))));
+    // A slot may name what some family's policy binds to that same slot, and nothing a family binds to another slot.
+    for (const auto& [family, slot, member] : std::vector<std::array<std::string_view, 3>>{
+             {"openai.chat", "max_output_tokens", "max_output_tokens"}, {"google.interactions", "max_output_tokens", "max_tokens"},
+             {"openai.chat", "messages", "contents"}, {"openai.chat", "messages", "input"}})
+        CHECK(std::holds_alternative<ValidatedDescriptor>(load(family_descriptor(family, bound(slot, member)))));
+    rejected(family_descriptor("openai.chat", bound("model", "contents")), "/bindings/model");
+    rejected(family_descriptor("openai.chat", bound("stream", "input")), "/bindings/stream");
+    rejected(family_descriptor("google.generate", bound("model", "max_tokens")), "/bindings/model");
+    // Direct OpenAI names the Chat output cap `max_completion_tokens` by default. That default opens the cap slot only: another
+    // slot is refused, with the output cap rebound or not.
+    constexpr std::string_view direct = "https://api.openai.com";
+    rejected(family_descriptor("openai.chat", R"({"model":"max_completion_tokens","max_output_tokens":"other_cap"})", direct), "/bindings/model");
+    rejected(family_descriptor("openai.chat", bound("model", "max_completion_tokens"), direct), "/bindings/model");
+    rejected(family_descriptor("openai.chat", R"({"stream":"max_completion_tokens","max_output_tokens":"other_cap"})", direct), "/bindings/stream");
+    CHECK(std::holds_alternative<ValidatedDescriptor>(load(family_descriptor("openai.chat", bound("max_output_tokens", "max_tokens"), direct))));
+    CHECK(std::holds_alternative<ValidatedDescriptor>(load(family_descriptor("openai.chat", {}, direct))));
     // Only Chat declares the alternate.
     rejected(family_descriptor("anthropic.messages", bound("max_output_tokens", "max_completion_tokens")), "/bindings/max_output_tokens");
     rejected(family_descriptor("openai.chat", bound("model", "max_completion_tokens")), "/bindings/model");
