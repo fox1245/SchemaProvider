@@ -433,6 +433,66 @@ void bands() {
   std::cout << "case passed: bands\n";
 }
 
+// With the input length not stated, a unit has a rate only when a row of it applies at every length, a row without a
+// band in the call's tier; the rate is then the dearest over every row. A unit whose rows are all banded has no row
+// below its band. A stated length picks the bands as before. The estimate, without the usage's input, refuses the same.
+void unstated_length() {
+  constexpr std::uint64_t rate = 1'000'000'000, image = 4 * cent, fee = 1'000'000'000'000;
+  const auto decide = [](std::optional<std::uint64_t> measured) {
+    return Call{facts("decisions", "decide", {quantity("input", std::nullopt, Source::InputLimit), quantity("output", 10)}), {}, measured};
+  };
+  const auto none = [](const Call& call, const descriptor::ModelCatalogue& c) {
+    pricing::EndpointCounted counted;
+    counted.model = ServedModel{call.facts.model, call.facts.model, ServedRelation::Exact};
+    return pricing::endpoint_estimate(call.facts, counted, c);
+  };
+  // Input priced only above a band, at zero and above zero: unstated, refused; above the band, bounded; below, refused.
+  const auto zero_band = entry({{"input+200000", "0"}, {"output", "0"}});
+  // With the count unknown too, the input also has no count (InputBound), as for any input without a rate.
+  CHECK(refuses(bound(decide(std::nullopt), *zero_band), UnboundedBy::ModelPrice, "input"));
+  CHECK(totals(bound(decide(200001), *zero_band), 0));
+  CHECK(only(bound(decide(1000), *zero_band), UnboundedBy::ModelPrice, "input"));
+  CHECK(!none(decide(std::nullopt), *zero_band).total);
+  const auto rate_band = entry({{"input+200000", usd(rate)}, {"output", "0"}});
+  CHECK(refuses(bound(decide(std::nullopt), *rate_band), UnboundedBy::ModelPrice, "input"));
+  CHECK(totals(bound(decide(200001), *rate_band), rounded(200001 * rate)));
+  CHECK(only(bound(decide(1000), *rate_band), UnboundedBy::ModelPrice, "input"));
+  // The same for the output set; a banded row of another member beside the base row is taken at its dearest.
+  CHECK(only(bound(decide(std::nullopt), *entry({{"input", "0"}, {"output+200000", "0"}})), UnboundedBy::ModelPrice, "output"));
+  CHECK(totals(bound(decide(std::nullopt), *entry({{"input", "0"}, {"cache_read+200000", "0"}, {"output", "0"}})), 0));
+  // An item priced only above a band, at zero and above zero.
+  const auto images = [](std::optional<std::uint64_t> measured, Dimensions dimensions = {}) {
+    return Call{facts("images", "generate", {quantity("item:image", 1), quantity("input", std::nullopt, Source::InputLimit), quantity("output", 0)},
+                      std::move(dimensions)), {}, measured};
+  };
+  for (const std::uint64_t price : {std::uint64_t{0}, image}) {
+    const auto item_band = entry({{"input", "0"}, {"output", "0"}, {"item:image+200000", usd(price)}});
+    CHECK(only(bound(images(std::nullopt), *item_band), UnboundedBy::ModelPrice, "item:image[operation=generate]"));
+    CHECK(totals(bound(images(200001), *item_band), rounded(price)));
+    CHECK(only(bound(images(1000), *item_band), UnboundedBy::ModelPrice, "item:image[operation=generate]"));
+    CHECK(!none(images(std::nullopt), *item_band).total);
+  }
+  // Only banded rows of the qualifier the call offers, beside a row without a band of another qualifier.
+  const auto qualified = entry({{"input", "0"}, {"output", "0"}, {"item:image[quality=low]", usd(image)}, {"item:image[quality=high]+200000", usd(image)}});
+  CHECK(only(bound(images(std::nullopt, {{"quality", "high"}}), *qualified), UnboundedBy::ModelPrice, "item:image[operation=generate,quality=high]"));
+  CHECK(totals(bound(images(std::nullopt, {{"quality", "low"}}), *qualified), rounded(image)));
+  // A row without a band beside banded ones: the dearest of every row, as before.
+  CHECK(totals(bound(images(std::nullopt), *entry({{"input", "0"}, {"output", "0"}, {"item:image", usd(image)}, {"item:image+200000", usd(2 * image)}})),
+               rounded(2 * image)));
+  // A request fee only above a band: unstated, refused; above the band, charged; below it no fee row applies, as before.
+  const auto fee_band = entry({{"input", "0"}, {"output", "0"}, {"request+200000", usd(fee)}});
+  CHECK(only(bound(decide(std::nullopt), *fee_band), UnboundedBy::ModelPrice, "request"));
+  CHECK(totals(bound(decide(200001), *fee_band), rounded(fee)));
+  CHECK(totals(bound(decide(1000), *fee_band), 0));
+  CHECK(!none(decide(std::nullopt), *fee_band).total);
+  // The image tokens of an input, a unit the call needs when it has references.
+  const auto references = Call{facts("images", "edit", {quantity("input", std::nullopt, Source::InputLimit), quantity("input_image", std::nullopt, Source::InputLimit),
+                                                        quantity("output", 0)})};
+  CHECK(refuses(bound(references, *entry({{"input", "0"}, {"input_image+200000", "0"}, {"output", "0"}})), UnboundedBy::ModelPrice, "input_image"));
+  CHECK(totals(bound(references, *entry({{"input", "0"}, {"input_image", "0"}, {"output", "0"}})), 0));
+  std::cout << "case passed: an unstated input length needs a row without a band\n";
+}
+
 // One attempt for an operation charged once accepted; the retry policy's attempts otherwise.
 void attempts() {
   constexpr std::uint64_t input = 300'000'000, output = 1'200'000'000;
@@ -894,18 +954,22 @@ struct Oracle {
                      const std::string& unit, bool images) {
       if (n && *n == 0) return;
       std::optional<std::uint64_t> dearest;
-      bool variable = false, based = false, imaged = false;
+      bool variable = false, based = false, imaged = false, based_everywhere = false, imaged_everywhere = false;
       for (const auto& [key, r] : g.rows) {
         if (r.item || std::find(units.begin(), units.end(), r.name) == units.end() || !applies(r, length)) continue;
         if (!r.rate) { variable = true; continue; }
-        if (r.name == base) based = true;
-        if (r.name == "input_image") imaged = true;
+        if (r.name == base) { based = true; based_everywhere = based_everywhere || r.above == 0; }
+        if (r.name == "input_image") { imaged = true; imaged_everywhere = imaged_everywhere || r.above == 0; }
         if (!dearest || *r.rate > *dearest) dearest = r.rate;
       }
+      // With the length not stated, the call may be above no band: the units it needs must have a row without one.
+      const bool unstated = length == most;
       bool ok = true;
       if (variable) { refuse(UnboundedBy::ModelPrice, unit); ok = false; }
       if (!based) { refuse(UnboundedBy::ModelPrice, unit); ok = false; }
+      else if (unstated && !based_everywhere) { refuse(UnboundedBy::ModelPrice, unit); ok = false; }
       if (images && !imaged) { refuse(UnboundedBy::ModelPrice, "input_image"); ok = false; }
+      else if (images && unstated && !imaged_everywhere) { refuse(UnboundedBy::ModelPrice, "input_image"); ok = false; }
       if (!n) {
         if (!(ok && *dearest == 0)) refuse(unknown, unit);
         return;
@@ -929,25 +993,29 @@ struct Oracle {
           continue;
         }
         std::optional<std::uint64_t> dearest;
-        bool variable = false;
+        bool variable = false, everywhere = false;
         for (const auto& [key, r] : g.rows) {
           if (!r.item || "item:" + r.name != q.unit || !applies(r, length)) continue;
+          everywhere = everywhere || r.above == 0;
           if (!r.rate) variable = true;
           else if (!dearest || *r.rate > *dearest) dearest = r.rate;
         }
-        if (variable || !dearest) refuse(UnboundedBy::ModelPrice, with_dimensions(q.unit));
+        if (variable || !dearest || (length == most && !everywhere)) refuse(UnboundedBy::ModelPrice, with_dimensions(q.unit));
         else if (*dearest > 0 && !n) refuse(UnboundedBy::Quantity, q.unit);
         else if (n) sum += *n * *dearest;
       }
     }
     // The request fee.
     std::optional<std::uint64_t> fee;
+    bool fee_everywhere = false;
     for (const auto& [key, r] : g.rows) {
       if (r.item || r.name != "request" || !applies(r, length)) continue;
       if (!r.rate) { refuse(UnboundedBy::ModelPrice, "request"); fee.reset(); break; }
+      fee_everywhere = fee_everywhere || r.above == 0;
       if (!fee || *r.rate > *fee) fee = r.rate;
     }
-    if (fee) sum += *fee;
+    if (fee && length == most && !fee_everywhere) refuse(UnboundedBy::ModelPrice, "request");
+    else if (fee) sum += *fee;
     // Item rows of kinds no quantity counts.
     for (const auto& [key, r] : g.rows)
       if (r.item && std::find(kinds.begin(), kinds.end(), r.name) == kinds.end() && may_apply(r, length) && !(r.rate && *r.rate == 0))
@@ -1459,7 +1527,7 @@ int main() {
     bound_covers_every_consistent_result();
     estimate_within_the_bound();
     images(); decisions(); embeddings(); rerank(); speech(); transcription(); videos();
-    billing(); refusals(); zeros(); image_tokens(); bands(); attempts(); overflow();
+    billing(); refusals(); zeros(); image_tokens(); bands(); unstated_length(); attempts(); overflow();
     images_estimate(); estimate_rounds_once(); token_estimates(); item_estimates(); estimate_refusals();
     std::cout << "endpoint pricing properties passed\n";
     return 0;

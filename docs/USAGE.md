@@ -582,7 +582,7 @@ else for (const auto& why : bound.unbounded) log(sp::pricing::to_string(why.by),
 - **Output.** `output` bills at the dearest output rate: `output`, `reasoning`, `output_image` or `output_audio`. An `output` rate is needed.
 - **Request fee.** `request` is charged once when the entry lists it.
 - **Items.** An `item:<kind>` quantity bills at `dearest_item_price` for the offered dimensions.
-- **Bands.** The `input` count is the input length that picks bands. When it is not stated, every band applies.
+- **Bands.** The `input` count is the input length that picks bands. When it is not stated, every band applies, and since the call may then be above no band, a unit has a rate only when a row of it applies at every length, a row without a band in the call's tier; the rate is then the dearest over every row. Without one it is `ModelPrice` with the unit as subject: the first unit of the input or the output tokens (`input`, `output`; the other units of a set bill only above a row of the first and are taken at the dearest of their rows), `input_image` when the call has image tokens, the request fee, and an item unit whose rows the call's dimensions match are all banded. A stated length picks the bands as before.
 
 **Declared zeros.** A quantity that can be above zero needs a rate. A listed `"0"` is a declared zero. A unit the entry does not list has no price, never a price of zero, and neither does a row that applies at a variable price (`-1`). A rate above zero needs the count. A unit whose rates are all declared zeros needs no count.
 
@@ -599,7 +599,7 @@ else for (const auto& why : bound.unbounded) log(sp::pricing::to_string(why.by),
 | `Unmodeled` | `<endpoint>/<operation>` | the call bills the requests it carries (a batch submit) |
 | `Unmodeled` | the endpoint, `dimensions`, a unit or a price key | the call names no operation; its dimensions are unsorted, repeat a key or name another operation; image tokens (`input_image`) without an `input` quantity, or more of them than its stated count; a quantity of a unit the bound does not price; a row that applies to the call, is not a declared zero, and is of an item kind none of the quantities count, such as output seconds of a speech model |
 | `ModelPrice` | model | no entry, or an entry without prices |
-| `ModelPrice` | unit | no rate for a quantity that can be above zero, a variable price on a row that applies, or a row of the unit that names a dimension the call offers without a value; an item unit is named with the call's operation and each offered dimension whose key a row of the unit names, such as `item:image[operation=generate,quality=high]`; the other dimensions, which change no price, are not printed |
+| `ModelPrice` | unit | no rate for a quantity that can be above zero, a variable price on a row that applies, a row of the unit that names a dimension the call offers without a value, or, with the input length not stated, no row of the unit without a band; an item unit is named with the call's operation and each offered dimension whose key a row of the unit names, such as `item:image[operation=generate,quality=high]`; the other dimensions, which change no price, are not printed |
 | `RouteCeiling` | model | a routing gateway: no route ceiling or pin covers an endpoint call's prices; or an entry with a route ceiling at an origin that is not a gateway |
 | `TierPrice` | model | the entry prices no unit under `service_tier` |
 | `InputBound` | `input` | no `at_most`, no measured count and no input limit, and an input rate above zero |
