@@ -2,7 +2,8 @@
 // catalogue entries and usages that reaches every rule they apply: input bands at, below and above a threshold, service
 // tiers, cache reads and writes with and without the one-hour split, reasoning, audio and image modality counters, a
 // unit the entry does not list, the request fee, route ceilings at a routing gateway, zero counters, and sums that round
-// up. No entry here has a price that is not a fixed amount. Every field of each answer is compared, so a change to any of
+// up. No entry of that table has a price that is not a fixed amount. A second catalogue records the answers for a row at
+// a variable price beside a fixed row of the same unit. Every field of each answer is compared, so a change to any of
 // them for any of these inputs fails here.
 #include "core/enum_names.h"
 #include "core/pricing.h"
@@ -312,6 +313,41 @@ void worst_cases() {
   }
 }
 
+// A variable row above a band beside a fixed row of its unit, for a cache read and for the request fee.
+void variable_rows() {
+  const auto c = catalogue(R"({"version":1,"models":[
+    {"id":"variable-cache","pricing":{"input":"0.000003","output":"0.000008","cache_read":"0.000004","cache_read+1000":"-1"}},
+    {"id":"variable-fee","pricing":{"input":"0.000003","output":"0.000008","request":"0.001","request+1000":"-1"}}]})");
+  const auto describe_price = [](const pricing::ModelPrice& p) {
+    std::string out;
+    for (const auto& rate : {p.input, p.output, p.cache_read, p.cache_write, p.reasoning, p.request, p.cache_write_1h, p.output_image, p.input_audio,
+                             p.output_audio, p.ceiling_input, p.ceiling_output, p.ceiling_request})
+      out += (rate ? std::to_string(*rate) : std::string("-")) + ",";
+    for (const auto& [type, fee] : p.tool_fees) out += type + "=" + std::to_string(fee) + ",";
+    return out;
+  };
+  for (const auto& [name, id] : {std::pair{"cache", "variable-cache"}, std::pair{"fee", "variable-fee"}}) {
+    const auto& entry = *c->entry(id);
+    const auto at = [&](const char* what) { return std::string("variable ") + what + " " + name; };
+    answers.emplace_back(at("dearest 2000"), describe_price(pricing::dearest_price_of(entry, {}, 2'000)));
+    answers.emplace_back(at("dearest 500"), describe_price(pricing::dearest_price_of(entry, {}, 500)));
+    answers.emplace_back(at("exact 2000"), describe_price(pricing::price_of(entry, {}, 2'000)));
+    answers.emplace_back(at("bound price 2000"), describe(pricing::upper_bound(pricing::dearest_price_of(entry, {}, 2'000), {2'000, 10, false, {}})));
+    answers.emplace_back(at("bound entry 2000"), describe(pricing::upper_bound(entry, {}, {2'000, 10, false, {}})));
+    answers.emplace_back(at("bound entry 500"), describe(pricing::upper_bound(entry, {}, {500, 10, false, {}})));
+    pricing::WorstCaseInput input;
+    input.family = "openai.chat";
+    input.model = id;
+    input.output_tokens = 10;
+    input.measured_input_tokens = 2'000;
+    input.invocations = 1;
+    answers.emplace_back(at("worst 2000"), describe(pricing::worst_case(input, *c)));
+    const ServedModel model{id, id, ServedRelation::Exact};
+    answers.emplace_back(at("estimate 2000 reads"), describe(pricing::estimate(*c, "openai.chat", "", model, usage(2'000, 10, 100))));
+    answers.emplace_back(at("estimate 2000"), describe(pricing::estimate(*c, "openai.chat", "", model, usage(2'000, 10))));
+  }
+}
+
 // The recorded answers, by name.
 const std::vector<Pin> pins{
     {"estimate flat basic", "9700000 Derived CeilingCatalogueProduct entry=flat requested=0 assumed=[output at output_image] unpriced=[] lower=0"},
@@ -462,6 +498,24 @@ const std::vector<Pin> pins{
     {"worst gateway fallbacks", "21960500 Derived CeilingCatalogueProduct | entry=vendor/routed-b model=vendor/routed-b tokens=7000/100/7000 fees=0 invocations=1 attempts=1 tools= ceiling=1 pinned=0 pin=3000000000,9600000000,-,-,500,"},
     {"worst gateway unceiled", "none | RouteCeiling [vendor/unceiled] the entry lists no route ceiling (ceiling_input, ceiling_output), so the router may pick any price | entry= model= tokens=0/0/0 fees=0 invocations=0 attempts=1 tools= ceiling=1 pinned=0 pin=none"},
     {"worst gateway no fee", "3900000 Derived CeilingCatalogueProduct | entry=vendor/routed-b model=vendor/routed-b tokens=1000/100/1000 fees=0 invocations=1 attempts=1 tools= ceiling=1 pinned=0 pin=3000000000,9000000000,-,-,-,"},
+    {"variable dearest 2000 cache", "-,-,-,-,-,-,-,-,-,-,-,-,-,"},
+    {"variable dearest 500 cache", "3000000000,8000000000,4000000000,-,-,-,-,-,-,-,-,-,-,"},
+    {"variable exact 2000 cache", "3000000000,8000000000,-,-,-,-,-,-,-,-,-,-,-,"},
+    {"variable bound price 2000 cache", "none unpriced=[input,output]"},
+    {"variable bound entry 2000 cache", "none unpriced=[cache_read]"},
+    {"variable bound entry 500 cache", "2080000 Derived CeilingCatalogueProduct unpriced=[]"},
+    {"variable worst 2000 cache", "none | ModelPrice [variable-cache] catalogue entry 'variable-cache' prices cache_read at a variable price (cache_read+1000) | entry= model= tokens=0/0/0 fees=0 invocations=0 attempts=1 tools= ceiling=0 pinned=0 pin=none"},
+    {"variable estimate 2000 reads cache", "none entry=variable-cache requested=0 assumed=[] unpriced=[cache_read] lower=0"},
+    {"variable estimate 2000 cache", "6080000 Derived CeilingCatalogueProduct entry=variable-cache requested=0 assumed=[] unpriced=[] lower=0"},
+    {"variable dearest 2000 fee", "-,-,-,-,-,-,-,-,-,-,-,-,-,"},
+    {"variable dearest 500 fee", "3000000000,8000000000,-,-,-,1000000000000,-,-,-,-,-,-,-,"},
+    {"variable exact 2000 fee", "3000000000,8000000000,-,-,-,-,-,-,-,-,-,-,-,"},
+    {"variable bound price 2000 fee", "none unpriced=[input,output]"},
+    {"variable bound entry 2000 fee", "none unpriced=[request]"},
+    {"variable bound entry 500 fee", "2580000 Derived CeilingCatalogueProduct unpriced=[]"},
+    {"variable worst 2000 fee", "none | ModelPrice [variable-fee] catalogue entry 'variable-fee' prices request at a variable price (request+1000) | entry= model= tokens=0/0/0 fees=0 invocations=0 attempts=1 tools= ceiling=0 pinned=0 pin=none"},
+    {"variable estimate 2000 reads fee", "none entry=variable-fee requested=0 assumed=[cache_read at input] unpriced=[request] lower=0"},
+    {"variable estimate 2000 fee", "none entry=variable-fee requested=0 assumed=[] unpriced=[request] lower=0"},
 };
 }  // namespace
 
@@ -470,6 +524,7 @@ int main() {
     estimates();
     bounds();
     worst_cases();
+    variable_rows();
     std::size_t failed = 0;
     for (const auto& [name, actual] : answers) {
       const Pin* pin = nullptr;
