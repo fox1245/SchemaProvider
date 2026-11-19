@@ -3,7 +3,12 @@
 // A sealed message and a native archive carry these values, so a change that moves one makes what was sealed
 // before it unusable. Moving a pin must be a deliberate, documented change; a data edit that only changes
 // admission (models, MIME types, limits, levels) must leave every pin where it is.
+#include "codecs/accumulator.h"
 #include "codecs/chat.h"
+#include "codecs/gemini.h"
+#include "codecs/interactions.h"
+#include "codecs/messages.h"
+#include "codecs/responses.h"
 #include "core/native.h"
 #include "core/native_archive_custody_internal.h"
 #include "core/native_testing.h"
@@ -13,9 +18,11 @@
 
 #include <cstdio>
 #include <exception>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <variant>
+#include <vector>
 
 namespace {
 int failures = 0;
@@ -160,6 +167,132 @@ void chat_audio_configuration() {
   // Moving it makes Chat history sealed with an audio output configuration ReplayIneligible.
   pin("openai_chat.audio_configuration", "057315db972f9d2e706c5fab62aaee57d5e65cdf81d24950945636dc798eaf04", computed);
 }
+
+// The route a native context binds is text that a captured answer carries: a later turn replays the answer only when
+// its own route is the same text, and a native archive stores it. Each turn below is encoded, its answer captured
+// through the family's codec, and the next turn sends the answer back.
+struct Turns {
+  std::string first, next;
+  bool captured = false, replayed = false;
+};
+std::vector<sp::Message> opening() { return {sp::Message::user_text("hello")}; }
+std::optional<sp::Message> answer_of(const sp::Accumulator& accumulator) {
+  if (!accumulator.outcome() || !std::holds_alternative<sp::Completion>(*accumulator.outcome())) return std::nullopt;
+  const auto& messages = std::get<sp::Completion>(*accumulator.outcome()).messages;
+  if (messages.empty() || !messages.front().native || !messages.front().native->complete()) return std::nullopt;
+  return messages.front();
+}
+// `encode` is the family's encoder and `decode` feeds the family's codec the answer.
+template <class Request, class Encoded, class Encode, class Decode>
+Turns turns(const descriptor::ValidatedDescriptor& d, std::string_view model, bool streaming, Encode encode, Decode decode) {
+  Turns out;
+  const auto first = encode(d, Request::simple(std::string(model), opening(), 64), streaming);
+  const auto* wire = std::get_if<Encoded>(&first);
+  if (!wire || !wire->context) return out;
+  out.first = std::string(sp::native_testing::ContextAccess::route(*wire->context));
+  sp::Accumulator accumulator;
+  decode(d, accumulator, wire->context);
+  const auto answer = answer_of(accumulator);
+  if (!answer) return out;
+  out.captured = true;
+  auto history = opening();
+  history.push_back(*answer);
+  history.push_back(sp::Message::user_text("next"));
+  const auto next = encode(d, Request::simple(std::string(model), std::move(history), 64), streaming);
+  if (const auto* again = std::get_if<Encoded>(&next); again && again->context) {
+    out.next = std::string(sp::native_testing::ContextAccess::route(*again->context));
+    out.replayed = true;
+  }
+  return out;
+}
+using Context = std::shared_ptr<const sp::NativeContext>;
+Turns family_turns(const descriptor::ValidatedDescriptor& d, std::string_view model, bool streaming) {
+  const auto family = d.family();
+  if (family == "openai.chat")
+    return turns<sp::chat::Request, sp::chat::EncodedRequest>(d, model, streaming, [](const auto& value, const auto& request, bool mode) { return sp::chat::encode(value, request, mode); },
+        [&](const auto& descriptor, sp::Accumulator& accumulator, const Context& context) {
+          sp::chat::Codec codec(descriptor, sp::chat::Mode::Buffered, accumulator, {}, context);
+          codec.buffered("{\"id\":\"generation-1\",\"model\":" + sp::json::quote(model) +
+                         R"(,"created":7,"object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"answer"},"finish_reason":"stop"}],"usage":null})", {});
+          codec.finish();
+        });
+  if (family == "anthropic.messages")
+    return turns<sp::messages::Request, sp::messages::EncodedRequest>(d, model, streaming, [](const auto& value, const auto& request, bool mode) { return sp::messages::encode(value, request, mode); },
+        [&](const auto& descriptor, sp::Accumulator& accumulator, const Context& context) {
+          sp::messages::Codec codec(descriptor, sp::messages::Mode::Buffered, accumulator, context);
+          codec.buffered("{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":" + sp::json::quote(model) +
+                         R"(,"content":[{"type":"text","text":"answer"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":2,"output_tokens":1}})", {});
+          codec.finish();
+        });
+  if (family == "openai.responses")
+    return turns<sp::responses::Request, sp::responses::EncodedRequest>(d, model, streaming, [](const auto& value, const auto& request, bool mode) { return sp::responses::encode(value, request, mode); },
+        [&](const auto& descriptor, sp::Accumulator& accumulator, const Context& context) {
+          sp::responses::Codec codec(descriptor, sp::responses::Mode::Buffered, accumulator, context);
+          codec.buffered("{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":1,\"model\":" + sp::json::quote(model) +
+                         R"(,"status":"completed","output":[{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"answer","annotations":[]}]}],"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3},"incomplete_details":null,"error":null})", {});
+          codec.finish();
+        });
+  if (family == "google.generate")
+    return turns<sp::gemini::Request, sp::gemini::EncodedRequest>(d, model, streaming, [](const auto& value, const auto& request, bool mode) { return sp::gemini::encode(value, request, mode); },
+        [&](const auto& descriptor, sp::Accumulator& accumulator, const Context& context) {
+          sp::gemini::Codec codec(descriptor, sp::gemini::Mode::Buffered, accumulator, context);
+          codec.buffered("{\"modelVersion\":" + sp::json::quote(model) +
+                         R"(,"responseId":"g1","candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"answer"}]},"finishReason":"STOP"}]})", {});
+          codec.finish();
+        });
+  if (family == "google.interactions")
+    return turns<sp::interactions::Request, sp::interactions::EncodedRequest>(d, model, streaming, [](const auto& value, const auto& request, bool mode) { return sp::interactions::encode(value, request, mode); },
+        [&](const auto& descriptor, sp::Accumulator& accumulator, const Context& context) {
+          sp::interactions::Codec codec(descriptor, sp::interactions::Mode::Buffered, accumulator, context);
+          codec.buffered("{\"id\":\"i1\",\"model\":" + sp::json::quote(model) +
+                         R"(,"status":"completed","steps":[{"type":"model_output","content":[{"type":"text","text":"answer"}]}]})", {});
+          codec.finish();
+        });
+  return {};
+}
+// The route a turn binds, in both transport modes, and the same route on the turn that replays its answer.
+void route(std::string_view name, const descriptor::LoadResult& result, std::string_view model, std::string_view pinned) {
+  const auto* value = loaded(name, result);
+  if (!value) return;
+  for (const bool streaming : {false, true}) {
+    const auto turn = family_turns(*value, model, streaming);
+    const std::string mode = std::string(name) + (streaming ? ".streamed" : ".buffered");
+    // Moving it makes every answer captured on this descriptor stop replaying, and its archives stop restoring.
+    pin(mode + ".route", pinned, turn.first);
+    if (!turn.captured) { ++failures; std::fprintf(stderr, "NOT CAPTURED %s\n", mode.c_str()); continue; }
+    if (!turn.replayed) { ++failures; std::fprintf(stderr, "NOT REPLAYED %s\n", mode.c_str()); continue; }
+    pin(mode + ".replayed_route", pinned, turn.next);
+  }
+}
+descriptor::LoadResult loopback(std::string_view id, std::string_view family, std::string_view buffered, std::string_view streaming) {
+  return descriptor::load("{\"descriptor_version\":1,\"revision\":1,\"id\":" + sp::json::quote(id) + ",\"family\":" + sp::json::quote(family) +
+                          R"(,"connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":)" + sp::json::quote(buffered) +
+                          ",\"streaming\":" + sp::json::quote(streaming) + "}}}");
+}
+void native_routes() {
+  route("openai_chat", presets::try_openai_chat(), "fixture-model", "/v1/chat/completions");
+  route("openai_responses", presets::try_openai_responses(), "fixture-model", "/v1/responses");
+  route("anthropic_messages", presets::try_anthropic_messages(), "fixture-model", "/v1/messages");
+  route("google_generate_routed", presets::try_google_generate(), "fixture-model", "/v1beta/models/fixture-model:generateContent");
+  route("google_generate_literal", presets::try_google_generate("gemini-2.5-flash"), "gemini-2.5-flash",
+        "/v1beta/models/gemini-2.5-flash:generateContent");
+  route("google_interactions", presets::try_google_interactions(), "fixture-model", "/v1beta/interactions");
+  route("openrouter_chat", presets::try_openrouter_chat(), "fixture-model", "/api/v1/chat/completions");
+  route("openrouter_responses", presets::try_openrouter_responses(), "fixture-model", "/api/v1/responses");
+  route("openrouter_messages", presets::try_openrouter_messages(), "fixture-model", "/api/v1/messages");
+  route("loopback_chat", presets::try_loopback_chat(), "fixture-model", "/v1/chat/completions");
+  // Hand-written descriptors: a literal Generate route, a model-routed one and an Interactions one.
+  route("loopback_generate_literal",
+        loopback("generate-literal", "google.generate", "/v1beta/models/fixture-model:generateContent",
+                 "/v1beta/models/fixture-model:streamGenerateContent?alt=sse"),
+        "fixture-model", "/v1beta/models/fixture-model:generateContent");
+  route("loopback_generate_routed",
+        loopback("generate-routed", "google.generate", "/v1beta/models/{model}:generateContent",
+                 "/v1beta/models/{model}:streamGenerateContent?alt=sse"),
+        "other-model", "/v1beta/models/other-model:generateContent");
+  route("loopback_interactions", loopback("interactions", "google.interactions", "/v1beta/interactions", "/v1beta/interactions"),
+        "fixture-model", "/v1beta/interactions");
+}
 } // namespace
 
 int main() {
@@ -167,6 +300,7 @@ int main() {
     builtin_policy_identity();
     preset_origins_and_bindings();
     chat_audio_configuration();
+    native_routes();
   } catch (const std::exception& error) {
     ++failures;
     std::fprintf(stderr, "EXCEPTION %s\n", error.what());

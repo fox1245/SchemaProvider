@@ -676,6 +676,7 @@ std::optional<Digest> chat_configuration_digest_of(const descriptor::ValidatedDe
   if (!configuration_digest(descriptor, request, choices, digest)) return std::nullopt;
   return digest;
 }
+std::string_view ContextAccess::route(const NativeContext& context) noexcept { return context.route_; }
 } // namespace native_testing
 NativeContext::NativeContext(Family family, std::string model, std::string route, size_t prefix_count, descriptor::PolicySnapshot policy)
     : family_(family), model_(std::move(model)), route_(std::move(route)), prefix_count_(prefix_count), policy_(std::move(policy)) {}

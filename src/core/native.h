@@ -10,6 +10,7 @@
 namespace sp {
 class Accumulator;
 class NativeArchive;
+namespace native_testing { struct ContextAccess; }
 // Private in-process provenance, not issuer authentication or a persistence format.
 // There is deliberately no constructor accepting caller-provided binding hashes.
 class NativeContext final {
@@ -72,6 +73,7 @@ class NativeContext final {
   friend class NativeReplay;
   friend class NativeArchive;
   friend class Accumulator;
+  friend struct native_testing::ContextAccess;
 };
 class NativeReplay final {
  public:
