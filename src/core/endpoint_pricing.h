@@ -89,7 +89,12 @@ struct EndpointBound {
 //     `context_window`) times `per`, or the measured input tokens capped at that; the entry's `output_limit`; the
 //     `stated_seconds`. A `Request` quantity without `at_most` is not stated.
 //   - The input length is the `input` quantity: rows above an input band apply when the call may exceed the band, and
-//     every band applies when the length is not stated.
+//     every band applies when the length is not stated. The call may then be above no band, so a unit has a rate only
+//     when a row of it applies at every length, a row without a band in the tier, and the rate is the dearest over every
+//     row: otherwise `ModelPrice`, subject the unit, for the first unit of the input or the output tokens (`input`,
+//     `output`; the other units of a set are taken at the dearest of their rows, as they bill only above a row of the
+//     first), for `input_image` when the call has image tokens, for the request fee, and for an item unit whose rows the
+//     call's dimensions match are all banded.
 //   - `input` is priced at the dearest input rate (`input`, `cache_read`, `cache_write`, `cache_write_1h`,
 //     `input_audio`, `input_image`), which needs an `input` rate. An `input_image` quantity counts image tokens of
 //     the input: one that can be above zero needs an `input_image` rate, and an `input` quantity whose count, when

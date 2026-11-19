@@ -310,6 +310,11 @@ EndpointBound endpoint_worst_case(const EndpointWorstCaseInput& in, const descri
     stated_input = sum;
   }
   const std::uint64_t length = stated_input && !unstated_input ? *stated_input : every_band;
+  // Without a stated length the call may be above no band, so a unit has a rate only when a row of it applies at every
+  // length: a row without a band. The rate is then the dearest over every row, which every band may reach.
+  const bool unstated_length = length == every_band;
+  const auto unbanded = [&](std::span<const std::string_view> units) { return token_rows(*entry, units.first(1), tier, 0).base; };
+  constexpr std::string_view below_band = "no row of the unit prices a call below its input band, and the call's input length is not stated";
   // The image tokens of the input are among its input tokens, which the input quantities count: image tokens that can
   // be above zero need an input quantity, and one that holds them when both counts are stated.
   if (image_tokens && (!has_input || (stated_input && !unstated_input && stated_images && *stated_images > *stated_input)))
@@ -344,9 +349,15 @@ EndpointBound endpoint_worst_case(const EndpointWorstCaseInput& in, const descri
     if (!rows.base) {
       block(UnboundedBy::ModelPrice, std::string(unit), "catalogue entry '" + entry->id + "' lists no rate for the unit");
       priced = false;
+    } else if (unstated_length && !unbanded(units)) {
+      block(UnboundedBy::ModelPrice, std::string(unit), std::string(below_band));
+      priced = false;
     }
     if (images && !token_rows(*entry, image_token_units, tier, length).base) {
       block(UnboundedBy::ModelPrice, std::string(image_token_units[0]), "catalogue entry '" + entry->id + "' lists no rate for the input's image tokens");
+      priced = false;
+    } else if (images && unstated_length && !unbanded(image_token_units)) {
+      block(UnboundedBy::ModelPrice, std::string(image_token_units[0]), std::string(below_band));
       priced = false;
     }
     if (!count) {
@@ -362,6 +373,8 @@ EndpointBound endpoint_worst_case(const EndpointWorstCaseInput& in, const descri
   // The request fee, once.
   if (const auto fee = token_rows(*entry, request_units, tier, length); !fee.variable.empty())
     block(UnboundedBy::ModelPrice, std::string(request_units[0]), "catalogue entry '" + entry->id + "' prices it at a variable price (" + std::string(fee.variable) + ")");
+  else if (fee.dearest && unstated_length && !unbanded(request_units))
+    block(UnboundedBy::ModelPrice, std::string(request_units[0]), std::string(below_band));
   else if (fee.dearest)
     charge(request_units[0], fee.dearest->second, 1, fee.dearest->first);
   // The items, each at the dearest row the call's dimensions match.
@@ -380,6 +393,11 @@ EndpointBound endpoint_worst_case(const EndpointWorstCaseInput& in, const descri
       block(UnboundedBy::ModelPrice, with_dimensions(*entry, q.unit, offered),
             applying_rows(*entry, q.unit, offered, tier, length) ? "catalogue entry '" + entry->id + "' has no row of the unit that applies to the call"
                                                                  : "a row of the unit that applies to the call has a variable price");
+      continue;
+    }
+    // Rows of the qualifiers the call matches, without a band.
+    if (const auto everywhere = applying_rows(*entry, q.unit, offered, tier, 0); unstated_length && everywhere && everywhere->empty()) {
+      block(UnboundedBy::ModelPrice, with_dimensions(*entry, q.unit, offered), std::string(below_band));
       continue;
     }
     if (rate->first == 0) charge(q.unit, rate->second, counts[i].value_or(0), 0);
