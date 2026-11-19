@@ -406,10 +406,7 @@ class PolicyLoader {
             // The options are the tool's other members: an object whose properties never name an owned member.
             if (fact.options->kind != ValueSchema::Kind::Object) fail("/server_tools/options", "object schema");
             for (const auto& name : fact.options->names)
-              if (name == "type" || name == "name" || name == "max_uses" || name == "input_schema" || name == "description" ||
-                  (messages && (name == "allowed_callers" || name == "allowed_domains" || name == "blocked_domains" ||
-                                name == "user_location" || name == "citations" || name == "max_content_tokens")))
-                fail("/server_tools/options", "properties other than the tool's typed members");
+              if (role_of(owned_tool_members(f.family), name)) fail("/server_tools/options", "properties other than the tool's typed members");
           }
           if (f.family == "openai.responses") {
             // The typed hosted tools the Responses encoder can write, or a generic one with declared options.
@@ -603,29 +600,6 @@ class PolicyLoader {
       // the schema of the members a request may add beside the typed ones.
       if (auto endpoints = root.get("endpoints"); endpoints.valid()) {
         if (!endpoints.is_array() || endpoints.size() > 64) fail("/endpoints", "bounded array of endpoint facts");
-        static constexpr std::string_view image_members[]{"model", "prompt", "n", "size", "quality", "background", "output_format",
-                                                          "output_compression", "images", "input_references", "stream", "partial_images"};
-        static constexpr std::string_view decision_members[]{"model", "input", "state", "questions"};
-        static constexpr std::string_view embedding_members[]{"model", "input", "dimensions", "encoding_format", "input_type", "requests"};
-        static constexpr std::string_view rerank_members[]{"model", "query", "documents", "top_n"};
-        static constexpr std::string_view moderation_members[]{"model", "input"};
-        static constexpr std::string_view speech_members[]{"model", "input", "voice", "instructions", "response_format", "speed", "stream_format"};
-        static constexpr std::string_view transcription_members[]{"model", "file", "input_audio", "language", "prompt", "stream"};
-        static constexpr std::string_view video_members[]{"model", "prompt", "input_references", "frame_images", "duration", "aspect_ratio",
-                                                          "resolution", "size", "generate_audio"};
-        static constexpr std::string_view file_members[]{"file", "purpose", "expires_after"};
-        static constexpr std::string_view realtime_members[]{"model", "generationConfig", "systemInstruction", "tools", "inputAudioTranscription",
-                                                             "outputAudioTranscription", "sessionResumption", "type", "instructions",
-                                                             "output_modalities", "audio"};
-        static constexpr std::string_view batch_members[]{"input_file_id", "endpoint", "completion_window", "requests", "batch"};
-        const auto owned_by = [](std::string_view endpoint, std::string_view name) {
-          const auto in = [&](const auto& list) { return std::find(std::begin(list), std::end(list), name) != std::end(list); };
-          return (endpoint == "images" && in(image_members)) || (endpoint == "decisions" && in(decision_members)) ||
-                 (endpoint == "embeddings" && in(embedding_members)) || (endpoint == "rerank" && in(rerank_members)) ||
-                 (endpoint == "moderation" && in(moderation_members)) || (endpoint == "speech" && in(speech_members)) ||
-                 (endpoint == "transcription" && in(transcription_members)) || (endpoint == "videos" && in(video_members)) ||
-                 (endpoint == "files" && in(file_members)) || (endpoint == "realtime" && in(realtime_members)) || (endpoint == "batches" && in(batch_members));
-        };
         const auto operations_of = [](std::string_view endpoint, std::string_view shape) -> std::vector<std::string_view> {
           if (endpoint == "images" && shape == "openai") return {"generate", "edit"};
           if (endpoint == "images" && shape == "openrouter") return {"generate"};
@@ -701,7 +675,7 @@ class PolicyLoader {
             fact.options = std::get<ValueSchema>(std::move(parsed));
             if (fact.options->kind != ValueSchema::Kind::Object) fail("/endpoints/options", "object schema");
             for (const auto& name : fact.options->names)
-              if (owned_by(fact.endpoint, name)) fail("/endpoints/options", "properties other than the endpoint's typed members");
+              if (member_role(fact.endpoint, name)) fail("/endpoints/options", "properties other than the endpoint's typed members");
           }
           if (e.get("auth").valid()) {
             fact.auth = text(e.get("auth"), "/endpoints/auth");

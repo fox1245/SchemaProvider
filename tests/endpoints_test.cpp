@@ -8,18 +8,23 @@
 #include "codecs/images.h"
 #include "codecs/jobs.h"
 #include "codecs/moderation.h"
+#include "codecs/realtime.h"
 #include "codecs/rerank.h"
 #include "codecs/speech.h"
 #include "codecs/transcription.h"
 #include "codecs/videos.h"
 #include "descriptor/descriptor.h"
+#include "descriptor/owned_keys.h"
 #include "descriptor/policy.h"
+#include "descriptor/presets.h"
 #include "json/json.h"
 #include "sp/config_defaults.h"
 #include "support/endpoint_fakes.h"
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <map>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <variant>
@@ -334,6 +339,120 @@ void transcription_endpoint() {
   CHECK(refused(transcription::encode, router, [&] { auto r = routed; r.translate = true; r.language.reset(); return r; }()) == ErrorKind::Unsupported);
 }
 
+// The members an endpoint's encoder owns are the members its requests carry. Requests that set every typed member, at each
+// provider shape, are encoded; the top-level members of each body (the form fields of a multipart one, the members of a
+// session's setup message) are the members the endpoint writes. The table holds each of them as written, and writes none of
+// its other members.
+std::set<std::string> json_members(const std::string& body) {
+  std::set<std::string> out;
+  for (auto member : document(body)->root().members()) out.insert(std::string(member.key));
+  return out;
+}
+// The field names of a multipart body, a bracketed name (`expires_after[seconds]`) by its first part.
+std::set<std::string> form_fields(const std::string& body) {
+  std::set<std::string> out;
+  const std::string mark = "Content-Disposition: form-data; name=\"";
+  for (auto at = body.find(mark); at != std::string::npos; at = body.find(mark, at + mark.size())) {
+    const auto begin = at + mark.size();
+    const auto name = body.substr(begin, body.find('"', begin) - begin);
+    out.insert(name.substr(0, name.find('[')));
+  }
+  return out;
+}
+void endpoint_members_cover_encoders() {
+  const auto openai = at("https://api.openai.com"), router = at("https://openrouter.ai"), google = at("https://generativelanguage.googleapis.com");
+  const auto picture = Media::image("image/png", std::make_shared<const std::string>(png));
+  const auto wav = std::make_shared<const std::string>(base64_encode(std::string("RIFF\x24\x00\x00\x00WAVEfmt synthetic", 24)));
+  std::map<std::string, std::set<std::string>> written;
+  const auto add = [&](const std::string& endpoint, std::set<std::string> members) { written[endpoint].insert(members.begin(), members.end()); };
+
+  images::Request image{"m", "a fox"};
+  image.count = 2; image.size = "1024x1024"; image.quality = "high"; image.background = "transparent"; image.output_format = "webp"; image.output_compression = 80;
+  add("images", json_members(encoded<images::Encoded>(images::encode, openai, image).body));
+  image.references = {picture};
+  add("images", json_members(encoded<images::Encoded>(images::encode, openai, image).body));
+  add("images", json_members(encoded<images::Encoded>(images::encode, router, image).body));
+
+  decisions::Request question;
+  question.model = "m";
+  question.input = document(R"("a ticket")");
+  question.questions.push_back({"urgent", decisions::Kind::Predicate, document(R"("is it urgent?")")});
+  add("decisions", json_members(encoded<decisions::Encoded>(decisions::encode, openai, question).body));
+  add("decisions", json_members(encoded<decisions::Encoded>(decisions::encode, router, question).body));
+
+  embeddings::Request vectors{"text-embedding-3-small", {{"a red fox"}, {"a blue whale"}}};
+  vectors.dimensions = 256;
+  add("embeddings", json_members(encoded<embeddings::Encoded>(embeddings::encode, openai, vectors).body));
+  vectors.task = "query";
+  add("embeddings", json_members(encoded<embeddings::Encoded>(embeddings::encode, router, vectors).body));
+  vectors.task = "RETRIEVAL_DOCUMENT";
+  add("embeddings", json_members(encoded<embeddings::Encoded>(embeddings::encode, google, vectors).body));
+
+  rerank::Request ranked{"m", "q", {"a", "b"}};
+  ranked.top = 1;
+  add("rerank", json_members(encoded<rerank::Encoded>(rerank::encode, router, ranked).body));
+  add("moderation", json_members(encoded<moderation::Encoded>(moderation::encode, openai, moderation::Request{"m", {{"a"}}}).body));
+
+  speech::Request spoken{"m", "Hello there.", "alloy"};
+  spoken.instructions = "Speak slowly."; spoken.format = "mp3"; spoken.speed = 1.25;
+  add("speech", json_members(encoded<speech::Encoded>(speech::encode, openai, spoken).body));
+
+  transcription::Request heard{"m", Media::audio("audio/wav", wav)};
+  heard.language = "en"; heard.prompt = "A greeting.";
+  add("transcription", form_fields(encoded<transcription::Encoded>(transcription::encode, openai, heard).body));
+  heard.prompt.reset();
+  add("transcription", json_members(encoded<transcription::Encoded>(transcription::encode, router, heard).body));
+
+  videos::Request clip{"m", "a fox"};
+  clip.references = {picture}; clip.duration = 4; clip.aspect_ratio = "16:9"; clip.resolution = "720p"; clip.size = "1280x720"; clip.audio = true;
+  add("videos", json_members(encoded<videos::Encoded>(videos::encode, router, clip).body));
+
+  files::Upload upload{{std::make_shared<const std::string>("note")}, "note.txt", "text/plain", "user_data", 3600};
+  add("files", form_fields(encoded<files::Encoded>(static_cast<std::variant<files::Encoded, Error> (*)(const descriptor::ValidatedDescriptor&, const files::Upload&)>(files::encode), openai, upload).body));
+
+  // The items of an Anthropic or Google batch are requests of that family, so their descriptors are the family's own.
+  using BatchEncode = std::variant<batches::Encoded, Error> (*)(const descriptor::ValidatedDescriptor&, const batches::Submit&);
+  add("batches", json_members(encoded<batches::Encoded>(static_cast<BatchEncode>(batches::encode), openai, batches::Submit{{}, "file-9", "/v1/responses"}).body));
+  add("batches", json_members(encoded<batches::Encoded>(static_cast<BatchEncode>(batches::encode), descriptor::presets::anthropic_messages(),
+      batches::Submit{{{"a-1", messages::Request::simple("claude-haiku-4-5", "Say: alpha", 16)}}}).body));
+  add("batches", json_members(encoded<batches::Encoded>(static_cast<BatchEncode>(batches::encode), descriptor::presets::google_generate(),
+      batches::Submit{{{"g-1", gemini::Request::simple("gemini-3.5-flash-lite", "x")}}}).body));
+
+  // A realtime session sets itself up with one message: Google's `setup` object, and OpenAI's `session` object.
+  const auto setup_members = [&](const descriptor::ValidatedDescriptor& d, const realtime::Setup& setup, std::string_view wrapper) {
+    auto codec = realtime::make_codec(d);
+    CHECK(codec);
+    auto opened = codec->open(setup);
+    CHECK(std::holds_alternative<std::vector<realtime::Frame>>(opened));
+    const auto& frames = std::get<std::vector<realtime::Frame>>(opened);
+    CHECK(frames.size() == 1);
+    std::set<std::string> out;
+    for (auto member : document(frames[0].data)->root().get(wrapper).members()) out.insert(std::string(member.key));
+    return out;
+  };
+  realtime::Setup session;
+  session.model = "m"; session.instructions = "Be brief."; session.voice = "alloy"; session.input_transcription = true; session.transcription_model = "t";
+  session.output_transcription = true; session.resume = std::string();
+  session.tools = {realtime::Tool{"lookup", "d", document(R"({"type":"object"})")}};
+  add("realtime", setup_members(google, session, "setup"));
+  session.resume.reset(); session.output_transcription = false;
+  add("realtime", setup_members(openai, session, "session"));
+
+  // The table holds every member written as written, and no member it holds as held or reserved is written. The OpenAI
+  // transcription encoder also writes `response_format`, which the policy's options admit; the table owns the typed members only.
+  written["transcription"].erase("response_format");
+  for (const auto endpoint : {"images", "decisions", "embeddings", "rerank", "moderation", "speech", "transcription", "videos", "files", "realtime", "batches"}) {
+    std::set<std::string> table;
+    for (const auto& member : descriptor::owned_members(endpoint)) if (member.role == descriptor::MemberRole::Written) table.insert(std::string(member.name));
+    CHECK(!table.empty());
+    if (written[endpoint] != table) {
+      for (const auto& name : written[endpoint]) if (!table.contains(name)) std::cerr << endpoint << " writes " << name << ", which the table does not hold as written\n";
+      for (const auto& name : table) if (!written[endpoint].contains(name)) std::cerr << endpoint << ": the table holds " << name << " as written, and no request writes it\n";
+    }
+    CHECK(written[endpoint] == table);
+  }
+}
+
 void generation_endpoint() {
   const auto router = at("https://openrouter.ai");
   const auto wire = encoded<generations::Encoded>(generations::encode, router, generations::Get{"gen-1792420896-swTWG0mrnUerfipmnSCE"});
@@ -646,6 +765,6 @@ void mime_parameters_with_whitespace() {
 }
 
 int main() {
-  try { embedding_endpoints(); embedding_counts(); rerank_endpoint(); rerank_results(); runtime_checks(); fact_headers(); moderation_endpoint(); speech_endpoint(); transcription_endpoint(); generation_endpoint(); mime_parameters_with_whitespace(); response_bounds(); calendar_dates(); transcription_forms(); transcription_audio(); std::cout << "endpoint properties passed\n"; return 0; }
+  try { embedding_endpoints(); embedding_counts(); rerank_endpoint(); rerank_results(); runtime_checks(); fact_headers(); moderation_endpoint(); speech_endpoint(); transcription_endpoint(); generation_endpoint(); mime_parameters_with_whitespace(); response_bounds(); calendar_dates(); transcription_forms(); transcription_audio(); endpoint_members_cover_encoders(); std::cout << "endpoint properties passed\n"; return 0; }
   catch (const std::exception& error) { std::cerr << "endpoint test failed: " << error.what() << '\n'; return 1; }
 }
