@@ -15,6 +15,8 @@
 #include "descriptor/descriptor.h"
 #include "descriptor/policy.h"
 #include "descriptor/presets.h"
+#include "json/json.h"
+#include "sp/config_defaults.h"
 
 #include <cstdio>
 #include <exception>
@@ -264,10 +266,12 @@ void route(std::string_view name, const descriptor::LoadResult& result, std::str
     pin(mode + ".replayed_route", pinned, turn.next);
   }
 }
-descriptor::LoadResult loopback(std::string_view id, std::string_view family, std::string_view buffered, std::string_view streaming) {
-  return descriptor::load("{\"descriptor_version\":1,\"revision\":1,\"id\":" + sp::json::quote(id) + ",\"family\":" + sp::json::quote(family) +
-                          R"(,"connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":)" + sp::json::quote(buffered) +
-                          ",\"streaming\":" + sp::json::quote(streaming) + "}}}");
+descriptor::LoadResult loopback(std::string_view id, std::string_view family, std::string_view buffered, std::string_view streaming,
+                                descriptor::PolicySnapshot policy = {}) {
+  const std::string source = "{\"descriptor_version\":1,\"revision\":1,\"id\":" + sp::json::quote(id) + ",\"family\":" + sp::json::quote(family) +
+                             R"(,"connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":)" + sp::json::quote(buffered) +
+                             ",\"streaming\":" + sp::json::quote(streaming) + "}}}";
+  return policy ? descriptor::load(source, std::move(policy)) : descriptor::load(source);
 }
 void native_routes() {
   route("openai_chat", presets::try_openai_chat(), "fixture-model", "/v1/chat/completions");
@@ -293,6 +297,50 @@ void native_routes() {
   route("loopback_interactions", loopback("interactions", "google.interactions", "/v1beta/interactions", "/v1beta/interactions"),
         "fixture-model", "/v1beta/interactions");
 }
+// The embedded policy with `routes` of one family replaced by `facts`.
+descriptor::PolicySnapshot with_routes(std::string_view family, std::string_view facts) {
+  const sp::json::Limits limits{sp::config_defaults::codec_admission_policy_bytes, sp::config_defaults::codec_admission_policy_depth};
+  auto parsed = sp::json::parse(sp::config_defaults::descriptor_policy_json, limits);
+  const auto root = std::get<sp::json::Document>(parsed).root();
+  std::string out = "{";
+  for (auto top : root.members()) {
+    out += (out.size() > 1 ? "," : "") + sp::json::quote(top.key) + ':';
+    if (top.key != "families") { out += top.value.dump(); continue; }
+    std::string families = "[";
+    for (auto entry : top.value.elements()) {
+      if (families.size() > 1) families += ',';
+      if (entry.get("family").as_string() != family) { families += entry.dump(); continue; }
+      std::string object = "{";
+      for (auto field : entry.members())
+        if (field.key != "routes") object += (object.size() > 1 ? "," : "") + sp::json::quote(field.key) + ':' + field.value.dump();
+      families += object + ",\"routes\":" + std::string(facts) + '}';
+    }
+    out += families + ']';
+  }
+  out += '}';
+  auto loaded = descriptor::load_policy(out, sp::config_defaults::codec_defaults_json);
+  if (const auto* error = std::get_if<descriptor::ConfigError>(&loaded)) {
+    ++failures;
+    std::fprintf(stderr, "POLICY NOT LOADED %s: %s\n", error->pointer.c_str(), error->expected.c_str());
+    return {};
+  }
+  return std::get<descriptor::PolicySnapshot>(std::move(loaded));
+}
+// Descriptors of the other families whose paths name `{model}` were not admitted before. Their native route is the
+// path the turn was sent to, with the request's model in it, and the answer replays on the next turn for that model.
+void model_routed_native_routes() {
+  route("loopback_chat_routed", loopback("chat-routed", "openai.chat", "/v1/models/{model}/chat", "/v1/models/{model}/chat"),
+        "fixture-model", "/v1/models/fixture-model/chat");
+  route("loopback_responses_routed", loopback("responses-routed", "openai.responses", "/v1/{model}/responses", "/v1/{model}/responses"),
+        "fixture-model", "/v1/fixture-model/responses");
+  route("loopback_messages_routed", loopback("messages-routed", "anthropic.messages", "/v1/models/{model}:rawPredict", "/v1/models/{model}:rawPredict"),
+        "fixture-model", "/v1/models/fixture-model:rawPredict");
+  // Interactions where the policy states no route fact for it.
+  if (const auto policy = with_routes("google.interactions", "[]"))
+    route("loopback_interactions_routed",
+          loopback("interactions-routed", "google.interactions", "/v1/{model}/interactions", "/v1/{model}/interactions", policy),
+          "fixture-model", "/v1/fixture-model/interactions");
+}
 } // namespace
 
 int main() {
@@ -301,6 +349,7 @@ int main() {
     preset_origins_and_bindings();
     chat_audio_configuration();
     native_routes();
+    model_routed_native_routes();
   } catch (const std::exception& error) {
     ++failures;
     std::fprintf(stderr, "EXCEPTION %s\n", error.what());
