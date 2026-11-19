@@ -187,6 +187,15 @@ struct CacheFact {
   std::vector<std::string> origins, routes;
   CacheCapabilities capabilities;
 };
+// Where a chat family's paths are at the listed origins, or at every origin when `origins` is empty (`routes`): the
+// buffered and the streaming path template. A template is an origin-relative path (descriptor::valid_route_template)
+// that names the request's model with `{model}` in both templates or in neither, and only a template carries a
+// query. At an origin, the fact that lists it applies, else the family's fact without origins; an origin where none
+// applies takes any valid pair of paths.
+struct RouteFact {
+  std::vector<std::string> origins;
+  std::string buffered, streaming;
+};
 // An OpenRouter plugin id or server tool type the policy admits at its declared origins, with the schema of the
 // plugin's other members or of the tool's `parameters` (none: no options).
 struct GatewayFact { std::string name; std::optional<ValueSchema> options; };
@@ -301,6 +310,12 @@ class DescriptorPolicy final {
   // the facts for a family has the embedded policy's. Empty for a family the policy does not have. A descriptor's
   // `connection.auth` wins over it (descriptor::auth_scheme).
   std::string_view auth_scheme(std::string_view family, std::string_view origin) const noexcept;
+  // The route facts of `family` in the policy's order, empty for a family without any or not in the policy. A policy
+  // that states no `routes` for a family has the embedded policy's.
+  const std::vector<RouteFact>& routes(std::string_view family) const noexcept;
+  // The route fact for `family` at `origin`: the one that lists the origin, else the one without origins. Null when
+  // none applies, and then a descriptor there may have any valid pair of paths.
+  const RouteFact* route(std::string_view family, std::string_view origin) const noexcept;
  private:
   DescriptorPolicy() = default;
   // The first entry, in lookup order, whose `control_values` name `control` (ModelCatalogue::for_each_match).
@@ -351,6 +366,7 @@ class DescriptorPolicy final {
   };
   std::vector<std::pair<std::string, ValidationFacts>> validation_;  // family, facts
   const ValidationFacts* validation(std::string_view family) const noexcept;
+  std::vector<std::pair<std::string, std::vector<RouteFact>>> routes_;  // family, facts
   static std::optional<std::string> check(const FamilyPolicy&, const ValidationFacts&, const EffectiveChoices&,
                                           std::optional<std::uint64_t> limit, bool require_cap);
   friend std::optional<std::string> validate_choices(const ValidatedDescriptor&, std::string_view, const EffectiveChoices&);
@@ -395,6 +411,13 @@ std::optional<std::string> validate_choices(const ValidatedDescriptor&, std::str
 const MediaPolicy& media_policy(const ValidatedDescriptor&) noexcept;
 // What this descriptor's family does with a cache mark at its origin for `model` (DescriptorPolicy::cache_capabilities).
 std::optional<CacheCapabilities> cache_capabilities(const ValidatedDescriptor&, std::string_view model) noexcept;
+// True when the descriptor's paths are the route fact of its origin (DescriptorPolicy::route), filled or not, or when
+// no fact applies there. Admission holds every family to it, apart from an Interactions descriptor with literal paths,
+// which loads and whose encoder refuses it.
+bool route_admitted(const ValidatedDescriptor&) noexcept;
+// Why a request for `model` cannot go through this descriptor's route: on a model-routed descriptor, a model that
+// cannot take the place of `{model}` (route_model_substitute). Empty when it can.
+std::optional<std::string> route_refusal(const ValidatedDescriptor&, std::string_view model);
 // The credential scheme this descriptor's chat calls send the API key with: its `connection.auth`, else its policy's
 // auth_scheme for its family and origin. Endpoint calls and realtime sessions use their endpoint fact's `auth`.
 std::string_view auth_scheme(const ValidatedDescriptor&) noexcept;

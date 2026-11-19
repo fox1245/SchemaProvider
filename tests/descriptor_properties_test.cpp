@@ -213,7 +213,7 @@ void endpoint_security_and_paths() {
         CHECK(std::holds_alternative<sp::descriptor::ValidatedDescriptor>(sp::descriptor::load(descriptor({}, url))));
     for (auto url : {"http://example.test", "http://localhost.evil.test", "http://127.0.0.1.evil.test", "http://127.1", "http://2130706433", "http://0177.0.0.1", "http://127.0.0.256", "http://[::ffff:127.0.0.1]", "https://user:SECRET@example.test", "https://example.test?SECRET", "https://example.test/#SECRET", "https://example.test/path", "https://example.test:0", "https://example.test:65536", "https://example.test:", "https://example.test\\@evil.test", "https://[::::]", "https://example.test%2f.evil.test", "file:///tmp/a"})
         rejected(descriptor({}, url), "/connection/base_url");
-    for (auto path : {"//evil.test/chat", "https://evil.test/chat", "/../chat", "/v1/./chat", "/v1/%2e%2e/chat", "/chat?SECRET", "/chat#SECRET", "/chat\\evil", "/chat/{model}", "/chat//other"})
+    for (auto path : {"//evil.test/chat", "https://evil.test/chat", "/../chat", "/v1/./chat", "/v1/%2e%2e/chat", "/chat?SECRET", "/chat#SECRET", "/chat\\evil", "/chat/{models}", "/chat/{model}/{model}", "/chat//other"})
         rejected(descriptor({}, "https://example.test", path), "/connection/paths/buffered");
     rejected(descriptor({}, "https://example.test", "/chat", R"(,"headers":{"Authorization":"SECRET"})"), "/connection/headers");
     rejected(descriptor({}, "https://example.test", "/chat", R"(,"headers":{"X-Trace":"SECRET\r\nInjected: x"})"), "/connection/headers");
@@ -270,8 +270,26 @@ void generate_route_shape() {
         rejected(generate_descriptor(buffered("m"), streaming("{model}")), "/connection/paths/streaming");
         for (const std::string& path : {buffered("{models}"), buffered("{model}{model}"), buffered("x{model}"), root + "{model}/{model}:generateContent"})
             rejected(generate_descriptor(path, streaming("{model}")), "/connection/paths/buffered");
-        // Only Generate routes take a placeholder.
-        rejected(descriptor({}, "https://example.test", "/v1/{model}/chat"), "/connection/paths/buffered");
+        // Every family takes a placeholder where no route fact of its policy applies: the built-in policy states
+        // none for Chat, Messages and Responses. It stands in both paths or in neither, and a query is a fact's alone.
+        for (const auto* path : {"/v1/{model}/chat", "/{model}", "/v1/models/{model}:chat"}) {
+            auto any = load(descriptor({}, "https://example.test", path));
+            CHECK(std::holds_alternative<ValidatedDescriptor>(any) && std::get<ValidatedDescriptor>(any).model_routed());
+        }
+        const auto chat_pair = [](std::string_view buffered, std::string_view streaming) {
+            return "{\"descriptor_version\":1,\"revision\":7,\"id\":\"synthetic-chat\",\"family\":\"openai.chat\",\"connection\":{\"base_url\":\"https://example.test\",\"paths\":{\"buffered\":"
+                + sp::json::quote(buffered) + ",\"streaming\":" + sp::json::quote(streaming) + "}}}";
+        };
+        rejected(chat_pair("/v1/{model}/chat", "/v1/chat"), "/connection/paths/streaming");
+        rejected(chat_pair("/v1/chat", "/v1/{model}/chat"), "/connection/paths/streaming");
+        rejected(chat_pair("/v1/{model}/chat", "/v1/{model}/chat?alt=sse"), "/connection/paths/streaming");
+        // `:` is a path character of every family.
+        CHECK(std::holds_alternative<ValidatedDescriptor>(load(descriptor({}, "https://example.test", "/v1/models/m:chat"))));
+        // Interactions keeps the embedded path at Google's origin and everywhere else; a descriptor with another
+        // literal path still loads, as before, and its requests are refused by the encoder.
+        CHECK(std::holds_alternative<ValidatedDescriptor>(load(R"({"descriptor_version":1,"revision":1,"id":"interactions","family":"google.interactions","connection":{"base_url":"https://example.test","paths":{"buffered":"/v1beta/other","streaming":"/v1beta/interactions"}}})")));
+        rejected(R"({"descriptor_version":1,"revision":7,"id":"interactions","family":"google.interactions","connection":{"base_url":"https://example.test","paths":{"buffered":"/v1beta/{model}/interactions","streaming":"/v1beta/{model}/interactions"}}})", "/connection/paths/buffered");
+        rejected(R"({"descriptor_version":1,"revision":7,"id":"interactions","family":"google.interactions","connection":{"base_url":"https://example.test","paths":{"buffered":"/v1beta/interactions?x=1","streaming":"/v1beta/interactions"}}})", "/connection/paths/buffered");
         const auto preset = presets::try_google_generate();
         CHECK(std::holds_alternative<ValidatedDescriptor>(preset) && std::get<ValidatedDescriptor>(preset).model_routed());
     }

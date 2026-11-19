@@ -99,12 +99,12 @@ The closed descriptor-version-1 root accepts only these keys:
 | `descriptor_version` | Exactly `1`; future versions are rejected, not guessed. |
 | `revision`, `id` | Positive unsigned fact revision and stable ASCII identifier. |
 | `family` | `openai.chat`, `openai.responses`, `anthropic.messages`, `google.generate` or `google.interactions`. |
-| `connection` | Origin-only `base_url`, literal `paths.buffered`/`paths.streaming`, optional non-reserved literal `headers`, optional `auth`: the credential scheme of the descriptor's chat calls (see [credential schemes](#credential-schemes)). |
+| `connection` | Origin-only `base_url`, `paths.buffered`/`paths.streaming` (see [paths and route facts](#paths-and-route-facts)), optional non-reserved literal `headers`, optional `auth`: the credential scheme of the descriptor's chat calls (see [credential schemes](#credential-schemes)). |
 | `bindings` | Optional admitted model/message/stream/output-cap member names and usage path segments. Defaults come from the family's policy. The Chat output cap defaults to `max_completion_tokens` on direct OpenAI (`https://api.openai.com`), whose current models reject `max_tokens`, and to `max_tokens` on every other origin, OpenRouter and compatible endpoints included. An explicit `max_output_tokens` binding wins on any origin. |
 | `stop_reasons` | Optional raw stop values with their declared stop kinds, added to the family policy's table (`ValidatedDescriptor::stop_mappings()` lists the result, and `stop_kind(raw)` answers what the codecs decode). A descriptor may add values, but in every family it may not give a value its policy or the embedded policy lists another kind, and it may not list `error`, `failed`, `cancelled` or `incomplete`, whose meaning the codecs decide in code. Chat, Messages, Responses and Generate decode stops through the table, then through the embedded policy's row for a value the table has none for; a value neither lists is `StopKind::Unknown` with the raw value kept (see [stop reasons](#stop-reasons)). Interactions maps its statuses in code, so entries added for it change the native binding identity, not decoded stops. |
 | `evidence` | Optional HTTPS documentation URLs and verification date; metadata is not runtime qualification. |
 
-The loader rejects duplicate/unknown keys, wrong types, size/depth overflow, path traversal, URL userinfo and invalid bindings. Non-loopback origins require HTTPS. HTTP is allowed only for canonical loopback hosts. Google generate paths name their model: the loader requires `/v1beta/models/<model>:generateContent` and `/v1beta/models/<model>:streamGenerateContent?alt=sse` for the same `<model>` (a ConfigError at `/connection/paths/buffered` or `/streaming` otherwise). `<model>` is either `{model}` in both paths, so that one descriptor serves every model of the origin and each request goes to its own `Request::model`, or one literal model made of letters, digits, `-`, `.` and `_`, which serves only requests for that model. On a `{model}` descriptor native history binds the model it was sealed for: replaying it in a request for another model is `ReplayIneligible`. Descriptors cannot script authentication, expand environment variables, interpolate prompts or merge arbitrary JSON bodies. Host endpoint allow-lists are a host responsibility; descriptor validation alone does not decide who should receive a credential.
+The loader rejects duplicate/unknown keys, wrong types, size/depth overflow, path traversal, URL userinfo and invalid bindings. Non-loopback origins require HTTPS. HTTP is allowed only for canonical loopback hosts. The paths follow the family's route facts in the descriptor policy, and in every family they may name `{model}`, so that one descriptor serves every model of its origin ([paths and route facts](#paths-and-route-facts)). Descriptors cannot script authentication, expand environment variables, interpolate prompts or merge arbitrary JSON bodies. Host endpoint allow-lists are a host responsibility; descriptor validation alone does not decide who should receive a credential.
 
 Pass credentials separately:
 
@@ -197,6 +197,48 @@ Each family of the descriptor policy states its schemes in `auth`, an array of f
 ```
 
 A policy written before the facts, without `auth` for a family, takes that family's facts from the embedded policy and sends what it sent before. Its content digest then covers the facts it took, so a pinned older policy needs its pin refreshed once. `DescriptorPolicy::auth_scheme(family, origin)` answers which scheme a family's chat call uses at an origin, and `descriptor::credential_header(scheme, key)` gives the header name and value a scheme sends; a host that builds its own requests per provider can ask them instead of keeping its own table.
+
+### Paths and route facts
+
+A descriptor's `paths.buffered` and `paths.streaming` are origin-relative paths: segments of letters, digits, `-`, `_`, `.`, `~` and `:`, none of them empty, `.` or `..`, with no URL escape, fragment or backslash. A path may name the request's model with `{model}`, once, in both paths or in neither.
+
+Where a family's paths may go is policy data. Each family of the descriptor policy may state `routes`, at most 16 facts. A fact has a `buffered` and a `streaming` path template and may list `origins` (canonical origins without a path, each in one fact); a fact without `origins` applies at every origin, and a family has one such fact at most. At an origin the fact that lists it applies, else the family's fact without origins. A template is a path as above that may end in a query of `name=value` pairs joined by `&`; `{model}` stands in both templates or in neither, and never in the query. A Generate request carries its model in the path alone, so a Generate template names `{model}`. A malformed fact is a `ConfigError` at `/routes`, `/routes/buffered`, `/routes/streaming` or `/routes/origins`. The built-in policy states:
+
+| Family | `routes` |
+|---|---|
+| `google.generate` | `[{"buffered": "/v1beta/models/{model}:generateContent", "streaming": "/v1beta/models/{model}:streamGenerateContent?alt=sse"}]` |
+| `google.interactions` | `[{"buffered": "/v1beta/interactions", "streaming": "/v1beta/interactions"}]` |
+| `openai.chat`, `anthropic.messages`, `openai.responses` | none |
+
+- **Where a fact applies,** a descriptor's pair is the fact's templates as they are, and the descriptor is model-routed when they name `{model}`; or both templates with one model name of letters, digits, `-`, `.` and `_` in place of `{model}`, a literal route for that model (`ValidatedDescriptor::route_model()`). Only such a pair carries a query. Any other pair is a `ConfigError` at `/connection/paths/buffered` when no template fits the buffered path, or at `/connection/paths/streaming` when the streaming path does not match it. An Interactions descriptor with other literal paths still loads, as it always has, and its encoder refuses each request (`InvalidConfig`); `descriptor::route_admitted(descriptor)` says whether a descriptor's paths are its origin's route.
+- **Where none applies,** any pair without a query loads. A pair that names `{model}` in both paths is model-routed, in every family, and a literal Generate pair is refused, since nothing says where its model is.
+- **Requests.** On a model-routed descriptor the request's model takes the place of `{model}` (`resolved_path(streaming, model)`). It must be a name of letters, digits, `-`, `.` and `_` that is not `.` and holds no `..`; any other model is refused before anything is sent (`InvalidRequest`, reason `request.route.model_name`; a Generate model outside those characters keeps the reason `request.generate.literal_model_name_required`), so a request's model never adds, removes or replaces a path segment and never reaches the query or the origin. A literal Generate route serves only its own model, and a request for another one is `InvalidConfig`.
+- **History.** Native history binds the path a turn was sent to, with the model in it, so an answer captured on a model-routed descriptor replays only in a request for the same model: replaying it for another model is `ReplayIneligible`. A descriptor that is not model-routed binds its paths as before.
+
+A host that serves a provider's wire shape under other paths writes them into the descriptor. A Messages descriptor at a host with Vertex-style paths:
+
+```json
+{
+  "descriptor_version": 1, "revision": 1, "id": "messages-vertex-style", "family": "anthropic.messages",
+  "connection": {"base_url": "https://llm.example.com",
+                 "paths": {"buffered": "/v1/projects/p/locations/l/publishers/anthropic/models/{model}:rawPredict",
+                           "streaming": "/v1/projects/p/locations/l/publishers/anthropic/models/{model}:streamRawPredict"},
+                 "auth": "bearer"}
+}
+```
+
+A Generate or Interactions descriptor at such a host needs a route fact for its origin in a custom policy, which replaces the built-in shape there and keeps it elsewhere:
+
+```json
+"routes": [{"origins": ["https://llm.example.com"],
+            "buffered": "/v1/projects/p/locations/l/publishers/google/models/{model}:generateContent",
+            "streaming": "/v1/projects/p/locations/l/publishers/google/models/{model}:streamGenerateContent?alt=sse"},
+           {"buffered": "/v1beta/models/{model}:generateContent", "streaming": "/v1beta/models/{model}:streamGenerateContent?alt=sse"}]
+```
+
+The request bodies stay the family's: a different path adds or drops no body member.
+
+A policy written before the facts, without `routes` for a family, takes that family's facts from the embedded policy and admits and sends what it did before. Its content digest then covers the facts it took, behind the marker `sp.descriptor-policy.borrowed.v1`, so a pinned older policy needs its pin refreshed once. Route facts are admission data: they are not part of the replay identity, and the native origin digest and the archive binding of a descriptor read only the descriptor, as before. `DescriptorPolicy::routes(family)` lists a family's facts, `route(family, origin)` names the one that applies at an origin, and `descriptor::valid_path(path)` and `valid_route_template(path)` check a path before it is written.
 
 ### Request controls and rules in the policy
 
@@ -1134,7 +1176,7 @@ if (auto* file = std::get_if<sp::files::File>(&uploaded)) {
 - **Batches.** OpenAI `/v1/batches`, Anthropic `/v1/messages/batches` and Google `batchGenerateContent` run many chat requests later, at a discount ([D7](decisions/D7-files-batches.md)).
   - Each `batches::Item` is a custom id (up to 64 letters, digits, `_` and `-`) and the family request the host would otherwise send: Chat, Messages, Responses or Generate.
   - Anthropic and Google take the items inline in `batches::Submit`. A Google batch runs one model, which every item names. An Anthropic item cannot need a beta header of its own.
-  - OpenAI reads them from a file: `batches::jsonl(family, items)` writes it for the Chat or Responses descriptor. Upload it with `files::Upload` and purpose `batch`, then submit its id and the path its lines call (`/v1/responses`).
+  - OpenAI reads them from a file: `batches::jsonl(family, items)` writes it for the Chat or Responses descriptor. Upload it with `files::Upload` and purpose `batch`, then submit its id and the path its lines call (`/v1/responses`), any path a descriptor may have (`descriptor::valid_path`). Each line calls the path of the descriptor that wrote it, with the item's model in place of `{model}`.
   - A submit is charge-on-accept. `batches::Batch` is a plain value to journal: the id, a `jobs::Status` (`Completed` once the provider ended the batch), the provider's word, request counts, OpenAI's usage, and where the results are. `batches::Get` polls it, `Cancel` stops it, and `Delete` removes an ended one (Anthropic, Google).
   - `batches::Results` downloads the results as JSONL, to a file or to memory: OpenAI's output file (with `errors`, its error file), Anthropic's results, Google's responses file. Google's inline results come with the batch: `batches::inline_lines`.
   - `batches::decode(family, original, line)` turns one line into the outcome `original` would have had, through the family codec, so the result is the same `Completion` a direct call returns. `batches::custom_id(line)` finds the request a line answers. A request the provider failed, cancelled or let expire is a `Failure` (`batches.line.failed`, `Cancelled`, `DeadlineExceeded`) with the provider's line in its raw events.
@@ -1401,6 +1443,8 @@ A host that sends to several families ends up restating what SchemaProvider alre
 **Routing.** `family_admits_routing(FamilyPolicy)` is true when the family declares routing origins (`openrouter_origins`); `routed_gateway(descriptor)` is true when this descriptor's origin is one.
 
 **Credential scheme.** `DescriptorPolicy::auth_scheme(family, origin)` names the scheme a chat call of the family sends the key with at an origin, from the family's `auth` facts, and `descriptor::auth_scheme(descriptor)` the one a descriptor's chat calls use, its `connection.auth` first. `descriptor::credential_header(scheme, key)` gives the header that scheme sends, and `credential_header_name(name)` says whether a header name, in any letter case, is one of them (see [credential schemes](#credential-schemes)).
+
+**Paths.** `DescriptorPolicy::routes(family)` and `route(family, origin)` give the paths a family's descriptors take at an origin, `ValidatedDescriptor::model_routed()`, `resolved_path(streaming, model)` and `route_model()` the route of one descriptor, and `descriptor::route_model_substitute(model)` whether a model may fill `{model}`. A host that builds descriptor paths per provider can read them instead of keeping its own path table (see [paths and route facts](#paths-and-route-facts)).
 
 **Service tiers.** `DescriptorPolicy::billing_tier(family, tier)` returns the tier the catalogue prices a call under: empty for a tier that bills at the standard rates (the family's `standard_service_tiers`: `default` at Chat and Responses, `standard` at Interactions), the name itself for any other. Pass the result as `price_of`'s `service_tier`.
 

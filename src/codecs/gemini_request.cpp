@@ -156,12 +156,11 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   auto bad = [](std::string message) -> EncodeResult { return Error{ErrorKind::InvalidRequest, std::move(message)}; };
   auto replay_bad = []() -> EncodeResult { return Error{ErrorKind::ReplayIneligible, "native replay provenance, binding or content mismatch"}; };
   if (descriptor.family() != "google.generate") return Error{ErrorKind::InvalidConfig, "Gemini encoder requires generate descriptor"};
-  if (request.model.empty() || request.model.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._") != std::string::npos) return bad("literal model name required");
-  const auto base = "/v1beta/models/" + request.model;
-  // descriptor::load holds a google.generate descriptor to one model in both paths, or to {model}; a literal route
-  // serves only the request for its own model.
-  if (!descriptor.model_routed() &&
-      (descriptor.path(false) != base + ":generateContent" || descriptor.path(true) != base + ":streamGenerateContent?alt=sse"))
+  if (!descriptor::route_model_name(request.model)) return bad("literal model name required");
+  if (auto refusal = descriptor::route_refusal(descriptor, request.model)) return bad(std::move(*refusal));
+  // descriptor::load holds a google.generate descriptor to {model} in both paths, or to one model where its origin's
+  // route fact has the placeholder; a literal route serves only the request for its own model.
+  if (!descriptor.model_routed() && request.model != descriptor.route_model())
     return Error{ErrorKind::InvalidConfig, "Gemini descriptor paths must target the same literal model"};
   const auto& resources = descriptor.policy()->resources();
   CacheMarkReport mark_report;

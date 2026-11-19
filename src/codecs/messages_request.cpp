@@ -94,6 +94,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   auto replay_bad = []() -> EncodeResult { return Error{ErrorKind::ReplayIneligible, "native replay provenance, binding or content mismatch"}; };
   if (descriptor.family() != "anthropic.messages") return Error{ErrorKind::InvalidConfig, "Messages encoder requires Messages descriptor"};
   if (request.model.empty() || request.messages.empty()) return bad("model and messages are required");
+  if (auto refusal = descriptor::route_refusal(descriptor, request.model)) return bad(std::move(*refusal));
   const auto& resources = descriptor.policy()->resources();
   const auto& family = descriptor.family_policy();
   auto effective = descriptor::effective_defaults(descriptor, request.model);
@@ -374,7 +375,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (!context->history_valid_) return replay_bad();
   if (!context->valid_) return Error{ErrorKind::ResourceLimit, "native binding could not be captured"};
   if (media_error) return *media_error;
-  EncodedRequest result{"POST", std::string(descriptor.path(streaming)), {}, {}, {}};
+  EncodedRequest result{"POST", descriptor.resolved_path(streaming, request.model), {}, {}, {}};
   std::string_view version = *family.header_version;
   for (const auto& header : descriptor.headers()) {
     auto key = lower(header.first);

@@ -237,7 +237,7 @@ class PolicyLoader {
         fail("", "configured policy depth limit");
       auto families=root.get("families"); if(!families.is_array() || families.size()!=5)fail("/families","all five typed families");
       for(auto v:families.elements()) {
-        closed(v,{"family","bindings","stop_reasons","defaults","required_output_cap","temperature_range","top_p_range","thinking_minimum","thinking_top_p_minimum","reasoning_efforts","reasoning_summaries","thinking_levels","service_tiers","header_versions","header_version","server_tools","openrouter_origins","media","openrouter_media"},"/families",{"temperature_forbidden_model_prefixes","temperature_forbidden_generations","max_completion_tokens_origins","unreplayable_parts","extensions","openrouter_plugins","openrouter_server_tools","betas","response_blocks","input_blocks","controls","standard_service_tiers","cache","auth","output_cap_maximum","thinking_budget_below_cap","thinking_budget_excludes_level","thinking_budget_excludes_temperature"});
+        closed(v,{"family","bindings","stop_reasons","defaults","required_output_cap","temperature_range","top_p_range","thinking_minimum","thinking_top_p_minimum","reasoning_efforts","reasoning_summaries","thinking_levels","service_tiers","header_versions","header_version","server_tools","openrouter_origins","media","openrouter_media"},"/families",{"temperature_forbidden_model_prefixes","temperature_forbidden_generations","max_completion_tokens_origins","unreplayable_parts","extensions","openrouter_plugins","openrouter_server_tools","betas","response_blocks","input_blocks","controls","standard_service_tiers","cache","auth","output_cap_maximum","thinking_budget_below_cap","thinking_budget_excludes_level","thinking_budget_excludes_temperature","routes"});
         FamilyPolicy f; f.family=text(v.get("family"),"/families");
         if(f.family!="openai.chat" && f.family!="anthropic.messages" && f.family!="openai.responses" && f.family!="google.generate" && f.family!="google.interactions")fail("/families","typed family");
         if(policy->family(f.family))fail("/families","unique families");
@@ -544,6 +544,14 @@ class PolicyLoader {
           if (!embedded) fail("/auth", "credential facts for the family in the embedded policy");
           policy->auth_.emplace_back(f.family, embedded->facts);
           borrowed.push_back({{f.family, "auth"}, embedded->json});
+        }
+        // Where the family's paths are. A policy written before the facts has the embedded policy's for the family,
+        // where it states some, and its content digest covers them (borrowed_).
+        if (auto facts = v.get("routes"); facts.valid()) {
+          policy->routes_.emplace_back(f.family, route_facts(facts, f.family));
+        } else if (const auto stated = embedded_member(f.family, "routes"); stated.valid()) {
+          policy->routes_.emplace_back(f.family, route_facts(stated, f.family));
+          borrowed.push_back({{f.family, "routes"}, stated.dump()});
         }
         // What the request checks read: the family's controls and the rules that bind a request's members. A policy
         // that states none for a family has the embedded policy's, and its content digest covers them (borrowed_).
@@ -880,14 +888,22 @@ class PolicyLoader {
       // Reuse descriptor admission for slot collisions, escaped usage segments,
       // and reserved wire fields instead of introducing a second convention.
       for (const auto& family : policy->families_) {
-        // A google.generate route has to name its model in both paths (descriptor.cpp).
-        const bool generate = family.family == "google.generate";
+        // The paths are the family's own route: its first fact that names {model}, filled with a model name, else
+        // its first fact, at the fact's first origin. A family without facts takes a {model} pair anywhere.
+        const auto& facts = policy->routes(family.family);
+        const auto named = std::find_if(facts.begin(), facts.end(), [](const RouteFact& fact) { return fact.buffered.find("{model}") != std::string::npos; });
+        const RouteFact* chosen = named != facts.end() ? &*named : facts.empty() ? nullptr : &facts.front();
+        const auto filled = [](std::string path) {
+          if (const auto at = path.find("{model}"); at != std::string::npos) path.replace(at, 7, "policy-admission");
+          return path;
+        };
+        const std::string base = chosen && !chosen->origins.empty() ? chosen->origins.front() : std::string("https://policy.invalid");
+        const std::string buffered = chosen ? filled(chosen->buffered) : std::string("/policy/{model}");
+        const std::string streaming = chosen ? filled(chosen->streaming) : std::string("/policy/{model}");
         const auto descriptor_source =
             std::string("{\"descriptor_version\":1,\"revision\":1,\"id\":\"policy-admission\",\"family\":") +
-            json::quote(family.family) +
-            ",\"connection\":{\"base_url\":\"https://policy.invalid\",\"paths\":{\"buffered\":" +
-            (generate ? "\"/v1beta/models/policy-admission:generateContent\",\"streaming\":\"/v1beta/models/policy-admission:streamGenerateContent?alt=sse\"}}}"
-                      : "\"/policy\",\"streaming\":\"/policy\"}}}");
+            json::quote(family.family) + ",\"connection\":{\"base_url\":" + json::quote(base) + ",\"paths\":{\"buffered\":" +
+            json::quote(buffered) + ",\"streaming\":" + json::quote(streaming) + "}}}";
         auto admitted = load(descriptor_source, PolicySnapshot(policy));
         if (auto* error = std::get_if<ConfigError>(&admitted)) throw std::move(*error);
       }
@@ -1012,6 +1028,39 @@ class PolicyLoader {
     if (!facts.back().origins.empty()) fail("/auth", "a last fact for every origin");
     return facts;
   }
+  // A family's `routes` facts: at most 16, each a buffered and a streaming template with optional origins, as the
+  // cache facts have them. An origin is in one fact at most, and one fact at most is for every origin.
+  static std::vector<RouteFact> route_facts(Value list, std::string_view family) {
+    if (!list.is_array() || list.size() > 16) fail("/routes", "array of at most 16 route facts");
+    std::vector<RouteFact> facts;
+    auto path = [](Value item, std::string_view pointer) {
+      if (!item.is_string() || !valid_route_template(item.as_string()))
+        fail(pointer, "origin-relative path template without traversal or URL escapes, with {model} once at most and a name=value query");
+      return std::string(item.as_string());
+    };
+    for (auto item : list.elements()) {
+      closed(item, {"buffered", "streaming"}, "/routes", {"origins"});
+      RouteFact fact;
+      fact.buffered = path(item.get("buffered"), "/routes/buffered");
+      fact.streaming = path(item.get("streaming"), "/routes/streaming");
+      const bool named = fact.buffered.find("{model}") != std::string::npos;
+      if (named != (fact.streaming.find("{model}") != std::string::npos)) fail("/routes", "{model} in both templates or in neither");
+      // A Generate request carries its model in the path alone (descriptor.cpp).
+      if (family == "google.generate" && !named) fail("/routes", "Generate templates that name {model}");
+      if (item.get("origins").valid()) {
+        fact.origins = strings(item.get("origins"), "/routes/origins", true);
+        for (const auto& origin : fact.origins) {
+          if (!valid_origin(origin) || origin.ends_with('/')) fail("/routes/origins", "canonical origins without path");
+          for (const auto& earlier : facts)
+            if (contains(earlier.origins, origin)) fail("/routes/origins", "each origin in one fact");
+        }
+      } else if (std::any_of(facts.begin(), facts.end(), [](const RouteFact& earlier) { return earlier.origins.empty(); })) {
+        fail("/routes", "one fact at most for every origin");
+      }
+      facts.push_back(std::move(fact));
+    }
+    return facts;
+  }
   struct EmbeddedAuth { std::vector<DescriptorPolicy::AuthFact> facts; std::string json; };
   // The embedded policy's `auth` facts of a family, with their canonical JSON, or null when it states none. Parsed
   // once from the embedded text; it never goes through builtin_policy(), which runs this loader.
@@ -1059,6 +1108,22 @@ class PolicyLoader {
     return r;
   }
 };
+const std::vector<RouteFact>& DescriptorPolicy::routes(std::string_view family) const noexcept {
+  for (const auto& [name, facts] : routes_) if (name == family) return facts;
+  static const std::vector<RouteFact> none;
+  return none;
+}
+const RouteFact* DescriptorPolicy::route(std::string_view family, std::string_view origin) const noexcept {
+  const auto& facts = routes(family);
+  for (const auto& fact : facts) if (contains(fact.origins, origin)) return &fact;
+  for (const auto& fact : facts) if (fact.origins.empty()) return &fact;
+  return nullptr;
+}
+std::optional<std::string> route_refusal(const ValidatedDescriptor& descriptor, std::string_view model) {
+  // The model takes the place of {model} in the path, so it may not add, remove or replace a segment.
+  if (descriptor.model_routed() && !route_model_substitute(model)) return "model name cannot take the place of {model} in the descriptor's paths";
+  return std::nullopt;
+}
 const DescriptorPolicy::ValidationFacts* DescriptorPolicy::validation(std::string_view name) const noexcept {
   for (const auto& [family, facts] : validation_) if (family == name) return &facts;
   return nullptr;

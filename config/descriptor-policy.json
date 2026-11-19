@@ -410,6 +410,7 @@
       "thinking_budget_excludes_level": true,
       "openrouter_origins": [],
       "auth": [{"scheme": "x-goog-api-key"}],
+      "routes": [{"buffered": "/v1beta/models/{model}:generateContent", "streaming": "/v1beta/models/{model}:streamGenerateContent?alt=sse"}],
       "cache": [{"explicit": false, "unsupported": "ignore"}],
       "media": {
         "image": {"mime": ["image/png", "image/jpeg", "image/jpg", "image/webp", "image/heic", "image/heif", "image/gif", "image/avif", "image/bmp"], "sources": ["inline", "url", "file"]},
@@ -487,6 +488,7 @@
       "standard_service_tiers": ["standard"],
       "openrouter_origins": [],
       "auth": [{"scheme": "x-goog-api-key"}],
+      "routes": [{"buffered": "/v1beta/interactions", "streaming": "/v1beta/interactions"}],
       "cache": [{"explicit": false, "unsupported": "ignore"}],
       "media": {
         "image": {"mime": ["image/png", "image/jpeg", "image/webp", "image/heic", "image/heif", "image/gif", "image/bmp"], "sources": ["inline", "url", "file"]},
