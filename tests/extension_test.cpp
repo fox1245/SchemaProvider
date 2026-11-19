@@ -16,6 +16,7 @@
 #include "sp/config_defaults.h"
 #include <iostream>
 #include <map>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -311,9 +312,11 @@ void extension_replay() {
   }
 }
 
-// The owned lists cover every top-level member the encoders write with their typed controls set.
+// The table of owned members holds every top-level member the encoders write with their typed controls set, as written,
+// and each member it holds as written is written by some request of its family.
 void owned_keys_cover_encoder_output() {
   const auto policy = descriptor::builtin_policy();
+  std::map<std::string, std::set<std::string>> written;
   auto keys_of = [](const std::string& body) {
     const auto document = parse(body);
     std::vector<std::string> out;
@@ -321,7 +324,11 @@ void owned_keys_cover_encoder_output() {
     return out;
   };
   auto check = [&](std::string_view family, const std::string& body) {
-    for (const auto& key : keys_of(body)) if (!descriptor::request_key_owned(family, key)) throw std::runtime_error(std::string(family) + " writes unowned " + key);
+    for (const auto& key : keys_of(body)) {
+      if (descriptor::member_role(family, key) != descriptor::MemberRole::Written) throw std::runtime_error(std::string(family) + " writes " + key + ", which the table does not hold as written");
+      if (!descriptor::request_key_owned(family, key)) throw std::runtime_error(std::string(family) + " writes unowned " + key);
+      written[std::string(family)].insert(key);
+    }
   };
   {
     const auto d = load("anthropic.messages", "https://api.anthropic.com", policy);
@@ -330,14 +337,34 @@ void owned_keys_cover_encoder_output() {
     r.tools = {messages::ToolDefinition{"lookup", "d", owned(R"({"type":"object"})"), {}, {}, {}, {}, {}, {}, {}, {}}};
     r.tool_choice = messages::ToolChoice{messages::ToolChoiceMode::Auto, {}, {}};
     for (bool stream : {false, true}) { auto e = messages::encode(d, r, stream); CHECK(std::holds_alternative<messages::EncodedRequest>(e)); check("anthropic.messages", std::get<messages::EncodedRequest>(e).body); }
+    auto thinking = messages::Request::simple("fixture-model", "hi", 64);
+    thinking.thinking_mode = messages::ThinkingMode::Adaptive;
+    auto thought = messages::encode(d, thinking, false); CHECK(std::holds_alternative<messages::EncodedRequest>(thought)); check("anthropic.messages", std::get<messages::EncodedRequest>(thought).body);
+    // Routing is for the OpenRouter origin.
+    auto routed = messages::Request::simple("fixture-model", "hi", 64); routed.provider = OpenRouterRouting{};
+    auto sent = messages::encode(load("anthropic.messages", "https://openrouter.ai", policy), routed, false);
+    CHECK(std::holds_alternative<messages::EncodedRequest>(sent)); check("anthropic.messages", std::get<messages::EncodedRequest>(sent).body);
+    // MCP servers are named by a toolset entry.
+    auto mcp = messages::Request::simple("fixture-model", "hi", 64);
+    mcp.mcp_servers = {messages::McpServer{"ctx", "https://mcp.example.test/mcp", std::nullopt}};
+    messages::ToolDefinition toolset{"", {}, {}, "mcp_toolset", std::nullopt};
+    toolset.options = owned(R"({"mcp_server_name":"ctx"})");
+    mcp.tools = {toolset};
+    auto e = messages::encode(d, mcp, false); CHECK(std::holds_alternative<messages::EncodedRequest>(e)); check("anthropic.messages", std::get<messages::EncodedRequest>(e).body);
   }
   {
+    // OpenRouter keeps `max_tokens`; direct OpenAI names its output cap `max_completion_tokens`.
     const auto d = load("openai.chat", "https://openrouter.ai", policy);
     auto r = chat::Request::simple("fixture-model", "hi", 64); r.temperature = 0.5; r.top_p = 0.9; r.service_tier = "auto";
     r.response_format = ResponseFormat{}; r.reasoning = chat::ReasoningOptions{std::string("low"), {}, {}, {}}; r.include_reasoning = true;
     r.usage_include = true; r.models = {"a/b"}; r.plugins = {{"response-healing", {}}}; r.provider = OpenRouterRouting{};
     r.modalities = {chat::OutputModality::Text, chat::OutputModality::Image}; r.image_config = chat::ImageOutput{};
+    r.tools = {chat::ToolDefinition{"lookup", "d", owned(R"({"type":"object"})")}}; r.tool_choice = chat::ToolChoice{chat::ToolChoiceMode::Auto, {}, std::nullopt};
     for (bool stream : {false, true}) { auto e = chat::encode(d, r, stream); CHECK(std::holds_alternative<chat::EncodedRequest>(e)); check("openai.chat", std::get<chat::EncodedRequest>(e).body); }
+    const auto direct = load("openai.chat", "https://api.openai.com", policy);
+    auto spoken = chat::Request::simple("fixture-model", "hi", 64);
+    spoken.modalities = {chat::OutputModality::Text, chat::OutputModality::Audio}; spoken.audio = chat::AudioOutput{"alloy", "wav"}; spoken.reasoning_effort = "low";
+    auto e = chat::encode(direct, spoken, false); CHECK(std::holds_alternative<chat::EncodedRequest>(e)); check("openai.chat", std::get<chat::EncodedRequest>(e).body);
   }
   {
     const auto d = load("openai.responses", "https://openrouter.ai", policy);
@@ -345,7 +372,7 @@ void owned_keys_cover_encoder_output() {
     r.reasoning = responses::ReasoningOptions{std::string("low"), std::string("auto")}; r.service_tier = "auto"; r.max_tool_calls = 3;
     r.parallel_tool_calls = true; r.verbosity = responses::Verbosity::Low; r.truncation = responses::Truncation::Auto; r.response_format = ResponseFormat{};
     r.plugins = {{"response-healing", {}}}; r.modalities = {responses::OutputModality::Image}; r.image_config = OpenRouterImageConfig{};
-    r.provider = OpenRouterRouting{}; r.required_tool = "lookup";
+    r.provider = OpenRouterRouting{}; r.required_tool = "lookup"; r.previous_response_id = "resp_1";
     r.tools = {responses::ToolDefinition{"lookup", "d", owned(R"({"type":"object","properties":{},"additionalProperties":false,"required":[]})"), {}, {}}};
     for (bool stream : {false, true}) { auto e = responses::encode(d, r, stream); CHECK(std::holds_alternative<responses::EncodedRequest>(e)); check("openai.responses", std::get<responses::EncodedRequest>(e).body); }
   }
@@ -361,6 +388,16 @@ void owned_keys_cover_encoder_output() {
     auto r = interactions::Request::simple("fixture-model", "hi", 64, "system"); r.store = true; r.service_tier = "standard";
     r.response_format = {interactions::TextResponseFormat{}}; r.builtin_tools = {interactions::UrlContextTool{}};
     for (bool stream : {false, true}) { auto e = interactions::encode(d, r, stream); CHECK(std::holds_alternative<interactions::EncodedRequest>(e)); check("google.interactions", std::get<interactions::EncodedRequest>(e).body); }
+    // An agent runs a stored interaction in the background, in place of a model.
+    auto agent = interactions::Request::simple("", "hi", 64, "system"); agent.agent = "deep-research"; agent.store = true; agent.background = true; agent.previous_interaction_id = "int_1";
+    auto e = interactions::encode(d, agent, false); CHECK(std::holds_alternative<interactions::EncodedRequest>(e)); check("google.interactions", std::get<interactions::EncodedRequest>(e).body);
+  }
+  // Each member held as written is written by some request, and no other member is written.
+  for (const auto family : {"openai.chat", "anthropic.messages", "openai.responses", "google.generate", "google.interactions"}) {
+    std::set<std::string> table;
+    for (const auto& member : descriptor::owned_members(family)) if (member.role == descriptor::MemberRole::Written) table.insert(std::string(member.name));
+    for (const auto& name : table) if (!written[family].contains(name)) std::cerr << family << ": the table holds " << name << " as written, and no test request writes it\n";
+    CHECK(!table.empty() && written[family] == table);
   }
 }
 
@@ -426,25 +463,25 @@ constexpr std::string_view recorded_names[] = {
     "voice",
 };
 constexpr std::string_view recorded_answers[] = {
-    "openai.chat audio ext=R bind=----",
+    "openai.chat audio ext=R bind=1234",
     "openai.chat contents ext=R bind=----",
-    "openai.chat extensions ext=R bind=----",
-    "openai.chat function_call ext=R bind=----",
-    "openai.chat functions ext=R bind=----",
-    "openai.chat image_config ext=R bind=----",
-    "openai.chat include_reasoning ext=R bind=----",
+    "openai.chat extensions ext=R bind=1234",
+    "openai.chat function_call ext=R bind=1234",
+    "openai.chat functions ext=R bind=1234",
+    "openai.chat image_config ext=R bind=1234",
+    "openai.chat include_reasoning ext=R bind=1234",
     "openai.chat input ext=R bind=----",
     "openai.chat max_completion_tokens ext=R bind=123-",
     "openai.chat max_output_tokens ext=R bind=----",
     "openai.chat max_tokens ext=R bind=444-",
     "openai.chat messages ext=R bind=2-34",
-    "openai.chat modalities ext=R bind=----",
+    "openai.chat modalities ext=R bind=1234",
     "openai.chat model ext=R bind=-234",
-    "openai.chat models ext=R bind=----",
+    "openai.chat models ext=R bind=1234",
     "openai.chat n ext=A bind=1234",
-    "openai.chat plugins ext=R bind=----",
+    "openai.chat plugins ext=R bind=1234",
     "openai.chat provider ext=R bind=1234",
-    "openai.chat reasoning ext=R bind=----",
+    "openai.chat reasoning ext=R bind=1234",
     "openai.chat reasoning_effort ext=R bind=1234",
     "openai.chat response_format ext=R bind=1234",
     "openai.chat service_tier ext=R bind=1234",
@@ -455,12 +492,15 @@ constexpr std::string_view recorded_answers[] = {
     "openai.chat tool_choice ext=R bind=1234",
     "openai.chat tools ext=R bind=1234",
     "openai.chat top_p ext=R bind=1234",
-    "openai.chat usage ext=R bind=----",
-    "anthropic.messages cache_control ext=R bind=----",
+    "openai.chat usage ext=R bind=1234",
+    "anthropic.messages cache_control ext=R bind=1234",
+    "anthropic.messages compaction ext=A bind=1234",
     "anthropic.messages container ext=R bind=1234",
     "anthropic.messages contents ext=R bind=----",
     "anthropic.messages context_management ext=A bind=1234",
-    "anthropic.messages extensions ext=R bind=----",
+    "anthropic.messages diagnostics ext=A bind=1234",
+    "anthropic.messages extensions ext=R bind=1234",
+    "anthropic.messages inference_geo ext=A bind=1234",
     "anthropic.messages input ext=R bind=----",
     "anthropic.messages max_completion_tokens ext=R bind=1234",
     "anthropic.messages max_output_tokens ext=R bind=----",
@@ -474,6 +514,7 @@ constexpr std::string_view recorded_answers[] = {
     "anthropic.messages provider ext=R bind=1234",
     "anthropic.messages response_format ext=A bind=1234",
     "anthropic.messages service_tier ext=A bind=1234",
+    "anthropic.messages speed ext=A bind=1234",
     "anthropic.messages stop ext=A bind=1234",
     "anthropic.messages stop_sequences ext=A bind=1234",
     "anthropic.messages stream ext=R bind=33-4",
@@ -490,8 +531,8 @@ constexpr std::string_view recorded_answers[] = {
     "openai.responses contents ext=R bind=----",
     "openai.responses context_management ext=A bind=1234",
     "openai.responses conversation ext=R bind=1234",
-    "openai.responses extensions ext=R bind=----",
-    "openai.responses image_config ext=R bind=----",
+    "openai.responses extensions ext=R bind=1234",
+    "openai.responses image_config ext=R bind=1234",
     "openai.responses include ext=R bind=1234",
     "openai.responses input ext=R bind=2-34",
     "openai.responses instructions ext=R bind=1234",
@@ -501,13 +542,13 @@ constexpr std::string_view recorded_answers[] = {
     "openai.responses max_tool_calls ext=R bind=1234",
     "openai.responses messages ext=R bind=----",
     "openai.responses metadata ext=A bind=1234",
-    "openai.responses modalities ext=R bind=----",
+    "openai.responses modalities ext=R bind=1234",
     "openai.responses model ext=R bind=-234",
     "openai.responses n ext=A bind=1234",
     "openai.responses parallel_tool_calls ext=R bind=1234",
-    "openai.responses plugins ext=R bind=----",
+    "openai.responses plugins ext=R bind=1234",
     "openai.responses previous_response_id ext=R bind=1234",
-    "openai.responses prompt ext=R bind=----",
+    "openai.responses prompt ext=R bind=1234",
     "openai.responses prompt_cache_key ext=A bind=1234",
     "openai.responses provider ext=R bind=1234",
     "openai.responses reasoning ext=R bind=1234",
@@ -526,10 +567,10 @@ constexpr std::string_view recorded_answers[] = {
     "google.generate agent ext=A bind=1234",
     "google.generate background ext=A bind=1234",
     "google.generate cachedContent ext=R bind=1234",
-    "google.generate cached_content ext=R bind=----",
+    "google.generate cached_content ext=R bind=1234",
     "google.generate contents ext=R bind=2-34",
     "google.generate environment ext=A bind=1234",
-    "google.generate extensions ext=R bind=----",
+    "google.generate extensions ext=R bind=1234",
     "google.generate generationConfig ext=R bind=1234",
     "google.generate generation_config ext=R bind=1234",
     "google.generate input ext=R bind=----",
@@ -555,16 +596,16 @@ constexpr std::string_view recorded_answers[] = {
     "google.generate temperature ext=R bind=1234",
     "google.generate toolConfig ext=R bind=1234",
     "google.generate tool_choice ext=R bind=1234",
-    "google.generate tool_config ext=R bind=----",
+    "google.generate tool_config ext=R bind=1234",
     "google.generate tools ext=R bind=1234",
     "google.generate top_p ext=R bind=1234",
     "google.interactions agent ext=R bind=1234",
-    "google.interactions agent_config ext=R bind=----",
+    "google.interactions agent_config ext=R bind=1234",
     "google.interactions background ext=R bind=1234",
     "google.interactions cachedContent ext=A bind=1234",
     "google.interactions contents ext=R bind=----",
     "google.interactions environment ext=A bind=1234",
-    "google.interactions extensions ext=R bind=----",
+    "google.interactions extensions ext=R bind=1234",
     "google.interactions generationConfig ext=A bind=1234",
     "google.interactions generation_config ext=R bind=1234",
     "google.interactions input ext=R bind=2-34",
@@ -577,7 +618,7 @@ constexpr std::string_view recorded_answers[] = {
     "google.interactions previous_interaction_id ext=R bind=1234",
     "google.interactions provider ext=R bind=1234",
     "google.interactions response_format ext=R bind=1234",
-    "google.interactions response_modalities ext=R bind=----",
+    "google.interactions response_modalities ext=R bind=1234",
     "google.interactions safetySettings ext=A bind=1234",
     "google.interactions safety_settings ext=A bind=1234",
     "google.interactions serviceTier ext=A bind=1234",
@@ -774,10 +815,34 @@ void owned_members_recorded() {
   for (const auto& line : expected) if (std::find(actual.begin(), actual.end(), line) == actual.end()) { std::cerr << "missing: " << line << '\n'; same = false; }
   CHECK(same);
 }
+// A binding never names a key the family's policy admits as an extension: the body would hold the member twice.
+void bindings_never_name_admitted_extensions() {
+  constexpr std::string_view slots[]{"model", "messages", "stream", "max_output_tokens"};
+  for (const auto family : recorded_families) {
+    const auto policy = admitted(family, R"("extensions":[{"key":"fixture_member","origins":["https://example.test"],"value":{"type":"boolean"},"replay_eligible":true}])");
+    for (const auto slot : slots) {
+      const auto source = [&](std::string_view key) {
+        const bool google = family.starts_with("google.");
+        const std::string path = family == "google.generate" ? "/v1beta/models/fixture-model:generateContent" : family == "google.interactions" ? "/v1beta/interactions" :
+            family == "anthropic.messages" ? "/v1/messages" : family == "openai.chat" ? "/v1/chat/completions" : "/v1/responses";
+        const std::string stream = family == "google.generate" ? "/v1beta/models/fixture-model:streamGenerateContent?alt=sse" : path;
+        return "{\"descriptor_version\":1,\"revision\":1,\"id\":\"admitted-key\",\"family\":" + json::quote(family) + ",\"connection\":{\"base_url\":" +
+               json::quote(google ? "https://generativelanguage.googleapis.com" : "https://example.test") + ",\"paths\":{\"buffered\":" + json::quote(path) +
+               ",\"streaming\":" + json::quote(stream) + "}},\"bindings\":{" + json::quote(slot) + ":" + json::quote(key) + "}}";
+      };
+      const auto refused_by_policy = descriptor::load(source("fixture_member"), policy);
+      CHECK(std::holds_alternative<descriptor::ConfigError>(refused_by_policy));
+      CHECK(std::get<descriptor::ConfigError>(refused_by_policy).pointer == "/bindings/" + std::string(slot));
+      // The same name is free under a policy that admits no such extension, and another name is free under this one.
+      CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(descriptor::load(source("fixture_member"), descriptor::builtin_policy())));
+      CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(descriptor::load(source("fixture_other"), policy)));
+    }
+  }
+}
 } // namespace
 
 int main() {
-  try { value_schemas(); policy_facts(); extensions_on_every_family(); extension_replay(); owned_keys_cover_encoder_output(); admitted_options(); owned_members_recorded();
+  try { value_schemas(); policy_facts(); extensions_on_every_family(); extension_replay(); owned_keys_cover_encoder_output(); admitted_options(); owned_members_recorded(); bindings_never_name_admitted_extensions();
         std::cout << "extension properties passed\n"; return 0; }
   catch (const std::exception& error) { std::cerr << "extension test failed: " << error.what() << '\n'; return 1; }
 }

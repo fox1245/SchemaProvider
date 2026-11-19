@@ -5,6 +5,7 @@
 #include "sp/config_defaults.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -14,6 +15,7 @@
 #include <string_view>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace {
 int failures = 0;
@@ -298,6 +300,52 @@ void generate_route_shape() {
     CHECK(std::holds_alternative<ValidatedDescriptor>(load(R"({"descriptor_version":1,"revision":1,"id":"interactions","family":"google.interactions","connection":{"base_url":"https://example.test","paths":{"buffered":"/v1beta/interactions","streaming":"/v1beta/interactions"}}})")));
     // The presets and the embedded policy's own route still load.
     CHECK(std::holds_alternative<ValidatedDescriptor>(presets::try_google_generate("gemini-2.5-flash")));
+}
+// A descriptor of `family` at a fixed origin whose bindings object is `bindings` (empty for none).
+std::string family_descriptor(std::string_view family, std::string_view bindings = {}) {
+    const bool google = family.starts_with("google.");
+    const std::string origin = google ? "https://generativelanguage.googleapis.com" : "https://example.test";
+    const std::string path = family == "google.generate" ? "/v1beta/models/fixture-model:generateContent" : family == "google.interactions" ? "/v1beta/interactions" :
+        family == "anthropic.messages" ? "/v1/messages" : family == "openai.chat" ? "/v1/chat/completions" : "/v1/responses";
+    const std::string streaming = family == "google.generate" ? "/v1beta/models/fixture-model:streamGenerateContent?alt=sse" : path;
+    return "{\"descriptor_version\":1,\"revision\":7,\"id\":\"owned-members\",\"family\":" + sp::json::quote(family) + ",\"connection\":{\"base_url\":" +
+           sp::json::quote(origin) + ",\"paths\":{\"buffered\":" + sp::json::quote(path) + ",\"streaming\":" + sp::json::quote(streaming) + "}}" +
+           (bindings.empty() ? std::string() : ",\"bindings\":" + std::string(bindings)) + "}";
+}
+std::string bound(std::string_view slot, std::string_view member) { return "{" + sp::json::quote(slot) + ":" + sp::json::quote(member) + "}"; }
+
+// A binding never names a member an encoder owns: one it writes, an alias, provider-held state, or a provider member
+// a policy extension may still admit. The members each family's policy binds to its four slots stay open to every slot,
+// and a slot keeps its declared alternate.
+void bindings_never_name_owned_members() {
+    using namespace sp::descriptor;
+    constexpr std::string_view slots[]{"model", "messages", "stream", "max_output_tokens"};
+    // The Chat encoder writes `usage`: a binding named after it would put the member into the body twice.
+    rejected(family_descriptor("openai.chat", bound("model", "usage")), "/bindings/model");
+    // A member a Messages policy extension names is reserved for it.
+    rejected(family_descriptor("anthropic.messages", bound("model", "context_management")), "/bindings/model");
+    // A reserved member no policy admits as an extension is refused all the same.
+    rejected(family_descriptor("anthropic.messages", bound("model", "stop_sequences")), "/bindings/model");
+    rejected(family_descriptor("openai.chat", bound("model", "n")), "/bindings/model");
+    // One member of each family that no list refused a binding to before.
+    const struct { std::string_view family, member; } newly[]{
+        {"openai.chat", "audio"}, {"openai.chat", "plugins"}, {"anthropic.messages", "cache_control"}, {"anthropic.messages", "speed"},
+        {"openai.responses", "prompt"}, {"openai.responses", "modalities"}, {"google.generate", "tool_config"}, {"google.generate", "cached_content"},
+        {"google.interactions", "response_modalities"}, {"google.interactions", "agent_config"}};
+    for (const auto& [family, member] : newly)
+        for (const auto slot : slots) rejected(family_descriptor(family, bound(slot, member)), "/bindings/" + std::string(slot));
+    // The collision of two slots is still reported at the later slot.
+    rejected(family_descriptor("openai.chat", bound("model", "messages")), "/bindings/messages");
+    rejected(family_descriptor("openai.responses", bound("stream", "input")), "/bindings/stream");
+    // A slot may name a member some family's policy binds to a slot, and Chat's output cap its alternate.
+    for (const auto& [family, slot, member] : std::vector<std::array<std::string_view, 3>>{
+             {"openai.chat", "max_output_tokens", "max_completion_tokens"}, {"openai.responses", "max_output_tokens", "max_tokens"},
+             {"openai.responses", "model", "deployment"}, {"google.generate", "messages", "input"}, {"google.generate", "max_output_tokens", "maxOutputTokens"},
+             {"anthropic.messages", "messages", "input"}, {"openai.chat", "model", "model"}})
+        CHECK(std::holds_alternative<ValidatedDescriptor>(load(family_descriptor(family, bound(slot, member)))));
+    // Only Chat declares the alternate.
+    rejected(family_descriptor("anthropic.messages", bound("max_output_tokens", "max_completion_tokens")), "/bindings/max_output_tokens");
+    rejected(family_descriptor("openai.chat", bound("model", "max_completion_tokens")), "/bindings/model");
 }
 void collisions_and_selector_rejection() {
     rejected(descriptor(R"(,"bindings":{"model":"messages"})"), "/bindings/messages");
@@ -821,6 +869,7 @@ int main() {
     endpoint_security_and_paths();
     generate_route_shape();
     collisions_and_selector_rejection();
+    bindings_never_name_owned_members();
     diagnostics_exclude_untrusted_keys_and_controls();
     duplicate_errors_retain_only_unambiguous_revision();
     deployment_header_admission();

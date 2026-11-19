@@ -367,6 +367,20 @@ The checks of a request's effective controls read the family's policy data inste
 - **Text.** The refusal "top_p unsupported by typed Generate request" is chosen by the shape of the data, a family that lists `temperature` but not `top_p`, so a custom policy in that shape gets it for its family too.
 - **Layout.** No installed struct changes: `DescriptorPolicy` keeps the facts in a private member after the others, and no capability bit is added. The interface revision stays 7.
 
+One table lists the request members each encoder owns, and a descriptor binding is checked against it (#144). See [owned request members](USAGE.md#owned-request-members).
+- **Unchanged.** Policy extensions are admitted and refused exactly as before, in every family and letter case, and the endpoint and server tool options refuse the same names. `request_key_owned` keeps its signature and its answers.
+- **Refused now.** A descriptor whose `bindings` name one of these members is a `ConfigError` at the slot's pointer (`/bindings/model`, `/bindings/messages`, `/bindings/stream` or `/bindings/max_output_tokens`), where it used to load and write the member into the body twice:
+  - Chat: `audio`, `function_call`, `functions`, `image_config`, `include_reasoning`, `modalities`, `models`, `plugins`, `reasoning`, `usage`;
+  - Messages: `cache_control`;
+  - Responses: `image_config`, `modalities`, `plugins`, `prompt`;
+  - Generate: `cached_content`, `tool_config`;
+  - Interactions: `agent_config`, `response_modalities`;
+  - every family: `extensions`;
+  - every family: a key the family's policy admits as an extension (`speed`, `inference_geo`, `diagnostics` and `compaction` for Messages with the built-in policy).
+- **Still admitted.** A slot may name a member a family's policy binds to a slot (`input`, `contents`, `max_tokens`, `max_output_tokens`, `maxOutputTokens`, ...), and the Chat output cap may name `max_completion_tokens`. Two slots that name one member are refused at the later slot, as before.
+- **Queries.** `<descriptor/owned_keys.h>` adds `MemberRole`, `OwnedMember`, `owned_members(family_or_endpoint)`, `owned_tool_members(family)`, `member_role(family_or_endpoint, name)`, `role_of(members, name)`, `owned_member_families()` and `slot_alternate(family, slot)`. A host that keeps a reserved-member list of its own for extension checks can call `owned_members`.
+- **Layout.** Only declarations are added to `<descriptor/owned_keys.h>`. No installed struct changes its layout, no digest moves, and no capability bit is added.
+
 The paths of a chat family are policy data, and `{model}` works in every family (#144). See [paths and route facts](USAGE.md#paths-and-route-facts).
 - **Unchanged.** With the built-in policy every descriptor that loaded before loads with the same meaning, and every one refused before is still refused, apart from those listed below. A descriptor without `{model}` sends to its paths and binds them in native history as before, so the native origin digests, the archive bindings and the route a captured answer carries do not move, and neither does the replay identity.
 - **Policy data.** Each family gains the optional `routes` facts: `buffered` and `streaming` path templates, with optional `origins`, at most 16. The built-in policy states the Generate shape (`/v1beta/models/{model}:generateContent` and `/v1beta/models/{model}:streamGenerateContent?alt=sse`) and the Interactions path (`/v1beta/interactions`) for every origin, and none for Chat, Messages and Responses. Descriptor admission reads them in place of the Generate shape compiled into the loader, and the Generate and Interactions encoders in place of their path comparisons. A policy without `routes` for a family takes the embedded policy's facts for that family and admits what it admitted before. Its content digest mixes in the facts it takes, behind the marker `sp.descriptor-policy.borrowed.v1`, so a pinned policy of that kind needs its pin refreshed once. The built-in policy's content digest changes; its replay identity does not.

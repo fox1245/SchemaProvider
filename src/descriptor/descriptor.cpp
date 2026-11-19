@@ -1,4 +1,5 @@
 #include "descriptor/descriptor.h"
+#include "descriptor/owned_keys.h"
 #include "descriptor/policy.h"
 #include "descriptor/stop_facts.h"
 #include "json/json.h"
@@ -419,31 +420,27 @@ private:
         std::array slots{
             std::pair{"model", &value_.model_member_}, std::pair{"messages", &value_.messages_member_},
             std::pair{"stream", &value_.stream_member_}, std::pair{"max_output_tokens", &value_.max_output_tokens_member_}};
-        std::unordered_set<std::string> destinations{"tools", "tool_choice", "temperature", "top_p", "stream_options", "n", "response_format", "stop", "max_completion_tokens", "provider"};
-        if (value_.family_ == "openai.chat") { destinations.insert("reasoning_effort"); destinations.insert("service_tier"); }
-        if (value_.family_ == "anthropic.messages") {
-            for (const auto* reserved : {"system", "thinking", "metadata", "stop_sequences", "top_k", "output_config", "service_tier", "context_management", "container", "mcp_servers"})
-                destinations.insert(reserved);
-        }
-        if (value_.family_ == "openai.responses") {
-            for (const auto* reserved : {"reasoning", "include", "store", "instructions", "conversation",
-                    "previous_response_id", "parallel_tool_calls", "max_tool_calls", "background", "truncation", "text",
-                    "metadata", "service_tier", "prompt_cache_key", "context_management", "access_programs"})
-                destinations.insert(reserved);
-        }
-        if (value_.family_ == "google.generate" || value_.family_ == "google.interactions") {
-            for (const auto* reserved : {"systemInstruction", "generationConfig", "toolConfig", "cachedContent", "serviceTier",
-                    "system_instruction", "generation_config", "store", "service_tier", "previous_interaction_id",
-                    "background", "agent", "environment", "safetySettings", "safety_settings"})
-                destinations.insert(reserved);
-        }
+        // A slot may name a member some family's policy binds to a slot of its own (a descriptor of one family may borrow
+        // another family's spelling), and this descriptor's own defaults, the origin's output cap among them. Two slots
+        // naming one member still collide below.
+        std::unordered_set<std::string> bound_by_policy;
+        for (const auto family_name : owned_member_families())
+            if (const auto* family = value_.policy_->family(family_name))
+                bound_by_policy.insert({family->model_member, family->messages_member, family->stream_member, family->cap_member});
+        for (const auto& slot : slots) bound_by_policy.insert(*slot.second);
+        // Any other member the table owns, and any key the family's policy admits as an extension, would reach the body twice.
+        std::unordered_set<std::string> extension_keys;
+        for (const auto& fact : value_.family_policy().extensions) extension_keys.insert(fact.key);
+        std::unordered_set<std::string> taken;
         for (auto [name, target] : slots) {
             const std::string pointer = std::string("/bindings/") + name;
             if (auto field = item.get(name); field.valid()) *target = string(field, pointer, 128);
             if (!member_name(*target)) fail(pointer, "literal object member identifier");
-            // max_completion_tokens is the family's alternate declared token slot.
-            if (value_.family_ == "openai.chat" && std::string_view(name) == "max_output_tokens" && *target == "max_completion_tokens") destinations.erase(*target);
-            if (!destinations.insert(*target).second) fail(pointer, "distinct non-reserved request destination", "request destination collision");
+            const auto alternate = slot_alternate(value_.family_, name);
+            const bool open = bound_by_policy.contains(*target) || (!alternate.empty() && *target == alternate);
+            if (!open && (member_role(value_.family_, *target) || extension_keys.contains(*target)))
+                fail(pointer, "distinct non-reserved request destination", "request destination collision");
+            if (!taken.insert(*target).second) fail(pointer, "distinct non-reserved request destination", "request destination collision");
         }
         auto usage = item.get("usage");
         if (!usage.valid()) return;
