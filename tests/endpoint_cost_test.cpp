@@ -170,6 +170,9 @@ const auto priced = catalogue_of("{\"version\":1,\"models\":[" +
     // No rate for the image tokens of an input.
     entry("vendor/image-plain", limits(image_input, image_output),
           {{"input", in_rate}, {"output", out_rate}, {"item:image", image_rate}, {"item:input_image", reference_rate}}) + "," +
+    // Each image priced only by a row keyed on an extension member.
+    entry("vendor/image-moderated", limits(image_input, image_output),
+          {{"input", in_rate}, {"input_image", image_token_rate}, {"output", out_rate}, {"item:image[moderation=low]", moderated_rate}, {"item:input_image", 0}}) + "," +
     // Priced by tokens alone: each image and each reference a declared zero.
     entry("vendor/image-tokens", limits(image_input, image_output),
           {{"input", in_rate}, {"input_image", image_token_rate}, {"output", out_rate}, {"item:image", 0}, {"item:input_image", 0}}) + "," +
@@ -351,46 +354,46 @@ void stated_facts() {
   auto facts = ok(direct.prepare(request)).endpoint_facts();
   CHECK(facts.endpoint == "images" && facts.operation == "generate" && facts.model == "vendor/image" && !facts.routed_gateway);
   CHECK(quantities_of(facts) == "item:image=2 item:input_image=0! input<input output<output");
-  CHECK(dimensions_of(facts) == "background=transparent,output_compression=80,quality=high,size=1024x1024");
+  CHECK(dimensions_of(facts) == "background=transparent,operation=generate,output_compression=80,quality=high,size=1024x1024");
   // With references, an edit at OpenAI, whose image tokens are among its input tokens; an unset count is not stated.
   auto edit = image("vendor/image", std::nullopt);
   edit.references = {Media::file(MediaKind::Image, "file-abc"), Media::file(MediaKind::Image, "file-def")};
   facts = ok(direct.prepare(edit)).endpoint_facts();
   CHECK(facts.operation == "edit" && quantities_of(facts) == "item:image item:input_image=2! input<input input_image<input output<output");
-  CHECK(dimensions_of(facts).empty());
+  CHECK(dimensions_of(facts) == "operation=edit");
   // Extensions under their own names when they are a string, a boolean or an unsigned integer in the qualifier grammar;
   // an object, or text outside the grammar, is offered by no dimension.
   auto routed = image("vendor/image", 1);
   routed.extensions = document(R"({"provider":{"sort":"price"},"aspect_ratio":"16:9","seed":7,"user":"a person"})");
   facts = ok(router.prepare(routed)).endpoint_facts();
-  CHECK(facts.routed_gateway && dimensions_of(facts) == "aspect_ratio=16:9,seed=7");
+  CHECK(facts.routed_gateway && dimensions_of(facts) == "aspect_ratio=16:9,operation=generate,seed=7");
   auto moderated = image("vendor/image", 1);
   moderated.extensions = document(R"({"moderation":"low"})");
-  CHECK(dimensions_of(ok(direct.prepare(moderated)).endpoint_facts()) == "moderation=low");
+  CHECK(dimensions_of(ok(direct.prepare(moderated)).endpoint_facts()) == "moderation=low,operation=generate");
   // Decisions: tokens up to the limits.
   facts = ok(direct.prepare(decision("vendor/decider"))).endpoint_facts();
-  CHECK(quantities_of(facts) == "input<input output<output" && dimensions_of(facts).empty());
+  CHECK(quantities_of(facts) == "input<input output<output" && dimensions_of(facts) == "operation=decide");
   // Embeddings: the input limit counts per input.
   embeddings::Request embed{"vendor/embed", {{"a"}, {"b"}, {"c"}}};
   embed.dimensions = 256;
   facts = ok(direct.prepare(embed)).endpoint_facts();
-  CHECK(quantities_of(facts) == "input<inputx3" && dimensions_of(facts) == "dimensions=256");
+  CHECK(quantities_of(facts) == "input<inputx3" && dimensions_of(facts) == "dimensions=256,operation=embed");
   // Rerank: the documents, and search units nothing bounds.
   rerank::Request rank{"vendor/ranker", "fox", {"a fox", "a dog"}};
   rank.top = 1;
   facts = ok(direct.prepare(rank)).endpoint_facts();
-  CHECK(quantities_of(facts) == "item:document=2! item:search_unit input<inputx2" && dimensions_of(facts) == "top=1");
+  CHECK(quantities_of(facts) == "item:document=2! item:search_unit input<inputx2" && dimensions_of(facts) == "operation=rank,top=1");
   // Speech: the input's bytes; the voice only when it is a value of the grammar.
   speech::Request speak{"vendor/speaker", "Hello there.", "alloy"};
   speak.format = "mp3";
   facts = ok(direct.prepare(speak)).endpoint_facts();
-  CHECK(quantities_of(facts) == "item:character=12! input<input output<output" && dimensions_of(facts) == "format=mp3,voice=alloy");
-  CHECK(dimensions_of(ok(direct.prepare(speech::Request{"vendor/speaker", "Hello there.", "Alloy Two"})).endpoint_facts()).empty());
+  CHECK(quantities_of(facts) == "item:character=12! input<input output<output" && dimensions_of(facts) == "format=mp3,operation=speak,voice=alloy");
+  CHECK(dimensions_of(ok(direct.prepare(speech::Request{"vendor/speaker", "Hello there.", "Alloy Two"})).endpoint_facts()) == "operation=speak");
   // Transcription: the seconds the host states.
   auto heard = transcript("vendor/transcriber");
   heard.language = "en";
   facts = ok(direct.prepare(heard)).endpoint_facts();
-  CHECK(facts.operation == "transcribe" && quantities_of(facts) == "item:second<seconds input<input output<output" && dimensions_of(facts) == "language=en");
+  CHECK(facts.operation == "transcribe" && quantities_of(facts) == "item:second<seconds input<input output<output" && dimensions_of(facts) == "language=en,operation=transcribe");
   CHECK(ok(direct.prepare(transcript("vendor/transcriber", true))).endpoint_facts().operation == "translate");
   // Videos: the duration, the references, the tokens.
   videos::Request video{"vendor/video", "A fox in the snow."};
@@ -400,7 +403,7 @@ void stated_facts() {
   video.audio = true;
   facts = ok(direct.prepare(video)).endpoint_facts();
   CHECK(quantities_of(facts) == "item:second=5 item:input_image=0! input<input output<output" &&
-        dimensions_of(facts) == "aspect_ratio=16:9,audio=true,resolution=720p");
+        dimensions_of(facts) == "aspect_ratio=16:9,audio=true,operation=submit,resolution=720p");
   // A call that bills nothing states nothing.
   facts = ok(direct.prepare(moderation::Request{"vendor/moderator", {{"a sentence"}}})).endpoint_facts();
   CHECK(facts.quantities.empty() && facts.dimensions.empty());
@@ -434,6 +437,18 @@ void images_bound() {
   CHECK(nano(bound) == rounded(edit_rate + 2 * reference_rate + tokens));
   CHECK(line_of(bound, "item:image") == "item:image[operation=edit] 1 x " + std::to_string(edit_rate));
   CHECK(line_of(bound, "item:input_image") == "item:input_image 2 x " + std::to_string(reference_rate));
+  // The prepared facts' dimensions are complete: the item price queries over them give the rate the bound priced at.
+  {
+    const auto prepared_edit = direct.prepare(edit);
+    const auto& facts = ok(prepared_edit).endpoint_facts();
+    const auto* found = priced->find(facts.family, facts.origin, facts.model).entry;
+    CHECK(found && found->id == "vendor/image");
+    const auto dearest = pricing::dearest_item_price(*found, "item:image", facts.dimensions, "", image_input);
+    CHECK(dearest && dearest->first == edit_rate && dearest->second == "item:image[operation=edit]");
+    CHECK(line_of(bound, "item:image") == dearest->second + " 1 x " + std::to_string(dearest->first));
+    const auto specific = pricing::item_price(*found, "item:image", facts.dimensions, "", image_input);
+    CHECK(specific && specific->first == edit_rate && specific->second == "item:image[operation=edit]");
+  }
   // The host's count of the input, capped at the limit.
   CHECK(nano(bound_of(direct.prepare(image("vendor/image", 1)), measured(300))) == rounded(image_rate + 300 * image_token_rate + image_output * out_rate));
   CHECK(nano(bound_of(direct.prepare(image("vendor/image", 1)), measured(50'000))) == rounded(image_rate + tokens));
@@ -461,6 +476,39 @@ void images_bound() {
   CHECK(runtime::worst_case_cost(ok(retried.prepare(image("vendor/image", 1), run_with(3))), *priced).attempts == 3);
   // A model the catalogue does not price.
   CHECK(has(bound_of(direct.prepare(image("vendor/unknown", 1))).unbounded, UnboundedBy::ModelPrice, "vendor/unknown"));
+}
+
+// A refusal's subject names what prices: the unit, with the offered dimensions whose keys a row of the unit names, and
+// the operation. The values of other members (a user id, a session) change no price and are not printed.
+void refusal_subjects() {
+  auto direct = client_of(openai_chat());
+  const std::uint64_t tokens = image_input * image_token_rate + image_output * out_rate;
+  // A row keyed on an extension member applies.
+  auto low = image("vendor/image-moderated", 1);
+  low.extensions = document(R"({"moderation":"low","user":"person-42","safety_identifier":"hash-9"})");
+  auto bound = bound_of(direct.prepare(low));
+  CHECK(nano(bound) == rounded(moderated_rate + tokens));
+  for (const auto& line : bound.lines) CHECK(line.row.find("person-42") == std::string::npos && line.row.find("hash-9") == std::string::npos);
+  // No row applies: the key a row names is printed with the call's value, the others are not.
+  auto other = low;
+  other.extensions = document(R"({"moderation":"auto","user":"person-42","safety_identifier":"hash-9"})");
+  bound = bound_of(direct.prepare(other));
+  CHECK(reasons_of(bound) == "ModelPrice [item:image[moderation=auto,operation=generate]] catalogue entry 'vendor/image-moderated' has no row of the "
+                             "unit that applies to the call; ");
+  auto unnamed = image("vendor/image-moderated", 1);
+  unnamed.quality = "high";
+  unnamed.extensions = document(R"({"user":"person-42"})");
+  bound = bound_of(direct.prepare(unnamed));
+  CHECK(reasons_of(bound) == "ModelPrice [item:image[operation=generate]] catalogue entry 'vendor/image-moderated' has no row of the unit that "
+                             "applies to the call; ");
+  // An entry with no row of the unit at all names the unit and the operation alone.
+  auto unpriced = unnamed;
+  unpriced.model = "vendor/decider";
+  CHECK(reasons_of(bound_of(direct.prepare(unpriced))).find("ModelPrice [item:image[operation=generate]] ") == 0);
+  for (const auto* request : {&other, &unnamed, &unpriced})
+    for (const auto& reason : bound_of(direct.prepare(*request)).unbounded)
+      CHECK(reason.subject.find("person-42") == std::string::npos && reason.detail.find("person-42") == std::string::npos &&
+            reason.subject.find("hash-9") == std::string::npos && reason.detail.find("hash-9") == std::string::npos);
 }
 
 void decisions_bound() {
@@ -556,7 +604,7 @@ void videos_bound() {
   twice.audio = true;
   twice.extensions = document(R"({"audio":false})");
   const auto twice_facts = ok(direct.prepare(twice)).endpoint_facts();
-  CHECK(dimensions_of(twice_facts) == "audio=true,audio=false,resolution=720p");
+  CHECK(dimensions_of(twice_facts) == "audio=true,audio=false,operation=submit,resolution=720p");
   bound = bound_of(direct.prepare(twice));
   CHECK(!bound.total && has(bound.unbounded, UnboundedBy::Unmodeled, "dimensions"));
   // At the routing gateway, the only origin the built-in policy admits videos at, it keeps no bound.
@@ -569,6 +617,7 @@ int main() {
   try {
     // The bounds first, so a wrong count shows as a wrong amount.
     images_bound();
+    refusal_subjects();
     decisions_bound();
     embeddings_bound();
     rerank_bound();

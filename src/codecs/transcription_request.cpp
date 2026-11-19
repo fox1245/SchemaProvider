@@ -23,7 +23,7 @@ void field(std::string& body, std::string_view boundary, std::string_view name, 
 std::string_view operation(const Request& request) noexcept { return request.translate ? "translate" : "transcribe"; }
 EndpointFacts endpoint_facts(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
   auto facts = endpoints::call_facts(descriptor, "transcription", operation(request), request.model);
-  facts.dimensions = endpoints::dimensions({{"language", request.language}}, request.extensions);
+  facts.dimensions = endpoints::dimensions(operation(request), {{"language", request.language}}, request.extensions);
   auto seconds = endpoints::requested("item:second", std::nullopt);
   seconds.source = EndpointQuantity::Source::StatedSeconds;
   facts.quantities.push_back(std::move(seconds));

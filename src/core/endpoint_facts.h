@@ -45,7 +45,9 @@ struct EndpointFacts {
   // The origin is a routing gateway (descriptor::routed_gateway).
   bool routed_gateway = false;
   // The qualifier dimensions the call offers, sorted by key, and the quantities it bills: a prepared call that bills its
-  // model states those of its request (images::endpoint_facts, ...), and any other call states none. The chat requests
+  // model states those of its request (images::endpoint_facts, ...), and any other call states none. Its dimensions
+  // hold `operation` with `operation` above and the request's own values, extension members included, so
+  // pricing::dearest_item_price and item_price over them give the rates the bound prices at. The chat requests
   // it carries, and the uploaded file whose lines are those requests: empty in every prepared call, since the SDK does
   // not fill them yet.
   std::vector<std::pair<std::string, std::string>> dimensions;

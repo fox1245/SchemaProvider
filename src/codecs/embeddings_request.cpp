@@ -19,7 +19,7 @@ bool token(std::string_view value, bool upper_case = true) {
 std::string_view operation(const Request&) noexcept { return "embed"; }
 EndpointFacts endpoint_facts(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
   auto facts = endpoints::call_facts(descriptor, "embeddings", operation(request), request.model);
-  facts.dimensions = endpoints::dimensions({{"dimensions", endpoints::decimal(request.dimensions)}, {"task", request.task}}, request.extensions);
+  facts.dimensions = endpoints::dimensions(operation(request), {{"dimensions", endpoints::decimal(request.dimensions)}, {"task", request.task}}, request.extensions);
   const std::uint64_t inputs = request.inputs.size();
   facts.quantities.push_back(endpoints::input_limited("input", inputs));
   if (std::any_of(request.inputs.begin(), request.inputs.end(), [](const Input& input) { return !input.media.empty(); }))

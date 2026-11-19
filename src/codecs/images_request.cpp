@@ -21,9 +21,10 @@ std::string_view operation(const descriptor::EndpointFact& fact, const Request& 
 }
 EndpointFacts endpoint_facts(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
   const auto* fact = descriptor.policy()->endpoint("images", descriptor.base_url());
-  auto facts = endpoints::call_facts(descriptor, "images", fact ? operation(*fact, request) : std::string_view{}, request.model);
-  facts.dimensions = endpoints::dimensions({{"background", request.background}, {"output_compression", endpoints::decimal(request.output_compression)},
-                                            {"output_format", request.output_format}, {"quality", request.quality}, {"size", request.size}},
+  const auto performed = fact ? operation(*fact, request) : std::string_view{};
+  auto facts = endpoints::call_facts(descriptor, "images", performed, request.model);
+  facts.dimensions = endpoints::dimensions(performed, {{"background", request.background}, {"output_compression", endpoints::decimal(request.output_compression)},
+                                                      {"output_format", request.output_format}, {"quality", request.quality}, {"size", request.size}},
                                            request.extensions);
   facts.quantities.push_back(endpoints::requested("item:image", request.count));
   facts.quantities.push_back(endpoints::requested("item:input_image", request.references.size(), true));

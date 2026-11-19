@@ -113,11 +113,14 @@ EndpointFacts call_facts(const descriptor::ValidatedDescriptor& descriptor, std:
   return facts;
 }
 std::vector<std::pair<std::string, std::string>> dimensions(
-    std::initializer_list<std::pair<std::string_view, std::optional<std::string>>> typed, const std::shared_ptr<const json::Document>& extensions) {
+    std::string_view operation, std::initializer_list<std::pair<std::string_view, std::optional<std::string>>> typed,
+    const std::shared_ptr<const json::Document>& extensions) {
   std::vector<std::pair<std::string, std::string>> out;
   const auto offer = [&](std::string_view key, std::string_view value) {
     if (descriptor::valid_dimension_key(key) && descriptor::valid_dimension_value(value)) out.emplace_back(std::string(key), std::string(value));
   };
+  // The call's own operation, so a row qualified by an operation prices only that operation's calls.
+  offer("operation", operation);
   for (const auto& [key, value] : typed)
     if (value) offer(key, *value);
   if (extensions && extensions->root().is_object())

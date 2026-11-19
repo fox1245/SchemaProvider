@@ -531,9 +531,15 @@ struct Oracle {
   bool applies(const Row& r, std::uint64_t input_length) const {
     return r.tier == g.tier && (r.above == 0 || input_length > r.above) && offers(r);
   }
+  // The unit with the call's operation and the offered dimensions some row of the unit names: no other value is printed.
   std::string with_dimensions(const std::string& unit) const {
     std::string out = unit + "[";
-    for (const auto& [name, value] : offered) out += (out.back() == '[' ? "" : ",") + name + "=" + value;
+    for (const auto& [name, value] : offered) {
+      const bool read = name == "operation" || std::any_of(g.rows.begin(), g.rows.end(), [&](const auto& row) {
+        return row.second.item && "item:" + row.second.name == unit && row.second.qualifier.count(name);
+      });
+      if (read) out += (out.back() == '[' ? "" : ",") + name + "=" + value;
+    }
     return out + "]";
   }
   std::optional<std::uint64_t> count(const EndpointQuantity& q) const {
