@@ -464,15 +464,15 @@ constexpr std::string_view recorded_names[] = {
 };
 constexpr std::string_view recorded_answers[] = {
     "openai.chat audio ext=R bind=1234",
-    "openai.chat contents ext=R bind=----",
+    "openai.chat contents ext=R bind=1-34",
     "openai.chat extensions ext=R bind=1234",
     "openai.chat function_call ext=R bind=1234",
     "openai.chat functions ext=R bind=1234",
     "openai.chat image_config ext=R bind=1234",
     "openai.chat include_reasoning ext=R bind=1234",
-    "openai.chat input ext=R bind=----",
+    "openai.chat input ext=R bind=1-34",
     "openai.chat max_completion_tokens ext=R bind=123-",
-    "openai.chat max_output_tokens ext=R bind=----",
+    "openai.chat max_output_tokens ext=R bind=123-",
     "openai.chat max_tokens ext=R bind=444-",
     "openai.chat messages ext=R bind=2-34",
     "openai.chat modalities ext=R bind=1234",
@@ -496,14 +496,14 @@ constexpr std::string_view recorded_answers[] = {
     "anthropic.messages cache_control ext=R bind=1234",
     "anthropic.messages compaction ext=A bind=1234",
     "anthropic.messages container ext=R bind=1234",
-    "anthropic.messages contents ext=R bind=----",
+    "anthropic.messages contents ext=R bind=1-34",
     "anthropic.messages context_management ext=A bind=1234",
     "anthropic.messages diagnostics ext=A bind=1234",
     "anthropic.messages extensions ext=R bind=1234",
     "anthropic.messages inference_geo ext=A bind=1234",
-    "anthropic.messages input ext=R bind=----",
+    "anthropic.messages input ext=R bind=1-34",
     "anthropic.messages max_completion_tokens ext=R bind=1234",
-    "anthropic.messages max_output_tokens ext=R bind=----",
+    "anthropic.messages max_output_tokens ext=R bind=123-",
     "anthropic.messages max_tokens ext=R bind=444-",
     "anthropic.messages mcp_servers ext=R bind=1234",
     "anthropic.messages messages ext=R bind=2-34",
@@ -528,7 +528,7 @@ constexpr std::string_view recorded_answers[] = {
     "anthropic.messages top_p ext=R bind=1234",
     "openai.responses access_programs ext=A bind=1234",
     "openai.responses background ext=R bind=1234",
-    "openai.responses contents ext=R bind=----",
+    "openai.responses contents ext=R bind=1-34",
     "openai.responses context_management ext=A bind=1234",
     "openai.responses conversation ext=R bind=1234",
     "openai.responses extensions ext=R bind=1234",
@@ -538,9 +538,9 @@ constexpr std::string_view recorded_answers[] = {
     "openai.responses instructions ext=R bind=1234",
     "openai.responses max_completion_tokens ext=R bind=1234",
     "openai.responses max_output_tokens ext=R bind=444-",
-    "openai.responses max_tokens ext=R bind=----",
+    "openai.responses max_tokens ext=R bind=123-",
     "openai.responses max_tool_calls ext=R bind=1234",
-    "openai.responses messages ext=R bind=----",
+    "openai.responses messages ext=R bind=1-34",
     "openai.responses metadata ext=A bind=1234",
     "openai.responses modalities ext=R bind=1234",
     "openai.responses model ext=R bind=-234",
@@ -573,11 +573,11 @@ constexpr std::string_view recorded_answers[] = {
     "google.generate extensions ext=R bind=1234",
     "google.generate generationConfig ext=R bind=1234",
     "google.generate generation_config ext=R bind=1234",
-    "google.generate input ext=R bind=----",
+    "google.generate input ext=R bind=1-34",
     "google.generate max_completion_tokens ext=R bind=1234",
-    "google.generate max_output_tokens ext=R bind=----",
-    "google.generate max_tokens ext=R bind=----",
-    "google.generate messages ext=R bind=----",
+    "google.generate max_output_tokens ext=R bind=123-",
+    "google.generate max_tokens ext=R bind=123-",
+    "google.generate messages ext=R bind=1-34",
     "google.generate model ext=R bind=-234",
     "google.generate n ext=A bind=1234",
     "google.generate previous_interaction_id ext=A bind=1234",
@@ -603,7 +603,7 @@ constexpr std::string_view recorded_answers[] = {
     "google.interactions agent_config ext=R bind=1234",
     "google.interactions background ext=R bind=1234",
     "google.interactions cachedContent ext=A bind=1234",
-    "google.interactions contents ext=R bind=----",
+    "google.interactions contents ext=R bind=1-34",
     "google.interactions environment ext=A bind=1234",
     "google.interactions extensions ext=R bind=1234",
     "google.interactions generationConfig ext=A bind=1234",
@@ -611,8 +611,8 @@ constexpr std::string_view recorded_answers[] = {
     "google.interactions input ext=R bind=2-34",
     "google.interactions max_completion_tokens ext=R bind=1234",
     "google.interactions max_output_tokens ext=R bind=444-",
-    "google.interactions max_tokens ext=R bind=----",
-    "google.interactions messages ext=R bind=----",
+    "google.interactions max_tokens ext=R bind=123-",
+    "google.interactions messages ext=R bind=1-34",
     "google.interactions model ext=R bind=-234",
     "google.interactions n ext=A bind=1234",
     "google.interactions previous_interaction_id ext=R bind=1234",
@@ -634,6 +634,36 @@ constexpr std::string_view recorded_answers[] = {
     "google.interactions tool_choice ext=R bind=1234",
     "google.interactions tools ext=R bind=1234",
     "google.interactions top_p ext=R bind=1234",
+    "openai.chat@https://api.openai.com audio bind=1234",
+    "openai.chat@https://api.openai.com contents bind=1-34",
+    "openai.chat@https://api.openai.com extensions bind=1234",
+    "openai.chat@https://api.openai.com function_call bind=1234",
+    "openai.chat@https://api.openai.com functions bind=1234",
+    "openai.chat@https://api.openai.com image_config bind=1234",
+    "openai.chat@https://api.openai.com include_reasoning bind=1234",
+    "openai.chat@https://api.openai.com input bind=1-34",
+    "openai.chat@https://api.openai.com max_completion_tokens bind=123-",
+    "openai.chat@https://api.openai.com max_output_tokens bind=123-",
+    "openai.chat@https://api.openai.com max_tokens bind=123-",
+    "openai.chat@https://api.openai.com messages bind=2-34",
+    "openai.chat@https://api.openai.com modalities bind=1234",
+    "openai.chat@https://api.openai.com model bind=-234",
+    "openai.chat@https://api.openai.com models bind=1234",
+    "openai.chat@https://api.openai.com n bind=1234",
+    "openai.chat@https://api.openai.com plugins bind=1234",
+    "openai.chat@https://api.openai.com provider bind=1234",
+    "openai.chat@https://api.openai.com reasoning bind=1234",
+    "openai.chat@https://api.openai.com reasoning_effort bind=1234",
+    "openai.chat@https://api.openai.com response_format bind=1234",
+    "openai.chat@https://api.openai.com service_tier bind=1234",
+    "openai.chat@https://api.openai.com stop bind=1234",
+    "openai.chat@https://api.openai.com stream bind=33-4",
+    "openai.chat@https://api.openai.com stream_options bind=1234",
+    "openai.chat@https://api.openai.com temperature bind=1234",
+    "openai.chat@https://api.openai.com tool_choice bind=1234",
+    "openai.chat@https://api.openai.com tools bind=1234",
+    "openai.chat@https://api.openai.com top_p bind=1234",
+    "openai.chat@https://api.openai.com usage bind=1234",
     "endpoint:images background",
     "endpoint:images images",
     "endpoint:images input_references",
@@ -738,9 +768,10 @@ bool extension_refused(std::string_view family, std::string_view name) {
       R"(,"origins":["https://example.test"],"value":{"type":"boolean"},"replay_eligible":true}])"), "/extensions/key");
 }
 // The binding digits for `name`: each slot in turn bound to it, the others left at the family's own members.
-std::string binding_answer(std::string_view family, std::string_view name) {
+// `origin` empty: the family's own fixed origin. The Chat output cap defaults to `max_completion_tokens` at direct OpenAI.
+std::string binding_answer(std::string_view family, std::string_view name, std::string_view at = {}) {
   const bool google = family.starts_with("google.");
-  const std::string origin = google ? "https://generativelanguage.googleapis.com" : "https://example.test";
+  const std::string origin = !at.empty() ? std::string(at) : google ? "https://generativelanguage.googleapis.com" : "https://example.test";
   const std::string path = family == "google.generate" ? "/v1beta/models/fixture-model:generateContent" : family == "google.interactions" ? "/v1beta/interactions" :
       family == "anthropic.messages" ? "/v1/messages" : family == "openai.chat" ? "/v1/chat/completions" : "/v1/responses";
   const std::string stream = family == "google.generate" ? "/v1beta/models/fixture-model:streamGenerateContent?alt=sse" : path;
@@ -802,6 +833,10 @@ void owned_members_recorded() {
       const auto digits = binding_answer(family, name);
       if (extension || digits != "----") actual.push_back(std::string(family) + " " + std::string(name) + " ext=" + (extension ? "R" : "A") + " bind=" + digits);
     }
+  // The same descriptor at an origin whose default output cap is not the family's: the slot-member names are recorded there too.
+  constexpr std::string_view direct = "https://api.openai.com";
+  for (const auto name : recorded_names)
+    if (const auto digits = binding_answer("openai.chat", name, direct); digits != "----") actual.push_back("openai.chat@" + std::string(direct) + " " + std::string(name) + " bind=" + digits);
   const EndpointPolicies policies;
   for (const auto endpoint : recorded_endpoints)
     for (const auto name : recorded_names)

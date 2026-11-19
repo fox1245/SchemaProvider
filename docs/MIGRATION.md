@@ -377,7 +377,7 @@ One table lists the request members each encoder owns, and a descriptor binding 
   - Interactions: `agent_config`, `response_modalities`;
   - every family: `extensions`;
   - every family: a key the family's policy admits as an extension (`speed`, `inference_geo`, `diagnostics` and `compaction` for Messages with the built-in policy).
-- **Still admitted.** A slot may name a member a family's policy binds to a slot (`input`, `contents`, `max_tokens`, `max_output_tokens`, `maxOutputTokens`, ...), and the Chat output cap may name `max_completion_tokens`. Two slots that name one member are refused at the later slot, as before.
+- **Still admitted.** A slot may name the member some family's policy binds to that same slot (the messages slot `input` or `contents`, the output cap `max_tokens`, `max_output_tokens` or `maxOutputTokens`, ...), its own default at the descriptor's origin, and, for the Chat output cap, `max_completion_tokens`. A slot naming a member of another slot's spelling (`model` bound to `contents`, `stream` bound to `input`) is refused at its own pointer, which loaded before. Two slots that name one member are refused at the later slot, as before.
 - **Queries.** `<descriptor/owned_keys.h>` adds `MemberRole`, `OwnedMember`, `owned_members(family_or_endpoint)`, `owned_tool_members(family)`, `member_role(family_or_endpoint, name)`, `role_of(members, name)`, `owned_member_families()` and `slot_alternate(family, slot)`. A host that keeps a reserved-member list of its own for extension checks can call `owned_members`.
 - **Layout.** Only declarations are added to `<descriptor/owned_keys.h>`. No installed struct changes its layout, no digest moves, and no capability bit is added.
 
