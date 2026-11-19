@@ -678,6 +678,12 @@ std::optional<Digest> chat_configuration_digest_of(const descriptor::ValidatedDe
 }
 std::string_view ContextAccess::route(const NativeContext& context) noexcept { return context.route_; }
 } // namespace native_testing
+// The route a turn binds: on a model-routed descriptor the buffered path with the model in it, in both modes, as a
+// Generate turn always binds; on any other the path of the turn's mode. It is empty for a model that resolved_path
+// refuses, and a context with an empty route is not valid.
+static std::string bound_route(const descriptor::ValidatedDescriptor& descriptor, bool streaming, std::string_view model) {
+  return descriptor.resolved_path(descriptor.model_routed() ? false : streaming, model);
+}
 NativeContext::NativeContext(Family family, std::string model, std::string route, size_t prefix_count, descriptor::PolicySnapshot policy)
     : family_(family), model_(std::move(model)), route_(std::move(route)), prefix_count_(prefix_count), policy_(std::move(policy)) {}
 std::shared_ptr<const NativeContext> NativeContext::decoding_only() const {
@@ -724,16 +730,16 @@ static size_t history_start(const descriptor::ValidatedDescriptor& descriptor, c
   return 0;
 }
 NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, const messages::Request& request, const descriptor::EffectiveChoices& choices, bool streaming)
-    : family_(Family::Messages), model_(request.model), route_(descriptor.resolved_path(streaming, request.model)),
+    : family_(Family::Messages), model_(request.model), route_(bound_route(descriptor, streaming, request.model)),
       prefix_count_(request.messages.size() - history_start(descriptor, request.messages)), policy_(descriptor.policy()) {
-  valid_ = descriptor.family() == "anthropic.messages" && origin_digest(descriptor, origin_) && configuration_digest(descriptor, request, choices, prefix_);
+  valid_ = !route_.empty() && descriptor.family() == "anthropic.messages" && origin_digest(descriptor, origin_) && configuration_digest(descriptor, request, choices, prefix_);
   if (!request_controls::extensions_replay_eligible(descriptor, request.extensions)) replay_eligible_ = false;
   root_ = prefix_;
   if (valid_) bind_history(request.messages, false, history_start(descriptor, request.messages));
 }
 NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, const responses::Request& request, const descriptor::EffectiveChoices& choices, bool streaming)
-    : family_(Family::Responses), model_(request.model), route_(descriptor.resolved_path(streaming, request.model)), prefix_count_(request.messages.size()), policy_(descriptor.policy()) {
-  valid_ = descriptor.family() == "openai.responses" && origin_digest(descriptor, origin_) && configuration_digest(descriptor, request, choices, prefix_);
+    : family_(Family::Responses), model_(request.model), route_(bound_route(descriptor, streaming, request.model)), prefix_count_(request.messages.size()), policy_(descriptor.policy()) {
+  valid_ = !route_.empty() && descriptor.family() == "openai.responses" && origin_digest(descriptor, origin_) && configuration_digest(descriptor, request, choices, prefix_);
   if (!request_controls::extensions_replay_eligible(descriptor, request.extensions)) replay_eligible_ = false;
   if (!valid_) return;
   configuration_ = prefix_;
@@ -772,7 +778,7 @@ NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, 
 }
 NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, const gemini::Request& request, const descriptor::EffectiveChoices& choices, bool)
     : family_(Family::Gemini), model_(request.model), route_(descriptor.resolved_path(false, request.model)), prefix_count_(request.messages.size()), policy_(descriptor.policy()) {
-  valid_ = descriptor.family() == family_name(family_) && origin_digest(descriptor, origin_) && configuration_digest(descriptor, request, choices, prefix_);
+  valid_ = !route_.empty() && descriptor.family() == family_name(family_) && origin_digest(descriptor, origin_) && configuration_digest(descriptor, request, choices, prefix_);
   if (!request_controls::extensions_replay_eligible(descriptor, request.extensions)) replay_eligible_ = false;
   thinking_disabled_ = choices.thinking_budget && *choices.thinking_budget == 0 && !choices.thinking_level;
   service_functions_ = std::any_of(request.builtin_tools.begin(), request.builtin_tools.end(),
@@ -785,8 +791,8 @@ NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, 
   }
 }
 NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, const interactions::Request& request, const descriptor::EffectiveChoices& choices, bool streaming)
-    : family_(Family::Interactions), model_(request.model), route_(descriptor.resolved_path(streaming, request.model)), prefix_count_(request.messages.size()), policy_(descriptor.policy()) {
-  valid_ = descriptor.family() == family_name(family_) && origin_digest(descriptor, origin_) && configuration_digest(descriptor, request, choices, prefix_);
+    : family_(Family::Interactions), model_(request.model), route_(bound_route(descriptor, streaming, request.model)), prefix_count_(request.messages.size()), policy_(descriptor.policy()) {
+  valid_ = !route_.empty() && descriptor.family() == family_name(family_) && origin_digest(descriptor, origin_) && configuration_digest(descriptor, request, choices, prefix_);
   if (!request_controls::extensions_replay_eligible(descriptor, request.extensions)) replay_eligible_ = false;
   // A continued interaction's history is held by the service, so its output has no client-held replay authority;
   // neither has a stored interaction read back by id.
@@ -800,9 +806,9 @@ NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, 
   }
 }
 NativeContext::NativeContext(const descriptor::ValidatedDescriptor& descriptor, const chat::Request& request, const descriptor::EffectiveChoices& choices, bool streaming)
-    : family_(Family::Chat), model_(request.model), route_(descriptor.resolved_path(streaming, request.model)),
+    : family_(Family::Chat), model_(request.model), route_(bound_route(descriptor, streaming, request.model)),
       prefix_count_(request.canonical_messages.empty() ? request.messages.size() : request.canonical_messages.size()), policy_(descriptor.policy()) {
-  valid_ = descriptor.family() == family_name(family_) && origin_digest(descriptor, origin_) && configuration_digest(descriptor, request, choices, prefix_);
+  valid_ = !route_.empty() && descriptor.family() == family_name(family_) && origin_digest(descriptor, origin_) && configuration_digest(descriptor, request, choices, prefix_);
   if (!request_controls::extensions_replay_eligible(descriptor, request.extensions)) replay_eligible_ = false;
   if (!valid_) return;
   if (request.audio) audio_format_ = request.audio->format;
@@ -889,7 +895,7 @@ void NativeContext::bind_history(const std::vector<Message>& messages, bool port
 bool NativeContext::matches_descriptor(const descriptor::ValidatedDescriptor& descriptor) const {
   Digest digest{};
   // The route binds the model on a model-routed descriptor, so a seal never replays to another model.
-  return valid_ && (route_ == descriptor.resolved_path(false, model_) || route_ == descriptor.resolved_path(true, model_)) &&
+  return valid_ && !route_.empty() && (route_ == descriptor.resolved_path(false, model_) || route_ == descriptor.resolved_path(true, model_)) &&
          origin_digest(descriptor, digest) && digest == origin_;
 }
 std::optional<std::string_view> NativeContext::server_tool_name(std::string_view id) const {

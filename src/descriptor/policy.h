@@ -416,8 +416,13 @@ std::optional<CacheCapabilities> cache_capabilities(const ValidatedDescriptor&, 
 // which loads and whose encoder refuses it.
 bool route_admitted(const ValidatedDescriptor&) noexcept;
 // Why a request for `model` cannot go through this descriptor's route: on a model-routed descriptor, a model that
-// cannot take the place of `{model}` (route_model_substitute). Empty when it can.
+// cannot take the place of `{model}` in either path (resolved_path is empty). Empty when it can. Encoders answer it
+// with InvalidRequest.
 std::optional<std::string> route_refusal(const ValidatedDescriptor&, std::string_view model);
+// Why a request for `model` does not fit this descriptor's literal route: a descriptor whose paths name a model
+// (ValidatedDescriptor::route_model) serves requests for that model only. Empty when it fits, and for a descriptor
+// whose paths name no model. Encoders answer it with InvalidConfig.
+std::optional<std::string> literal_route_refusal(const ValidatedDescriptor&, std::string_view model);
 // The credential scheme this descriptor's chat calls send the API key with: its `connection.auth`, else its policy's
 // auth_scheme for its family and origin. Endpoint calls and realtime sessions use their endpoint fact's `auth`.
 std::string_view auth_scheme(const ValidatedDescriptor&) noexcept;

@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <iostream>
 #include <set>
+#include <source_location>
 #include <stdexcept>
 #include <string>
 
@@ -1809,8 +1810,9 @@ template <class Result> std::string wire_path(const Result& result) {
   if (const auto* error = std::get_if<Error>(&result)) throw std::runtime_error("encode refused: " + error->safe_message);
   return std::get<0>(result).path;
 }
-template <class Result> ErrorKind refusal_kind(const Result& result) {
-  CHECK(std::holds_alternative<Error>(result));
+// The kind of a refusal; a result that is not one fails at the caller's line.
+template <class Result> ErrorKind refusal_kind(const Result& result, std::source_location where = std::source_location::current()) {
+  if (!std::holds_alternative<Error>(result)) throw std::runtime_error("line " + std::to_string(where.line()) + ": not refused");
   return std::get<Error>(result).kind;
 }
 constexpr std::string_view generate_fact = R"({"buffered":"/v1beta/models/{model}:generateContent","streaming":"/v1beta/models/{model}:streamGenerateContent?alt=sse"})";
@@ -2033,6 +2035,166 @@ void route_queries() {
   for (const auto* path : {"/v1/{model}/{model}", "/v1?m={model}", "/v1?alt", "/v1#x", "/v1/{models}"}) CHECK(!descriptor::valid_route_template(path));
 }
 
+// The path of an operation on a stored interaction is the route's path with `/<id>` (and `/cancel`) after it and
+// the route's query, if any, after that.
+interactions::Request lifecycle(interactions::Lifecycle operation, std::string id = "abc") {
+  auto request = interactions::Request::simple("fixture-model", "hi", 64);
+  request.messages.clear();
+  request.lifecycle = operation;
+  request.interaction_id = std::move(id);
+  return request;
+}
+void interaction_lifecycle_routes() {
+  using interactions::Lifecycle;
+  const auto expect = [](const descriptor::ValidatedDescriptor& d, std::string_view create, std::string_view one, std::string_view cancel) {
+    CHECK(wire_path(interactions::encode(d, interactions::Request::simple("fixture-model", "hi", 64), false)) == create);
+    const auto get = interactions::encode(d, lifecycle(Lifecycle::Get), false);
+    CHECK(wire_path(get) == one && std::get<interactions::EncodedRequest>(get).method == "GET");
+    const auto remove = interactions::encode(d, lifecycle(Lifecycle::Delete), false);
+    CHECK(wire_path(remove) == one && std::get<interactions::EncodedRequest>(remove).method == "DELETE");
+    const auto stop = interactions::encode(d, lifecycle(Lifecycle::Cancel), false);
+    CHECK(wire_path(stop) == cancel && std::get<interactions::EncodedRequest>(stop).method == "POST");
+  };
+  // The embedded route, as before.
+  expect(descriptor::presets::google_interactions(), "/v1beta/interactions", "/v1beta/interactions/abc", "/v1beta/interactions/abc/cancel");
+  // A route with a query keeps it at the end.
+  const auto queried = load(edited(policy_text(), "google.interactions", "routes",
+      std::string(R"([{"origins":["http://127.0.0.1:18080"],"buffered":"/v2/interactions?v=1&x=y","streaming":"/v2/interactions?v=1&x=y"},)") +
+      std::string(interactions_fact) + "]"));
+  expect(admitted(routed("google.interactions", "http://127.0.0.1:18080", "/v2/interactions?v=1&x=y", "/v2/interactions?v=1&x=y", queried)),
+         "/v2/interactions?v=1&x=y", "/v2/interactions/abc?v=1&x=y", "/v2/interactions/abc/cancel?v=1&x=y");
+  // A model-routed route, with and without a query.
+  const auto routed_query = load(edited(policy_text(), "google.interactions", "routes",
+      std::string(R"([{"origins":["http://127.0.0.1:18080"],"buffered":"/v2/{model}/interactions?v=1","streaming":"/v2/{model}/interactions?v=1"},)") +
+      std::string(interactions_fact) + "]"));
+  expect(admitted(routed("google.interactions", "http://127.0.0.1:18080", "/v2/{model}/interactions?v=1", "/v2/{model}/interactions?v=1", routed_query)),
+         "/v2/fixture-model/interactions?v=1", "/v2/fixture-model/interactions/abc?v=1", "/v2/fixture-model/interactions/abc/cancel?v=1");
+  const auto unpinned = load(edited(policy_text(), "google.interactions", "routes", "[]"));
+  expect(admitted(routed("google.interactions", "http://127.0.0.1:18080", "/v1/{model}/interactions", "/v1/{model}/interactions", unpinned)),
+         "/v1/fixture-model/interactions", "/v1/fixture-model/interactions/abc", "/v1/fixture-model/interactions/abc/cancel");
+}
+
+// An interaction id is one path segment: `.`, `..` and an id that holds `..` are refused before anything is sent.
+void interaction_ids_keep_the_path() {
+  using interactions::Lifecycle;
+  const auto d = descriptor::presets::google_interactions();
+  for (const auto operation : {Lifecycle::Get, Lifecycle::Delete, Lifecycle::Cancel}) {
+    for (const auto* id : {".", "..", "a..b", "..a", "a..", "../x", "a/b", "a?b", "a#b", "a%2e", ""})
+      CHECK(refusal_kind(interactions::encode(d, lifecycle(operation, id), false)) == ErrorKind::InvalidRequest);
+    for (const auto* id : {"abc", "a.b", "v1_ChdpbnRlcmFjdGlvbg=", ".a", "a."})
+      CHECK(wire_path(interactions::encode(d, lifecycle(operation, id), false)).starts_with(std::string("/v1beta/interactions/") + id));
+  }
+}
+
+// A literal route names its model in every family: where the origin's route fact has `{model}`, a descriptor whose
+// paths carry one model serves requests for that model only. Where no such fact applies, a path names no model and
+// the descriptor takes any.
+void literal_routes_name_their_model() {
+  const std::string loopback = "http://127.0.0.1:18080";
+  const auto policy_for = [&](std::string_view family, std::string_view buffered, std::string_view streaming) {
+    return load(edited(policy_text(), family, "routes", R"([{"origins":[")" + loopback + R"("],"buffered":)" + json::quote(buffered) +
+                                                          ",\"streaming\":" + json::quote(streaming) + "}]"));
+  };
+  const auto chat = admitted(routed("openai.chat", loopback, "/v1/models/gpt-a/chat", "/v1/models/gpt-a/chat",
+                                    policy_for("openai.chat", "/v1/models/{model}/chat", "/v1/models/{model}/chat")));
+  CHECK(chat.route_model() == "gpt-a" && !chat.model_routed());
+  CHECK(wire_path(chat::encode(chat, chat::Request::simple("gpt-a", "hi", 64), false)) == "/v1/models/gpt-a/chat");
+  CHECK(refusal_kind(chat::encode(chat, chat::Request::simple("gpt-b", "hi", 64), false)) == ErrorKind::InvalidConfig);
+  const auto messages = admitted(routed("anthropic.messages", loopback, "/v1/models/claude-a:rawPredict", "/v1/models/claude-a:streamRawPredict",
+                                        policy_for("anthropic.messages", "/v1/models/{model}:rawPredict", "/v1/models/{model}:streamRawPredict")));
+  CHECK(wire_path(messages::encode(messages, messages::Request::simple("claude-a", "hi", 64), true)) == "/v1/models/claude-a:streamRawPredict");
+  CHECK(refusal_kind(messages::encode(messages, messages::Request::simple("claude-b", "hi", 64), true)) == ErrorKind::InvalidConfig);
+  const auto responses = admitted(routed("openai.responses", loopback, "/v1/gpt-a/responses", "/v1/gpt-a/responses",
+                                         policy_for("openai.responses", "/v1/{model}/responses", "/v1/{model}/responses")));
+  CHECK(wire_path(responses::encode(responses, responses::Request::simple("gpt-a", "hi", 64), false)) == "/v1/gpt-a/responses");
+  CHECK(refusal_kind(responses::encode(responses, responses::Request::simple("gpt-b", "hi", 64), false)) == ErrorKind::InvalidConfig);
+  const auto interactions = admitted(routed("google.interactions", loopback, "/v2/gem-a/interactions", "/v2/gem-a/interactions",
+                                            policy_for("google.interactions", "/v2/{model}/interactions", "/v2/{model}/interactions")));
+  CHECK(wire_path(interactions::encode(interactions, interactions::Request::simple("gem-a", "hi", 64), false)) == "/v2/gem-a/interactions");
+  CHECK(refusal_kind(interactions::encode(interactions, interactions::Request::simple("gem-b", "hi", 64), false)) == ErrorKind::InvalidConfig);
+  // The refusal is one check every family shares, and Generate keeps its own.
+  const auto refused_text = std::get<Error>(chat::encode(chat, chat::Request::simple("gpt-b", "hi", 64), false)).safe_message;
+  CHECK(!reason::code(reason::Source::SharedRequest, refused_text).empty());
+  CHECK(std::get<Error>(responses::encode(responses, responses::Request::simple("gpt-b", "hi", 64), false)).safe_message == refused_text);
+  // Without a `{model}` fact at the origin a path names no model: the presets and a literal loopback path take any.
+  namespace presets = descriptor::presets;
+  for (const auto& d : {presets::openai_chat(), presets::openrouter_chat(), presets::loopback_chat(),
+                        admitted(routed("openai.chat", loopback, "/v1/models/gpt-a/chat", "/v1/models/gpt-a/chat"))})
+    for (const auto* model : {"model-a", "model-b"}) CHECK(std::holds_alternative<chat::EncodedRequest>(chat::encode(d, chat::Request::simple(model, "hi", 64), false)));
+  for (const auto& d : {presets::openai_responses(), presets::openrouter_responses()})
+    for (const auto* model : {"model-a", "model-b"}) CHECK(std::holds_alternative<responses::EncodedRequest>(responses::encode(d, responses::Request::simple(model, "hi", 64), false)));
+  for (const auto& d : {presets::anthropic_messages(), presets::openrouter_messages()})
+    for (const auto* model : {"model-a", "model-b"}) CHECK(std::holds_alternative<messages::EncodedRequest>(messages::encode(d, messages::Request::simple(model, "hi", 64), false)));
+  for (const auto* model : {"model-a", "model-b"})
+    CHECK(std::holds_alternative<interactions::EncodedRequest>(interactions::encode(presets::google_interactions(), interactions::Request::simple(model, "hi", 64), false)));
+}
+
+// A path is at most 2048 bytes, with the request's model in it too; and a route template leaves room for the model
+// the policy's own admission check puts in its place.
+void route_lengths() {
+  const auto chat = admitted(routed("openai.chat", "http://127.0.0.1:18080", "/v1/models/{model}/chat", "/v1/models/{model}/chat"));
+  const std::string fits(2048 - std::string("/v1/models//chat").size(), 'm');
+  for (const bool streaming : {false, true}) {
+    CHECK(wire_path(chat::encode(chat, chat::Request::simple(fits, "hi", 64), streaming)).size() == 2048);
+    CHECK(refusal_kind(chat::encode(chat, chat::Request::simple(fits + "m", "hi", 64), streaming)) == ErrorKind::InvalidRequest);
+  }
+  const auto messages = admitted(routed("anthropic.messages", "http://127.0.0.1:18080", "/{model}", "/{model}:stream"));
+  CHECK(refusal_kind(messages::encode(messages, messages::Request::simple(std::string(2041, 'm'), "hi", 64), false)) == ErrorKind::InvalidRequest);
+  CHECK(wire_path(messages::encode(messages, messages::Request::simple(std::string(2040, 'm'), "hi", 64), false)).size() == 2041);
+  const auto template_of = [](std::size_t size) { return "/" + std::string(size - 1 - std::string("{model}").size(), 'a') + "{model}"; };
+  const auto chat_routes = [&](const std::string& buffered, const std::string& streaming) {
+    return edited(policy_text(), "openai.chat", "routes", "[{\"buffered\":" + json::quote(buffered) + ",\"streaming\":" + json::quote(streaming) + "}]");
+  };
+  // policy-admission is 16 bytes: a template of 2039 bytes fills to 2048.
+  CHECK(load_outcome(chat_routes(template_of(2039), template_of(2039))).empty());
+  CHECK(load_outcome(chat_routes(template_of(2040), template_of(2039))).starts_with("/routes/buffered "));
+  CHECK(load_outcome(chat_routes(template_of(2039), template_of(2048))).starts_with("/routes/streaming "));
+}
+
+// resolved_path checks the model it puts in place of `{model}` itself: a name the shared check refuses, or a path
+// that would grow past 2048 bytes, gives an empty path. The encoders refuse such a request first, with the route's
+// reason, so an empty path is never sent. A path without `{model}` is returned for any model, as before.
+void resolved_paths_are_checked() {
+  const auto chat = admitted(routed("openai.chat", "http://127.0.0.1:18080", "/v1/models/{model}/chat", "/v1/models/{model}/chat"));
+  const auto messages = admitted(routed("anthropic.messages", "http://127.0.0.1:18080", "/v1/models/{model}:rawPredict", "/v1/models/{model}:streamRawPredict"));
+  const std::string route_text = "model name cannot take the place of {model} in the descriptor's paths";
+  for (const auto& model : std::vector<std::string>{"..", ".", "a..b", "a/b", "a?x", "a#x", "", "{model}", std::string(2048, 'm')}) {
+    for (const bool streaming : {false, true}) {
+      CHECK(chat.resolved_path(streaming, model).empty() && messages.resolved_path(streaming, model).empty());
+      if (model.empty()) continue;
+      const auto chat_refusal = chat::encode(chat, chat::Request::simple(model, "hi", 64), streaming);
+      CHECK(refusal_kind(chat_refusal) == ErrorKind::InvalidRequest && std::get<Error>(chat_refusal).safe_message == route_text);
+      const auto messages_refusal = messages::encode(messages, messages::Request::simple(model, "hi", 64), streaming);
+      CHECK(refusal_kind(messages_refusal) == ErrorKind::InvalidRequest && std::get<Error>(messages_refusal).safe_message == route_text);
+    }
+  }
+  CHECK(reason::request_code(reason::Source::ChatRequest, route_text) == "request.route.model_name");
+  CHECK(messages.resolved_path(true, "claude-x") == "/v1/models/claude-x:streamRawPredict");
+  // A descriptor that is not model-routed returns its own path, whatever the model.
+  const auto plain = descriptor::presets::openai_chat();
+  for (const auto* model : {"..", "a/b", "a?x", "", "gpt-x"})
+    for (const bool streaming : {false, true}) CHECK(plain.resolved_path(streaming, model) == "/v1/chat/completions");
+  const auto literal = descriptor::presets::google_generate("gemini-2.5-flash");
+  CHECK(literal.resolved_path(true, "a/b") == "/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse");
+}
+
+// The fact that lists an origin applies there wherever it stands in the list.
+void scoped_fact_wins_in_any_order() {
+  const auto policy = load(edited(policy_text(), "google.interactions", "routes", "[" + std::string(interactions_fact) +
+      R"(,{"origins":["http://127.0.0.1:18080"],"buffered":"/v2/interactions","streaming":"/v2/interactions"}])"));
+  CHECK(policy->route("google.interactions", "http://127.0.0.1:18080")->buffered == "/v2/interactions");
+  CHECK(policy->route("google.interactions", "https://generativelanguage.googleapis.com")->buffered == "/v1beta/interactions");
+  const auto d = admitted(routed("google.interactions", "http://127.0.0.1:18080", "/v2/interactions", "/v2/interactions", policy));
+  CHECK(wire_path(interactions::encode(d, interactions::Request::simple("fixture-model", "hi", 64), false)) == "/v2/interactions");
+  const auto old_path = admitted(routed("google.interactions", "http://127.0.0.1:18080", "/v1beta/interactions", "/v1beta/interactions", policy));
+  CHECK(refusal_kind(interactions::encode(old_path, interactions::Request::simple("fixture-model", "hi", 64), false)) == ErrorKind::InvalidConfig);
+  const auto generate = load(edited(policy_text(), "google.generate", "routes", "[" + std::string(generate_fact) +
+      R"(,{"origins":["https://llm.example.com"],"buffered":"/g/{model}:generateContent","streaming":"/g/{model}:streamGenerateContent?alt=sse"}])"));
+  CHECK(admitted(routed("google.generate", "https://llm.example.com", "/g/{model}:generateContent", "/g/{model}:streamGenerateContent?alt=sse", generate)).model_routed());
+  CHECK(refusal_pointer(routed("google.generate", "https://llm.example.com", "/v1beta/models/{model}:generateContent",
+                               "/v1beta/models/{model}:streamGenerateContent?alt=sse", generate)) == "/connection/paths/buffered");
+}
+
 // The model put in place of `{model}` never changes the path's segments, its query or its origin: a name the
 // charset does not admit is refused before the path is built, in every family.
 void hostile_route_models() {
@@ -2085,6 +2247,8 @@ int main() {
     route_facts_are_validated(); embedded_policy_states_the_routes(); older_policies_keep_the_routes();
     interactions_route_from_policy(); generate_route_at_a_pinned_origin(); placeholder_in_every_family(); hostile_route_models();
     route_queries();
+    interaction_lifecycle_routes(); interaction_ids_keep_the_path(); literal_routes_name_their_model(); route_lengths(); scoped_fact_wins_in_any_order();
+    resolved_paths_are_checked();
     std::cout << "host query properties passed\n"; return 0;
   }
   catch (const std::exception& error) { std::cerr << "host query test failed: " << error.what() << '\n'; return 1; }

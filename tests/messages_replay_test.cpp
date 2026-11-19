@@ -1,6 +1,7 @@
 #include "codecs/messages.h"
 #include "codecs/messages_request.h"
 #include "core/native.h"
+#include "core/native_testing.h"
 #include "json/json.h"
 #include <algorithm>
 #include <functional>
@@ -976,9 +977,64 @@ void model_routed_path() {
   other.model = "other-model";
   rejected(descriptor, other);
 }
+// A model-routed descriptor whose two modes have different paths (`:rawPredict`, `:streamRawPredict`) binds one route
+// for both, the buffered path with the model in it, so an answer captured on a streamed turn replays on a buffered
+// one and the other way round.
+descriptor::ValidatedDescriptor two_paths(std::string_view buffered, std::string_view streaming) {
+  const std::string source = R"({"descriptor_version":1,"revision":1,"id":"synthetic-messages","family":"anthropic.messages","connection":{"base_url":"http://127.0.0.1:18080","paths":{"buffered":)" +
+      json::quote(buffered) + R"(,"streaming":)" + json::quote(streaming) + R"(},"headers":{"anthropic-version":"2023-06-01","X-Fixture":"synthetic"}}})";
+  auto parsed = descriptor::load(source);
+  CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(parsed));
+  return std::get<descriptor::ValidatedDescriptor>(std::move(parsed));
+}
+Message capture_in(const descriptor::ValidatedDescriptor& descriptor, const messages::Request& request, bool stream) {
+  const auto wire = encoded(descriptor, request, stream);
+  Accumulator accumulator;
+  messages::Codec codec(descriptor, messages::Mode::Buffered, accumulator, wire.context);
+  codec.buffered(response(R"([{"type":"text","text":"Answer"}])"), {true, ErrorKind::Truncated});
+  codec.finish(); CHECK(accumulator.outcome() && std::holds_alternative<Completion>(*accumulator.outcome()));
+  auto message = std::get<Completion>(*accumulator.outcome()).messages.at(0);
+  CHECK(message.native && message.native->complete()); return message;
+}
+void model_routed_modes_share_a_route() {
+  const auto descriptor = two_paths("/v1/models/{model}:rawPredict", "/v1/models/{model}:streamRawPredict");
+  for (const bool first : {true, false}) {
+    auto request = base_request();
+    request.messages.push_back(capture_in(descriptor, request, first));
+    request.messages.push_back(user("Continue"));
+    for (const bool next : {false, true}) {
+      const auto wire = encoded(descriptor, request, next);
+      CHECK(wire.path == (next ? "/v1/models/fixture-model:streamRawPredict" : "/v1/models/fixture-model:rawPredict"));
+    }
+  }
+  // A literal descriptor with two paths binds the path of each mode, as it always has.
+  const auto literal = two_paths("/v1/messages", "/v1/messages:stream");
+  auto request = base_request();
+  request.messages.push_back(capture_in(literal, request, true));
+  request.messages.push_back(user("Continue"));
+  CHECK(encoded(literal, request, true).path == "/v1/messages:stream");
+  rejected(literal, request, ErrorKind::ReplayIneligible, false);
+}
+// The route a turn binds is checked on its own: through a descriptor with the same id, origin and bindings, and so
+// the same native origin digest, but another path, an answer captured for the same model under the same
+// configuration is not replayed. A request for another model is refused by the route and by the configuration
+// binding at once, since the configuration binds the request's model too.
+void route_binding_alone() {
+  const auto here = two_paths("/a/{model}:rawPredict", "/a/{model}:rawPredict");
+  const auto there = two_paths("/b/{model}:rawPredict", "/b/{model}:rawPredict");
+  CHECK(native_testing::origin_digest_of(here) && native_testing::origin_digest_of(here) == native_testing::origin_digest_of(there));
+  auto request = base_request();
+  request.messages.push_back(capture_in(here, request, false));
+  request.messages.push_back(user("Continue"));
+  CHECK(encoded(here, request).path == "/a/fixture-model:rawPredict");
+  rejected(there, request);
+  auto other = request;
+  other.model = "other-model";
+  rejected(here, other);
+}
 int main() {
   try {
-    model_routed_path();
+    model_routed_path(); model_routed_modes_share_a_route(); route_binding_alone();
     server_tool_options(); typed_client_tools_and_betas(); mcp_connector_and_replay(); compaction_and_history_roots(); input_blocks_and_skills();
     typed_wire_request(); native_retention_and_content_integrity(); prefix_and_origin_binding();
     immutable_context_and_failed_capture(); client_loop_ownership(); server_loop_ownership_and_pause(); signature_accumulation_and_limits();

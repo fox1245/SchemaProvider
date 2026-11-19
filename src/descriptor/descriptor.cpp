@@ -168,13 +168,15 @@ bool origin(std::string_view url, bool https_only = false) {
     return secure || loopback;
 }
 constexpr std::string_view placeholder = "{model}";
+// The longest path a descriptor, a route template or a request may have.
+constexpr std::size_t path_limit = 2048;
 bool segment_char(char c) { return ascii_alpha(c) || digit(c) || c == '-' || c == '_' || c == '.' || c == '~' || c == ':'; }
 bool query_char(char c) { return ascii_alpha(c) || digit(c) || c == '-' || c == '_' || c == '.' || c == '~'; }
 bool names_model(std::string_view path) { return path.find(placeholder) != std::string_view::npos; }
 // An origin-relative path without a query: no authority, no traversal, no URL escapes. `{model}` may stand once in
 // it where `placeholder_allowed` is set; a second one, or any other brace, is refused.
 bool relative_path(std::string_view path, bool placeholder_allowed) noexcept {
-    if (path.empty() || path.front() != '/' || path.starts_with("//") || path.size() > 2048) return false;
+    if (path.empty() || path.front() != '/' || path.starts_with("//") || path.size() > path_limit) return false;
     const auto at = placeholder_allowed ? path.find(placeholder) : std::string_view::npos;
     for (std::size_t i = 0; i < path.size(); ++i) {
         if (i == at) { i += placeholder.size() - 1; continue; }
@@ -615,18 +617,23 @@ LoadResult load_with_environment_headers(
 namespace sp::descriptor {
 bool valid_origin(std::string_view url) { return origin(url); }
 bool valid_path(std::string_view path) noexcept { return relative_path(path, false); }
-bool valid_route_template(std::string_view path) noexcept { return path.size() <= 2048 && stated_path(path, true); }
+bool valid_route_template(std::string_view path) noexcept { return path.size() <= path_limit && stated_path(path, true); }
 bool route_model_name(std::string_view model) noexcept {
     return !model.empty() && model.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._") == std::string_view::npos;
 }
 bool route_model_substitute(std::string_view model) noexcept {
     return route_model_name(model) && model != "." && model.find("..") == std::string_view::npos;
 }
-std::string ValidatedDescriptor::resolved_path(bool streaming, std::string_view model) const {
-    std::string resolved(path(streaming));
-    if (!model_routed_) return resolved;
-    if (const auto at = resolved.find(placeholder); at != std::string::npos) resolved.replace(at, placeholder.size(), model);
+std::string model_path(std::string_view path, std::string_view model) {
+    const auto at = path.find(placeholder);
+    if (at == std::string_view::npos) return std::string(path);
+    if (!route_model_substitute(model) || path.size() - placeholder.size() + model.size() > path_limit) return {};
+    std::string resolved(path);
+    resolved.replace(at, placeholder.size(), model);
     return resolved;
+}
+std::string ValidatedDescriptor::resolved_path(bool streaming, std::string_view model) const {
+    return model_routed_ ? model_path(path(streaming), model) : std::string(path(streaming));
 }
 std::string_view ValidatedDescriptor::route_model() const noexcept {
     // Read from the stored paths and the policy each time, so it holds for any copy of the descriptor.

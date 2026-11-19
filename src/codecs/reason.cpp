@@ -1236,6 +1236,7 @@ constexpr Entry transcription_request_table[] = {
 };
 constexpr Entry shared_request_table[] = {
   {"model name cannot take the place of {model} in the descriptor's paths", "request.route.model_name"},
+  {"the descriptor's paths name another model", "request.route.literal_model"},
   {"options are not admitted by the policy", "request.options.options_are_not_admitted_by_the_policy"},
   {"options do not match the policy's schema", "request.options.options_do_not_match_the_policy_s_schema"},
   {"an OpenRouter plugin is not admitted by the policy", "request.plugins.an_openrouter_plugin_is_not_admitted_by_the"},

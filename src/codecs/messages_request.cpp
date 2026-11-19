@@ -95,6 +95,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (descriptor.family() != "anthropic.messages") return Error{ErrorKind::InvalidConfig, "Messages encoder requires Messages descriptor"};
   if (request.model.empty() || request.messages.empty()) return bad("model and messages are required");
   if (auto refusal = descriptor::route_refusal(descriptor, request.model)) return bad(std::move(*refusal));
+  if (auto refusal = descriptor::literal_route_refusal(descriptor, request.model)) return Error{ErrorKind::InvalidConfig, std::move(*refusal)};
   const auto& resources = descriptor.policy()->resources();
   const auto& family = descriptor.family_policy();
   auto effective = descriptor::effective_defaults(descriptor, request.model);

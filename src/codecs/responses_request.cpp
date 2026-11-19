@@ -204,6 +204,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (descriptor.family() != "openai.responses") return Error{ErrorKind::InvalidConfig, "Responses encoder requires Responses descriptor"};
   if (request.model.empty() || request.messages.empty()) return bad("model and messages are required");
   if (auto refusal = descriptor::route_refusal(descriptor, request.model)) return bad(std::move(*refusal));
+  if (auto refusal = descriptor::literal_route_refusal(descriptor, request.model)) return Error{ErrorKind::InvalidConfig, std::move(*refusal)};
   CacheMarkReport mark_report;
   if (auto error = cache_marks::drop(descriptor, request.model, request.messages, mark_report)) return std::move(*error);
   const auto& resources = descriptor.policy()->resources();
