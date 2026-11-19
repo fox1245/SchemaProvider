@@ -295,6 +295,54 @@ std::string borrowed_values(const std::vector<std::string_view>& family_names) {
       if (entry.get("family").as_string() == name) { put(name); put("auth"); put(entry.get("auth").dump()); }
   return out;
 }
+// The route facts a policy takes from the embedded policy join its content digest in the same form: per family in
+// name order, then per member, the family, the member and the member's canonical JSON, each with its length.
+void route_content_digests() {
+  auto parsed = json::parse(config_defaults::descriptor_policy_json, {config_defaults::codec_admission_policy_bytes, config_defaults::codec_admission_policy_depth});
+  const auto root = std::get<json::Document>(parsed).root();
+  const auto routes_of = [&](std::string_view name) {
+    std::string out;
+    const auto put = [&](std::string_view text) { out += std::to_string(text.size()) + ":" + std::string(text); };
+    for (auto entry : root.get("families").elements())
+      if (entry.get("family").as_string() == name) { put(name); put("routes"); put(entry.get("routes").dump()); }
+    return out;
+  };
+  // Only Generate and Interactions state facts in the embedded policy, so only they are taken.
+  const auto older_text = edited({}, "routes", {});
+  const auto older = loaded_policy(older_text);
+  CHECK(older && older->content_digest_hex() == plain_digest(older_text, routes_of("google.generate") + routes_of("google.interactions")));
+  const auto generate_text = edited("google.generate", "routes", {});
+  const auto generate = loaded_policy(generate_text);
+  CHECK(generate && generate->content_digest_hex() == plain_digest(generate_text, routes_of("google.generate")));
+  // A family without embedded facts takes none.
+  const auto chat_text = edited("openai.chat", "routes", {});
+  const auto chat = loaded_policy(chat_text);
+  CHECK(chat && chat->content_digest_hex() == plain_digest(chat_text));
+  // With the credential facts, the family's members are taken in name order.
+  const auto both_text = [&] {
+    auto parsed_text = json::parse(edited("google.generate", "routes", {}), {config_defaults::codec_admission_policy_bytes, config_defaults::codec_admission_policy_depth});
+    std::string out = "{";
+    for (auto top : std::get<json::Document>(parsed_text).root().members()) {
+      out += (out.size() > 1 ? "," : "") + json::quote(top.key) + ':';
+      if (top.key != "families") { out += top.value.dump(); continue; }
+      std::string families = "[";
+      for (auto entry : top.value.elements()) {
+        if (families.size() > 1) families += ',';
+        if (entry.get("family").as_string() != "google.generate") { families += entry.dump(); continue; }
+        std::string object = "{";
+        for (auto field : entry.members())
+          if (field.key != "auth") object += (object.size() > 1 ? "," : "") + json::quote(field.key) + ':' + field.value.dump();
+        families += object + '}';
+      }
+      out += families + ']';
+    }
+    return out + '}';
+  }();
+  const auto both = loaded_policy(both_text);
+  CHECK(both && both->content_digest_hex() == plain_digest(both_text, borrowed_values({"google.generate"}) + routes_of("google.generate")));
+  // The facts are not part of the replay identity.
+  CHECK(older && older->identity_hex() == descriptor::builtin_policy()->identity_hex());
+}
 void content_digests() {
   const auto builtin = descriptor::builtin_policy();
   CHECK(builtin->content_digest_hex() == plain_digest(config_defaults::descriptor_policy_json));
@@ -606,6 +654,7 @@ int main() {
   builtin_headers();
   older_policy_without_facts();
   content_digests();
+  route_content_digests();
   descriptor_scheme();
   policy_scheme();
   policy_grammar();
