@@ -145,7 +145,7 @@ constexpr std::uint64_t image_rate = 40'000'000'000'000, high_rate = 80'000'000'
                         moderated_rate = 60'000'000'000'000, reference_rate = 10'000'000'000'000;
 constexpr std::uint64_t embed_rate = 100'000'000, document_rate = 1'000'000'000'000, search_unit_rate = 2'000'000'000'000;
 // Speech: a fraction of a nano-USD per byte, so the bound rounds up.
-constexpr std::uint64_t character_rate = 15'000'500'000;
+constexpr std::uint64_t character_rate = 15'000'500'000, paced_rate = 30'001'000'000;
 constexpr std::uint64_t second_rate = 100'000'000'000, translate_rate = 200'000'000'000, video_second_rate = 50'000'000'000'000,
                         video_1080p_rate = 100'000'000'000'000;
 // The model limits of the entries.
@@ -173,6 +173,10 @@ const auto priced = catalogue_of("{\"version\":1,\"models\":[" +
     // Each image priced only by a row keyed on an extension member.
     entry("vendor/image-moderated", limits(image_input, image_output),
           {{"input", in_rate}, {"input_image", image_token_rate}, {"output", out_rate}, {"item:image[moderation=low]", moderated_rate}, {"item:input_image", 0}}) + "," +
+    // Each image priced by the operation, and dearer for one value of an extension member.
+    entry("vendor/image-styled", limits(image_input, image_output),
+          {{"input", in_rate}, {"input_image", image_token_rate}, {"output", out_rate}, {"item:image[operation=generate]", image_rate},
+           {"item:image[operation=generate,style=1.5]", high_rate}, {"item:input_image", 0}}) + "," +
     // Priced by tokens alone: each image and each reference a declared zero.
     entry("vendor/image-tokens", limits(image_input, image_output),
           {{"input", in_rate}, {"input_image", image_token_rate}, {"output", out_rate}, {"item:image", 0}, {"item:input_image", 0}}) + "," +
@@ -182,6 +186,11 @@ const auto priced = catalogue_of("{\"version\":1,\"models\":[" +
     entry("vendor/ranker", limits(long_input), {{"input", in_rate}, {"item:document", document_rate}, {"item:search_unit", 0}}) + "," +
     entry("vendor/ranker-units", limits(long_input), {{"input", in_rate}, {"item:document", document_rate}, {"item:search_unit", search_unit_rate}}) + "," +
     entry("vendor/speaker", limits(long_input, long_output), {{"input", in_rate}, {"output", small_out_rate}, {"item:character", character_rate}}) + "," +
+    // Dearer characters at one speed; and seconds at one speed, which a speech call does not count.
+    entry("vendor/speaker-paced", limits(long_input, long_output),
+          {{"input", in_rate}, {"output", small_out_rate}, {"item:character", character_rate}, {"item:character[operation=speak,speed=1.5]", paced_rate}}) + "," +
+    entry("vendor/speaker-timed", limits(long_input, long_output),
+          {{"input", in_rate}, {"output", small_out_rate}, {"item:character", character_rate}, {"item:second[speed=1.5]", second_rate}}) + "," +
     entry("vendor/transcriber", limits(long_input, long_output),
           {{"input", in_rate}, {"output", small_out_rate}, {"item:second", second_rate}, {"item:second[operation=translate]", translate_rate}}) + "," +
     entry("vendor/video", limits(long_input, long_output),
@@ -189,8 +198,23 @@ const auto priced = catalogue_of("{\"version\":1,\"models\":[" +
            {"item:second[resolution=1080p]", video_1080p_rate}, {"item:input_image", reference_rate}}) + "]}");
 
 // The built-in policy with the rerank and video facts admitted at OpenAI's origin too, which is not a routing gateway,
-// and the video fact taking `audio` and `seed` as extensions there.
-const auto direct_policy = load(policy_with([](json::Value fact) { return fact.dump(); }, [] {
+// and the video fact taking `audio` and `seed` as extensions there; OpenAI's image fact taking a `style` that may be a
+// number, text or an object, and its speech fact a `format` and an `operation`.
+const auto direct_policy = load(policy_with([](json::Value fact) {
+  const auto name = fact.get("endpoint").as_string();
+  if (fact.get("shape").as_string() != "openai") return fact.dump();
+  if (name == "images")
+    return fact_text(fact, {}, {{"options", R"({"type":"object","properties":{"moderation":{"type":"string","max_length":32,"token":true},)"
+                                            R"("user":{"type":"string","max_length":256},"style":{"one_of":[{"type":"number"},)"
+                                            R"({"type":"string","max_length":64},{"type":"object","properties":{"name":{"type":"string","max_length":16}}}]}}})"}});
+  if (name == "speech") {
+    auto text = fact.dump();
+    text.insert(text.size() - 1, R"(,"options":{"type":"object","properties":{"format":{"type":"string","max_length":16,"token":true},)"
+                                 R"("operation":{"type":"string","max_length":16,"token":true}}})");
+    return text;
+  }
+  return fact.dump();
+}, [] {
   auto parsed = json::parse(config_defaults::descriptor_policy_json);
   const auto root = std::get<json::Document>(parsed).root();
   std::vector<std::string> added;
@@ -361,12 +385,12 @@ void stated_facts() {
   facts = ok(direct.prepare(edit)).endpoint_facts();
   CHECK(facts.operation == "edit" && quantities_of(facts) == "item:image item:input_image=2! input<input input_image<input output<output");
   CHECK(dimensions_of(facts) == "operation=edit");
-  // Extensions under their own names when they are a string, a boolean or an unsigned integer in the qualifier grammar;
-  // an object, or text outside the grammar, is offered by no dimension.
+  // Extensions under their own names: a string, a boolean or an unsigned integer in the qualifier grammar with its value,
+  // and an object, or text outside the grammar, without one.
   auto routed = image("vendor/image", 1);
   routed.extensions = document(R"({"provider":{"sort":"price"},"aspect_ratio":"16:9","seed":7,"user":"a person"})");
   facts = ok(router.prepare(routed)).endpoint_facts();
-  CHECK(facts.routed_gateway && dimensions_of(facts) == "aspect_ratio=16:9,operation=generate,seed=7");
+  CHECK(facts.routed_gateway && dimensions_of(facts) == "aspect_ratio=16:9,operation=generate,provider=,seed=7,user=");
   auto moderated = image("vendor/image", 1);
   moderated.extensions = document(R"({"moderation":"low"})");
   CHECK(dimensions_of(ok(direct.prepare(moderated)).endpoint_facts()) == "moderation=low,operation=generate");
@@ -383,12 +407,12 @@ void stated_facts() {
   rank.top = 1;
   facts = ok(direct.prepare(rank)).endpoint_facts();
   CHECK(quantities_of(facts) == "item:document=2! item:search_unit input<inputx2" && dimensions_of(facts) == "operation=rank,top=1");
-  // Speech: the input's bytes; the voice only when it is a value of the grammar.
+  // Speech: the input's bytes; a voice outside the grammar without its value.
   speech::Request speak{"vendor/speaker", "Hello there.", "alloy"};
   speak.format = "mp3";
   facts = ok(direct.prepare(speak)).endpoint_facts();
   CHECK(quantities_of(facts) == "item:character=12! input<input output<output" && dimensions_of(facts) == "format=mp3,operation=speak,voice=alloy");
-  CHECK(dimensions_of(ok(direct.prepare(speech::Request{"vendor/speaker", "Hello there.", "Alloy Two"})).endpoint_facts()) == "operation=speak");
+  CHECK(dimensions_of(ok(direct.prepare(speech::Request{"vendor/speaker", "Hello there.", "Alloy Two"})).endpoint_facts()) == "operation=speak,voice=");
   // Transcription: the seconds the host states.
   auto heard = transcript("vendor/transcriber");
   heard.language = "en";
@@ -511,6 +535,70 @@ void refusal_subjects() {
             reason.subject.find("hash-9") == std::string::npos && reason.detail.find("hash-9") == std::string::npos);
 }
 
+// A member that is set and whose value the qualifier grammar cannot hold is offered without a value: a row qualified by
+// it could apply, so the unit it would price has no total, and the price queries give no rate.
+void unstated_members() {
+  auto direct = client_of(openai_chat(direct_policy));
+  const std::uint64_t tokens = image_input * image_token_rate + image_output * out_rate;
+  const std::string refused = "ModelPrice [item:image[operation=generate,style]] a row of the unit is qualified by a member whose value the call does not "
+                              "state; ";
+  const auto styled = [](std::string style, std::string model = "vendor/image-styled") {
+    auto request = image(std::move(model), 1);
+    request.extensions = document("{\"style\":" + style + "}");
+    return request;
+  };
+  // A number with a fraction, a signed integer, an object, text outside the grammar.
+  for (const auto* style : {"1.5", "-2", R"({"name":"x"})", R"("a b")"}) {
+    const auto call = direct.prepare(styled(style));
+    const auto facts = ok(call).endpoint_facts();
+    CHECK(dimensions_of(facts) == "operation=generate,style=");
+    CHECK(reasons_of(bound_of(call)) == refused);
+    const auto* found = priced->find(facts.family, facts.origin, facts.model).entry;
+    CHECK(found && !pricing::dearest_item_price(*found, "item:image", facts.dimensions, "", image_input) &&
+          !pricing::item_price(*found, "item:image", facts.dimensions, "", image_input));
+    // An entry with no row qualified by the member bounds the call as before.
+    CHECK(nano(bound_of(direct.prepare(styled(style, "vendor/image")))) == rounded(image_rate + tokens));
+  }
+  // A value the grammar holds is offered, and matches only its own rows.
+  CHECK(nano(bound_of(direct.prepare(styled(R"("vivid")")))) == rounded(image_rate + tokens));
+  CHECK(nano(bound_of(direct.prepare(styled(R"("1.5")")))) == rounded(high_rate + tokens));
+  // A typed member no dimension can hold: speech `speed`.
+  speech::Request paced{"vendor/speaker-paced", "Hello there.", "alloy"};
+  paced.speed = 1.5;
+  CHECK(dimensions_of(ok(direct.prepare(paced)).endpoint_facts()) == "operation=speak,speed=,voice=alloy");
+  CHECK(reasons_of(bound_of(direct.prepare(paced))) ==
+        "ModelPrice [item:character[operation=speak,speed]] a row of the unit is qualified by a member whose value the call does not state; ");
+  const auto spoken = rounded(12 * character_rate + long_input * in_rate + long_output * small_out_rate);
+  auto unpaced = paced;
+  unpaced.speed.reset();
+  CHECK(nano(bound_of(direct.prepare(unpaced))) == spoken);
+  auto plain = paced;
+  plain.model = "vendor/speaker";
+  CHECK(nano(bound_of(direct.prepare(plain))) == spoken);
+  // A row of a unit the call does not count, qualified by such a member, could apply: no bound.
+  auto timed = paced;
+  timed.model = "vendor/speaker-timed";
+  CHECK(reasons_of(bound_of(direct.prepare(timed))) == "Unmodeled [item:second[speed=1.5]] the entry prices a unit this operation cannot count; ");
+  timed.speed.reset();
+  CHECK(nano(bound_of(direct.prepare(timed))) == spoken);
+}
+
+// A key offered twice: a typed member and an extension of the same name, or an extension named `operation`. The bound
+// refuses without printing either value.
+void repeated_keys() {
+  auto direct = client_of(openai_chat(direct_policy));
+  const std::string refused = "Unmodeled [dimensions] the call's dimensions are not sorted by key with each key once; ";
+  speech::Request formats{"vendor/speaker", "Hello there.", "alloy"};
+  formats.format = "mp3";
+  formats.extensions = document(R"({"format":"wav"})");
+  CHECK(dimensions_of(ok(direct.prepare(formats)).endpoint_facts()) == "format=mp3,format=wav,operation=speak,voice=alloy");
+  CHECK(reasons_of(bound_of(direct.prepare(formats))) == refused);
+  speech::Request operations{"vendor/speaker", "Hello there.", "alloy"};
+  operations.extensions = document(R"({"operation":"sing"})");
+  CHECK(dimensions_of(ok(direct.prepare(operations)).endpoint_facts()) == "operation=speak,operation=sing,voice=alloy");
+  CHECK(reasons_of(bound_of(direct.prepare(operations))) == refused);
+}
+
 void decisions_bound() {
   auto direct = client_of(openai_chat());
   auto bound = bound_of(direct.prepare(decision("vendor/decider")));
@@ -618,6 +706,8 @@ int main() {
     // The bounds first, so a wrong count shows as a wrong amount.
     images_bound();
     refusal_subjects();
+    repeated_keys();
+    unstated_members();
     decisions_bound();
     embeddings_bound();
     rerank_bound();

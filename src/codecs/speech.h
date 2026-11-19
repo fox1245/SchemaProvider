@@ -39,8 +39,8 @@ std::string_view operation(const Request&) noexcept;
 // What a request bills by (core/endpoint_facts.h): the speech fact and `speak`, with the quantities `item:character`,
 // the bytes of `input` in UTF-8, which are at least as many as its characters by any count; `input`, the input tokens
 // up to the model's input limit or the host's measured count; and `output`, the output tokens up to the model's output
-// limit; and the dimensions `format` and `voice` when they are set, with the request's extensions
-// (endpoints::dimensions).
+// limit; and the dimensions `format`, `speed` (without its value, a floating-point number) and `voice` when they are
+// set, with the request's extensions (endpoints::dimensions).
 EndpointFacts endpoint_facts(const descriptor::ValidatedDescriptor&, const Request&);
 
 using Close = endpoints::Close;

@@ -6,6 +6,49 @@
 
 namespace sp::pricing {
 namespace {
+// Calls `visit` with the key and value of each dimension `qualifier` (`quality=high,size=1024x1024`) names, until it
+// returns true; returns whether one did.
+template <class Visit> bool any_dimension(std::string_view qualifier, Visit visit) {
+  for (std::size_t start = 0; !qualifier.empty();) {
+    const auto comma = qualifier.find(',', start);
+    const auto dimension = qualifier.substr(start, comma == std::string_view::npos ? std::string_view::npos : comma - start);
+    const auto equals = dimension.find('=');
+    if (visit(dimension.substr(0, equals), equals == std::string_view::npos ? std::string_view{} : dimension.substr(equals + 1))) return true;
+    if (comma == std::string_view::npos) return false;
+    start = comma + 1;
+  }
+  return false;
+}
+// The value a call offers for `key`, or nothing when it offers none. An empty value is a member the call has whose
+// value no dimension can hold.
+std::optional<std::string_view> offered_value(const std::vector<std::pair<std::string, std::string>>& dimensions, std::string_view key) {
+  for (const auto& [name, value] : dimensions)
+    if (name == key) return std::string_view(value);
+  return std::nullopt;
+}
+// Whether `qualifier` names a dimension the call offers without a value: the row may apply, and nothing says whether.
+bool names_unstated(std::string_view qualifier, const std::vector<std::pair<std::string, std::string>>& dimensions) {
+  return any_dimension(qualifier, [&](std::string_view key, std::string_view) {
+    const auto value = offered_value(dimensions, key);
+    return value && value->empty();
+  });
+}
+// Whether some row of `unit` under `tier`, in any band, names a dimension the call offers without a value.
+bool unit_names_unstated(const descriptor::CatalogueEntry& entry, std::string_view unit, std::string_view tier,
+                         const std::vector<std::pair<std::string, std::string>>& dimensions) {
+  return std::any_of(entry.pricing.begin(), entry.pricing.end(), [&](const auto& price) {
+    const auto item = descriptor::item_price_key(price.first);
+    return item && item->unit == unit && item->tier == tier && names_unstated(item->qualifier, dimensions);
+  });
+}
+// Whether a row qualified by `qualifier` can apply to the call: each dimension it names is offered with that value or
+// without a value.
+bool may_apply(std::string_view qualifier, const std::vector<std::pair<std::string, std::string>>& dimensions) {
+  return !any_dimension(qualifier, [&](std::string_view key, std::string_view wanted) {
+    const auto value = offered_value(dimensions, key);
+    return !value || (!value->empty() && *value != wanted);
+  });
+}
 // One row of an item unit that applies to a call.
 struct ItemRow {
   std::string_view key, qualifier;
@@ -13,13 +56,15 @@ struct ItemRow {
   std::uint64_t above = 0, rate = 0;
 };
 // The rows of `unit` that apply to the call (endpoint_pricing.h), in the entry's order. Nothing when a row that applies
-// has a price that is not a fixed amount, or when the call's dimensions are not sorted by key with each key once: a
-// row skipped then could only make the dearest row a cheaper one.
+// has a price that is not a fixed amount, when a row of the unit names a dimension the call offers without a value, or
+// when the call's dimensions are not sorted by key with each key once: a row skipped then could only make the dearest
+// row a cheaper one.
 std::optional<std::vector<ItemRow>> applying_rows(const descriptor::CatalogueEntry& entry, std::string_view unit,
                                                   const std::vector<std::pair<std::string, std::string>>& dimensions,
                                                   std::string_view tier, std::uint64_t input_tokens) {
   for (std::size_t i = 1; i < dimensions.size(); ++i)
     if (!(dimensions[i - 1].first < dimensions[i].first)) return std::nullopt;
+  if (unit_names_unstated(entry, unit, tier, dimensions)) return std::nullopt;
   std::vector<ItemRow> rows;
   for (const auto& [key, text] : entry.pricing) {
     const auto item = descriptor::item_price_key(key);
@@ -110,19 +155,12 @@ TokenRows token_rows(const descriptor::CatalogueEntry& entry, std::span<const st
 }
 // Whether `qualifier` (`quality=high,size=1024x1024`) names the dimension `key`.
 bool names_key(std::string_view qualifier, std::string_view key) {
-  for (std::size_t start = 0; !qualifier.empty();) {
-    const auto comma = qualifier.find(',', start);
-    const auto dimension = qualifier.substr(start, comma == std::string_view::npos ? std::string_view::npos : comma - start);
-    if (dimension.substr(0, dimension.find('=')) == key) return true;
-    if (comma == std::string_view::npos) return false;
-    start = comma + 1;
-  }
-  return false;
+  return any_dimension(qualifier, [&](std::string_view name, std::string_view) { return name == key; });
 }
 // An item unit with the dimensions of a call that its rows read, in the qualifier's spelling:
 // `item:image[operation=generate,quality=high]`. A dimension is printed when it is the operation or when a row of the
 // unit in the entry names its key; any other changes no price, so the request's own text (a user or session id) never
-// reaches a reason.
+// reaches a reason. A dimension offered without a value is printed as its key alone (`item:image[operation=generate,style]`).
 std::string with_dimensions(const descriptor::CatalogueEntry& entry, std::string_view unit,
                             const std::vector<std::pair<std::string, std::string>>& dimensions) {
   std::string out = std::string(unit) + "[";
@@ -133,7 +171,7 @@ std::string with_dimensions(const descriptor::CatalogueEntry& entry, std::string
       return item && item->unit == unit && names_key(item->qualifier, key);
     });
     if (!read) continue;
-    out += (first ? "" : ",") + key + "=" + value;
+    out += (first ? "" : ",") + key + (value.empty() ? "" : "=" + value);
     first = false;
   }
   return out + "]";
@@ -333,6 +371,10 @@ EndpointBound endpoint_worst_case(const EndpointWorstCaseInput& in, const descri
     if (!q.unit.starts_with(descriptor::item_unit_prefix)) continue;
     counted.push_back(q.unit);
     if (counts[i] && *counts[i] == 0) continue;
+    if (unit_names_unstated(*entry, q.unit, tier, offered)) {
+      block(UnboundedBy::ModelPrice, with_dimensions(*entry, q.unit, offered), "a row of the unit is qualified by a member whose value the call does not state");
+      continue;
+    }
     const auto rate = dearest_item_price(*entry, q.unit, offered, tier, length);
     if (!rate) {
       block(UnboundedBy::ModelPrice, with_dimensions(*entry, q.unit, offered),
@@ -348,7 +390,7 @@ EndpointBound endpoint_worst_case(const EndpointWorstCaseInput& in, const descri
   for (const auto& [key, text] : entry->pricing) {
     const auto item = descriptor::item_price_key(key);
     if (!item || item->tier != tier || (item->above && length <= item->above)) continue;
-    if (std::find(counted.begin(), counted.end(), item->unit) != counted.end() || !descriptor::qualifier_offered(item->qualifier, offered)) continue;
+    if (std::find(counted.begin(), counted.end(), item->unit) != counted.end() || !may_apply(item->qualifier, offered)) continue;
     if (const auto rate = per_million(text); rate && *rate == 0) continue;
     block(UnboundedBy::Unmodeled, key, "the entry prices a unit this operation cannot count");
   }

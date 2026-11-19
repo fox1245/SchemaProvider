@@ -497,7 +497,7 @@ else for (const auto& why : bound.unbounded) log(sp::pricing::to_string(why.by),
 - `StatedSeconds`: `stated_seconds`.
 - `Request`: none, so the quantity is not stated.
 
-**Dimensions.** The call offers its `dimensions` and its operation (`operation=<operation>`, added when the facts do not state it), so a row qualified by another operation does not apply. A dimension the call leaves unset is offered by no value, so only a row without a qualifier prices it.
+**Dimensions.** The call offers its `dimensions` and its operation (`operation=<operation>`, added when the facts do not state it), so a row qualified by another operation does not apply. A dimension the call leaves unset is offered by no value, so only a row without a qualifier prices it. A dimension offered with an empty value is a member the call has but whose value it cannot state: it matches no row, and when a row of the unit (in the tier, in any band) names its key, that row may apply, so the unit has no price (`ModelPrice`, subject the unit with that key alone, as `item:image[operation=generate,style]`), and `dearest_item_price` and `item_price` give none.
 
 **Prices.**
 - **Input.** `input` bills at the dearest input rate: `input`, `cache_read`, `cache_write`, `cache_write_1h`, `input_audio` or `input_image`. An `input` rate is needed. An `input_image` quantity counts image tokens of the input: one that can be above zero needs an `input_image` rate, and an `input` quantity whose count, when both are stated, is at least its own.
@@ -521,7 +521,7 @@ else for (const auto& why : bound.unbounded) log(sp::pricing::to_string(why.by),
 | `Unmodeled` | `<endpoint>/<operation>` | the call bills the requests it carries (a batch submit) |
 | `Unmodeled` | the endpoint, `dimensions`, a unit or a price key | the call names no operation; its dimensions are unsorted, repeat a key or name another operation; image tokens (`input_image`) without an `input` quantity, or more of them than its stated count; a quantity of a unit the bound does not price; a row that applies to the call, is not a declared zero, and is of an item kind none of the quantities count, such as output seconds of a speech model |
 | `ModelPrice` | model | no entry, or an entry without prices |
-| `ModelPrice` | unit | no rate for a quantity that can be above zero, or a variable price on a row that applies; an item unit is named with the call's operation and each offered dimension whose key a row of the unit names, such as `item:image[operation=generate,quality=high]`; the other dimensions, which change no price, are not printed |
+| `ModelPrice` | unit | no rate for a quantity that can be above zero, a variable price on a row that applies, or a row of the unit that names a dimension the call offers without a value; an item unit is named with the call's operation and each offered dimension whose key a row of the unit names, such as `item:image[operation=generate,quality=high]`; the other dimensions, which change no price, are not printed |
 | `RouteCeiling` | model | a routing gateway: no route ceiling or pin covers an endpoint call's prices; or an entry with a route ceiling at an origin that is not a gateway |
 | `TierPrice` | model | the entry prices no unit under `service_tier` |
 | `InputBound` | `input` | no `at_most`, no measured count and no input limit, and an input rate above zero |
@@ -562,15 +562,15 @@ The prepared call supplies the rest:
 | images (`generate`; `edit` at OpenAI when the request has references) | `item:image`: `count`. `item:input_image`: the references. `input`: the input limit. `input_image`: the input limit, when there are references. `output`: the output limit | `background`, `output_compression`, `output_format`, `quality`, `size` |
 | decisions (`decide`) | `input`: the input limit. `output`: the output limit | |
 | embeddings (`embed`) | `input`: the input limit for each input. `input_image`: the same, when an input has media | `dimensions`, `task` |
-| rerank (`rank`) | `item:document`: the documents. `item:search_unit`: not stated. `input`: the input limit for each document | `top` |
-| speech (`speak`) | `item:character`: the bytes of `input` in UTF-8. `input`: the input limit. `output`: the output limit | `format`, `voice` |
+| rerank (`rank`) | `item:document`: the documents. `item:search_unit`: not stated, so the entry must list it: unlisted, the call has no total (`ModelPrice`); listed above zero, none either (`Quantity`), since nothing bounds the count; listed as `"0"`, where the provider does not bill search units, it has one. `input`: the input limit for each document | `top` |
+| speech (`speak`) | `item:character`: the bytes of `input` in UTF-8. `input`: the input limit. `output`: the output limit | `format`, `speed` (its key alone), `voice` |
 | transcription (`transcribe`, `translate`) | `item:second`: `audio_seconds`. `input`: the input limit. `output`: the output limit | `language` |
 | videos (`submit`) | `item:second`: `duration`. `item:input_image`: the references. `input`: the input limit. `input_image`: the input limit, when there are references. `output`: the output limit | `aspect_ratio`, `audio` (`true` or `false`), `resolution`, `size` |
 
 - **Limits.** The input limit is the model entry's (the smaller of `input_limit` and `context_window`), or the measured count capped at it. The output limit is the entry's `output_limit`, once per call. `input_image` counts the image tokens among the input tokens, so its rate is needed only when the request has images.
 - **Characters.** The UTF-8 bytes of a text are at least as many as its characters by any count (code points, UTF-16 units, grapheme clusters), so they bound the count a provider bills.
 - **Extensions.** Each member of the request's `extensions` is a dimension under its own name when its value is a string, a boolean (`true`, `false`) or an unsigned integer (in decimal), such as OpenRouter's image `aspect_ratio` and `resolution`, so a row qualified by it applies. `EndpointFacts::dimensions` therefore holds the request's own values, extension members included (a user or session id, for instance): journal and log it as the request itself. A reason prints only the dimensions a row of its unit names.
-- **Unset and other values.** A member that is unset, or whose key or value is outside the qualifier grammar (`descriptor::valid_dimension_key` and `valid_dimension_value`: an object, a number with a fraction, text with a space), is offered by no dimension, so only a row without a qualifier prices the call.
+- **Unset and unstated values.** A member that is unset offers no dimension, so only a row without a qualifier prices the call. A member that is set but whose value is outside the qualifier grammar (`descriptor::valid_dimension_value`: an object, an array, null, a number with a fraction or a sign, text with a space, speech `speed`) is offered with its key and an empty value. No row matches it, and a row of the priced unit that names the key leaves the call without a bound (`ModelPrice`, subject the unit with the key alone). A key outside the grammar (`valid_dimension_key`) no row can name, and it is left out.
 - **A key twice.** An extension named like a typed dimension (a video extension `audio`) offers the key twice, and the bound refuses the call (`Unmodeled`, subject `dimensions`) rather than choose one.
 - **Operation.** Every request type states `operation=<operation>` among its dimensions, so `item:image[operation=edit]` prices only an edit, and `pricing::dearest_item_price` and `item_price` over `EndpointFacts::dimensions` give the rates the bound prices at.
 - **No quantities.** Moderation, token counting, files, a job's poll and download, batches and generation statistics state none. A policy that bills moderation or token counting by its model gives such a call no bound (`Unmodeled`, subject `<endpoint>/<operation>`), never its request fee alone.
@@ -586,11 +586,12 @@ The prepared call supplies the rest:
 | rerank whose entry prices `item:search_unit` above zero: nothing in a request bounds search units | `Quantity` | `item:search_unit` |
 | a model whose entry has no `output_limit`, at an output rate above zero | `OutputCap` | `output` |
 | a quantity whose unit the entry does not list; an item unit is named with the operation and the offered dimensions a row of the unit names | `ModelPrice` | the unit |
+| a member set to a value the qualifier grammar cannot hold, and a row of the priced unit qualified by it | `ModelPrice` | the unit, with the member's key alone |
 | a call at a routing gateway (rerank and videos are admitted only at OpenRouter in the built-in policy) | `RouteCeiling` | the model |
 | a chat request, or a call that did not prepare | `Unmodeled` | `request` |
 
 **Limits.** The bound reads the request as it is sent:
-- A member that changes the charge and that the request types do not model is priced only when the catalogue has a row qualified by it, since it is offered as a dimension. Token rows take no qualifier, so a custom policy that admits on an endpoint an extension member choosing a service tier is bounded at the standard token rates.
+- A member that changes the charge and that the request types do not model is priced by a row qualified by it, and refused when a row is qualified by it and the call cannot state its value. Token rows take no qualifier, so a custom policy that admits on an endpoint an extension member choosing a service tier is bounded at the standard token rates.
 - Speech `speed`, the number of questions of a decision, speech `instructions` and a transcription `prompt` are no quantity: only the token limits cover what they add (the input limit, and for speech the output limit).
 - `audio_seconds` is an upper bound the host states. For a provider that rounds a length up to an increment, or bills a minimum, state the length it bills. A video's `duration` is priced as requested, so such rounding or minimum is not covered there.
 - The image output tokens are bounded once per call by the entry's output limit, whatever the number of images.

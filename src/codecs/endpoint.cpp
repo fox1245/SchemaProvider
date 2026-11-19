@@ -116,11 +116,14 @@ std::vector<std::pair<std::string, std::string>> dimensions(
     std::string_view operation, std::initializer_list<std::pair<std::string_view, std::optional<std::string>>> typed,
     const std::shared_ptr<const json::Document>& extensions) {
   std::vector<std::pair<std::string, std::string>> out;
+  // A member whose value the grammar cannot hold is offered without one: no row matches it, and a row that names its
+  // key leaves the unit unpriced. A key outside the grammar cannot be named by a row.
   const auto offer = [&](std::string_view key, std::string_view value) {
-    if (descriptor::valid_dimension_key(key) && descriptor::valid_dimension_value(value)) out.emplace_back(std::string(key), std::string(value));
+    if (!descriptor::valid_dimension_key(key)) return;
+    out.emplace_back(std::string(key), descriptor::valid_dimension_value(value) ? std::string(value) : std::string());
   };
   // The call's own operation, so a row qualified by an operation prices only that operation's calls.
-  offer("operation", operation);
+  if (!operation.empty()) offer("operation", operation);
   for (const auto& [key, value] : typed)
     if (value) offer(key, *value);
   if (extensions && extensions->root().is_object())
@@ -128,6 +131,7 @@ std::vector<std::pair<std::string, std::string>> dimensions(
       if (member.value.is_string()) offer(member.key, member.value.as_string());
       else if (member.value.is_bool()) offer(member.key, *boolean(member.value.as_bool()));
       else if (member.value.is_uint()) offer(member.key, *decimal(member.value.as_uint()));
+      else offer(member.key, {});  // a number with a fraction or a sign, null, an array, an object
     }
   // Stable, so a key offered twice stays twice and the bound sees it.
   std::stable_sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
@@ -140,6 +144,10 @@ std::optional<std::string> decimal(std::optional<std::uint64_t> value) {
 std::optional<std::string> boolean(std::optional<bool> value) {
   if (!value) return std::nullopt;
   return std::string(*value ? "true" : "false");
+}
+std::optional<std::string> unstated(bool set) {
+  if (!set) return std::nullopt;
+  return std::string();
 }
 EndpointQuantity requested(std::string unit, std::optional<std::uint64_t> count, bool exact) {
   EndpointQuantity quantity;

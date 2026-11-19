@@ -47,9 +47,11 @@ struct EndpointFacts {
   // The qualifier dimensions the call offers, sorted by key, and the quantities it bills: a prepared call that bills its
   // model states those of its request (images::endpoint_facts, ...), and any other call states none. Its dimensions
   // hold `operation` with `operation` above and the request's own values, extension members included, so
-  // pricing::dearest_item_price and item_price over them give the rates the bound prices at. The chat requests
-  // it carries, and the uploaded file whose lines are those requests: empty in every prepared call, since the SDK does
-  // not fill them yet.
+  // pricing::dearest_item_price and item_price over them give the rates the bound prices at. A member that is set but
+  // whose value no dimension can hold (a floating-point number, a signed integer, null, an array, an object, text outside
+  // the qualifier grammar) has its key with an empty value: no row matches it, and a row of a priced unit that names
+  // the key leaves that unit without a bound. The chat requests it carries, and the uploaded file whose lines are those
+  // requests: empty in every prepared call, since the SDK does not fill them yet.
   std::vector<std::pair<std::string, std::string>> dimensions;
   std::vector<EndpointQuantity> quantities;
   std::vector<CarriedRequest> carried;
