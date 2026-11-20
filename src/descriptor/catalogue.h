@@ -88,7 +88,9 @@ class ModelCatalogue final {
   const std::vector<CatalogueEntry>& entries() const noexcept { return entries_; }
   // The id, then an alias, then the longest prefix profile. Among entries of the same rank, one
   // that lists `family` wins over one that lists other families, and an entry scoped to `origin`
-  // wins over an unscoped one. Entries scoped to other origins never match.
+  // wins over an unscoped one. Entries scoped to other origins never match. An entry's origins are canonical
+  // (load_catalogue refuses another spelling) and are compared byte for byte, so pass `origin` in its canonical
+  // spelling (descriptor::canonical_origin), as a descriptor's base_url() is.
   ModelMatch find(std::string_view family, std::string_view origin, std::string_view model) const noexcept;
   // The exact or prefix entry with this id, or nullptr.
   const CatalogueEntry* entry(std::string_view id, bool prefix = false) const noexcept;

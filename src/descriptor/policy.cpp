@@ -36,7 +36,7 @@ constexpr std::size_t bundle_catalogue_bytes = 8u * 1024u * 1024u;
 // A fact's origin is compared byte for byte with a descriptor's base URL, which is its origin's serialization
 // (canonical_origin), so the policy states the origin in that spelling. Called after the origin is known valid.
 void canonical_spelling(std::string_view origin, std::string_view path) {
-  if (!canonical_origin_spelling(origin)) fail(path, "origin in its canonical spelling: lower-case host, no default port");
+  if (!canonical_origin_spelling(origin)) fail(path, canonical_origin_expected);
 }
 // Every key must be present and no other may appear, except the listed optional ones: a snapshot
 // written before an optional fact existed stays admissible.

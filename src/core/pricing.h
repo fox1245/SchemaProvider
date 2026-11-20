@@ -120,7 +120,8 @@ struct CostEstimate {
 // dearer of `request` and `ceiling_request`; an entry without a ceiling has no total ("ceiling"). A ceiling row at a
 // variable price is named as its unit ("ceiling_input", "ceiling_output"), and then, when the entry lists both
 // ceilings, a variable "request" or "ceiling_request" as well; beside a ceiling the entry does not list, the fees are
-// not named.
+// not named. The entry is selected as ModelCatalogue::find does, so `origin` is in its canonical spelling
+// (descriptor::canonical_origin), as a descriptor's base_url() is.
 CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_view family, std::string_view origin,
                       const ServedModel& model, const Usage& usage, std::string_view service_tier = {},
                       bool route_ceiling = false);
@@ -184,7 +185,8 @@ struct UnboundedReason {
   std::string detail;
 };
 // The request, as the bound reads it. `family`, `origin` and `model` select catalogue entries as
-// ModelCatalogue::find does.
+// ModelCatalogue::find does, so `origin` is in its canonical spelling (descriptor::canonical_origin), as a descriptor's
+// base_url() is.
 struct WorstCaseInput {
   std::string_view family, origin, model;
   const RequestFacts* facts = nullptr;
