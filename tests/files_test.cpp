@@ -4,7 +4,9 @@
 #include "codecs/files.h"
 #include "crypto/crypto.h"
 #include "descriptor/descriptor.h"
+#include "descriptor/policy.h"
 #include "json/json.h"
+#include "sp/config_defaults.h"
 #include "support/endpoint_fakes.h"
 #include <filesystem>
 #include <fstream>
@@ -19,14 +21,14 @@ using namespace sp::test;
 using namespace std::chrono_literals;
 #define CHECK(condition) do { if (!(condition)) throw std::runtime_error("line " + std::to_string(__LINE__) + ": " #condition); } while (false)
 constexpr std::string_view openai = "https://api.openai.com", anthropic = "https://api.anthropic.com",
-                           google = "https://generativelanguage.googleapis.com";
-descriptor::ValidatedDescriptor at(std::string_view origin) {
+                           google = "https://generativelanguage.googleapis.com", router = "https://openrouter.ai";
+descriptor::ValidatedDescriptor at(std::string_view origin, descriptor::PolicySnapshot policy = descriptor::builtin_policy()) {
   const std::string family = origin == google ? "google.generate" : origin == anthropic ? "anthropic.messages" : "openai.chat";
   const std::string path = origin == google ? "/v1beta/models/{model}:generateContent" : origin == anthropic ? "/v1/messages" : "/v1/chat/completions";
   const std::string stream = origin == google ? "/v1beta/models/{model}:streamGenerateContent?alt=sse" : path;
   auto loaded = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"files-fixture","family":)" + json::quote(family) +
                                  R"(,"connection":{"base_url":)" + json::quote(origin) + R"(,"paths":{"buffered":)" + json::quote(path) +
-                                 R"(,"streaming":)" + json::quote(stream) + "}}}");
+                                 R"(,"streaming":)" + json::quote(stream) + "}}}", std::move(policy));
   CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
   return std::get<descriptor::ValidatedDescriptor>(std::move(loaded));
 }
@@ -92,7 +94,6 @@ void uploads() {
   CHECK(refused(at(google), unhashed) == ErrorKind::InvalidRequest);
   CHECK(refused(at(openai), plain) == ErrorKind::InvalidRequest);          // OpenAI needs a purpose
   CHECK(refused(at(anthropic), upload) == ErrorKind::Unsupported);         // the others take none
-  CHECK(refused(at("https://openrouter.ai"), plain) == ErrorKind::Unsupported);
   auto huge = plain; huge.source.bytes = std::make_shared<const std::string>(std::size_t{17} << 20, 'x');
   CHECK(refused(at(anthropic), huge) == ErrorKind::ResourceLimit);
 }
@@ -621,9 +622,222 @@ void runtime_download() {
   untouched();
   std::filesystem::remove_all(directory);
 }
+// OpenRouter's Files API (https://openrouter.ai/docs/guides/features/files-api and the API reference pages it links):
+// the same calls as the other providers, with the documented object, `cursor` paging and name rules, and no
+// chunked upload.
+descriptor::PolicySnapshot edited_policy(std::string_view from, std::string_view to) {
+  std::string text(config_defaults::descriptor_policy_json);
+  const auto found = text.find(from);
+  if (found == std::string::npos) throw std::runtime_error("no " + std::string(from) + " in the embedded policy");
+  text.replace(found, from.size(), to);
+  auto loaded = descriptor::load_policy(text, config_defaults::codec_defaults_json);
+  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(loaded));
+  return std::get<descriptor::PolicySnapshot>(std::move(loaded));
+}
+std::string reason_of(const descriptor::ValidatedDescriptor& d, const files::Upload& upload) {
+  auto result = files::encode(d, upload);
+  CHECK(std::holds_alternative<Error>(result));
+  return std::get<Error>(result).reason;
+}
+void openrouter_files() {
+  const auto note = std::make_shared<const std::string>("a,b\n1,2\n");
+  files::Upload upload{{note}, "data/report.csv", "text/csv"};
+  const auto sent = encoded(at(router), upload);
+  const auto b = boundary_of(sent);
+  CHECK(sent.path == "/api/v1/files" && sent.method == "POST" && sent.auth == "bearer" && !sent.charge_on_accept &&
+        sent.content_type.starts_with("multipart/form-data; boundary=sp-boundary-"));
+  // The file alone, in the field `file`: no `purpose`, no expiry.
+  CHECK(sent.body == "--" + b + "\r\nContent-Disposition: form-data; name=\"file\"; filename=\"data/report.csv\"\r\nContent-Type: text/csv\r\n\r\n" + *note +
+                         "\r\n--" + b + "--\r\n");
+  auto purposed = upload; purposed.purpose = "user_data";
+  CHECK(refused(at(router), purposed) == ErrorKind::Unsupported && reason_of(at(router), purposed) == "request.files.purpose_unsupported");
+  auto expiring = upload; expiring.expires_after = 3600;
+  CHECK(refused(at(router), expiring) == ErrorKind::Unsupported);
+  auto empty = upload; empty.source.bytes = std::make_shared<const std::string>();
+  CHECK(reason_of(at(router), empty) == "request.files.source_empty");
+  auto typeless = upload; typeless.mime = "text";
+  CHECK(refused(at(router), typeless) == ErrorKind::InvalidRequest);
+
+  // The file name rules: 1 to 255 bytes, `/` for folders, no empty, `.` or `..` segment, none of `< > : " | ? * \`.
+  for (const std::string name : {std::string("report.pdf"), std::string("data/report.csv"), std::string("a/b/c/d.txt"), std::string("..a/b.."),
+                                 std::string("a.b"), std::string(255, 'n'), std::string("sp ace.txt")}) {
+    auto named = upload; named.filename = name;
+    CHECK(std::holds_alternative<endpoints::Encoded>(files::encode(at(router), named)));
+  }
+  for (const std::string name : {std::string(), std::string(256, 'n'), std::string("/a"), std::string("a/"), std::string("a//b"), std::string("."), std::string(".."),
+                                 std::string("./a"), std::string("a/./b"), std::string("a/../b"), std::string("../a"), std::string("a/.."), std::string("a<b"),
+                                 std::string("a>b"), std::string("a:b"), std::string("a\"b"), std::string("a|b"), std::string("a?b"), std::string("a*b"),
+                                 std::string("a\\b"), std::string("a\nb"), std::string("a\tb"), std::string("a\x01" "b"), std::string("a\x7f" "b")}) {
+    auto named = upload; named.filename = name;
+    CHECK(refused(at(router), named) == ErrorKind::InvalidRequest);
+  }
+  // The characters the provider refuses are the policy fact's, and its rules come on top of the encoder's own
+  // (a quote or a backslash would end the multipart parameter).
+  for (const char* name : {"a<b", "a>b", "a:b", "a|b", "a?b", "a*b"}) {
+    auto named = upload; named.filename = name;
+    CHECK(reason_of(at(router), named) == "request.files.name_rejected");
+  }
+  {
+    const auto custom = edited_policy(R"("forbidden":")", R"("forbidden":"#)");
+    auto hashed = upload; hashed.filename = "a#b";
+    CHECK(std::holds_alternative<endpoints::Encoded>(files::encode(at(router), hashed)));
+    CHECK(reason_of(at(router, custom), hashed) == "request.files.name_rejected");
+    const auto flat = edited_policy(R"("folders":true)", R"("folders":false)");
+    CHECK(reason_of(at(router, flat), upload) == "request.files.name_rejected");
+    auto plain = upload; plain.filename = "report.csv";
+    CHECK(std::holds_alternative<endpoints::Encoded>(files::encode(at(router, flat), plain)));
+  }
+
+  // The size limit is the fact's: 100 MiB, and a limit the policy states instead.
+  const auto slice = [&](std::uint64_t size) { auto sliced = upload; sliced.source = {nullptr, {"/data/big.bin", 0, size}}; return sliced; };
+  constexpr std::uint64_t limit = 104857600;
+  CHECK(descriptor::builtin_policy()->endpoint("files", router)->max_file_bytes == limit);
+  CHECK(encoded(at(router), slice(limit)).file->size == limit);
+  CHECK(reason_of(at(router), slice(limit + 1)) == "request.files.file_size_limit" && refused(at(router), slice(limit + 1)) == ErrorKind::InvalidRequest);
+  {
+    const auto small = edited_policy(R"("max_file_bytes":104857600)", R"("max_file_bytes":1000)");
+    CHECK(small->endpoint("files", router)->max_file_bytes == 1000u);
+    CHECK(encoded(at(router, small), slice(1000)).file->size == 1000u);
+    CHECK(reason_of(at(router, small), slice(1001)) == "request.files.file_size_limit");
+    auto thousand = upload; thousand.source.bytes = std::make_shared<const std::string>(1000, 'x');
+    CHECK(std::holds_alternative<endpoints::Encoded>(files::encode(at(router, small), thousand)));
+    auto over = upload; over.source.bytes = std::make_shared<const std::string>(1001, 'x');
+    CHECK(reason_of(at(router, small), over) == "request.files.file_size_limit");
+    // The other providers state no file limit and no name rules.
+    CHECK(descriptor::builtin_policy()->endpoint("files", openai)->max_file_bytes == 0 && !descriptor::builtin_policy()->endpoint("files", openai)->file_names);
+  }
+
+  // Reads, a listing by cursor, a deletion and a download.
+  constexpr const char* id = "or_file_011CNha8iCJcU1wXNR6q4V8w";
+  const auto get = encoded(at(router), files::Get{id});
+  CHECK(get.path == std::string("/api/v1/files/") + id && get.method == "GET" && get.content_type.empty() && get.model == id);
+  const auto del = encoded(at(router), files::Delete{id});
+  CHECK(del.method == "DELETE" && del.path == std::string("/api/v1/files/") + id && del.body.empty());
+  const auto content = encoded(at(router), files::Download{id, "/tmp/out"});
+  CHECK(content.path == std::string("/api/v1/files/") + id + "/content" && content.sink == "/tmp/out");
+  CHECK(refused(at(router), files::Get{"../keys"}) == ErrorKind::InvalidRequest && refused(at(router), files::Delete{".."}) == ErrorKind::InvalidRequest);
+  constexpr const char* cursor = "eyJjdXJzb3IiOiJvcl9maWxlXzAxMUNOaGE4aUNKY1Uxd1hOUjZxNFY4dyJ9";
+  CHECK(encoded(at(router), files::List{}).path == "/api/v1/files");
+  CHECK(encoded(at(router), files::List{100, cursor}).path == std::string("/api/v1/files?limit=100&cursor=") + cursor);
+  CHECK(encoded(at(router), files::List{std::nullopt, "a+b/c="}).path == "/api/v1/files?cursor=a%2Bb%2Fc%3D");
+  CHECK(refused(at(router), files::List{0}) == ErrorKind::InvalidRequest);
+  CHECK(refused(at(router), files::List{std::nullopt, {}, "batch"}) == ErrorKind::Unsupported);
+
+  // No chunked upload: every step is refused before it is sent.
+  CHECK(refused(at(router), files::Start{"a.txt", "text/plain", 10}) == ErrorKind::Unsupported);
+  const files::Session session{std::string(router), "openrouter", "upload_1", {}, 10};
+  CHECK(refused(at(router), files::Part{session, {std::make_shared<const std::string>("x")}}) == ErrorKind::Unsupported);
+  CHECK(refused(at(router), files::Complete{session}) == ErrorKind::Unsupported);
+  CHECK(refused(at(router), files::Query{session}) == ErrorKind::Unsupported);
+  CHECK(refused(at(router), files::Cancel{session}) == ErrorKind::Unsupported);
+}
+
+void openrouter_responses() {
+  using Kind = files::Codec::Kind;
+  // The documented file object (the guide's metadata example, and the API reference's `_shape` of the OpenRouter shape).
+  const auto file = std::get<files::File>(files::typed(decoded(router, Kind::File,
+      R"({"id":"or_file_011CNha8iCJcU1wXNR6q4V8w","type":"file","filename":"data/report.csv","mime_type":"text/csv","size_bytes":24576,"created_at":"2026-08-25T00:00:00Z","downloadable":false})")));
+  CHECK(file.id == "or_file_011CNha8iCJcU1wXNR6q4V8w" && file.origin == router && file.name == "data/report.csv" && file.mime == "text/csv" && file.bytes == 24576u &&
+        file.created_at == 1787616000u && !file.expires_at && file.downloadable == false && file.state == files::State::Active && file.shape == "openrouter" &&
+        file.raw && file.raw->root().get("type").as_string() == "file" && file.purpose.empty() && file.uri.empty());
+  const auto shaped = std::get<files::File>(files::typed(decoded(router, Kind::File,
+      R"({"_shape":"openrouter","id":"or_file_x","type":"file","filename":"document.pdf","mime_type":"application/pdf","size_bytes":1024000,"created_at":"2025-01-01T00:00:00Z","downloadable":true})")));
+  CHECK(shaped.downloadable == true && shaped.created_at == 1735689600u && shaped.bytes == 1024000u);
+  // An object the service answered with in a live check: `created_at` is ISO 8601 with milliseconds, read as Unix seconds.
+  const auto live = std::get<files::File>(files::typed(decoded(router, Kind::File,
+      R"({"_shape":"openrouter","id":"or_file_0VbWvsZpHy4eppdP2e5wlI0y","type":"file","filename":"sp-live-227/a.txt","mime_type":"text/plain","size_bytes":23,"created_at":"2026-11-20T16:07:35.794Z","downloadable":false})")));
+  CHECK(live.id == "or_file_0VbWvsZpHy4eppdP2e5wlI0y" && live.name == "sp-live-227/a.txt" && live.bytes == 23u && live.created_at == 1795190855u &&
+        live.downloadable == false && live.shape == "openrouter");
+  // The other shapes the service answers with are not read as this one.
+  for (const char* body : {R"({"_shape":"openai","id":"or_file_x","object":"file","bytes":1,"created_at":1,"filename":"a","purpose":"user_data","status":"processed"})",
+                           R"({"_shape":"anthropic","id":"or_file_x","type":"file"})"}) {
+    const auto failed = decoded(router, Kind::File, body);
+    CHECK(std::holds_alternative<Failure>(failed) && std::get<Failure>(failed).error.kind == ErrorKind::ProtocolCorrupt &&
+          std::get<Failure>(failed).error.reason == "files.response.shape_unexpected");
+  }
+  // The other providers' files name the shape that held them.
+  CHECK(std::get<files::File>(files::typed(decoded(openai, Kind::File, R"({"id":"file-a"})"))).shape == "openai");
+  CHECK(std::get<files::File>(files::typed(decoded(anthropic, Kind::File, R"({"id":"file_a"})"))).shape == "anthropic");
+  CHECK(std::get<files::File>(files::typed(decoded(google, Kind::File, R"({"name":"files/a"})"))).shape == "google");
+  for (const char* body : {R"({"type":"file","filename":"a"})", R"({"id":"","type":"file"})", R"({"id":"or_file_x","size_bytes":"3"})",
+                           R"({"id":"or_file_x","created_at":"yesterday"})", R"({"id":"or_file_x","downloadable":"no"})", "[]"}) {
+    const auto failed = decoded(router, Kind::File, body);
+    CHECK(std::holds_alternative<Failure>(failed) && std::get<Failure>(failed).error.kind == ErrorKind::ProtocolCorrupt &&
+          std::get<Failure>(failed).error.reason.starts_with("files."));
+  }
+
+  // A listing pages by `cursor`; every page also carries `last_id`, which is not the cursor.
+  const std::string items = R"([{"id":"or_file_a","type":"file","filename":"a.txt","mime_type":"text/plain","size_bytes":1,"created_at":"2025-01-01T00:00:00Z","downloadable":false},)"
+                            R"({"id":"or_file_b","type":"file","filename":"b.txt","mime_type":"text/plain","size_bytes":2,"created_at":"2025-01-01T00:00:00Z","downloadable":true}])";
+  const auto page = std::get<files::Page>(files::typed_page(decoded(router, Kind::Page,
+      R"({"_shape":"openrouter","cursor":"opaque-next","data":)" + items + R"(,"first_id":"or_file_a","has_more":true,"last_id":"or_file_b"})")));
+  CHECK(page.files.size() == 2 && page.files[1].id == "or_file_b" && page.files[1].downloadable == true && page.files[1].shape == "openrouter" && page.files[0].raw &&
+        page.next == "opaque-next");
+  const auto last = std::get<files::Page>(files::typed_page(decoded(router, Kind::Page,
+      R"({"_shape":"openrouter","cursor":null,"data":)" + items + R"(,"first_id":"or_file_a","has_more":false,"last_id":"or_file_b"})")));
+  CHECK(last.files.size() == 2 && last.next.empty());
+  CHECK(std::get<files::Page>(files::typed_page(decoded(router, Kind::Page, R"({"cursor":null,"data":[],"first_id":null,"has_more":false,"last_id":null})"))).files.empty());
+  // A page that says more follow and names no cursor would read as the last page, whatever `last_id` holds.
+  for (const char* tail : {R"("cursor":null,"has_more":true,"last_id":"or_file_b")", R"("has_more":true,"last_id":"or_file_b")", R"("cursor":"","has_more":true,"last_id":"or_file_b")"}) {
+    const auto failed = decoded(router, Kind::Page, std::string(R"({"data":[],)") + tail + "}");
+    CHECK(std::holds_alternative<Failure>(failed) && std::get<Failure>(failed).error.reason == "files.page.cursor_missing");
+  }
+  for (const auto& [body, reason] : std::initializer_list<std::pair<const char*, const char*>>{
+           {R"({"data":[],"cursor":7,"has_more":false})", "files.page.cursor_invalid"},
+           {R"({"data":[],"cursor":null})", "files.page.more_required"},
+           {R"({"data":[],"cursor":null,"has_more":"no"})", "files.page.more_required"},
+           {R"({"data":{},"has_more":false})", "files.page.list_required"},
+           {R"({"_shape":"openai","object":"list","data":[],"has_more":false,"first_id":null,"last_id":null})", "files.response.shape_unexpected"},
+           {R"({"data":[{"type":"file"}],"has_more":false})", "files.file.id_required"}}) {
+    const auto failed = decoded(router, Kind::Page, body);
+    CHECK(std::holds_alternative<Failure>(failed) && std::get<Failure>(failed).error.kind == ErrorKind::ProtocolCorrupt && std::get<Failure>(failed).error.reason == reason);
+  }
+
+  // A deletion is confirmed by the object the service answers with.
+  CHECK(std::get<files::Deleted>(files::typed_deleted(decoded(router, Kind::Deleted, R"({"_shape":"openrouter","id":"or_file_a","type":"file_deleted"})", "or_file_a"))).id == "or_file_a");
+  CHECK(std::get<files::Deleted>(files::typed_deleted(decoded(router, Kind::Deleted, R"({"id":"or_file_a","type":"file_deleted"})", "or_file_a"))).id == "or_file_a");
+  for (const char* body : {"{}", R"({"id":"or_file_a"})", R"({"id":"or_file_a","type":"file"})", R"({"id":"or_file_a","deleted":true,"object":"file"})"}) {
+    const auto failed = decoded(router, Kind::Deleted, body, "or_file_a");
+    CHECK(std::holds_alternative<Failure>(failed) && std::get<Failure>(failed).error.reason == "files.delete.unconfirmed");
+  }
+
+  // No form in which a chat or Responses request names the file is documented, so no reference is made from it.
+  const auto reference = files::media(file, router, 0);
+  CHECK(std::holds_alternative<Error>(reference) && std::get<Error>(reference).kind == ErrorKind::InvalidRequest &&
+        std::get<Error>(reference).reason == "files.media.reference_unsupported");
+  CHECK(std::get<Error>(files::media(file, openai, 0)).reason == "files.media.origin_mismatch");
+}
+
+// Through the runtime, the calls reach the origin's paths and the listing's next page comes back as `next`.
+void openrouter_runtime() {
+  auto executor = std::make_shared<QueueExecutor>();
+  auto wire = std::make_shared<ScriptTransport>();
+  runtime::Options options;
+  options.api_key = "synthetic-key";
+  auto client = runtime::detail::ClientAccess::make(at(router), options, executor, wire);
+  runtime::RunOptions run;
+  run.retry = runtime::RetryPolicy{true, false, 3, 0ms, 0ms};
+  const auto run_for = [&] { auto value = run; value.deadline = executor->now() + 10s; return value; };
+  const auto complete = [&](auto prepared) { auto call = client.start(std::move(prepared)); executor->drain(); return call.join(); };
+  wire->script = [](Exchange& e) {
+    e.reply(200, "application/json", R"({"_shape":"openrouter","cursor":"c2","data":[{"id":"or_file_a","type":"file","filename":"a.txt","mime_type":"text/plain","size_bytes":3,"created_at":"2025-01-01T00:00:00Z","downloadable":false}],"first_id":"or_file_a","has_more":true,"last_id":"or_file_a"})");
+  };
+  const auto listed = complete(client.prepare(files::List{1, "c1"}, run_for()));
+  const auto& request = wire->exchanges.back()->request;
+  CHECK(request.method == "GET" && request.url == "https://openrouter.ai/api/v1/files?limit=1&cursor=c1" && header(request, "Authorization") == "Bearer synthetic-key");
+  const auto& page = std::get<files::Page>(listed);
+  CHECK(page.files.size() == 1 && page.next == "c2" && page.attempt.attempts == 1);
+  wire->script = [](Exchange& e) { e.reply(200, "application/json", R"({"id":"or_file_a","type":"file_deleted"})"); };
+  CHECK(std::get<files::Deleted>(complete(client.prepare(files::Delete{"or_file_a"}, run_for()))).id == "or_file_a");
+  CHECK(wire->exchanges.back()->request.method == "DELETE" && wire->exchanges.back()->request.url == "https://openrouter.ai/api/v1/files/or_file_a");
+  // A provider refusal (an upload cannot be downloaded) is the call's error, as for any other.
+  wire->script = [](Exchange& e) { e.reply(400, "application/json", R"({"error":{"code":400,"message":"Invalid request parameters"}})"); };
+  const auto refused_content = complete(client.prepare(files::Download{"or_file_a"}, run_for()));
+  CHECK(std::holds_alternative<Failure>(refused_content) && std::get<Failure>(refused_content).error.http_status == 400);
+}
 }  // namespace
 
 int main() {
-  try { uploads(); reads(); decoded_files(); references(); chunked(); upload_urls(); digits_fit(); upload_url_stays_private(); runtime_upload(); runtime_download(); std::cout << "file properties passed\n"; return 0; }
+  try { uploads(); reads(); decoded_files(); references(); chunked(); upload_urls(); digits_fit(); upload_url_stays_private(); runtime_upload(); runtime_download(); openrouter_files(); openrouter_responses(); openrouter_runtime(); std::cout << "file properties passed\n"; return 0; }
   catch (const std::exception& error) { std::cerr << "file test failed: " << error.what() << '\n'; return 1; }
 }

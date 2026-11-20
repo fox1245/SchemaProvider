@@ -30,6 +30,21 @@ bool file_name(std::string_view value) {
     return c < 0x20 || c == 0x7f || c == '"' || c == '\\';
   });
 }
+// Whether a name follows the endpoint's rules for the name of an uploaded file (the policy fact's `file_names`): its length,
+// the characters it may not hold, and, where `/` makes folders, that the name neither starts nor ends with `/` and has no
+// empty, `.` or `..` segment. Where it does not, `/` is forbidden.
+bool follows(std::string_view name, const descriptor::FileNamesFact& rules) {
+  if (name.empty() || name.size() > rules.max_bytes || name.find_first_of(rules.forbidden) != std::string_view::npos) return false;
+  if (!rules.folders) return name.find('/') == std::string_view::npos;
+  if (name.front() == '/' || name.back() == '/') return false;
+  for (std::size_t at = 0; at <= name.size();) {
+    const auto end = std::min(name.find('/', at), name.size());
+    const auto segment = name.substr(at, end - at);
+    if (segment.empty() || segment == "." || segment == "..") return false;
+    at = end + 1;
+  }
+  return true;
+}
 bool sha256_hex(std::string_view value) {
   return value.size() == 64 && std::all_of(value.begin(), value.end(), [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); });
 }
@@ -265,8 +280,12 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   if (auto* error = std::get_if<Error>(&found)) return *error;
   auto& [fact, path] = std::get<Route>(found);
   const bool google = fact->shape == "google", openai = fact->shape == "openai";
-  if (auto length = source_length(upload.source); auto* error = std::get_if<Error>(&length)) return *error;
+  const auto length = source_length(upload.source);
+  if (const auto* error = std::get_if<Error>(&length)) return *error;
+  // The endpoint's file size limit (the policy fact's), where it states one.
+  if (fact->max_file_bytes && std::get<std::uint64_t>(length) > fact->max_file_bytes) return bad(reason::files_request::file_size_limit);
   if (!file_name(upload.filename)) return bad(reason::files_request::name_invalid);
+  if (fact->file_names && !follows(upload.filename, *fact->file_names)) return bad(reason::files_request::name_rejected);
   if (!mime_type(upload.mime)) return bad(reason::files_request::mime_invalid);
   if (openai ? !token(upload.purpose, 64) : !upload.purpose.empty())
     return openai ? bad(reason::files_request::purpose_required) : reason::error(ErrorKind::Unsupported, reason::files_request::purpose_unsupported);
@@ -318,7 +337,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   std::string query;
   const auto add = [&](std::string_view name, std::string_view value) { query.append(query.empty() ? "?" : "&").append(name).append("=").append(query_value(value)); };
   if (list.limit) add(google ? "pageSize" : "limit", std::to_string(*list.limit));
-  if (!list.after.empty()) add(google ? "pageToken" : openai ? "after" : "page", list.after);
+  if (!list.after.empty()) add(google ? "pageToken" : openai ? "after" : fact->shape == "openrouter" ? "cursor" : "page", list.after);
   if (!list.purpose.empty()) add("purpose", list.purpose);
   Encoded encoded{path + query, {}, {}, false, fact->auth};
   endpoints::add_fact_headers(encoded, *fact);

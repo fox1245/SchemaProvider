@@ -113,6 +113,11 @@ struct AcceptedAudioFact {
   std::vector<std::pair<std::string, std::string>> types;
   std::uint64_t max_bytes = 0;
 };
+// The rules a files endpoint states for the name of an uploaded file, beyond the encoder's own (1 byte or more, no control
+// character, quote or backslash): at most `max_bytes` bytes; `folders` lets `/` make a path of names, none of which is
+// empty, `.` or `..`, while the whole name neither starts nor ends with `/`, and without it `/` is forbidden; and none of
+// the characters in `forbidden`.
+struct FileNamesFact { std::uint64_t max_bytes = 0; bool folders = false; std::string forbidden{}; };
 // A non-chat endpoint the policy admits (D6): what it does (`images`), the wire shape a compiled codec speaks
 // (`openai`, `openrouter`), the origins that serve it, the path of each operation (`generate`, `edit`), the
 // schema of the members a request may add beside the typed ones, the authentication header, whether the
@@ -146,6 +151,9 @@ struct EndpointFact {
   // A decisions fact: the image MIME types its `assets` member takes, each with the `format` it names the type by.
   // None for a fact that takes no assets.
   std::vector<std::pair<std::string, std::string>> asset_formats{};
+  // A files endpoint: the largest file one upload sends, zero for none, and the rules for the name of an uploaded file.
+  std::uint64_t max_file_bytes = 0;
+  std::optional<FileNamesFact> file_names{};
 };
 // The path of one operation of an endpoint fact, if it has one.
 std::optional<std::string_view> endpoint_path(const EndpointFact&, std::string_view operation) noexcept;

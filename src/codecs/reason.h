@@ -1545,6 +1545,9 @@ inline constexpr Reason page_limit{"files.page.limit", "a file listing exceeds t
 inline constexpr Reason page_cursor_invalid{"files.page.cursor_invalid", "a page cursor is a string"};
 inline constexpr Reason page_cursor_missing{"files.page.cursor_missing", "a page that says more follow names its last id"};
 inline constexpr Reason delete_unconfirmed{"files.delete.unconfirmed", "the response does not confirm the deletion"};
+inline constexpr Reason response_shape_unexpected{"files.response.shape_unexpected", "an OpenRouter file response is in the OpenRouter shape"};
+inline constexpr Reason page_more_required{"files.page.more_required", "an OpenRouter file listing says whether more follow"};
+inline constexpr Reason media_reference_unsupported{"files.media.reference_unsupported", "no documented form names this provider's file in a request"};
 inline constexpr Reason media_origin_mismatch{"files.media.origin_mismatch", "a file is named only at the origin that holds it"};
 inline constexpr Reason media_not_active{"files.media.not_active", "a file is named once it is active"};
 inline constexpr Reason media_expired{"files.media.expired", "the file has expired"};
@@ -1560,7 +1563,7 @@ inline constexpr Reason all[]{
     endpoint_not_admitted, response_json_invalid, response_not_object, file_id_required, page_list_required,
     page_limit, page_cursor_invalid, page_cursor_missing, delete_unconfirmed, media_origin_mismatch, media_not_active, media_expired,
     session_unreadable, session_status_required, session_url_required, session_file_required, session_size_invalid,
-    session_cancel_unconfirmed, session_id_required,
+    session_cancel_unconfirmed, session_id_required, response_shape_unexpected, page_more_required, media_reference_unsupported,
 };
 }  // namespace files
 namespace files_request {
@@ -1593,6 +1596,8 @@ inline constexpr Reason complete_unsupported{"request.files.complete_unsupported
 inline constexpr Reason complete_early{"request.files.complete_early", "an upload completes once every part is sent"};
 inline constexpr Reason part_id_invalid{"request.files.part_id_invalid", "an upload part id is a token"};
 inline constexpr Reason query_unsupported{"request.files.query_unsupported", "only a Google upload says how much it holds"};
+inline constexpr Reason name_rejected{"request.files.name_rejected", "a file name follows the endpoint's name rules"};
+inline constexpr Reason file_size_limit{"request.files.file_size_limit", "an upload is within the endpoint's file size limit"};
 // Every constant of the source, for the enumeration test.
 inline constexpr Reason all[]{
     endpoint_not_admitted, path_missing, id_invalid, source_ambiguous, source_empty, digest_invalid, name_invalid,
@@ -1600,6 +1605,7 @@ inline constexpr Reason all[]{
     limit_invalid, cursor_invalid, purpose_invalid, purpose_filter_unsupported, download_limit_invalid,
     session_origin_mismatch, session_url_invalid, session_id_invalid, part_too_large, part_size_limit,
     part_offset_mismatch, part_granularity, complete_unsupported, complete_early, part_id_invalid, query_unsupported,
+    name_rejected, file_size_limit,
 };
 }  // namespace files_request
 namespace batches {
