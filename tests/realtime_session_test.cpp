@@ -232,8 +232,11 @@ void provider_close(transport::Transport& transport) {
   CHECK(wrong_key.error->reason == "runtime.realtime.provider_closed" && wrong_key.error->vendor_code == "3000" && wrong_key.error->http_status == 0);
   const auto google_key = closed_with(1007, "API%20key%20not%20valid.%20Please%20pass%20a%20valid%20API%20key.");
   CHECK(google_key.error && google_key.error->kind == ErrorKind::Authentication && google_key.close_reason.starts_with("API key not valid"));
-  // The same code with another reason is not a wrong key, and a code the fact does not list is an ordinary close.
-  CHECK(!closed_with(1007, "bad%20payload").error);
+  // The code decides: the close reason is the provider's free text, so the same code with another reason is the same
+  // failure. A code the fact does not list is an ordinary close.
+  const auto other_reason = closed_with(1007, "bad%20payload");
+  CHECK(other_reason.error && other_reason.error->kind == ErrorKind::Authentication && other_reason.error->retry_class == RetryClass::Never);
+  CHECK(other_reason.error->reason == "runtime.realtime.provider_closed" && other_reason.error->vendor_code == "1007");
   CHECK(!closed_with(4001, "bye").error);
   // The status is the policy's to classify.
   const auto busy = closed_with(4003, "busy");
