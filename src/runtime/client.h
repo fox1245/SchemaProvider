@@ -258,6 +258,7 @@ inline stores::PageOutcome typed_outcome(const sp::Outcome& outcome, const store
 inline stores::SearchOutcome typed_outcome(const sp::Outcome& outcome, const stores::SearchOutcome*) { return stores::typed_search(outcome); }
 inline stores::ContentOutcome typed_outcome(const sp::Outcome& outcome, const stores::ContentOutcome*) { return stores::typed_content(outcome); }
 inline stores::DeleteOutcome typed_outcome(const sp::Outcome& outcome, const stores::DeleteOutcome*) { return stores::typed_deleted(outcome); }
+inline batches::PageOutcome typed_outcome(const sp::Outcome& outcome, const batches::PageOutcome*) { return batches::typed_page(outcome); }
 inline tokens::Outcome typed_outcome(const sp::Outcome& outcome, const tokens::Outcome*) { return tokens::typed(outcome); }
 inline generations::Outcome typed_outcome(const sp::Outcome& outcome, const generations::Outcome*) { return generations::typed(outcome); }
 }  // namespace detail
@@ -395,11 +396,14 @@ class Client {
   PreparedEndpoint<batches::Outcome> prepare(batches::Cancel, RunOptions = {});
   PreparedEndpoint<batches::DeleteOutcome> prepare(batches::Delete, RunOptions = {});
   PreparedEndpoint<jobs::DownloadOutcome> prepare(batches::Results, RunOptions = {});
+  PreparedEndpoint<batches::PageOutcome> prepare(batches::List, RunOptions = {});
   batches::Outcome complete(batches::Submit, RunOptions = {});
   batches::Outcome complete(batches::Get, RunOptions = {});
   batches::Outcome complete(batches::Cancel, RunOptions = {});
   batches::DeleteOutcome complete(batches::Delete, RunOptions = {});
   jobs::DownloadOutcome complete(batches::Results, RunOptions = {});
+  batches::PageOutcome complete(batches::List, RunOptions = {});
+  batches::PageOutcome complete(PreparedEndpoint<batches::PageOutcome>);
   batches::Outcome complete(PreparedEndpoint<batches::Outcome>);
   batches::DeleteOutcome complete(PreparedEndpoint<batches::DeleteOutcome>);
   EndpointCall<batches::Outcome> start(PreparedEndpoint<batches::Outcome>, std::function<void(batches::Outcome)> on_outcome = {});
@@ -454,6 +458,7 @@ class Client {
   EndpointCall<stores::SearchOutcome> start(PreparedEndpoint<stores::SearchOutcome>, std::function<void(stores::SearchOutcome)> on_outcome = {});
   EndpointCall<stores::ContentOutcome> start(PreparedEndpoint<stores::ContentOutcome>, std::function<void(stores::ContentOutcome)> on_outcome = {});
   EndpointCall<stores::DeleteOutcome> start(PreparedEndpoint<stores::DeleteOutcome>, std::function<void(stores::DeleteOutcome)> on_outcome = {});
+  EndpointCall<batches::PageOutcome> start(PreparedEndpoint<batches::PageOutcome>, std::function<void(batches::PageOutcome)> on_outcome = {});
   // Token counting (D7): the input tokens of a chat request of this client's family, without running it. Free.
   PreparedEndpoint<tokens::Outcome> prepare(tokens::Count, RunOptions = {});
   tokens::Outcome complete(tokens::Count, RunOptions = {});

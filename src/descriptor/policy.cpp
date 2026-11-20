@@ -711,10 +711,12 @@ class PolicyLoader {
         std::vector<std::optional<std::string>> stated(all_listings.size());
         // The origin each fact states: empty for `null`, nothing where the fact does not state it.
         std::vector<std::optional<std::string>> stated_origins(all_listings.size());
+        // The tier variants each fact states; a listing without them has none (no embedded value is taken).
+        std::vector<std::vector<std::pair<std::string, std::string>>> tier_variants(all_listings.size());
         if (const auto facts = root.get("listings"); facts.valid()) {
           if (!facts.is_array() || facts.size() > all_listings.size()) fail("/listings", "array of at most one fact per listing");
           for (auto item : facts.elements()) {
-            closed(item, {"listing", "family"}, "/listings", {"default_origin"});
+            closed(item, {"listing", "family"}, "/listings", {"default_origin", "tier_variants"});
             const auto name = item.get("listing");
             const auto at = std::find_if(all_listings.begin(), all_listings.end(),
                                          [&](Listing listing) { return name.is_string() && listing_name(listing) == name.as_string(); });
@@ -733,8 +735,25 @@ class PolicyLoader {
                 canonical_spelling(*stated_origin, "/listings/default_origin");
               }
             }
+            // A catalogue variant (`vendor/model:<suffix>`) whose entry prices the base model under a catalogue tier. A
+            // suffix and a tier are tokens a price key and a model id can hold.
+            if (const auto variants = item.get("tier_variants"); variants.valid()) {
+              if (!variants.is_object() || !variants.size() || variants.size() > 8) fail("/listings/tier_variants", "object of one to eight variant tiers");
+              const auto word = [](std::string_view value, bool colon) {
+                return !value.empty() && value.size() <= 64 && std::all_of(value.begin(), value.end(), [&](char c) {
+                  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' || (colon && c == ':');
+                });
+              };
+              auto& stated_variants = tier_variants[static_cast<std::size_t>(at - all_listings.begin())];
+              for (auto member : variants.members()) {
+                auto tier = text(member.value, "/listings/tier_variants");
+                if (!word(member.key, false) || !word(tier, true)) fail("/listings/tier_variants", "a variant suffix and a catalogue tier name");
+                stated_variants.emplace_back(std::string(member.key), std::move(tier));
+              }
+            }
           }
         }
+        for (std::size_t i = 0; i < all_listings.size(); ++i) policy->listing_tier_variants_.emplace_back(all_listings[i], std::move(tier_variants[i]));
         for (std::size_t i = 0; i < all_listings.size(); ++i) {
           const std::string name(listing_name(all_listings[i]));
           if (stated[i]) {
@@ -782,6 +801,8 @@ class PolicyLoader {
           if (endpoint == "batches" && shape == "openai") return {"submit", "get", "cancel"};
           if (endpoint == "batches" && shape == "anthropic") return {"submit", "get", "cancel", "delete", "results"};
           if (endpoint == "batches" && shape == "google") return {"submit", "get", "cancel", "delete"};
+          // OpenRouter: the items inline, the results inline in the batch, no cancel.
+          if (endpoint == "batches" && shape == "openrouter") return {"submit", "get", "list", "delete"};
           if (endpoint == "tokens" && (shape == "openai" || shape == "anthropic" || shape == "google")) return {"count"};
           if (endpoint == "generations" && shape == "openrouter") return {"get"};
           // Provider-side search stores: OpenAI vector stores (their files, file batches and search) and Google file
@@ -820,7 +841,7 @@ class PolicyLoader {
           fail("/endpoints/billing", "none, model, carried or unpriced");
         };
         for (auto e : endpoints.elements()) {
-          closed(e, {"endpoint","shape","origins","paths"}, "/endpoints", {"options","auth","charge_on_accept","headers","keep","audio","close_codes","max_response_bytes","accepted_audio","max_part_bytes","billing","carried_tier","max_items","output_cap","max_results","asset_formats","max_file_bytes","file_names"});
+          closed(e, {"endpoint","shape","origins","paths"}, "/endpoints", {"options","auth","charge_on_accept","headers","keep","audio","close_codes","max_response_bytes","accepted_audio","max_part_bytes","billing","carried_tier","max_items","output_cap","max_results","asset_formats","max_file_bytes","file_names","items"});
           EndpointFact fact{text(e.get("endpoint"), "/endpoints/endpoint"), text(e.get("shape"), "/endpoints/shape"),
                             strings(e.get("origins"), "/endpoints/origins")};
           const auto operations = operations_of(fact.endpoint, fact.shape);
@@ -1083,6 +1104,45 @@ class PolicyLoader {
             std::pair<std::pair<std::string, std::string>, std::string> entry{{"/endpoints/" + fact.endpoint + "/" + fact.shape, "max_items"}, embedded.dump()};
             if (std::find(borrowed.begin(), borrowed.end(), entry) == borrowed.end()) borrowed.push_back(std::move(entry));
           }
+          // The items of a batch sent inline to one endpoint of the gateway: the path each family's requests go under, the
+          // media they may carry, and what the batch path refuses. Required where the shape sends them so, and refused
+          // elsewhere.
+          std::optional<BatchItemsFact> items;
+          const bool gateway_batch = fact.endpoint == "batches" && fact.shape == "openrouter";
+          if (const auto stated = e.get("items"); stated.valid()) {
+            if (!gateway_batch) fail("/endpoints/items", "items on an OpenRouter batch fact");
+            closed(stated, {"paths", "media"}, "/endpoints/items", {"refused_plugins", "refused_variants"});
+            BatchItemsFact out;
+            const auto item_paths = stated.get("paths");
+            if (!item_paths.is_object() || !item_paths.size() || item_paths.size() > 8) fail("/endpoints/items/paths", "object of one to eight family paths");
+            for (auto member : item_paths.members()) {
+              if (!policy->family(member.key)) fail("/endpoints/items/paths", "a family of the policy");
+              const auto path = text(member.value, "/endpoints/items/paths");
+              if (!path.starts_with('/') || path.size() > 256 || path.find_first_of("?# \\\"{}") != std::string::npos ||
+                  std::any_of(path.begin(), path.end(), [](unsigned char c) { return c < 0x21 || c > 0x7e; }))
+                fail("/endpoints/items/paths", "an absolute path without query");
+              out.paths.emplace_back(std::string(member.key), path);
+            }
+            out.media = media_admission(stated.get("media"), "/endpoints/items/media", "");
+            const auto names = [&](std::string_view key) {
+              std::vector<std::string> values;
+              if (const auto list = stated.get(key); list.valid()) {
+                values = strings(list, "/endpoints/items");
+                if (values.size() > 64 || std::any_of(values.begin(), values.end(), [](const std::string& value) {
+                      return value.empty() || value.size() > 128 || !std::all_of(value.begin(), value.end(), [](char c) {
+                        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+                      });
+                    }))
+                  fail("/endpoints/items", "at most 64 plugin ids or variant suffixes");
+              }
+              return values;
+            };
+            out.refused_plugins = names("refused_plugins");
+            out.refused_variants = names("refused_variants");
+            items = std::move(out);
+          } else if (gateway_batch) {
+            fail("/endpoints/items", "the items of an OpenRouter batch fact");
+          }
           for (const auto& existing : policy->endpoints_)
             if (existing.endpoint == fact.endpoint)
               for (const auto& origin : fact.origins)
@@ -1107,6 +1167,7 @@ class PolicyLoader {
           }
           policy->max_items_.push_back(max_items);
           policy->max_results_.push_back(max_results);
+          policy->batch_items_.push_back(std::move(items));
           policy->endpoints_.push_back(std::move(fact));
           policy->billing_.push_back(std::move(billed));
         }
@@ -1800,6 +1861,16 @@ std::optional<std::uint64_t> DescriptorPolicy::endpoint_limit(std::string_view e
 bool over_limit(const ValidatedDescriptor& descriptor, std::string_view name, std::uint64_t count) noexcept {
   const auto limit = descriptor.policy()->limit(descriptor.family(), name);
   return limit && count > *limit;
+}
+const std::vector<std::pair<std::string, std::string>>& DescriptorPolicy::listing_tier_variants(Listing listing) const noexcept {
+  for (const auto& [kind, variants] : listing_tier_variants_) if (kind == listing) return variants;
+  static const std::vector<std::pair<std::string, std::string>> none;
+  return none;
+}
+const BatchItemsFact* DescriptorPolicy::batch_items(std::string_view endpoint, std::string_view origin) const noexcept {
+  for (std::size_t i = 0; i < endpoints_.size() && i < batch_items_.size(); ++i)
+    if (endpoints_[i].endpoint == endpoint && contains(endpoints_[i].origins, origin)) return batch_items_[i] ? &*batch_items_[i] : nullptr;
+  return nullptr;
 }
 std::string_view DescriptorPolicy::carried_tier(std::string_view endpoint, std::string_view origin) const noexcept {
   for (std::size_t i = 0; i < endpoints_.size() && i < billing_.size(); ++i)

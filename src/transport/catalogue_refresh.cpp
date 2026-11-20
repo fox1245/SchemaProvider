@@ -464,6 +464,46 @@ void read_ceilings(Transport& transport, const RefreshRequest& request, const de
     if (report.ceiling_gaps.size() == gaps_before) ++report.ceilings;
   }
 }
+
+// The listing's catalogue variants whose prices are a tier of their base model's (DescriptorPolicy::
+// listing_tier_variants: OpenRouter's `vendor/model:batch` is the batch-priced version of `vendor/model`): each
+// variant entry's prices, its bands and route ceilings included, are written onto the base entry under the tier
+// (`prompt/batch`, `completion/batch+200000`, `ceiling_input/batch`), in place of any it had there. The variant's own
+// entry stays as listed. A base entry the listing does not name gets nothing, and one that cannot hold the rows beside
+// its own prices gets none of them, so no tier price is ever partial or guessed.
+void write_tier_variants(const descriptor::DescriptorPolicy& policy, Listing listing, std::vector<CatalogueEntry>& entries) {
+  const auto& variants = policy.listing_tier_variants(listing);
+  if (variants.empty()) return;
+  for (std::size_t i = 0; i < entries.size(); ++i) {
+    const auto& variant = entries[i];
+    if (variant.prefix) continue;
+    for (const auto& [suffix, tier] : variants) {
+      const std::string tail = ":" + suffix;
+      if (variant.id.size() <= tail.size() || !variant.id.ends_with(tail)) continue;
+      const auto base_id = variant.id.substr(0, variant.id.size() - tail.size());
+      const auto base = std::find_if(entries.begin(), entries.end(), [&](const CatalogueEntry& e) { return !e.prefix && e.id == base_id; });
+      if (base == entries.end()) continue;
+      // Rows of the tier the base entry had go first: the variant states the tier's prices whole.
+      auto candidate = *base;
+      std::erase_if(candidate.pricing, [&](const auto& price) {
+        const auto unbanded = descriptor::unbanded_unit(price.first);
+        const auto slash = unbanded.rfind('/');
+        return slash != std::string_view::npos && unbanded.substr(slash + 1) == tier;
+      });
+      const auto without = candidate;
+      bool written = true;
+      for (const auto& [unit, text] : variant.pricing) {
+        const auto unbanded = descriptor::unbanded_unit(unit);
+        if (unbanded.find('/') != std::string_view::npos) { written = false; break; }
+        candidate.pricing.emplace_back(std::string(unbanded) + "/" + tier + std::string(std::string_view(unit).substr(unbanded.size())), text);
+      }
+      std::sort(candidate.pricing.begin(), candidate.pricing.end());
+      std::vector<CatalogueEntry> alone{candidate};
+      if (!written || std::holds_alternative<ConfigError>(descriptor::make_catalogue(std::move(alone)))) candidate = without;
+      *base = std::move(candidate);
+    }
+  }
+}
 } // namespace
 
 std::string default_listing_url(Listing listing) { return std::string(descriptor::builtin_policy()->listing_origin(listing)); }
@@ -568,9 +608,11 @@ std::variant<RefreshResult, ConfigError> refresh_catalogue(Transport& transport,
                                               static_cast<std::uint64_t>(listed_before(request.previous, name, origin)) * request.min_kept_percent)
             report.error = "listing named far fewer models than before";
           else {
-            if (!ceilings.empty()) {
+            if (!ceilings.empty() || !policy->listing_tier_variants(source.listing).empty()) {
               auto entries = listed->entries();
-              read_ceilings(transport, request, *policy, plan, deadline, entries, report);
+              if (!ceilings.empty()) read_ceilings(transport, request, *policy, plan, deadline, entries, report);
+              // After the ceilings, so a variant's route ceiling is written under its tier too.
+              write_tier_variants(*policy, source.listing, entries);
               listed = catalogue_of(std::move(entries));
             }
             // The catalogue has to hold this listing next to the others; if it cannot, only this source fails.

@@ -2029,6 +2029,16 @@ PreparedEndpoint<jobs::DownloadOutcome> Client::prepare(batches::Results call, R
       [&] { return endpoints::call_facts(client->descriptor, results.first, results.second, {}); }));
 }
 jobs::DownloadOutcome Client::complete(batches::Results call, RunOptions options) { return complete(prepare(std::move(call), std::move(options))); }
+PreparedEndpoint<batches::PageOutcome> Client::prepare(batches::List call, RunOptions options) {
+  auto client = state_;
+  return PreparedEndpoint<batches::PageOutcome>(prepare_endpoint<batches::Encoded>(std::move(options), "batches.list",
+      [&] { return batches::encode(client->descriptor, call); }, [&] { return endpoints::call_facts(client->descriptor, "batches", batches::operation(call), {}); }));
+}
+batches::PageOutcome Client::complete(batches::List call, RunOptions options) { return complete(prepare(std::move(call), std::move(options))); }
+batches::PageOutcome Client::complete(PreparedEndpoint<batches::PageOutcome> call) { return complete_endpoint(std::move(call)); }
+EndpointCall<batches::PageOutcome> Client::start(PreparedEndpoint<batches::PageOutcome> call, std::function<void(batches::PageOutcome)> on_outcome) {
+  return start_endpoint(std::move(call), std::move(on_outcome));
+}
 batches::Outcome Client::complete(PreparedEndpoint<batches::Outcome> call) { return complete_endpoint(std::move(call)); }
 batches::DeleteOutcome Client::complete(PreparedEndpoint<batches::DeleteOutcome> call) { return complete_endpoint(std::move(call)); }
 EndpointCall<batches::Outcome> Client::start(PreparedEndpoint<batches::Outcome> call, std::function<void(batches::Outcome)> on_outcome) {

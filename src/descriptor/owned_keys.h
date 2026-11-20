@@ -167,6 +167,7 @@ inline constexpr OwnedMember k_realtime[] = {
 inline constexpr OwnedMember k_batches[] = {
     {"input_file_id", MemberRole::Written}, {"endpoint", MemberRole::Written},
     {"completion_window", MemberRole::Written}, {"requests", MemberRole::Written}, {"batch", MemberRole::Written},
+    {"model", MemberRole::Written},
 };
 
 inline constexpr OwnedMember k_tool_messages[] = {
