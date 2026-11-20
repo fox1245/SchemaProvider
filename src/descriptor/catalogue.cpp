@@ -881,6 +881,16 @@ void leave_out(CatalogueEntry& entry, std::string_view unit, std::vector<Withhel
       if (read_by_no_unit(listed) && std::find(markers.begin(), markers.end(), std::string(listed)) == markers.end()) markers.emplace_back(listed);
     }
   }
+  // A member only an override lists has no row to remove and is as unread: it is kept at a variable price too.
+  if (read_by_no_unit(unit) &&
+      std::none_of(markers.begin(), markers.end(), [&](const std::string& marker) { return plain_price_unit(marker) == plain_price_unit(unit); }))
+    markers.emplace_back(unit);
+  // An entry with no room for the markers cannot say what it prices: every price is left out, as for an override it cannot read.
+  if (kept.size() + markers.size() > max_prices) {
+    withheld.push_back({entry.id, std::string()});
+    entry.pricing.clear();
+    return;
+  }
   for (auto& marker : markers) kept.emplace_back(std::move(marker), "-1");
   std::sort(kept.begin(), kept.end());
   entry.pricing = std::move(kept);
