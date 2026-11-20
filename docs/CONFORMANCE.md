@@ -8,6 +8,20 @@ Scope: the cells and properties below cover the chat families and the artifacts 
 
 Current source scope is five typed buffered/SSE families, bounded prepare/start/complete lifecycle, owned nullable/raw outcomes, exact native binding and archive v3 custody, plus interface 4 controls, Responses cursor ownership and explicit Generate portable history. General sidecar fixture schema, constraints engine, generated support tables, SDK journal projection/kit, cross-origin equivalence and general Drop/Demote remain historical proposals. Generate's explicit imported-call sentinel is a narrow current path, not those historical treatments. WebSocket sessions have no chat cell; NeoGraph owns its outcome/checkpoint serializers.
 
+## 0.4.4 release record
+
+**Source.** The 0.4.4 release tree: interface revision 7, shared-library generation 7, with libsodium 1.0.22 (`SP_WITH_SODIUM=ON`). The sanitizer builds ran on git tree `dc8f1e0c232e2883c74ec29a00d236bc97de0195`, the tree of `main` at `eab8db7` (after #217); the release commit changes from there version numbers and documents only, nothing under `src/`, `config/` or `cmake/`, and the Release build and the live matrix ran on the release commit. The native builds ran on Linux x86_64 (Ubuntu 24.04) with GCC 13.3, CMake 3.28, libcurl 8.5.0 and Node 24.19, on 2026-11-20, with `SP_BUILD_TESTS`, `SP_BUILD_CANARY` and `SP_BUILD_RUNTIME_TESTS` on and `SP_BUILD_BENCHMARKS` off (85 registered entries).
+
+| Build | Result |
+|---|---|
+| Release | 85 of 85 registered entries passed |
+| ASan+UBSan, RelWithDebInfo | 84 passed, none failed; `native_archive_key_residue` skipped because its scan does not run under an instrumented allocator, as in the earlier sanitizer cohorts. No AddressSanitizer, UndefinedBehaviorSanitizer or LeakSanitizer report |
+| TSan, RelWithDebInfo | 84 passed, none failed; `native_archive_key_residue` skipped for the same reason. No ThreadSanitizer report. The entries ran under the `setarch -R` runner |
+
+- **CI.** The project's CI (the native tests on macOS with libsodium, the installed custody consumer and a build without libsodium, the single-thread WebAssembly job, and CodeQL) passed on the head of #217, the one pull request merged since 0.4.3, whose tree is the tree above.
+- **Live.** On 2026-11-20 the live matrix of the 0.4.1 record ran on the release build, with the same cells, models and settings, retries off: 59 of 59 passed. The Responses custody cell at reasoning effort low passed this time: the model returned encrypted reasoning, which it had not in the 0.4.1, 0.4.2 and 0.4.3 runs. The same day, the realtime response bound of #217 at OpenAI (`gpt-realtime-2.1-mini`, rates from OpenAI's pricing page in a host catalogue, `max_output_tokens` 60, turn detection off): three turns with text output (bounds 264,000 to 309,600 nano-USD, estimates 71,040 to 131,400) and three with audio output (bounds 1,320,000 to 1,384,200, estimates 330,000 to 647,400), each estimate within its bound; the committed turns named their model.
+- **Not run here.** The installed-consumer configurations and the WebAssembly suite ran only in CI; aarch64, Windows and HTTP/3 were not run for this record. Google Live responses have no bound (no output cap), so no live cell checks one.
+
 ## 0.4.3 release record
 
 **Source.** The 0.4.3 release tree: interface revision 7, shared-library generation 7, with libsodium 1.0.22 (`SP_WITH_SODIUM=ON`). The sanitizer builds ran on git tree `531624973413526bef2d856797425f4d947d80b9`, the tree of `main` at `4d15b41` (after #215); the release commit changes from there version numbers and documents only, nothing under `src/`, `config/` or `cmake/`, and the Release build and the live matrix ran on the release commit itself. The native builds ran on Linux x86_64 (Ubuntu 24.04) with GCC 13.3, CMake 3.28, libcurl 8.5.0 and Node 24.19, on 2026-11-20, with `SP_BUILD_TESTS`, `SP_BUILD_CANARY` and `SP_BUILD_RUNTIME_TESTS` on and `SP_BUILD_BENCHMARKS` off (85 registered entries).
