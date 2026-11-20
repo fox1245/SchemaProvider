@@ -1,6 +1,7 @@
 #include "codecs/realtime.h"
 #include "codecs/endpoint.h"
 #include "codecs/reason.h"
+#include "codecs/served_model.h"
 #include "core/media.h"
 #include "descriptor/policy.h"
 #include "descriptor/stop_facts.h"
@@ -122,8 +123,9 @@ class Turn {
   void user_text(std::string_view value) { text_.append(value); role_ = Role::User; active_ = true; }
   bool active() const { return active_; }
   // The turn as a Completion, through the accumulator so it keeps the chat invariants; then a fresh turn.
-  std::variant<Completion, Error> commit(std::string id, StopReason stop, SemanticLimits limits) {
+  std::variant<Completion, Error> commit(std::string id, StopReason stop, SemanticLimits limits, ServedModel model) {
     Accumulator accumulator(limits);
+    accumulator.served_model(std::move(model));
     std::uint32_t local = 0;
     std::uint64_t order = 0;
     bool ok = accumulator.accept(Begin{id}) && accumulator.accept(MessageBegin{{0}, id.empty() ? std::nullopt : std::optional<std::string>(id), role_, nullptr});
@@ -174,9 +176,13 @@ class FormatCodec : public Codec {
   std::uint32_t input_rate() const noexcept override { return input_.rate; }
   std::uint32_t input_bytes_per_second() const noexcept override { return input_.rate * input_.sample_bytes; }
  protected:
-  FormatCodec(const descriptor::EndpointFact& fact, SemanticLimits limits)
-      : inputs_(fact.audio_input), outputs_(fact.audio_output), input_(inputs_.front()), output_(outputs_.front()), limits_(limits) {}
+  FormatCodec(const descriptor::ValidatedDescriptor& descriptor, const descriptor::EndpointFact& fact, SemanticLimits limits)
+      : inputs_(fact.audio_input), outputs_(fact.audio_output), input_(inputs_.front()), output_(outputs_.front()), limits_(limits),
+        descriptor_(descriptor) {}
+  // The model of a turn: the setup's, and the one the provider reports serving, classified as a chat response's is.
+  ServedModel served() const { return ServedModel{requested_, reported_, served::relation(descriptor_, requested_, reported_)}; }
   std::optional<Error> choose(const Setup& setup) {
+    requested_ = setup.model;
     const auto* in = format_of(inputs_, setup.input_audio);
     const auto* out = format_of(outputs_, setup.output_audio);
     if (!in || !out) return bad(reason::realtime_request::audio_format_invalid);
@@ -194,14 +200,18 @@ class FormatCodec : public Codec {
   std::vector<descriptor::AudioFormatFact> inputs_, outputs_;
   descriptor::AudioFormatFact input_, output_;
   SemanticLimits limits_;
+  descriptor::ValidatedDescriptor descriptor_;
+  // The setup's model, and the model the provider names for the session (empty: none named).
+  std::string requested_, reported_;
 };
 
 // Google Live (`BidiGenerateContent`): one JSON object per message, either way.
 class GoogleCodec final : public FormatCodec {
  public:
-  GoogleCodec(const descriptor::EndpointFact& fact, SemanticLimits limits) : FormatCodec(fact, limits) {}
+  GoogleCodec(const descriptor::ValidatedDescriptor& descriptor, const descriptor::EndpointFact& fact, SemanticLimits limits) : FormatCodec(descriptor, fact, limits) {}
   std::variant<std::vector<Frame>, Error> open(const Setup& setup) override {
     if (auto error = choose(setup)) return *error;
+    if (!setup.turn_detection) return unsupported(reason::realtime_request::turn_detection_unsupported);
     // A transcription model answers in text only; it refuses AUDIO.
     transcribing_ = setup.output.empty();
     std::string out = "{\"setup\":{\"model\":" + json::quote("models/" + setup.model) + ",\"generationConfig\":{\"responseModalities\":[";
@@ -350,7 +360,7 @@ class GoogleCodec final : public FormatCodec {
   std::optional<Error> commit(std::vector<Event>& events, StopReason stop) {
     held_ = false;
     if (!turn_.active()) return std::nullopt;
-    auto turn = turn_.commit({}, std::move(stop), limits_);
+    auto turn = turn_.commit({}, std::move(stop), limits_, served());
     if (auto* error = std::get_if<Error>(&turn)) return *error;
     events.push_back(TurnCommitted{std::move(std::get<Completion>(turn))});
     return std::nullopt;
@@ -364,7 +374,7 @@ class GoogleCodec final : public FormatCodec {
 // OpenAI Realtime (`/v1/realtime`): typed JSON events, either way.
 class OpenAICodec final : public FormatCodec {
  public:
-  OpenAICodec(const descriptor::EndpointFact& fact, SemanticLimits limits) : FormatCodec(fact, limits) {}
+  OpenAICodec(const descriptor::ValidatedDescriptor& descriptor, const descriptor::EndpointFact& fact, SemanticLimits limits) : FormatCodec(descriptor, fact, limits) {}
   std::variant<std::vector<Frame>, Error> open(const Setup& setup) override {
     if (auto error = choose(setup)) return *error;
     transcribing_ = setup.output.empty();
@@ -384,6 +394,8 @@ class OpenAICodec final : public FormatCodec {
       if (setup.transcription_model.empty()) return bad(reason::realtime_request::transcription_model_required);
       session += ",\"transcription\":{\"model\":" + json::quote(setup.transcription_model) + "}";
     }
+    // Without turn detection the host ends each utterance (EndAudio) and asks for each answer (Respond).
+    if (!setup.turn_detection) session += ",\"turn_detection\":null";
     session += "},\"output\":{\"format\":" + wire_format(output_);
     if (!setup.voice.empty()) session += ",\"voice\":" + json::quote(setup.voice);
     session += "}}";
@@ -423,7 +435,10 @@ class OpenAICodec final : public FormatCodec {
     const auto root = wire->root();
     const auto type = root.get("type").as_string();
     std::vector<Event> events;
-    if (type == "session.created") events.push_back(Ready{text_of(root.get("session").get("id"))});
+    if (type == "session.created") {
+      events.push_back(Ready{text_of(root.get("session").get("id"))});
+      if (const auto model = root.get("session").get("model"); model.is_string()) reported_ = std::string(model.as_string());
+    }
     else if (type == "error") {
       const auto error = root.get("error");
       Error value = reject(ErrorKind::RemoteFailure, reason::realtime::session_provider_error);
@@ -442,12 +457,15 @@ class OpenAICodec final : public FormatCodec {
       if (transcribing_) {
         turn_.user_text(transcript);
         if (const auto usage = root.get("usage"); usage.is_object()) turn_.usage(openai_usage(usage));
-        auto turn = turn_.commit(text_of(root.get("item_id")), StopReason{StopKind::EndTurn, "transcribed"}, limits_);
+        auto turn = turn_.commit(text_of(root.get("item_id")), StopReason{StopKind::EndTurn, "transcribed"}, limits_, served());
         if (auto* error = std::get_if<Error>(&turn)) return *error;
         events.push_back(TurnCommitted{std::move(std::get<Completion>(turn))});
       }
     }
-    else if (type == "response.created") response_ = text_of(root.get("response").get("id"));
+    else if (type == "response.created") {
+      response_ = text_of(root.get("response").get("id"));
+      if (const auto model = root.get("response").get("model"); model.is_string()) reported_ = std::string(model.as_string());
+    }
     else if (type == "response.output_audio.delta") {
       std::string pcm;
       if (!base64_decode(text_of(root.get("delta")), pcm)) return reject(ErrorKind::ProtocolCorrupt, reason::realtime::audio_not_base64);
@@ -498,7 +516,7 @@ class OpenAICodec final : public FormatCodec {
       // A stop the codec cannot name ends a turn even without content, so that it is delivered.
       const bool unnamed = kind == StopKind::Unknown && !raw.empty() && !failure_class;
       if (turn_.active() || status == "completed" || unnamed) {
-        auto turn = turn_.commit(text_of(response.get("id")), StopReason{kind, raw}, limits_);
+        auto turn = turn_.commit(text_of(response.get("id")), StopReason{kind, raw}, limits_, served());
         if (auto* error = std::get_if<Error>(&turn)) return *error;
         events.push_back(TurnCommitted{std::move(std::get<Completion>(turn))});
       }
@@ -531,6 +549,8 @@ std::variant<Connection, Error> connect(const descriptor::ValidatedDescriptor& d
     return bad(reason::realtime_request::transcription_setup_invalid);
   if (!format_of(fact->audio_input, setup.input_audio) || !format_of(fact->audio_output, setup.output_audio))
     return bad(reason::realtime_request::audio_format_invalid);
+  // Google Live turns its automatic activity detection off through the `realtimeInputConfig` option.
+  if (!setup.turn_detection && fact->shape == "google") return unsupported(reason::realtime_request::turn_detection_unsupported);
   if (setup.voice.size() > 128 || setup.instructions.size() > descriptor.policy()->resources().request_bytes)
     return bad(reason::realtime_request::setup_bounds);
   for (const auto& tool : setup.tools)
@@ -557,8 +577,8 @@ std::variant<Connection, Error> connect(const descriptor::ValidatedDescriptor& d
 std::unique_ptr<Codec> make_codec(const descriptor::ValidatedDescriptor& descriptor, SemanticLimits limits) {
   const auto* fact = fact_of(descriptor);
   if (!fact) return nullptr;
-  if (fact->shape == "google") return std::make_unique<GoogleCodec>(*fact, limits);
-  if (fact->shape == "openai") return std::make_unique<OpenAICodec>(*fact, limits);
+  if (fact->shape == "google") return std::make_unique<GoogleCodec>(descriptor, *fact, limits);
+  if (fact->shape == "openai") return std::make_unique<OpenAICodec>(descriptor, *fact, limits);
   return nullptr;
 }
 
@@ -615,22 +635,40 @@ pricing::EndpointBound response_bound(const descriptor::ValidatedDescriptor& des
   response.origin = descriptor.base_url();
   response.model = setup.model;
   response.audio_output = std::find(setup.output.begin(), setup.output.end(), Modality::Audio) != setup.output.end();
-  // The cap the fact names, sent as an extension of the setup: an unsigned integer is a cap, any other value none.
+  // The cap the fact names, sent as an extension of the setup: an unsigned integer above zero is a cap, any other value
+  // none.
   if (!fact->output_cap.empty() && setup.extensions)
-    if (const auto cap = setup.extensions->root().get(fact->output_cap); cap.is_uint()) response.output_tokens = cap.as_uint();
-  // The Google codec keeps Live's thoughts beside the output total (google_usage): the cap does not count them.
-  response.thinking_beside_output = fact->shape == "google";
+    if (const auto cap = setup.extensions->root().get(fact->output_cap); cap.is_uint() && cap.as_uint()) response.output_tokens = cap.as_uint();
+  // The Google codec keeps Live's thoughts beside the output total (google_usage): the cap does not count them. With
+  // tools, Live may count a tool-use prompt beside the input.
+  const bool google = fact->shape == "google";
+  response.thinking_beside_output = google;
+  response.tool_prompt_beside_input = google && !setup.tools.empty();
   response.input_tokens = input.input_tokens;
   response.audio_seconds = input.audio_seconds;
   out = pricing::realtime_response_bound(response, catalogue);
-  // A transcript of the user's audio bills a transcription beside the response (OpenAI's `transcription_model`), and
-  // the session commits no turn for it, so no usage of it reaches the host.
-  if (setup.input_transcription) {
+  const auto refuse = [&](std::string subject, std::string detail) {
     out.total.reset();
     out.lines.clear();
     out.entry.clear();
-    out.unbounded.push_back({pricing::UnboundedBy::Unmodeled, "input_transcription", "the session bills a transcription of the user's audio that no usage reports"});
+    out.model.clear();
+    out.attempts = 0;
+    out.unbounded.push_back({pricing::UnboundedBy::Unmodeled, std::move(subject), std::move(detail)});
+  };
+  // One command may start several responses while the provider detects turns by itself (a pause, the user speaking
+  // over the model), and each reads again the output of the one before, which no bound the host stated covers.
+  if (google) {
+    constexpr std::string_view off[]{"realtimeInputConfig", "automaticActivityDetection", "disabled"};
+    auto member = setup.extensions ? setup.extensions->root() : json::Value{};
+    for (const auto key : off) member = member.get(key);
+    if (!member.is_bool() || !member.as_bool())
+      refuse("realtimeInputConfig.automaticActivityDetection.disabled", "Live detects the user's turns and answers by itself, so one input may start several responses");
+  } else if (setup.turn_detection) {
+    refuse("turn_detection", "the provider detects the user's turns and answers by itself, so one input may start several responses");
   }
+  // A transcript of the user's audio bills a transcription beside the response (OpenAI's `transcription_model`), and
+  // the session commits no turn for it, so no usage of it reaches the host.
+  if (setup.input_transcription) refuse("input_transcription", "the session bills a transcription of the user's audio that no usage reports");
   return out;
 }
 }  // namespace sp::realtime

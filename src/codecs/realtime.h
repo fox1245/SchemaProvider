@@ -45,6 +45,12 @@ struct Setup {
   // The formats of the audio the session takes and answers with, each the `mime` of a format in the endpoint's fact
   // (`audio/pcm;rate=24000`, `audio/pcmu`). Empty: the first the fact lists. A transcription session answers no audio.
   std::string input_audio{}, output_audio{};
+  // The provider detects the end of the user's speech and answers by itself (OpenAI's server turn detection). False:
+  // OpenAI sends `turn_detection: null`, and only the host ends an utterance (EndAudio) and asks for an answer
+  // (Respond), so one command starts at most one response. Google Live refuses false
+  // (`request.realtime.turn_detection_unsupported`): it turns automatic activity detection off through its
+  // `realtimeInputConfig` option.
+  bool turn_detection = true;
 };
 
 // Client commands.
@@ -163,20 +169,25 @@ struct ResponseInput {
 EndpointFacts transcription_facts(const descriptor::ValidatedDescriptor&, const Setup&);
 // A bound on what the next model response of a session with `setup` can bill, with the prices of `catalogue`; free of
 // side effects, and nothing is reserved. A response is one model invocation, so a host reserves this before it sends
-// what may start one: `Respond`, and also `EndAudio`, audio, `Text` or a `ToolResult` where the provider answers by
-// itself (Google always; OpenAI under its turn detection). A tool call ends a response, and the answer after its
+// what may start one: `Respond`, and at Google also `EndAudio`, audio, `Text` or a `ToolResult`, which Live answers by
+// itself. A tool call ends a response, and the answer after its
 // result is the next response. By the setup:
 // - A transcription session (no output): pricing::endpoint_worst_case over transcription_facts, with
 //   `audio_seconds` as the stated seconds, the sum of `input_tokens` (when stated) as the measured input, and one
 //   attempt.
 // - Any other session: pricing::realtime_response_bound with the descriptor's family and origin, the setup's model,
 //   `audio_output` when `setup.output` names audio, and the output cap the value of the extension member the realtime
-//   fact names in `output_cap`, when it is an unsigned integer (OpenAI's `"inf"`, an absent member and a fact without
-//   `output_cap` are no cap, `OutputCap`). At Google, whose usage counts thinking beside the output, thinking needs a
-//   cap the setup cannot state, and the policy admits no output cap there, so a Google response has no bound.
-// Also refused: a session with input transcription (`Unmodeled`, subject `input_transcription`, after the response's own
-// reasons), whose transcription bills beside the response and commits no turn, so no usage of it reaches the host; an
-// origin without a realtime fact (`Unmodeled`, subject `realtime`), extensions the fact does not admit
+//   fact names in `output_cap`, when it is an unsigned integer above zero (OpenAI's `"inf"`, zero, an absent member and
+//   a fact without `output_cap` are no cap, `OutputCap`). At Google, whose usage counts thinking beside the output,
+//   thinking needs a cap the setup cannot state, and the policy admits no output cap there, so a Google response has no
+//   bound; with tools, Live may also count a tool-use prompt beside the input (`Unmodeled`, subject
+//   `toolUsePromptTokenCount`).
+// After the response's own reasons, also refused (`Unmodeled`), each clearing the entry, model and attempts: a session
+// where the provider detects turns and answers by itself, since one input may then start several responses (subject
+// `turn_detection` at OpenAI while `setup.turn_detection` is true; at Google
+// `realtimeInputConfig.automaticActivityDetection.disabled` unless that option is true); and a session with input
+// transcription (subject `input_transcription`), whose transcription bills beside the response and commits no turn, so
+// no usage of it reaches the host. Before the bound: an origin without a realtime fact (`Unmodeled`, subject `realtime`), extensions the fact does not admit
 // (`Unmodeled`, subject `extensions`), a routing gateway (`RouteCeiling`), and a connection whose billing the policy does
 // not state (`Billing`, subject `realtime/connect`); one it states is not billed is exactly zero.
 pricing::EndpointBound response_bound(const descriptor::ValidatedDescriptor&, const Setup&, const ResponseInput&,

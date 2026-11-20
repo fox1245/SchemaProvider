@@ -238,9 +238,13 @@ EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const EndpointCou
 std::vector<std::string> beyond_bound(const EndpointBound& bound, const EndpointEstimate& estimate);
 
 // The input tokens of one model response of a realtime session, by modality, as the host counts them: what the provider
-// reads again of the conversation so far (the last committed turn's input and its output, which the conversation keeps,
-// as the turns' usage reports them, less what the provider drops), plus what the host sends since. A count must not
-// understate its modality; none is checked.
+// reads again of the conversation so far plus what the host sends since. The first response's input holds the
+// instructions and the tool declarations, which the host counts. A later one's is the last committed turn's input and
+// output, as its usage reports them, plus what is sent since; nothing is subtracted for what the provider may drop
+// (a truncation, `contextWindowCompression`). Earlier output comes back as input of a modality the SDK does not verify,
+// so the host counts it at the dearer modality (earlier audio output as audio). A turn committed without usage (a
+// cancelled response, a Live tool call closed by the next turn) leaves no basis, and the session has no bound from then
+// on. A count must not understate its modality; none is checked.
 struct RealtimeInputTokens {
   std::uint64_t text = 0, audio = 0, image = 0;
 };
@@ -252,12 +256,15 @@ struct RealtimeResponseInput {
   // The response may answer with audio (realtime::Setup::output names it); text is always among what it may bill.
   bool audio_output = false;
   // The cap on the response's output tokens, which counts its reasoning as the usage's output total does (the
-  // origin fact's `output_cap`). Unset: no cap.
+  // origin fact's `output_cap`). Unset or zero: no cap.
   std::optional<std::uint64_t> output_tokens;
   // The session's usage counts thinking beside the output total (Google Live `thoughtsTokenCount`), so the output cap
   // does not bound it, and `thinking_tokens` must state the most a response may think.
   bool thinking_beside_output = false;
   std::optional<std::uint64_t> thinking_tokens;
+  // The session's usage may count a tool-use prompt beside the input (Google Live `toolUsePromptTokenCount`, with
+  // tools), which `estimate` leaves unpriced: no bound.
+  bool tool_prompt_beside_input = false;
   // The response's input in tokens. Unset: not stated.
   std::optional<RealtimeInputTokens> input_tokens;
   // New input audio stated in seconds instead of tokens. No catalogue or policy fact states how many audio tokens a
@@ -278,8 +285,9 @@ struct RealtimeResponseInput {
 // The rates are the dearest over every input band the stated input reaches. A modality with tokens whose rate the entry
 // does not list is `ModelPrice` with the unit as subject (an audio output without `output_audio` included), never priced
 // at another modality's rate, and so is a unit the bound reads with a row at a price that is not a fixed amount. Also
-// refused: no output cap (`OutputCap`), thinking beside the output with no cap on it (`OutputCap`, subject
-// `reasoning`), no stated input (`InputBound`), audio stated in seconds (`Quantity`, subject `input_audio`), no entry
+// refused: no output cap or a cap of zero (`OutputCap`), thinking beside the output with no cap on it (`OutputCap`,
+// subject `reasoning`), a tool-use prompt beside the input (`Unmodeled`, subject `toolUsePromptTokenCount`), no stated
+// input (`InputBound`), audio stated in seconds (`Quantity`, subject `input_audio`), no entry
 // or one without prices (`ModelPrice`, subject the model), an entry with no fixed price at the standard rates
 // (`TierPrice`), a route ceiling (`RouteCeiling`: a realtime origin is not a routing gateway), a listed price no unit
 // reads for something the response carries (`ModelPrice`), an item unit above zero or at no fixed amount (`Unmodeled`,

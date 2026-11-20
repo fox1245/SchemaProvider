@@ -1113,6 +1113,7 @@
   ["request.realtime.cancel_unsupported", "Google Live has no cancel; speaking over the model interrupts it"],
   ["request.realtime.transcription_model_required", "OpenAI transcribes the input with a transcription model"],
   ["request.realtime.resume_unsupported", "OpenAI Realtime sessions do not resume"],
+  ["request.realtime.turn_detection_unsupported", "Google Live turns automatic activity detection off through realtimeInputConfig"],
   ["files.endpoint.not_admitted", "file endpoints are not admitted at this origin"],
   ["files.response.json_invalid", "invalid response JSON"],
   ["files.response.not_object", "response must be object"],

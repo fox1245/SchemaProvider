@@ -1522,11 +1522,12 @@ inline constexpr Reason tool_result_invalid{"request.realtime.tool_result_invali
 inline constexpr Reason cancel_unsupported{"request.realtime.cancel_unsupported", "Google Live has no cancel; speaking over the model interrupts it"};
 inline constexpr Reason transcription_model_required{"request.realtime.transcription_model_required", "OpenAI transcribes the input with a transcription model"};
 inline constexpr Reason resume_unsupported{"request.realtime.resume_unsupported", "OpenAI Realtime sessions do not resume"};
+inline constexpr Reason turn_detection_unsupported{"request.realtime.turn_detection_unsupported", "Google Live turns automatic activity detection off through realtimeInputConfig"};
 // Every constant of the source, for the enumeration test.
 inline constexpr Reason all[]{
     endpoint_not_admitted, path_missing, model_invalid, transcription_setup_invalid, audio_format_invalid,
     setup_bounds, tool_invalid, options_not_admitted, options_invalid, tool_result_invalid, cancel_unsupported,
-    transcription_model_required, resume_unsupported,
+    transcription_model_required, resume_unsupported, turn_detection_unsupported,
 };
 }  // namespace realtime_request
 namespace files {

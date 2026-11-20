@@ -910,10 +910,13 @@ EndpointBound realtime_response_bound(const RealtimeResponseInput& in, const des
     out.lines.clear();
     return out;
   };
-  if (!in.output_tokens) block(UnboundedBy::OutputCap, {}, "the session states no cap on a response's output tokens");
+  // A cap of zero answers nothing a provider bills by, so it is no cap.
+  if (!in.output_tokens || !*in.output_tokens) block(UnboundedBy::OutputCap, {}, "the session states no cap on a response's output tokens");
   if (in.thinking_beside_output && !in.thinking_tokens)
     block(UnboundedBy::OutputCap, "reasoning", "the session's usage counts thinking beside the output, and no cap on it is stated");
   if (!in.input_tokens) block(UnboundedBy::InputBound, {}, "the host states no input tokens for the response");
+  if (in.tool_prompt_beside_input)
+    block(UnboundedBy::Unmodeled, "toolUsePromptTokenCount", "the session's usage counts a tool-use prompt beside the input, which no price covers");
   if (in.audio_seconds && *in.audio_seconds)
     block(UnboundedBy::Quantity, "input_audio",
           "the audio is stated in seconds, and no catalogue or policy fact states its tokens per second; state it in tokens");
