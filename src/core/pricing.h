@@ -155,7 +155,8 @@ Bound upper_bound(const ModelPrice& price, const BoundRequest& request);
 // `cache_read`, `cache_write`, `cache_write_1h`, `input_audio`) when the request has input tokens, an output rate
 // (`output`, `reasoning`, `output_image`, `output_audio`) when it has output tokens, the request fee always, at the
 // route ceiling `ceiling_input`, `ceiling_output` and `ceiling_request`, and a tool's fee when it has uses. At the
-// route ceiling "ceiling" names only a ceiling the entry does not list; a variable ceiling row is named as its unit.
+// route ceiling "ceiling" names only a ceiling the entry does not list; a variable ceiling row is named as its unit,
+// and a variable fee only when both ceilings are listed.
 Bound upper_bound(const descriptor::CatalogueEntry& entry, std::string_view service_tier, const BoundRequest& request);
 
 

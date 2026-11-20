@@ -345,7 +345,7 @@ void transcription_endpoint() {
   CHECK(seconds_of(R"({"text":"a","duration":2.0})") == 2u && seconds_of(R"({"text":"a","duration":0})") == 0u &&
         seconds_of(R"({"text":"a","duration":0.0001})") == 1u && seconds_of(R"({"text":"a","duration":7})") == 7u &&
         seconds_of(R"({"text":"a","duration":59.999999999})") == 60u && seconds_of(R"({"text":"a","duration":1e3})") == 1000u &&
-        seconds_of(R"({"text":"a","duration":12.5,"usage":{"seconds":30}})") == 13u && seconds_of(R"({"text":"a","usage":{"seconds":30.2}})") == 31u &&
+        seconds_of(R"({"text":"a","duration":12.5,"usage":{"seconds":30}})") == 30u && seconds_of(R"({"text":"a","usage":{"seconds":30.2}})") == 31u &&
         seconds_of(R"({"text":"a","usage":{"seconds":4,"input_tokens":3}})") == 4u);
   // The provider cost reader and the length reader read a reported number the same way, from its shortest decimal, and
   // round up: whole seconds are the cost's nano-USD divided by 1e9, rounded up, on the same number.
@@ -376,10 +376,16 @@ void transcription_endpoint() {
   CHECK(!seconds_of(R"({"text":"a","duration":9007199254740993.2})") && !seconds_of(R"({"text":"a","duration":9007199254740992.0})") &&
         seconds_of(R"({"text":"a","duration":9007199254740991.0})") == 9'007'199'254'740'991u &&
         seconds_of(R"({"text":"a","duration":9007199254740993})") == 9'007'199'254'740'993u);
-  // The result's own length is not read from a negative `duration` either.
+  // Both reports are read, and two that disagree give the larger: the smaller must never price the call.
+  CHECK(seconds_of(R"({"text":"a","duration":0,"usage":{"seconds":12.4}})") == 13u &&
+        seconds_of(R"({"text":"a","duration":30,"usage":{"seconds":12.4}})") == 30u &&
+        seconds_of(R"({"text":"a","duration":-3,"usage":{"seconds":12.4}})") == 13u &&
+        seconds_of(R"({"text":"a","duration":12.4,"usage":{"seconds":0}})") == 13u);
+  // The result's own length is not read from a negative `duration` either, and is the larger report as well.
   const auto length_of = [&](std::string_view body) { return std::get<transcription::Result>(decoded<transcription::Codec>(transcription::typed, router, body, "m")).seconds; };
   CHECK(!length_of(R"({"text":"a","duration":-1})") && length_of(R"({"text":"a","duration":-1,"usage":{"seconds":90}})") == 90.0 &&
-        length_of(R"({"text":"a","duration":0})") == 0.0);
+        length_of(R"({"text":"a","duration":0})") == 0.0 && length_of(R"({"text":"a","duration":0,"usage":{"seconds":12.4}})") == 12.4 &&
+        length_of(R"({"text":"a","duration":30,"usage":{"seconds":12.4}})") == 30.0);
   CHECK(std::holds_alternative<Failure>(decoded<transcription::Codec>(transcription::typed, openai, R"({"segments":[]})", "m")));
   // A translation into English: OpenAI only, and without a language.
   auto translate = request; translate.model = "whisper-1"; translate.language.reset(); translate.extensions.reset(); translate.translate = true;

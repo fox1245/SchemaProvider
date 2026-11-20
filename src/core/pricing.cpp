@@ -406,10 +406,11 @@ Bound bounded(const ModelPrice& price, const detail::UnitKeys& variable, const B
     output = price.ceiling_output;
     fee = dearest({price.request, price.ceiling_request});
     // A ceiling the entry does not list is "ceiling"; a ceiling row at a variable price is named.
-    if ((!input && detail::key_of(variable, "ceiling_input").empty()) || (!output && detail::key_of(variable, "ceiling_output").empty()))
-      out.unpriced.emplace_back("ceiling");
+    // Beside a ceiling the entry does not list, the fees are not named, as the estimate and worst_case name them.
+    const bool absent = (!input && detail::key_of(variable, "ceiling_input").empty()) || (!output && detail::key_of(variable, "ceiling_output").empty());
+    if (absent) out.unpriced.emplace_back("ceiling");
     name_variable({"ceiling_input", "ceiling_output"});
-    name_variable({"request", "ceiling_request"});
+    if (!absent) name_variable({"request", "ceiling_request"});
   } else {
     input = price.input ? dearest({price.input, price.cache_read, price.cache_write, price.cache_write_1h, price.input_audio}) : std::nullopt;
     output = price.output ? dearest({price.output, price.reasoning, price.output_image, price.output_audio}) : std::nullopt;

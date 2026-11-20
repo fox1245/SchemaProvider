@@ -16,9 +16,10 @@ std::optional<Count> counter(json::Value value) {
   if (!value.is_uint()) return std::nullopt;
   return Count{value.as_uint(), Evidence::Reported};
 }
-// A reported length in seconds as whole seconds, rounded up. The parser keeps no lexeme, so a fraction is read from the
-// shortest decimal that round-trips to the parsed number (the provider's own text whenever it had at most 17
-// significant digits), as provider costs are, and rounded up with integer arithmetic. Nothing for a negative or
+// A reported length in seconds as whole seconds, rounded up. The parser keeps no lexeme: the value rounded up is the
+// double it parsed, read from the shortest decimal that round-trips to it, as provider costs are, and rounded up with
+// integer arithmetic. A provider text the double does not hold exactly is lost before this reads it
+// (`2.0000000000000001` is parsed as 2.0, so it gives 2). Nothing for a negative or
 // non-finite number, and nothing for one at or above 2^53 that is not an integer: there the spacing of a double is above
 // one second, so its value may be below the reported length. An integer is exact at any size up to 64 bits.
 std::optional<std::uint64_t> whole_seconds(json::Value value) {
@@ -94,13 +95,12 @@ bool Codec::buffered(std::string_view body, Close close) {
     usage.provider_cost = codecs::provider_cost(reported, descriptor_);
     usage.stage = UsageStage::Final;
   }
-  // The audio's length in whole seconds rounded up: `duration`, else `usage.seconds`, when `duration` gives no count.
-  for (const auto value : {root.get("duration"), root.get("usage").get("seconds")}) {
-    if (const auto seconds = whole_seconds(value)) {
-      usage.extra[std::string(seconds_counter)] = Count{*seconds, Evidence::Derived};
-      break;
-    }
-  }
+  // The audio's length in whole seconds rounded up: of `duration` and `usage.seconds`, each that gives a count, the
+  // larger, since two reports of one length that disagree must not price the smaller.
+  std::optional<std::uint64_t> length;
+  for (const auto value : {root.get("duration"), root.get("usage").get("seconds")})
+    if (const auto seconds = whole_seconds(value); seconds && (!length || *seconds > *length)) length = seconds;
+  if (length) usage.extra[std::string(seconds_counter)] = Count{*length, Evidence::Derived};
   return emit(UsageUpdate{std::move(usage)}) && emit(Stop{StopReason{StopKind::EndTurn, "completed"}}) &&
          emit(MessageSeal{{0}}) && emit(Commit{"transcription.text+normal_close"});
 }
@@ -115,9 +115,9 @@ Outcome typed(const sp::Outcome& internal) {
     const auto root = raw.payload->root();
     if (root.get("language").is_string()) result.language = std::string(root.get("language").as_string());
     // OpenAI reports the length as `usage.seconds` (or `duration` in verbose form), OpenRouter as `duration`.
-    // A negative length is none; `usage.seconds` may still give one.
+    // A negative length is none; of the reports that give one, the larger.
     for (const auto value : {root.get("duration"), root.get("usage").get("seconds")})
-      if (value.is_number() && value.as_double() >= 0 && !result.seconds) result.seconds = value.as_double();
+      if (value.is_number() && value.as_double() >= 0 && (!result.seconds || value.as_double() > *result.seconds)) result.seconds = value.as_double();
   }
   result.usage = completion.usage;
   result.model = completion.model;
