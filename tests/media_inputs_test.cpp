@@ -528,6 +528,33 @@ void policy_cannot_create_unrepresentable_sources() {
       expect_error(run_descriptor(family, d, {media}, false), ErrorKind::Unsupported);
   }
 }
+// A kind the policy admits from no source is refused with the text of its kind and the code of the check,
+// request.media.<kind>_input_not_accepted.
+void kind_without_sources_names_its_check() {
+  const auto defaults = parse_json(config_defaults::descriptor_policy_json);
+  std::string families = "[";
+  for (const auto family : defaults->root().get("families").elements()) {
+    if (families.size() > 1) families += ',';
+    if (family.get("family").as_string() != "google.generate") { families += family.dump(); continue; }
+    families += replace_member(family, "media", R"({"image":{"mime":[],"sources":[]},"audio":{"mime":[],"sources":[]},)"
+                                                R"("video":{"mime":[],"sources":[]},"document":{"mime":[],"sources":[]}})");
+  }
+  families += ']';
+  auto loaded = descriptor::load_policy(replace_member(defaults->root(), "families", families), config_defaults::codec_defaults_json);
+  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(loaded));
+  const auto policy = std::get<descriptor::PolicySnapshot>(std::move(loaded));
+  const auto& d = load_descriptor(Fam::Gemini, default_origin(Fam::Gemini, Origin::Direct), policy);
+  const std::pair<const char*, const char*> kinds[]{{"image/png", "image"}, {"audio/wav", "audio"}, {"video/mp4", "video"},
+                                                    {"application/pdf", "document"}};
+  for (const auto& [mime, kind] : kinds) {
+    const auto result = run_descriptor(Fam::Gemini, d, {inline_media(mime)}, false);
+    CHECK(std::holds_alternative<Error>(result));
+    const auto& error = std::get<Error>(result);
+    CHECK(error.kind == ErrorKind::Unsupported);
+    CHECK(error.safe_message == std::string("this family does not accept ") + kind + " input");
+    CHECK(error.reason == std::string("request.media.") + kind + "_input_not_accepted");
+  }
+}
 void size_and_aggregate_error_contract() {
   const auto per_kind = bounded_policy(4096);
   const auto aggregate = bounded_policy(900);
@@ -1183,6 +1210,7 @@ int main() {
     mime_parameter_whitespace_is_written_safely();
     size_and_aggregate_error_contract();
     policy_cannot_create_unrepresentable_sources();
+    kind_without_sources_names_its_check();
     generate_alias_inputs_and_safety();
     generate_alias_policy_is_closed();
     generate_alias_output_semantics();
