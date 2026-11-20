@@ -1,4 +1,5 @@
 #include "codecs/chat.h"
+#include "codecs/request_checks.h"
 #include "core/cache_marks.h"
 #include "core/native.h"
 #include "codecs/media_input.h"

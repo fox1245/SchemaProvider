@@ -1,4 +1,5 @@
 #include "codecs/messages_request.h"
+#include "codecs/request_checks.h"
 #include "codecs/media_input.h"
 #include "core/cache_marks.h"
 #include "core/native.h"
