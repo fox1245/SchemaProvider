@@ -58,6 +58,8 @@ Usage google_usage(json::Value usage) {
   for (const auto key : {"thoughtsTokenCount", "toolUsePromptTokenCount"})
     if (const auto count = counter(usage.get(key))) value.extra[key] = *count;
   for (const auto key : {"promptTokensDetails", "cacheTokensDetails", "responseTokensDetails", "toolUsePromptTokensDetails"}) modality_counts(usage, key, value);
+  // For pricing: the input's image tokens, which bill at their own rate (pricing::realtime_image_tokens).
+  if (const auto image = value.extra.find("promptTokensDetails.IMAGE"); image != value.extra.end()) value.extra[std::string(pricing::realtime_image_tokens)] = image->second;
   value.stage = UsageStage::Final;
   return value;
 }

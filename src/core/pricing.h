@@ -108,6 +108,8 @@ struct CostEstimate {
 //   `output_tokens_by_modality.audio`, realtime `output_token_details.audio_tokens` and
 //   `responseTokensDetails.AUDIO`) at `output_audio`. Audio tokens without that rate, or more audio input than
 //   uncached input, leave no total ("input_audio", "output_audio").
+// - Image input: a realtime turn's image tokens (OpenAI `input_token_details.image_tokens`, Google Live
+//   `realtime.image_tokens`) at `input_image`, out of the uncached input; without that rate no total ("input_image").
 // - A zero rate for a unit whose base unit has a price is applied and named in `assumptions` ("<unit> at zero").
 // - `request` is charged once.
 // - A unit with a row that applies at a price that is not a fixed amount (price_of) prices none of the tokens it may
@@ -116,6 +118,10 @@ struct CostEstimate {
 //   without a modality breakdown at a variable `output_image`, and every call at a variable `request`. A Messages
 //   compaction iteration's cache writes and output tokens have no split and no breakdown: a variable
 //   `cache_write_1h` or `output_image` leaves them unpriced, the unit named once.
+// - Seconds: a usage that reports `seconds` (a realtime transcription turn) bills them at `item:second`, the entry's row
+//   without a qualifier (endpoint_pricing.h item_price); no such row, or a row at a variable price, leaves no total
+//   ("item:second"). Beside no token counter the turn bills no tokens, and an entry whose `input` or `output` is not a
+//   declared zero in every band leaves no total ("input", "output").
 // Server tool fees are not priced. Gemini's `toolUsePromptTokenCount` bills beyond the prompt count and is not
 // priced either: a usage that reports it has no total. With a `service_tier`, the entry's prices for that tier, and
 // the input band of the call's input tokens (`price_of`); the tier is matched exactly, so a response's `default` or
@@ -137,6 +143,11 @@ CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_v
 CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_view family, std::string_view origin,
                       const ServedModel& model, const Usage& usage, const RequestFacts& facts, std::string_view service_tier,
                       bool route_ceiling = false);
+
+// The Usage::extra key under which the Google Live codec copies the image tokens of a turn's input from its prompt
+// breakdown (`promptTokensDetails.IMAGE`), for `estimate` to bill at `input_image`. The breakdown's key is also a
+// Generate usage's, whose image tokens bill at the input rates, so the estimate does not read it for images.
+inline constexpr std::string_view realtime_image_tokens = "realtime.image_tokens";
 
 // A side of a call's tokens.
 enum class TokenSide : std::uint8_t { Input, Output };
