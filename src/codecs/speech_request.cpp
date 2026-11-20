@@ -1,4 +1,5 @@
 #include "codecs/speech.h"
+#include "codecs/reason.h"
 #include "descriptor/policy.h"
 #include "descriptor/value_schema.h"
 #include "json/json.h"
@@ -8,7 +9,7 @@
 
 namespace sp::speech {
 namespace {
-Error bad(std::string message) { return Error{ErrorKind::InvalidRequest, std::move(message)}; }
+Error bad(const reason::Reason& message) { return reason::error(ErrorKind::InvalidRequest, message); }
 bool token(std::string_view value) {
   return !value.empty() && value.size() <= 64 && std::all_of(value.begin(), value.end(), [](char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
@@ -30,17 +31,17 @@ EndpointFacts endpoint_facts(const descriptor::ValidatedDescriptor& descriptor, 
 }
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
   const auto* fact = descriptor.policy()->endpoint("speech", descriptor.base_url());
-  if (!fact) return Error{ErrorKind::Unsupported, "speech endpoints are not admitted at this origin"};
+  if (!fact) return reason::error(ErrorKind::Unsupported, reason::speech_request::endpoint_not_admitted);
   const auto path = descriptor::endpoint_path(*fact, operation(request));
-  if (!path) return Error{ErrorKind::Unsupported, "the speech endpoint has no path"};
-  if (request.model.empty() || request.input.empty()) return bad("speech needs a model and input");
-  if (!request.voice.empty() && request.voice.size() > 256) return bad("a speech voice is bounded text");
-  if (request.format && !token(*request.format)) return bad("a speech format is a token");
-  if (request.speed && (!std::isfinite(*request.speed) || *request.speed <= 0)) return bad("speech speed must be positive");
+  if (!path) return reason::error(ErrorKind::Unsupported, reason::speech_request::path_missing);
+  if (request.model.empty() || request.input.empty()) return bad(reason::speech_request::model_and_input_required);
+  if (!request.voice.empty() && request.voice.size() > 256) return bad(reason::speech_request::voice_invalid);
+  if (request.format && !token(*request.format)) return bad(reason::speech_request::format_invalid);
+  if (request.speed && (!std::isfinite(*request.speed) || *request.speed <= 0)) return bad(reason::speech_request::speed_invalid);
   if (request.extensions) {
-    if (!fact->options) return Error{ErrorKind::Unsupported, "the speech endpoint admits no options"};
+    if (!fact->options) return reason::error(ErrorKind::Unsupported, reason::speech_request::options_not_admitted);
     if (!request.extensions->root().is_object() || descriptor::check_value(*fact->options, request.extensions->root()))
-      return bad("speech options do not match the policy's schema");
+      return bad(reason::speech_request::options_invalid);
   }
   const auto& resources = descriptor.policy()->resources();
   std::string body;
@@ -55,7 +56,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   }
   if (request.extensions) for (auto member : request.extensions->root().members()) out.raw(",").quoted(member.key).raw(":").value(member.value, 1);
   out.raw("}");
-  if (!out.ok()) return Error{ErrorKind::ResourceLimit, "speech request exceeds JSON limits"};
+  if (!out.ok()) return reason::error(ErrorKind::ResourceLimit, reason::speech_request::json_limit);
   Encoded encoded{std::string(*path), std::move(body), request.model, fact->charge_on_accept, fact->auth};
   endpoints::add_fact_headers(encoded, *fact);
   encoded.accept = "audio/*";
