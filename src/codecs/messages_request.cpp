@@ -1,4 +1,6 @@
 #include "codecs/messages_request.h"
+#include "codecs/reason.h"
+#include "descriptor/policy_refusals.h"
 #include "codecs/request_checks.h"
 #include "codecs/media_input.h"
 #include "core/cache_marks.h"
@@ -51,17 +53,17 @@ std::optional<Error> admit(const descriptor::ValidatedDescriptor& descriptor, co
                            std::string& decoded_text, size_t remaining_decoded_bytes) {
   if (auto error = media_input::admit(descriptor, media)) return error;
   if (media.kind == MediaKind::Image && media.detail != ImageDetail::Auto)
-    return Error{ErrorKind::Unsupported, "Messages images have no detail control"};
+    return reason::error(ErrorKind::Unsupported, reason::messages_request::messages_images_have_no_detail_control);
   if (media.kind != MediaKind::Document) return std::nullopt;
   if (descriptor::over_limit(descriptor, "document_title_chars", media.name.size()))
-    return Error{ErrorKind::InvalidRequest, "Messages document title length limit exceeded"};
+    return reason::error(ErrorKind::InvalidRequest, reason::messages_request::messages_document_title_is_limited_to_500);
   if (media.source == MediaSource::Url && !media.mime.empty() && !mime_equal(media.mime, "application/pdf"))
-    return Error{ErrorKind::Unsupported, "Messages URL documents must be PDF"};
+    return reason::error(ErrorKind::Unsupported, reason::messages_request::messages_url_documents_must_be_pdf);
   if (media.source == MediaSource::Inline && plain_text(media)) {
     if (base64_decoded_size(*media.data) > remaining_decoded_bytes)
-      return Error{ErrorKind::ResourceLimit, "decoded text documents exceed aggregate request budget"};
+      return reason::error(ErrorKind::ResourceLimit, reason::messages_request::decoded_text_documents_exceed_aggregate);
     if (!base64_decode(*media.data, decoded_text) || !media_input::valid_utf8(decoded_text))
-      return Error{ErrorKind::InvalidRequest, "Messages text documents must be valid UTF-8"};
+      return reason::error(ErrorKind::InvalidRequest, reason::messages_request::messages_text_documents_must_be_valid_utf_8);
   }
   return std::nullopt;
 }
@@ -92,12 +94,12 @@ void write_media(json::BoundedWriter& body, const Media& media, std::string_view
 }
 } // namespace
 EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request, bool streaming) {
-  auto bad = [](std::string message) -> EncodeResult { return Error{ErrorKind::InvalidRequest, std::move(message)}; };
-  auto replay_bad = []() -> EncodeResult { return Error{ErrorKind::ReplayIneligible, "native replay provenance, binding or content mismatch"}; };
-  if (descriptor.family() != "anthropic.messages") return Error{ErrorKind::InvalidConfig, "Messages encoder requires Messages descriptor"};
-  if (request.model.empty() || request.messages.empty()) return bad("model and messages are required");
-  if (auto refusal = descriptor::route_refusal(descriptor, request.model)) return bad(std::move(*refusal));
-  if (auto refusal = descriptor::literal_route_refusal(descriptor, request.model)) return Error{ErrorKind::InvalidConfig, std::move(*refusal)};
+  auto bad = [](const reason::Reason& message) -> EncodeResult { return reason::error(ErrorKind::InvalidRequest, message); };
+  auto replay_bad = []() -> EncodeResult { return reason::error(ErrorKind::ReplayIneligible, reason::messages_request::native_replay_provenance_binding_or_content); };
+  if (descriptor.family() != "anthropic.messages") return reason::error(ErrorKind::InvalidConfig, reason::messages_request::messages_encoder_requires_messages_descriptor);
+  if (request.model.empty() || request.messages.empty()) return bad(reason::messages_request::model_and_messages_are_required);
+  if (auto refusal = descriptor::route_refusal_reason(descriptor, request.model)) return bad(std::move(*refusal));
+  if (auto refusal = descriptor::literal_route_refusal_reason(descriptor, request.model)) return reason::error(ErrorKind::InvalidConfig, *refusal);
   const auto& resources = descriptor.policy()->resources();
   const auto& family = descriptor.family_policy();
   auto effective = descriptor::effective_defaults(descriptor, request.model);
@@ -106,31 +108,31 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (request.temperature) effective.temperature = request.temperature;
   if (request.top_p) effective.top_p = request.top_p;
   if (request.temperature && descriptor::temperature_forbidden(descriptor, request.model))
-    return bad("temperature is prohibited for this model");
+    return bad(reason::messages_request::temperature_is_prohibited_for_this_model);
   if (request.temperature && (!std::isfinite(*request.temperature) ||
       *request.temperature < family.temperature_range[0] || *request.temperature > family.temperature_range[1]))
-    return bad("temperature outside admitted range");
+    return bad(reason::messages_request::temperature_outside_admitted_range);
   std::optional<ThinkingMode> thinking_mode = request.thinking_mode;
   if (thinking_mode) {
     switch (*thinking_mode) {
       case ThinkingMode::Manual:
-        if (!effective.thinking_budget || !*effective.thinking_budget) return bad("manual thinking requires a positive budget");
+        if (!effective.thinking_budget || !*effective.thinking_budget) return bad(reason::messages_request::manual_thinking_requires_a_positive_budget);
         break;
       case ThinkingMode::Adaptive:
       case ThinkingMode::Disabled:
-        if (request.thinking_budget) return bad("adaptive and disabled thinking forbid budget");
+        if (request.thinking_budget) return bad(reason::messages_request::adaptive_and_disabled_thinking_forbid_budget);
         effective.thinking_budget.reset();
         break;
-      default: return bad("invalid thinking mode");
+      default: return bad(reason::messages_request::invalid_thinking_mode);
     }
   } else if (effective.thinking_budget) thinking_mode = ThinkingMode::Manual;
   const bool thinking_enabled = thinking_mode && *thinking_mode != ThinkingMode::Disabled;
   if (thinking_enabled) {
     effective.temperature.reset();
     if (effective.top_p && *effective.top_p < family.thinking_top_p_minimum)
-      return bad("thinking top_p outside admitted range");
+      return bad(reason::messages_request::thinking_top_p_outside_admitted_range);
   }
-  if (auto error = descriptor::validate_choices(descriptor, request.model, effective)) return bad(std::move(*error));
+  if (auto error = descriptor::choices_refusal(descriptor, request.model, effective)) return bad(std::move(*error));
   std::string_view effort, ttl, tool_mode;
   if (request.output_effort) switch (*request.output_effort) {
     case OutputEffort::Low: effort = "low"; break;
@@ -138,12 +140,12 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     case OutputEffort::High: effort = "high"; break;
     case OutputEffort::Max: effort = "max"; break;
     case OutputEffort::XHigh: effort = "xhigh"; break;
-    default: return bad("invalid output effort");
+    default: return bad(reason::messages_request::invalid_output_effort);
   }
   if (request.cache_control && request.cache_control->ttl) switch (*request.cache_control->ttl) {
     case CacheTtl::FiveMinutes: ttl = "5m"; break;
     case CacheTtl::OneHour: ttl = "1h"; break;
-    default: return bad("invalid cache TTL");
+    default: return bad(reason::messages_request::invalid_cache_ttl);
   }
   const auto fact_of = [&](std::string_view type) -> const descriptor::ServerToolFact* {
     const auto found = std::find_if(family.server_tools.begin(), family.server_tools.end(), [&](const auto& fact) { return fact.type == type; });
@@ -159,10 +161,10 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     });
   };
   for (const auto& header : descriptor.headers()) if (lower(header.first) == "anthropic-beta") split_betas(header.second, betas);
-  if (request.betas.size() > 64) return bad("anthropic-beta value count limit exceeded");
+  if (request.betas.size() > 64) return bad(reason::messages_request::beta_count_limit);
   for (const auto& beta : request.betas) {
-    if (beta.empty() || beta.find_first_of(", \t\r\n") != std::string::npos) return bad("anthropic-beta values must be single tokens");
-    if (!beta_admitted(beta)) return Error{ErrorKind::Unsupported, "an anthropic-beta value is not admitted by the policy for this origin"};
+    if (beta.empty() || beta.find_first_of(", \t\r\n") != std::string::npos) return bad(reason::messages_request::beta_invalid);
+    if (!beta_admitted(beta)) return reason::error(ErrorKind::Unsupported, reason::messages_request::beta_not_admitted);
     if (std::find(betas.begin(), betas.end(), beta) == betas.end()) betas.push_back(beta);
   }
   const auto need_beta = [&](const descriptor::ServerToolFact& fact) {
@@ -173,7 +175,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   };
   for (const auto& tool : request.tools)
     if (const auto* fact = tool.type.empty() ? nullptr : fact_of(tool.type); fact && !need_beta(*fact))
-      return Error{ErrorKind::Unsupported, "a tool needs an anthropic-beta value this origin does not admit"};
+      return reason::error(ErrorKind::Unsupported, reason::messages_request::tool_beta_not_admitted);
   // A block that stands for the conversation before it (`compaction`) is where the service reads the history from:
   // it ignores what comes earlier, or refuses it in front of a signed block. Only the history from the last captured
   // message that carries one is sent and bound to its seals; what comes earlier is neither.
@@ -190,28 +192,28 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         const bool signed_block = opaque->wire_metadata && opaque->wire_metadata->root().get("signature").valid();
         const auto& beta = signed_block && !fact->signed_beta.empty() ? fact->signed_beta : fact->beta;
         if (beta.empty()) continue;
-        if (!beta_admitted(beta)) return Error{ErrorKind::Unsupported, "a replayed block needs an anthropic-beta value this origin does not admit"};
+        if (!beta_admitted(beta)) return reason::error(ErrorKind::Unsupported, reason::messages_request::block_beta_not_admitted);
         if (std::find(betas.begin(), betas.end(), beta) == betas.end()) betas.push_back(beta);
       }
   // MCP servers: bounded, unique names and https URLs, each named by exactly one `mcp_toolset` entry.
-  if (descriptor::over_limit(descriptor, "mcp_servers", request.mcp_servers.size())) return bad("MCP server count limit exceeded");
+  if (descriptor::over_limit(descriptor, "mcp_servers", request.mcp_servers.size())) return bad(reason::messages_request::mcp_server_count_limit);
   std::set<std::string_view> server_names;
   const auto printable = [](std::string_view value, std::size_t limit) {
     return !value.empty() && value.size() <= limit && std::none_of(value.begin(), value.end(), [](unsigned char c) { return c < 0x20 || c == 0x7f; });
   };
   for (const auto& server : request.mcp_servers) {
-    if (!printable(server.name, 255) || !server_names.insert(server.name).second) return bad("MCP servers require unique bounded names");
+    if (!printable(server.name, 255) || !server_names.insert(server.name).second) return bad(reason::messages_request::mcp_server_name_invalid);
     if (!server.url.starts_with("https://") || server.url.size() <= 8 || !printable(server.url, 2048) || server.url.find_first_of(" \"\\") != std::string::npos)
-      return bad("MCP server URLs must be https");
-    if (server.authorization_token && !printable(*server.authorization_token, 8192)) return bad("MCP authorization tokens must be bounded text");
+      return bad(reason::messages_request::mcp_server_url_invalid);
+    if (server.authorization_token && !printable(*server.authorization_token, 8192)) return bad(reason::messages_request::mcp_server_token_invalid);
   }
   std::map<std::string_view, int> referenced;
   for (const auto& tool : request.tools) if (tool.type == "mcp_toolset") {
     const auto name = tool.options ? tool.options->root().get("mcp_server_name") : json::Value{};
     if (!name.is_string() || !server_names.contains(name.as_string()) || ++referenced[name.as_string()] > 1)
-      return bad("an MCP toolset must name one declared MCP server");
+      return bad(reason::messages_request::mcp_toolset_server_invalid);
   }
-  if (referenced.size() != server_names.size()) return bad("every MCP server needs its MCP toolset");
+  if (referenced.size() != server_names.size()) return bad(reason::messages_request::mcp_server_without_toolset);
   if (request.tool_choice) {
     const auto& choice = *request.tool_choice;
     switch (choice.mode) {
@@ -219,7 +221,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       case ToolChoiceMode::Any: tool_mode = "any"; break;
       case ToolChoiceMode::None: tool_mode = "none"; break;
       case ToolChoiceMode::Tool: tool_mode = "tool"; break;
-      default: return bad("invalid tool choice");
+      default: return bad(reason::messages_request::invalid_tool_choice);
     }
     if (choice.mode == ToolChoiceMode::Tool) {
       // A custom tool, or a typed tool the caller executes (memory, bash), named by the request.
@@ -227,18 +229,18 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
             const auto* fact = tool.type.empty() ? nullptr : fact_of(tool.type);
             return tool.name == choice.name && (tool.type.empty() || (fact && fact->client));
           }))
-        return bad("named tool choice requires a declared client tool");
-    } else if (!choice.name.empty()) return bad("only named tool choice accepts a name");
+        return bad(reason::messages_request::named_tool_choice_requires_a_declared_client);
+    } else if (!choice.name.empty()) return bad(reason::messages_request::only_named_tool_choice_accepts_a_name);
     if ((choice.mode == ToolChoiceMode::Any || choice.mode == ToolChoiceMode::Tool) &&
         (request.tools.empty() || thinking_enabled))
-      return bad("forced tool choice requires tools and thinking disabled");
+      return bad(reason::messages_request::forced_tool_choice_requires_tools_and);
     if (choice.mode == ToolChoiceMode::None && choice.disable_parallel_tool_use)
-      return bad("none tool choice cannot control parallel use");
+      return bad(reason::messages_request::none_tool_choice_cannot_control_parallel_use);
   }
   if (request.provider)
     if (auto error = request_controls::validate_routing(descriptor, *request.provider)) return bad(std::move(*error));
   if (request.messages.size() > resources.request_messages || request.tools.size() > resources.request_tools)
-    return bad("request count limit exceeded");
+    return bad(reason::messages_request::request_count_limit_exceeded);
   // Check seals before encoding or interpreting the edited contents. Removing a seal
   // never converts native parts or captured tool calls into imported, trusted input.
   bool captured_history = false;
@@ -260,16 +262,16 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   // A block the caller writes is one the policy admits, matching the schema of the whole block.
   auto admit_block = [&](const Opaque& block) -> std::optional<Error> {
     const auto* fact = input_block(family, block.wire_type);
-    if (!fact) return Error{ErrorKind::Unsupported, "an input block is not admitted by the policy"};
+    if (!fact) return reason::error(ErrorKind::Unsupported, reason::messages_request::input_block_not_admitted);
     const auto raw = block.wire_metadata ? block.wire_metadata->root() : json::Value{};
     if (!raw.is_object() || !raw.get("type").is_string() || raw.get("type").as_string() != block.wire_type)
-      return Error{ErrorKind::InvalidRequest, "input block metadata mismatch"};
-    if (descriptor::check_value(fact->value, raw)) return Error{ErrorKind::InvalidRequest, "an input block does not match its declared schema"};
+      return reason::error(ErrorKind::InvalidRequest, reason::messages_request::input_block_metadata_mismatch);
+    if (descriptor::check_value(fact->value, raw)) return reason::error(ErrorKind::InvalidRequest, reason::messages_request::input_block_invalid);
     return std::nullopt;
   };
   for (size_t i = 0; i < request.messages.size(); ++i) {
     const auto& message = request.messages[i];
-    if (message.parts.size() > resources.request_parts) return bad("request part count limit exceeded");
+    if (message.parts.size() > resources.request_parts) return bad(reason::messages_request::request_part_count_limit_exceeded);
     // A block the caller writes in a user message (`search_result`) is input, not native state; it is admitted below.
     if (!message.native) for (const auto& part : message.parts)
       if (native_part(part) && (message.role == Role::Assistant || !std::holds_alternative<Opaque>(part))) return replay_bad();
@@ -281,15 +283,15 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         continue;
       }
       if (const auto* media = std::get_if<Media>(&part); media && !media_error) {
-        if (message.role != Role::User) media_error = Error{ErrorKind::InvalidRequest, "media inputs require user role"};
+        if (message.role != Role::User) media_error = reason::error(ErrorKind::InvalidRequest, reason::messages_request::media_inputs_require_user_role);
         else retain_media(*media);
       } else if (const auto* tool = std::get_if<ToolResult>(&part); tool && !media_error) {
         if (!tool->content_parts.empty() && !tool->content.empty())
-          media_error = Error{ErrorKind::InvalidRequest, "tool result content and content_parts are mutually exclusive"};
+          media_error = reason::error(ErrorKind::InvalidRequest, reason::messages_request::tool_result_content_and_content_parts_are);
         else if (tool->content_parts.size() > resources.request_parts)
-          media_error = Error{ErrorKind::InvalidRequest, "tool result part count limit exceeded"};
+          media_error = reason::error(ErrorKind::InvalidRequest, reason::messages_request::tool_result_part_count_limit_exceeded);
         else if (!tool->content_parts.empty() && message.role != Role::User && message.role != Role::Tool)
-          media_error = Error{ErrorKind::InvalidRequest, "tool results require user or tool role"};
+          media_error = reason::error(ErrorKind::InvalidRequest, reason::messages_request::tool_results_require_user_or_tool_role);
         else for (const auto& nested : tool->content_parts) if (const auto* block = std::get_if<Opaque>(&nested); block && !media_error) {
           media_error = admit_block(*block);
         } else if (const auto* media = std::get_if<Media>(&nested)) {
@@ -297,7 +299,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
           if (!media_error && (!media->id.empty() || !media->transcript.empty() ||
               (media->kind == MediaKind::Image && !media->name.empty()) ||
               (media->kind == MediaKind::Document && media->detail != ImageDetail::Auto)))
-            media_error = Error{ErrorKind::Unsupported, "tool result media contains unsupported output metadata"};
+            media_error = reason::error(ErrorKind::Unsupported, reason::messages_request::tool_result_media_contains_unsupported_output);
           if (media_error) break;
         }
       }
@@ -307,20 +309,20 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   // lineage mismatch precedence even when the edited prefix is no longer valid.
   if (media_error && !captured_history) return *media_error;
   if (auto refusal = request_controls::validate_extensions(descriptor, request.extensions))
-    return Error{refusal->admitted ? ErrorKind::InvalidRequest : ErrorKind::Unsupported, refusal->cause};
+    return reason::error(refusal->admitted ? ErrorKind::InvalidRequest : ErrorKind::Unsupported, refusal->cause);
   // An extension the service only takes with a beta (`compaction`, `context_management`) sends it.
   if (request.extensions) for (auto member : request.extensions->root().members())
     for (const auto& fact : family.extensions)
       if (fact.key == member.key && !fact.beta.empty() && descriptor::contains(fact.origins, descriptor.base_url())) {
-        if (!beta_admitted(fact.beta)) return Error{ErrorKind::Unsupported, "an extension needs an anthropic-beta value this origin does not admit"};
+        if (!beta_admitted(fact.beta)) return reason::error(ErrorKind::Unsupported, reason::messages_request::extension_beta_not_admitted);
         if (std::find(betas.begin(), betas.end(), fact.beta) == betas.end()) betas.push_back(fact.beta);
       }
   // Cache marks (core/cache_marks.h). The marks the typed request carries on what is sent ask the policy what the
   // origin does with them; marks written, they are listed in prompt order (tools, system, messages) for the limits.
   // A cache_control written inside a block or a tool's options joins the list but never asks the policy.
-  if (!request.system.empty() && !request.system_blocks.empty()) return bad("system and system_blocks are mutually exclusive");
-  if (request.system_blocks.size() > resources.request_parts) return bad("request part count limit exceeded");
-  for (const auto& block : request.system_blocks) if (block.text.empty()) return bad("system blocks require nonempty text");
+  if (!request.system.empty() && !request.system_blocks.empty()) return bad(reason::messages_request::system_blocks_conflict);
+  if (request.system_blocks.size() > resources.request_parts) return bad(reason::messages_request::request_part_count_limit_exceeded);
+  for (const auto& block : request.system_blocks) if (block.text.empty()) return bad(reason::messages_request::system_block_empty);
   CacheMarkReport mark_report;
   bool write_marks = false;
   {
@@ -341,7 +343,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       };
       for (const auto& tool : request.tools) {
         if (tool.cache && tool.options && tool.options->root().is_object() && tool.options->root().get("cache_control").valid())
-          return bad("cache_control is set both in a tool's options and as a cache mark");
+          return bad(reason::messages_request::cache_control_duplicate);
         if (tool.cache) lifetimes.push_back(tool.cache->ttl);
         else if (tool.options) raw_mark(tool.options->root());
       }
@@ -359,9 +361,9 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
             // The service refuses a cache_control inside `tool_result.content`; the mark of the result covers its parts.
             for (const auto& nested : result->content_parts) {
               if (const auto* text = std::get_if<Text>(&nested); text && text->cache)
-                return Error{ErrorKind::Unsupported, "Messages takes a cache mark on a tool result, not on a part inside it"};
+                return reason::error(ErrorKind::Unsupported, reason::messages_request::cache_mark_in_tool_result);
               if (const auto* media = std::get_if<Media>(&nested); media && media->cache)
-                return Error{ErrorKind::Unsupported, "Messages takes a cache mark on a tool result, not on a part inside it"};
+                return reason::error(ErrorKind::Unsupported, reason::messages_request::cache_mark_in_tool_result);
               if (const auto* block = std::get_if<Opaque>(&nested); block && block->wire_metadata) raw_mark(block->wire_metadata->root());
             }
             if (result->cache) lifetimes.push_back(result->cache->ttl);
@@ -376,7 +378,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   }
   auto context = std::shared_ptr<const NativeContext>(new NativeContext(descriptor, request, effective, streaming));
   if (!context->history_valid_) return replay_bad();
-  if (!context->valid_) return Error{ErrorKind::ResourceLimit, "native binding could not be captured"};
+  if (!context->valid_) return reason::error(ErrorKind::ResourceLimit, reason::messages_request::native_binding_could_not_be_captured);
   if (media_error) return *media_error;
   EncodedRequest result{"POST", descriptor.resolved_path(streaming, request.model), {}, {}, {}};
   std::string_view version = *family.header_version;
@@ -395,7 +397,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   }
   auto build = [&](json::BoundedWriter& body) -> std::optional<Error> {
   size_t text_document_index = 0;
-  auto bad = [](std::string message) { return Error{ErrorKind::InvalidRequest, std::move(message)}; };
+  auto bad = [](const reason::Reason& message) { return reason::error(ErrorKind::InvalidRequest, message); };
   body.raw("{").quoted(descriptor.request_model_member()).raw(":").quoted(request.model);
   body.raw(",").quoted(descriptor.max_output_tokens_member()).raw(":").raw(std::to_string(*effective.max_output_tokens));
   body.raw(",").quoted(descriptor.request_stream_member()).raw(streaming ? ":true" : ":false");
@@ -414,7 +416,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (request.container) {
     const auto& id = *request.container;
     if (id.empty() || id.size() > 256 || std::any_of(id.begin(), id.end(), [](unsigned char c) { return c <= 0x20 || c >= 0x7f || c == '"' || c == '\\'; }))
-      return bad("invalid code execution container id");
+      return bad(reason::messages_request::container_invalid);
   }
   if (!request.skills.empty()) {
     // The service names skill types and versions: bounded tokens, not a fixed list.
@@ -424,16 +426,16 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       });
     };
     std::set<std::pair<std::string_view, std::string_view>> skills;
-    if (descriptor::over_limit(descriptor, "container_skills", request.skills.size())) return bad("container skill count limit exceeded");
+    if (descriptor::over_limit(descriptor, "container_skills", request.skills.size())) return bad(reason::messages_request::skills_count_limit);
     // Skills load into the code-execution container, which only a declared code-execution tool provides.
     if (std::none_of(request.tools.begin(), request.tools.end(), [&](const auto& tool) {
           const auto* fact = tool.type.empty() ? nullptr : fact_of(tool.type);
           return fact && fact->container;
         }))
-      return bad("container skills need the code execution tool");
+      return bad(reason::messages_request::skills_need_code_execution);
     for (const auto& skill : request.skills)
       if (!token(skill.type) || !token(skill.skill_id) || (skill.version && !token(*skill.version)) || !skills.emplace(skill.type, skill.skill_id).second)
-        return bad("container skills require unique token ids, types and versions");
+        return bad(reason::messages_request::skills_invalid);
     body.raw(",\"container\":{");
     if (request.container) body.raw("\"id\":").quoted(*request.container).raw(",");
     body.raw("\"skills\":[");
@@ -482,25 +484,25 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     bool comma = false;
     for (const auto& tool : request.tools) {
       const auto* fact = tool.type.empty() ? nullptr : fact_of(tool.type);
-      if (!tool.type.empty() && !fact) return Error{ErrorKind::Unsupported, "unsupported server tool type"};
+      if (!tool.type.empty() && !fact) return reason::error(ErrorKind::Unsupported, reason::messages_request::unsupported_server_tool_type);
       // A toolset entry carries no name; every other tool has a unique one.
       if ((!fact || !fact->name.empty()) && (tool.name.empty() || !tool_names.insert(tool.name).second))
-        return bad("tools require unique nonempty names");
+        return bad(reason::messages_request::tools_require_unique_nonempty_names);
       if (comma) body.raw(",");
       comma = true;
       const bool server_options = !tool.allowed_callers.empty() || !tool.allowed_domains.empty() || !tool.blocked_domains.empty() ||
                                   tool.user_location || tool.citations || tool.max_content_tokens;
       if (!fact) {
         if (!tool.input_schema || !tool.input_schema->root().is_object() || tool.max_uses || server_options || tool.options)
-          return bad("client tools require object schemas and no server fields");
+          return bad(reason::messages_request::client_tools_require_object_schemas_and_no);
         body.raw("{\"name\":").quoted(tool.name).raw(",\"description\":").quoted(tool.description).raw(",\"input_schema\":").value(tool.input_schema->root(), 3);
         if (write_marks && tool.cache) cache_marks::write(body, *tool.cache);
         body.raw("}");
       } else {
-        if (tool.name != fact->name || tool.input_schema || !tool.description.empty()) return bad("server tool fields do not match typed schema");
-        if (tool.options && !fact->options) return Error{ErrorKind::Unsupported, "the policy admits no options for this tool type"};
-        if (tool.options && descriptor::check_value(*fact->options, tool.options->root())) return bad("tool options do not match the policy's schema");
-        if (tool.max_uses && (!*tool.max_uses || !fact->max_uses)) return bad("max_uses is unsupported or out of range");
+        if (tool.name != fact->name || tool.input_schema || !tool.description.empty()) return bad(reason::messages_request::server_tool_fields_do_not_match_typed_schema);
+        if (tool.options && !fact->options) return reason::error(ErrorKind::Unsupported, reason::messages_request::tool_options_not_admitted);
+        if (tool.options && descriptor::check_value(*fact->options, tool.options->root())) return bad(reason::messages_request::tool_options_invalid);
+        if (tool.max_uses && (!*tool.max_uses || !fact->max_uses)) return bad(reason::messages_request::max_uses_is_unsupported_or_out_of_range);
         // Caller types and domains are values the service extends: bounded tokens and host names, not a fixed list.
         const auto token = [](std::string_view value) {
           return !value.empty() && value.size() <= 64 && std::all_of(value.begin(), value.end(), [](char c) {
@@ -516,13 +518,13 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
           std::set<std::string_view> seen;
           return values.size() <= 64 && std::all_of(values.begin(), values.end(), [&](const std::string& v) { return check(v) && seen.insert(v).second; });
         };
-        if (!bounded(tool.allowed_callers, token)) return bad("allowed callers must be unique tokens");
-        if (!bounded(tool.allowed_domains, domain) || !bounded(tool.blocked_domains, domain)) return bad("domain filters must be unique host names");
-        if (!tool.allowed_domains.empty() && !tool.blocked_domains.empty()) return bad("allowed and blocked domains are mutually exclusive");
-        if (tool.max_content_tokens && !*tool.max_content_tokens) return bad("max_content_tokens must be positive");
+        if (!bounded(tool.allowed_callers, token)) return bad(reason::messages_request::allowed_callers_invalid);
+        if (!bounded(tool.allowed_domains, domain) || !bounded(tool.blocked_domains, domain)) return bad(reason::messages_request::domain_filters_invalid);
+        if (!tool.allowed_domains.empty() && !tool.blocked_domains.empty()) return bad(reason::messages_request::domain_filters_exclusive);
+        if (tool.max_content_tokens && !*tool.max_content_tokens) return bad(reason::messages_request::max_content_tokens_invalid);
         if (tool.user_location) {
           for (const auto* field : {&tool.user_location->city, &tool.user_location->region, &tool.user_location->country, &tool.user_location->timezone})
-            if (*field && (field->value().empty() || field->value().size() > 128)) return bad("user location fields must be bounded text");
+            if (*field && (field->value().empty() || field->value().size() > 128)) return bad(reason::messages_request::user_location_invalid);
         }
         const auto strings = [&](std::string_view key, const std::vector<std::string>& values) {
           if (values.empty()) return;
@@ -551,8 +553,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         if (write_marks && tool.cache) cache_marks::write(body, *tool.cache);
         body.raw("}");
       }
-      if (!body.ok()) return Error{has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest,
-                                  "request exceeds JSON limits or encoding"};
+      if (!body.ok()) return reason::error(has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest, reason::messages_request::request_exceeds_json_limits_or_encoding);
     }
     body.raw("]");
   }
@@ -576,13 +577,13 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     const auto& message = request.messages[index];
     const bool tool_role = message.role == Role::Tool;
     if (message.role != Role::User && message.role != Role::Assistant && !tool_role)
-      return Error{ErrorKind::Unsupported, "Messages history supports only user and assistant roles"};
+      return reason::error(ErrorKind::Unsupported, reason::messages_request::messages_history_supports_only_user_and);
     if (tool_role && (message.parts.empty() || std::any_of(message.parts.begin(), message.parts.end(),
         [](const Part& part) { return !std::holds_alternative<ToolResult>(part); })))
-      return bad("tool role messages require tool results only");
+      return bad(reason::messages_request::tool_role_messages_require_tool_results_only);
     const bool assistant = message.role == Role::Assistant;
-    if (assistant && !client_pending.empty()) return bad("client tool results must immediately follow their assistant message");
-    if (!assistant && client_pending.empty() && !server_pending.empty()) return bad("server continuation requires the captured assistant content");
+    if (assistant && !client_pending.empty()) return bad(reason::messages_request::client_tool_results_must_immediately_follow);
+    if (!assistant && client_pending.empty() && !server_pending.empty()) return bad(reason::messages_request::server_continuation_requires_the_captured);
     const bool responding_to_tools = !client_pending.empty();
     const bool server_waiting = !server_pending.empty();
     bool text_seen = false;
@@ -594,32 +595,32 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       if (part_comma) body.raw(",");
       part_comma = true;
       if (const auto* text = std::get_if<Text>(&part)) {
-        if (!assistant && responding_to_tools && server_waiting) return bad("pending server tools require tool-results-only continuation");
+        if (!assistant && responding_to_tools && server_waiting) return bad(reason::messages_request::pending_server_tools_require_tool_results);
         text_seen = true;
         body.raw("{\"type\":\"text\",\"text\":").quoted(text->value);
         if (write_marks && text->cache) cache_marks::write(body, *text->cache);
         body.raw("}");
       } else if (const auto* media = std::get_if<Media>(&part)) {
-        if (responding_to_tools && server_waiting) return bad("pending server tools require tool-results-only continuation");
+        if (responding_to_tools && server_waiting) return bad(reason::messages_request::pending_server_tools_require_tool_results);
         text_seen = true; // Tool results, when present, must precede ordinary input.
         const auto decoded_text = media->source == MediaSource::Inline && plain_text(*media)
             ? std::string_view(decoded_documents.at(text_document_index++)) : std::string_view{};
         write_media(body, *media, decoded_text, write_marks);
       } else if (const auto* thinking = std::get_if<Thinking>(&part)) {
-        if (!assistant) return bad("thinking belongs to assistant messages");
+        if (!assistant) return bad(reason::messages_request::thinking_belongs_to_assistant_messages);
         body.raw("{\"type\":\"thinking\",\"thinking\":").quoted(thinking->text);
         if (thinking->signature) body.raw(",\"signature\":").quoted(*thinking->signature);
         body.raw("}");
       } else if (const auto* redacted = std::get_if<RedactedThinking>(&part)) {
-        if (!assistant) return bad("redacted thinking belongs to assistant messages");
+        if (!assistant) return bad(reason::messages_request::redacted_thinking_belongs_to_assistant);
         body.raw("{\"type\":\"redacted_thinking\",\"data\":").quoted(redacted->data).raw("}");
       } else if (const auto* call = std::get_if<ToolCall>(&part)) {
-        if (!assistant || call->id.empty() || call->name.empty() || !call->input || !call->input->root().is_object()) return bad("invalid tool call history");
-        if (call->kind == ToolCallKind::ApprovalRequest) return Error{ErrorKind::Unsupported, "approval request replay is unsupported"};
+        if (!assistant || call->id.empty() || call->name.empty() || !call->input || !call->input->root().is_object()) return bad(reason::messages_request::invalid_tool_call_history);
+        if (call->kind == ToolCallKind::ApprovalRequest) return reason::error(ErrorKind::Unsupported, reason::messages_request::approval_request_replay_is_unsupported);
         const bool server = call->kind == ToolCallKind::ServerExecuted;
         const bool mcp = server && call->wire_type == "mcp_tool_use";
         const std::string_view type = mcp ? "mcp_tool_use" : server ? "server_tool_use" : "tool_use";
-        if (call->wire_type != type || !all_call_ids.insert(call->id).second) return bad("tool call type or ownership mismatch");
+        if (call->wire_type != type || !all_call_ids.insert(call->id).second) return bad(reason::messages_request::tool_call_type_or_ownership_mismatch);
         // An MCP call is answered by `mcp_tool_result`, so it pairs as a call of the tool `mcp`.
         if (server) server_pending.emplace(call->id, mcp ? std::string_view("mcp") : std::string_view(call->name));
         else {
@@ -628,16 +629,16 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         }
         body.raw("{\"type\":").quoted(type).raw(",\"id\":").quoted(call->id).raw(",\"name\":").quoted(call->name).raw(",\"input\":").value(call->input->root(), 5);
         if (call->wire_metadata) {
-          if (!call->wire_metadata->root().is_object()) return bad("tool metadata must be object");
+          if (!call->wire_metadata->root().is_object()) return bad(reason::messages_request::tool_metadata_must_be_object);
           for (auto member : call->wire_metadata->root().members()) {
-            if (member.key == "input" || member.key == "id" || member.key == "name" || member.key == "type") return bad("tool metadata collides with owned fields");
+            if (member.key == "input" || member.key == "id" || member.key == "name" || member.key == "type") return bad(reason::messages_request::tool_metadata_collides_with_owned_fields);
             body.raw(",").quoted(member.key).raw(":").value(member.value, 5);
           }
         }
         body.raw("}");
       } else if (const auto* tool_result = std::get_if<ToolResult>(&part)) {
         const auto owner = client_pending.find(tool_result->tool_use_id);
-        if (assistant || text_seen || owner == client_pending.end()) return bad("tool result lacks immediate unique client ownership");
+        if (assistant || text_seen || owner == client_pending.end()) return bad(reason::messages_request::tool_result_lacks_immediate_unique_client);
         // A toolset member's result names the toolset of its call.
         const auto toolset = owner->second;
         client_pending.erase(owner);
@@ -659,8 +660,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
                   ? std::string_view(decoded_documents.at(text_document_index++)) : std::string_view{};
               write_media(body, media, decoded, false);
             }
-            if (!body.ok()) return Error{has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest,
-                                        "request exceeds JSON limits or encoding"};
+            if (!body.ok()) return reason::error(has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest, reason::messages_request::request_exceeds_json_limits_or_encoding);
           }
           body.raw("]");
         }
@@ -669,36 +669,34 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         body.raw("}");
       } else if (const auto* server_result = std::get_if<ServerToolResult>(&part)) {
         const auto found = server_pending.find(server_result->tool_use_id);
-        if (!assistant || found == server_pending.end() || !matching_result(found->second, server_result->wire_type) || !server_result->content) return bad("server result lacks unique server ownership");
+        if (!assistant || found == server_pending.end() || !matching_result(found->second, server_result->wire_type) || !server_result->content) return bad(reason::messages_request::server_result_lacks_unique_server_ownership);
         const auto raw = server_result->content->root();
-        if (!raw.is_object() || !raw.get("type").is_string() || raw.get("type").as_string() != server_result->wire_type || !raw.get("tool_use_id").is_string() || raw.get("tool_use_id").as_string() != server_result->tool_use_id) return bad("server result metadata mismatch");
+        if (!raw.is_object() || !raw.get("type").is_string() || raw.get("type").as_string() != server_result->wire_type || !raw.get("tool_use_id").is_string() || raw.get("tool_use_id").as_string() != server_result->tool_use_id) return bad(reason::messages_request::server_result_metadata_mismatch);
         server_pending.erase(found);
         body.value(raw, 4);
       } else if (const auto* block = std::get_if<Opaque>(&part); block && !assistant) {
         // An input block the caller writes (`search_result`), admitted above, goes as given.
-        if (responding_to_tools && server_waiting) return bad("pending server tools require tool-results-only continuation");
+        if (responding_to_tools && server_waiting) return bad(reason::messages_request::pending_server_tools_require_tool_results);
         text_seen = true; // Tool results, when present, must precede ordinary input.
         body.value(block->wire_metadata->root(), 4);
       } else if (const auto* opaque = std::get_if<Opaque>(&part); opaque && assistant && opaque->wire_metadata && kept_block(family, opaque->wire_type)) {
         // A block the policy keeps whole (`fallback`, `mcp_tool_listing`, `compaction`) goes back exactly as captured, in place.
         const auto raw = opaque->wire_metadata->root();
-        if (!raw.is_object() || !raw.get("type").is_string() || raw.get("type").as_string() != opaque->wire_type) return bad("captured block metadata mismatch");
+        if (!raw.is_object() || !raw.get("type").is_string() || raw.get("type").as_string() != opaque->wire_type) return bad(reason::messages_request::captured_block_mismatch);
         body.value(raw, 4);
-      } else return Error{ErrorKind::Unsupported, "part cannot be replayed as Messages input"};
-      if (!body.ok()) return Error{has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest,
-                                  "request exceeds JSON limits or encoding"};
+      } else return reason::error(ErrorKind::Unsupported, reason::messages_request::part_cannot_be_replayed_as_messages_input);
+      if (!body.ok()) return reason::error(has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest, reason::messages_request::request_exceeds_json_limits_or_encoding);
     }
     body.raw("]}");
-    if (!assistant && !client_pending.empty()) return bad("all client tool calls need immediate results");
-    if (assistant && !server_pending.empty() && (!message.native || (message.native->stop_ != StopKind::PauseTurn && message.native->stop_ != StopKind::ToolUse))) return bad("unfinished server call lacks continuation stop");
-    if (assistant && message.native && message.native->stop_ == StopKind::PauseTurn && !client_pending.empty()) return bad("pause continuation cannot await client tools");
+    if (!assistant && !client_pending.empty()) return bad(reason::messages_request::all_client_tool_calls_need_immediate_results);
+    if (assistant && !server_pending.empty() && (!message.native || (message.native->stop_ != StopKind::PauseTurn && message.native->stop_ != StopKind::ToolUse))) return bad(reason::messages_request::unfinished_server_call_lacks_continuation);
+    if (assistant && message.native && message.native->stop_ == StopKind::PauseTurn && !client_pending.empty()) return bad(reason::messages_request::pause_continuation_cannot_await_client_tools);
   }
-  if (!client_pending.empty()) return bad("client tool results are required before dispatch");
+  if (!client_pending.empty()) return bad(reason::messages_request::client_tool_results_are_required_before);
   body.raw("]");
   request_controls::write_extensions(body, request.extensions);
   body.raw("}");
-  if (!body.ok()) return Error{has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest,
-                              "request exceeds JSON limits or encoding"};
+  if (!body.ok()) return reason::error(has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest, reason::messages_request::request_exceeds_json_limits_or_encoding);
   return std::nullopt;
   };
   // Measure the entire aggregate before allocating its encoded representation.
