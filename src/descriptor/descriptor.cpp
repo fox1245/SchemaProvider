@@ -101,6 +101,14 @@ bool ipv4(std::string_view host, bool& loopback) {
     loopback = first == 127;
     return true;
 }
+// Whether a host label is a number in the WHATWG URL Standard's sense (the "ends in a number" check of its host
+// parser): ASCII digits only, or `0x` / `0X` followed by zero or more ASCII hex digits.
+bool numeric_label(std::string_view label) {
+    if (label.empty()) return false;
+    if (std::all_of(label.begin(), label.end(), digit)) return true;
+    return label.size() >= 2 && label[0] == '0' && (label[1] == 'x' || label[1] == 'X') &&
+        std::all_of(label.begin() + 2, label.end(), hex);
+}
 bool ipv6(std::string_view host) {
     const auto compressed = host.find("::");
     if (compressed != std::string_view::npos && host.find("::", compressed + 2) != std::string_view::npos) return false;
@@ -216,7 +224,12 @@ bool origin(std::string_view url, bool https_only = false, std::string* canonica
                 auto label = rest.substr(0, dot);
                 if (label.empty() || label.size() > 63 || label.front() == '-' || label.back() == '-' ||
                     !std::all_of(label.begin(), label.end(), [](char c) { return ascii_alpha(c) || digit(c) || c == '-'; })) return false;
-                if (dot == std::string_view::npos) break;
+                // A URL parser or a resolver reads a host whose last label is a number as an IPv4 address in one of
+                // its many spellings (`0x7f000001`, `example.0x10`); only the dotted-decimal literal above is taken.
+                if (dot == std::string_view::npos) {
+                    if (numeric_label(label)) return false;
+                    break;
+                }
                 rest.remove_prefix(dot + 1);
             }
         }

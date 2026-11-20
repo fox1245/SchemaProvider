@@ -810,7 +810,19 @@ void origin_spellings() {
       {"https://[1:0:0:2:0:0:0:3]", "https://[1:0:0:2::3]"}, {"https://[0:0:0:0:0:0:0:0]", "https://[::]"},
       {"http://[0:0:0:0:0:0:0:2]", "<refused>"},
       {"https://Api.Example.com:65535", "https://api.example.com:65535"}, {"HTTPS://api.example.com", "<refused>"},
-      {"Https://api.example.com", "<refused>"}, {"https://api.example.com:0", "<refused>"}};
+      {"Https://api.example.com", "<refused>"}, {"https://api.example.com:0", "<refused>"},
+      // A host whose last label is a number (decimal digits, or 0x and hex digits) is read as an IPv4 address by a URL
+      // parser or a resolver, whatever its other labels are; only the dotted-decimal literal is taken as one.
+      {"https://0x7f000001", "<refused>"}, {"https://0x7f.0.0.1", "<refused>"}, {"https://2130706433", "<refused>"},
+      {"https://127.1", "<refused>"}, {"https://example.0x10", "<refused>"}, {"http://0x7f000001", "<refused>"},
+      {"http://0x7f000001:8080", "<refused>"}, {"https://example.0X1F", "<refused>"}, {"https://example.0x", "<refused>"},
+      {"https://example.123", "<refused>"}, {"https://a.0.0x7f000001", "<refused>"}, {"https://localhost.0x1", "<refused>"},
+      {"https://127.0.0.1", "https://127.0.0.1"}, {"http://127.0.0.1", "http://127.0.0.1"},
+      {"https://api2.example.com", "https://api2.example.com"}, {"https://a1.b2", "https://a1.b2"},
+      {"https://localhost", "https://localhost"}, {"https://1password.com", "https://1password.com"},
+      {"https://example.0xg", "https://example.0xg"}, {"https://example.0x1g", "https://example.0x1g"},
+      {"https://example.1e5", "https://example.1e5"}, {"https://example.x0", "https://example.x0"},
+      {"https://0x7f.example.com", "https://0x7f.example.com"}, {"https://10.example.com", "https://10.example.com"}};
   for (const auto& [spelling, expected_base] : spellings) {
     const auto got = base(spelling);
     if (got != expected_base) std::fprintf(stderr, "ORIGIN BASE %.*s: expected %.*s, got %s\n", static_cast<int>(spelling.size()), spelling.data(),
@@ -826,6 +838,12 @@ void origin_spellings() {
   CHECK(descriptor::canonical_origin("https://a.com:08443") == "https://a.com:8443" && descriptor::canonical_origin_spelling("https://a.com:8443"));
   CHECK(descriptor::canonical_origin_spelling("https://a.com") && descriptor::canonical_origin_spelling("http://[::1]:9"));
   CHECK(!descriptor::canonical_origin_spelling("http://[0:0:0:0:0:0:0:1]:9"));
+  // The policy and the catalogue admit an origin through the same check as a descriptor's base_url.
+  for (const std::string_view spelling : {"https://0x7f000001", "https://0x7f.0.0.1", "https://2130706433", "https://127.1", "https://example.0x10",
+                                          "http://0x7f000001"})
+    CHECK(!descriptor::valid_origin(spelling) && descriptor::canonical_origin(spelling).empty() && !descriptor::canonical_origin_spelling(spelling));
+  for (const std::string_view spelling : {"https://127.0.0.1", "https://api2.example.com", "https://a1.b2", "https://localhost"})
+    CHECK(descriptor::valid_origin(spelling) && descriptor::canonical_origin_spelling(spelling));
   // A catalogue entry scoped to a provider's origin matches a descriptor that spells the origin another way.
   const auto builtin = descriptor::builtin_catalogue();
   const descriptor::CatalogueEntry* scoped_entry = nullptr;
