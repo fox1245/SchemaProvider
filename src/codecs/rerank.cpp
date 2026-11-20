@@ -20,34 +20,33 @@ Codec::Codec(const descriptor::ValidatedDescriptor& descriptor, Accumulator& acc
              std::uint64_t documents, std::uint64_t top)
     : descriptor_(descriptor), accumulator_(accumulator), requested_(std::move(requested)), limits_(limits), documents_(documents), top_(top) {}
 bool Codec::emit(const Event& event) { return accumulator_.accept(event); }
-bool Codec::fail(ErrorKind kind, std::string text) {
-  Error error{kind, std::move(text)};
-  error.reason = reason::code(reason::Source::Rerank, error.safe_message);
+bool Codec::fail(ErrorKind kind, const reason::Reason& text) {
+  Error error = reason::error(kind, text);
   emit(Fail{std::move(error)});
   return false;
 }
 bool Codec::buffered(std::string_view body, Close close) {
-  if (!close.normal) return fail(close.error, "abnormal response close");
+  if (!close.normal) return fail(close.error, reason::transport::response_close);
   auto parsed = json::parse(body, {limits_.max_content_bytes, limits_.max_json_depth});
   if (auto* error = std::get_if<json::ParseError>(&parsed))
     return fail(error->code == json::ParseCode::SizeExceeded || error->code == json::ParseCode::DepthExceeded
-                    ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, "invalid response JSON");
+                    ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, reason::rerank::response_json_invalid);
   auto wire = std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
   const auto root = wire->root();
-  if (!root.is_object()) return fail(ErrorKind::ProtocolCorrupt, "response must be object");
+  if (!root.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::rerank::response_not_object);
   if (!emit(RawWire{"rerank.response", wire})) return false;
-  if (root.get("error").valid() && !root.get("error").is_null()) return fail(ErrorKind::RemoteFailure, "remote error property");
+  if (root.get("error").valid() && !root.get("error").is_null()) return fail(ErrorKind::RemoteFailure, reason::rerank::response_remote_error);
   const auto results = root.get("results");
-  if (!results.is_array()) return fail(ErrorKind::ProtocolCorrupt, "rerank results required");
+  if (!results.is_array()) return fail(ErrorKind::ProtocolCorrupt, reason::rerank::results_required);
   std::set<std::uint64_t> seen;
   for (auto item : results.elements()) {
     if (!item.is_object() || !item.get("index").is_uint() || !item.get("relevance_score").is_number() || !std::isfinite(item.get("relevance_score").as_double()))
-      return fail(ErrorKind::ProtocolCorrupt, "a rerank result has an index and a score");
+      return fail(ErrorKind::ProtocolCorrupt, reason::rerank::result_invalid);
     const auto index = item.get("index").as_uint();
-    if ((documents_ && index >= documents_) || !seen.insert(index).second) return fail(ErrorKind::ProtocolCorrupt, "a rerank result names a document of the request once");
+    if ((documents_ && index >= documents_) || !seen.insert(index).second) return fail(ErrorKind::ProtocolCorrupt, reason::rerank::result_index_invalid);
   }
   if (documents_ && results.size() != (top_ ? std::min(top_, documents_) : documents_))
-    return fail(ErrorKind::ProtocolCorrupt, "the response holds the rerank results the call asked for");
+    return fail(ErrorKind::ProtocolCorrupt, reason::rerank::results_count_mismatch);
   const auto served = root.get("model");
   const std::string_view name = served.is_string() ? served.as_string() : std::string_view{};
   accumulator_.served_model({requested_, std::string(name), served::relation(descriptor_, requested_, name)});
