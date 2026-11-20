@@ -133,11 +133,11 @@ constexpr std::string_view ceiling_request_units[]{"ceiling_request"};
 constexpr std::string_view pin_row = "provider.max_price.prompt";
 
 // Whether a call at a routing gateway is bounded by the cap its request sets on the router's choice: every quantity it
-// states is input tokens (`input`), which the cap's prompt amount covers, and the request states that amount. A call
-// that states any other quantity (output tokens, the input's image tokens, an item unit) has no amount of the cap that
-// is known to bind it.
+// states is input tokens (`input`), which the cap's prompt amount covers, and the request states that amount above zero.
+// A call that states any other quantity (output tokens, the input's image tokens, an item unit) has no amount of the
+// cap that is known to bind it, and how the gateway answers a cap of zero is not known.
 bool pinned_input(const EndpointFacts& facts) {
-  return facts.max_price && facts.max_price->prompt_nano_usd && !facts.quantities.empty() &&
+  return facts.max_price && facts.max_price->prompt_nano_usd && *facts.max_price->prompt_nano_usd > 0 && !facts.quantities.empty() &&
          std::all_of(facts.quantities.begin(), facts.quantities.end(), [](const EndpointQuantity& q) { return q.unit == input_units[0]; });
 }
 // The tier a call is priced under: the facts' own, else the one the caller names (empty for the standard rates). Empty
@@ -564,6 +564,12 @@ EndpointBound endpoint_worst_case(const EndpointWorstCaseInput& in, const descri
       else if (fee.dearest && fee.dearest->first > 0)
         block(UnboundedBy::RouteCeiling, std::string(request_units[0]), "the entry lists a request fee, which the request's cap is not known to bind at a routing gateway");
     }
+    // A ceiling below an input price the entry lists bounds nothing (it was written before that price was listed, or
+    // kept from an earlier refresh), so it cannot price the call; a cap below it still does, as the router keeps to it.
+    if (out.unbounded.empty() && *facts.max_price->prompt_nano_usd > rows.dearest->first &&
+        ceiling_below_listed(*entry, TokenSide::Input, rows.dearest->first, tier, length))
+      block(UnboundedBy::RouteCeiling, facts.model,
+            "the entry's ceiling_input is below a token price the entry lists on that side, so it bounds nothing; refresh the catalogue");
     if (out.unbounded.empty()) {
       const auto own = *facts.max_price->prompt_nano_usd, highest = rows.dearest->first;
       if (own < highest) charge(input_units[0], pin_row, *count, own);
@@ -636,7 +642,9 @@ EndpointBound endpoint_worst_case(const EndpointWorstCaseInput& in, const descri
   out.attempts = attempts;
   if (pin) {
     out.route_ceiling = true;
-    out.pinned = facts.max_price->prompt_nano_usd == pin->prompt_nano_usd;
+    // The request carries the pin when its cap, as the host wrote it, is at most the pin's amount: a host that writes
+    // the pin back sends the number nearest its amount, which reads as up to one nano-USD more.
+    out.pinned = detail::cap_within(*facts.max_price->prompt_nano_usd, *pin->prompt_nano_usd);
     out.pin = std::move(pin);
   }
   return out;

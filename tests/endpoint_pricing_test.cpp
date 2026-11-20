@@ -1878,6 +1878,7 @@ void tier_from_facts() {
 // variable ceiling refuse.
 void gateway_embeddings() {
   constexpr std::uint64_t listed = 20'000'000, ceiling = 30'000'000;
+  const auto u900 = tokens(900, std::nullopt);
   const auto c = entry({{"input", usd(listed)}, {"ceiling_input", usd(ceiling)}}, R"("input_limit":2048)");
   Call call{facts("embeddings", "embed", {quantity("input", std::nullopt, Source::InputLimit, 3)})};
   call.facts.routed_gateway = true;
@@ -1910,10 +1911,32 @@ void gateway_embeddings() {
   call.facts.max_price->completion_nano_usd = 7;
   b = bound(call, *c);
   CHECK(totals(b, rounded(3 * 2048 * ceiling)) && b.pinned && b.pin->prompt_nano_usd == ceiling && b.pin->completion_nano_usd == 7);
-  // A cap of zero admits only a free endpoint.
+  // A cap of zero is no cap the bound takes: how the gateway answers it is not known.
   call.facts.max_price = OpenRouterMaxPrice{};
   call.facts.max_price->prompt_nano_usd = 0;
-  CHECK(totals(bound(call, *c), 0));
+  b = bound(call, *c);
+  CHECK(only(b, UnboundedBy::RouteCeiling, "vendor/model") && b.unbounded[0].detail == unpinned && !b.pin);
+  const auto unpinned_estimate = estimated(call.facts, &u900, {}, *c);
+  CHECK(estimates(unpinned_estimate, rounded(900 * listed)) && unpinned_estimate.assumptions == Names({"listed rates"}));
+  call.facts.max_price->prompt_nano_usd = 25'000'000;
+  // A cap one nano-USD above the ceiling, as the JSON number nearest the ceiling reads (0.00003 USD per million reads
+  // as 30001 nano-USD), is the pin a host writes back: the request carries it.
+  const auto at_ceiling = entry({{"input", usd(20'000)}, {"ceiling_input", usd(30'000)}}, R"("input_limit":2048)");
+  call.facts.max_price->prompt_nano_usd = 30'001;
+  b = bound(call, *at_ceiling);
+  CHECK(totals(b, rounded(std::uint64_t{3 * 2048} * 30'000)) && b.pinned && b.pin->prompt_nano_usd == 30'000);
+  call.facts.max_price->prompt_nano_usd = 30'002;
+  b = bound(call, *at_ceiling);
+  CHECK(totals(b, rounded(std::uint64_t{3 * 2048} * 30'000)) && !b.pinned && b.pin->prompt_nano_usd == 30'000);
+  // A ceiling below the input price the entry lists bounds nothing: a cap above it refuses, and a cap below it still
+  // bounds the call, since the router keeps to the cap.
+  const auto stale = entry({{"input", usd(30'000'000)}, {"ceiling_input", usd(20'000'000)}}, R"("input_limit":2048)");
+  call.facts.max_price->prompt_nano_usd = 50'000'000;
+  b = bound(call, *stale);
+  CHECK(only(b, UnboundedBy::RouteCeiling, "vendor/model") && b.unbounded[0].detail.find("bounds nothing") != std::string::npos);
+  call.facts.max_price->prompt_nano_usd = 10'000'000;
+  b = bound(call, *stale);
+  CHECK(totals(b, rounded(std::uint64_t{3 * 2048} * 10'000'000)) && b.pinned);
   call.facts.max_price->prompt_nano_usd = 25'000'000;
   // No route ceiling: the router may pick any price below the cap only if the ceiling is listed.
   b = bound(call, *entry({{"input", usd(listed)}}, R"("input_limit":2048)"));
@@ -1937,7 +1960,7 @@ void gateway_embeddings() {
   call.facts.quantities.pop_back();
   // The tier's own ceiling.
   call.facts.service_tier = "flex";
-  CHECK(totals(bound(call, *entry({{"input/flex", usd(listed)}, {"ceiling_input/flex", usd(10'000'000)}}, R"("input_limit":2048)")),
+  CHECK(totals(bound(call, *entry({{"input/flex", usd(5'000'000)}, {"ceiling_input/flex", usd(10'000'000)}}, R"("input_limit":2048)")),
                rounded(std::uint64_t{3 * 2048} * 10'000'000)));
   call.facts.service_tier.clear();
 

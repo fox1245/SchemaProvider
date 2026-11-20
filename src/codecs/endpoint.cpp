@@ -177,32 +177,7 @@ std::optional<std::uint64_t> nano_usd(json::Value value) {
     if (usd > max_price_limit_nano_usd / nano) return std::nullopt;
     return usd * nano;
   }
-  const double usd = value.as_double();
-  if (!std::isfinite(usd) || usd < 0) return std::nullopt;
-  if (usd == 0) return 0;
-  // usd = mantissa / 2^shift, exactly: frexp and ldexp only move the exponent.
-  int exponent = 0;
-  const auto mantissa = static_cast<std::uint64_t>(std::ldexp(std::frexp(usd, &exponent), 53));
-  const int shift = 53 - exponent;
-  if (shift <= 0) return std::nullopt;  // at least 2^52 USD
-  // The quotient of mantissa x 1e9 (below 2^83) by 2^shift, and whether it leaves a remainder.
-  const auto product = pricing::detail::Wide::product(mantissa, nano);
-  std::uint64_t quotient = 0;
-  bool remainder = false;
-  if (shift >= 128) {
-    remainder = true;
-  } else if (shift >= 64) {
-    const int rest = shift - 64;
-    quotient = rest ? product.high >> rest : product.high;
-    remainder = product.low != 0 || (rest && (product.high & ((std::uint64_t{1} << rest) - 1)) != 0);
-  } else {
-    if (product.high >> shift) return std::nullopt;
-    quotient = (product.low >> shift) | (product.high << (64 - shift));
-    remainder = (product.low & ((std::uint64_t{1} << shift) - 1)) != 0;
-  }
-  if (remainder) ++quotient;
-  if (quotient > max_price_limit_nano_usd) return std::nullopt;
-  return quotient;
+  return pricing::detail::nano_usd_rounded_up(value.as_double());
 }
 }  // namespace
 std::optional<OpenRouterMaxPrice> max_price(const std::shared_ptr<const json::Document>& extensions) {

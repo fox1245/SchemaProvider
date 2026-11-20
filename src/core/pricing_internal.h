@@ -4,6 +4,7 @@
 #include "core/pricing.h"
 #include "descriptor/policy.h"
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <initializer_list>
 #include <limits>
@@ -60,6 +61,47 @@ inline std::optional<std::uint64_t> rounded_nano_usd(Wide sum) {
   const auto nano = sum.divided(1'000'000);
   if (!nano.fits()) return std::nullopt;
   return nano.low;
+}
+
+// An amount of USD that a JSON number states (a `provider.max_price` member) as whole nano-USD, rounded up from the
+// number's exact binary value, so that no amount a reader of the number may take is above it. Nothing for a negative
+// or non-finite number and for an amount above max_price_limit_nano_usd.
+inline std::optional<std::uint64_t> nano_usd_rounded_up(double usd) {
+  constexpr std::uint64_t nano = 1'000'000'000;
+  if (!std::isfinite(usd) || usd < 0) return std::nullopt;
+  if (usd == 0) return 0;
+  // usd = mantissa / 2^shift, exactly: frexp and ldexp only move the exponent.
+  int exponent = 0;
+  const auto mantissa = static_cast<std::uint64_t>(std::ldexp(std::frexp(usd, &exponent), 53));
+  const int shift = 53 - exponent;
+  if (shift <= 0) return std::nullopt;  // at least 2^52 USD
+  // The quotient of mantissa x 1e9 (below 2^83) by 2^shift, and whether it leaves a remainder.
+  const auto product = Wide::product(mantissa, nano);
+  std::uint64_t quotient = 0;
+  bool remainder = false;
+  if (shift >= 128) {
+    remainder = true;
+  } else if (shift >= 64) {
+    const int rest = shift - 64;
+    quotient = rest ? product.high >> rest : product.high;
+    remainder = product.low != 0 || (rest && (product.high & ((std::uint64_t{1} << rest) - 1)) != 0);
+  } else {
+    if (product.high >> shift) return std::nullopt;
+    quotient = (product.low >> shift) | (product.high << (64 - shift));
+    remainder = (product.low & ((std::uint64_t{1} << shift) - 1)) != 0;
+  }
+  if (remainder) ++quotient;
+  if (quotient > max_price_limit_nano_usd) return std::nullopt;
+  return quotient;
+}
+// Whether a cap read as `cap` nano-USD (nano_usd_rounded_up) is at most `amount` nano-USD as a host writes it: at most
+// the amount, or the very value the JSON number nearest `amount` / 1e9 USD reads as, which is the number a host that
+// writes the amount sends (0.02 USD reads as 20000001).
+inline bool cap_within(std::uint64_t cap, std::uint64_t amount) {
+  if (cap <= amount) return true;
+  if (amount > max_price_limit_nano_usd) return false;
+  // Both are exact in a double below 2^53, and the quotient is rounded to the nearest double.
+  return nano_usd_rounded_up(static_cast<double>(amount) / 1e9) == cap;
 }
 
 // A price unit: its name (`input`, `tool:web_search`), its service tier (`/flex`) and the input length above which

@@ -736,6 +736,8 @@ const auto items_priced = catalogue_of("{\"version\":1,\"models\":[" +
 constexpr std::uint64_t routed_embed_rate = 100'000'000, routed_embed_ceiling = 150'000'000;
 const auto routed = catalogue_of("{\"version\":1,\"models\":[" +
     entry("vendor/embed", limits(embed_input), {{"input", routed_embed_rate}, {"ceiling_input", routed_embed_ceiling}}) + "," +
+    // A ceiling of 0.02 USD per million tokens, whose nearest JSON number reads as one nano-USD more.
+    entry("vendor/embed-small", limits(embed_input), {{"input", 10'000'000}, {"ceiling_input", 20'000'000}}) + "," +
     entry("vendor/image", limits(image_input, image_output),
           {{"input", in_rate}, {"input_image", image_token_rate}, {"output", out_rate}, {"item:image", image_rate}, {"item:input_image", reference_rate},
            {"ceiling_input", in_rate}, {"ceiling_output", out_rate}}) + "," +
@@ -755,6 +757,13 @@ embeddings::Request embedding(std::string_view extensions = {}) {
   embeddings::Request request{"vendor/embed", {{"a"}, {"b"}, {"c"}}};
   if (!extensions.empty()) request.extensions = document(extensions);
   return request;
+}
+// A nano-USD amount as the decimal USD text a host writes it in (20000000 is 0.02).
+std::string usd_text(std::uint64_t nano_usd) {
+  std::string fraction = std::to_string(nano_usd % 1'000'000'000);
+  fraction.insert(0, 9 - fraction.size(), '0');
+  while (!fraction.empty() && fraction.back() == '0') fraction.pop_back();
+  return std::to_string(nano_usd / 1'000'000'000) + (fraction.empty() ? "" : "." + fraction);
 }
 std::string capped(std::string_view prompt) { return R"({"provider":{"sort":"price","max_price":{"prompt":)" + std::string(prompt) + "}}}"; }
 const std::string unpinned = "an endpoint call at a routing gateway has no per-item route ceiling and no pin";
@@ -789,10 +798,23 @@ void gateway_embeddings_bound() {
   CHECK(ok(router.prepare(embedding(capped("1e-9")))).endpoint_facts().max_price->prompt_nano_usd == 2);
   CHECK(ok(router.prepare(embedding(capped("1")))).endpoint_facts().max_price->prompt_nano_usd == 1'000'000'000);
   CHECK(ok(router.prepare(embedding(capped("0")))).endpoint_facts().max_price->prompt_nano_usd == 0);
+  // A cap of zero is no cap the bound takes: how the gateway answers it is not known.
+  CHECK(reasons_of(bound_at(embedding(capped("0")))) == "RouteCeiling [vendor/embed] " + unpinned + "; ");
   // A cap above the route ceiling: the ceiling bounds the call, and the pin to carry is the ceiling.
   bound = bound_at(embedding(capped("0.2")));
   CHECK(nano(bound) == rounded(3 * embed_input * routed_embed_ceiling) && line_of(bound, "input") == "ceiling_input 1536 x 150000000");
   CHECK(bound.route_ceiling && !bound.pinned && bound.pin && bound.pin->prompt_nano_usd == routed_embed_ceiling);
+  // The pin written back, as a host writes its amount, is carried: 0.02 reads as 20000001 nano-USD, one above the ceiling.
+  auto small = embedding(capped("0.03"));
+  small.model = "vendor/embed-small";
+  bound = bound_at(small);
+  CHECK(!bound.pinned && bound.pin && bound.pin->prompt_nano_usd == 20'000'000 && usd_text(*bound.pin->prompt_nano_usd) == "0.02");
+  auto written = embedding(capped(usd_text(*bound.pin->prompt_nano_usd)));
+  written.model = "vendor/embed-small";
+  CHECK(ok(router.prepare(written)).endpoint_facts().max_price->prompt_nano_usd == 20'000'001);
+  bound = bound_at(written);
+  CHECK(nano(bound) == rounded(3 * embed_input * 20'000'000) && line_of(bound, "input") == "ceiling_input 1536 x 20000000" && bound.pinned &&
+        bound.pin->prompt_nano_usd == 20'000'000);
   // A cap above the largest amount max_price takes is no cap the bound reads.
   CHECK(!ok(router.prepare(embedding(capped("10000000")))).endpoint_facts().max_price);
   CHECK(reasons_of(bound_at(embedding(capped("10000000")))) == "RouteCeiling [vendor/embed] " + unpinned + "; ");
