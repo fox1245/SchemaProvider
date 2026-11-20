@@ -91,6 +91,7 @@ std::unique_ptr<Codec> make_codec(std::string_view name, const descriptor::Valid
   if (name == "tokens") return std::make_unique<tokens::Codec>(descriptor, accumulator, limits);
   if (name == "batches") return std::make_unique<batches::Codec>(descriptor, accumulator, batches::Codec::Kind::Batch, std::move(requested), limits);
   if (name == "batches.delete") return std::make_unique<batches::Codec>(descriptor, accumulator, batches::Codec::Kind::Deleted, std::move(requested), limits);
+  if (name == "batches.list") return std::make_unique<batches::Codec>(descriptor, accumulator, batches::Codec::Kind::Page, std::move(requested), limits);
   // A file, a page of files, or a deletion; `requested` is the file id the call named.
   if (name == "files") return std::make_unique<files::Codec>(descriptor, accumulator, files::Codec::Kind::File, std::move(requested), limits);
   if (name == "files.list") return std::make_unique<files::Codec>(descriptor, accumulator, files::Codec::Kind::Page, std::move(requested), limits);

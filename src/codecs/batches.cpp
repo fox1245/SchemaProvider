@@ -1,11 +1,14 @@
 #include "codecs/batches.h"
 #include "codecs/gemini.h"
 #include "codecs/messages.h"
+#include "codecs/provider_cost.h"
 #include "codecs/reason.h"
 #include "codecs/responses.h"
 #include "descriptor/policy.h"
 #include "json/json.h"
 #include <algorithm>
+#include <map>
+#include <set>
 #include <type_traits>
 
 namespace sp::batches {
@@ -32,8 +35,10 @@ std::shared_ptr<const json::Document> copy(json::Value value) {
   auto parsed = json::parse(value.dump());
   return std::holds_alternative<json::Document>(parsed) ? std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed))) : nullptr;
 }
-// Google's inline results, where the finished batch carries them.
-json::Value inline_results(json::Value root) {
+// The inline results of a finished batch: Google's, where the batch carries them, and OpenRouter's `results`.
+json::Value inline_results(json::Value root, std::string_view shape) {
+  if (shape == "openrouter") return root.get("results").is_array() ? root.get("results") : json::Value{};
+  if (shape != "google") return {};
   for (auto holder : {root.get("response"), root.get("metadata").get("output")}) {
     const auto list = holder.get("inlinedResponses").get("inlinedResponses");
     if (list.is_array()) return list;
@@ -67,7 +72,7 @@ bool batch_of(json::Value root, std::string_view shape, std::string_view origin,
     batch.created_at = time_of(metadata.get("createTime"));
     batch.ended_at = time_of(metadata.get("endTime"));
     batch.output_file = responses_file(root);
-    batch.results_ready = inline_results(root).is_array();
+    batch.results_ready = inline_results(root, shape).is_array();
     return true;
   }
   const auto status = root.get(shape == "anthropic" ? "processing_status" : "status");
@@ -97,6 +102,31 @@ bool batch_of(json::Value root, std::string_view shape, std::string_view origin,
   batch.counts.succeeded = count_of(counts.get("completed"));
   batch.counts.failed = count_of(counts.get("failed"));
   batch.counts.pending = batch.counts.total - std::min(batch.counts.total, batch.counts.succeeded + batch.counts.failed);
+  if (shape == "openrouter") {
+    // The statuses are OpenAI's words; the batch ends at `finalized_at`, carries its results inline, and its usage is
+    // Chat's counters with the cost OpenRouter charged for the whole batch (`usage.cost`, USD).
+    batch.ended_at = time_of(root.get("finalized_at"));
+    batch.results_ready = inline_results(root, shape).is_array();
+    if (const auto usage = root.get("usage"); usage.is_object()) {
+      batch.usage.input_total = counter(usage.get("prompt_tokens"));
+      batch.usage.output_total = counter(usage.get("completion_tokens"));
+      batch.usage.total = counter(usage.get("total_tokens"));
+      batch.usage.cache_read = counter(usage.get("prompt_tokens_details").get("cached_tokens"));
+      batch.usage.reasoning = counter(usage.get("completion_tokens_details").get("reasoning_tokens"));
+      auto& cost = batch.usage.provider_cost;
+      if (usage.get("cost").valid()) {
+        cost.source = CostSource::OpenRouterUsd;
+        cost.status[0] = codecs::usd_amount(usage.get("cost"), true, cost.total);
+        if (cost.status[0] != CostStatus::Available && cost.status[0] != CostStatus::Missing) cost.quality = UsageQuality::Inconsistent;
+      }
+      if (const auto byok = usage.get("is_byok"); byok.is_bool()) {
+        cost.is_byok = byok.as_bool();
+        cost.byok_status = CostStatus::Available;
+      }
+      batch.usage.stage = UsageStage::Final;
+    }
+    return true;
+  }
   batch.output_file = text_of(root.get("output_file_id"));
   batch.error_file = text_of(root.get("error_file_id"));
   for (const char* key : {"completed_at", "failed_at", "expired_at", "cancelled_at"})
@@ -162,8 +192,21 @@ bool Codec::buffered(std::string_view body, Close close) {
     return false;
   Batch probe;
   if (kind_ == Kind::Batch && !batch_of(root, fact->shape, descriptor_.base_url(), probe)) return fail(ErrorKind::ProtocolCorrupt, reason::batches::batch_id_required);
-  // Anthropic answers a deletion with a `message_batch_deleted` object, Google with an empty one.
+  // A page lists batch objects, each with its id and status.
+  if (kind_ == Kind::Page) {
+    const auto data = root.get("data");
+    if (!data.is_array()) return fail(ErrorKind::ProtocolCorrupt, reason::batches::page_invalid);
+    for (auto element : data.elements()) {
+      Batch listed;
+      if (!batch_of(element, fact->shape, descriptor_.base_url(), listed)) return fail(ErrorKind::ProtocolCorrupt, reason::batches::page_invalid);
+    }
+  }
+  // Anthropic answers a deletion with a `message_batch_deleted` object, Google with an empty one, OpenRouter with the
+  // batch's id and what each deletion target did.
   if (kind_ == Kind::Deleted && fact->shape == "anthropic" && text_of(root.get("type")) != "message_batch_deleted")
+    return fail(ErrorKind::ProtocolCorrupt, reason::batches::delete_unconfirmed);
+  if (kind_ == Kind::Deleted && fact->shape == "openrouter" &&
+      (text_of(root.get("object")) != "batch" || text_of(root.get("id")) != subject_ || !root.get("deletion").is_object()))
     return fail(ErrorKind::ProtocolCorrupt, reason::batches::delete_unconfirmed);
   if (!emit(Begin{}) || !emit(MessageBegin{{0}, std::nullopt, Role::Assistant, nullptr})) return false;
   return emit(UsageUpdate{probe.usage}) && emit(Stop{StopReason{StopKind::EndTurn, "completed"}}) && emit(MessageSeal{{0}}) &&
@@ -192,10 +235,29 @@ DeleteOutcome typed_deleted(const sp::Outcome& internal) {
   return deleted;
 }
 
+PageOutcome typed_page(const sp::Outcome& internal) {
+  if (const auto* failure = std::get_if<Failure>(&internal)) return *failure;
+  const auto& completion = std::get<Completion>(internal);
+  Page page;
+  if (const auto context = context_of(completion)) {
+    const auto root = context->response;
+    for (auto element : root.get("data").elements()) {
+      Batch listed;
+      if (!batch_of(element, context->shape, context->origin, listed)) continue;
+      listed.raw = copy(element);
+      page.batches.push_back(std::move(listed));
+    }
+    if (root.get("has_more").is_bool() && root.get("has_more").as_bool()) page.next = text_of(root.get("last_id"));
+  }
+  page.attempt = completion.attempt;
+  page.raw_events = completion.raw_events;
+  return page;
+}
+
 std::vector<std::string> inline_lines(const Batch& batch) {
   std::vector<std::string> lines;
   if (!batch.raw) return lines;
-  const auto list = inline_results(batch.raw->root());
+  const auto list = inline_results(batch.raw->root(), batch.shape);
   if (list.is_array()) for (auto item : list.elements()) lines.push_back(item.dump());
   return lines;
 }
@@ -280,5 +342,33 @@ std::variant<Line, Error> decode(const descriptor::ValidatedDescriptor& family, 
     out.outcome = *accumulator.outcome();
     return std::move(out);
   }, original);
+}
+
+std::variant<std::vector<Line>, Error> results(const descriptor::ValidatedDescriptor& family, const Batch& batch, const std::vector<Item>& items,
+                                               SemanticLimits limits) {
+  if (!batch.raw || !inline_results(batch.raw->root(), batch.shape).is_array())
+    return reason::error(ErrorKind::InvalidRequest, reason::batches::results_missing);
+  // The batch names the path its requests went to; the items fact maps the family to that path.
+  const auto* items_fact = family.policy()->batch_items("batches", batch.origin);
+  const auto endpoint = text_of(batch.raw->root().get("endpoint"));
+  const bool same_family = items_fact && batch.origin == family.base_url() &&
+                           std::any_of(items_fact->paths.begin(), items_fact->paths.end(), [&](const auto& entry) {
+                             return entry.first == family.family() && entry.second == endpoint;
+                           });
+  if (!same_family) return reason::error(ErrorKind::InvalidRequest, reason::batches::results_family);
+  std::map<std::string_view, const Item*> by_id;
+  for (const auto& item : items)
+    if (!by_id.emplace(item.custom_id, &item).second) return reason::error(ErrorKind::InvalidRequest, reason::batches::results_custom_id);
+  std::vector<Line> out;
+  std::set<std::string> answered;
+  for (const auto& line : inline_lines(batch)) {
+    const auto id = custom_id(line);
+    const auto found = id ? by_id.find(*id) : by_id.end();
+    if (found == by_id.end() || !answered.insert(*id).second) return reason::error(ErrorKind::InvalidRequest, reason::batches::results_custom_id);
+    auto decoded = decode(family, found->second->request, line, limits);
+    if (auto* error = std::get_if<Error>(&decoded)) return std::move(*error);
+    out.push_back(std::move(std::get<Line>(decoded)));
+  }
+  return out;
 }
 }  // namespace sp::batches

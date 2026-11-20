@@ -155,6 +155,15 @@ struct EndpointFact {
   std::uint64_t max_file_bytes = 0;
   std::optional<FileNamesFact> file_names{};
 };
+// What a batch fact whose items go inline in one call of one endpoint (`items` of an OpenRouter batches fact) states
+// about them: the path the batch names for the requests of each family (its `endpoint`), the media input an item may
+// carry (the family's own media policy still applies), the plugins and the model variant suffixes the batch path
+// refuses.
+struct BatchItemsFact {
+  std::vector<std::pair<std::string, std::string>> paths;  // family, path
+  MediaPolicy media{};
+  std::vector<std::string> refused_plugins{}, refused_variants{};
+};
 // The path of one operation of an endpoint fact, if it has one.
 std::optional<std::string_view> endpoint_path(const EndpointFact&, std::string_view operation) noexcept;
 // Whether the provider bills an operation of an endpoint, as the fact's `billing` states it (`none`, `model`,
@@ -365,6 +374,13 @@ class DescriptorPolicy final {
   // policy's, which states each provider's API origin. Empty when the policy states `null`: the listing has no default,
   // and a source of it names its `url` and its `origin`. A canonical origin (descriptor::canonical_origin_spelling).
   std::string_view listing_origin(Listing listing) const noexcept;
+  // The catalogue variants of a model listing whose prices are another tier of the base model's (`tier_variants` of the
+  // policy's `listings` fact): each variant suffix, without its `:`, with the catalogue tier its entry's prices are
+  // (OpenRouter `vendor/model:batch`, the batch-priced version of `vendor/model`). Empty for a listing without any.
+  const std::vector<std::pair<std::string, std::string>>& listing_tier_variants(Listing listing) const noexcept;
+  // The items fact of the endpoint fact at `origin` (BatchItemsFact), null when it states none. `origin` is compared
+  // byte for byte.
+  const BatchItemsFact* batch_items(std::string_view endpoint, std::string_view origin) const noexcept;
   // The route facts of `family` in the policy's order, empty for a family without any or not in the policy. A policy
   // that states no `routes` for a family has the embedded policy's.
   const std::vector<RouteFact>& routes(std::string_view family) const noexcept;
@@ -432,6 +448,10 @@ class DescriptorPolicy final {
   std::vector<std::pair<Listing, std::string>> listing_origins_;
   // The `max_results` of the endpoint fact at the same index of endpoints_ (a search store's most results per search).
   std::vector<std::optional<std::uint64_t>> max_results_;
+  // The tier variants of each listing (listing_tier_variants), in the order of all_listings.
+  std::vector<std::pair<Listing, std::vector<std::pair<std::string, std::string>>>> listing_tier_variants_;
+  // The items fact of the endpoint fact at the same index of endpoints_ (batch_items).
+  std::vector<std::optional<BatchItemsFact>> batch_items_;
   static std::optional<reason::Reason> check(const FamilyPolicy&, const ValidationFacts&, const EffectiveChoices&,
                                              std::optional<std::uint64_t> limit, bool require_cap);
   friend std::optional<reason::Reason> choices_refusal(const ValidatedDescriptor&, std::string_view, const EffectiveChoices&);
