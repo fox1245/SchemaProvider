@@ -2191,8 +2191,10 @@ void resolved_paths_are_checked() {
       if (model.empty()) continue;
       const auto chat_refusal = chat::encode(chat, chat::Request::simple(model, "hi", 64), streaming);
       CHECK(refusal_kind(chat_refusal) == ErrorKind::InvalidRequest && std::get<Error>(chat_refusal).safe_message == route_text);
+      CHECK(std::get<Error>(chat_refusal).reason == "request.route.model_name");
       const auto messages_refusal = messages::encode(messages, messages::Request::simple(model, "hi", 64), streaming);
       CHECK(refusal_kind(messages_refusal) == ErrorKind::InvalidRequest && std::get<Error>(messages_refusal).safe_message == route_text);
+      CHECK(std::get<Error>(messages_refusal).reason == "request.route.model_name");
     }
   }
   CHECK(listed(reason::shared_request::all, route_text, "request.route.model_name"));
@@ -2223,8 +2225,9 @@ void endpoint_model_paths() {
     CHECK(refusal_kind(tokens::encode(responses_api, tokens::Count{responses::Request::simple(model, "hi", 16)})) == ErrorKind::InvalidRequest);
     CHECK(refusal_kind(embeddings::encode(chat_api, embeddings::Request{model, {{"a"}}})) == ErrorKind::InvalidRequest);
   }
-  const auto refused_text = std::get<Error>(tokens::encode(responses_api, tokens::Count{responses::Request::simple("a..b", "hi", 16)})).safe_message;
-  CHECK(listed(reason::tokens_request::all, refused_text, "request.tokens.model_path"));
+  const auto tokens_refusal = std::get<Error>(tokens::encode(responses_api, tokens::Count{responses::Request::simple("a..b", "hi", 16)}));
+  CHECK(listed(reason::tokens_request::all, tokens_refusal.safe_message, "request.tokens.model_path"));
+  CHECK(tokens_refusal.reason == "request.tokens.model_path");
   CHECK(std::get<Error>(embeddings::encode(chat_api, embeddings::Request{"a..b", {{"a"}}})).reason == "request.embeddings.model_path");
   // Google names the model in the path of each: the built-in paths take a model and refuse the same names. A literal
   // Generate route may name `.`, `..` or `a..b` itself, so such a model reaches the endpoint's own path.
