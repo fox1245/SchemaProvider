@@ -1283,6 +1283,27 @@ const auto fast_priced = catalogue_of("{\"version\":1,\"models\":[" +
     entry("vendor/no-fast", limits(batched_input, batched_output),
           {{"input", standard_in}, {"output", standard_out}, {"input/batch", batch_in}, {"output/batch", batch_out}}) + "]}");
 // The built-in policy with each Messages extension fact written by `edit` (its text; empty keeps the fact as it is).
+// The built-in policy with `member` of `family` set to `value`, a JSON text.
+std::string family_member_with(std::string_view name, std::string_view member, std::string_view value) {
+  auto parsed = json::parse(config_defaults::descriptor_policy_json);
+  const auto root = std::get<json::Document>(parsed).root();
+  std::string out = "{";
+  for (auto top : root.members()) {
+    out += (out.size() > 1 ? "," : "") + json::quote(top.key) + ":";
+    if (top.key != "families") { out += top.value.dump(); continue; }
+    std::string families = "[";
+    for (auto family : top.value.elements()) {
+      if (families.size() > 1) families += ",";
+      if (family.get("family").as_string() != name) { families += family.dump(); continue; }
+      std::string object = "{";
+      for (auto field : family.members())
+        if (field.key != member) object += (object.size() > 1 ? "," : "") + json::quote(field.key) + ":" + field.value.dump();
+      families += object + "," + json::quote(member) + ":" + std::string(value) + "}";
+    }
+    out += families + "]";
+  }
+  return out + "}";
+}
 std::string messages_extensions_with(const std::function<std::string(json::Value)>& edit) {
   auto parsed = json::parse(config_defaults::descriptor_policy_json);
   const auto root = std::get<json::Document>(parsed).root();
@@ -1472,6 +1493,95 @@ void priced_extensions() {
   });
   EXPECT(chat_bound_under(none_for_speed, R"({"speed":"fast"})"), standard);
   EXPECT(chat_bound_under(none_for_speed, R"({"inference_geo":"us"})"), unmodeled_geo);
+
+  // Under a tier, a unit the entry prices at the standard rates and not in the tier: no bound and no estimate, whether
+  // the tier is an extension's or the request's own (the rule a batch's carried requests already follow).
+  const auto cached = catalogue_of("{\"version\":1,\"models\":[" +
+      entry("vendor/fast-cached", limits(batched_input, batched_output),
+            {{"input", standard_in}, {"output", standard_out}, {"cache_write", 1'250'000'000}, {"cache_write_1h", 2'000'000'000},
+             {"input/fast", fast_in}, {"output/fast", fast_out}}) + "]}");
+  {
+    auto request = extended("vendor/fast-cached", R"({"speed":"fast"})");
+    request.messages[0].parts[0] = Text{"Say: alpha", {}, CacheControl{}};
+    const auto prepared = messages_api.prepare(request, run_with(1));
+    const std::string outside = "no total | TierPrice [vendor/fast-cached] the entry prices cache_write at the standard rates but not under service tier 'fast'";
+    const auto bound = runtime::worst_case_cost(prepared, *cached, runtime::WorstCaseOptions{300});
+    EXPECT(bounded_as(bound.total, bound.unbounded), outside);
+    ServedModel served;
+    served.requested = "vendor/fast-cached";
+    auto usage = request_usage(120, 7);
+    usage.cache_write = Count{40};
+    const auto first_unpriced = [](const pricing::CostEstimate& e) {
+      return e.total ? std::string("total") : e.unpriced.empty() ? std::string("none") : e.unpriced.front();
+    };
+    EXPECT(first_unpriced(pricing::estimate(*cached, prepared.family(), prepared.descriptor()->base_url(), served, usage, prepared.facts(), "")), "tier");
+    RequestFacts none;
+    pricing::WorstCaseInput in;
+    in.family = "anthropic.messages";
+    in.origin = "https://api.anthropic.com";
+    in.model = "vendor/fast-cached";
+    in.facts = &none;
+    in.service_tier = "fast";
+    in.output_tokens = 16;
+    in.measured_input_tokens = 300;
+    in.invocations = 1;
+    in.attempts = 1;
+    const auto by_tier = pricing::worst_case(in, *cached);
+    EXPECT(bounded_as(by_tier.total, by_tier.unbounded), outside);
+    EXPECT(first_unpriced(pricing::estimate(*cached, in.family, in.origin, served, usage, "fast")), "tier");
+    // At the standard rates nothing changes.
+    EXPECT(first_unpriced(pricing::estimate(*cached, in.family, in.origin, served, usage)), "total");
+  }
+
+  // A Chat extension a custom policy prices: the prepared facts name it and the bound prices under its tier; an
+  // OpenAI file batch's lines are estimated only from its items, and two items of one custom id are refused.
+  const auto chat_policy = load(family_member_with("openai.chat", "extensions",
+      R"([{"key":"fixture_speed","origins":["https://api.openai.com"],"value":{"type":"enum","values":["slow","quick"]},"replay_eligible":true,)"
+      R"("prices":{"values":{"quick":{"tier":"priority"}}}}])"));
+  const auto chat_family = openai_chat(chat_policy);
+  auto chat_api = client_of(openai_chat(chat_policy));
+  const auto chat_priced = catalogue_of("{\"version\":1,\"models\":[" +
+      entry("vendor/quick", limits(batched_input, batched_output),
+            {{"input", standard_in}, {"output", standard_out}, {"input/priority", fast_in}, {"output/priority", fast_out}, {"input/batch", batch_in},
+             {"output/batch", batch_out}}) + "]}");
+  const auto chat_request = [](std::string_view speed) {
+    auto request = chat::Request::simple("vendor/quick", "Say: alpha", 16);
+    request.extensions = document("{\"fixture_speed\":\"" + std::string(speed) + "\"}");
+    return request;
+  };
+  {
+    const auto quick = chat_api.prepare(chat_request("quick"), run_with(1));
+    std::string named;
+    for (const auto& priced : quick.facts().priced_extensions) named += priced.key + "/" + priced.tier + "/" + std::to_string(priced.unmodeled) + " ";
+    EXPECT(named, "fixture_speed/priority/0 ");
+    auto bound = runtime::worst_case_cost(quick, *chat_priced, runtime::WorstCaseOptions{300});
+    EXPECT(bounded_as(bound.total, bound.unbounded), fast);
+    bound = runtime::worst_case_cost(chat_api.prepare(chat_request("slow"), run_with(1)), *chat_priced, runtime::WorstCaseOptions{300});
+    EXPECT(bounded_as(bound.total, bound.unbounded), standard);
+  }
+  {
+    const auto submit = chat_api.prepare(batches::Submit{{}, "file-abc", "/v1/chat/completions"});
+    const auto& facts = ok(submit).endpoint_facts();
+    const auto line = answered("o-1", "vendor/quick", request_usage(120, 7));
+    EXPECT(estimated_as(runtime::batch_estimate(facts, chat_family, {line}, *chat_priced)), "no total | unpriced extensions");
+    EXPECT(estimated_as(runtime::batch_estimate(facts, chat_family, {batches::Item{"o-1", chat_request("quick")}}, {line}, *chat_priced)),
+           "no total | unpriced o-1:tier");
+    EXPECT(estimated_as(runtime::batch_estimate(facts, chat_family, {batches::Item{"o-1", chat_request("slow")}}, {line}, *chat_priced)), line_total);
+    EXPECT(estimated_as(runtime::batch_estimate(facts, chat_family, {batches::Item{"o-1", chat_request("slow")}, batches::Item{"o-1", chat_request("quick")}},
+                                                {line}, *chat_priced)),
+           "no total | unpriced o-1:duplicate");
+    // The built-in Chat policy prices no extension: the lines are estimated without the items, as before.
+    const auto builtin_submit = client_of(openai_chat()).prepare(batches::Submit{{}, "file-abc", "/v1/chat/completions"});
+    EXPECT(estimated_as(runtime::batch_estimate(ok(builtin_submit).endpoint_facts(), openai_chat(), {line}, *chat_priced)), line_total);
+  }
+  // Two carried requests of one custom id in a submit's facts.
+  {
+    const auto submit = messages_api.prepare(batches::Submit{{{"a-1", extended("vendor/fast", "")}}});
+    auto facts = ok(submit).endpoint_facts();
+    facts.carried.push_back(facts.carried.front());
+    EXPECT(estimated_as(runtime::batch_estimate(facts, anthropic_messages(), {answered("a-1", "vendor/fast", request_usage(120, 7))}, *fast_priced)),
+           "no total | unpriced a-1:duplicate");
+  }
   report_mismatches("priced_extensions");
   std::cout << "case passed: extension values that change the price\n";
 }

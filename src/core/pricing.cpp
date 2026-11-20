@@ -470,6 +470,12 @@ CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_v
     out.unpriced.push_back(other_tier ? "tier" : "model");
     return out;
   }
+  // Under a tier, a unit the entry prices at the standard rates and not in the tier would be billed at another unit's
+  // rate, which is not the tier's price for it.
+  if (!detail::unit_outside_tier(*entry, service_tier).empty()) {
+    out.unpriced.push_back("tier");
+    return out;
+  }
   out.entry = entry->id;
   out.requested_entry = served && !by_served;
   detail::UsageRules rules;
@@ -707,6 +713,13 @@ WorstCase worst_case(const WorstCaseInput& in, const descriptor::ModelCatalogue&
       block(UnboundedBy::TierPrice, model,
             tier.empty() ? "the entry prices no unit at the standard rates"
                          : "the entry prices no unit under service tier '" + std::string(tier) + "'");
+      continue;
+    }
+    // Under a tier, a unit the entry prices at the standard rates and not in the tier would be bounded at another unit's
+    // rate, which is not the tier's price for it.
+    if (const auto outside = detail::unit_outside_tier(*entry, tier); !outside.empty()) {
+      block(UnboundedBy::TierPrice, model,
+            "the entry prices " + std::string(outside) + " at the standard rates but not under service tier '" + std::string(tier) + "'");
       continue;
     }
     // A price beyond tokens that no unit reads, for something the request carries: the bound would be a total below the bill.

@@ -909,7 +909,9 @@ void variable_rows() {
   const auto c = catalogue(R"({"version":1,"models":[
     {"id":"fixed","input_limit":5000,"pricing":{"input":"0.000001","output":"0.000002","tool:web_search":"0.01"}},
     {"id":"band","input_limit":5000,"pricing":{"input":"0.000001","input+1000":"-1","output":"0.000002","tool:web_search":"0.01","tool:web_search+1000":"-1"}},
-    {"id":"tier","input_limit":5000,"pricing":{"input":"0.000001","output":"0.000002","tool:web_search":"0.01","input/priority":"-1","output/priority":"0.000004"}},
+    {"id":"tier","input_limit":5000,"pricing":{"input":"0.000001","output":"0.000002","tool:web_search":"0.01","input/priority":"-1","output/priority":"0.000004",
+      "tool:web_search/priority":"0.01"}},
+    {"id":"tier-no-fee","input_limit":5000,"pricing":{"input":"0.000001","output":"0.000002","tool:web_search":"0.01","input/priority":"0.000002","output/priority":"0.000004"}},
     {"id":"tier-band","input_limit":5000,"pricing":{"input":"0.000001","output":"0.000002","input/priority":"0.000002","output/priority":"0.000004",
       "input/priority+1000":"-1"}},
     {"id":"tier-cache","input_limit":5000,"pricing":{"input":"0.000001","output":"0.000002","input/priority":"0.000002","output/priority":"0.000004",
@@ -981,6 +983,14 @@ void variable_rows() {
   CHECK(names(worst("tier", 500, "priority"), "input"));
   e = pricing::estimate(*c, "openai.chat", "", exact("tier"), usage(500, 10), "priority");
   CHECK(!e.total && e.unpriced == Names({"input"}));
+  // A unit the entry prices at the standard rates and not in the tier (its fee) leaves the tier without a bound and an
+  // estimate, rather than priced at another unit's rate (#207).
+  const auto outside = worst("tier-no-fee", 500, "priority");
+  CHECK(!outside.total && outside.unbounded.size() == 1 && outside.unbounded.front().by == pricing::UnboundedBy::TierPrice &&
+        outside.unbounded.front().detail == "the entry prices tool:web_search at the standard rates but not under service tier 'priority'");
+  e = pricing::estimate(*c, "openai.chat", "", exact("tier-no-fee"), usage(500, 10), "priority");
+  CHECK(!e.total && e.unpriced == Names({"tier"}));
+  CHECK(worst("tier-no-fee", 500).total && pricing::estimate(*c, "openai.chat", "", exact("tier-no-fee"), usage(500, 10)).total);
   // A variable band of a tier beside the tier's fixed row: at, below and above the band.
   const auto& tier_band = *c->entry("tier-band");
   for (const std::uint64_t input : {500u, 1000u}) {
