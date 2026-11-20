@@ -1490,6 +1490,8 @@ constexpr BuiltinBilling builtin_billing[]{
     {"files", "google", "upload", Billing::None}, {"files", "google", "get", Billing::None}, {"files", "google", "list", Billing::None},
     {"files", "google", "delete", Billing::None}, {"files", "google", "content", Billing::None}, {"files", "google", "start", Billing::None},
     {"files", "google", "part", Billing::None}, {"files", "google", "query", Billing::None}, {"files", "google", "cancel", Billing::None},
+    {"files", "openrouter", "upload", Billing::None}, {"files", "openrouter", "get", Billing::None}, {"files", "openrouter", "list", Billing::None},
+    {"files", "openrouter", "delete", Billing::None}, {"files", "openrouter", "content", Billing::None},
     {"batches", "openai", "submit", Billing::Carried}, {"batches", "openai", "get", Billing::None}, {"batches", "openai", "cancel", Billing::None},
     {"batches", "anthropic", "submit", Billing::Carried}, {"batches", "anthropic", "get", Billing::None},
     {"batches", "anthropic", "cancel", Billing::None}, {"batches", "anthropic", "delete", Billing::None},

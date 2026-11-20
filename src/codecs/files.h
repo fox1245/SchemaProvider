@@ -38,6 +38,10 @@ struct File {
   // The call that returned the file; empty for a file in a listing.
   AttemptEvidence attempt{};
   std::vector<RawWire> raw_events{};
+  // The wire shape of the policy's files fact that held the file (`openai`, `anthropic`, `google`, `openrouter`). Set by the
+  // decoder; empty for a File a host built. `media()` reads it, as no form in which a request names an OpenRouter file is
+  // documented.
+  std::string shape{};
 };
 using Outcome = std::variant<File, Failure>;
 
@@ -158,8 +162,8 @@ std::string_view operation(const Query&) noexcept;
 std::string_view operation(const Cancel&) noexcept;
 
 // The file as a chat request's reference: Google's URI, or the OpenAI or Anthropic id, with its MIME type. It is
-// refused for another origin than the file's, while the file is not active, and once it expired (`now` in Unix
-// seconds).
+// refused for another origin than the file's, for a file of the `openrouter` shape (no form that names it in a request is
+// documented), while the file is not active, and once it expired (`now` in Unix seconds).
 std::variant<Media, Error> media(const File&, std::string_view origin, std::uint64_t now);
 
 using Close = endpoints::Close;

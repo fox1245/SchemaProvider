@@ -236,6 +236,20 @@ void policy_facts() {
   CHECK(std::holds_alternative<descriptor::PolicySnapshot>(policy_with(files_fact(R"(,"max_part_bytes":67108864)"))));
   refused_at(files_fact(R"(,"max_part_bytes":0)"), "/endpoints/max_part_bytes");
   refused_at("[" + base + R"(,"max_part_bytes":1024}])", "/endpoints/max_part_bytes");
+  // A files fact's file size limit and file name rules.
+  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(policy_with(files_fact(R"(,"max_file_bytes":104857600)"))));
+  for (const char* bound : {"0", "-1", "\"big\"", "1.5"}) refused_at(files_fact(std::string(R"(,"max_file_bytes":)") + bound), "/endpoints/max_file_bytes");
+  refused_at("[" + base + R"(,"max_file_bytes":1024}])", "/endpoints/max_file_bytes");
+  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(policy_with(files_fact(R"(,"file_names":{"max_bytes":255,"folders":true,"forbidden":"<>:\"|?*\\"})"))));
+  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(policy_with(files_fact(R"(,"file_names":{"max_bytes":8})"))));
+  for (const auto& [names, pointer] : std::initializer_list<std::pair<const char*, const char*>>{
+           {R"({})", "/endpoints/file_names"}, {R"([])", "/endpoints/file_names"}, {R"({"max_bytes":0})", "/endpoints/file_names/max_bytes"},
+           {R"({"max_bytes":"8"})", "/endpoints/file_names/max_bytes"}, {R"({"max_bytes":256})", "/endpoints/file_names/max_bytes"}, {R"({"max_bytes":8,"folders":"yes"})", "/endpoints/file_names/folders"},
+           {R"({"max_bytes":8,"forbidden":7})", "/endpoints/file_names/forbidden"}, {R"({"max_bytes":8,"forbidden":"a b"})", "/endpoints/file_names/forbidden"},
+           {R"({"max_bytes":8,"forbidden":"aa"})", "/endpoints/file_names/forbidden"}, {R"({"max_bytes":8,"forbidden":"\u00e9"})", "/endpoints/file_names/forbidden"},
+           {R"({"max_bytes":8,"forbidden":"\n"})", "/endpoints/file_names/forbidden"}, {R"({"max_bytes":8,"other":1})", "/endpoints/file_names"}})
+    refused_at(files_fact(std::string(R"(,"file_names":)") + names), pointer);
+  refused_at("[" + base + R"(,"file_names":{"max_bytes":8}}])", "/endpoints/file_names");
   const auto* built_in = descriptor::builtin_policy()->endpoint("images", "https://openrouter.ai");
   CHECK(built_in && built_in->shape == "openrouter" && built_in->charge_on_accept && descriptor::endpoint_path(*built_in, "generate") == "/api/v1/images" &&
         !descriptor::endpoint_path(*built_in, "edit"));

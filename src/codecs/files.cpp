@@ -40,6 +40,7 @@ std::string google_digest(std::string_view encoded) {
 bool file_of(json::Value item, std::string_view shape, std::string_view origin, File& file) {
   if (!item.is_object()) return false;
   file.origin = std::string(origin);
+  file.shape = std::string(shape);
   if (shape == "google") {
     const auto name = item.get("name");
     if (!name.is_string() || !name.as_string().starts_with("files/") ||
@@ -153,6 +154,7 @@ std::string session_document(const Session& session, std::uint64_t part) {
 
 std::variant<Media, Error> media(const File& file, std::string_view origin, std::uint64_t now) {
   if (file.origin != origin) return reason::error(ErrorKind::InvalidRequest, reason::files::media_origin_mismatch);
+  if (file.shape == "openrouter") return reason::error(ErrorKind::InvalidRequest, reason::files::media_reference_unsupported);
   if (file.state != State::Active) return reason::error(ErrorKind::InvalidRequest, reason::files::media_not_active);
   if (file.expires_at && *file.expires_at <= now) return reason::error(ErrorKind::InvalidRequest, reason::files::media_expired);
   const std::string_view mime = file.mime;
@@ -188,6 +190,12 @@ bool Codec::buffered(std::string_view body, Close close) {
   if (!emit(RawWire{"files.context", std::make_shared<const json::Document>(std::move(std::get<json::Document>(context)))}) ||
       !emit(RawWire{"files.response", wire}))
     return false;
+  // OpenRouter names the shape of its answer, and answers other clients in OpenAI's or Anthropic's: those are not read as this one.
+  if (shape == "openrouter") {
+    const auto marker = root.get("_shape");
+    if (marker.valid() && !marker.is_null() && !(marker.is_string() && marker.as_string() == "openrouter"))
+      return fail(ErrorKind::ProtocolCorrupt, reason::files::response_shape_unexpected);
+  }
   File probe;
   if (kind_ == Kind::File) {
     if (!file_of(file_object(root, shape), shape, descriptor_.base_url(), probe)) return fail(ErrorKind::ProtocolCorrupt, reason::files::file_id_required);
@@ -201,13 +209,20 @@ bool Codec::buffered(std::string_view body, Close close) {
     for (const char* cursor : {"nextPageToken", "next_page", "last_id"})
       if (!optional_member(root.get(cursor), is_string)) return fail(ErrorKind::ProtocolCorrupt, reason::files::page_cursor_invalid);
     // OpenAI says more follow after its last id: a page that says so without one would read as the last page.
-    if (shape != "google" && !root.get("next_page").valid() && root.get("has_more").is_bool() && root.get("has_more").as_bool() &&
+    if (shape != "google" && shape != "openrouter" && !root.get("next_page").valid() && root.get("has_more").is_bool() && root.get("has_more").as_bool() &&
         !(root.get("last_id").is_string() && !root.get("last_id").as_string().empty()))
       return fail(ErrorKind::ProtocolCorrupt, reason::files::page_cursor_missing);
+    // OpenRouter's pages always carry `last_id`, a file id that is not the cursor: more pages follow only if `cursor` names them.
+    if (shape == "openrouter") {
+      if (!optional_member(root.get("cursor"), is_string)) return fail(ErrorKind::ProtocolCorrupt, reason::files::page_cursor_invalid);
+      if (!root.get("has_more").is_bool()) return fail(ErrorKind::ProtocolCorrupt, reason::files::page_more_required);
+      if (root.get("has_more").as_bool() && !(root.get("cursor").is_string() && !root.get("cursor").as_string().empty()))
+        return fail(ErrorKind::ProtocolCorrupt, reason::files::page_cursor_missing);
+    }
   } else {
     // OpenAI says `deleted`, Anthropic answers a `file_deleted` object, Google an empty one.
     const bool refused = (shape == "openai" && !(root.get("deleted").is_bool() && root.get("deleted").as_bool())) ||
-                         (shape == "anthropic" && text_of(root.get("type")) != "file_deleted");
+                         ((shape == "anthropic" || shape == "openrouter") && text_of(root.get("type")) != "file_deleted");
     if (refused) return fail(ErrorKind::ProtocolCorrupt, reason::files::delete_unconfirmed);
   }
   if (!emit(Begin{}) || !emit(MessageBegin{{0}, std::nullopt, Role::Assistant, nullptr})) return false;
@@ -348,8 +363,11 @@ PageOutcome typed_page(const sp::Outcome& internal) {
         file.raw = copy(item);
         page.files.push_back(std::move(file));
       }
-    // Google and Anthropic name the next page; OpenAI says whether there is one after the last id.
-    if (context->shape == "google") page.next = text_of(root.get("nextPageToken"));
+    // Google and Anthropic name the next page; OpenAI says whether there is one after the last id; OpenRouter gives its
+    // cursor when more follow.
+    if (context->shape == "openrouter") {
+      if (root.get("has_more").is_bool() && root.get("has_more").as_bool()) page.next = text_of(root.get("cursor"));
+    } else if (context->shape == "google") page.next = text_of(root.get("nextPageToken"));
     else if (root.get("next_page").valid()) page.next = text_of(root.get("next_page"));
     else if (root.get("has_more").is_bool() && root.get("has_more").as_bool()) page.next = text_of(root.get("last_id"));
   }

@@ -777,7 +777,7 @@ class PolicyLoader {
           if (endpoint == "files" && shape == "google") return {"upload", "get", "list", "delete", "content", "start"};
           // A realtime session (D8): the WebSocket path it connects to.
           if (endpoint == "realtime" && (shape == "google" || shape == "openai")) return {"connect"};
-          if (endpoint == "files" && shape == "anthropic") return {"upload", "get", "list", "delete", "content"};
+          if (endpoint == "files" && (shape == "anthropic" || shape == "openrouter")) return {"upload", "get", "list", "delete", "content"};
           // Batches: OpenAI reads results from its files, Anthropic serves them itself.
           if (endpoint == "batches" && shape == "openai") return {"submit", "get", "cancel"};
           if (endpoint == "batches" && shape == "anthropic") return {"submit", "get", "cancel", "delete", "results"};
@@ -820,7 +820,7 @@ class PolicyLoader {
           fail("/endpoints/billing", "none, model, carried or unpriced");
         };
         for (auto e : endpoints.elements()) {
-          closed(e, {"endpoint","shape","origins","paths"}, "/endpoints", {"options","auth","charge_on_accept","headers","keep","audio","close_codes","max_response_bytes","accepted_audio","max_part_bytes","billing","carried_tier","max_items","output_cap","max_results","asset_formats"});
+          closed(e, {"endpoint","shape","origins","paths"}, "/endpoints", {"options","auth","charge_on_accept","headers","keep","audio","close_codes","max_response_bytes","accepted_audio","max_part_bytes","billing","carried_tier","max_items","output_cap","max_results","asset_formats","max_file_bytes","file_names"});
           EndpointFact fact{text(e.get("endpoint"), "/endpoints/endpoint"), text(e.get("shape"), "/endpoints/shape"),
                             strings(e.get("origins"), "/endpoints/origins")};
           const auto operations = operations_of(fact.endpoint, fact.shape);
@@ -863,6 +863,31 @@ class PolicyLoader {
             fact.max_part_bytes = integer(e.get("max_part_bytes"), "/endpoints/max_part_bytes");
             if (fact.endpoint != "files" || !fact.max_part_bytes || fact.max_part_bytes > std::numeric_limits<std::size_t>::max())
               fail("/endpoints/max_part_bytes", "a positive size in bytes on a files fact");
+          }
+          if (e.get("max_file_bytes").valid()) {
+            fact.max_file_bytes = integer(e.get("max_file_bytes"), "/endpoints/max_file_bytes");
+            if (fact.endpoint != "files" || !fact.max_file_bytes || fact.max_file_bytes > std::numeric_limits<std::size_t>::max())
+              fail("/endpoints/max_file_bytes", "a positive size in bytes on a files fact");
+          }
+          if (const auto names = e.get("file_names"); names.valid()) {
+            if (fact.endpoint != "files") fail("/endpoints/file_names", "a files fact");
+            closed(names, {"max_bytes"}, "/endpoints/file_names", {"folders", "forbidden"});
+            FileNamesFact rules;
+            rules.max_bytes = integer(names.get("max_bytes"), "/endpoints/file_names/max_bytes");
+            // The encoder's own bound on a file name is 255 bytes: a fact may state a lower one.
+            if (!rules.max_bytes || rules.max_bytes > 255) fail("/endpoints/file_names/max_bytes", "a length from 1 to 255 bytes");
+            if (names.get("folders").valid()) rules.folders = boolean(names.get("folders"), "/endpoints/file_names/folders");
+            if (const auto forbidden = names.get("forbidden"); forbidden.valid()) {
+              if (!forbidden.is_string()) fail("/endpoints/file_names/forbidden", "a string of printable ASCII characters");
+              rules.forbidden = std::string(forbidden.as_string());
+              std::string seen;
+              for (const unsigned char c : rules.forbidden) {
+                if (c <= 0x20 || c >= 0x7f || seen.find(static_cast<char>(c)) != std::string::npos)
+                  fail("/endpoints/file_names/forbidden", "a string of distinct printable ASCII characters");
+                seen += static_cast<char>(c);
+              }
+            }
+            fact.file_names = std::move(rules);
           }
           if (const auto audio = e.get("accepted_audio"); audio.valid()) {
             if (fact.endpoint != "transcription") fail("/endpoints/accepted_audio", "a transcription fact");
