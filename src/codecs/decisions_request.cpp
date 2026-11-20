@@ -73,11 +73,11 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
     for (const auto& asset : request.assets) {
       if (asset.key.empty() || !media_input::valid_utf8(asset.key)) return bad(reason::decisions_request::asset_key_invalid);
       if (!keys.insert(asset.key).second) return bad(reason::decisions_request::asset_key_duplicate);
-      // The member holds inline images; PNG and JPEG are the formats it names.
+      // The member holds inline images, of the types the fact names a format for.
       if (asset.media.kind != MediaKind::Image || asset.media.source != MediaSource::Inline)
         return reason::error(ErrorKind::Unsupported, reason::decisions_request::asset_unsupported);
       if (auto error = media_input::admit(descriptor, asset.media)) return *error;
-      if (!media_input::asset_image_format(asset.media.mime)) return reason::error(ErrorKind::Unsupported, reason::decisions_request::asset_unsupported);
+      if (!media_input::asset_format(*fact, asset.media.mime)) return reason::error(ErrorKind::Unsupported, reason::decisions_request::asset_unsupported);
     }
   }
   if (request.extensions) {
@@ -146,7 +146,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
       const auto& asset = request.assets[i];
       if (i) out.raw(",");
       // An admitted inline image has canonical base64 and a MIME type that has a format name.
-      out.quoted(asset.key).raw(":{\"type\":\"image\",\"format\":").quoted(*media_input::asset_image_format(asset.media.mime))
+      out.quoted(asset.key).raw(":{\"type\":\"image\",\"format\":").quoted(*media_input::asset_format(*fact, asset.media.mime))
           .raw(",\"data_base64\":").quoted(*asset.media.data).raw("}");
     }
     out.raw("}");

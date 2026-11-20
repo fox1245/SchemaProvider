@@ -210,6 +210,20 @@ void policy_facts() {
     refused_at(transcription(std::string(R"("accepted_audio":)") + audio), pointer);
   for (const char* limit : {"0", "50331649", "\"1\""})
     refused_at(transcription(std::string(R"("accepted_audio":{"types":{"audio/wav":"wav"},"max_bytes":)") + limit + "}"), "/endpoints/accepted_audio/max_bytes");
+  // The image types a decisions fact's `assets` member takes, each with the format it names.
+  const auto decisions_fact = [](std::string_view endpoint, std::string_view shape, std::string_view origin, std::string_view member) {
+    return "[" + std::string(R"({"endpoint":")") + std::string(endpoint) + R"(","shape":")" + std::string(shape) + R"(","origins":[")" + std::string(origin) +
+           R"("],"paths":{"decide":"/api/alpha/decisions"},)" + std::string(member) + "}]";
+  };
+  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(policy_with(decisions_fact("decisions", "openrouter", "https://openrouter.ai", R"("asset_formats":{"image/webp":"webp","image/png":"png"})"))));
+  for (const auto& [formats, pointer] : std::initializer_list<std::pair<const char*, const char*>>{
+           {R"({})", "/endpoints/asset_formats"}, {R"({"audio/wav":"wav"})", "/endpoints/asset_formats"},
+           {R"({"Image/PNG":"png"})", "/endpoints/asset_formats"}, {R"({"image/png":"PNG"})", "/endpoints/asset_formats"},
+           {R"({"image/png":""})", "/endpoints/asset_formats"}, {R"({"image/png":"a.b"})", "/endpoints/asset_formats"},
+           {R"(["image/png"])", "/endpoints/asset_formats"}, {R"({"image/png":7})", "/endpoints/asset_formats"}})
+    refused_at(decisions_fact("decisions", "openrouter", "https://openrouter.ai", std::string(R"("asset_formats":)") + formats), pointer);
+  refused_at(decisions_fact("decisions", "openai", "https://api.openai.com", R"("asset_formats":{"image/png":"png"})"), "/endpoints/asset_formats");
+  refused_at("[" + base + R"(,"asset_formats":{"image/png":"png"}}])", "/endpoints/asset_formats");
   // `response_format` is an option of the transcription fact, not a member the SDK owns.
   CHECK(std::holds_alternative<descriptor::PolicySnapshot>(policy_with(transcription(R"("options":{"type":"object","properties":{"response_format":{"type":"enum","values":["json"]}}})"))));
   const auto files_fact = [](std::string_view member) {
