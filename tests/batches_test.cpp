@@ -3,6 +3,7 @@
 // of 2026-10-19 to two-item batches, with one failed line of each kind added.
 // Usage: sp_batches_tests <fixture directory>
 #include "codecs/batches.h"
+#include "codecs/batches_internal.h"
 #include "descriptor/presets.h"
 #include "json/json.h"
 #include <filesystem>
@@ -155,6 +156,43 @@ batches::Outcome batch_of(const descriptor::ValidatedDescriptor& d, std::string_
   CHECK(accumulator.outcome());
   return batches::typed(*accumulator.outcome());
 }
+// The caps each item's family encoder reads, kept from the one encoding a submit sends, and the bytes and headers of
+// the public encoders unchanged by it.
+void captured_caps() {
+  const auto same = [](const endpoints::Encoded& a, const endpoints::Encoded& b) {
+    return a.path == b.path && a.body == b.body && a.model == b.model && a.headers == b.headers && a.method == b.method &&
+           a.charge_on_accept == b.charge_on_accept && a.content_type == b.content_type;
+  };
+  const auto caps_of = [](const std::vector<batches::detail::ItemCaps>& items) {
+    std::string out;
+    const auto number = [](const std::optional<std::uint64_t>& value) { return value ? std::to_string(*value) : std::string("-"); };
+    for (const auto& item : items) out += (out.empty() ? "" : " ") + item.custom_id + "/" + item.model + "/" + number(item.max_output_tokens) + "/" + number(item.model_invocation_limit);
+    return out;
+  };
+  const batches::Submit inline_anthropic{{{"a-1", messages::Request::simple("claude-haiku-4-5", "Say: alpha", 16)},
+                                          {"a-2", messages::Request::simple("claude-haiku-4-5", "Say: beta", 32)}}};
+  auto anthropic_submit = std::get<batches::detail::EncodedSubmit>(batches::detail::encode_submit(anthropic(), inline_anthropic));
+  CHECK(same(anthropic_submit.encoded, encoded(anthropic(), inline_anthropic)));
+  CHECK(caps_of(anthropic_submit.items) == "a-1/claude-haiku-4-5/16/1 a-2/claude-haiku-4-5/32/1");
+  const batches::Submit inline_google{{{"g-1", gemini::Request::simple("gemini-3.5-flash-lite", "Say: alpha", 8)},
+                                       {"g-2", gemini::Request::simple("gemini-3.5-flash-lite", "Say: beta")}}};
+  auto google_submit = std::get<batches::detail::EncodedSubmit>(batches::detail::encode_submit(google(), inline_google));
+  CHECK(same(google_submit.encoded, encoded(google(), inline_google)));
+  CHECK(caps_of(google_submit.items).starts_with("g-1/gemini-3.5-flash-lite/8/1 g-2/gemini-3.5-flash-lite/"));
+  // OpenAI's items are in the file: the submit carries none.
+  const batches::Submit from_file{{}, "file-abc", "/v1/responses"};
+  auto openai_submit = std::get<batches::detail::EncodedSubmit>(batches::detail::encode_submit(openai_responses(), from_file));
+  CHECK(same(openai_submit.encoded, encoded(openai_responses(), from_file)) && openai_submit.items.empty());
+  // The input file: the same bytes as jsonl, with each item's caps.
+  const std::vector<batches::Item> items{{"o-1", responses_item("Say: alpha")}, {"o-2", responses::Request::simple("gpt-5-nano", "Say: beta", 128)}};
+  auto lines = std::get<batches::detail::EncodedLines>(batches::detail::encode_lines(openai_responses(), items));
+  CHECK(lines.text == std::get<std::string>(batches::jsonl(openai_responses(), items)));
+  CHECK(caps_of(lines.items) == "o-1/gpt-5-nano/64/1 o-2/gpt-5-nano/128/1");
+  // A refusal is the public encoder's.
+  CHECK(std::get<Error>(batches::detail::encode_submit(anthropic(), batches::Submit{})).safe_message == "a batch has items");
+  CHECK(std::get<Error>(batches::detail::encode_lines(anthropic(), items)).safe_message == "an OpenAI batch file holds Chat or Responses requests");
+}
+
 void batch_objects() {
   const auto openai = std::get<batches::Batch>(batch_of(openai_chat(), read("openai-batch.json")));
   CHECK(openai.id == "batch_6ad6245d717c81908adf45db42ffb5b1" && openai.status == jobs::Status::Completed && openai.counts.total == 2 &&
@@ -208,6 +246,8 @@ void result_lines() {
     const auto decoded = std::get<batches::Line>(batches::decode(anthropic(), messages::Request::simple("claude-haiku-4-5", i ? "Say: beta" : "Say: alpha", 16), claude[i]));
     CHECK(decoded.custom_id == (i ? "a-2" : "a-1") && text_of(decoded.outcome).find(i ? "beta" : "alpha") != std::string::npos);
     CHECK(std::get<Completion>(decoded.outcome).usage.output_total->value == 4);
+    // The model the request named, which a batch estimate prices the line by when the served one has no entry.
+    CHECK(std::get<Completion>(decoded.outcome).model.requested == "claude-haiku-4-5");
   }
   const auto request = messages::Request::simple("claude-haiku-4-5", "x", 16);
   CHECK(std::get<Failure>(std::get<batches::Line>(batches::decode(anthropic(), request, claude[2])).outcome).error.reason == "batches.line.failed");
@@ -230,7 +270,7 @@ int main(int argc, char** argv) {
   try {
     if (argc != 2) throw std::runtime_error("usage: sp_batches_tests <fixture directory>");
     fixtures = argv[1];
-    requests(); batch_objects(); result_lines();
+    requests(); captured_caps(); batch_objects(); result_lines();
     std::cout << "batch properties passed\n";
     return 0;
   } catch (const std::exception& error) { std::cerr << "batch test failed: " << error.what() << '\n'; return 1; }
