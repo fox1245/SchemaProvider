@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <initializer_list>
 #include <limits>
+#include <vector>
 
 namespace sp::canary {
 namespace {
@@ -81,7 +82,7 @@ Profile parse_profile(std::string_view source, const qualification::Catalog& cat
   auto root = doc->root();
   keys(root, {"version", "provider", "model", "origin", "input_bound_kind", "max_input_tokens",
       "max_output_tokens", "input_micro_usd_per_million", "output_micro_usd_per_million",
-      "call_cap", "token_cap", "micro_usd_cap", "thinking_budget", "provenance"});
+      "call_cap", "token_cap", "micro_usd_cap", "thinking_budget", "catalog_family", "provenance"});
   if (number(root, "version") != 1) fail();
   Profile result;
   auto provider = text(root, "provider", 32);
@@ -106,6 +107,7 @@ Profile parse_profile(std::string_view source, const qualification::Catalog& cat
   const auto expected = openai_provider ? "https://api.openai.com" :
       messages_provider ? "https://api.anthropic.com" : "https://generativelanguage.googleapis.com";
   result.loopback_ = loopback(result.origin_);
+  if (root.get("catalog_family").valid()) result.catalog_family_ = text(root, "catalog_family", 32);
   if (result.origin_ != expected && !(allow_test_loopback && result.loopback_)) fail();
   if (text(root, "input_bound_kind", 32) != "model_context_window") fail();
   auto& b = result.bounds_;
@@ -128,7 +130,10 @@ Profile parse_profile(std::string_view source, const qualification::Catalog& cat
   // Live campaign targets take their model-window/rate floors from the model
   // catalogue. A profile may over-reserve, but cannot substitute a character-token guess.
   if (!result.loopback_) {
-    const auto* price = catalog.find(result.model_, family(result.provider_));
+    // A declared catalogue family must be one the catalogue lists for the model; the
+    // same floors then apply to it as to the family the requests are sent with.
+    const auto* price = catalog.find(result.model_,
+        result.catalog_family_.empty() ? family(result.provider_) : std::string_view(result.catalog_family_));
     if (!price) fail();
     const bool long_context = price->long_context_threshold && b.input_tokens > *price->long_context_threshold;
     const auto writes = std::max(price->cache_write_5m_rate.value_or(0), price->cache_write_1h_rate.value_or(0));
@@ -144,8 +149,10 @@ Profile parse_profile(std::string_view source, const qualification::Catalog& cat
         b.output_rate < scaled(price->output_rate, long_context ? price->long_output_numerator : 2)) fail();
   }
   auto provenance = root.get("provenance");
-  keys(provenance, {"model_url", "pricing_url", "verified_at"});
-  for (auto key : {"model_url", "pricing_url"}) {
+  keys(provenance, {"model_url", "pricing_url", "compatibility_url", "verified_at"});
+  std::vector<const char*> sources{"model_url", "pricing_url"};
+  if (provenance.get("compatibility_url").valid()) sources.push_back("compatibility_url");
+  for (auto key : sources) {
     auto url = text(provenance, key, 2048);
     const bool openai = url.starts_with("https://developers.openai.com/") || url.starts_with("https://platform.openai.com/");
     const bool anthropic = url.starts_with("https://platform.claude.com/") || url.starts_with("https://docs.anthropic.com/");

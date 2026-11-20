@@ -24,11 +24,15 @@ class Profile {
   const std::string& origin() const { return origin_; }
   const Bounds& bounds() const { return bounds_; }
   std::uint64_t thinking_budget() const { return thinking_budget_; }
+  // The family whose catalogue record prices this profile. Empty: the family the
+  // runner sends the requests with. A profile declares one when the surface it
+  // reaches at its origin is priced like another catalogued surface of the model.
+  const std::string& catalog_family() const { return catalog_family_; }
   bool loopback() const { return loopback_; }
  private:
   Profile() = default;
   Provider provider_{};
-  std::string model_, origin_;
+  std::string model_, origin_, catalog_family_;
   Bounds bounds_;
   std::uint64_t thinking_budget_{};
   bool loopback_{};

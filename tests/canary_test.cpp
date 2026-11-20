@@ -40,16 +40,13 @@ std::shared_ptr<const sp::qualification::Catalog> catalog_with(Replacements edit
 }
 void shipped_profiles(const std::filesystem::path& source) {
   const auto directory = source / "tools/canary_profiles";
-  // The process Gemini campaign is sent and metered as openai.chat, and the catalogue
-  // lists its model only for the Google families, so that profile is refused: the
-  // meter would deny it at admission too (#197). Every other shipped profile parses.
-  constexpr std::string_view uncatalogued_family = "gemini.json";
+  // The process Gemini campaign is sent through the OpenAI-compatible endpoint, and the profile
+  // declares the catalogue family that prices it (#197): every shipped profile parses.
   std::size_t count = 0;
   for (const auto& entry : std::filesystem::directory_iterator(directory)) {
     const auto name = entry.path().filename().string();
     const auto text = read_profile_file(entry.path().string());
-    require(admitted([&] { (void)parse_profile(text, embedded_catalog()); }) == (name != uncatalogued_family),
-        "shipped profile admission changed: " + name);
+    require(admitted([&] { (void)parse_profile(text, embedded_catalog()); }), "shipped profile refused: " + name);
     ++count;
   }
   require(count == 9, "shipped profile set changed: " + std::to_string(count));
@@ -57,9 +54,29 @@ void shipped_profiles(const std::filesystem::path& source) {
   const auto accepts = [&](const sp::qualification::Catalog& catalog, std::string_view name) {
     return admitted([&] { (void)parse_profile(load(name), catalog); });
   };
+  // A profile without the member is priced under the family it is sent with, as before: the
+  // catalogue lists the Gemini model only for the Google families, so it is refused until it
+  // lists it for openai.chat as well.
+  auto undeclared = load("gemini.json");
+  const std::string_view declaration = "  \"catalog_family\": \"google.generate\",\n";
+  require(undeclared.find(declaration) != std::string::npos, "Gemini profile lost its catalogue family");
+  undeclared.erase(undeclared.find(declaration), declaration.size());
   const auto gemini_chat = catalog_with({{"\"families\":[\"google.generate\",\"google.interactions\"]",
                                           "\"families\":[\"google.generate\",\"google.interactions\",\"openai.chat\"]"}});
-  require(accepts(*gemini_chat, uncatalogued_family), "Gemini process profile refused although catalogued for its family");
+  require(!admitted([&] { (void)parse_profile(undeclared, embedded_catalog()); }), "undeclared family priced under another family");
+  require(admitted([&] { (void)parse_profile(undeclared, *gemini_chat); }), "undeclared family not priced under the sending family");
+  // A declared family must be one the catalogue lists for the model, even when the sending family is
+  // listed: the declaration, not the sending family, decides the record.
+  const auto sending_only = catalog_with({{"\"families\":[\"google.generate\",\"google.interactions\"]",
+                                           "\"families\":[\"openai.chat\",\"google.interactions\"]"}});
+  require(admitted([&] { (void)parse_profile(undeclared, *sending_only); }) && !accepts(*sending_only, "gemini.json"),
+      "declared family not required to be listed for the model");
+  // Malformed declarations are refused against a catalogue that admits the undeclared profile.
+  for (const auto* bogus : {"\"catalog_family\": \"not.a.family\",", "\"catalog_family\": 7,", "\"catalog_family\": \"\","}) {
+    auto declared = std::string(undeclared);
+    declared.insert(declared.find("\"provenance\""), std::string(bogus) + "\n  ");
+    require(!admitted([&] { (void)parse_profile(declared, *gemini_chat); }), "bad catalogue family admitted");
+  }
   // A live profile must name a catalogued model; the model id is not compiled in.
   auto renamed = load("openai-responses.json");
   renamed.replace(renamed.find("gpt-6-luna"), std::string_view("gpt-6-luna").size(), "gpt-6-other");
@@ -90,7 +107,9 @@ void shipped_profiles(const std::filesystem::path& source) {
       "implicit cache writes not counted in the vision input floor");
   const auto gemini = catalog_with({{"\"output_rate\":400000,", "\"output_rate\":400001,"}});
   require(!accepts(*gemini, "vision-gemini.json") && !accepts(*gemini, "vision-interactions.json") &&
-      accepts(*gemini_chat, "vision-gemini.json"), "Gemini output floor not derived from the catalogue");
+      accepts(embedded_catalog(), "vision-gemini.json") && !accepts(*gemini, "gemini.json") &&
+      accepts(embedded_catalog(), "gemini.json"),
+      "Gemini output floor not derived from the catalogue record of the declared family");
   // Window floors: the context window for vision campaigns, the input maximum otherwise.
   const auto window = catalog_with({{"\"context_window\":1050000", "\"context_window\":1050001"}});
   require(!accepts(*window, "vision-chat.json") && accepts(*window, "openai.json"), "vision window floor not the context window");
@@ -193,6 +212,40 @@ void replay(runtime_test::Peer& peer, const std::filesystem::path& source) {
           !result.cases[5].native_complete && result.cases[5].reason == Reason::NegativeAccepted &&
           result.cases[4].usage_stage == sp::UsageStage::Final && result.cases[5].usage_stage == sp::UsageStage::Final,
           "accepted Responses controls lost native-free final outcomes or positive authority");
+    campaign.preserved(); private_report(report_json(result));
+  }
+}
+// The Gemini process campaign is sent as openai.chat; its profile declares the family the
+// catalogue prices it under, and the meter admits the call under that declared family (#197).
+void declared_catalog_family(runtime_test::Peer& peer, const std::filesystem::path& source) {
+  const auto google = "https://ai.google.dev/gemini-api/docs/pricing";
+  const auto gemini_profile = [&](const std::string& model, bool declare) {
+    auto text = profile("gemini", model, peer.port);
+    text.replace(text.find("\"max_output_tokens\":2048"), std::string_view("\"max_output_tokens\":2048").size(), "\"max_output_tokens\":128");
+    const auto openai_url = std::string("\"https://developers.openai.com/api/docs/pricing\"");
+    for (auto at = text.find(openai_url); at != std::string::npos; at = text.find(openai_url))
+      text.replace(at, openai_url.size(), sp::json::quote(google));
+    if (declare) text.insert(text.find("\"provenance\""), "\"catalog_family\":\"google.generate\",");
+    return text;
+  };
+  for (const bool declare : {false, true}) {
+    const auto model = peer.arm("known-usage"); Campaign campaign(source, {model});
+    auto catalog = qualification_test::load(campaign.root / "config/model-catalog.json");
+    const std::string_view all = "\"families\":[\"openai.chat\",\"openai.responses\",\"anthropic.messages\",\"google.generate\",\"google.interactions\"]";
+    const auto at = catalog.find(all);
+    require(at != std::string::npos, "campaign catalogue anchor missing");
+    catalog.replace(at, all.size(), "\"families\":[\"google.generate\",\"google.interactions\"]");
+    qualification_test::save(campaign.root / "config/model-catalog.json", catalog);
+    const auto result = run(parse_profile(gemini_profile(model, declare), embedded_catalog(), true), campaign.root.string(), secret);
+    if (declare) {
+      require(result.cases.size() == 2 && !result.cases[0].admission_denial && result.cases[0].state != State::NotRun &&
+          result.meter_totals && result.meter_totals->calls == 2, "declared catalogue family not admitted by the meter");
+      wire_count(peer, model, 2, 0, result);
+    } else {
+      require(result.cases[0].admission_denial == sp::qualification::Denial::UnknownModel &&
+          result.cases[0].state == State::NotRun, "undeclared family priced under another family");
+      wire_count(peer, model, 0, 0, result);
+    }
     campaign.preserved(); private_report(report_json(result));
   }
 }
@@ -353,7 +406,7 @@ int main(int argc, char** argv) {
     runtime_test::Peer peer(argv[1], argv[2]);
     shipped_profiles(source);
     profile_and_credential_boundaries(source);
-    replay(peer, source); settlements(peer, source); prior_attempt_holds(source); invalid_and_restart(peer, source); money_denial(peer, source); cli_repeat(peer, source, argv[3]); cli_catalogue_source(source, argv[3]);
+    replay(peer, source); settlements(peer, source); declared_catalog_family(peer, source); prior_attempt_holds(source); invalid_and_restart(peer, source); money_denial(peer, source); cli_repeat(peer, source, argv[3]); cli_catalogue_source(source, argv[3]);
     std::cout << "prepared metered canary behavior passed\n"; return 0;
   } catch (const std::exception& error) {
     std::cerr << "canary behavior failed: " << error.what() << '\n'; return 1;
