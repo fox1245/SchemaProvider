@@ -1,4 +1,5 @@
 #include "codecs/embeddings.h"
+#include "codecs/reason.h"
 #include "codecs/media_input.h"
 #include "descriptor/policy.h"
 #include "descriptor/value_schema.h"
@@ -8,7 +9,7 @@
 
 namespace sp::embeddings {
 namespace {
-Error bad(std::string message) { return Error{ErrorKind::InvalidRequest, std::move(message)}; }
+Error bad(const reason::Reason& message) { return reason::error(ErrorKind::InvalidRequest, message); }
 bool token(std::string_view value, bool upper_case = true) {
   return !value.empty() && value.size() <= 128 && std::all_of(value.begin(), value.end(), [&](char c) {
     return (c >= 'a' && c <= 'z') || (upper_case && c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
@@ -29,34 +30,34 @@ EndpointFacts endpoint_facts(const descriptor::ValidatedDescriptor& descriptor, 
 }
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
   const auto* fact = descriptor.policy()->endpoint("embeddings", descriptor.base_url());
-  if (!fact) return Error{ErrorKind::Unsupported, "embedding endpoints are not admitted at this origin"};
+  if (!fact) return reason::error(ErrorKind::Unsupported, reason::embeddings_request::endpoint_not_admitted);
   const auto path = descriptor::endpoint_path(*fact, operation(request));
-  if (!path) return Error{ErrorKind::Unsupported, "the embedding endpoint has no path"};
+  if (!path) return reason::error(ErrorKind::Unsupported, reason::embeddings_request::path_missing);
   const bool google = fact->shape == "google", openai = fact->shape == "openai";
-  if (request.model.empty() || request.inputs.empty()) return bad("embeddings need a model and inputs");
+  if (request.model.empty() || request.inputs.empty()) return bad(reason::embeddings_request::model_and_inputs_required);
   // Google names the model in the path.
-  if (google && !token(request.model)) return bad("a Google embedding model is a path segment");
+  if (google && !token(request.model)) return bad(reason::embeddings_request::model_segment_invalid);
   // A model takes the place of {model} in the path through the check every path shares (descriptor::model_path).
   auto resolved = descriptor::model_path(*path, request.model);
-  if (resolved.empty()) return bad("a model name cannot take the place of {model} in the endpoint's path");
-  if (request.dimensions && !*request.dimensions) return bad("embedding dimensions must be positive");
-  if (request.task && (openai || !token(*request.task))) return openai ? Error{ErrorKind::Unsupported, "OpenAI embeddings take no task"} : bad("an embedding task is a token");
+  if (resolved.empty()) return bad(reason::embeddings_request::model_path);
+  if (request.dimensions && !*request.dimensions) return bad(reason::embeddings_request::dimensions_invalid);
+  if (request.task && (openai || !token(*request.task))) return openai ? reason::error(ErrorKind::Unsupported, reason::embeddings_request::task_unsupported) : bad(reason::embeddings_request::task_invalid);
   bool media = false;
   for (const auto& input : request.inputs) {
-    if (input.text.empty() && input.media.empty()) return bad("an embedding input has text or media");
+    if (input.text.empty() && input.media.empty()) return bad(reason::embeddings_request::input_empty);
     for (const auto& item : input.media) {
       media = true;
-      if (openai) return Error{ErrorKind::Unsupported, "OpenAI embeddings take text only"};
-      if (!google && item.kind != MediaKind::Image) return Error{ErrorKind::Unsupported, "OpenRouter embeddings take images as media"};
-      if (google && item.source == MediaSource::Url) return Error{ErrorKind::Unsupported, "Google embeddings take inline or uploaded media"};
+      if (openai) return reason::error(ErrorKind::Unsupported, reason::embeddings_request::media_unsupported);
+      if (!google && item.kind != MediaKind::Image) return reason::error(ErrorKind::Unsupported, reason::embeddings_request::media_kind_unsupported);
+      if (google && item.source == MediaSource::Url) return reason::error(ErrorKind::Unsupported, reason::embeddings_request::media_source_unsupported);
       if (item.source != MediaSource::File) { if (auto error = media_input::admit(descriptor, item)) return *error; }
-      else if (item.reference.empty()) return bad("an embedding media file names its reference");
+      else if (item.reference.empty()) return bad(reason::embeddings_request::media_reference_missing);
     }
   }
   if (request.extensions) {
-    if (!fact->options) return Error{ErrorKind::Unsupported, "the embedding endpoint admits no options"};
+    if (!fact->options) return reason::error(ErrorKind::Unsupported, reason::embeddings_request::options_not_admitted);
     if (!request.extensions->root().is_object() || descriptor::check_value(*fact->options, request.extensions->root()))
-      return bad("embedding options do not match the policy's schema");
+      return bad(reason::embeddings_request::options_invalid);
   }
   const auto& resources = descriptor.policy()->resources();
   std::string body;
@@ -105,7 +106,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   }
   if (request.extensions) for (auto member : request.extensions->root().members()) out.raw(",").quoted(member.key).raw(":").value(member.value, 1);
   out.raw("}");
-  if (!out.ok()) return Error{ErrorKind::ResourceLimit, "embedding request exceeds JSON limits"};
+  if (!out.ok()) return reason::error(ErrorKind::ResourceLimit, reason::embeddings_request::json_limit);
   Encoded encoded{std::move(resolved), std::move(body), request.model, fact->charge_on_accept, fact->auth};
   endpoints::add_fact_headers(encoded, *fact);
   encoded.context.inputs = request.inputs.size();
