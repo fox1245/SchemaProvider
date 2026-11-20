@@ -620,6 +620,15 @@ pricing::EndpointBound response_bound(const descriptor::ValidatedDescriptor& des
   response.thinking_beside_output = fact->shape == "google";
   response.input_tokens = input.input_tokens;
   response.audio_seconds = input.audio_seconds;
-  return pricing::realtime_response_bound(response, catalogue);
+  out = pricing::realtime_response_bound(response, catalogue);
+  // A transcript of the user's audio bills a transcription beside the response (OpenAI's `transcription_model`), and
+  // the session commits no turn for it, so no usage of it reaches the host.
+  if (setup.input_transcription) {
+    out.total.reset();
+    out.lines.clear();
+    out.entry.clear();
+    out.unbounded.push_back({pricing::UnboundedBy::Unmodeled, "input_transcription", "the session bills a transcription of the user's audio that no usage reports"});
+  }
+  return out;
 }
 }  // namespace sp::realtime
