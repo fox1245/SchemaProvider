@@ -11,6 +11,7 @@
 #include <variant>
 #include <vector>
 
+namespace sp::reason { struct Reason; }
 namespace sp::decisions {
 // What a question asks: how likely a statement is (OpenRouter calls it `noul`), which option applies, which level a
 // score reaches, or (OpenRouter) where something is in an image.
@@ -81,7 +82,7 @@ class Codec final : public endpoints::Codec {
   Codec(const descriptor::ValidatedDescriptor&, Accumulator&, std::string requested, SemanticLimits = {});
   bool buffered(std::string_view body, Close close) override;
  private:
-  bool fail(ErrorKind, std::string);
+  bool fail(ErrorKind, const reason::Reason&);
   bool emit(const Event&);
   const descriptor::ValidatedDescriptor& descriptor_;
   Accumulator& accumulator_;
