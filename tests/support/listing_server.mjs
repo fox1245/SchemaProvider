@@ -53,9 +53,19 @@ const server = http.createServer((req, res) => {
   const [, scenario, ...rest] = url.pathname.split('/');
   const path = '/' + rest.join('/');
   const h = req.headers;
-  const counts = (seen[scenario] ??= { total: 0, endpoints: [] });
+  const counts = (seen[scenario] ??= { total: 0, endpoints: [], headers: [] });
   counts.total += 1;
+  // The headers of each request as sent, names and order as received, without the `host` the transport adds.
+  const sent = [];
+  for (let i = 0; i + 1 < req.rawHeaders.length; i += 2) if (req.rawHeaders[i].toLowerCase() !== 'host') sent.push([req.rawHeaders[i], req.rawHeaders[i + 1]]);
+  counts.headers.push(sent);
   if (path.startsWith(endpointsPrefix) && path.endsWith(endpointsSuffix)) counts.endpoints.push(path.slice(endpointsPrefix.length, -endpointsSuffix.length));
+  // Scenarios `capture-*` accept any credential and serve no listing but OpenRouter's model list, so a test reads
+  // the headers a refresh sent: the listing request, and for OpenRouter the endpoints request that follows it.
+  if (scenario.startsWith('capture-')) {
+    if (scenario.startsWith('capture-openrouter') && path === '/api/v1/models') return send(res, 200, openrouter(1, false));
+    return send(res, 404, {});
+  }
   if (ceilings(scenario, path, url, h, res)) return;
   if (listingExtras(scenario, path, h, res)) return;
   if (scenario === 'broken') return send(res, 500, { error: { message: 'synthetic outage' } });
@@ -92,7 +102,7 @@ const server = http.createServer((req, res) => {
 });
 server.listen(0, '127.0.0.1', () => process.stdout.write(JSON.stringify({ port: server.address().port }) + '\n'));
 // Control lines on stdin, each answered with one JSON line on stdout:
-//   {"requests": scenario}             the requests that scenario received
+//   {"requests": scenario}             the requests that scenario received, with the headers of each
 //   {"set": scenario, "models": {...}}  the endpoints of each model of a ceilings scenario: id -> [pricing, ...],
 //                                      and with "listed": {...} the prices its models listing gives: id -> pricing
 let control = '';
@@ -106,8 +116,8 @@ process.stdin.on('data', (chunk) => {
     try {
       const command = JSON.parse(line);
       if (typeof command.requests === 'string') {
-        const counts = seen[command.requests] ?? { total: 0, endpoints: [] };
-        answer = { total: counts.total, endpoints: counts.endpoints };
+        const counts = seen[command.requests] ?? { total: 0, endpoints: [], headers: [] };
+        answer = { total: counts.total, endpoints: counts.endpoints, headers: counts.headers };
       } else if (typeof command.set === 'string' && command.models && typeof command.models === 'object') {
         generated[command.set] = Object.fromEntries(Object.entries(command.models).map(([id, prices]) => [id, { endpoints: prices.map(endpoint) }]));
         if (command.listed && typeof command.listed === 'object') generatedListed[command.set] = command.listed;
