@@ -24,29 +24,28 @@ std::optional<std::string> value_text(json::Value value) {
 Codec::Codec(const descriptor::ValidatedDescriptor& descriptor, Accumulator& accumulator, std::string requested, SemanticLimits limits)
     : descriptor_(descriptor), accumulator_(accumulator), requested_(std::move(requested)), limits_(limits) {}
 bool Codec::emit(const Event& event) { return accumulator_.accept(event); }
-bool Codec::fail(ErrorKind kind, std::string text) {
-  Error error{kind, std::move(text)};
-  error.reason = reason::code(reason::Source::Decisions, error.safe_message);
+bool Codec::fail(ErrorKind kind, const reason::Reason& text) {
+  Error error = reason::error(kind, text);
   emit(Fail{std::move(error)});
   return false;
 }
 bool Codec::buffered(std::string_view body, Close close) {
-  if (!close.normal) return fail(close.error, "abnormal response close");
+  if (!close.normal) return fail(close.error, reason::transport::response_close);
   auto parsed = json::parse(body, {limits_.max_content_bytes, limits_.max_json_depth});
   if (auto* error = std::get_if<json::ParseError>(&parsed))
     return fail(error->code == json::ParseCode::SizeExceeded || error->code == json::ParseCode::DepthExceeded
-                    ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, "invalid response JSON");
+                    ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, reason::decisions::response_json_invalid);
   auto wire = std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
   const auto root = wire->root();
-  if (!root.is_object()) return fail(ErrorKind::ProtocolCorrupt, "response must be object");
+  if (!root.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::decisions::response_not_object);
   if (!emit(RawWire{"decisions.response", wire})) return false;
-  if (root.get("error").valid() && !root.get("error").is_null()) return fail(ErrorKind::RemoteFailure, "remote error property");
+  if (root.get("error").valid() && !root.get("error").is_null()) return fail(ErrorKind::RemoteFailure, reason::decisions::response_remote_error);
   // OpenAI lists answers in question order; OpenRouter keys them by question name.
   const auto answers = root.get("answers");
-  if (!answers.is_array() && !answers.is_object()) return fail(ErrorKind::ProtocolCorrupt, "decision answers required");
-  if (answers.size() >= limits_.max_parts) return fail(ErrorKind::ResourceLimit, "decision answer count limit");
+  if (!answers.is_array() && !answers.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::decisions::answers_required);
+  if (answers.size() >= limits_.max_parts) return fail(ErrorKind::ResourceLimit, reason::decisions::answers_count_limit);
   const auto served = root.get("model");
-  if (served.valid() && !served.is_string()) return fail(ErrorKind::ProtocolCorrupt, "decision model must be string");
+  if (served.valid() && !served.is_string()) return fail(ErrorKind::ProtocolCorrupt, reason::decisions::model_not_string);
   const std::string_view served_name = served.is_string() ? served.as_string() : std::string_view{};
   accumulator_.served_model({requested_, std::string(served_name), served::relation(descriptor_, requested_, served_name)});
   const auto id = root.get("id");
@@ -56,22 +55,22 @@ bool Codec::buffered(std::string_view body, Close close) {
   std::uint32_t index = 0;
   auto answer = [&](json::Value item, std::optional<std::string_view> key) {
     if (!item.is_object() || !item.get("type").is_string() || item.get("type").as_string().empty())
-      return fail(ErrorKind::ProtocolCorrupt, "decision answer needs a type");
+      return fail(ErrorKind::ProtocolCorrupt, reason::decisions::answer_type_required);
     const auto type = item.get("type").as_string();
     for (const char* member : {"probability", "noul", "score", "confidence"})
       if (item.get(member).valid() && !item.get(member).is_null() && !number(item.get(member)))
-        return fail(ErrorKind::ProtocolCorrupt, "decision probabilities and scores are numbers");
+        return fail(ErrorKind::ProtocolCorrupt, reason::decisions::answer_number_invalid);
     // An OpenRouter answer carries its question's name, which keys it, as `name`.
     std::shared_ptr<const json::Document> metadata;
     if (key) {
       std::string text = "{\"name\":" + json::quote(*key);
       for (auto member : item.members()) if (member.key != "name") text += "," + json::quote(member.key) + ":" + member.value.dump();
       auto rebuilt = json::parse(text + "}", {limits_.max_content_bytes, limits_.max_json_depth});
-      if (!std::holds_alternative<json::Document>(rebuilt)) return fail(ErrorKind::ResourceLimit, "decision answer limit");
+      if (!std::holds_alternative<json::Document>(rebuilt)) return fail(ErrorKind::ResourceLimit, reason::decisions::answer_limit);
       metadata = std::make_shared<const json::Document>(std::move(std::get<json::Document>(rebuilt)));
     } else {
       auto copied = json::parse(item.dump(), {limits_.max_content_bytes, limits_.max_json_depth});
-      if (!std::holds_alternative<json::Document>(copied)) return fail(ErrorKind::ResourceLimit, "decision answer limit");
+      if (!std::holds_alternative<json::Document>(copied)) return fail(ErrorKind::ResourceLimit, reason::decisions::answer_limit);
       metadata = std::make_shared<const json::Document>(std::move(std::get<json::Document>(copied)));
     }
     PartHeader header;
