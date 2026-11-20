@@ -928,8 +928,9 @@ class PolicyLoader {
                 if (code < 1000 || code > 4999 || status < 100 || status > 599) fail("/endpoints/close_codes", "a close code and an HTTP status");
                 close.code = static_cast<std::uint16_t>(code);
                 close.status = static_cast<int>(status);
-                if (item.get("reason").valid()) close.reason = text(item.get("reason"), "/endpoints/close_codes/reason");
-                for (const auto& existing : fact.close_codes) if (existing.code == close.code && existing.reason == close.reason) fail("/endpoints/close_codes", "unique close codes");
+                // An older policy may name a reason text; it is checked as text and decides nothing.
+                if (item.get("reason").valid()) text(item.get("reason"), "/endpoints/close_codes/reason");
+                for (const auto& existing : fact.close_codes) if (existing.code == close.code) fail("/endpoints/close_codes", "unique close codes");
                 fact.close_codes.push_back(std::move(close));
               }
             }
