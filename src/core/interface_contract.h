@@ -98,9 +98,9 @@ inline constexpr std::uint64_t PricedExtensions = 1ULL << 23;
 // past, so it lacks this bit and a require_interface_contract call with RequiredProvider refuses it.
 inline constexpr std::uint64_t EndpointTierAndPin = 1ULL << 24;
 // descriptor::EndpointFact carries `output_cap`, the realtime option that caps a response's output tokens, which
-// realtime::response_bound and pricing::realtime_response_bound read. A library built before the member has a smaller
-// EndpointFact, which a consumer built with this header would read past, so it lacks this bit and a
-// require_interface_contract call with RequiredProvider refuses it.
+// realtime::response_bound and pricing::realtime_response_bound read, and realtime::Setup carries `turn_detection`. A
+// library built before the members has a smaller EndpointFact and Setup, which a consumer built with this header would
+// read past, so it lacks this bit and a require_interface_contract call with RequiredProvider refuses it.
 inline constexpr std::uint64_t RealtimeResponseBound = 1ULL << 25;
 inline constexpr std::uint64_t RequiredProvider = TypedRuntime | PreparedAdmission |
     NullableUsage | All5Native | TrustedArchive | OrderedWireEvents | NativeSocketRuntime |
