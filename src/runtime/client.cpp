@@ -387,6 +387,9 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
   std::FILE* sink_file = nullptr;
   std::uint64_t sink_bytes = 0;
   std::optional<crypto::Sha256> sink_hash;
+  // An upload whose content is in memory: the SHA-256 (hex) of those bytes, which the body carries whole in every
+  // attempt. A file slice's digest is the transport's, taken as the slice is read.
+  std::string memory_upload_sha256;
   bool sink_whole = false;
   bool admitted = false;
   bool prepared = false;
@@ -890,7 +893,7 @@ struct OperationState : std::enable_shared_from_this<OperationState> {
       } else {
         if (endpoint_codec) {
           endpoints::Close ended{normal, close_error.kind, {}};
-          ended.upload_sha256 = wire.upload_sha256;
+          ended.upload_sha256 = wire.upload_sha256.empty() ? memory_upload_sha256 : wire.upload_sha256;
           ended.status = response ? response->value.status : 0;
           if (response) for (const auto& header : response->value.headers) ended.headers.emplace_back(header.name, header.value);
           if (!sink_path.empty() && normal) {
@@ -1846,8 +1849,17 @@ template <class Outcome> EndpointCall<Outcome> Client::start_endpoint(PreparedEn
 }
 PreparedEndpoint<files::Outcome> Client::prepare(files::Upload upload, RunOptions options) {
   auto client = state_;
-  return PreparedEndpoint<files::Outcome>(prepare_endpoint<files::Encoded>(std::move(options), "files",
+  PreparedEndpoint<files::Outcome> call(prepare_endpoint<files::Encoded>(std::move(options), "files",
       static_cast<int>(reason::Source::FilesRequest), [&] { return files::encode(client->descriptor, upload); }, [&] { return endpoints::call_facts(client->descriptor, "files", files::operation(upload), {}); }));
+  // The bytes in memory are sent whole in one request, so the file's digest is theirs (files::File::uploaded_sha256).
+  if (auto& state = call.prepared_.state_; state && call.prepared_.valid() && !call.prepared_.error() && upload.source.bytes) {
+    static constexpr char digits[] = "0123456789abcdef";
+    for (const auto byte : crypto::sha256(*upload.source.bytes)) {
+      state->memory_upload_sha256 += digits[byte >> 4];
+      state->memory_upload_sha256 += digits[byte & 15];
+    }
+  }
+  return call;
 }
 PreparedEndpoint<files::Outcome> Client::prepare(files::Get get, RunOptions options) {
   auto client = state_;

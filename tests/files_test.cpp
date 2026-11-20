@@ -521,6 +521,23 @@ void runtime_upload() {
   wire->script = [](Exchange& e) { e.finish(transport::Status::Failed, transport::FailureKind::UploadSource); };
   const auto unreadable = complete(client.prepare(files::Upload{{nullptr, {"/data/gone.bin", 0, 10}}, "gone.bin", "application/octet-stream"}, run_for()));
   CHECK(std::get<Failure>(unreadable).error.kind == ErrorKind::InvalidRequest && std::get<Failure>(unreadable).error.reason == "transport.upload.source");
+
+  // Bytes in memory go whole in the body, and the file reports their digest, whatever the transport reports: here an
+  // OpenAI batch input file, whose digest a batch bound compares with the items.
+  auto openai_client = runtime::detail::ClientAccess::make(at(openai), options, executor, wire);
+  const auto jsonl = std::make_shared<const std::string>("{\"custom_id\":\"o-1\",\"method\":\"POST\",\"url\":\"/v1/chat/completions\",\"body\":{}}\n");
+  std::string expected;
+  for (const auto byte : crypto::sha256(*jsonl)) { expected += "0123456789abcdef"[byte >> 4]; expected += "0123456789abcdef"[byte & 15]; }
+  wire->script = [](Exchange& e) { e.reply(200, "application/json", R"({"id":"file-abc","object":"file","bytes":64,"filename":"batch.jsonl","purpose":"batch"})"); };
+  files::Upload batch_input{{jsonl}, "batch.jsonl", "application/jsonl"};
+  batch_input.purpose = "batch";
+  const auto start_openai = [&](auto prepared) { auto call = openai_client.start(std::move(prepared)); executor->drain(); return call.join(); };
+  const auto in_memory = std::get<files::File>(start_openai(openai_client.prepare(batch_input, run_for())));
+  CHECK(wire->exchanges.back()->request.body.find(*jsonl) != std::string::npos && !wire->exchanges.back()->request.file_body);
+  CHECK(in_memory.id == "file-abc" && in_memory.uploaded_sha256 == expected && in_memory.uploaded_sha256.size() == 64);
+  // A read of the file names no upload, so no digest.
+  wire->script = [](Exchange& e) { e.reply(200, "application/json", R"({"id":"file-abc","object":"file","purpose":"batch"})"); };
+  CHECK(std::get<files::File>(start_openai(openai_client.prepare(files::Get{"file-abc"}, run_for()))).uploaded_sha256.empty());
 }
 // A file's content is a document whatever its type; the file the caller named changes only when the download was
 // accepted, and a download that was not leaves what was there.
