@@ -466,24 +466,23 @@ void read_ceilings(Transport& transport, const RefreshRequest& request, const de
 }
 } // namespace
 
-std::string default_listing_url(Listing listing) {
-  switch (listing) {
-    case Listing::OpenRouter: return "https://openrouter.ai";
-    case Listing::Gemini: return "https://generativelanguage.googleapis.com";
-    case Listing::Anthropic: return "https://api.anthropic.com";
-    case Listing::OpenAI: return "https://api.openai.com";
-  }
-  return {};
-}
+std::string default_listing_url(Listing listing) { return std::string(descriptor::builtin_policy()->listing_origin(listing)); }
 
 std::variant<RefreshResult, ConfigError> refresh_catalogue(Transport& transport, const RefreshRequest& request) {
   try {
+    const auto policy = request.policy ? request.policy : descriptor::builtin_policy();
     std::vector<Planned> planned;
     for (std::size_t i = 0; i < request.sources.size(); ++i) {
       const auto& source = request.sources[i];
       const auto pointer = "/sources/" + std::to_string(i);
-      auto url = source.url.empty() ? default_listing_url(source.listing) : source.url;
-      auto origin = source.origin.empty() ? default_listing_url(source.listing) : source.origin;
+      // A source without a url or an origin takes the listing's default origin from the policy (#221).
+      const auto fallback = policy->listing_origin(source.listing);
+      if (source.url.empty() && fallback.empty())
+        throw ConfigError{pointer + "/url", "a url, since the policy states no default origin for the listing", 0, "listing source rejected"};
+      if (source.origin.empty() && fallback.empty())
+        throw ConfigError{pointer + "/origin", "an origin, since the policy states no default origin for the listing", 0, "listing source rejected"};
+      auto url = source.url.empty() ? std::string(fallback) : source.url;
+      auto origin = source.origin.empty() ? std::string(fallback) : source.origin;
       if (!allowed_url(url)) throw ConfigError{pointer + "/url", "https URL, or http on a loopback host, without query", 0, "listing source rejected"};
       if (!descriptor::valid_origin(origin) || origin.ends_with('/'))
         throw ConfigError{pointer + "/origin", "canonical origin without path", 0, "listing source rejected"};
@@ -511,7 +510,6 @@ std::variant<RefreshResult, ConfigError> refresh_catalogue(Transport& transport,
       planned.push_back({source, std::move(url), std::move(origin), std::move(ceilings)});
     }
 
-    const auto policy = request.policy ? request.policy : descriptor::builtin_policy();
     RefreshResult out;
     const auto deadline = after(std::chrono::steady_clock::now(), request.total_timeout);
     std::vector<CatalogueSnapshot> fresh;

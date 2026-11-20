@@ -744,6 +744,69 @@ void invalid_requests(transport::Transport& transport) {
   require(transport::default_listing_url(Listing::Gemini) == "https://generativelanguage.googleapis.com", "default listing URL");
 }
 
+// The origin a source of each listing defaults to is the policy's data (#221), beside the family the listing belongs to.
+// A policy of its own may name another one, take the embedded one by leaving it out, or state that a listing has none
+// (`null`), and then a source of that listing names its `url` and its `origin`.
+void default_origins_are_policy_data(transport::Transport& transport, Peer& peer) {
+  // The built-in policy's: each provider's API origin.
+  require(transport::default_listing_url(Listing::OpenRouter) == "https://openrouter.ai" &&
+              transport::default_listing_url(Listing::Gemini) == "https://generativelanguage.googleapis.com" &&
+              transport::default_listing_url(Listing::Anthropic) == "https://api.anthropic.com" &&
+              transport::default_listing_url(Listing::OpenAI) == "https://api.openai.com",
+          "the built-in default listing origins");
+  // A default origin of the policy's own, here the loopback peer: a source without a url or an origin is fetched there
+  // (the OpenAI listing path at the root of the origin) and its entries are scoped to it. A trust anchor that does not
+  // exist keeps any other fetch from being sent.
+  const auto own = "http://127.0.0.1:" + std::to_string(peer.port);
+  const auto own_policy = policy_of(policy_edit::edited(
+      {}, "listings", R"([{"listing":"openai","family":"openai.chat","default_origin":")" + own + R"("}])"));
+  {
+    transport::RefreshRequest request;
+    request.sources = {source(Listing::OpenAI, {}, "openai-test-key")};
+    request.policy = own_policy;
+    request.ca_file = "/nonexistent/sp-test-no-trust-anchor.pem";
+    request.total_timeout = std::chrono::milliseconds(10000);
+    const auto result = refreshed(transport, request);
+    require(result.sources.size() == 1 && result.sources[0].ok, "a source at the policy's default origin refreshed: " +
+                                                                   (result.sources.empty() ? std::string("no report") : result.sources[0].error));
+    require(result.sources[0].origin == own, "the source is scoped to the policy's default origin, not " + result.sources[0].origin);
+    const auto* entry = result.generated->entry("gpt-test-1");
+    require(entry && entry->origins == std::vector<std::string>{own}, "the listed entry is scoped to the policy's default origin");
+    require(seen(peer, "v1").total == 1, "the listing was fetched from the policy's default origin");
+  }
+  // A listing the policy states without an origin takes the embedded one: a source served elsewhere is scoped to it.
+  const auto borrowing = policy_of(policy_edit::edited({}, "listings", R"([{"listing":"openai","family":"openai.chat"}])"));
+  {
+    transport::RefreshRequest request;
+    request.sources = {source(Listing::OpenAI, base(peer, "openai"), "openai-test-key")};
+    request.policy = borrowing;
+    const auto result = refreshed(transport, request);
+    require(result.sources.size() == 1 && result.sources[0].ok && result.sources[0].origin == "https://api.openai.com",
+            "a listing stated without an origin takes the embedded one");
+  }
+  // A listing with no default origin: a source of it without a url, or without an origin, is refused before any request.
+  const auto none = policy_of(policy_edit::edited({}, "listings", R"([{"listing":"openai","family":"openai.chat","default_origin":null}])"));
+  const auto refused_at = [&](transport::ListingSource listed, std::string_view pointer) {
+    transport::RefreshRequest request;
+    request.sources = {source(Listing::Gemini, base(peer, "gemini"), "gemini-test-key"), std::move(listed)};
+    request.policy = none;
+    auto result = transport::refresh_catalogue(transport, request);
+    const auto* error = std::get_if<descriptor::ConfigError>(&result);
+    require(error && error->pointer == pointer, "a source of a listing without a default origin refused at " + std::string(pointer) + ", not " +
+                                                    (error ? error->pointer : std::string("a refresh")));
+  };
+  refused_at(source(Listing::OpenAI, {}, "openai-test-key"), "/sources/1/url");
+  refused_at(source(Listing::OpenAI, base(peer, "openai"), "openai-test-key"), "/sources/1/origin");
+  {
+    transport::RefreshRequest request;
+    request.sources = {{Listing::OpenAI, base(peer, "openai"), "openai-test-key", "https://api.openai.com", {}}};
+    request.policy = none;
+    const auto result = refreshed(transport, request);
+    require(result.sources.size() == 1 && result.sources[0].ok, "a source that names its url and origin needs no default");
+  }
+  passed("default listing origins: the policy's data, borrowed from the embedded policy, or none");
+}
+
 void embedded_facts_apply_at_every_origin(transport::Transport& transport, Peer& peer) {
   transport::RefreshRequest request;
   request.sources = {source(Listing::OpenAI, base(peer, "openai-builtin"), "openai-test-key")};
@@ -1326,6 +1389,7 @@ int main(int argc, char** argv) {
     ceiling_requests_are_checked(transport, peer);
     ceilings_bound_every_endpoint(transport, peer);
     ceilings_count_listed_bands(transport, peer);
+    default_origins_are_policy_data(transport, peer);
 #ifndef _WIN32
     if (argc == 4) the_tool_reads_route_ceilings(peer, argv[3]);
     if (argc == 4) the_tool_prints_no_listed_key_text(peer, argv[3]);

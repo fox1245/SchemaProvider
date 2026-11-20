@@ -557,10 +557,10 @@
     }
   ],
   "listings": [
-    {"listing": "openrouter", "family": "openai.chat"},
-    {"listing": "gemini", "family": "google.generate"},
-    {"listing": "anthropic", "family": "anthropic.messages"},
-    {"listing": "openai", "family": "openai.chat"}
+    {"listing": "openrouter", "family": "openai.chat", "default_origin": "https://openrouter.ai"},
+    {"listing": "gemini", "family": "google.generate", "default_origin": "https://generativelanguage.googleapis.com"},
+    {"listing": "anthropic", "family": "anthropic.messages", "default_origin": "https://api.anthropic.com"},
+    {"listing": "openai", "family": "openai.chat", "default_origin": "https://api.openai.com"}
   ],
   "endpoints": [
     {"endpoint":"images","shape":"openai","origins":["https://api.openai.com"],"paths":{"generate":"/v1/images/generations","edit":"/v1/images/edits"},"billing":{"generate":"model","edit":"model"},"charge_on_accept":true,"max_response_bytes":50331648,
