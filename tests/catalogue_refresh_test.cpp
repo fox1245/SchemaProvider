@@ -737,6 +737,9 @@ void invalid_requests(transport::Transport& transport) {
   refused_at(source(Listing::OpenAI, "https://api.example.test/v1?x=1", "k"), "/sources/0/url");
   refused_at(source(Listing::OpenAI, "http://127.0.0.1.example.test", "k"), "/sources/0/url");
   refused_at({Listing::OpenAI, {}, "k", "https://api.example.test/path", {}}, "/sources/0/origin");
+  // The origin scopes the generated entries and picks the listing's credential scheme, so it is the canonical spelling.
+  for (const std::string_view spelling : {"https://OpenRouter.ai", "https://openrouter.ai:443"})
+    refused_at({Listing::OpenRouter, {}, "k", std::string(spelling), {}}, "/sources/0/origin");
   refused_at(source(Listing::OpenAI, {}, "line\nbreak"), "/sources/0/api_key");
   require(transport::default_listing_url(Listing::Gemini) == "https://generativelanguage.googleapis.com", "default listing URL");
 }

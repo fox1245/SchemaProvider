@@ -33,6 +33,11 @@ constexpr std::size_t bundle_catalogue_bytes = 8u * 1024u * 1024u;
 [[noreturn]] void fail(std::string_view path, std::string_view expected) {
   throw ConfigError{std::string(path), std::string(expected), 0, "descriptor policy value rejected"};
 }
+// A fact's origin is compared byte for byte with a descriptor's base URL, which is its origin's serialization
+// (canonical_origin), so the policy states the origin in that spelling. Called after the origin is known valid.
+void canonical_spelling(std::string_view origin, std::string_view path) {
+  if (!canonical_origin_spelling(origin)) fail(path, "origin in its canonical spelling: lower-case host, no default port");
+}
 // Every key must be present and no other may appear, except the listed optional ones: a snapshot
 // written before an optional fact existed stays admissible.
 void closed(Value value, std::initializer_list<std::string_view> keys, std::string_view path,
@@ -272,9 +277,11 @@ class PolicyLoader {
             fail(std::string("/") + std::string(key), "temperature facts in the model catalogue");
         if (!f.openrouter_origins.empty() && f.family != "openai.chat" && f.family != "openai.responses" && f.family != "anthropic.messages")
           fail("/openrouter_origins", "routing only for declared OpenRouter API families");
-        for (const auto& route : f.openrouter_origins)
+        for (const auto& route : f.openrouter_origins) {
           if (!valid_origin(route) || route.ends_with('/'))
             fail("/openrouter_origins", "canonical admitted origin without path");
+          canonical_spelling(route, "/openrouter_origins");
+        }
         // Optional: origins whose API rejects max_tokens, so the output cap defaults to max_completion_tokens there.
         if (auto origins = v.get("max_completion_tokens_origins"); origins.valid()) {
           const auto listed = strings(origins, "/max_completion_tokens_origins");
@@ -282,6 +289,7 @@ class PolicyLoader {
           for (const auto& origin : listed) {
             if (!valid_origin(origin) || origin.ends_with('/') || contains(f.openrouter_origins, origin))
               fail("/max_completion_tokens_origins", "canonical admitted origin without path, apart from the OpenRouter origins");
+            canonical_spelling(origin, "/max_completion_tokens_origins");
             policy->completion_cap_origins_.emplace_back(f.family, origin);
           }
         }
@@ -345,8 +353,10 @@ class PolicyLoader {
             if (!std::all_of(fact.value.begin(), fact.value.end(), [](unsigned char c) {
                   return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.'; }))
               fail("/betas/value", "lower-case beta token");
-            for (const auto& origin : fact.origins)
+            for (const auto& origin : fact.origins) {
               if (!valid_origin(origin) || origin.ends_with('/')) fail("/betas/origins", "canonical origins without path");
+              canonical_spelling(origin, "/betas/origins");
+            }
             for (const auto& existing : f.betas) if (existing.value == fact.value) fail("/betas/value", "unique beta values");
             f.betas.push_back(std::move(fact));
           }
@@ -457,8 +467,10 @@ class PolicyLoader {
               fail("/extensions/key", "member name token");
             if (request_key_owned(f.family, fact.key)) fail("/extensions/key", "a member the encoder does not own");
             if (fact.origins.empty()) fail("/extensions/origins", "at least one origin");
-            for (const auto& origin : fact.origins)
+            for (const auto& origin : fact.origins) {
               if (!valid_origin(origin) || origin.ends_with('/')) fail("/extensions/origins", "canonical origins without path");
+              canonical_spelling(origin, "/extensions/origins");
+            }
             for (const auto& existing : f.extensions) if (existing.key == fact.key) fail("/extensions/key", "unique extension keys");
             f.extensions.push_back(std::move(fact));
           }
@@ -495,8 +507,10 @@ class PolicyLoader {
             CacheFact fact;
             auto& caps = fact.capabilities;
             if (c.get("origins").valid()) fact.origins = strings(c.get("origins"), "/cache/origins", true);
-            for (const auto& origin : fact.origins)
+            for (const auto& origin : fact.origins) {
               if (!valid_origin(origin) || origin.ends_with('/')) fail("/cache/origins", "canonical origins without path");
+              canonical_spelling(origin, "/cache/origins");
+            }
             if (c.get("routes").valid()) {
               fact.routes = strings(c.get("routes"), "/cache/routes", true);
               if (fact.origins.empty() || f.openrouter_origins.empty() ||
@@ -726,8 +740,10 @@ class PolicyLoader {
           const auto operations = operations_of(fact.endpoint, fact.shape);
           if (operations.empty()) fail("/endpoints/shape", "an endpoint and shape the SDK has a codec for");
           if (fact.origins.empty()) fail("/endpoints/origins", "at least one origin");
-          for (const auto& origin : fact.origins)
+          for (const auto& origin : fact.origins) {
             if (!valid_origin(origin) || origin.ends_with('/')) fail("/endpoints/origins", "canonical origins without path");
+            canonical_spelling(origin, "/endpoints/origins");
+          }
           const auto paths = e.get("paths");
           if (!paths.is_object() || !paths.size()) fail("/endpoints/paths", "object of operation paths");
           for (auto member : paths.members()) {
@@ -1077,6 +1093,7 @@ class PolicyLoader {
         fact.origins = strings(item.get("origins"), "/auth/origins", true);
         for (const auto& origin : fact.origins) {
           if (!valid_origin(origin) || origin.ends_with('/')) fail("/auth/origins", "canonical origins without path");
+          canonical_spelling(origin, "/auth/origins");
           for (const auto& earlier : facts)
             if (contains(earlier.origins, origin)) fail("/auth/origins", "each origin in one fact");
         }
@@ -1112,6 +1129,7 @@ class PolicyLoader {
         fact.origins = strings(item.get("origins"), "/routes/origins", true);
         for (const auto& origin : fact.origins) {
           if (!valid_origin(origin) || origin.ends_with('/')) fail("/routes/origins", "canonical origins without path");
+          canonical_spelling(origin, "/routes/origins");
           for (const auto& earlier : facts)
             if (contains(earlier.origins, origin)) fail("/routes/origins", "each origin in one fact");
         }

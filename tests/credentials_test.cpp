@@ -679,6 +679,152 @@ void scheme_is_not_bound() {
   CHECK(preset && preset_bearer && bound(*preset) == bound(*preset_bearer));
 }
 
+// A base URL may spell its origin with upper-case host letters, the scheme's default port or a trailing slash. The
+// descriptor holds the origin's serialization (RFC 6454: lower-case host, no default port, no slash), so every fact
+// the policy scopes to the origin applies to it as to the canonical spelling, and sealed history binds the same
+// digests: those the identity test pins for the preset.
+struct SpellingRow {
+  bool loads = false, gateway = false;
+  std::string base_url, chat_header, embeddings_header, bound;
+};
+std::string header_name(const Sent& call) {
+  if (!call.reached) return "<not sent>";
+  return call.credentials.empty() ? "<none>" : call.credentials.front().first;
+}
+template <class Embed>
+SpellingRow spelling_row(const descriptor::LoadResult& loaded, const Embed& embed) {
+  SpellingRow row;
+  const auto* d = std::get_if<descriptor::ValidatedDescriptor>(&loaded);
+  if (!d) return row;
+  row.loads = true;
+  row.base_url = std::string(d->base_url());
+  row.gateway = descriptor::routed_gateway(*d);
+  row.chat_header = header_name(sent(*d, request_for(d->family())));
+  row.embeddings_header = header_name(sent(*d, embed));
+  row.bound = bound(*d);
+  return row;
+}
+// One line per spelling that does not behave as the canonical one; it names header names only, never a key.
+void print_row(std::string_view label, std::string_view spelling, const SpellingRow& row) {
+  std::fprintf(stderr, "ORIGIN ROW %.*s %.*s: loads=%d base_url=%s chat_header=%s gateway=%d embeddings_header=%s bound=%s\n",
+               static_cast<int>(label.size()), label.data(), static_cast<int>(spelling.size()), spelling.data(), row.loads,
+               row.base_url.c_str(), row.chat_header.c_str(), row.gateway, row.embeddings_header.c_str(), row.bound.c_str());
+}
+bool same_row(const SpellingRow& a, const SpellingRow& b) {
+  return a.loads == b.loads && a.gateway == b.gateway && a.base_url == b.base_url && a.chat_header == b.chat_header &&
+         a.embeddings_header == b.embeddings_header && a.bound == b.bound;
+}
+void origin_spellings() {
+  const auto router_embed = embeddings::Request{"openai/text-embedding-3-small", {{"a"}}};
+  const auto google_embed = embeddings::Request{"gemini-embedding-2", {{"a"}}};
+  const auto router = [&](std::string_view base, descriptor::PolicySnapshot policy = {}) {
+    return spelling_row(descriptor::presets::try_openrouter_chat({.base_url = std::string(base), .policy = std::move(policy)}), router_embed);
+  };
+  const auto google = [&](std::string_view base) {
+    return spelling_row(descriptor::presets::try_google_generate({.base_url = std::string(base)}), google_embed);
+  };
+  // The pins of policy_identity_test for presets::openrouter_chat() and presets::google_generate().
+  constexpr std::string_view router_pin = "b08080a4a008a2b0dcb64075383432de713057c48aacf23c90705d365510311d/"
+                                          "29c45ed29b11c14b814b44832bb705e550d7bcf88ecacc9d32bbe9eaffa011ea";
+  constexpr std::string_view google_pin = "32c10d13950ef6ce9f030093918ce74d46391c66183b62f794bb47a5ac28920e/"
+                                          "c9fd48ef451c060feef5d1ea14829e02dc6158438b1116b12fda7507e6b98d9d";
+  // A chat call at OpenRouter sends the key in x-api-key where a policy scopes that scheme to the origin.
+  const auto scoped = loaded_policy(edited("openai.chat", "auth", R"([{"origins":["https://openrouter.ai"],"scheme":"x-api-key"},{"scheme":"bearer"}])"));
+  CHECK(scoped != nullptr);
+  const auto canonical_router = router("https://openrouter.ai"), canonical_google = google("https://generativelanguage.googleapis.com");
+  const auto canonical_scoped = router("https://openrouter.ai", scoped);
+  CHECK(canonical_router.loads && canonical_router.gateway && canonical_router.chat_header == "Authorization" &&
+        canonical_router.embeddings_header == "Authorization" && canonical_router.bound == router_pin);
+  CHECK(canonical_google.loads && !canonical_google.gateway && canonical_google.chat_header == "x-goog-api-key" &&
+        canonical_google.embeddings_header == "x-goog-api-key" && canonical_google.bound == google_pin);
+  CHECK(canonical_scoped.loads && canonical_scoped.chat_header == "x-api-key");
+  for (const std::string_view spelling : {"https://OpenRouter.ai", "https://OPENROUTER.AI", "https://openrouter.ai:443",
+                                          "https://openrouter.ai:0443", "https://openrouter.ai/", "https://OpenRouter.AI:443/"}) {
+    const auto row = router(spelling), scoped_row = router(spelling, scoped);
+    if (!same_row(row, canonical_router)) print_row("openrouter", spelling, row);
+    if (!same_row(scoped_row, canonical_scoped)) print_row("openrouter-scoped-auth", spelling, scoped_row);
+    CHECK(same_row(row, canonical_router));
+    CHECK(same_row(scoped_row, canonical_scoped));
+  }
+  for (const std::string_view spelling : {"https://GenerativeLanguage.googleapis.com", "https://generativelanguage.googleapis.com:443",
+                                          "https://generativelanguage.googleapis.com/", "https://GENERATIVELANGUAGE.GOOGLEAPIS.COM:443/"}) {
+    const auto row = google(spelling);
+    if (!same_row(row, canonical_google)) print_row("gemini", spelling, row);
+    CHECK(same_row(row, canonical_google));
+  }
+  // Only the scheme's own default port is dropped, and a port is written as its number.
+  const auto base = [](std::string_view spelling) -> std::string {
+    auto loaded = descriptor::presets::try_openai_chat({.base_url = std::string(spelling)});
+    const auto* d = std::get_if<descriptor::ValidatedDescriptor>(&loaded);
+    return d ? std::string(d->base_url()) : std::string("<refused>");
+  };
+  const std::pair<std::string_view, std::string_view> spellings[]{
+      {"https://openrouter.ai:80", "https://openrouter.ai:80"}, {"https://openrouter.ai:8443", "https://openrouter.ai:8443"},
+      {"https://openrouter.ai:08443", "https://openrouter.ai:8443"}, {"http://127.0.0.1:443", "http://127.0.0.1:443"},
+      {"http://127.0.0.1:80", "http://127.0.0.1"}, {"http://127.0.0.1:080/", "http://127.0.0.1"},
+      {"http://LocalHost:9", "http://localhost:9"}, {"http://[::1]:80", "http://[::1]"},
+      {"http://[0:0:0:0:0:0:0:1]:9", "http://[0:0:0:0:0:0:0:1]:9"}, {"https://[FE80::A1]:443", "https://[fe80::a1]"},
+      {"https://Api.Example.com:65535", "https://api.example.com:65535"}, {"HTTPS://api.example.com", "<refused>"},
+      {"Https://api.example.com", "<refused>"}, {"https://api.example.com:0", "<refused>"}};
+  for (const auto& [spelling, expected_base] : spellings) {
+    const auto got = base(spelling);
+    if (got != expected_base) std::fprintf(stderr, "ORIGIN BASE %.*s: expected %.*s, got %s\n", static_cast<int>(spelling.size()), spelling.data(),
+                                           static_cast<int>(expected_base.size()), expected_base.data(), got.c_str());
+    CHECK(got == expected_base);
+  }
+  // A port that is not the default keeps the descriptor off the gateway's facts.
+  const auto other_port = router("https://openrouter.ai:80");
+  CHECK(other_port.loads && !other_port.gateway && other_port.embeddings_header == "<not sent>");
+}
+
+// An origin a policy lists is compared with the descriptor's canonical origin, so the policy must list it in that
+// spelling: one in any other is refused where it stands, and the embedded policy lists every origin canonically.
+constexpr std::string_view canonical_origin_expected = "origin in its canonical spelling: lower-case host, no default port";
+void policy_refused_as(const std::string& text, std::string_view pointer, std::string_view expected_text) {
+  auto loaded = descriptor::load_policy(text, config_defaults::codec_defaults_json);
+  const auto* error = std::get_if<descriptor::ConfigError>(&loaded);
+  if (!error || error->pointer != pointer || error->expected != expected_text)
+    std::fprintf(stderr, "POLICY ORIGIN expected refusal at %.*s, got %s\n", static_cast<int>(pointer.size()), pointer.data(),
+                 error ? (error->pointer + ": " + error->expected).c_str() : "a loaded policy");
+  CHECK(error && error->pointer == pointer && error->expected == expected_text);
+}
+// The embedded policy with every `from` in `member` (of `family`, or of the policy itself when `family` is empty)
+// spelled `to`.
+std::string respelled(std::string_view family, std::string_view member, std::string_view from, std::string_view to) {
+  auto parsed = json::parse(config_defaults::descriptor_policy_json, {config_defaults::codec_admission_policy_bytes, config_defaults::codec_admission_policy_depth});
+  const auto root = std::get<json::Document>(parsed).root();
+  std::string value;
+  if (family.empty()) value = root.get(member).dump();
+  for (auto entry : root.get("families").elements())
+    if (!family.empty() && entry.get("family").as_string() == family) value = entry.get(member).dump();
+  CHECK(value.find(from) != std::string::npos);
+  for (auto at = value.find(from); at != std::string::npos; at = value.find(from, at + to.size())) value.replace(at, from.size(), to);
+  return family.empty() ? policy_edit::edited({}, member, value) : edited(family, member, value);
+}
+void policy_origins_are_canonical() {
+  CHECK(loaded_policy(std::string(config_defaults::descriptor_policy_json)) != nullptr);
+  for (const std::string_view spelling : {"https://OpenRouter.ai", "https://openrouter.ai:443"})
+    policy_refused_as(respelled("openai.chat", "openrouter_origins", "https://openrouter.ai", spelling), "/openrouter_origins", canonical_origin_expected);
+  policy_refused_as(respelled("openai.chat", "max_completion_tokens_origins", "https://api.openai.com", "https://API.openai.com"),
+                    "/max_completion_tokens_origins", canonical_origin_expected);
+  policy_refused_as(respelled("anthropic.messages", "betas", "https://api.anthropic.com", "https://api.anthropic.com:443"), "/betas/origins",
+                    canonical_origin_expected);
+  policy_refused_as(respelled("anthropic.messages", "extensions", "https://api.anthropic.com", "https://Api.Anthropic.com"),
+                    "/extensions/origins", canonical_origin_expected);
+  policy_refused_as(respelled("openai.chat", "cache", "https://openrouter.ai", "https://OPENROUTER.AI"), "/cache/origins", canonical_origin_expected);
+  policy_refused_as(edited("openai.chat", "auth", R"([{"origins":["https://OpenRouter.ai"],"scheme":"x-api-key"},{"scheme":"bearer"}])"),
+                    "/auth/origins", canonical_origin_expected);
+  policy_refused_as(edited("openai.chat", "routes", R"([{"origins":["https://LLM.example.com"],"buffered":"/v1/chat/completions","streaming":"/v1/chat/completions"}])"),
+                    "/routes/origins", canonical_origin_expected);
+  policy_refused_as(respelled({}, "endpoints", "https://generativelanguage.googleapis.com", "https://generativelanguage.googleapis.com:443"),
+                    "/endpoints/origins", canonical_origin_expected);
+  // The refusals that were there keep their text.
+  policy_refused_as(edited("openai.chat", "auth", R"([{"origins":["https://openrouter.ai/"],"scheme":"x-api-key"},{"scheme":"bearer"}])"),
+                    "/auth/origins", "canonical origins without path");
+  // A canonical origin with a port that is not the default loads.
+  CHECK(loaded_policy(edited("openai.chat", "auth", R"([{"origins":["https://openrouter.ai:8443","http://127.0.0.1:443"],"scheme":"x-api-key"},{"scheme":"bearer"}])")) != nullptr);
+}
+
 // Each call carries exactly one header of its scheme's name, Authorization included, and none of the other two, in
 // any letter case, in every family, whether the scheme is the policy's or the descriptor's.
 void one_header_per_name() {
@@ -720,6 +866,8 @@ int main() {
   endpoint_fact_over_family_facts();
   scheme_is_not_bound();
   one_header_per_name();
+  origin_spellings();
+  policy_origins_are_canonical();
   if (failures) { std::fprintf(stderr, "%d credential checks failed\n", failures); return 1; }
   std::puts("credential headers passed");
   return 0;

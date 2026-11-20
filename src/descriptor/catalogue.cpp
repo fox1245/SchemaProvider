@@ -272,6 +272,15 @@ CatalogueEntry parse_entry(Value value, const std::string& pointer) {
   }
   entry.families = list(value.get("families"), at(pointer, "families"), known_family, "SDK family");
   entry.origins = list(value.get("origins"), at(pointer, "origins"), origin, "canonical origin without path");
+  // An entry's origins are compared byte for byte with a descriptor's base URL, its origin's serialization.
+  if (const auto origins = value.get("origins"); present(origins)) {
+    std::size_t i = 0;
+    for (auto element : origins.elements()) {
+      if (!descriptor::canonical_origin_spelling(element.as_string()))
+        fail(at(at(pointer, "origins"), i), "origin in its canonical spelling: lower-case host, no default port");
+      ++i;
+    }
+  }
   entry.aliases = list(value.get("aliases"), at(pointer, "aliases"), model_name, "model name");
   entry.served_as = list(value.get("served_as"), at(pointer, "served_as"), model_name, "model name");
   if (entry.prefix && (!entry.aliases.empty() || !entry.served_as.empty()))
@@ -1164,6 +1173,7 @@ void read_pricing(Value pricing, CatalogueEntry& e, ListingPage& page) {
 ListingResult parse_listing(Listing listing, std::string_view body, std::string_view origin) {
   try {
     if (!descriptor::valid_origin(origin) || origin.ends_with('/')) fail("", "canonical origin for the listed entries");
+    if (!descriptor::canonical_origin_spelling(origin)) fail("", "origin in its canonical spelling: lower-case host, no default port");
     auto parsed = json::parse(body, {32u * 1024u * 1024u, 64});
     if (std::holds_alternative<json::ParseError>(parsed)) fail("", "a JSON listing");
     const auto root = std::get<json::Document>(parsed).root();

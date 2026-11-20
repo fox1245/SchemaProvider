@@ -142,6 +142,17 @@ void loader_is_closed_and_bounded() {
     refused(R"([{"id":"x","families":["openai.chat","openai.chat"]}])", "/models/0/families");
     refused(R"([{"id":"x","origins":["https://api.example.test/"]}])", "/models/0/origins/0");
     refused(R"([{"id":"x","origins":["ftp://api.example.test"]}])", "/models/0/origins/0");
+    // Origins are compared with a descriptor's canonical origin, so an entry lists them in that spelling.
+    for (const std::string_view spelling : {"https://API.example.test", "https://api.example.test:443", "http://127.0.0.1:80"})
+        refused_as(std::string(R"([{"id":"x","origins":["https://a.example.test",")") + std::string(spelling) + R"("]}])",
+                   "/models/0/origins/1", "origin in its canonical spelling: lower-case host, no default port");
+    refused_as(R"([{"id":"x","origins":["https://api.example.test/"]}])", "/models/0/origins/0", "canonical origin without path");
+    CHECK(std::holds_alternative<CatalogueSnapshot>(load_catalogue(R"({"version":1,"models":[{"id":"x","origins":["https://api.example.test:8443","http://127.0.0.1:443"]}]})")));
+    for (const std::string_view spelling : {"https://OpenRouter.ai", "https://openrouter.ai:443"}) {
+        const auto listed = parse_listing(Listing::OpenRouter, R"({"data":[]})", spelling);
+        const auto* error = std::get_if<ConfigError>(&listed);
+        CHECK(error && error->expected == "origin in its canonical spelling: lower-case host, no default port");
+    }
     refused(R"([{"id":"x","match":"prefix","aliases":["y"]}])", "/models/0");
     refused(R"([{"id":"x","output_limit":0}])", "/models/0/output_limit");
     refused(R"([{"id":"x","pricing":{"prompt":"1e-7"}}])", "/models/0/pricing/prompt");

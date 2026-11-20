@@ -34,6 +34,8 @@ public:
     std::string_view id() const { return id_; }
     std::uint64_t revision() const { return revision_; }
     std::string_view family() const { return family_; }
+    // `connection.base_url` as its origin's serialization (canonical_origin): `https://API.example.com:443/` is held
+    // as `https://api.example.com`. Policy facts, catalogue entries and the native digests read this spelling.
     std::string_view base_url() const { return base_url_; }
     std::string_view path(bool streaming) const { return streaming ? streaming_path_ : buffered_path_; }
     // True for a descriptor of any family whose paths name `{model}`: one descriptor serves every
@@ -100,6 +102,14 @@ LoadResult load_with_environment_headers(
     const std::vector<std::pair<std::string, std::string>>& overrides = {},
     PolicySnapshot policy = {});
 bool valid_origin(std::string_view url);
+// The serialization (RFC 6454 section 6.2) of an origin valid_origin admits: the host's ASCII letters lower-cased, an
+// IPv6 literal kept in its brackets, a port that is the scheme's default (443 for https, 80 for http) left out and any
+// other written as its decimal number, and no trailing slash. Empty when valid_origin refuses `url`. A descriptor holds
+// its base URL in this spelling (ValidatedDescriptor::base_url).
+std::string canonical_origin(std::string_view url);
+// True when `url` is an origin spelled as canonical_origin writes it. Every origin a policy, a catalogue or a listing
+// source names must be: it is compared byte for byte with a descriptor's base URL.
+bool canonical_origin_spelling(std::string_view url);
 // An origin-relative path as descriptor admission takes a literal one: segments of letters, digits, `-`, `_`,
 // `.`, `~` and `:`, none of them empty, `.` or `..`, and no query, URL escape or placeholder.
 bool valid_path(std::string_view path) noexcept;
