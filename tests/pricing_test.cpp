@@ -4,10 +4,12 @@
 #include <algorithm>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -853,6 +855,22 @@ void item_prices_follow_the_rows() {
 // may reach) and whose price is not a fixed amount leaves its unit without a price for that request, beside a fixed row
 // of the same unit: the bound has no total and names the unit, and so does the estimate. A variable row that does not
 // apply changes nothing.
+// Helpers of the cases of a variable row.
+using Names = std::vector<std::string>;
+ServedModel exact(std::string_view model) { return ServedModel{std::string(model), std::string(model), ServedRelation::Exact}; }
+// No total, and a reason of the price that names the unit.
+bool names(const pricing::WorstCase& w, std::string_view unit) {
+  return !w.total && std::any_of(w.unbounded.begin(), w.unbounded.end(), [&](const pricing::UnboundedReason& r) {
+    return r.by == pricing::UnboundedBy::ModelPrice && r.detail.find(unit) != std::string::npos;
+  });
+}
+// The reasons of an estimate without a total, and the total of one with it.
+Names unpriced_of(const pricing::CostEstimate& e) { return e.total ? Names({"(a total)"}) : e.unpriced; }
+std::uint64_t total_of(const pricing::CostEstimate& e) {
+  if (!e.total) throw std::runtime_error("no total where one was expected");
+  return e.total->nano_usd;
+}
+
 void variable_rows() {
   const auto c = catalogue(R"({"version":1,"models":[
     {"id":"fixed","input_limit":5000,"pricing":{"input":"0.000001","output":"0.000002","tool:web_search":"0.01"}},
@@ -866,7 +884,6 @@ void variable_rows() {
     {"id":"reasoning","input_limit":5000,"pricing":{"input":"0.000001","output":"0.000002","reasoning":"-1"}},
     {"id":"alias","input_limit":5000,"pricing":{"input":"0.000001","prompt":"-1","output":"0.000002"}},
     {"id":"variable","input_limit":5000,"pricing":{"prompt":"-1","completion":"-1"}}]})");
-  const auto exact = [](std::string_view model) { return ServedModel{std::string(model), std::string(model), ServedRelation::Exact}; };
   const auto worst = [&](std::string_view model, std::uint64_t measured, std::string_view tier = {}, const RequestFacts* facts = nullptr) {
     pricing::WorstCaseInput in;
     in.family = "openai.chat";
@@ -878,23 +895,10 @@ void variable_rows() {
     in.invocations = 1;
     return pricing::worst_case(in, *c);
   };
-  // No total, and a reason of the price that names the unit.
-  const auto names = [](const pricing::WorstCase& w, std::string_view unit) {
-    return !w.total && std::any_of(w.unbounded.begin(), w.unbounded.end(), [&](const pricing::UnboundedReason& r) {
-      return r.by == pricing::UnboundedBy::ModelPrice && r.detail.find(unit) != std::string::npos;
-    });
-  };
   const auto same = [](const pricing::WorstCase& a, const pricing::WorstCase& b) {
     return a.total && b.total && a.total->nano_usd == b.total->nano_usd && a.unbounded.empty() && b.unbounded.empty();
   };
   const auto& fixed = *c->entry("fixed");
-  using Names = std::vector<std::string>;
-  // The reasons of an estimate without a total, and the total of one with it.
-  const auto unpriced_of = [](const pricing::CostEstimate& e) { return e.total ? Names({"(a total)"}) : e.unpriced; };
-  const auto total_of = [](const pricing::CostEstimate& e) {
-    if (!e.total) throw std::runtime_error("no total where one was expected");
-    return e.total->nano_usd;
-  };
   // A variable band beside a fixed base row: at the band and below it the base row prices the call as before; above
   // it the unit has no price.
   const auto& band = *c->entry("band");
@@ -1053,12 +1057,13 @@ void variable_rows() {
     CHECK(!w.total && !w.pin && w.unbounded.size() == 1 && w.unbounded[0].by == pricing::UnboundedBy::ModelPrice &&
           w.unbounded[0].detail.find(unit) != std::string::npos);
   }
+  std::cout << "case passed: a variable row that applies leaves its unit unpriced, and one that does not changes nothing\n";
+}
 
-  // A dearest price from an entry with a variable row that applies, beside a fixed row of the same unit: before, the
-  // variable row was skipped and the fixed one bounded the call; the price leaves the unit out, so a bound over it alone
-  // would be lower than the fixed row. It therefore has no input, output, fee or route ceiling rate, and a bound over
-  // it has none; the bound that takes the entry names the unit; the exact price leaves out only the unit.
-  const auto more = catalogue(R"({"version":1,"models":[
+// Entries with a variable row beside fixed rows: of a cache read and a request fee above a band, of a 1-hour write and
+// an image output rate, and of route ceilings.
+descriptor::CatalogueSnapshot variable_beside_fixed() {
+  return catalogue(R"({"version":1,"models":[
     {"id":"cache","pricing":{"input":"0.000003","output":"0.000008","cache_read":"0.000004","cache_read+1000":"-1"}},
     {"id":"fee","pricing":{"input":"0.000003","output":"0.000008","request":"0.001","request+1000":"-1"}},
     {"id":"compaction-hour","pricing":{"input":"0.000001","output":"0.000002","cache_write":"0.0000025","cache_write_1h":"-1"}},
@@ -1067,6 +1072,15 @@ void variable_rows() {
       "ceiling_output":"0.0000096","ceiling_request":"-1"}},
     {"id":"vendor/half-ceiling","context_window":5000,"pricing":{"prompt":"0.0000001","completion":"0.0000004","ceiling_input":"-1"}},
     {"id":"vendor/no-ceiling","context_window":5000,"pricing":{"prompt":"0.0000001","completion":"0.0000004","request":"-1"}}]})");
+}
+
+// A dearest price from an entry with a variable row that applies, beside a fixed row of the same unit: before, the
+// variable row was skipped and the fixed one bounded the call; the price leaves the unit out, so a bound over it alone
+// would be lower than the fixed row. It therefore has no input, output, fee or route ceiling rate, and a bound over
+// it has none; the bound that takes the entry names the unit; the exact price leaves out only the unit.
+void variable_dearest_price() {
+  const auto more = variable_beside_fixed();
+  pricing::Bound b;
   for (const auto& [model, unit] : {std::pair{"cache", "cache_read"}, std::pair{"fee", "request"}}) {
     const auto& e = *more->entry(model);
     b = pricing::upper_bound(pricing::dearest_price_of(e, {}, 2'000), {2'000, 10, false, {}});
@@ -1088,10 +1102,14 @@ void variable_rows() {
   }
   CHECK(pricing::upper_bound(pricing::dearest_price_of(*more->entry("cache"), {}, 500), {500, 10, false, {}}).total->nano_usd ==
         500 * std::uint64_t{4'000'000'000} / 1'000'000 + 10 * std::uint64_t{8'000'000'000} / 1'000'000);
+  std::cout << "case passed: a dearest price beside a variable row that applies has no rate\n";
+}
 
-  // A Messages compaction iteration's cache writes have no 5-minute and 1-hour split, so a variable 1-hour rate leaves
-  // them unpriced, as it does the top-level writes without a split; its output tokens have no modality breakdown, so a
-  // variable image output rate leaves them unpriced, as it does the top-level output without one.
+// A Messages compaction iteration's cache writes have no 5-minute and 1-hour split, so a variable 1-hour rate leaves
+// them unpriced, as it does the top-level writes without a split; its output tokens have no modality breakdown, so a
+// variable image output rate leaves them unpriced, as it does the top-level output without one.
+void variable_compaction() {
+  const auto more = variable_beside_fixed();
   auto compacted = usage(1'000, 0);
   compacted.extra["compaction.cache_creation_input_tokens"] = Count{10, Evidence::Derived};
   CHECK(unpriced_of(pricing::estimate(*more, "anthropic.messages", "", exact("compaction-hour"), compacted)) == Names({"cache_write_1h"}));
@@ -1101,9 +1119,20 @@ void variable_rows() {
   CHECK(unpriced_of(pricing::estimate(*more, "anthropic.messages", "", exact("compaction-image"), compacted)) == Names({"output_image"}));
   compacted.extra["compaction.output_tokens"] = Count{0, Evidence::Derived};
   CHECK(total_of(pricing::estimate(*more, "anthropic.messages", "", exact("compaction-image"), compacted)) == 1'000'000u);
+  // Beside the same unit unpriced at the top level, the unit is named once.
+  auto both = usage(1'000, 10, 0, 300);
+  both.extra["compaction.cache_creation_input_tokens"] = Count{10, Evidence::Derived};
+  both.extra["compaction.output_tokens"] = Count{5, Evidence::Derived};
+  CHECK(unpriced_of(pricing::estimate(*more, "anthropic.messages", "", exact("compaction-hour"), both)) == Names({"cache_write_1h"}));
+  CHECK(unpriced_of(pricing::estimate(*more, "anthropic.messages", "", exact("compaction-image"), both)) == Names({"output_image"}));
+  std::cout << "case passed: a compaction iteration beside a variable 1-hour write or image output rate\n";
+}
 
-  // At a routing gateway a route ceiling row at a variable price is named with the other variable units of the call; a
-  // ceiling that is absent keeps its answer.
+// At a routing gateway a route ceiling row at a variable price is named with the other variable units of the call; a
+// ceiling that is absent keeps its answer.
+void variable_ceilings() {
+  const auto more = variable_beside_fixed();
+  pricing::Bound b;
   const auto routed = [&](std::string_view model) {
     pricing::WorstCaseInput in;
     in.family = "openai.chat";
@@ -1142,17 +1171,57 @@ void variable_rows() {
   CHECK(!b.total && b.unpriced == Names({"ceiling", "request"}));
   w = routed("vendor/no-ceiling");
   CHECK(!w.total && reasons(w) == Reasons({{ceiling_reason, ""}}));
-  std::cout << "case passed: a variable row that applies leaves its unit unpriced, and one that does not changes nothing\n";
+  std::cout << "case passed: a variable route ceiling is named, and an absent one keeps its answer\n";
+}
+
+// Token counts whose sums pass 64 bits: the input length rebuilt from the uncached input and the cache counters is above
+// every band, and cache counters that sum past the input total leave no uncached input, not the wrapped remainder.
+void sums_past_64_bits() {
+  const auto c = catalogue(R"({"version":1,"models":[
+    {"id":"long","pricing":{"input":"0","cache_read":"0","output":"0.000001","output+1000":"0.000003"}},
+    {"id":"split","pricing":{"input":"0.000001","cache_read":"0","cache_write":"0","output":"0"}}]})");
+  constexpr auto most = std::numeric_limits<std::uint64_t>::max();
+  Usage u;
+  u.input_uncached = Count{most - 499, Evidence::Reported};
+  u.cache_read = Count{1000, Evidence::Reported};
+  u.output_total = Count{1'000'000, Evidence::Reported};
+  CHECK(total_of(pricing::estimate(*c, "openai.chat", "", exact("long"), u)) == 3'000'000'000u);
+  Usage v;
+  v.input_total = Count{1000, Evidence::Reported};
+  v.cache_read = Count{most - 499, Evidence::Reported};
+  v.cache_write = Count{1000, Evidence::Reported};
+  v.output_total = Count{0, Evidence::Reported};
+  CHECK(total_of(pricing::estimate(*c, "openai.chat", "", exact("split"), v)) == 0u);
+  // In range, the same counters as before: 400 uncached of 1000, at 1000 nano-USD each.
+  v.cache_read = Count{500, Evidence::Reported};
+  v.cache_write = Count{100, Evidence::Reported};
+  CHECK(total_of(pricing::estimate(*c, "openai.chat", "", exact("split"), v)) == 400'000u);
+  std::cout << "case passed: token sums past 64 bits\n";
 }
 } // namespace
 
+// Every case runs, and each failing one is reported, so one failure does not hide the cases after it.
 int main() {
-  try {
-    prices_from_entries(); estimates(); wide_products(); bounds(); bands(); dearer_rates();
-    unpriced_usage(); zero_rates(); tier_reasons(); usage_stage(); reservation_from_entry(); skipped_prices();
-    hour_cache_writes(); left_out_units_refuse(); override_keys_are_units(); bands_count_every_input_token(); listed_overrides_bound_every_call();
-    item_rows_change_no_token_price(); item_prices(); item_prices_follow_the_rows(); variable_rows();
-    std::cout << "pricing properties passed\n"; return 0;
+  const std::pair<const char*, void (*)()> cases[]{
+      {"prices_from_entries", prices_from_entries}, {"estimates", estimates}, {"wide_products", wide_products}, {"bounds", bounds},
+      {"bands", bands}, {"dearer_rates", dearer_rates}, {"unpriced_usage", unpriced_usage}, {"zero_rates", zero_rates},
+      {"tier_reasons", tier_reasons}, {"usage_stage", usage_stage}, {"reservation_from_entry", reservation_from_entry},
+      {"skipped_prices", skipped_prices}, {"hour_cache_writes", hour_cache_writes}, {"left_out_units_refuse", left_out_units_refuse},
+      {"override_keys_are_units", override_keys_are_units}, {"bands_count_every_input_token", bands_count_every_input_token},
+      {"listed_overrides_bound_every_call", listed_overrides_bound_every_call}, {"item_rows_change_no_token_price", item_rows_change_no_token_price},
+      {"item_prices", item_prices}, {"item_prices_follow_the_rows", item_prices_follow_the_rows}, {"variable_rows", variable_rows},
+      {"variable_dearest_price", variable_dearest_price}, {"variable_compaction", variable_compaction}, {"variable_ceilings", variable_ceilings},
+      {"sums_past_64_bits", sums_past_64_bits}};
+  int failed = 0;
+  for (const auto& [name, run] : cases) {
+    try {
+      run();
+    } catch (const std::exception& error) {
+      std::cerr << "pricing test failed: " << name << ": " << error.what() << '\n';
+      ++failed;
+    }
   }
-  catch (const std::exception& error) { std::cerr << "pricing test failed: " << error.what() << '\n'; return 1; }
+  if (failed) return 1;
+  std::cout << "pricing properties passed\n";
+  return 0;
 }

@@ -108,9 +108,12 @@ bool priced_in_other_tier(const descriptor::CatalogueEntry& entry, std::string_v
   return false;
 }
 }  // namespace
+// With a variable row that applies, the price has no rate at all: a bound over a price that only left that unit out would
+// read the other units' rates and be lower than the bill.
 ModelPrice dearest_price_of(const descriptor::CatalogueEntry& entry, std::string_view service_tier,
                             std::uint64_t input_tokens) {
-  return select(entry, service_tier, input_tokens, true).price;
+  auto selected = select(entry, service_tier, input_tokens, true);
+  return selected.variable.empty() ? std::move(selected.price) : ModelPrice{};
 }
 
 namespace {
@@ -145,8 +148,11 @@ UsageSum usage_sum(const Selection& selection, const Usage& usage, const UsageRu
   const auto cache_read = count(usage.cache_read).value_or(0), cache_write = count(usage.cache_write).value_or(0);
   std::optional<std::uint64_t> uncached = count(usage.input_uncached);
   if (!uncached && usage.input_total) {
+    // Cache counters that sum past 64 bits are above any total.
     const auto total = usage.input_total->value;
-    uncached = total >= cache_read + cache_write ? total - cache_read - cache_write : 0;
+    std::uint64_t cached = 0;
+    if (!detail::checked_add(cache_read, cache_write, cached)) cached = detail::kMax;
+    uncached = total >= cached ? total - cached : 0;
   }
   auto& sum = out.sum;  // nano-USD x 1e6
   auto& complete = out.complete;
@@ -179,7 +185,18 @@ UsageSum usage_sum(const Selection& selection, const Usage& usage, const UsageRu
   if (rules.route_ceiling) {
     // The served endpoint is unknown: every input token at the ceiling's input rate, every output token at its
     // output rate.
-    if (!price.ceiling_input || !price.ceiling_output) { out.unpriced.emplace_back("ceiling"); complete = false; return out; }
+    // A ceiling the entry does not list is "ceiling"; a ceiling row at a variable price is named, and so, when every
+    // ceiling is listed, is a variable request fee.
+    const bool absent = (!price.ceiling_input && !selection.is_variable("ceiling_input")) ||
+                        (!price.ceiling_output && !selection.is_variable("ceiling_output"));
+    bool variable_ceiling = false;
+    if (absent) out.unpriced.emplace_back("ceiling");
+    for (const std::string_view unit : {"ceiling_input", "ceiling_output"})
+      if (selection.is_variable(unit)) { out.unpriced.emplace_back(unit); variable_ceiling = true; }
+    if (!absent && variable_ceiling)
+      for (const std::string_view unit : {"request", "ceiling_request"})
+        if (selection.is_variable(unit)) out.unpriced.emplace_back(unit);
+    if (absent || variable_ceiling) { complete = false; return out; }
     assume("route ceiling");
     if (!uncached) { if (rules.input) { out.unpriced.emplace_back("input"); complete = false; } }
     else charge("ceiling_input", *uncached, price.ceiling_input, "ceiling");
@@ -290,12 +307,22 @@ UsageSum usage_sum(const Selection& selection, const Usage& usage, const UsageRu
     }
     if (compaction) {
       const auto read = extra("compaction.cache_read_input_tokens"), written = extra("compaction.cache_creation_input_tokens");
+      const auto compacted_output = extra("compaction.output_tokens");
+      // The iteration's writes have no 5-minute and 1-hour split and its output no modality breakdown, so a variable
+      // 1-hour or image output rate may price any of them, as it does the top-level counters without one. Named once.
+      const auto variable = [&](std::string_view unit, std::uint64_t units) {
+        if (!units || !selection.is_variable(unit)) return;
+        if (std::find(out.unpriced.begin(), out.unpriced.end(), unit) == out.unpriced.end()) out.unpriced.emplace_back(unit);
+        complete = false;
+      };
       charge("input", extra("compaction.input_tokens"), price.input, "input");
       const auto compaction_read = fallback("cache_read", price.cache_read, price.input, "cache_read at input", read);
       charge(compaction_read.unit, read, compaction_read.value, "cache_read", price.input);
       const auto compaction_write = fallback("cache_write", price.cache_write, price.input, "cache_write at input", written);
       charge(compaction_write.unit, written, compaction_write.value, "cache_write", price.input);
-      charge("output", extra("compaction.output_tokens"), price.output, "output");
+      variable("cache_write_1h", written);
+      charge("output", compacted_output, price.output, "output");
+      variable("output_image", compacted_output);
     }
     if (selection.is_variable("request")) { out.unpriced.emplace_back("request"); complete = false; }
     else if (price.request) {
@@ -314,9 +341,13 @@ CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_v
   const descriptor::CatalogueEntry* entry = nullptr;
   detail::Selection selection;
   auto count_of = [](const std::optional<Count>& c) -> std::uint64_t { return c ? c->value : 0; };
-  // The input length that picks the entry's band: every input token, cache reads and writes included.
-  const auto input_length = usage.input_total ? usage.input_total->value
-      : count_of(usage.input_uncached) + count_of(usage.cache_read) + count_of(usage.cache_write);
+  // The input length that picks the entry's band: every input token, cache reads and writes included. A sum past 64
+  // bits is above every band.
+  std::uint64_t input_length = 0;
+  if (usage.input_total) input_length = usage.input_total->value;
+  else
+    for (const auto& counter : {usage.input_uncached, usage.cache_read, usage.cache_write})
+      if (!detail::checked_add(input_length, count_of(counter), input_length)) input_length = detail::kMax;
   bool other_tier = false;
   auto priced = [&](std::string_view name) {
     if (name.empty()) return false;
@@ -374,7 +405,10 @@ Bound bounded(const ModelPrice& price, const detail::UnitKeys& variable, const B
     input = price.ceiling_input;
     output = price.ceiling_output;
     fee = dearest({price.request, price.ceiling_request});
-    if (!input || !output) out.unpriced.emplace_back("ceiling");
+    // A ceiling the entry does not list is "ceiling"; a ceiling row at a variable price is named.
+    if ((!input && detail::key_of(variable, "ceiling_input").empty()) || (!output && detail::key_of(variable, "ceiling_output").empty()))
+      out.unpriced.emplace_back("ceiling");
+    name_variable({"ceiling_input", "ceiling_output"});
     name_variable({"request", "ceiling_request"});
   } else {
     input = price.input ? dearest({price.input, price.cache_read, price.cache_write, price.cache_write_1h, price.input_audio}) : std::nullopt;
@@ -529,19 +563,25 @@ WorstCase worst_case(const WorstCaseInput& in, const descriptor::ModelCatalogue&
       block(UnboundedBy::RouteCeiling, model, "the entry lists a route ceiling but the origin is not a routing gateway, so it cannot be pinned");
       continue;
     }
-    if (in.routed_gateway && (!candidate.price.ceiling_input || !candidate.price.ceiling_output)) {
-      block(UnboundedBy::RouteCeiling, model, "the entry lists no route ceiling (ceiling_input, ceiling_output), so the router may pick any price");
-      continue;
-    }
-    // The pin states the request fee, which a row with a price that is not a fixed amount leaves unknown.
     if (in.routed_gateway) {
-      bool variable_fee = false;
+      // A ceiling the entry does not list leaves the router free; a ceiling row at a variable price is named, and so,
+      // when every ceiling is listed, is a variable request fee, which the pin would state.
+      const bool absent = (!candidate.price.ceiling_input && detail::key_of(candidate.variable, "ceiling_input").empty()) ||
+                          (!candidate.price.ceiling_output && detail::key_of(candidate.variable, "ceiling_output").empty());
+      if (absent) block(UnboundedBy::RouteCeiling, model, "the entry lists no route ceiling (ceiling_input, ceiling_output), so the router may pick any price");
+      bool variable = false;
+      for (const std::string_view unit : {"ceiling_input", "ceiling_output"})
+        if (const auto key = detail::key_of(candidate.variable, unit); !key.empty()) {
+          block(UnboundedBy::ModelPrice, model, variable_rate(*entry, unit, key));
+          variable = true;
+        }
+      if (absent) continue;
       for (const std::string_view unit : {"request", "ceiling_request"})
         if (const auto key = detail::key_of(candidate.variable, unit); !key.empty()) {
           block(UnboundedBy::ModelPrice, model, variable_rate(*entry, unit, key));
-          variable_fee = true;
+          variable = true;
         }
-      if (variable_fee) continue;
+      if (variable) continue;
     }
     candidates.push_back(std::move(candidate));
   }
