@@ -104,6 +104,12 @@ struct CostEstimate {
 //   (`cached_tokens_details.image_tokens`, `cacheTokensDetails.IMAGE`) has no total ("cache_read_image"), since no unit
 //   prices cached image tokens; a Generate usage's cached image tokens bill among the cache reads, as its image tokens
 //   bill at the input rates.
+//   A usage without the breakdown (Chat, Responses) that reports input audio, priced by an entry that lists
+//   `cache_read_audio`, bills as many cache reads as there are audio tokens at the dearer of `cache_read` and
+//   `cache_read_audio` ("cache_read at cache_read_audio" when that is the audio rate), since they may be cached audio;
+//   a variable `cache_read_audio` leaves them unpriced.
+// - An OpenAI realtime turn whose `input_token_details` text, audio and image tokens do not sum to its input total
+//   contradicts it, and has no total ("input").
 // - Output: with a `reasoning` price, reasoning tokens at it and the rest of output_total at `output`; otherwise
 //   all of output_total at `output`.
 // - Messages: the compaction iterations (Usage::extra `compaction.input_tokens`, `compaction.output_tokens` and

@@ -214,6 +214,9 @@ constexpr std::array<std::string_view, 2> input_image_counters{"input_token_deta
 constexpr std::array<std::string_view, 2> cached_breakdown{"cacheTokensDetails.", "cached_tokens_by_modality."};
 constexpr std::array<std::string_view, 1> cached_audio_counters{"input_token_details.cached_tokens_details.audio_tokens"};
 constexpr std::array<std::string_view, 1> cached_image_counters{"input_token_details.cached_tokens_details.image_tokens"};
+// The OpenAI realtime codec's input by modality, which sums to the input total.
+constexpr std::array<std::string_view, 3> realtime_input_counters{"input_token_details.text_tokens", "input_token_details.audio_tokens",
+                                                                  "input_token_details.image_tokens"};
 // The unit of cached audio input tokens, and the name of cached image input tokens, which no unit prices.
 constexpr std::string_view cached_audio_unit = "cache_read_audio", cached_image_name = "cache_read_image";
 // The tokens of one modality in a breakdown, matched without regard to case. Empty when the usage has none.
@@ -284,6 +287,18 @@ UsageSum usage_sum(const Selection& selection, const Usage& usage, const UsageRu
   };
   // Gemini bills the tool-use prompt beyond the prompt count; no price here covers it.
   if (extra("toolUsePromptTokenCount")) { out.unpriced.emplace_back("toolUsePromptTokenCount"); complete = false; }
+  // An OpenAI realtime turn's text, audio and image input tokens that do not sum to its input total contradict it: which
+  // of them is wrong is not known, so the input has no price.
+  if (usage.input_total) {
+    std::uint64_t parts = 0;
+    bool every = true, fits = true;
+    for (const std::string_view counter : realtime_input_counters) {
+      const auto found = usage.extra.find(std::string(counter));
+      if (found == usage.extra.end()) { every = false; break; }
+      fits = fits && detail::checked_add(parts, found->second.value, parts);
+    }
+    if (every && (!fits || parts != usage.input_total->value)) { out.unpriced.emplace_back("input"); complete = false; }
+  }
   // A Messages compaction iteration is billed at the model's rates beside the top-level counters.
   const bool compaction = rules.compaction;
   if (rules.route_ceiling) {
@@ -334,6 +349,9 @@ UsageSum usage_sum(const Selection& selection, const Usage& usage, const UsageRu
     // cache reads contradicts them, and prices nothing.
     const auto audio_count = audio_of(input_audio_counters, input_breakdown);
     const auto cached_audio = tokens_of(cached_audio_counters, cached_breakdown, "audio");
+    // Whether the usage breaks its cache reads down by modality at all. Without the breakdown (Chat, Responses) the
+    // cache reads may hold up to the input's audio tokens of cached audio.
+    const bool cached_split = modality_tokens(usage, cached_breakdown, "audio").has_value() || counter_tokens(cached_audio_counters).has_value();
     const bool cached_audio_contradicts = cached_audio > audio_count || cached_audio > cache_read;
     if (cached_audio_contradicts) {
       out.unpriced.emplace_back(cached_audio_unit);
@@ -376,8 +394,22 @@ UsageSum usage_sum(const Selection& selection, const Usage& usage, const UsageRu
       return Rate{general, "input"};
     };
     const auto cached_text = cache_read - cached_audio_in;
+    // Without the breakdown, an entry that prices cached audio bills the cache reads that may be audio (at most the
+    // input's audio tokens) at the dearer of the cached text and cached audio rates, so the estimate is not below the
+    // bill whichever they were. A variable cached audio rate then leaves them unpriced.
+    const bool audio_cache_listed = price.cache_read_audio || selection.is_variable(cached_audio_unit);
+    const auto maybe_audio = !cached_split && audio_cache_listed ? (std::min)(cache_read, audio_count) : std::uint64_t{0};
     const auto read_rate = fallback("cache_read", price.cache_read, price.input, "cache_read at input", cached_text);
-    charge(read_rate.unit, cached_text, read_rate.value, "cache_read", price.input);
+    if (maybe_audio && !price.cache_read_audio) {
+      charge(read_rate.unit, cached_text - maybe_audio, read_rate.value, "cache_read", price.input);
+      charge(cached_audio_unit, maybe_audio, std::nullopt, cached_audio_unit);
+    } else if (maybe_audio && read_rate.value && *price.cache_read_audio > *read_rate.value) {
+      charge(read_rate.unit, cached_text - maybe_audio, read_rate.value, "cache_read", price.input);
+      assume("cache_read at cache_read_audio");
+      charge(cached_audio_unit, maybe_audio, price.cache_read_audio, cached_audio_unit, price.input_audio);
+    } else {
+      charge(read_rate.unit, cached_text, read_rate.value, "cache_read", price.input);
+    }
     if (!cached_audio_contradicts) charge(cached_audio_unit, cached_audio_in, price.cache_read_audio, cached_audio_unit, price.input_audio);
     // Messages splits cache writes into 5-minute and 1-hour writes; without the split, all of them bill at the
     // dearer rate.

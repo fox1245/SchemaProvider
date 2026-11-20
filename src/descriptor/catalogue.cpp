@@ -846,8 +846,10 @@ std::vector<std::string_view> left_out_with(std::string_view unit) {
   }
   return {plain};
 }
-// Whether pricing bills the tokens of `unit` at another unit where `unit` has no price: a part of the input or the
-// output, or a cache write.
+// Whether a time window that leaves `unit` out of the base or of a window leaves it out of the entry: a part of the
+// input or the output and a cache write, which pricing bills at another unit where they have no price, and cached audio,
+// which it never does but which the bounds reserve beside the audio input. Leaving it out is the conservative choice
+// either way: with it go input_audio and input (left_out_with), so no bound or estimate reads a rate below the bill.
 bool falls_back(std::string_view unit) {
   const auto plain = plain_price_unit(unit);
   const auto found = std::find_if(std::begin(billed_units), std::end(billed_units), [&](const auto& item) { return item.first == plain; });

@@ -124,6 +124,8 @@ constexpr std::string_view input_units[]{"input", "cache_read", "cache_write", "
                                          "cache_read_audio"};
 constexpr std::string_view output_units[]{"output", "reasoning", "output_image", "output_audio"};
 constexpr std::string_view image_token_units[]{"input_image"};
+// A cached audio input token, whose listed rate the request's cap on the prompt price does not bind.
+constexpr std::string_view cached_audio_units[]{"cache_read_audio"};
 constexpr std::string_view request_units[]{"request"};
 // The dimension every call offers: the operation it performs.
 constexpr std::string_view operation_dimension = "operation";
@@ -571,9 +573,17 @@ EndpointBound endpoint_worst_case(const EndpointWorstCaseInput& in, const descri
         ceiling_below_listed(*entry, TokenSide::Input, rows.dearest->first, tier, length))
       block(UnboundedBy::RouteCeiling, facts.model,
             "the entry's ceiling_input is below a token price the entry lists on that side, so it bounds nothing; refresh the catalogue");
+    // The cap binds only the prices `provider.max_price.prompt` names, not a cached audio token's: the estimate bills that
+    // at its listed rate, so the bound reserves at least it.
+    const auto cached_audio = token_rows(*entry, cached_audio_units, tier, length);
+    if (!cached_audio.variable.empty())
+      block(UnboundedBy::ModelPrice, std::string(cached_audio_units[0]),
+            "catalogue entry '" + entry->id + "' prices it at a variable price (" + std::string(cached_audio.variable) + ")");
     if (out.unbounded.empty()) {
       const auto own = *facts.max_price->prompt_nano_usd, highest = rows.dearest->first;
-      if (own < highest) charge(input_units[0], pin_row, *count, own);
+      const auto capped = (std::min)(own, highest);
+      if (cached_audio.dearest && cached_audio.dearest->first > capped) charge(input_units[0], cached_audio.dearest->second, *count, cached_audio.dearest->first);
+      else if (own < highest) charge(input_units[0], pin_row, *count, own);
       else charge(input_units[0], rows.dearest->second, *count, highest);
       // The pin the request must carry: its own cap, the prompt amount lowered to the route ceiling.
       pin = *facts.max_price;
@@ -788,7 +798,7 @@ EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const EndpointCou
     const auto cap = *facts.max_price->prompt_nano_usd;
     bool lowered = false;
     for (auto* rate : {&selection.price.input, &selection.price.cache_read, &selection.price.cache_write, &selection.price.cache_write_1h,
-                       &selection.price.input_audio, &selection.input_image, &selection.price.cache_read_audio})
+                       &selection.price.input_audio, &selection.input_image})
       if (*rate && **rate > cap) {
         *rate = cap;
         lowered = true;

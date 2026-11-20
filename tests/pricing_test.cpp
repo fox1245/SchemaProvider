@@ -1366,6 +1366,21 @@ void cached_audio_input() {
                                                             {"cacheTokensDetails.TEXT", 100}, {"cacheTokensDetails.IMAGE", 200}});
   expect_total(pricing::estimate(*c, "google.generate", "", model("cached-audio"), generate_images), 420'000u + 18'000u + 24'000u, __LINE__);
 
+  // A usage without the breakdown (Chat): 1000 in, 200 of them cached, 200 audio. The cache reads may be the audio, so
+  // where the entry prices cached audio they bill at the dearer of the two cache rates: 600 text, 200 audio and 200
+  // cached at 3e-7, which is at least the bill whether the audio count holds the cached audio (800 text at 6e-7 and 200
+  // cached audio: 564'000) or not (2'444'000). An entry that lists no cached audio rate bills them as before.
+  const auto chat = with(usage(1'000, 10, 200), {{"input_audio", 200}});
+  {
+    const auto e = pricing::estimate(*c, "openai.chat", "", model("cached-audio"), chat);
+    expect_total(e, 360'000u + 2'000'000u + 60'000u + 24'000u, __LINE__);
+    SOFT(e.total && e.total->nano_usd >= 564'000u && e.total->nano_usd >= 2'444'000u);
+    SOFT(e.assumptions == std::vector<std::string>({"cache_read at cache_read_audio"}));
+  }
+  expect_total(pricing::estimate(*c, "openai.chat", "", model("no-cached-audio"), chat), 360'000u + 2'000'000u + 12'000u + 24'000u, __LINE__);
+  expect_unpriced(pricing::estimate(*c, "openai.chat", "", model("variable-cached-audio"), chat), {"cache_read_audio"}, __LINE__);
+  // Without audio, or without cache reads, nothing may be cached audio.
+  expect_total(pricing::estimate(*c, "openai.chat", "", model("cached-audio"), usage(1'000, 10, 200)), 480'000u + 12'000u + 24'000u, __LINE__);
   // The bounds reserve at the dearest input rate, the cached audio rate included: at 1e-4 it is dearer than the audio
   // rate, and the estimate of the issue's turn at that rate stays below each bound.
   const auto& dear = *c->entry("dear-cached-audio");

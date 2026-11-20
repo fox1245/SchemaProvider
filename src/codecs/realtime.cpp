@@ -82,6 +82,18 @@ Usage openai_usage(json::Value usage) {
   value.cache_read = counter(usage.get("input_token_details").get("cached_tokens"));
   value.reasoning = counter(usage.get("output_token_details").get("reasoning_tokens"));
   leaves(usage, {}, value);
+  // The input by modality sums to the input total (live turns of 2026-11-20: 726 = 21 + 705 + 0); counters that do not
+  // contradict it.
+  const auto details = usage.get("input_token_details");
+  const auto text = counter(details.get("text_tokens")), audio = counter(details.get("audio_tokens")), image = counter(details.get("image_tokens"));
+  if (value.input_total && text && audio && image) {
+    const auto most = std::numeric_limits<std::uint64_t>::max();
+    const bool fits = audio->value <= most - text->value && image->value <= most - text->value - audio->value;
+    if (!fits || text->value + audio->value + image->value != value.input_total->value) {
+      value.quality = UsageQuality::Inconsistent;
+      value.conflicts.push_back({"input_tokens", "text, audio and image input tokens differ from the input total"});
+    }
+  }
   value.stage = UsageStage::Final;
   return value;
 }
