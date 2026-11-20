@@ -24,8 +24,8 @@ Outcome interaction_state(const descriptor::ValidatedDescriptor& descriptor, con
   State state;
   if (const auto* failure = std::get_if<Failure>(&outcome)) {
     // An interaction that ended failed or cancelled is a finished job; anything else did not reach its state.
-    const bool cancelled = failure->error.kind == ErrorKind::Cancelled && failure->error.reason == reason::code(reason::Source::Interactions, "interaction cancelled");
-    const bool failed = failure->error.reason == reason::code(reason::Source::Interactions, "interaction failed");
+    const bool cancelled = failure->error.kind == ErrorKind::Cancelled && failure->error.reason == reason::interactions::terminal_cancelled.code;
+    const bool failed = failure->error.reason == reason::interactions::remote_failed.code;
     if (!cancelled && !failed) return *failure;
     state.status = cancelled ? Status::Cancelled : Status::Failed;
     state.raw_status = cancelled ? "cancelled" : "failed";
