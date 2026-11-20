@@ -70,10 +70,9 @@ Codec::Codec(const descriptor::ValidatedDescriptor& d, Mode mode, Accumulator& a
   served::observe(descriptor_, accumulator_, context_, {});
 }
 bool Codec::emit(const Event& e) { return accumulator_.accept(e, buffered_failure_ ? &*buffered_failure_ : nullptr); }
-bool Codec::fail(ErrorKind kind, std::string label, std::string_view vendor_code) {
+bool Codec::fail(ErrorKind kind, const reason::Reason& label, std::string_view vendor_code) {
   if (buffered_failure_ && !closed_) return false;
-  Error error{kind, std::move(label)};
-  error.reason = reason::code(reason::Source::Gemini, error.safe_message);
+  Error error = reason::error(kind, label);
   const bool machine = !vendor_code.empty() && vendor_code.size() <= 64 && vendor_code.front() >= 'A' && vendor_code.front() <= 'Z' &&
       std::all_of(vendor_code.begin(), vendor_code.end(), [](char c) { return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; });
   if (machine) error.vendor_code = std::string(vendor_code);
@@ -82,7 +81,7 @@ bool Codec::fail(ErrorKind kind, std::string label, std::string_view vendor_code
 bool Codec::local_id(std::string& id, LocalId part) {
   if (ownership_token_.empty()) {
     unsigned char random[8];
-    if (!crypto::random_bytes(random, sizeof random)) return fail(ErrorKind::ResourceLimit, "Gemini local ownership id exhausted");
+    if (!crypto::random_bytes(random, sizeof random)) return fail(ErrorKind::ResourceLimit, reason::gemini::function_call_ownership_exhausted);
     for (const auto byte : random) { ownership_token_ += "0123456789abcdef"[byte >> 4]; ownership_token_ += "0123456789abcdef"[byte & 15]; }
   }
   id = "gemini-local-" + ownership_token_ + '-' + std::to_string(part.value);
@@ -98,11 +97,11 @@ std::shared_ptr<const json::Document> Codec::own(json::Value v) {
   // their exact native subtree rather than laundering it into a valid object.
   if (auto e = std::get_if<json::ParseError>(&parsed); e && e->code == json::ParseCode::DuplicateKey && envelope_unique(e->context.root()))
     return std::make_shared<const json::Document>(std::move(e->context));
-  fail(ErrorKind::ProtocolCorrupt, "invalid retained Gemini JSON"); return {};
+  fail(ErrorKind::ProtocolCorrupt, reason::gemini::retained_json_invalid); return {};
 }
 bool Codec::buffered(std::string_view body, Close close) {
   if (closed_ || accumulator_.terminal()) return false;
-  if (mode_ != Mode::Buffered || body_seen_) return fail(ErrorKind::Misuse, "unexpected buffered Gemini response");
+  if (mode_ != Mode::Buffered || body_seen_) return fail(ErrorKind::Misuse, reason::gemini::buffered_unexpected);
   body_seen_ = true;
   if (!close.normal) buffered_failure_ = Error{close.error, "abnormal Gemini response close"};
   const bool decoded = document(body);
@@ -111,17 +110,17 @@ bool Codec::buffered(std::string_view body, Close close) {
 }
 bool Codec::frame(std::string_view event, std::string_view data) {
   if (closed_ || accumulator_.terminal()) return false;
-  if (mode_ != Mode::Sse) return fail(ErrorKind::Misuse, "unexpected Gemini stream frame");
+  if (mode_ != Mode::Sse) return fail(ErrorKind::Misuse, reason::gemini::stream_frame_unexpected);
   return document(data, event);
 }
 bool Codec::identity(json::Value root) {
   auto id = root.get("responseId"), model = root.get("modelVersion");
   if (id.valid()) {
-    if (!nonempty(id) || (!generation_.empty() && generation_ != id.as_string())) return fail(ErrorKind::ProtocolCorrupt, "Gemini response identity changed");
+    if (!nonempty(id) || (!generation_.empty() && generation_ != id.as_string())) return fail(ErrorKind::ProtocolCorrupt, reason::gemini::response_id_changed);
     generation_ = id.as_string();
   }
   if (model.valid()) {
-    if (!nonempty(model) || (!model_.empty() && model_ != model.as_string())) return fail(ErrorKind::ProtocolCorrupt, "Gemini model identity changed");
+    if (!nonempty(model) || (!model_.empty() && model_ != model.as_string())) return fail(ErrorKind::ProtocolCorrupt, reason::gemini::model_identity_changed);
     // Google serves aliases and auto-routed models under other names (gemini-3.5-flash as
     // gemini-3.6-flash, lyria-3-pro-preview as lyria-3.5); the name is recorded, never refused.
     if (model_.empty()) served::observe(descriptor_, accumulator_, context_, model.as_string());
@@ -132,32 +131,33 @@ bool Codec::identity(json::Value root) {
 bool Codec::document(std::string_view bytes, std::string_view event) {
   const bool remote_error = event == "error";
   const bool unsupported_event = !event.empty() && event != "message" && !remote_error;
-  auto reject = [&](ErrorKind kind, std::string label) {
-    if (remote_error) return fail(ErrorKind::RemoteFailure, "remote Gemini error event");
-    if (unsupported_event) return fail(ErrorKind::Unsupported, "unknown Gemini SSE event");
+  auto reject = [&](ErrorKind kind, const reason::Reason& label) {
+    if (remote_error) return fail(ErrorKind::RemoteFailure, reason::gemini::remote_error_event);
+    if (unsupported_event) return fail(ErrorKind::Unsupported, reason::gemini::event_unknown);
     return fail(kind, std::move(label));
   };
-  if (!context_ || descriptor_.family() != "google.generate" || !context_->matches_descriptor(descriptor_)) return reject(ErrorKind::InvalidConfig, "Gemini request context required");
-  if (bytes.size() > limits_.max_content_bytes - std::min(input_bytes_, limits_.max_content_bytes)) return reject(ErrorKind::ResourceLimit, "Gemini response byte limit");
+  if (!context_ || descriptor_.family() != "google.generate" || !context_->matches_descriptor(descriptor_)) return reject(ErrorKind::InvalidConfig, reason::gemini::context_required);
+  if (bytes.size() > limits_.max_content_bytes - std::min(input_bytes_, limits_.max_content_bytes)) return reject(ErrorKind::ResourceLimit, reason::gemini::response_byte_limit);
   input_bytes_ += bytes.size();
   auto parsed = json::parse(bytes, {limits_.max_content_bytes, limits_.max_json_depth});
   std::shared_ptr<const json::Document> wire;
   if (auto e = std::get_if<json::ParseError>(&parsed)) {
     if (e->code == json::ParseCode::DuplicateKey && envelope_unique(e->context.root()))
       wire = std::make_shared<const json::Document>(std::move(e->context));
-    else return reject(e->code == json::ParseCode::SizeExceeded || e->code == json::ParseCode::DepthExceeded ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, "invalid Gemini response JSON");
+    else return reject(e->code == json::ParseCode::SizeExceeded || e->code == json::ParseCode::DepthExceeded ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, reason::gemini::response_json_invalid);
   } else wire = std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
   const auto root = wire->root();
-  if (!root.is_object()) return reject(ErrorKind::ProtocolCorrupt, "Gemini response must be object");
+  if (!root.is_object()) return reject(ErrorKind::ProtocolCorrupt, reason::gemini::response_object_required);
   const Event raw = RawWire{event.empty() ? "generateContentResponse" : std::string(event), wire};
   if (remote_error) {
-    const Error error{ErrorKind::RemoteFailure, "remote Gemini error event"};
+    // The classification takes precedence over a failure to retain the document, and carries no code there.
+    const Error error{ErrorKind::RemoteFailure, std::string(reason::gemini::remote_error_event.message)};
     if (!accumulator_.accept(raw, &error)) return false;
-    return fail(error.kind, error.safe_message);
+    return fail(error.kind, reason::gemini::remote_error_event);
   }
   if (!emit(raw)) return false;
-  if (unsupported_event) return fail(ErrorKind::Unsupported, "unknown Gemini SSE event");
-  if (root.get("error").valid()) return fail(ErrorKind::RemoteFailure, "remote Gemini error response");
+  if (unsupported_event) return fail(ErrorKind::Unsupported, reason::gemini::event_unknown);
+  if (root.get("error").valid()) return fail(ErrorKind::RemoteFailure, reason::gemini::remote_error_response);
   if (!identity(root)) return false;
   unknown(root, {"candidates", "promptFeedback", "usageMetadata", "modelVersion", "responseId", "modelStatus"});
   if (!begun_) {
@@ -165,26 +165,26 @@ bool Codec::document(std::string_view bytes, std::string_view event) {
     begun_ = true;
   }
   if (auto feedback = root.get("promptFeedback"); feedback.valid()) {
-    if (!feedback.is_object()) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini prompt feedback");
+    if (!feedback.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::gemini::prompt_feedback_invalid);
     auto blocked = feedback.get("blockReason");
-    if (blocked.valid() && (!blocked.is_string() || (blocked.as_string() != "BLOCK_REASON_UNSPECIFIED" && !blocked.as_string().empty()))) return fail(blocked.is_string() ? ErrorKind::RemoteFailure : ErrorKind::ProtocolCorrupt, "Gemini prompt blocked",
+    if (blocked.valid() && (!blocked.is_string() || (blocked.as_string() != "BLOCK_REASON_UNSPECIFIED" && !blocked.as_string().empty()))) return fail(blocked.is_string() ? ErrorKind::RemoteFailure : ErrorKind::ProtocolCorrupt, reason::gemini::prompt_feedback_blocked,
                                                                                                                                        blocked.is_string() ? blocked.as_string() : std::string_view{});
   }
   if (auto candidates = root.get("candidates"); candidates.valid()) {
-    if (!candidates.is_array() || candidates.size() > 1) return fail(ErrorKind::ProtocolCorrupt, "Gemini requires a single candidate");
+    if (!candidates.is_array() || candidates.size() > 1) return fail(ErrorKind::ProtocolCorrupt, reason::gemini::candidates_single_required);
     for (auto c : candidates.elements()) if (!candidate(c)) return false;
   }
   if (auto u = root.get("usageMetadata"); u.valid() && !u.is_null()) if (!usage(u)) return false;
   return true;
 }
 bool Codec::candidate(json::Value c) {
-  if (!c.is_object()) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini candidate");
+  if (!c.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::gemini::candidate_invalid);
   auto index = c.get("index");
-  if (index.valid() && (!count(index) || number(index) != 0)) return fail(ErrorKind::ProtocolCorrupt, "Gemini candidate index mismatch");
+  if (index.valid() && (!count(index) || number(index) != 0)) return fail(ErrorKind::ProtocolCorrupt, reason::gemini::candidate_index_mismatch);
   auto reason = c.get("finishReason");
-  if (reason.valid() && !reason.is_string()) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini finish reason");
+  if (reason.valid() && !reason.is_string()) return fail(ErrorKind::ProtocolCorrupt, reason::gemini::finish_reason_invalid);
   const bool terminal = reason.is_string() && !reason.as_string().empty() && reason.as_string() != "FINISH_REASON_UNSPECIFIED";
-  if (stopped_) return fail(ErrorKind::ProtocolCorrupt, "Gemini candidate after finish reason");
+  if (stopped_) return fail(ErrorKind::ProtocolCorrupt, reason::gemini::finish_reason_candidate_after);
   const auto raw = terminal ? reason.as_string() : std::string_view{};
   // A failure-class word (which no stop table may list) ends the call before the stop table is read, as the two values
   // below do: the stop stays Unknown and nothing the candidate carried is sealed, so no call becomes executable.
@@ -194,19 +194,19 @@ bool Codec::candidate(json::Value c) {
     stop_ = StopReason{StopKind::Unknown, std::string(raw), {}, std::move(details)};
     stopped_ = true;
     if (!emit(Stop{*stop_})) return false;
-    if (*failure_word == descriptor::FailureStop::Cancelled) return fail(ErrorKind::Cancelled, "Gemini cancelled finish reason");
-    if (*failure_word == descriptor::FailureStop::Incomplete) return fail(ErrorKind::Unsupported, "unsupported Gemini finish reason");
-    return fail(ErrorKind::RemoteFailure, "Gemini failure finish reason");
+    if (*failure_word == descriptor::FailureStop::Cancelled) return fail(ErrorKind::Cancelled, reason::gemini::finish_reason_cancelled);
+    if (*failure_word == descriptor::FailureStop::Incomplete) return fail(ErrorKind::Unsupported, reason::gemini::finish_reason_unsupported);
+    return fail(ErrorKind::RemoteFailure, reason::gemini::finish_reason_failure);
   };
   // A buffered candidate seals a part as it reads it, so there the word is decided before the parts. A stream decides it
   // with the finish reason below and keeps what it delivered; a client call is sealed only with a stop it reaches.
   if (failure_word && mode_ == Mode::Buffered) return failure_reason();
   if (auto content = c.get("content"); content.valid()) {
-    if (!content.is_object()) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini candidate content");
-    if (auto role = content.get("role"); role.valid() && (!role.is_string() || role.as_string() != "model")) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini output role");
+    if (!content.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::gemini::candidate_content_invalid);
+    if (auto role = content.get("role"); role.valid() && (!role.is_string() || role.as_string() != "model")) return fail(ErrorKind::ProtocolCorrupt, reason::gemini::candidate_role_invalid);
     auto parts = content.get("parts");
     if ((!parts.valid() && !terminal) || (parts.valid() && !parts.is_array()))
-      return fail(ErrorKind::ProtocolCorrupt, "Gemini parts array required outside an empty terminal");
+      return fail(ErrorKind::ProtocolCorrupt, reason::gemini::candidate_parts_required);
     for (auto p : parts.elements()) if (!part(p)) return false;
   }
   unknown(c, {"index", "content", "finishReason", "finishMessage", "safetyRatings", "citationMetadata", "tokenCount", "groundingAttributions", "groundingMetadata", "avgLogprobs", "logprobsResult", "urlContextMetadata"});
@@ -219,7 +219,7 @@ bool Codec::candidate(json::Value c) {
       stop_ = StopReason{StopKind::Unknown, std::string(raw), {}, std::move(details)};
       stopped_ = true;
       if (!emit(Stop{*stop_})) return false;
-      return fail(ErrorKind::RemoteFailure, "Gemini generation blocked or rejected", raw);
+      return fail(ErrorKind::RemoteFailure, reason::gemini::remote_generation_blocked, raw);
     }
     stop_ = StopReason{stop_kind(descriptor_, raw, has_call_), std::string(raw), {}, std::move(details)};
     stopped_ = true;
@@ -228,7 +228,7 @@ bool Codec::candidate(json::Value c) {
     for (auto local : pending_seals_) if (!emit(PartSeal{local, {}, {}})) return false;
     pending_seals_.clear();
     // A blocked candidate, whatever value the table gives ContentFilter, ends the call.
-    if (stop_->kind == StopKind::ContentFilter) return fail(ErrorKind::RemoteFailure, "Gemini generation blocked or rejected", raw);
+    if (stop_->kind == StopKind::ContentFilter) return fail(ErrorKind::RemoteFailure, reason::gemini::remote_generation_blocked, raw);
   }
   return true;
 }
@@ -268,24 +268,24 @@ bool Codec::close_run() {
     writer.raw("}");
   }
   writer.raw("}");
-  if (!writer.ok()) return fail(ErrorKind::ResourceLimit, "Gemini native array limit");
+  if (!writer.ok()) return fail(ErrorKind::ResourceLimit, reason::gemini::native_array_limit);
   auto parsed = json::parse(bytes, {limits_.max_content_bytes, limits_.max_json_depth});
   auto* document = std::get_if<json::Document>(&parsed);
-  if (!document) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini native array");
+  if (!document) return fail(ErrorKind::ProtocolCorrupt, reason::gemini::native_array_invalid);
   wire_parts_[run.slot] = std::make_shared<const json::Document>(std::move(*document));
   return true;
 }
 bool Codec::part(json::Value p) {
-  if (!p.is_object()) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini part");
+  if (!p.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::gemini::part_invalid);
   auto thought = p.get("thought"), signature = p.get("thoughtSignature");
-  if ((thought.valid() && !thought.is_bool()) || (signature.valid() && !signature.is_string())) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini thought metadata");
+  if ((thought.valid() && !thought.is_bool()) || (signature.valid() && !signature.is_string())) return fail(ErrorKind::ProtocolCorrupt, reason::gemini::part_thought_invalid);
   unsigned data_fields = 0;
   std::string_view data_key;
   for (auto key : {"text", "inlineData", "functionCall", "functionResponse", "fileData", "executableCode", "codeExecutionResult", "toolCall", "toolResponse"})
     if (p.get(key).valid()) { ++data_fields; data_key = key; }
-  if (data_fields > 1) return fail(ErrorKind::ProtocolCorrupt, "Gemini part contains conflicting data fields");
+  if (data_fields > 1) return fail(ErrorKind::ProtocolCorrupt, reason::gemini::part_fields_conflict);
   for (auto m : p.members()) {
-    if (m.key != data_key && m.key != "thought" && m.key != "thoughtSignature" && m.key != "partMetadata" && m.key != "mediaResolution" && m.key != "mediaProcessing" && m.key != "audioTranscription" && m.key != "speechMetadata" && m.key != "videoMetadata") return fail(ErrorKind::Unsupported, "unknown Gemini part semantic");
+    if (m.key != data_key && m.key != "thought" && m.key != "thoughtSignature" && m.key != "partMetadata" && m.key != "mediaResolution" && m.key != "mediaProcessing" && m.key != "audioTranscription" && m.key != "speechMetadata" && m.key != "videoMetadata") return fail(ErrorKind::Unsupported, reason::gemini::part_semantic_unknown);
   }
   auto retained = own(p); if (!retained) return false;
   const LocalId local{static_cast<uint32_t>(wire_parts_.size())};
@@ -297,29 +297,29 @@ bool Codec::part(json::Value p) {
   std::string_view media_mime;
   const auto transcription = p.get("audioTranscription");
   if (data_key == "text") {
-    if (!p.get("text").is_string()) return fail(ErrorKind::ProtocolCorrupt, "Gemini text must be string");
+    if (!p.get("text").is_string()) return fail(ErrorKind::ProtocolCorrupt, reason::gemini::part_text_invalid);
     kind = thought.is_bool() && thought.as_bool() ? PartKind::Thinking : PartKind::Text;
     fragment = p.get("text").as_string();
   } else if (data_key.empty() && transcription.valid()) {
     // A transcription model answers with a part whose only data is the transcript; it is the answer's text.
     // Next to inline audio the same member stays metadata of that part.
-    if (!transcription.is_object() || !transcription.get("text").is_string()) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini audio transcription");
+    if (!transcription.is_object() || !transcription.get("text").is_string()) return fail(ErrorKind::ProtocolCorrupt, reason::gemini::part_transcription_invalid);
     unknown(transcription, {"text"});
     header.wire_type = "audioTranscription";
     kind = PartKind::Text;
     fragment = transcription.get("text").as_string();
   } else if (data_key == "functionCall") {
     auto call = p.get("functionCall");
-    if (!call.is_object() || !nonempty(call.get("name"))) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini function identity");
+    if (!call.is_object() || !nonempty(call.get("name"))) return fail(ErrorKind::ProtocolCorrupt, reason::gemini::function_call_identity_invalid);
     auto id = call.get("id");
-    if (id.valid() && !nonempty(id)) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini function call id");
+    if (id.valid() && !nonempty(id)) return fail(ErrorKind::ProtocolCorrupt, reason::gemini::function_call_id_invalid);
     if (!context_->client_tool_declared(call.get("name").as_string()) && !context_->service_declares_functions())
-      return fail(ErrorKind::Unsupported, "undeclared Gemini client function");
-    if (call.get("partialArgs").valid() || call.get("willContinue").valid()) return fail(ErrorKind::Unsupported, "streamed partial function arguments unsupported");
+      return fail(ErrorKind::Unsupported, reason::gemini::function_call_undeclared);
+    if (call.get("partialArgs").valid() || call.get("willContinue").valid()) return fail(ErrorKind::Unsupported, reason::gemini::function_call_partial_args_unsupported);
     header.name = call.get("name").as_string();
     if (id.valid()) header.wire_id = id.as_string();
     else if (!local_id(header.wire_id, local)) return false;
-    if (!calls_.insert(header.wire_id).second) return fail(ErrorKind::ProtocolCorrupt, "duplicate Gemini function call id");
+    if (!calls_.insert(header.wire_id).second) return fail(ErrorKind::ProtocolCorrupt, reason::gemini::function_call_id_duplicate);
     auto args = call.get("args");
     content = args.valid() ? args.dump() : "{}";
     fragment = content;
@@ -330,20 +330,20 @@ bool Codec::part(json::Value p) {
     // A call the service runs itself: code execution always, other built-in tools and MCP servers with
     // includeServerSideToolInvocations. The whole part stays the call's native metadata.
     const auto call = p.get(data_key);
-    if (!call.is_object()) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini opaque part payload");
+    if (!call.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::gemini::part_opaque_invalid);
     const auto id = call.get("id"), tool_name = call.get("toolName"), tool_type = call.get("toolType"), args = call.get("args");
     if ((id.valid() && !nonempty(id)) || (tool_name.valid() && !nonempty(tool_name)) || (tool_type.valid() && !nonempty(tool_type)) ||
         (args.valid() && !args.is_object()))
-      return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini server tool call");
+      return fail(ErrorKind::ProtocolCorrupt, reason::gemini::server_tool_call_invalid);
     if (data_key == "executableCode") header.name = "code_execution";
     else if (tool_name.valid()) header.name = tool_name.as_string();
     else if (tool_type.valid()) {
       header.name = tool_type.as_string();
       for (auto& c : header.name) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + ('a' - 'A'));
-    } else return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini server tool call");
+    } else return fail(ErrorKind::ProtocolCorrupt, reason::gemini::server_tool_call_invalid);
     if (id.valid()) header.wire_id = id.as_string();
     else if (!local_id(header.wire_id, local)) return false;
-    if (!calls_.insert(header.wire_id).second) return fail(ErrorKind::ProtocolCorrupt, "duplicate Gemini function call id");
+    if (!calls_.insert(header.wire_id).second) return fail(ErrorKind::ProtocolCorrupt, reason::gemini::function_call_id_duplicate);
     open_server_calls_.emplace_back(data_key == "executableCode" ? "codeExecutionResult" : "toolResponse", header.wire_id);
     header.tool_kind = ToolCallKind::ServerExecuted;
     content = data_key == "executableCode" ? call.dump() : args.valid() ? args.dump() : "{}";
@@ -351,9 +351,9 @@ bool Codec::part(json::Value p) {
     kind = PartKind::ToolCall;
   } else if (data_key == "codeExecutionResult" || data_key == "toolResponse") {
     const auto result = p.get(data_key);
-    if (!result.is_object()) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini opaque part payload");
+    if (!result.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::gemini::part_opaque_invalid);
     const auto id = result.get("id");
-    if (id.valid() && !nonempty(id)) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini server tool result");
+    if (id.valid() && !nonempty(id)) return fail(ErrorKind::ProtocolCorrupt, reason::gemini::server_tool_result_invalid);
     // Without an id the result answers the oldest open call of its kind.
     const auto open = std::find_if(open_server_calls_.begin(), open_server_calls_.end(), [&](const auto& entry) {
       return entry.first == data_key && (!id.valid() || entry.second == id.as_string());
@@ -373,7 +373,7 @@ bool Codec::part(json::Value p) {
     const auto mime = blob.get("mimeType"), data = blob.get(inline_data ? "data" : "fileUri");
     if (!blob.is_object() || !data.is_string() || (mime.valid() && (!mime.is_string() || !mime_syntax(mime.as_string()))) ||
         (inline_data && !mime.is_string()) || (!inline_data && !reference_syntax(data.as_string())))
-      return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini media part");
+      return fail(ErrorKind::ProtocolCorrupt, reason::gemini::part_media_invalid);
     if (inline_data) unknown(blob, {"mimeType", "data", "displayName"}); else unknown(blob, {"mimeType", "fileUri", "displayName"});
     header.media = media_output::describe(mime.is_string() ? mime.as_string() : std::string_view{},
                                           inline_data ? MediaSource::Inline : MediaSource::File,
@@ -383,7 +383,7 @@ bool Codec::part(json::Value p) {
     kind = PartKind::Media;
     if (inline_data) payload = data.as_string();
     if (mime.is_string()) media_mime = mime.as_string();
-  } else if (!data_key.empty() && !p.get(data_key).is_object()) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini opaque part payload");
+  } else if (!data_key.empty() && !p.get(data_key).is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::gemini::part_opaque_invalid);
   // Consecutive chunks of one answer, thought or transcript arrive as parts of the same shape, and so do the frames of one
   // audio stream. A chunk with a signature, a call, another member or another value of one is a part of its own.
   const bool text_run = mode_ == Mode::Sse && (kind == PartKind::Text || kind == PartKind::Thinking) && !signature.valid() &&
@@ -395,7 +395,7 @@ bool Codec::part(json::Value p) {
     if ((text_run || audio_run) && run_.kind == kind && run_.outer == outer && continues_wire(run_.head->root(), p, outer, inner)) {
       ++run_.chunks;
       if (audio_run) {
-        if (!canonical_base64(*payload)) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini media part");
+        if (!canonical_base64(*payload)) return fail(ErrorKind::ProtocolCorrupt, reason::gemini::part_media_invalid);
         const auto encoded = media_output::stream_chunk(run_.carry, *payload);
         run_.data += encoded;
         return encoded.empty() || emit(PartDelta{run_.part, {PartKind::Media, encoded}});
@@ -406,14 +406,14 @@ bool Codec::part(json::Value p) {
     if (!close_run()) return false;
   }
   // A new wire part: the limit bounds the parts of the answer, not the chunks they arrive in.
-  if (wire_parts_.size() >= limits_.max_parts) return fail(ErrorKind::ResourceLimit, "Gemini part limit");
+  if (wire_parts_.size() >= limits_.max_parts) return fail(ErrorKind::ResourceLimit, reason::gemini::part_limit);
   // An empty text part without a signature (Gemini ends most streams with one) says nothing: it stays in the
   // retained wire for native replay and is not a typed part.
   if (kind == PartKind::Text && fragment.empty() && !signature.valid()) {
     wire_parts_.push_back(std::move(retained));
     return true;
   }
-  if (audio_run && !canonical_base64(*payload)) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini media part");
+  if (audio_run && !canonical_base64(*payload)) return fail(ErrorKind::ProtocolCorrupt, reason::gemini::part_media_invalid);
   const auto header_kind = header.tool_kind;
   if (!emit(PartBegin{{0}, local, kind, std::move(header), wire_parts_.size()})) return false;
   if (text_run || audio_run) {
@@ -439,12 +439,12 @@ bool Codec::part(json::Value p) {
   return true;
 }
 bool Codec::usage(json::Value v) {
-  if (!v.is_object()) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini usage");
+  if (!v.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::gemini::usage_invalid);
   Usage next; next.stage = UsageStage::Partial;
   auto field = [&](std::string_view key, std::optional<Count>& out) {
     auto n = v.get(key);
     if (!n.valid() || n.is_null()) return true;
-    if (!count(n)) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini usage counter");
+    if (!count(n)) return fail(ErrorKind::ProtocolCorrupt, reason::gemini::usage_counter_invalid);
     out = Count{number(n), Evidence::Reported}; return true;
   };
   std::optional<Count> candidates, tool;
@@ -469,7 +469,7 @@ bool Codec::usage(json::Value v) {
   if (candidates && (next.reasoning || no_thoughts)) {
     const uint64_t thoughts = next.reasoning ? next.reasoning->value : 0;
     if (thoughts > std::numeric_limits<uint64_t>::max() - candidates->value)
-      return fail(ErrorKind::ProtocolCorrupt, "Gemini usage sum overflow");
+      return fail(ErrorKind::ProtocolCorrupt, reason::gemini::usage_sum_overflow);
     const auto sum = candidates->value + thoughts;
     next.output_total = Count{sum, Evidence::Derived};
   }
@@ -490,7 +490,7 @@ bool Codec::usage(json::Value v) {
   }
   if (next.input_total && next.output_total) {
     if (next.output_total->value > std::numeric_limits<uint64_t>::max() - next.input_total->value)
-      return fail(ErrorKind::ProtocolCorrupt, "Gemini usage sum overflow");
+      return fail(ErrorKind::ProtocolCorrupt, reason::gemini::usage_sum_overflow);
     const auto sum = next.input_total->value + next.output_total->value;
     next.total = Count{sum, Evidence::Derived};
     if (next.provider_reported_total && next.provider_reported_total->value != sum) conflict("total", "provider total differs from prompt plus candidates plus thoughts");
@@ -498,11 +498,11 @@ bool Codec::usage(json::Value v) {
   for (auto key : {"promptTokensDetails", "cacheTokensDetails", "candidatesTokensDetails", "toolUsePromptTokensDetails"}) {
     auto details = v.get(key);
     if (!details.valid() || details.is_null()) continue;
-    if (!details.is_array()) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini usage details");
+    if (!details.is_array()) return fail(ErrorKind::ProtocolCorrupt, reason::gemini::usage_details_invalid);
     for (auto entry : details.elements()) {
-      if (!entry.is_object() || !nonempty(entry.get("modality")) || !count(entry.get("tokenCount"))) return fail(ErrorKind::ProtocolCorrupt, "invalid Gemini modality usage");
+      if (!entry.is_object() || !nonempty(entry.get("modality")) || !count(entry.get("tokenCount"))) return fail(ErrorKind::ProtocolCorrupt, reason::gemini::usage_modality_invalid);
       auto name = std::string(key) + "." + std::string(entry.get("modality").as_string());
-      if (!next.extra.emplace(name, Count{number(entry.get("tokenCount")), Evidence::Reported}).second) return fail(ErrorKind::ProtocolCorrupt, "duplicate Gemini modality usage");
+      if (!next.extra.emplace(name, Count{number(entry.get("tokenCount")), Evidence::Reported}).second) return fail(ErrorKind::ProtocolCorrupt, reason::gemini::usage_modality_duplicate);
     }
   }
   unknown(v, {"promptTokenCount", "cachedContentTokenCount", "candidatesTokenCount", "thoughtsTokenCount", "toolUsePromptTokenCount", "totalTokenCount", "promptTokensDetails", "cacheTokensDetails", "candidatesTokensDetails", "toolUsePromptTokensDetails", "serviceTier"});
@@ -512,8 +512,8 @@ bool Codec::usage(json::Value v) {
 void Codec::finish(Close close) {
   if (closed_ || accumulator_.terminal()) { closed_ = true; return; }
   closed_ = true;
-  if (!close.normal) { fail(close.error, "abnormal Gemini response close"); return; }
-  if (!begun_ || !stopped_) { fail(ErrorKind::Truncated, "missing Gemini finish reason"); return; }
+  if (!close.normal) { fail(close.error, reason::transport::gemini_response_close); return; }
+  if (!begun_ || !stopped_) { fail(ErrorKind::Truncated, reason::gemini::terminal_missing); return; }
   if (run_.open && !close_run()) return;
   std::string array;
   auto build = [&](json::BoundedWriter& w) {
@@ -522,14 +522,14 @@ void Codec::finish(Close close) {
     w.raw("]");
   };
   json::BoundedWriter measure({limits_.max_content_bytes, limits_.max_json_depth}); build(measure);
-  if (!measure.ok()) { fail(ErrorKind::ResourceLimit, "Gemini native array limit"); return; }
+  if (!measure.ok()) { fail(ErrorKind::ResourceLimit, reason::gemini::native_array_limit); return; }
   array.reserve(measure.size());
   json::BoundedWriter writer({measure.size(), limits_.max_json_depth}, &array); build(writer);
   auto parsed = json::parse(array, {limits_.max_content_bytes, limits_.max_json_depth});
   std::shared_ptr<const json::Document> wire;
   if (auto d = std::get_if<json::Document>(&parsed)) wire = std::make_shared<const json::Document>(std::move(*d));
   else if (auto e = std::get_if<json::ParseError>(&parsed); e && e->code == json::ParseCode::DuplicateKey && envelope_unique(e->context.root())) wire = std::make_shared<const json::Document>(std::move(e->context));
-  else { fail(ErrorKind::ProtocolCorrupt, "invalid Gemini native array"); return; }
+  else { fail(ErrorKind::ProtocolCorrupt, reason::gemini::native_array_invalid); return; }
   if (!emit(MessageSeal{{0}, std::move(wire)})) return;
   if (usage_.stage != UsageStage::Missing) { usage_.stage = UsageStage::Final; if (!emit(UsageUpdate{usage_})) return; }
   emit(Commit{mode_ == Mode::Sse ? "gemini.finishReason+normal_sse_eof" : "gemini.finishReason+normal_close"});
