@@ -524,20 +524,30 @@ EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const EndpointCou
     else if (q.unit.starts_with(descriptor::item_unit_prefix)) kinds.push_back(q.unit);
     else refuse(q.unit);
   }
-  // The input length that picks bands: the usage's input tokens, cache reads and writes included, when it counts any
-  // token. Without it no band can be chosen, so a band of a unit priced without tokens leaves no total.
+  // The input length that picks bands: the usage's input tokens, cache reads and writes included, when it reports an
+  // input counter. Without it no band can be chosen, so a band of a unit the estimate prices (the request fee, an item
+  // kind the operation counts, and the output tokens a usage with output counters alone reports) leaves no total.
   const bool reported = usage && (usage->input_total || usage->input_uncached || usage->cache_read || usage->cache_write || usage->output_total ||
                                   usage->reasoning);
+  const bool input_reported = usage && (usage->input_total || usage->input_uncached || usage->cache_read || usage->cache_write);
   std::optional<std::uint64_t> length;
-  if (reported) {
-    const auto value = [](const std::optional<Count>& c) -> std::uint64_t { return c ? c->value : 0; };
-    length = usage->input_total ? usage->input_total->value : value(usage->input_uncached) + value(usage->cache_read) + value(usage->cache_write);
+  if (input_reported) {
+    if (usage->input_total) {
+      length = usage->input_total->value;
+    } else {
+      // A sum past 64 bits is above every band.
+      std::uint64_t sum = 0;
+      for (const auto& counter : {usage->input_uncached, usage->cache_read, usage->cache_write})
+        if (counter && !checked_add(sum, counter->value, sum)) sum = detail::kMax;
+      length = sum;
+    }
   } else if (std::any_of(entry->pricing.begin(), entry->pricing.end(), [&](const auto& price) {
                const auto unit = parse_unit(price.first);
                if (!unit || unit->tier != tier || !unit->above) return false;
                const auto item = descriptor::item_price_key(price.first);
-               return descriptor::plain_price_unit(unit->name) == request_units[0] ||
-                      (item && std::find(kinds.begin(), kinds.end(), item->unit) != kinds.end());
+               const auto name = descriptor::plain_price_unit(unit->name);
+               return name == request_units[0] || (item && std::find(kinds.begin(), kinds.end(), item->unit) != kinds.end()) ||
+                      (reported && std::find(std::begin(output_units), std::end(output_units), name) != std::end(output_units));
              })) {
     refuse(input_units[0]);
   }
@@ -633,6 +643,8 @@ EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const EndpointCou
 std::vector<std::string> beyond_bound(const EndpointBound& bound, const EndpointEstimate& estimate) {
   std::vector<std::string> out;
   if (!bound.total || !estimate.total) return out;
+  // Another entry's rates (the served model's) are not the bound's: the estimate may exceed it at every quantity within.
+  if (estimate.entry != bound.entry) out.emplace_back("entry");
   // The quantity of `unit` over the lines, at most 2^64 - 1.
   const auto quantity = [](const std::vector<EndpointLine>& lines, std::string_view unit) {
     std::uint64_t sum = 0;

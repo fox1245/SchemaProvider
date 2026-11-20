@@ -25,8 +25,9 @@ struct Request {
   std::shared_ptr<const json::Document> extensions{};
 };
 // The Usage::extra counter of a result's reported audio length in whole seconds, rounded up: `duration` (OpenRouter, and
-// OpenAI in `verbose_json`), else `usage.seconds` (OpenAI). A result that reports no length, or one that is not a number
-// from 0 to 2^64 - 1, records none.
+// OpenAI in `verbose_json`), else `usage.seconds` (OpenAI) when `duration` gives no count. A result that reports no
+// length, or one that is not a number from 0 to 2^64 - 1, records none, and so does one at or above 2^53 that is not an
+// integer, whose double may be below the reported length.
 inline constexpr std::string_view seconds_counter = "seconds";
 struct Result {
   std::string text;

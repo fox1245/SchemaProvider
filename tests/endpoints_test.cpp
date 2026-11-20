@@ -367,6 +367,19 @@ void transcription_endpoint() {
   CHECK(!seconds_of(R"({"text":"a"})") && !seconds_of(R"({"text":"a","usage":{"input_tokens":3}})") &&
         !seconds_of(R"({"text":"a","usage":{"seconds":-1}})") && !seconds_of(R"({"text":"a","usage":{"seconds":1e30}})") &&
         !seconds_of(R"({"text":"a","usage":{"seconds":"30"}})"));
+  // A `duration` no count can hold is no length, so `usage.seconds` gives it. A number at or above 2^53 that is not an
+  // integer is no exact count of seconds: past that a double's spacing is above one second, so it would round down.
+  CHECK(seconds_of(R"({"text":"a","duration":-1,"usage":{"seconds":90}})") == 90u &&
+        seconds_of(R"({"text":"a","duration":-0.5,"usage":{"seconds":30.2}})") == 31u &&
+        seconds_of(R"({"text":"a","duration":1e30,"usage":{"seconds":30}})") == 30u &&
+        seconds_of(R"({"text":"a","duration":1e16,"usage":{"seconds":30}})") == 30u);
+  CHECK(!seconds_of(R"({"text":"a","duration":9007199254740993.2})") && !seconds_of(R"({"text":"a","duration":9007199254740992.0})") &&
+        seconds_of(R"({"text":"a","duration":9007199254740991.0})") == 9'007'199'254'740'991u &&
+        seconds_of(R"({"text":"a","duration":9007199254740993})") == 9'007'199'254'740'993u);
+  // The result's own length is not read from a negative `duration` either.
+  const auto length_of = [&](std::string_view body) { return std::get<transcription::Result>(decoded<transcription::Codec>(transcription::typed, router, body, "m")).seconds; };
+  CHECK(!length_of(R"({"text":"a","duration":-1})") && length_of(R"({"text":"a","duration":-1,"usage":{"seconds":90}})") == 90.0 &&
+        length_of(R"({"text":"a","duration":0})") == 0.0);
   CHECK(std::holds_alternative<Failure>(decoded<transcription::Codec>(transcription::typed, openai, R"({"segments":[]})", "m")));
   // A translation into English: OpenAI only, and without a language.
   auto translate = request; translate.model = "whisper-1"; translate.language.reset(); translate.extensions.reset(); translate.translate = true;

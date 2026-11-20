@@ -178,19 +178,24 @@ struct EndpointEstimate {
 //   request's `at_most`, with "<unit> at the request's bound"; else none. A count of zero needs no rate, a declared
 //   zero needs no count, and a positive rate needs one. Each at the most specific row that applies (item_price).
 // - The request fee, once.
-// - Without the usage's input tokens no band can be chosen: a row in a band of a unit the estimate prices is "input".
+// - Only an input counter (input, uncached input, cache reads or writes) states the input length; without one no band
+//   can be chosen: a row in a band of the request fee, of an item unit the operation counts or, when the usage reports
+//   output counters alone, of the output tokens is "input". A length rebuilt from the uncached input and the cache
+//   counters past 64 bits is above every band.
 // - A row that applies with a price that is not a fixed amount leaves its unit unpriced, as do the rows of an item
 //   kind the operation cannot count and a quantity of another unit, as the bound refuses them.
 // Every part is summed exactly and rounded up once. Any unpriced unit leaves no total and no lines: never a partial
 // total. The estimate is never limited to the bound: a result beyond its request is priced as it came
 // (beyond_bound names what exceeds the bound). For the same facts, catalogue and tier, a result whose every counted
-// quantity is at most the bound's quantity of its unit is estimated at most at the bound.
+// quantity is at most the bound's quantity of its unit, priced by the entry the bound used (the requested model's), is
+// estimated at most at the bound. A served model's own entry may price it above the bound at every quantity within.
 EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const EndpointCounted& counted, const descriptor::ModelCatalogue& catalogue,
                                    std::string_view service_tier = {});
-// What of `estimate` exceeds `bound`: each unit whose estimated quantity (its lines summed) is above the bound's
-// quantity of it (a unit the bound has no line for has none), unless every line of the unit in both is at a rate of
-// zero, so that no quantity of it changes the cost (a declared zero the bound needs no count for has a line of none);
-// and "total" when the estimate's total is above the bound's. Empty when either has no total.
+// What of `estimate` exceeds `bound`: first "entry" when the estimate is priced by another entry than the bound's (the
+// served model's, whose rates are not the bound's); then each unit whose estimated quantity (its lines summed) is above
+// the bound's quantity of it (a unit the bound has no line for has none), unless every line of the unit in both is at a
+// rate of zero, so that no quantity of it changes the cost (a declared zero the bound needs no count for has a line of
+// none); and "total" when the estimate's total is above the bound's. Empty when either has no total.
 std::vector<std::string> beyond_bound(const EndpointBound& bound, const EndpointEstimate& estimate);
 
 } // namespace sp::pricing
