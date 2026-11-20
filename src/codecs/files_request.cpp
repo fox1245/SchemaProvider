@@ -1,4 +1,5 @@
 #include "codecs/files.h"
+#include "codecs/reason.h"
 #include "crypto/crypto.h"
 #include "descriptor/policy.h"
 #include "json/json.h"
@@ -6,7 +7,7 @@
 
 namespace sp::files {
 namespace {
-Error bad(std::string message) { return Error{ErrorKind::InvalidRequest, std::move(message)}; }
+Error bad(const reason::Reason& message) { return reason::error(ErrorKind::InvalidRequest, message); }
 // A path segment the caller names. `.` and `..` are tokens by their characters but move the request elsewhere.
 bool token(std::string_view value, std::size_t limit = 128) {
   return !value.empty() && value.size() <= limit && value != "." && value != ".." && std::all_of(value.begin(), value.end(), [](char c) {
@@ -44,9 +45,9 @@ std::string query_value(std::string_view value) {
 struct Route { const descriptor::EndpointFact* fact; std::string path; };
 std::variant<Route, Error> route(const descriptor::ValidatedDescriptor& descriptor, std::string_view operation) {
   const auto* fact = descriptor.policy()->endpoint("files", descriptor.base_url());
-  if (!fact) return Error{ErrorKind::Unsupported, "file endpoints are not admitted at this origin"};
+  if (!fact) return reason::error(ErrorKind::Unsupported, reason::files_request::endpoint_not_admitted);
   const auto path = descriptor::endpoint_path(*fact, operation);
-  if (!path) return Error{ErrorKind::Unsupported, "the file endpoint has no path for this operation"};
+  if (!path) return reason::error(ErrorKind::Unsupported, reason::files_request::path_missing);
   return Route{fact, std::string(*path)};
 }
 // A call about one file: its id is a token at OpenAI and Anthropic, and `files/<token>` at Google.
@@ -69,7 +70,7 @@ std::variant<Encoded, Error> by_id(const descriptor::ValidatedDescriptor& descri
   const auto resolved = fact->shape == "google" ? google_name(descriptor, named) : std::string(named);
   const std::string_view id = resolved;
   if (fact->shape == "google" ? !(id.starts_with("files/") && token(id.substr(6))) : !token(id))
-    return bad("a file id is a token, or files/<token> at Google");
+    return bad(reason::files_request::id_invalid);
   if (const auto at = path.find("{id}"); at != std::string::npos) path.replace(at, 4, id);
   // The decoder reports the file id the call named, which a deletion's answer may not repeat.
   Encoded encoded{std::move(path), {}, std::string(id), false, fact->auth};
@@ -81,9 +82,9 @@ std::variant<Encoded, Error> by_id(const descriptor::ValidatedDescriptor& descri
 // The checks every upload's content passes; the content's length.
 std::variant<std::uint64_t, Error> source_length(const Source& source) {
   const bool in_memory = source.bytes != nullptr, from_file = !source.file.path.empty();
-  if (in_memory == from_file) return bad("an upload sends bytes or a file slice, not both");
-  if (in_memory ? source.bytes->empty() : !source.file.size) return bad("an upload is not empty");
-  if (from_file && !source.file.sha256.empty() && !sha256_hex(source.file.sha256)) return bad("a file slice digest is lower-case hex SHA-256");
+  if (in_memory == from_file) return bad(reason::files_request::source_ambiguous);
+  if (in_memory ? source.bytes->empty() : !source.file.size) return bad(reason::files_request::source_empty);
+  if (from_file && !source.file.sha256.empty() && !sha256_hex(source.file.sha256)) return bad(reason::files_request::digest_invalid);
   return in_memory ? std::uint64_t{source.bytes->size()} : source.file.size;
 }
 // Puts the content after `encoded.body`, and `suffix` after it: in memory under the request limit, or as a file slice.
@@ -96,13 +97,13 @@ std::optional<Error> attach(const descriptor::ValidatedDescriptor& descriptor, E
   // Bytes in memory are held to the request limit; a larger file is uploaded from its path.
   const auto limit = descriptor.policy()->resources().request_bytes;
   if (source.bytes->size() > limit - std::min(limit, encoded.body.size() + suffix.size()))
-    return Error{ErrorKind::ResourceLimit, "an upload in memory exceeds the request limit"};
+    return reason::error(ErrorKind::ResourceLimit, reason::files_request::size_limit);
   encoded.body.append(*source.bytes).append(suffix);
   return std::nullopt;
 }
 std::variant<std::string, Error> boundary() {
   unsigned char random[12];
-  if (!crypto::random_bytes(random, sizeof random)) return Error{ErrorKind::ResourceLimit, "no random boundary for the upload"};
+  if (!crypto::random_bytes(random, sizeof random)) return reason::error(ErrorKind::ResourceLimit, reason::files_request::boundary_unavailable);
   std::string text = "sp-boundary-";
   for (const auto byte : random) { text += "0123456789abcdef"[byte >> 4]; text += "0123456789abcdef"[byte & 15]; }
   return text;
@@ -110,15 +111,15 @@ std::variant<std::string, Error> boundary() {
 // A step of a chunked upload at the origin that began it: OpenAI's path for the operation, or Google's upload URL.
 std::variant<Route, Error> session_route(const descriptor::ValidatedDescriptor& descriptor, const Session& session, std::string_view operation) {
   const auto* fact = descriptor.policy()->endpoint("files", descriptor.base_url());
-  if (!fact) return Error{ErrorKind::Unsupported, "file endpoints are not admitted at this origin"};
-  if (session.origin != descriptor.base_url() || session.shape != fact->shape) return bad("an upload continues at the origin that began it");
+  if (!fact) return reason::error(ErrorKind::Unsupported, reason::files_request::endpoint_not_admitted);
+  if (session.origin != descriptor.base_url() || session.shape != fact->shape) return bad(reason::files_request::session_origin_mismatch);
   if (fact->shape == "google") {
-    if (!upload_url(descriptor.base_url(), session.url)) return bad("a Google upload URL is under the origin's upload path");
+    if (!upload_url(descriptor.base_url(), session.url)) return bad(reason::files_request::session_url_invalid);
     return Route{fact, session.url.substr(descriptor.base_url().size())};
   }
   const auto path = descriptor::endpoint_path(*fact, operation);
-  if (!path) return Error{ErrorKind::Unsupported, "the file endpoint has no path for this operation"};
-  if (!token(session.id)) return bad("an upload id is a token");
+  if (!path) return reason::error(ErrorKind::Unsupported, reason::files_request::path_missing);
+  if (!token(session.id)) return bad(reason::files_request::session_id_invalid);
   std::string resolved(*path);
   if (const auto at = resolved.find("{id}"); at != std::string::npos) resolved.replace(at, 4, session.id);
   return Route{fact, std::move(resolved)};
@@ -160,13 +161,13 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   if (auto* error = std::get_if<Error>(&found)) return *error;
   auto& [fact, path] = std::get<Route>(found);
   const bool google = fact->shape == "google";
-  if (!file_name(begin.filename)) return bad("a file name is bounded text without quotes or control characters");
-  if (!mime_type(begin.mime)) return bad("an upload names its MIME type");
-  if (!begin.size) return bad("an upload is not empty");
+  if (!file_name(begin.filename)) return bad(reason::files_request::name_invalid);
+  if (!mime_type(begin.mime)) return bad(reason::files_request::mime_invalid);
+  if (!begin.size) return bad(reason::files_request::source_empty);
   if (google ? !begin.purpose.empty() : !token(begin.purpose, 64))
-    return google ? Error{ErrorKind::Unsupported, "only OpenAI files take a purpose or an expiry"} : bad("an OpenAI file needs a purpose");
+    return google ? reason::error(ErrorKind::Unsupported, reason::files_request::purpose_unsupported) : bad(reason::files_request::purpose_required);
   if (begin.expires_after && (google || !*begin.expires_after))
-    return google ? Error{ErrorKind::Unsupported, "only OpenAI files take a purpose or an expiry"} : bad("a file expiry is positive");
+    return google ? reason::error(ErrorKind::Unsupported, reason::files_request::purpose_unsupported) : bad(reason::files_request::expiry_invalid);
   Session start{std::string(descriptor.base_url()), fact->shape};
   start.size = begin.size;
   Encoded encoded{std::move(path), {}, session_document(start), false, fact->auth};
@@ -194,17 +195,17 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   if (auto* error = std::get_if<Error>(&length)) return *error;
   const auto& session = part.session;
   const auto size = std::get<std::uint64_t>(length);
-  if (session.sent >= session.size || size > session.size - session.sent) return bad("a part fits in what remains of the upload");
-  if (fact->max_part_bytes && size > fact->max_part_bytes) return bad("a part is within the endpoint's part size limit");
+  if (session.sent >= session.size || size > session.size - session.sent) return bad(reason::files_request::part_too_large);
+  if (fact->max_part_bytes && size > fact->max_part_bytes) return bad(reason::files_request::part_size_limit);
   // The part is the file's next bytes: a slice of a local file starts where the upload stands.
-  if (!part.source.file.path.empty() && part.source.file.offset != session.sent) return bad("a file part starts where the upload stands");
+  if (!part.source.file.path.empty() && part.source.file.offset != session.sent) return bad(reason::files_request::part_offset_mismatch);
   Encoded encoded{std::move(path), {}, session_document(session, size), false, fact->auth};
   endpoints::add_fact_headers(encoded, *fact);
   encoded.context.secret = session.url;
   std::string suffix;
   if (fact->shape == "google") {
     const bool last = session.sent + size == session.size;
-    if (!last && session.granularity && size % session.granularity) return bad("a Google chunk before the last is a multiple of the granularity");
+    if (!last && session.granularity && size % session.granularity) return bad(reason::files_request::part_granularity);
     encoded.headers.emplace_back("X-Goog-Upload-Command", last ? "upload, finalize" : "upload");
     encoded.headers.emplace_back("X-Goog-Upload-Offset", std::to_string(session.sent));
     encoded.content_type = "application/octet-stream";
@@ -223,13 +224,13 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   auto found = session_route(descriptor, complete.session, operation(complete));
   if (auto* error = std::get_if<Error>(&found)) return *error;
   auto& [fact, path] = std::get<Route>(found);
-  if (fact->shape == "google") return Error{ErrorKind::Unsupported, "a Google upload completes with its last chunk"};
+  if (fact->shape == "google") return reason::error(ErrorKind::Unsupported, reason::files_request::complete_unsupported);
   const auto& session = complete.session;
-  if (session.sent != session.size || session.parts.empty()) return bad("an upload completes once every part is sent");
+  if (session.sent != session.size || session.parts.empty()) return bad(reason::files_request::complete_early);
   Encoded encoded{std::move(path), "{\"part_ids\":[", session_document(session), false, fact->auth};
   endpoints::add_fact_headers(encoded, *fact);
   for (std::size_t i = 0; i < session.parts.size(); ++i) {
-    if (!token(session.parts[i])) return bad("an upload part id is a token");
+    if (!token(session.parts[i])) return bad(reason::files_request::part_id_invalid);
     encoded.body.append(i ? "," : "").append(json::quote(session.parts[i]));
   }
   encoded.body += "]}";
@@ -239,7 +240,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   auto found = session_route(descriptor, query.session, operation(query));
   if (auto* error = std::get_if<Error>(&found)) return *error;
   auto& [fact, path] = std::get<Route>(found);
-  if (fact->shape != "google") return Error{ErrorKind::Unsupported, "only a Google upload says how much it holds"};
+  if (fact->shape != "google") return reason::error(ErrorKind::Unsupported, reason::files_request::query_unsupported);
   Encoded encoded{std::move(path), {}, session_document(query.session), false, fact->auth};
   endpoints::add_fact_headers(encoded, *fact);
   encoded.context.secret = query.session.url;
@@ -265,12 +266,12 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   auto& [fact, path] = std::get<Route>(found);
   const bool google = fact->shape == "google", openai = fact->shape == "openai";
   if (auto length = source_length(upload.source); auto* error = std::get_if<Error>(&length)) return *error;
-  if (!file_name(upload.filename)) return bad("a file name is bounded text without quotes or control characters");
-  if (!mime_type(upload.mime)) return bad("an upload names its MIME type");
+  if (!file_name(upload.filename)) return bad(reason::files_request::name_invalid);
+  if (!mime_type(upload.mime)) return bad(reason::files_request::mime_invalid);
   if (openai ? !token(upload.purpose, 64) : !upload.purpose.empty())
-    return openai ? bad("an OpenAI file needs a purpose") : Error{ErrorKind::Unsupported, "only OpenAI files take a purpose or an expiry"};
+    return openai ? bad(reason::files_request::purpose_required) : reason::error(ErrorKind::Unsupported, reason::files_request::purpose_unsupported);
   if (upload.expires_after && (!openai || !*upload.expires_after))
-    return openai ? bad("a file expiry is positive") : Error{ErrorKind::Unsupported, "only OpenAI files take a purpose or an expiry"};
+    return openai ? bad(reason::files_request::expiry_invalid) : reason::error(ErrorKind::Unsupported, reason::files_request::purpose_unsupported);
   auto mark = boundary();
   if (auto* error = std::get_if<Error>(&mark)) return *error;
   const auto& boundary = std::get<std::string>(mark);
@@ -310,10 +311,10 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   if (auto* error = std::get_if<Error>(&found)) return *error;
   auto& [fact, path] = std::get<Route>(found);
   const bool google = fact->shape == "google", openai = fact->shape == "openai";
-  if (list.limit && !*list.limit) return bad("a page limit is positive");
-  if (list.after.size() > 4096) return bad("a page cursor is bounded");
+  if (list.limit && !*list.limit) return bad(reason::files_request::limit_invalid);
+  if (list.after.size() > 4096) return bad(reason::files_request::cursor_invalid);
   if (!list.purpose.empty() && (!openai || !token(list.purpose, 64)))
-    return openai ? bad("a file purpose is a token") : Error{ErrorKind::Unsupported, "only OpenAI lists files by purpose"};
+    return openai ? bad(reason::files_request::purpose_invalid) : reason::error(ErrorKind::Unsupported, reason::files_request::purpose_filter_unsupported);
   std::string query;
   const auto add = [&](std::string_view name, std::string_view value) { query.append(query.empty() ? "?" : "&").append(name).append("=").append(query_value(value)); };
   if (list.limit) add(google ? "pageSize" : "limit", std::to_string(*list.limit));
@@ -326,7 +327,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   return encoded;
 }
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Download& download) {
-  if (!download.max_bytes) return bad("a download needs a positive byte limit");
+  if (!download.max_bytes) return bad(reason::files_request::download_limit_invalid);
   auto found = by_id(descriptor, download.id, operation(download), "GET");
   if (auto* error = std::get_if<Error>(&found)) return *error;
   auto& encoded = std::get<Encoded>(found);
