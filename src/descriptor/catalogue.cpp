@@ -851,6 +851,15 @@ bool falls_back(std::string_view unit) {
   return found != std::end(billed_units) &&
          (found->second == Bills::InputPart || found->second == Bills::CacheWrite || found->second == Bills::OutputPart);
 }
+// Whether a listed price member is one no price unit of the catalogue reads: not a unit of the estimate and the bound
+// (billed_units), a route ceiling, a tool fee, an item unit or the image tokens of an input.
+bool read_by_no_unit(std::string_view member) {
+  const auto plain = plain_price_unit(member);
+  return std::none_of(std::begin(billed_units), std::end(billed_units), [&](const auto& item) { return item.first == plain; }) &&
+         std::find(std::begin(route_ceiling_units), std::end(route_ceiling_units), plain) == std::end(route_ceiling_units) &&
+         !plain.starts_with(tool_fee_prefix) && !plain.starts_with(item_unit_prefix) && !plain.starts_with(item_ceiling_prefix) &&
+         plain != "input_image";
+}
 // Leaves the listed price member `unit` out of the entry, its base price and its bands, together with the units its
 // tokens would be billed at instead, and records each member left out. An empty `unit` leaves out every price.
 void leave_out(CatalogueEntry& entry, std::string_view unit, std::vector<WithheldUnit>& withheld) {
@@ -861,11 +870,19 @@ void leave_out(CatalogueEntry& entry, std::string_view unit, std::vector<Withhel
   }
   const auto names = left_out_with(unit);
   std::vector<std::pair<std::string, std::string>> kept;
+  std::vector<std::string> markers;
   for (auto& price : entry.pricing) {
     const auto listed = unbanded_unit(price.first);
     if (std::find(names.begin(), names.end(), plain_price_unit(listed)) == names.end()) kept.push_back(std::move(price));
-    else withheld.push_back({entry.id, std::string(listed)});
+    else {
+      withheld.push_back({entry.id, std::string(listed)});
+      // A member no price unit reads has no unit whose absence refuses a bound, so it stays at a variable price: the
+      // entry still lists it, at no amount, and a bound over a request that carries what it prices has no total.
+      if (read_by_no_unit(listed) && std::find(markers.begin(), markers.end(), std::string(listed)) == markers.end()) markers.emplace_back(listed);
+    }
   }
+  for (auto& marker : markers) kept.emplace_back(std::move(marker), "-1");
+  std::sort(kept.begin(), kept.end());
   entry.pricing = std::move(kept);
 }
 // The unit of a key's band: it prices requests with strictly more than `above` input tokens, as `min_prompt_tokens`

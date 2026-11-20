@@ -117,6 +117,39 @@ ModelPrice dearest_price_of(const descriptor::CatalogueEntry& entry, std::string
 }
 
 namespace {
+// The units of each side's token prices (plain names) beside the listing members a ceiling covers.
+constexpr std::string_view input_units[]{"input", "cache_read", "cache_write", "cache_write_1h", "input_audio", "input_image"};
+constexpr std::string_view output_units[]{"output", "reasoning", "output_image", "output_audio"};
+bool counts_on(TokenSide side, std::string_view name) {
+  const auto& units = side == TokenSide::Input ? std::span<const std::string_view>(input_units) : std::span<const std::string_view>(output_units);
+  if (std::find(units.begin(), units.end(), name) != units.end()) return true;
+  for (const auto& member : descriptor::listed_members) {
+    if (member.member != name) continue;
+    return member.role == descriptor::ListedRole::EitherTokens ||
+           member.role == (side == TokenSide::Input ? descriptor::ListedRole::InputTokens : descriptor::ListedRole::OutputTokens);
+  }
+  return false;
+}
+}  // namespace
+ListedFloor listed_floor(const descriptor::CatalogueEntry& entry, TokenSide side, std::string_view service_tier, std::uint64_t input_tokens) {
+  ListedFloor out;
+  for (const auto& [text_unit, text] : entry.pricing) {
+    const auto unit = parse_unit(text_unit);
+    if (!unit || unit->tier != service_tier || (unit->above && input_tokens <= unit->above)) continue;
+    if (!counts_on(side, canonical(unit->name))) continue;
+    const auto rate = per_million(text);
+    if (!rate) { out.unknown = true; continue; }
+    if (!out.rate || *rate > *out.rate) out.rate = rate;
+  }
+  return out;
+}
+bool ceiling_below_listed(const descriptor::CatalogueEntry& entry, TokenSide side, std::uint64_t ceiling, std::string_view service_tier,
+                          std::uint64_t input_tokens) {
+  const auto floor = listed_floor(entry, side, service_tier, input_tokens);
+  return floor.unknown || (floor.rate && ceiling < *floor.rate);
+}
+
+namespace {
 // The Usage::extra keys of a modality breakdown: Generate `<group>Details.<MODALITY>` and Interactions
 // `<group>_by_modality.<modality>`.
 // The Google Live codec writes the output breakdown under `responseTokensDetails.`.
@@ -128,6 +161,7 @@ constexpr std::array<std::string_view, 3> output_breakdown{"candidatesTokensDeta
 constexpr std::array<std::string_view, 2> input_audio_counters{"input_audio", "input_token_details.audio_tokens"};
 constexpr std::array<std::string_view, 2> output_audio_counters{"audio_tokens", "output_token_details.audio_tokens"};
 constexpr std::array<std::string_view, 1> output_image_counters{"completion_tokens_details.image_tokens"};
+constexpr std::array<std::string_view, 1> input_image_counters{"input_token_details.image_tokens"};
 // The tokens of one modality in a breakdown, matched without regard to case. Empty when the usage has none.
 std::optional<std::uint64_t> modality_tokens(const Usage& usage, std::span<const std::string_view> prefixes,
                                              std::string_view modality) {
@@ -210,6 +244,7 @@ UsageSum usage_sum(const Selection& selection, const Usage& usage, const UsageRu
       for (const std::string_view unit : {"request", "ceiling_request"})
         if (selection.is_variable(unit)) out.unpriced.emplace_back(unit);
     if (absent || variable_ceiling) { complete = false; return out; }
+    if (rules.stale_ceiling) { out.unpriced.emplace_back("ceiling"); complete = false; return out; }
     assume("route ceiling");
     if (!uncached) { if (rules.input) { out.unpriced.emplace_back("input"); complete = false; } }
     else charge("ceiling_input", *uncached, price.ceiling_input, "ceiling");
@@ -217,6 +252,8 @@ UsageSum usage_sum(const Selection& selection, const Usage& usage, const UsageRu
     charge("ceiling_input", cache_write, price.ceiling_input, "ceiling");
     if (!usage.output_total) { if (rules.output) { out.unpriced.emplace_back("output"); complete = false; } }
     else charge("ceiling_output", usage.output_total->value, price.ceiling_output, "ceiling");
+    // A realtime Google turn's thoughts bill beside the output its total counts.
+    charge("ceiling_output", extra("thoughtsTokenCount"), price.ceiling_output, "ceiling");
     if (compaction) {
       for (const auto counter : {"compaction.input_tokens", "compaction.cache_read_input_tokens", "compaction.cache_creation_input_tokens"})
         charge("ceiling_input", extra(counter), price.ceiling_input, "ceiling");
@@ -241,9 +278,11 @@ UsageSum usage_sum(const Selection& selection, const Usage& usage, const UsageRu
       else { out.unpriced.emplace_back("input_audio"); complete = false; }
     }
     // The image tokens of the input, when the caller counts them, the same way at `input_image`.
+    // A realtime turn counts them in `input_token_details.image_tokens`.
+    const auto image_count = rules.input_image && *rules.input_image ? rules.input_image : counter_tokens(input_image_counters);
     std::uint64_t image_in = 0;
-    if (rules.input_image && *rules.input_image && uncached) {
-      if (selection.input_image && *rules.input_image <= *uncached - audio_in) image_in = *rules.input_image;
+    if (image_count && *image_count && uncached) {
+      if (selection.input_image && *image_count <= *uncached - audio_in) image_in = *image_count;
       else { out.unpriced.emplace_back(input_image_unit); complete = false; }
     }
     if (!uncached) { if (rules.input) { out.unpriced.emplace_back("input"); complete = false; } }
@@ -319,6 +358,13 @@ UsageSum usage_sum(const Selection& selection, const Usage& usage, const UsageRu
       }
       charge("output_audio", audio_out, price.output_audio, "output_audio", price.output);
       charge("output", output - reasoning - images - audio_out, price.output, "output");
+      // A realtime Google turn reports its thoughts beside an output total that leaves them out (a Generate usage
+      // counts them in `reasoning`): they bill at the reasoning rate, else at the output rate.
+      if (const auto thoughts = extra("thoughtsTokenCount")) {
+        if (selection.is_variable("reasoning")) { out.unpriced.emplace_back("reasoning"); complete = false; }
+        else if (price.reasoning) charge("reasoning", thoughts, price.reasoning, "reasoning", price.output);
+        else charge("output", thoughts, price.output, "output");
+      }
     }
     if (compaction) {
       const auto read = extra("compaction.cache_read_input_tokens"), written = extra("compaction.cache_creation_input_tokens");
@@ -388,6 +434,9 @@ CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_v
   detail::UsageRules rules;
   rules.compaction = family == "anthropic.messages";
   rules.route_ceiling = route_ceiling;
+  rules.stale_ceiling = route_ceiling &&
+      ((selection.price.ceiling_input && ceiling_below_listed(*entry, TokenSide::Input, *selection.price.ceiling_input, service_tier, input_length)) ||
+       (selection.price.ceiling_output && ceiling_below_listed(*entry, TokenSide::Output, *selection.price.ceiling_output, service_tier, input_length)));
   auto summed = detail::usage_sum(selection, usage, rules);
   out.assumptions = std::move(summed.assumptions);
   out.unpriced = std::move(summed.unpriced);
@@ -460,7 +509,15 @@ Bound upper_bound(const ModelPrice& price, const BoundRequest& request) { return
 
 Bound upper_bound(const descriptor::CatalogueEntry& entry, std::string_view service_tier, const BoundRequest& request) {
   const auto selected = select(entry, service_tier, request.input_tokens, true);
-  return bounded(selected.price, selected.variable, request);
+  auto out = bounded(selected.price, selected.variable, request);
+  // A ceiling below a price the entry lists bounds nothing.
+  if (request.route_ceiling && out.total &&
+      ((selected.price.ceiling_input && ceiling_below_listed(entry, TokenSide::Input, *selected.price.ceiling_input, service_tier, request.input_tokens)) ||
+       (selected.price.ceiling_output && ceiling_below_listed(entry, TokenSide::Output, *selected.price.ceiling_output, service_tier, request.input_tokens)))) {
+    out.total.reset();
+    out.unpriced.emplace_back("ceiling");
+  }
+  return out;
 }
 
 std::string_view to_string(UnboundedBy by) noexcept {
@@ -503,20 +560,31 @@ bool same_max_price(const OpenRouterMaxPrice& left, const OpenRouterMaxPrice& ri
     if (left.*member != right.*member) return false;
   return true;
 }
-// The listed members (descriptor::unread_listed_members) the entry prices above zero, or at a price that is not a fixed
-// amount, in any tier or band, whose feature the request carries: no bound reads them, so the bound has no total for
-// the request.
-std::vector<std::string_view> carried_unread_members(const descriptor::CatalogueEntry& entry, const RequestFacts& facts) {
+// The listed price members the entry keeps and no unit, ceiling or tool fee reads, above zero or at no fixed amount in
+// any tier or band, that the request may bill: an item member whose feature the request carries
+// (descriptor::listed_members), and a member the table does not know, which is taken to price something the request
+// carries. A token member the table lists is covered by the route ceiling (listed_floor). No bound reads them, so a bound
+// over such a member has no total.
+std::vector<std::string_view> unread_members_carried(const descriptor::CatalogueEntry& entry, const RequestFacts& facts) {
   std::vector<std::string_view> out;
-  for (const auto& [member, feature] : descriptor::unread_listed_members) {
-    const bool carried = feature == descriptor::ListedFeature::ImageInput ? facts.image_input : facts.plugins;
-    if (!carried) continue;
-    for (const auto& [text_unit, text] : entry.pricing) {
-      const auto unit = parse_unit(text_unit);
-      if (!unit || unit->name != member) continue;
-      const auto rate = per_million(text);
-      if (!rate || *rate) { out.push_back(member); break; }
+  for (const auto& [text_unit, text] : entry.pricing) {
+    const auto unit = parse_unit(text_unit);
+    if (!unit) continue;
+    const auto name = canonical(unit->name);
+    if (held(name) || name.starts_with(descriptor::item_unit_prefix) || name.starts_with(descriptor::item_ceiling_prefix)) continue;
+    const auto rate = per_million(text);
+    if (rate && !*rate) continue;
+    bool carried = true;  // a member the table does not know
+    for (const auto& member : descriptor::listed_members) {
+      if (member.member != name) continue;
+      switch (member.feature) {
+        case descriptor::ListedFeature::None: carried = false; break;
+        case descriptor::ListedFeature::ImageInput: carried = facts.image_input; break;
+        case descriptor::ListedFeature::WebSearch: carried = facts.plugins; break;
+      }
+      break;
     }
+    if (carried && std::find(out.begin(), out.end(), name) == out.end()) out.push_back(name);
   }
   return out;
 }
@@ -591,7 +659,7 @@ WorstCase worst_case(const WorstCaseInput& in, const descriptor::ModelCatalogue&
       continue;
     }
     // A price beyond tokens that no unit reads, for something the request carries: the bound would be a total below the bill.
-    if (const auto unread = carried_unread_members(*entry, facts); !unread.empty()) {
+    if (const auto unread = unread_members_carried(*entry, facts); !unread.empty()) {
       for (const auto member : unread)
         block(UnboundedBy::ModelPrice, model,
               "catalogue entry '" + entry->id + "' lists a price for '" + std::string(member) + "' that no bound reads, and the request carries what it prices");
@@ -621,6 +689,18 @@ WorstCase worst_case(const WorstCaseInput& in, const descriptor::ModelCatalogue&
           block(UnboundedBy::ModelPrice, model, variable_rate(*entry, unit, key));
           variable = true;
         }
+      if (variable) continue;
+      // A ceiling below a token price the entry lists bounds nothing: it was written before that price was listed, or
+      // kept from an earlier refresh.
+      for (const auto side : {TokenSide::Input, TokenSide::Output}) {
+        const auto ceiling = side == TokenSide::Input ? candidate.price.ceiling_input : candidate.price.ceiling_output;
+        if (ceiling && ceiling_below_listed(*entry, side, *ceiling, in.service_tier, candidate.invocation_input)) {
+          block(UnboundedBy::RouteCeiling, model,
+                std::string("the entry's ") + (side == TokenSide::Input ? "ceiling_input" : "ceiling_output") +
+                    " is below a token price the entry lists on that side, so it bounds nothing; refresh the catalogue");
+          variable = true;
+        }
+      }
       if (variable) continue;
     }
     candidates.push_back(std::move(candidate));

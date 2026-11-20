@@ -5,6 +5,7 @@
 #include "core/value.h"
 #include "descriptor/catalogue.h"
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -130,6 +131,26 @@ CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_v
                       const ServedModel& model, const Usage& usage, std::string_view service_tier = {},
                       bool route_ceiling = false);
 
+// A side of a call's tokens.
+enum class TokenSide : std::uint8_t { Input, Output };
+// The dearest token price the entry itself lists on a side, in the tier and over the bands a request of `input_tokens`
+// input tokens may reach (the default reaches every band): input, cache reads and writes, audio and image input on the
+// input side; output, reasoning, image output and audio output on the output side; and the listing members a route
+// ceiling covers on their side (descriptor::listed_members). `unknown` is set when a row of such a unit is at a price
+// that is not a fixed amount: the floor is then not known.
+struct ListedFloor {
+  std::optional<std::uint64_t> rate;
+  bool unknown = false;
+};
+ListedFloor listed_floor(const descriptor::CatalogueEntry& entry, TokenSide side, std::string_view service_tier = {},
+                         std::uint64_t input_tokens = std::numeric_limits<std::uint64_t>::max());
+// Whether the entry's route ceiling for `side` (`ceiling_input` or `ceiling_output`) is below what the entry lists on
+// that side, or the listed price has no fixed amount: the ceiling does not bound the side. A bound or an estimate at
+// the route ceiling refuses such a ceiling (`RouteCeiling`, `ceiling`), and a refresh does not keep one.
+bool ceiling_below_listed(const descriptor::CatalogueEntry& entry, TokenSide side, std::uint64_t ceiling,
+                          std::string_view service_tier = {},
+                          std::uint64_t input_tokens = std::numeric_limits<std::uint64_t>::max());
+
 // What a call may use: its admitted input limit, its output cap, and at most `uses` of each server tool type.
 struct BoundRequest {
   std::uint64_t input_tokens = 0, output_tokens = 0;
@@ -240,10 +261,12 @@ struct WorstCase {
 // - Tools: each capped group at the dearest fee of its types times its cap; a group with no cap, or a tool with no
 //   listed fee, is unbounded.
 // - Models: the model and each fallback model, at the dearest candidate.
-// - Prices beyond tokens: an entry that lists a member of descriptor::unread_listed_members (`image`, `web_search`)
-//   above zero, or at no fixed amount, has no total (`ModelPrice`, the member in the detail) for a request that
-//   carries what it prices (RequestFacts::image_input, RequestFacts::plugins).
-// - Gateway: at the route ceiling, the dearest over the candidates.
+// - Prices beyond tokens: an entry that lists a member no unit reads (descriptor::listed_members: the item members
+//   `image` and `web_search`, or a member the table does not know) above zero, or at no fixed amount, has no total
+//   (`ModelPrice`, the member in the detail) for a request that carries what an item member prices
+//   (RequestFacts::image_input, RequestFacts::plugins), and for any request where the member is unknown.
+// - Gateway: at the route ceiling, the dearest over the candidates. A ceiling below a token price the entry lists on
+//   its side (ceiling_below_listed) is `RouteCeiling`.
 // - Variable prices: a unit with a row that applies at a price that is not a fixed amount (upper_bound with the entry)
 //   is `ModelPrice` (a tool fee `ToolFee`), the detail naming the unit and the row.
 // The attempts multiply the sum. Nothing here is a reservation or a ledger.

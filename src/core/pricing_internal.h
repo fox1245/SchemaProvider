@@ -146,6 +146,9 @@ struct UsageRules {
   // The image tokens among the input, when the caller counts them: carved out of the uncached input and billed at
   // `input_image`, as audio input is at `input_audio`.
   std::optional<std::uint64_t> input_image;
+  // At the route ceiling: a ceiling the entry lists is below a token price the same entry lists on its side (a ceiling
+  // written before that price was listed, or kept from an earlier refresh), so it bounds nothing.
+  bool stale_ceiling = false;
 };
 // One part of a usage's sum: tokens billed at the rate of `unit` (a plain name: `cache_read`, `ceiling_input`,
 // `request` for the fee), from the price key `key`.

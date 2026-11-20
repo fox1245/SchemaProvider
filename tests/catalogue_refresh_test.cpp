@@ -946,6 +946,28 @@ void failed_endpoints_keep_previous_ceilings(transport::Transport& transport, Pe
   require(result.diff.changed == (std::vector<std::string>{"vendor/fee", "vendor/many"}) && result.diff.added.empty() && result.diff.removed.empty(),
           "the diff names the entries whose ceiling changed, and only those");
 
+  // A previous ceiling below a price the listing now gives for the model (written before that price was listed) is not
+  // kept: here the previous output ceiling is half the listed 0.0000001 completion price, the input ceiling is above it.
+  {
+    std::vector<descriptor::CatalogueEntry> entries = previous->entries();
+    for (auto& entry : entries)
+      if (entry.id == "vendor/outage")
+        for (auto& price : entry.pricing)
+          if (price.first == "ceiling_output") price.second = "0.00000005";
+    auto made = descriptor::make_catalogue(std::move(entries));
+    require(std::holds_alternative<descriptor::CatalogueSnapshot>(made), "the previous catalogue with a low output ceiling loads");
+    transport::RefreshRequest low;
+    low.previous = std::get<descriptor::CatalogueSnapshot>(made);
+    low.page_timeout = std::chrono::milliseconds(300);
+    low.sources = {ceiling_source(peer, "ceilings-v2", {"vendor/outage"})};
+    const auto kept = refreshed(transport, low);
+    require(ceiling_of(kept.generated->entry("vendor/outage")) == "0.000001 - 0.0001",
+            "the input and request ceilings are kept, the output ceiling below the listed price is not: " + ceiling_of(kept.generated->entry("vendor/outage")));
+    require(gap_lines(kept.sources[0]) == (std::vector<std::string>{"vendor/outage|||endpoints answered HTTP 500|kept",
+                                                                     "vendor/outage|ceiling_output||kept ceiling is below a price the listing gives"}),
+            "the dropped unit is named");
+  }
+
   // Without a previous ceiling, a failed request keeps nothing.
   request.previous = nullptr;
   request.sources = {ceiling_source(peer, "ceilings-v2", {"vendor/outage"})};

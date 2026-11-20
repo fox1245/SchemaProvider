@@ -181,21 +181,31 @@ inline constexpr std::size_t max_band_digits = 19;
 // The units of a routing gateway's route ceiling, which a refresh writes from an endpoints listing
 // (transport/catalogue_refresh.h) and a models listing never gives.
 inline constexpr std::string_view route_ceiling_units[]{"ceiling_input", "ceiling_output", "ceiling_request"};
-// What a request carries that a listing member prices beyond tokens.
+// What a listing member that no price unit reads is for. A route ceiling covers a token member by its side; an item
+// member prices something a request carries, and a bound over it has no total when the request carries it.
+enum class ListedRole : std::uint8_t { InputTokens, OutputTokens, EitherTokens, Item };
+// The thing a request carries that an item member prices.
 enum class ListedFeature : std::uint8_t {
+  None,        // a token member: no feature
   ImageInput,  // an image the request takes as input
   WebSearch    // a web search the service runs for the request (an OpenRouter plugin)
 };
-// A price member OpenRouter's models listing gives that an entry keeps as listed and no price unit reads, with the feature
-// of a request it prices. A bound of a request that carries the feature, over an entry that lists the member above zero,
-// has no total: nothing in the entry says how many such items the call bills. `image_token` and `input_audio_cache`
-// are not here: a route ceiling covers them as token prices (transport/catalogue_refresh.cpp), and `image_output` is
-// the unit `output_image` (plain_price_unit).
-struct UnreadListedMember {
+struct ListedMember {
   std::string_view member;
+  ListedRole role;
   ListedFeature feature;
 };
-inline constexpr UnreadListedMember unread_listed_members[]{{"image", ListedFeature::ImageInput}, {"web_search", ListedFeature::WebSearch}};
+// The price members OpenRouter's models listing gives that an entry keeps as listed and no price unit reads, with what
+// each prices. The one table of this listing-grammar knowledge: a route ceiling covers the token members
+// (transport/catalogue_refresh.cpp lists them among its price members), pricing floors a ceiling by them, and a bound
+// over an item member above zero has no total for a request that carries its feature. A member that is in no unit and
+// not here is unknown, and a bound over it above zero has no total either. `image_output` is the unit `output_image`
+// (plain_price_unit), not a member here.
+inline constexpr ListedMember listed_members[]{
+    {"image_token", ListedRole::EitherTokens, ListedFeature::None},
+    {"input_audio_cache", ListedRole::InputTokens, ListedFeature::None},
+    {"image", ListedRole::Item, ListedFeature::ImageInput},
+    {"web_search", ListedRole::Item, ListedFeature::WebSearch}};
 // The unit a price unit names without its input band: `prompt` for `prompt+272000`; a unit without a band is itself.
 std::string_view unbanded_unit(std::string_view unit) noexcept;
 // Item units price an item a call makes or takes (an image, a second of audio) rather than a token:
