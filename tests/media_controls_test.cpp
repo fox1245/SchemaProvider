@@ -3,6 +3,7 @@
 #include "codecs/gemini_request.h"
 #include "codecs/interactions.h"
 #include "codecs/interactions_request.h"
+#include "codecs/reason.h"
 #include "codecs/responses.h"
 #include "codecs/responses_request.h"
 #include "core/native.h"
@@ -459,8 +460,43 @@ void decode_only_audio_scope() {
   CHECK(accumulator.outcome() && std::holds_alternative<Completion>(*accumulator.outcome()));
   const auto& completion = std::get<Completion>(*accumulator.outcome()); CHECK(std::get<Media>(completion.messages.front().parts.front()).mime == "audio/wav");
 }
+// A preset name is sent as the name whatever its text, and a custom voice id as {"id": ...}. Audio output names
+// exactly one of them; a bad token or format in the slot that is set keeps its earlier refusal.
+void chat_audio_voice_slots() {
+  const auto descriptor = descriptor_for("openai.chat");
+  auto speak = [](chat::AudioOutput audio) {
+    chat::Request value;
+    value.model = "fixture-model";
+    value.messages.push_back({Role::User, "Speak"});
+    value.modalities = {chat::OutputModality::Audio};
+    value.audio = std::move(audio);
+    return value;
+  };
+  auto body_of = [&](const chat::Request& value, bool streaming) {
+    auto encoded = chat::encode(descriptor, value, streaming);
+    CHECK(std::holds_alternative<chat::EncodedRequest>(encoded));
+    return std::get<chat::EncodedRequest>(encoded).body;
+  };
+  auto refused = [&](const chat::Request& value, std::string_view code) {
+    for (const bool streaming : {false, true}) {
+      const auto encoded = chat::encode(descriptor, value, streaming);
+      invalid(encoded);
+      CHECK(reason::request_code(reason::Source::ChatRequest, std::get<Error>(encoded).safe_message) == code);
+    }
+  };
+  for (const bool streaming : {false, true}) {
+    CHECK(body_of(speak(chat::AudioOutput{"", "wav", "voice_abc"}), streaming).find(R"("audio":{"voice":{"id":"voice_abc"},"format":"wav"})") != std::string::npos);
+    CHECK(body_of(speak(chat::AudioOutput{"voice_abc", "wav"}), streaming).find(R"("audio":{"voice":"voice_abc","format":"wav"})") != std::string::npos);
+    CHECK(body_of(speak(chat::AudioOutput{"alloy", "wav"}), streaming).find(R"("audio":{"voice":"alloy","format":"wav"})") != std::string::npos);
+  }
+  refused(speak(chat::AudioOutput{"alloy", "wav", "voice_abc"}), "request.chat.audio_output_takes_a_voice_or_a_voice_id_not_both");
+  refused(speak(chat::AudioOutput{"", "wav"}), "request.chat.audio_output_needs_a_voice_or_a_voice_id");
+  refused(speak(chat::AudioOutput{"", "wav", "voice abc"}), "request.chat.audio_output_needs_a_voice_and_a_supported_format");
+  refused(speak(chat::AudioOutput{"", "OGG!", "voice_abc"}), "request.chat.audio_output_needs_a_voice_and_a_supported_format");
+  refused(speak(chat::AudioOutput{"al loy", "wav"}), "request.chat.audio_output_needs_a_voice_and_a_supported_format");
+}
 }
 int main() {
-  try { gemini_nonthinking_media_request(); interaction_nonthinking_transcription_request(); gemini_boundaries_and_binding(); gemini_builtin_tools_and_audio_format(); gemini_service_tool_options(); gemini_unreplayable_service_parts(); interaction_boundaries_and_binding(); responses_format_binding(); decode_only_audio_scope(); open_value_shapes(); }
+  try { gemini_nonthinking_media_request(); interaction_nonthinking_transcription_request(); gemini_boundaries_and_binding(); gemini_builtin_tools_and_audio_format(); gemini_service_tool_options(); gemini_unreplayable_service_parts(); interaction_boundaries_and_binding(); responses_format_binding(); decode_only_audio_scope(); open_value_shapes(); chat_audio_voice_slots(); }
   catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

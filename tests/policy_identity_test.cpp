@@ -1,5 +1,5 @@
 // Pins the values that sealed history depends on: the replay identity of the built-in policy, the native origin
-// digest and the archive descriptor binding of every descriptor preset, and one Chat configuration digest.
+// digest and the archive descriptor binding of every descriptor preset, and the Chat configuration digests of audio output.
 // A sealed message and a native archive carry these values, so a change that moves one makes what was sealed
 // before it unusable. Moving a pin must be a deliberate, documented change; a data edit that only changes
 // admission (models, MIME types, limits, levels) must leave every pin where it is.
@@ -168,6 +168,30 @@ void chat_audio_configuration() {
   const std::string computed = digest ? archive::hex(*digest) : "<no configuration digest>";
   // Moving it makes Chat history sealed with an audio output configuration ReplayIneligible.
   pin("openai_chat.audio_configuration", "057315db972f9d2e706c5fab62aaee57d5e65cdf81d24950945636dc798eaf04", computed);
+}
+
+// The configuration digest of a Chat audio request with `audio` as its output parameters, as hex.
+std::string chat_audio_digest(const descriptor::ValidatedDescriptor& chat, const sp::chat::AudioOutput& audio) {
+  sp::chat::Request request;
+  request.model = "fixture-model";
+  request.messages.push_back({sp::Role::User, "speak"});
+  request.modalities = {sp::chat::OutputModality::Text, sp::chat::OutputModality::Audio};
+  request.audio = audio;
+  const auto digest = sp::native_testing::chat_configuration_digest_of(chat, request, descriptor::effective_defaults(chat, request.model));
+  return digest ? archive::hex(*digest) : "<no configuration digest>";
+}
+void chat_voice_configuration() {
+  const auto result = presets::try_openai_chat();
+  const auto* chat = loaded("openai_chat", result);
+  if (!chat) return;
+  pin("openai_chat.voice_preset", "bff58dc61c4cbcc420244bfb4c512f524db92a8711cd8327669e26128718519e", chat_audio_digest(*chat, sp::chat::AudioOutput{"alloy", "wav"}));
+  pin("openai_chat.voice_prefixed_preset", "afa1bc21258d0c02063244f3f752bf547f209a860fde76fd96097dd5defe7aec", chat_audio_digest(*chat, sp::chat::AudioOutput{"voice_abc", "wav"}));
+  // A custom voice id is bound behind its own marker: it never shares a digest with a preset name of the same text,
+  // and two ids differ. Moving the pin makes Chat history sealed with a custom voice id ReplayIneligible.
+  const auto custom = chat_audio_digest(*chat, sp::chat::AudioOutput{"", "wav", "x"});
+  CHECK(custom != chat_audio_digest(*chat, sp::chat::AudioOutput{"x", "wav"}));
+  CHECK(custom != chat_audio_digest(*chat, sp::chat::AudioOutput{"", "wav", "y"}));
+  pin("openai_chat.voice_id", "f41e1fb623a30bbcfcfb6c2442c8fdd74cd1038eb391627b3b91daa278273d8d", custom);
 }
 
 // The route a native context binds is text that a captured answer carries: a later turn replays the answer only when
@@ -354,6 +378,7 @@ int main() {
     builtin_policy_identity();
     preset_origins_and_bindings();
     chat_audio_configuration();
+    chat_voice_configuration();
     native_routes();
     model_routed_native_routes();
   } catch (const std::exception& error) {
