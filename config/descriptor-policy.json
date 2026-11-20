@@ -604,7 +604,7 @@
     {"endpoint":"generations","shape":"openrouter","origins":["https://openrouter.ai"],"paths":{"get":"/api/v1/generation"},"billing":"none"},
     {"endpoint":"realtime","shape":"google","origins":["https://generativelanguage.googleapis.com"],"paths":{"connect":"/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"},"billing":{"connect":"model"},"auth":"x-goog-api-key",
      "audio":{"input":[{"mime":"audio/pcm;rate=16000","rate":16000,"sample_bytes":2}],"output":[{"mime":"audio/pcm;rate=24000","rate":24000,"sample_bytes":2}]},
-     "close_codes":[{"code":1007,"status":401}],
+     "close_codes":[{"code":1007,"status":400}],
      "options":{"type":"object","properties":{"realtimeInputConfig":{"type":"object","properties":{"automaticActivityDetection":{"type":"object","properties":{"disabled":{"type":"boolean"}}},"activityHandling":{"type":"string","max_length":64,"token":true}}},"contextWindowCompression":{"type":"object","properties":{"triggerTokens":{"type":"integer","minimum":0},"slidingWindow":{"type":"object","properties":{"targetTokens":{"type":"integer","minimum":0}}}}}}}},
     {"endpoint":"realtime","shape":"openai","origins":["https://api.openai.com"],"paths":{"connect":"/v1/realtime"},"billing":{"connect":"model"},
      "audio":{"input":[{"mime":"audio/pcm;rate=24000","rate":24000,"sample_bytes":2},{"mime":"audio/pcmu","rate":8000,"sample_bytes":1},{"mime":"audio/pcma","rate":8000,"sample_bytes":1}],

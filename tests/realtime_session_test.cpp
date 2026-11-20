@@ -221,7 +221,7 @@ void tool_turn_settles_at_the_end(transport::Transport& transport) {
 // A provider that ends the session itself over a failure says so with a close code of its own. The fact names the codes
 // that are failures and the status each stands for, and the runtime error policy classifies that status.
 void provider_close(transport::Transport& transport) {
-  const std::string codes = R"(,"close_codes":[{"code":3000,"status":401},{"code":1007,"reason":"API key not valid","status":401},{"code":4003,"status":503}])";
+  const std::string codes = R"(,"close_codes":[{"code":3000,"status":401},{"code":1007,"reason":"API key not valid","status":400},{"code":4003,"status":503}])";
   const auto closed_with = [&](int code, const std::string& reason) {
     auto session = opened(transport, local("/realtime/close/" + std::to_string(code) + "/" + reason, codes), {});
     return ended_within(session);
@@ -230,13 +230,16 @@ void provider_close(transport::Transport& transport) {
   CHECK(wrong_key.clean && wrong_key.close_code == 3000 && wrong_key.error);
   CHECK(wrong_key.error->kind == ErrorKind::Authentication && wrong_key.error->retry_class == RetryClass::Never);
   CHECK(wrong_key.error->reason == "runtime.realtime.provider_closed" && wrong_key.error->vendor_code == "3000" && wrong_key.error->http_status == 0);
+  // 1007 is invalid frame payload data, sent for a wrong key and for other refusals alike. The code decides: the close
+  // reason is the provider's free text, so both are the same invalid request (the fact's 400), never retried, and the
+  // raw reason stays in close_reason for a host that looks further. A code the fact does not list is an ordinary close.
   const auto google_key = closed_with(1007, "API%20key%20not%20valid.%20Please%20pass%20a%20valid%20API%20key.");
-  CHECK(google_key.error && google_key.error->kind == ErrorKind::Authentication && google_key.close_reason.starts_with("API key not valid"));
-  // The code decides: the close reason is the provider's free text, so the same code with another reason is the same
-  // failure. A code the fact does not list is an ordinary close.
   const auto other_reason = closed_with(1007, "bad%20payload");
-  CHECK(other_reason.error && other_reason.error->kind == ErrorKind::Authentication && other_reason.error->retry_class == RetryClass::Never);
-  CHECK(other_reason.error->reason == "runtime.realtime.provider_closed" && other_reason.error->vendor_code == "1007");
+  for (const auto* closed : {&google_key, &other_reason}) {
+    CHECK(closed->error && closed->error->kind == ErrorKind::InvalidRequest && closed->error->retry_class == RetryClass::Never);
+    CHECK(closed->error->reason == "runtime.realtime.provider_closed" && closed->error->vendor_code == "1007" && closed->error->http_status == 0);
+  }
+  CHECK(google_key.close_reason.starts_with("API key not valid") && other_reason.close_reason == "bad payload");
   CHECK(!closed_with(4001, "bye").error);
   // The status is the policy's to classify.
   const auto busy = closed_with(4003, "busy");

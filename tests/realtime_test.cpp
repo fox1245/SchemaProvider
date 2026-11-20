@@ -512,7 +512,7 @@ void policy_facts() {
   const auto* openai = descriptor::builtin_policy()->endpoint("realtime", "https://api.openai.com");
   CHECK(openai && openai->audio_input.size() == 3 && openai->audio_input.at(0).mime == "audio/pcm;rate=24000" && openai->audio_input.at(1).mime == "audio/pcmu" &&
         openai->audio_input.at(1).sample_bytes == 1);
-  CHECK(google->close_codes.size() == 1 && google->close_codes[0].code == 1007 && google->close_codes[0].status == 401 &&
+  CHECK(google->close_codes.size() == 1 && google->close_codes[0].code == 1007 && google->close_codes[0].status == 400 &&
         openai->close_codes.size() == 1 && openai->close_codes[0].code == 3000 && openai->close_codes[0].status == 401);
 }
 }  // namespace
