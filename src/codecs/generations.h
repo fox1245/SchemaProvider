@@ -9,6 +9,7 @@
 #include <variant>
 #include <vector>
 
+namespace sp::reason { struct Reason; }
 namespace sp::generations {
 struct Get { std::string id; };
 struct Result {
@@ -42,7 +43,7 @@ class Codec final : public endpoints::Codec {
   Codec(const descriptor::ValidatedDescriptor&, Accumulator&, SemanticLimits = {});
   bool buffered(std::string_view body, Close close) override;
  private:
-  bool fail(ErrorKind, std::string);
+  bool fail(ErrorKind, const reason::Reason&);
   bool emit(const Event&);
   const descriptor::ValidatedDescriptor& descriptor_;
   Accumulator& accumulator_;
