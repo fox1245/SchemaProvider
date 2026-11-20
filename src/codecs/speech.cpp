@@ -24,20 +24,19 @@ std::string essence(std::string_view type) {
 Codec::Codec(const descriptor::ValidatedDescriptor& descriptor, Accumulator& accumulator, std::string requested, SemanticLimits limits)
     : descriptor_(descriptor), accumulator_(accumulator), requested_(std::move(requested)), limits_(limits) {}
 bool Codec::emit(const Event& event) { return accumulator_.accept(event); }
-bool Codec::fail(ErrorKind kind, std::string text) {
-  Error error{kind, std::move(text)};
-  error.reason = reason::code(reason::Source::Speech, error.safe_message);
+bool Codec::fail(ErrorKind kind, const reason::Reason& text) {
+  Error error = reason::error(kind, text);
   emit(Fail{std::move(error)});
   return false;
 }
 bool Codec::buffered(std::string_view body, Close close) {
-  if (!close.normal) return fail(close.error, "abnormal response close");
+  if (!close.normal) return fail(close.error, reason::transport::response_close);
   const auto type = essence(header(close, "content-type"));
   // A JSON or text body here is not audio: an SSE stream or an error the status did not report.
-  if (type.empty() || (!type.starts_with("audio/") && type != "application/octet-stream")) return fail(ErrorKind::ProtocolCorrupt, "speech response is not audio");
-  if (body.empty()) return fail(ErrorKind::ProtocolCorrupt, "speech response is empty");
+  if (type.empty() || (!type.starts_with("audio/") && type != "application/octet-stream")) return fail(ErrorKind::ProtocolCorrupt, reason::speech::response_not_audio);
+  if (body.empty()) return fail(ErrorKind::ProtocolCorrupt, reason::speech::response_empty);
   const auto encoded = base64_encode(body);
-  if (encoded.size() > limits_.max_content_bytes) return fail(ErrorKind::ResourceLimit, "speech audio limit");
+  if (encoded.size() > limits_.max_content_bytes) return fail(ErrorKind::ResourceLimit, reason::speech::audio_limit);
   const auto digest = crypto::sha256(body);
   std::string hex;
   for (const auto byte : digest) { const char* digits = "0123456789abcdef"; hex += digits[byte >> 4]; hex += digits[byte & 15]; }
