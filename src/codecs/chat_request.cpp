@@ -163,7 +163,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       return bad("gateway controls require declared OpenRouter origin");
   }
   if (auto refusal = request_controls::validate_plugins(descriptor.family_policy(), request.plugins, resources.request_tools))
-    return Error{refusal->admitted ? ErrorKind::InvalidRequest : ErrorKind::Unsupported, std::move(refusal->message)};
+    return Error{refusal->admitted ? ErrorKind::InvalidRequest : ErrorKind::Unsupported, refusal->cause};
   if (request.reasoning) {
     const auto& reasoning = *request.reasoning;
     if (!reasoning.effort && !reasoning.max_tokens && !reasoning.exclude && !reasoning.enabled)
@@ -234,7 +234,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   // still retain replay-mismatch precedence.
   if (media_error && !captured_history) return *media_error;
   if (auto refusal = request_controls::validate_extensions(descriptor, request.extensions))
-    return Error{refusal->admitted ? ErrorKind::InvalidRequest : ErrorKind::Unsupported, std::move(refusal->message)};
+    return Error{refusal->admitted ? ErrorKind::InvalidRequest : ErrorKind::Unsupported, refusal->cause};
   // Cache marks (core/cache_marks.h) ride the text parts of the ordered conversation, where the policy says the origin
   // and the model's route take them; elsewhere they are dropped and reported, or refused, as the policy says.
   CacheMarkReport mark_report;

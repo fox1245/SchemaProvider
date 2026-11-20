@@ -1,4 +1,5 @@
 #include "codecs/media_input.h"
+#include "codecs/reason.h"
 
 namespace sp::media_input {
 namespace {
@@ -12,11 +13,29 @@ bool lower_equal(std::string_view a, std::string_view b) noexcept {
   }
   return true;
 }
-Error rejection(ErrorKind kind, std::string message) {
+// A refusal with the constant of the check.
+Error rejection(ErrorKind kind, const reason::Reason& check) { return reason::error(kind, check); }
+// A refusal whose text has no code: a kind or source the family cannot represent, or one its policy does not list.
+Error uncoded(ErrorKind kind, std::string message) {
   Error error;
   error.kind = kind;
   error.safe_message = std::move(message);
   return error;
+}
+// The constant of each media fault (core/media.h); its text is media_fault_name's.
+const reason::Reason& fault_reason(MediaFault fault) noexcept {
+  switch (fault) {
+    case MediaFault::None: break;
+    case MediaFault::Kind: return reason::shared_request::media_media_kind_does_not_match_its_mime_type;
+    case MediaFault::Mime: return reason::shared_request::media_invalid_or_missing_media_mime_type;
+    case MediaFault::Source: return reason::shared_request::media_invalid_media_source;
+    case MediaFault::Base64: return reason::shared_request::media_media_payload_is_not_canonical_base64;
+    case MediaFault::Size: return reason::shared_request::media_media_payload_exceeds_the_decoded_size_limit;
+    case MediaFault::Signature: return reason::shared_request::media_media_payload_does_not_match_its_mime_type;
+    case MediaFault::Detail: return reason::shared_request::media_invalid_image_detail;
+    case MediaFault::Text: return reason::shared_request::media_invalid_media_name_or_identity;
+  }
+  return reason::shared_request::media_invalid_media;
 }
 } // namespace
 
@@ -32,7 +51,7 @@ std::size_t decoded_limit(const descriptor::CodecResources& resources, MediaKind
 
 std::optional<Error> admit(const descriptor::ValidatedDescriptor& descriptor, const Media& media) {
   if (static_cast<unsigned>(media.kind) >= media_kind_count || static_cast<unsigned>(media.source) > 2)
-    return rejection(ErrorKind::InvalidRequest, "invalid media kind or source");
+    return uncoded(ErrorKind::InvalidRequest, "invalid media kind or source");
   // Policy may narrow provider support, but cannot create a source union the
   // encoder has no wire representation for (or make inline_audio dereference a URL).
   const auto family = descriptor.family();
@@ -44,23 +63,23 @@ std::optional<Error> admit(const descriptor::ValidatedDescriptor& descriptor, co
        ((media.kind == MediaKind::Audio && media.source != MediaSource::Inline) ||
         (media.kind == MediaKind::Video && media.source == MediaSource::File))) ||
       (family == "anthropic.messages" && (media.kind == MediaKind::Audio || media.kind == MediaKind::Video));
-  if (unrepresentable) return rejection(ErrorKind::Unsupported, "this family cannot represent this media kind or source");
+  if (unrepresentable) return uncoded(ErrorKind::Unsupported, "this family cannot represent this media kind or source");
   const auto& policy = descriptor::media_policy(descriptor).kinds[static_cast<std::size_t>(media.kind)];
   const std::string kind(media_kind_name(media.kind));
-  if (!policy.sources) return rejection(ErrorKind::Unsupported, "this family does not accept " + kind + " input");
+  if (!policy.sources) return uncoded(ErrorKind::Unsupported, "this family does not accept " + kind + " input");
   if (!(policy.sources & (1U << static_cast<unsigned>(media.source))))
-    return rejection(ErrorKind::Unsupported, "this family does not accept " + kind + " input as " +
-                     std::string(media_source_name(media.source)));
+    return uncoded(ErrorKind::Unsupported, "this family does not accept " + kind + " input as " +
+                   std::string(media_source_name(media.source)));
   if (!media.mime.empty()) {
     const auto essence = mime_essence(media.mime);
     bool listed = false;
     for (const auto& admitted : policy.mime) if (lower_equal(admitted, essence)) { listed = true; break; }
-    if (!listed) return rejection(ErrorKind::InvalidRequest, "media MIME type is not admitted for this family");
+    if (!listed) return uncoded(ErrorKind::InvalidRequest, "media MIME type is not admitted for this family");
   }
   const auto fault = check_media(media, decoded_limit(descriptor.policy()->resources(), media.kind));
   if (fault != MediaFault::None)
     return rejection(fault == MediaFault::Size ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest,
-                     media_fault_name(fault));
+                     fault_reason(fault));
   return std::nullopt;
 }
 
@@ -71,13 +90,13 @@ std::optional<std::string_view> audio_format(const descriptor::AcceptedAudioFact
 }
 
 std::optional<Error> admit_audio(const descriptor::ValidatedDescriptor& descriptor, const Media& media, const descriptor::AcceptedAudioFact& fact) {
-  if (media.kind != MediaKind::Audio || media.source != MediaSource::Inline) return rejection(ErrorKind::InvalidRequest, "invalid media kind or source");
+  if (media.kind != MediaKind::Audio || media.source != MediaSource::Inline) return uncoded(ErrorKind::InvalidRequest, "invalid media kind or source");
   if (!media.mime.empty() && !audio_format(fact, media.mime))
-    return rejection(ErrorKind::InvalidRequest, "media MIME type is not admitted for this family");
+    return uncoded(ErrorKind::InvalidRequest, "media MIME type is not admitted for this family");
   const auto limit = fact.max_bytes ? static_cast<std::size_t>(fact.max_bytes) : decoded_limit(descriptor.policy()->resources(), MediaKind::Audio);
   const auto fault = check_media(media, limit);
   if (fault != MediaFault::None)
-    return rejection(fault == MediaFault::Size ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest, media_fault_name(fault));
+    return rejection(fault == MediaFault::Size ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest, fault_reason(fault));
   return std::nullopt;
 }
 

@@ -307,7 +307,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   // lineage mismatch precedence even when the edited prefix is no longer valid.
   if (media_error && !captured_history) return *media_error;
   if (auto refusal = request_controls::validate_extensions(descriptor, request.extensions))
-    return Error{refusal->admitted ? ErrorKind::InvalidRequest : ErrorKind::Unsupported, std::move(refusal->message)};
+    return Error{refusal->admitted ? ErrorKind::InvalidRequest : ErrorKind::Unsupported, refusal->cause};
   // An extension the service only takes with a beta (`compaction`, `context_management`) sends it.
   if (request.extensions) for (auto member : request.extensions->root().members())
     for (const auto& fact : family.extensions)
