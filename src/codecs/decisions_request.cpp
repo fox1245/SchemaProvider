@@ -1,4 +1,5 @@
 #include "codecs/decisions.h"
+#include "codecs/reason.h"
 #include "descriptor/policy.h"
 #include "descriptor/value_schema.h"
 #include "json/json.h"
@@ -7,7 +8,7 @@
 
 namespace sp::decisions {
 namespace {
-Error bad(std::string message) { return Error{ErrorKind::InvalidRequest, std::move(message)}; }
+Error bad(const reason::Reason& message) { return reason::error(ErrorKind::InvalidRequest, message); }
 // Guidance is a string; OpenRouter also takes a JSON object or array.
 bool guidance(const std::shared_ptr<const json::Document>& value, bool structured) {
   if (!value) return false;
@@ -35,40 +36,40 @@ EndpointFacts endpoint_facts(const descriptor::ValidatedDescriptor& descriptor, 
 }
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
   const auto* fact = descriptor.policy()->endpoint("decisions", descriptor.base_url());
-  if (!fact) return Error{ErrorKind::Unsupported, "decision endpoints are not admitted at this origin"};
+  if (!fact) return reason::error(ErrorKind::Unsupported, reason::decisions_request::endpoint_not_admitted);
   const bool openai = fact->shape == "openai";
   const auto path = descriptor::endpoint_path(*fact, operation(request));
-  if (!path) return Error{ErrorKind::Unsupported, "the decision endpoint has no path"};
-  if (request.model.empty() || request.questions.empty()) return bad("a decision needs a model and questions");
+  if (!path) return reason::error(ErrorKind::Unsupported, reason::decisions_request::path_missing);
+  if (request.model.empty() || request.questions.empty()) return bad(reason::decisions_request::model_and_questions_required);
   // OpenAI takes a string or message items; OpenRouter a string, an object or an array.
   const auto input = request.input ? request.input->root() : json::Value{};
-  if (!input.is_string() && !input.is_array() && (openai || !input.is_object())) return bad("decision input is a string, an array or (OpenRouter) an object");
+  if (!input.is_string() && !input.is_array() && (openai || !input.is_object())) return bad(reason::decisions_request::input_invalid);
   std::set<std::string_view> names;
   for (const auto& question : request.questions) {
     if ((!openai && question.name.empty()) || (!question.name.empty() && !names.insert(question.name).second))
-      return bad("decision questions need unique names");
-    if (!guidance(question.instructions, !openai)) return bad("decision instructions are a string or (OpenRouter) structured guidance");
-    if (openai && question.kind == Kind::Box) return Error{ErrorKind::Unsupported, "box questions are OpenRouter only"};
+      return bad(reason::decisions_request::names_invalid);
+    if (!guidance(question.instructions, !openai)) return bad(reason::decisions_request::guidance_invalid);
+    if (openai && question.kind == Kind::Box) return reason::error(ErrorKind::Unsupported, reason::decisions_request::box_unsupported);
     const bool listed = question.kind == Kind::Choice || question.kind == Kind::Score;
     if (listed != (question.options.size() >= 2) || (!listed && !question.options.empty()))
-      return bad("choice and score questions list at least two options; others list none");
+      return bad(reason::decisions_request::options_count_invalid);
     std::set<std::string_view> values;
     for (const auto& option : question.options) {
       if (option.value.empty() || (option.guidance && !guidance(option.guidance, !openai)))
-        return bad("decision options have a value and string or (OpenRouter) structured guidance");
+        return bad(reason::decisions_request::option_invalid);
       // An answer names its option by value, and OpenRouter keys a choice's criteria by it.
-      if (!values.insert(option.value).second) return bad("decision options need unique values");
+      if (!values.insert(option.value).second) return bad(reason::decisions_request::option_values_duplicate);
     }
     if (bool(question.when_true) != bool(question.when_false) || (question.when_true && question.kind != Kind::Predicate))
-      return bad("predicate guidance gives both a true and a false answer");
-    if (question.when_true && openai) return Error{ErrorKind::Unsupported, "predicate guidance is OpenRouter only"};
+      return bad(reason::decisions_request::predicate_guidance_invalid);
+    if (question.when_true && openai) return reason::error(ErrorKind::Unsupported, reason::decisions_request::predicate_guidance_unsupported);
     if (question.when_true && (!guidance(question.when_true, true) || !guidance(question.when_false, true)))
-      return bad("decision instructions are a string or (OpenRouter) structured guidance");
+      return bad(reason::decisions_request::guidance_invalid);
   }
   if (request.extensions) {
-    if (!fact->options) return Error{ErrorKind::Unsupported, "the decision endpoint admits no options"};
+    if (!fact->options) return reason::error(ErrorKind::Unsupported, reason::decisions_request::options_not_admitted);
     if (!request.extensions->root().is_object() || descriptor::check_value(*fact->options, request.extensions->root()))
-      return bad("decision options do not match the policy's schema");
+      return bad(reason::decisions_request::options_schema_invalid);
   }
   const auto& resources = descriptor.policy()->resources();
   std::string body;
@@ -127,7 +128,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   out.raw(openai ? "]" : "}");
   if (request.extensions) for (auto member : request.extensions->root().members()) out.raw(",").quoted(member.key).raw(":").value(member.value, 1);
   out.raw("}");
-  if (!out.ok()) return Error{ErrorKind::ResourceLimit, "decision request exceeds JSON limits"};
+  if (!out.ok()) return reason::error(ErrorKind::ResourceLimit, reason::decisions_request::json_limit);
   Encoded encoded{std::string(*path), std::move(body), request.model, fact->charge_on_accept, fact->auth};
   endpoints::add_fact_headers(encoded, *fact);
   return encoded;
