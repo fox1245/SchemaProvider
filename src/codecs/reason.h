@@ -1700,6 +1700,9 @@ inline constexpr Reason all[]{
 namespace transport {
 inline constexpr Reason response_close{"", "abnormal response close"};
 inline constexpr Reason gemini_response_close{"", "abnormal Gemini response close"};
+inline constexpr Reason interaction_close{"", "abnormal interaction close"};
+// Every transport text, for the enumeration test.
+inline constexpr Reason all[]{response_close, gemini_response_close, interaction_close};
 }  // namespace transport
 // An Error that carries the constant's text as safe_message and its code as reason.
 inline Error error(ErrorKind kind, const Reason& r) {
