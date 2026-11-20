@@ -1,4 +1,5 @@
 #include "codecs/images.h"
+#include "codecs/reason.h"
 #include "codecs/media_input.h"
 #include "descriptor/policy.h"
 #include "descriptor/value_schema.h"
@@ -7,7 +8,7 @@
 
 namespace sp::images {
 namespace {
-Error bad(std::string message) { return Error{ErrorKind::InvalidRequest, std::move(message)}; }
+Error bad(const reason::Reason& message) { return reason::error(ErrorKind::InvalidRequest, message); }
 // A token the provider defines (`1024x1024`, `high`, `16:9`): bounded, printable, no separators.
 bool token(std::string_view value) {
   return !value.empty() && value.size() <= 64 && std::all_of(value.begin(), value.end(), [](char c) {
@@ -35,26 +36,26 @@ EndpointFacts endpoint_facts(const descriptor::ValidatedDescriptor& descriptor, 
 }
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
   const auto* fact = descriptor.policy()->endpoint("images", descriptor.base_url());
-  if (!fact) return Error{ErrorKind::Unsupported, "image endpoints are not admitted at this origin"};
+  if (!fact) return reason::error(ErrorKind::Unsupported, reason::images_request::endpoint_not_admitted);
   const bool openai = fact->shape == "openai";
   const auto path = descriptor::endpoint_path(*fact, operation(*fact, request));
-  if (!path) return Error{ErrorKind::Unsupported, "the image endpoint has no path for this operation"};
-  if (request.model.empty() || request.prompt.empty()) return bad("image model and prompt are required");
+  if (!path) return reason::error(ErrorKind::Unsupported, reason::images_request::operation_not_admitted);
+  if (request.model.empty() || request.prompt.empty()) return bad(reason::images_request::model_and_prompt_required);
   for (const auto* value : {&request.size, &request.quality, &request.background, &request.output_format})
-    if (*value && !token(**value)) return bad("image size, quality, background and format are tokens");
-  if (request.count && !*request.count) return bad("image count must be positive");
-  if (request.output_compression && *request.output_compression > 100) return bad("image output compression is 0 to 100");
+    if (*value && !token(**value)) return bad(reason::images_request::controls_invalid);
+  if (request.count && !*request.count) return bad(reason::images_request::count_invalid);
+  if (request.output_compression && *request.output_compression > 100) return bad(reason::images_request::compression_invalid);
   for (const auto& media : request.references) {
-    if (media.kind != MediaKind::Image) return bad("image references are images");
+    if (media.kind != MediaKind::Image) return bad(reason::images_request::reference_not_image);
     if (media.source == MediaSource::File) {
-      if (!openai) return Error{ErrorKind::Unsupported, "image references by file id are OpenAI only"};
-      if (!token(media.reference)) return bad("an image file id is a token");
+      if (!openai) return reason::error(ErrorKind::Unsupported, reason::images_request::file_reference_unsupported);
+      if (!token(media.reference)) return bad(reason::images_request::file_id_invalid);
     } else if (auto error = media_input::admit(descriptor, media)) return *error;
   }
   if (request.extensions) {
-    if (!fact->options) return Error{ErrorKind::Unsupported, "the image endpoint admits no options"};
+    if (!fact->options) return reason::error(ErrorKind::Unsupported, reason::images_request::options_not_admitted);
     if (!request.extensions->root().is_object() || descriptor::check_value(*fact->options, request.extensions->root()))
-      return bad("image options do not match the policy's schema");
+      return bad(reason::images_request::options_invalid);
   }
   const auto& resources = descriptor.policy()->resources();
   std::string body;
@@ -83,7 +84,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   }
   if (request.extensions) for (auto member : request.extensions->root().members()) out.raw(",").quoted(member.key).raw(":").value(member.value, 1);
   out.raw("}");
-  if (!out.ok()) return Error{ErrorKind::ResourceLimit, "image request exceeds JSON limits"};
+  if (!out.ok()) return reason::error(ErrorKind::ResourceLimit, reason::images_request::json_limit);
   Encoded encoded{std::string(*path), std::move(body), request.model, fact->charge_on_accept, fact->auth};
   endpoints::add_fact_headers(encoded, *fact);
   return encoded;
