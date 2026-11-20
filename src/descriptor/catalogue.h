@@ -174,13 +174,28 @@ bool valid_price_text(std::string_view price) noexcept;
 // than a digit or one '.', or an amount that does not fit 64 bits.
 std::optional<std::uint64_t> price_per_million(std::string_view price) noexcept;
 // The plain name of a price unit that OpenRouter names otherwise (`prompt` is `input`, `input_cache_write_1h` is
-// `cache_write_1h`); any other name is its own. Pricing reads both names as the same unit.
+// `cache_write_1h`, `image_output` is `output_image`); any other name is its own. Pricing reads both names as the same unit.
 std::string_view plain_price_unit(std::string_view name) noexcept;
 // The most digits of the input band of a price unit, `<unit>+<tokens>`.
 inline constexpr std::size_t max_band_digits = 19;
 // The units of a routing gateway's route ceiling, which a refresh writes from an endpoints listing
 // (transport/catalogue_refresh.h) and a models listing never gives.
 inline constexpr std::string_view route_ceiling_units[]{"ceiling_input", "ceiling_output", "ceiling_request"};
+// What a request carries that a listing member prices beyond tokens.
+enum class ListedFeature : std::uint8_t {
+  ImageInput,  // an image the request takes as input
+  WebSearch    // a web search the service runs for the request (an OpenRouter plugin)
+};
+// A price member OpenRouter's models listing gives that an entry keeps as listed and no price unit reads, with the feature
+// of a request it prices. A bound of a request that carries the feature, over an entry that lists the member above zero,
+// has no total: nothing in the entry says how many such items the call bills. `image_token` and `input_audio_cache`
+// are not here: a route ceiling covers them as token prices (transport/catalogue_refresh.cpp), and `image_output` is
+// the unit `output_image` (plain_price_unit).
+struct UnreadListedMember {
+  std::string_view member;
+  ListedFeature feature;
+};
+inline constexpr UnreadListedMember unread_listed_members[]{{"image", ListedFeature::ImageInput}, {"web_search", ListedFeature::WebSearch}};
 // The unit a price unit names without its input band: `prompt` for `prompt+272000`; a unit without a band is itself.
 std::string_view unbanded_unit(std::string_view unit) noexcept;
 // Item units price an item a call makes or takes (an image, a second of audio) rather than a token:

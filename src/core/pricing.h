@@ -240,6 +240,9 @@ struct WorstCase {
 // - Tools: each capped group at the dearest fee of its types times its cap; a group with no cap, or a tool with no
 //   listed fee, is unbounded.
 // - Models: the model and each fallback model, at the dearest candidate.
+// - Prices beyond tokens: an entry that lists a member of descriptor::unread_listed_members (`image`, `web_search`)
+//   above zero, or at no fixed amount, has no total (`ModelPrice`, the member in the detail) for a request that
+//   carries what it prices (RequestFacts::image_input, RequestFacts::plugins).
 // - Gateway: at the route ceiling, the dearest over the candidates.
 // - Variable prices: a unit with a row that applies at a price that is not a fixed amount (upper_bound with the entry)
 //   is `ModelPrice` (a tool fee `ToolFee`), the detail naming the unit and the row.
