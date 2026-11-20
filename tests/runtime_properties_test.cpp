@@ -79,6 +79,7 @@ void interface_contract_capabilities() {
   static_assert((RequiredProvider & ChatVoiceId) == ChatVoiceId);
   static_assert((RequiredProvider & PricedExtensions) == PricedExtensions);
   static_assert((RequiredProvider & EndpointTierAndPin) == EndpointTierAndPin);
+  static_assert((RequiredProvider & RealtimeResponseBound) == RealtimeResponseBound);
   static_assert((RequiredProvider & EndpointCostBounds) == 0);
   const auto linked = sp::runtime::interface_contract();
   require(linked.revision == sp::EXPECTED_INTERFACE_REVISION, "linked interface revision differs");
@@ -95,6 +96,7 @@ void interface_contract_capabilities() {
   require((sp::core_interface_contract().capabilities & ChatVoiceId) != 0, "core omits AudioOutput::voice_id");
   require((sp::core_interface_contract().capabilities & PricedExtensions) != 0, "core omits ExtensionFact::prices");
   require((sp::core_interface_contract().capabilities & EndpointTierAndPin) != 0, "core omits the endpoint tier and pin members");
+  require((sp::core_interface_contract().capabilities & RealtimeResponseBound) != 0, "core omits EndpointFact::output_cap");
   require((linked.capabilities & EndpointCostBounds) != 0, "the runtime omits endpoint cost bounds");
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, OpenRouterRoutingMaxPrice);
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, ErrorReason);
@@ -108,6 +110,7 @@ void interface_contract_capabilities() {
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, ChatVoiceId);
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, PricedExtensions);
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, EndpointTierAndPin);
+  sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, RealtimeResponseBound);
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, EndpointCostBounds);
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, RequiredProvider);
   constexpr std::uint64_t ungranted = 1ULL << 63;

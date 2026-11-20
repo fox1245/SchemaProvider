@@ -623,11 +623,251 @@ void turn_usage_is_priced() {
   CHECK(!estimate.total && estimate.unpriced == std::vector<std::string>({"input_image"}));
 }
 
+// The reasons of a bound, as "<kind> [<subject>]; ...".
+std::string reasons_of(const pricing::EndpointBound& bound) {
+  std::string out;
+  for (const auto& reason : bound.unbounded) out += std::string(pricing::to_string(reason.by)) + " [" + reason.subject + "]; ";
+  return out;
+}
+// A rate in nano-USD per million tokens, from its decimal USD per token.
+std::uint64_t rate(std::string_view usd) { return *pricing::per_million(usd); }
+// Rates times tokens, rounded up once to whole nano-USD.
+std::uint64_t nano(std::initializer_list<std::pair<std::uint64_t, std::string_view>> lines) {
+  std::uint64_t sum = 0;
+  for (const auto& [tokens, usd] : lines) sum += tokens * rate(usd);
+  return (sum + 999'999) / 1'000'000;
+}
+
+// The bound of one model response of a session (#124): the host states the response's input by modality, the setup
+// states the output cap, and the catalogue prices each modality at its own rate. For every turn within those, the
+// estimate of its usage is at most the bound.
+void response_bounds() {
+  auto loaded = descriptor::load_catalogue(R"({"version":1,"models":[
+    {"id":"audio-model","output_limit":4096,"pricing":{"input":"0.000004","output":"0.000016","input_audio":"0.000032","output_audio":"0.000064"}},
+    {"id":"text-only-model","output_limit":4096,"pricing":{"input":"0.000004","output":"0.000016"}},
+    {"id":"thinking-model","output_limit":4096,"pricing":{"input":"0.000004","output":"0.000016","reasoning":"0.00004"}},
+    {"id":"reasoning-audio-model","output_limit":4096,"pricing":{"input":"0.000004","output":"0.000016","input_audio":"0.000032","output_audio":"0.000064","reasoning":"0.0001"}},
+    {"id":"dense-model","output_limit":4096,"pricing":{"input":"0.000004","input+1000":"0.000008","cache_read":"0.000001","output":"0.000016","input_audio":"0.000032",
+                                                       "input_image":"0.00001","output_audio":"0.000064","reasoning":"0.00004","request":"0.0001"}},
+    {"id":"dear-cache-model","output_limit":4096,"pricing":{"input":"0.000004","cache_read":"0.000006","output":"0.000016","input_audio":"0.000032",
+                                                            "input_image":"0.000002","output_audio":"0.000064"}},
+    {"id":"variable-audio-model","output_limit":4096,"pricing":{"input":"0.000004","output":"0.000016","input_audio":"-1","output_audio":"0.000064"}},
+    {"id":"seconds-audio-model","output_limit":4096,"pricing":{"input":"0.000004","output":"0.000016","input_audio":"0.000032","output_audio":"0.000064","item:second":"0.0001"}},
+    {"id":"ceiling-model","output_limit":4096,"pricing":{"input":"0.000004","output":"0.000016","input_audio":"0.000032","output_audio":"0.000064","ceiling_input":"0.0001","ceiling_output":"0.0001"}},
+    {"id":"gpt-live-transcribe","pricing":{"input":"0","output":"0","item:second":"0.0001"}},
+    {"id":"tokens-transcribe","input_limit":1000,"output_limit":100,"pricing":{"input":"0.000004","output":"0.000016"}}]})");
+  CHECK(std::holds_alternative<descriptor::CatalogueSnapshot>(loaded));
+  const auto& catalogue = *std::get<descriptor::CatalogueSnapshot>(loaded);
+  const auto openai = descriptor::presets::openai_chat();
+  const auto google = descriptor::presets::google_generate();
+  const auto served = [](std::string model) { return ServedModel{model, model, ServedRelation::Exact}; };
+  const auto capped = [](std::string model, std::string_view cap, std::vector<realtime::Modality> output = {realtime::Modality::Audio}) {
+    realtime::Setup setup;
+    setup.model = std::move(model);
+    setup.output = std::move(output);
+    if (!cap.empty()) setup.extensions = document(R"({"max_output_tokens":)" + std::string(cap) + "}");
+    return setup;
+  };
+  const auto stated = [](std::uint64_t text, std::uint64_t audio, std::uint64_t image = 0) {
+    realtime::ResponseInput input;
+    input.input_tokens = pricing::RealtimeInputTokens{text, audio, image};
+    return input;
+  };
+
+  // The policy names the option that caps a response's output: OpenAI's, and none at Google. It names a property of
+  // the fact's options that admits an integer, on a realtime fact.
+  CHECK(descriptor::builtin_policy()->endpoint("realtime", "https://api.openai.com")->output_cap == "max_output_tokens");
+  CHECK(descriptor::builtin_policy()->endpoint("realtime", "https://generativelanguage.googleapis.com")->output_cap.empty());
+  {
+    const auto fact = [](std::string_view more) {
+      return R"([{"endpoint":"realtime","shape":"openai","origins":["https://api.openai.com"],"paths":{"connect":"/v1/realtime"},)"
+             R"("audio":{"input":[{"mime":"audio/pcmu","rate":8000,"sample_bytes":1}],"output":[{"mime":"audio/pcmu","rate":8000,"sample_bytes":1}]},)"
+             R"("options":{"type":"object","properties":{"cap":{"type":"integer","minimum":1},"word":{"type":"string","max_length":8}}})" + std::string(more) + "}]";
+    };
+    const auto refused_at = [](const std::string& endpoints, std::string_view pointer) {
+      const auto result = policy_with(endpoints);
+      CHECK(std::holds_alternative<descriptor::ConfigError>(result) && std::get<descriptor::ConfigError>(result).pointer == pointer);
+    };
+    const auto accepted = policy_with(fact(R"(,"output_cap":"cap")"));
+    CHECK(std::holds_alternative<descriptor::PolicySnapshot>(accepted) &&
+          std::get<descriptor::PolicySnapshot>(accepted)->endpoint("realtime", "https://api.openai.com")->output_cap == "cap");
+    refused_at(fact(R"(,"output_cap":"word")"), "/endpoints/output_cap");
+    refused_at(fact(R"(,"output_cap":"other")"), "/endpoints/output_cap");
+    refused_at(fact(R"(,"output_cap":1)"), "/endpoints/output_cap");
+    refused_at(R"([{"endpoint":"images","shape":"openai","origins":["https://api.openai.com"],"paths":{"generate":"/v1/images"},"output_cap":"cap"}])",
+               "/endpoints/output_cap");
+  }
+
+  // The recorded OpenAI turn: 100 text and 20 audio tokens in, 40 audio tokens out. Stated as its input, with a cap of
+  // 40, the bound is that turn's estimate exactly: 100 x 4e-6 + 20 x 32e-6 + 40 x 64e-6 USD. The entry's output limit
+  // (4096) is not the cap.
+  const auto openai_turn = all<realtime::TurnCommitted>(inbound(openai, "openai-server.jsonl")).at(0)->turn.usage;
+  auto bound = realtime::response_bound(openai, capped("audio-model", "40"), stated(100, 20), catalogue);
+  CHECK(bound.total && bound.total->nano_usd == 3'600'000u && bound.unbounded.empty() && bound.entry == "audio-model" && bound.attempts == 1);
+  CHECK(bound.lines.size() == 3 && bound.lines[0].unit == "input" && bound.lines[1].unit == "input_audio" && bound.lines[1].quantity == 20 &&
+        bound.lines[1].rate == rate("0.000032") && bound.lines[2].unit == "output" && bound.lines[2].row == "output_audio" && bound.lines[2].quantity == 40);
+  auto estimate = pricing::estimate(catalogue, "openai.chat", "https://api.openai.com", served("audio-model"), openai_turn);
+  CHECK(estimate.total && estimate.total->nano_usd <= bound.total->nano_usd);
+  // A text-only session bills no audio output: the cap at the output rate.
+  bound = realtime::response_bound(openai, capped("audio-model", "40", {realtime::Modality::Text}), stated(100, 20), catalogue);
+  CHECK(bound.total && bound.total->nano_usd == nano({{100, "0.000004"}, {20, "0.000032"}, {40, "0.000016"}}));
+  // The recorded Google turn, through the pure function with a cap the policy does not admit there: the same.
+  const auto google_turn = all<realtime::TurnCommitted>(inbound(google, "google-server.jsonl")).at(1)->turn.usage;
+  pricing::RealtimeResponseInput live;
+  live.family = "google.generate";
+  live.origin = "https://generativelanguage.googleapis.com";
+  live.model = "audio-model";
+  live.audio_output = true;
+  live.output_tokens = 40;
+  live.thinking_beside_output = true;
+  live.thinking_tokens = 0;
+  live.input_tokens = pricing::RealtimeInputTokens{100, 20, 0};
+  bound = pricing::realtime_response_bound(live, catalogue);
+  estimate = pricing::estimate(catalogue, "google.generate", live.origin, served("audio-model"), google_turn);
+  CHECK(bound.total && bound.total->nano_usd == 3'600'000u && estimate.total && estimate.total->nano_usd <= bound.total->nano_usd);
+
+  // Reasoning the output total counts bills at the reasoning rate, the dearest output rate here: 40 reasoning tokens
+  // of an OpenAI turn at 1e-4 USD.
+  auto reasoned = openai_turn;
+  reasoned.extra.clear();
+  reasoned.reasoning = Count{40, Evidence::Reported};
+  bound = realtime::response_bound(openai, capped("reasoning-audio-model", "40"), stated(100, 20), catalogue);
+  estimate = pricing::estimate(catalogue, "openai.chat", "https://api.openai.com", served("reasoning-audio-model"), reasoned);
+  CHECK(bound.total && bound.total->nano_usd == nano({{100, "0.000004"}, {20, "0.000032"}, {40, "0.0001"}}));
+  CHECK(estimate.total && estimate.total->nano_usd == nano({{120, "0.000004"}, {40, "0.0001"}}) && estimate.total->nano_usd <= bound.total->nano_usd);
+  // Google Live's thoughts bill beside the output: 100 in, 40 out and 500 thoughts, against a thinking cap of 500.
+  live.model = "thinking-model";
+  live.audio_output = false;
+  live.input_tokens = pricing::RealtimeInputTokens{100, 0, 0};
+  live.thinking_tokens = 500;
+  auto live_turn = std::get<std::vector<realtime::Event>>(realtime::make_codec(google)->decode(false,
+      R"({"serverContent":{"modelTurn":{"parts":[{"text":"hi"}]},"turnComplete":true},"usageMetadata":{"promptTokenCount":100,"responseTokenCount":40,"thoughtsTokenCount":500,"totalTokenCount":140}})"));
+  const auto thinking_turn = all<realtime::TurnCommitted>(live_turn).at(0)->turn.usage;
+  bound = pricing::realtime_response_bound(live, catalogue);
+  estimate = pricing::estimate(catalogue, "google.generate", live.origin, served("thinking-model"), thinking_turn);
+  CHECK(bound.total && bound.total->nano_usd == nano({{100, "0.000004"}, {40, "0.00004"}, {500, "0.00004"}}));
+  CHECK(estimate.total && estimate.total->nano_usd == 21'040'000u && estimate.total->nano_usd <= bound.total->nano_usd);
+  live.thinking_tokens.reset();
+  CHECK(reasons_of(pricing::realtime_response_bound(live, catalogue)) == "OutputCap [reasoning]; ");
+
+  // No cap: none set, OpenAI's "inf", and Google, where the policy admits none and thinking has no cap either.
+  CHECK(reasons_of(realtime::response_bound(openai, capped("audio-model", ""), stated(100, 20), catalogue)) == "OutputCap []; ");
+  CHECK(reasons_of(realtime::response_bound(openai, capped("audio-model", R"("inf")"), stated(100, 20), catalogue)) == "OutputCap []; ");
+  realtime::Setup google_setup;
+  google_setup.model = "audio-model";
+  bound = realtime::response_bound(google, google_setup, stated(100, 20), catalogue);
+  CHECK(!bound.total && reasons_of(bound) == "OutputCap []; OutputCap [reasoning]; " && bound.lines.empty());
+  // A modality with tokens and no rate of its own is not priced at the text rates.
+  CHECK(reasons_of(realtime::response_bound(openai, capped("text-only-model", "40", {realtime::Modality::Text}), stated(100, 20), catalogue)) == "ModelPrice [input_audio]; ");
+  CHECK(reasons_of(realtime::response_bound(openai, capped("text-only-model", "40"), stated(100, 0), catalogue)) == "ModelPrice [output_audio]; ");
+  CHECK(reasons_of(realtime::response_bound(openai, capped("audio-model", "40"), stated(100, 0, 10), catalogue)) == "ModelPrice [input_image]; ");
+  CHECK(reasons_of(realtime::response_bound(openai, capped("variable-audio-model", "40"), stated(100, 20), catalogue)) == "ModelPrice [input_audio]; ");
+  CHECK(realtime::response_bound(openai, capped("variable-audio-model", "40"), stated(100, 0), catalogue).total);
+  // Audio stated in seconds: no fact converts seconds to tokens.
+  auto seconds = stated(100, 0);
+  seconds.audio_seconds = 3;
+  CHECK(reasons_of(realtime::response_bound(openai, capped("audio-model", "40"), seconds, catalogue)) == "Quantity [input_audio]; ");
+  seconds.audio_seconds = 0;
+  CHECK(realtime::response_bound(openai, capped("audio-model", "40"), seconds, catalogue).total);
+  // No stated input, no entry, an item unit no token counts, a route ceiling, extensions the fact does not admit.
+  CHECK(reasons_of(realtime::response_bound(openai, capped("audio-model", "40"), {}, catalogue)) == "InputBound []; ");
+  CHECK(reasons_of(realtime::response_bound(openai, capped("unknown-model", "40"), stated(1, 0), catalogue)) == "ModelPrice [unknown-model]; ");
+  CHECK(reasons_of(realtime::response_bound(openai, capped("seconds-audio-model", "40"), stated(1, 0), catalogue)) == "Unmodeled [item:second]; ");
+  CHECK(reasons_of(realtime::response_bound(openai, capped("ceiling-model", "40"), stated(1, 0), catalogue)) == "RouteCeiling [ceiling-model]; ");
+  auto foreign = capped("audio-model", "40");
+  foreign.extensions = document(R"({"max_output_tokens":40,"temperature":1})");
+  CHECK(reasons_of(realtime::response_bound(openai, foreign, stated(1, 0), catalogue)) == "Unmodeled [extensions]; ");
+
+  // Transcription sessions bill by the second where the entry prices it: the recorded OpenAI utterance of 4 seconds.
+  realtime::Setup transcribe;
+  transcribe.output = {};
+  transcribe.model = "gpt-live-transcribe";
+  realtime::ResponseInput utterance;
+  utterance.audio_seconds = 4;
+  bound = realtime::response_bound(openai, transcribe, utterance, catalogue);
+  CHECK(bound.total && bound.total->nano_usd == nano({{4, "0.0001"}}));
+  auto transcriber = realtime::make_codec(openai);
+  frames_of(transcriber->open(transcribe));
+  const auto heard = all<realtime::TurnCommitted>(inbound(openai, "openai-transcription-server.jsonl", transcriber.get())).at(0)->turn.usage;
+  pricing::EndpointCounted counted;
+  counted.usage = &heard;
+  counted.items = {{"item:second", heard.extra.at("seconds").value}};
+  counted.model = served("gpt-live-transcribe");
+  const auto facts = realtime::transcription_facts(openai, transcribe);
+  CHECK(facts.endpoint == "realtime" && facts.operation == "connect" && facts.billing == descriptor::EndpointBilling::Model);
+  const auto heard_cost = pricing::endpoint_estimate(facts, counted, catalogue);
+  CHECK(heard_cost.total && heard_cost.total->nano_usd == bound.total->nano_usd && pricing::beyond_bound(bound, heard_cost).empty());
+  // Without the length, and for an entry that prices no second, no bound.
+  CHECK(reasons_of(realtime::response_bound(openai, transcribe, {}, catalogue)) == "Quantity [item:second]; ");
+  transcribe.model = "tokens-transcribe";
+  bound = realtime::response_bound(openai, transcribe, utterance, catalogue);
+  CHECK(!bound.total && bound.unbounded.size() == 1 && bound.unbounded[0].by == pricing::UnboundedBy::ModelPrice);
+
+  // Generated turns within their stated input and caps: the estimate is at most the bound.
+  std::uint64_t seed = 124;
+  const auto draw = [&](std::uint64_t below) {
+    seed = seed * 6364136223846793005ULL + 1442695040888963407ULL;
+    return below ? (seed >> 33) % below : 0;
+  };
+  std::size_t checked = 0;
+  for (int i = 0; i < 400; ++i) {
+    const std::string model = i % 3 == 0 ? "dense-model" : i % 3 == 1 ? "dear-cache-model" : "reasoning-audio-model";
+    const bool images = model != "reasoning-audio-model", google_shaped = i % 2 == 1;
+    const std::uint64_t text = draw(3000), audio = draw(800), image = images ? draw(300) : 0, cap = 1 + draw(600);
+    // The turn: at most the stated input of each modality, cache reads among its text, at most the cap.
+    const std::uint64_t t = draw(text + 1), a = draw(audio + 1), im = draw(image + 1), cached = draw(t + 1);
+    const std::uint64_t out = draw(cap + 1), reasoning = google_shaped ? 0 : draw(out + 1), out_audio = draw(out - reasoning + 1);
+    const std::uint64_t thoughts = google_shaped ? draw(200) : 0;
+    Usage usage;
+    usage.input_total = Count{t + a + im, Evidence::Reported};
+    usage.cache_read = Count{cached, Evidence::Reported};
+    usage.output_total = Count{out, Evidence::Reported};
+    usage.stage = UsageStage::Final;
+    if (google_shaped) {
+      usage.extra["promptTokensDetails.TEXT"] = Count{t, Evidence::Reported};
+      usage.extra["promptTokensDetails.AUDIO"] = Count{a, Evidence::Reported};
+      if (im) usage.extra["promptTokensDetails.IMAGE"] = Count{im, Evidence::Reported};
+      usage.extra["responseTokensDetails.AUDIO"] = Count{out_audio, Evidence::Reported};
+      usage.extra["responseTokensDetails.TEXT"] = Count{out - out_audio, Evidence::Reported};
+      if (thoughts) usage.extra["thoughtsTokenCount"] = Count{thoughts, Evidence::Reported};
+    } else {
+      usage.reasoning = Count{reasoning, Evidence::Reported};
+      usage.extra["input_token_details.text_tokens"] = Count{t, Evidence::Reported};
+      usage.extra["input_token_details.audio_tokens"] = Count{a, Evidence::Reported};
+      usage.extra["input_token_details.image_tokens"] = Count{im, Evidence::Reported};
+      usage.extra["output_token_details.audio_tokens"] = Count{out_audio, Evidence::Reported};
+    }
+    pricing::RealtimeResponseInput response;
+    response.family = google_shaped ? "google.generate" : "openai.chat";
+    response.origin = google_shaped ? "https://generativelanguage.googleapis.com" : "https://api.openai.com";
+    response.model = model;
+    response.audio_output = true;
+    response.output_tokens = cap;
+    response.thinking_beside_output = google_shaped;
+    response.thinking_tokens = 200;
+    response.input_tokens = pricing::RealtimeInputTokens{text, audio, image};
+    const auto turn_bound = pricing::realtime_response_bound(response, catalogue);
+    const auto turn_cost = pricing::estimate(catalogue, response.family, response.origin, served(model), usage);
+    if (!turn_cost.total) throw std::runtime_error("generated turn " + std::to_string(i) + " has no estimate: " + (turn_cost.unpriced.empty() ? "" : turn_cost.unpriced[0]));
+    if (!turn_bound.total || turn_cost.total->nano_usd > turn_bound.total->nano_usd)
+      throw std::runtime_error("generated turn " + std::to_string(i) + " of " + model + ": estimate " + std::to_string(turn_cost.total->nano_usd) + " above bound " +
+                               (turn_bound.total ? std::to_string(turn_bound.total->nano_usd) : reasons_of(turn_bound)));
+    // Through the session's setup, an OpenAI-shaped turn gets the same bound.
+    if (!google_shaped) {
+      const auto through = realtime::response_bound(openai, capped(model, std::to_string(cap)), stated(text, audio, image), catalogue);
+      CHECK(through.total && through.total->nano_usd == turn_bound.total->nano_usd);
+    }
+    ++checked;
+  }
+  CHECK(checked == 400);
+}
+
 int main(int argc, char** argv) {
   try {
     if (argc != 2) throw std::runtime_error("usage: sp_realtime_tests <fixture directory>");
     fixtures = argv[1];
     google_live(); openai_realtime(); response_statuses(); usage_details(); tool_turn_usage(); turn_usage_is_priced(); audio_formats(); policy_facts(); transcription();
+    response_bounds();
     std::cout << "realtime properties passed\n";
     return 0;
   } catch (const std::exception& error) { std::cerr << "realtime test failed: " << error.what() << '\n'; return 1; }

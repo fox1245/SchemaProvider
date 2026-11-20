@@ -4,6 +4,7 @@
 // (`BidiGenerateContent`) and OpenAI Realtime (`/v1/realtime`). The session that runs a codec over the transport
 // is `realtime::Session` (`<transport/realtime_session.h>`); this layer does no I/O.
 #include "codecs/accumulator.h"
+#include "core/endpoint_pricing.h"
 #include "core/value.h"
 #include "descriptor/descriptor.h"
 #include <chrono>
@@ -142,4 +143,40 @@ class Codec {
 };
 // The codec of the origin's realtime shape, or null when the origin has no realtime fact.
 std::unique_ptr<Codec> make_codec(const descriptor::ValidatedDescriptor&, SemanticLimits = {});
+
+// What the host states of the next model response of a session, before it sends the input that may start it.
+struct ResponseInput {
+  // The response's input in tokens, by modality (pricing::RealtimeInputTokens): the conversation the provider reads
+  // again and what the host sends since. Unset: not stated.
+  std::optional<pricing::RealtimeInputTokens> input_tokens{};
+  // The length of new input audio in whole seconds, rounded up. In a transcription session it is the utterance's
+  // length, which the bound prices by `item:second`; in any other session nothing converts seconds to tokens, so
+  // seconds above zero leave no bound.
+  std::optional<std::uint64_t> audio_seconds{};
+};
+// The billing facts of a transcription session (`setup.output` empty) at the origin's realtime fact, as a prepared
+// endpoint call states them (EndpointFacts): the `connect` operation and its billing, the descriptor's family and origin,
+// the setup's model, the setup's extensions as dimensions (with `operation=connect`), and the quantities
+// `item:second` (the stated seconds), `input` (the input limit) and `output` (the output limit), as a transcription
+// request states them. pricing::endpoint_worst_case bounds an utterance with them, and pricing::endpoint_estimate prices
+// a committed one from its usage and `item:second` its `seconds`.
+EndpointFacts transcription_facts(const descriptor::ValidatedDescriptor&, const Setup&);
+// A bound on what the next model response of a session with `setup` can bill, with the prices of `catalogue`; free of
+// side effects, and nothing is reserved. A response is one model invocation, so a host reserves this before it sends
+// what may start one: `Respond`, and also `EndAudio`, audio, `Text` or a `ToolResult` where the provider answers by
+// itself (Google always; OpenAI under its turn detection). A tool call ends a response, and the answer after its
+// result is the next response. By the setup:
+// - A transcription session (no output): pricing::endpoint_worst_case over transcription_facts, with
+//   `audio_seconds` as the stated seconds, the sum of `input_tokens` (when stated) as the measured input, and one
+//   attempt.
+// - Any other session: pricing::realtime_response_bound with the descriptor's family and origin, the setup's model,
+//   `audio_output` when `setup.output` names audio, and the output cap the value of the extension member the realtime
+//   fact names in `output_cap`, when it is an unsigned integer (OpenAI's `"inf"`, an absent member and a fact without
+//   `output_cap` are no cap, `OutputCap`). At Google, whose usage counts thinking beside the output, thinking needs a
+//   cap the setup cannot state, and the policy admits no output cap there, so a Google response has no bound.
+// Also refused: an origin without a realtime fact (`Unmodeled`, subject `realtime`), extensions the fact does not admit
+// (`Unmodeled`, subject `extensions`), a routing gateway (`RouteCeiling`), and a connection whose billing the policy does
+// not state (`Billing`, subject `realtime/connect`); one it states is not billed is exactly zero.
+pricing::EndpointBound response_bound(const descriptor::ValidatedDescriptor&, const Setup&, const ResponseInput&,
+                                      const descriptor::ModelCatalogue& catalogue);
 }  // namespace sp::realtime

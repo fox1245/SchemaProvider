@@ -1,4 +1,5 @@
 #include "core/pricing.h"
+#include "core/endpoint_pricing.h"
 #include "core/pricing_internal.h"
 #include "descriptor/policy.h"
 #include <algorithm>
@@ -875,6 +876,122 @@ WorstCase worst_case(const WorstCaseInput& in, const descriptor::ModelCatalogue&
   out.output_tokens = output;
   out.invocations = invocations;
   out.total = UsdAmount{total, Evidence::Derived, CostRounding::CeilingCatalogueProduct};
+  return out;
+}
+
+EndpointBound realtime_response_bound(const RealtimeResponseInput& in, const descriptor::ModelCatalogue& catalogue) {
+  EndpointBound out;
+  const auto block = [&](UnboundedBy by, std::string subject, std::string detail) {
+    out.unbounded.push_back({by, std::move(subject), std::move(detail)});
+  };
+  const auto refused = [&]() {
+    out.lines.clear();
+    return out;
+  };
+  if (!in.output_tokens) block(UnboundedBy::OutputCap, {}, "the session states no cap on a response's output tokens");
+  if (in.thinking_beside_output && !in.thinking_tokens)
+    block(UnboundedBy::OutputCap, "reasoning", "the session's usage counts thinking beside the output, and no cap on it is stated");
+  if (!in.input_tokens) block(UnboundedBy::InputBound, {}, "the host states no input tokens for the response");
+  if (in.audio_seconds && *in.audio_seconds)
+    block(UnboundedBy::Quantity, "input_audio",
+          "the audio is stated in seconds, and no catalogue or policy fact states its tokens per second; state it in tokens");
+  const auto tokens = in.input_tokens.value_or(RealtimeInputTokens{});
+  const std::uint64_t output = in.output_tokens.value_or(0);
+  const std::uint64_t thinking = in.thinking_beside_output ? in.thinking_tokens.value_or(0) : 0;
+  const std::string model(in.model);
+  const auto* entry = catalogue.find(in.family, in.origin, in.model).entry;
+  if (!entry || entry->pricing.empty()) {
+    block(UnboundedBy::ModelPrice, model, "the catalogue has no price for the model at the origin");
+    return refused();
+  }
+  // The input length that picks the bands.
+  std::uint64_t length = 0;
+  if (!checked_add(tokens.text, tokens.audio, length) || !checked_add(length, tokens.image, length)) {
+    block(UnboundedBy::Overflow, model, "the input tokens do not fit 64 bits");
+    return refused();
+  }
+  const auto selected = select(*entry, {}, length, true);
+  if (!selected.priced) {
+    block(UnboundedBy::TierPrice, model, "the entry prices no unit at the standard rates");
+    return refused();
+  }
+  const auto& price = selected.price;
+  RequestFacts carried;
+  carried.image_input = tokens.image > 0;
+  for (const auto member : unread_members_carried(*entry, &carried))
+    block(UnboundedBy::ModelPrice, model,
+          "catalogue entry '" + entry->id + "' lists a price for '" + std::string(member) + "' that no bound reads, and the response carries what it prices");
+  // An item unit (a second of audio, an image) bills something the token counters do not count.
+  for (const auto& [key, text] : entry->pricing) {
+    const auto item = descriptor::item_price_key(key);
+    if (!item || !item->tier.empty()) continue;
+    if (const auto rate = per_million(text); rate && *rate == 0) continue;
+    block(UnboundedBy::Unmodeled, key, "the entry prices a unit the bound of a realtime response does not read");
+  }
+  for (const std::string_view unit : {"ceiling_input", "ceiling_output", "ceiling_request"})
+    if (!detail::key_of(selected.keys, unit).empty() || selected.is_variable(unit)) {
+      block(UnboundedBy::RouteCeiling, model, "the entry lists a route ceiling but the origin is not a routing gateway, so it cannot be pinned");
+      break;
+    }
+  // The dearest rate of `units` and the unit that gives it; nothing when `units[0]` has no rate. A unit with a row at
+  // a variable price is named, and so is a missing first unit.
+  struct Rate { std::uint64_t value = 0; std::string_view unit; };
+  const auto dearest = [&](std::initializer_list<std::string_view> units) -> std::optional<Rate> {
+    bool known = true;
+    for (const auto unit : units)
+      if (const auto key = detail::key_of(selected.variable, unit); !key.empty()) {
+        block(UnboundedBy::ModelPrice, std::string(unit), variable_rate(*entry, unit, key));
+        known = false;
+      }
+    const auto first = *units.begin();
+    const auto rate_of = [&](std::string_view unit) -> std::optional<std::uint64_t> {
+      if (unit == input_image_unit) return selected.input_image;
+      return price.*slot_of(unit);
+    };
+    if (!rate_of(first)) {
+      if (!selected.is_variable(first)) block(UnboundedBy::ModelPrice, std::string(first), "catalogue entry '" + entry->id + "' lists no rate for the unit");
+      return std::nullopt;
+    }
+    if (!known) return std::nullopt;
+    Rate best{*rate_of(first), first};
+    for (const auto unit : units)
+      if (const auto rate = rate_of(unit); rate && *rate > best.value) best = Rate{*rate, unit};
+    return best;
+  };
+  Wide sum;  // nano-USD x 1e6
+  const auto charge = [&](std::string_view line, const std::optional<Rate>& rate, std::uint64_t quantity) {
+    if (!rate) return;
+    out.lines.push_back({std::string(line), std::string(detail::key_of(selected.keys, rate->unit)), quantity, rate->value});
+    sum += Wide::product(quantity, rate->value);
+  };
+  if (tokens.text) charge("input", dearest({"input", "cache_read", "cache_write", "cache_write_1h"}), tokens.text);
+  if (tokens.audio) charge("input_audio", dearest({"input_audio"}), tokens.audio);
+  // A Google Live turn reports image tokens only in its prompt breakdown, which the estimate bills at the text rates.
+  if (tokens.image) charge(input_image_unit, dearest({input_image_unit, "input", "cache_read", "cache_write", "cache_write_1h"}), tokens.image);
+  if (output) {
+    const auto rate = in.audio_output ? dearest({"output", "reasoning", "output_image", "output_audio"}) : dearest({"output", "reasoning", "output_image"});
+    // Audio output tokens are not billed at the text output rate.
+    if (rate && in.audio_output && !price.output_audio && !selected.is_variable("output_audio"))
+      block(UnboundedBy::ModelPrice, "output_audio", "catalogue entry '" + entry->id + "' lists no rate for the unit");
+    charge("output", rate, output);
+  }
+  if (thinking) {
+    // The estimate bills thinking beside the output at `reasoning`, else at `output`.
+    const auto rate = price.reasoning || selected.is_variable("reasoning") ? dearest({"reasoning", "output"}) : dearest({"output"});
+    charge("reasoning", rate, thinking);
+  }
+  if (const auto key = detail::key_of(selected.variable, "request"); !key.empty()) block(UnboundedBy::ModelPrice, "request", variable_rate(*entry, "request", key));
+  else if (price.request) charge("request", Rate{*price.request, "request"}, 1);
+  if (!out.unbounded.empty()) return refused();
+  const auto nano = detail::rounded_nano_usd(sum);
+  if (!nano) {
+    block(UnboundedBy::Overflow, model, "the bound does not fit 64 bits");
+    return refused();
+  }
+  out.entry = entry->id;
+  out.model = model;
+  out.attempts = 1;
+  out.total = UsdAmount{*nano, Evidence::Derived, CostRounding::CeilingCatalogueProduct};
   return out;
 }
 

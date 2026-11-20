@@ -97,11 +97,16 @@ inline constexpr std::uint64_t PricedExtensions = 1ULL << 23;
 // `pin`. A library built before the members has smaller structs, which a consumer built with this header would read
 // past, so it lacks this bit and a require_interface_contract call with RequiredProvider refuses it.
 inline constexpr std::uint64_t EndpointTierAndPin = 1ULL << 24;
+// descriptor::EndpointFact carries `output_cap`, the realtime option that caps a response's output tokens, which
+// realtime::response_bound and pricing::realtime_response_bound read. A library built before the member has a smaller
+// EndpointFact, which a consumer built with this header would read past, so it lacks this bit and a
+// require_interface_contract call with RequiredProvider refuses it.
+inline constexpr std::uint64_t RealtimeResponseBound = 1ULL << 25;
 inline constexpr std::uint64_t RequiredProvider = TypedRuntime | PreparedAdmission |
     NullableUsage | All5Native | TrustedArchive | OrderedWireEvents | NativeSocketRuntime |
     RetainedJsonSize | CompleteAttemptEvidence | OpenRouterRoutingMaxPrice | ErrorReason | PolicyAdmittedExtensions |
     CompletionSecret | PartCacheMarks | ServedByUpstream | TransportConnectionCache | ModelControlFacts | TypedToolChoice |
-    RealtimeRuntimeDefaults | ChatVoiceId | PricedExtensions | EndpointTierAndPin;
+    RealtimeRuntimeDefaults | ChatVoiceId | PricedExtensions | EndpointTierAndPin | RealtimeResponseBound;
 }
 InterfaceContract core_interface_contract() noexcept;
 std::uint32_t codec_interface_revision() noexcept;

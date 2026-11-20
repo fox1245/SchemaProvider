@@ -139,6 +139,10 @@ struct EndpointFact {
   std::optional<AcceptedAudioFact> accepted_audio{};
   // A files endpoint: the largest part of a chunked upload, zero for none.
   std::uint64_t max_part_bytes = 0;
+  // Realtime: the member of `options` whose integer value caps the output tokens of each model response of a session
+  // (OpenAI `max_output_tokens`), reasoning included as the provider counts it in the response's output. Empty when
+  // the policy admits no such cap, and then no response of the session has a cost bound (realtime::response_bound).
+  std::string output_cap{};
 };
 // The path of one operation of an endpoint fact, if it has one.
 std::optional<std::string_view> endpoint_path(const EndpointFact&, std::string_view operation) noexcept;

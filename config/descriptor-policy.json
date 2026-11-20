@@ -610,6 +610,7 @@
      "audio":{"input":[{"mime":"audio/pcm;rate=24000","rate":24000,"sample_bytes":2},{"mime":"audio/pcmu","rate":8000,"sample_bytes":1},{"mime":"audio/pcma","rate":8000,"sample_bytes":1}],
               "output":[{"mime":"audio/pcm;rate=24000","rate":24000,"sample_bytes":2},{"mime":"audio/pcmu","rate":8000,"sample_bytes":1},{"mime":"audio/pcma","rate":8000,"sample_bytes":1}]},
      "close_codes":[{"code":3000,"status":401}],
-     "options":{"type":"object","properties":{"max_output_tokens":{"one_of":[{"type":"integer","minimum":1},{"type":"enum","values":["inf"]}]},"tool_choice":{"type":"string","max_length":64,"token":true}}}}
+     "options":{"type":"object","properties":{"max_output_tokens":{"one_of":[{"type":"integer","minimum":1},{"type":"enum","values":["inf"]}]},"tool_choice":{"type":"string","max_length":64,"token":true}}},
+     "output_cap":"max_output_tokens"}
   ]
 }
