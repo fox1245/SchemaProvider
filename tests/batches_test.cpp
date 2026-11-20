@@ -280,7 +280,9 @@ template <class Request> std::string refusal(const descriptor::ValidatedDescript
 }
 std::vector<std::string> member_names(std::string_view body) {
   std::vector<std::string> out;
-  for (auto member : document(body)->root().members()) out.emplace_back(member.key);
+  // The document outlives the loop: a temporary in a range-for initializer is destroyed before the loop runs.
+  const auto parsed = document(body);
+  for (auto member : parsed->root().members()) out.emplace_back(member.key);
   return out;
 }
 chat::Request chat_item(std::string prompt, std::string model = "vendor/model") { return chat::Request::simple(std::move(model), std::move(prompt), 16); }
