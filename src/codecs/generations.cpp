@@ -17,23 +17,22 @@ std::optional<Count> counter(json::Value value) {
 Codec::Codec(const descriptor::ValidatedDescriptor& descriptor, Accumulator& accumulator, SemanticLimits limits)
     : descriptor_(descriptor), accumulator_(accumulator), limits_(limits) {}
 bool Codec::emit(const Event& event) { return accumulator_.accept(event); }
-bool Codec::fail(ErrorKind kind, std::string text) {
-  Error error{kind, std::move(text)};
-  error.reason = reason::code(reason::Source::Generations, error.safe_message);
+bool Codec::fail(ErrorKind kind, const reason::Reason& text) {
+  Error error = reason::error(kind, text);
   emit(Fail{std::move(error)});
   return false;
 }
 bool Codec::buffered(std::string_view body, Close close) {
-  if (!close.normal) return fail(close.error, "abnormal response close");
+  if (!close.normal) return fail(close.error, reason::transport::response_close);
   auto parsed = json::parse(body, {limits_.max_content_bytes, limits_.max_json_depth});
   if (auto* error = std::get_if<json::ParseError>(&parsed))
     return fail(error->code == json::ParseCode::SizeExceeded || error->code == json::ParseCode::DepthExceeded
-                    ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, "invalid response JSON");
+                    ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, reason::generations::response_json_invalid);
   auto wire = std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
   const auto data = wire->root().get("data");
-  if (!data.is_object() || !data.get("id").is_string()) return fail(ErrorKind::ProtocolCorrupt, "generation statistics name the generation");
+  if (!data.is_object() || !data.get("id").is_string()) return fail(ErrorKind::ProtocolCorrupt, reason::generations::data_id_required);
   for (const char* key : {"native_tokens_prompt", "native_tokens_completion", "native_tokens_reasoning", "native_tokens_cached", "tokens_prompt", "tokens_completion"})
-    if (data.get(key).valid() && !data.get(key).is_null() && !data.get(key).is_uint()) return fail(ErrorKind::ProtocolCorrupt, "generation token counts are numbers");
+    if (data.get(key).valid() && !data.get(key).is_null() && !data.get(key).is_uint()) return fail(ErrorKind::ProtocolCorrupt, reason::generations::data_tokens_invalid);
   if (!emit(RawWire{"generations.response", wire})) return false;
   Usage usage;
   usage.input_total = counter(data.get("native_tokens_prompt"));
