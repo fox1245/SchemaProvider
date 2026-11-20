@@ -25,6 +25,7 @@ install(DIRECTORY
   "${CMAKE_CURRENT_SOURCE_DIR}/src/configuration"
   DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/SchemaProvider"
   FILES_MATCHING PATTERN "*.h"
+  PATTERN "batches_internal.h" EXCLUDE
   PATTERN "native_archive_fs.h" EXCLUDE
   PATTERN "native_archive_custody_format.h" EXCLUDE
   PATTERN "native_archive_custody_internal.h" EXCLUDE

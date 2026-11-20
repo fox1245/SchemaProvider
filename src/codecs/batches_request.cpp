@@ -1,4 +1,5 @@
 #include "codecs/batches.h"
+#include "codecs/batches_internal.h"
 #include "descriptor/policy.h"
 #include "descriptor/value_schema.h"
 #include "json/json.h"
@@ -32,8 +33,13 @@ std::variant<Route, Error> route(const descriptor::ValidatedDescriptor& descript
   if (!path) return Error{ErrorKind::Unsupported, "the batch endpoint has no path for this operation"};
   return Route{fact, std::string(*path)};
 }
-// One item as its family encodes it for a buffered call: the path, the body and the headers.
-struct ItemWire { std::string path, body, model; std::vector<std::pair<std::string, std::string>> headers; };
+// One item as its family encodes it for a buffered call: the path, the body and the headers, with the output cap and
+// the model invocations the family encoder read from it.
+struct ItemWire {
+  std::string path, body, model;
+  std::vector<std::pair<std::string, std::string>> headers;
+  std::optional<std::uint64_t> max_output_tokens, model_invocation_limit;
+};
 std::variant<ItemWire, Error> item_wire(const descriptor::ValidatedDescriptor& family, const Request& request) {
   return std::visit([&](const auto& typed) -> std::variant<ItemWire, Error> {
     using T = std::decay_t<decltype(typed)>;
@@ -45,7 +51,8 @@ std::variant<ItemWire, Error> item_wire(const descriptor::ValidatedDescriptor& f
     }();
     if (auto* error = std::get_if<Error>(&encoded)) return *error;
     auto& value = std::get<0>(encoded);
-    return ItemWire{std::move(value.path), std::move(value.body), typed.model, std::move(value.headers)};
+    return ItemWire{std::move(value.path), std::move(value.body), typed.model, std::move(value.headers), value.max_output_tokens,
+                    value.model_invocation_limit};
   }, request);
 }
 // The items of an inline batch, checked: no more than the endpoint fact's `max_items`, valid and unique ids, the family
@@ -87,21 +94,34 @@ std::pair<std::string_view, std::string_view> results_operation(const Results& r
   return {"files", "content"};
 }
 std::variant<std::string, Error> jsonl(const descriptor::ValidatedDescriptor& family, const std::vector<Item>& items) {
+  auto encoded = detail::encode_lines(family, items);
+  if (auto* error = std::get_if<Error>(&encoded)) return std::move(*error);
+  return std::move(std::get<detail::EncodedLines>(encoded).text);
+}
+std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Submit& submit) {
+  auto encoded = detail::encode_submit(descriptor, submit);
+  if (auto* error = std::get_if<Error>(&encoded)) return std::move(*error);
+  return std::move(std::get<detail::EncodedSubmit>(encoded).encoded);
+}
+
+namespace detail {
+std::variant<EncodedLines, Error> encode_lines(const descriptor::ValidatedDescriptor& family, const std::vector<Item>& items) {
   if (family.family() != "openai.chat" && family.family() != "openai.responses") return Error{ErrorKind::Unsupported, "an OpenAI batch file holds Chat or Responses requests"};
   if (items.empty()) return bad("a batch has items");
   std::set<std::string_view> seen;
-  std::string out;
+  EncodedLines out;
   for (const auto& item : items) {
     if (!custom_id_valid(item.custom_id) || !seen.insert(item.custom_id).second) return bad("a batch item has a unique custom id of up to 64 letters, digits, _ and -");
     auto wire = item_wire(family, item.request);
     if (auto* error = std::get_if<Error>(&wire)) return *error;
     auto& value = std::get<ItemWire>(wire);
-    out += "{\"custom_id\":" + json::quote(item.custom_id) + ",\"method\":\"POST\",\"url\":" + json::quote(value.path) + ",\"body\":" + value.body + "}\n";
+    out.text += "{\"custom_id\":" + json::quote(item.custom_id) + ",\"method\":\"POST\",\"url\":" + json::quote(value.path) + ",\"body\":" + value.body + "}\n";
+    out.items.push_back({item.custom_id, std::move(value.model), value.max_output_tokens, value.model_invocation_limit});
   }
   return out;
 }
 
-std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Submit& submit) {
+std::variant<EncodedSubmit, Error> encode_submit(const descriptor::ValidatedDescriptor& descriptor, const Submit& submit) {
   auto found = route(descriptor, "batches", operation(submit));
   if (auto* error = std::get_if<Error>(&found)) return *error;
   auto& [fact, path] = std::get<Route>(found);
@@ -113,6 +133,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   }
   std::string body;
   std::string model;
+  std::vector<ItemCaps> items;
   if (shape == "openai") {
     if (!submit.items.empty()) return bad("an OpenAI batch reads its items from an uploaded file");
     if (!token(submit.input_file)) return bad("an OpenAI batch names its uploaded input file");
@@ -129,6 +150,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
       for (const auto& header : value.headers)
         if (lower(header.first) == "anthropic-beta") return Error{ErrorKind::Unsupported, "a batch item needs no beta header"};
       body.append(i ? "," : "").append("{\"custom_id\":").append(json::quote(submit.items[i].custom_id)).append(",\"params\":").append(value.body).append("}");
+      items.push_back({submit.items[i].custom_id, value.model, value.max_output_tokens, value.model_invocation_limit});
     }
     body += "]";
   } else {
@@ -143,6 +165,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
       if (i && value.model != model) return bad("a Google batch runs one model");
       model = value.model;
       body.append(i ? "," : "").append("{\"request\":").append(value.body).append(",\"metadata\":{\"key\":").append(json::quote(submit.items[i].custom_id)).append("}}");
+      items.push_back({submit.items[i].custom_id, value.model, value.max_output_tokens, value.model_invocation_limit});
     }
     body += "]}}}";
     // Google names the model in the path.
@@ -156,8 +179,10 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   if (body.size() > descriptor.policy()->resources().request_bytes) return Error{ErrorKind::ResourceLimit, "a batch exceeds the request limit"};
   Encoded encoded{std::move(path), std::move(body), std::move(model), fact->charge_on_accept, fact->auth};
   endpoints::add_fact_headers(encoded, *fact);
-  return encoded;
+  return EncodedSubmit{std::move(encoded), std::move(items)};
 }
+}  // namespace detail
+
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Get& get) {
   return by_id(descriptor, get.id, operation(get), "GET");
 }
