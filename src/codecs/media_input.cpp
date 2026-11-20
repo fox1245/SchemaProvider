@@ -37,6 +37,16 @@ const reason::Reason& fault_reason(MediaFault fault) noexcept {
   }
   return reason::shared_request::media_invalid_media;
 }
+// The refusal of a kind the family's policy admits from no source; admit() has checked the kind.
+const reason::Reason& not_accepted(MediaKind kind) noexcept {
+  switch (kind) {
+    case MediaKind::Image: return reason::shared_request::media_image_input_not_accepted;
+    case MediaKind::Audio: return reason::shared_request::media_audio_input_not_accepted;
+    case MediaKind::Video: return reason::shared_request::media_video_input_not_accepted;
+    case MediaKind::Document: break;
+  }
+  return reason::shared_request::media_document_input_not_accepted;
+}
 } // namespace
 
 std::size_t decoded_limit(const descriptor::CodecResources& resources, MediaKind kind) noexcept {
@@ -66,7 +76,7 @@ std::optional<Error> admit(const descriptor::ValidatedDescriptor& descriptor, co
   if (unrepresentable) return uncoded(ErrorKind::Unsupported, "this family cannot represent this media kind or source");
   const auto& policy = descriptor::media_policy(descriptor).kinds[static_cast<std::size_t>(media.kind)];
   const std::string kind(media_kind_name(media.kind));
-  if (!policy.sources) return uncoded(ErrorKind::Unsupported, "this family does not accept " + kind + " input");
+  if (!policy.sources) return rejection(ErrorKind::Unsupported, not_accepted(media.kind));
   if (!(policy.sources & (1U << static_cast<unsigned>(media.source))))
     return uncoded(ErrorKind::Unsupported, "this family does not accept " + kind + " input as " +
                    std::string(media_source_name(media.source)));
