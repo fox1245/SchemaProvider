@@ -38,10 +38,9 @@ Codec::Codec(const descriptor::ValidatedDescriptor& descriptor, Mode mode, Accum
   served::observe(descriptor_, accumulator_, context_, {});
 }
 bool Codec::emit(const Event& event) { return accumulator_.accept(event, buffered_failure_ ? &*buffered_failure_ : nullptr); }
-bool Codec::fail(ErrorKind kind, std::string label) {
+bool Codec::fail(ErrorKind kind, const reason::Reason& label) {
   if (buffered_failure_ && !closed_) return false;
-  Error error{kind, std::move(label)};
-  error.reason = reason::code(reason::Source::Interactions, error.safe_message);
+  Error error = reason::error(kind, label);
   emit(Fail{std::move(error)}); return false;
 }
 void Codec::unknown(json::Value v, std::initializer_list<std::string_view> keys) {
@@ -50,14 +49,14 @@ void Codec::unknown(json::Value v, std::initializer_list<std::string_view> keys)
 std::shared_ptr<const json::Document> Codec::own(json::Value value) {
   std::string bytes; json::BoundedWriter writer({limits_.max_content_bytes, limits_.max_json_depth}, &bytes);
   writer.value(value);
-  if (!writer.ok()) { fail(ErrorKind::ResourceLimit, "retained JSON limit"); return {}; }
+  if (!writer.ok()) { fail(ErrorKind::ResourceLimit, reason::interactions::retained_json_limit); return {}; }
   auto parsed = json::parse(bytes, {limits_.max_content_bytes, limits_.max_json_depth});
   if (auto doc = std::get_if<json::Document>(&parsed)) return std::make_shared<const json::Document>(std::move(*doc));
-  fail(ErrorKind::ProtocolCorrupt, "invalid retained JSON"); return {};
+  fail(ErrorKind::ProtocolCorrupt, reason::interactions::retained_json_invalid); return {};
 }
 bool Codec::buffered(std::string_view body, Close close) {
   if (closed_ || accumulator_.terminal()) return false;
-  if (mode_ != Mode::Buffered || body_seen_) return fail(ErrorKind::Misuse, "unexpected buffered interaction");
+  if (mode_ != Mode::Buffered || body_seen_) return fail(ErrorKind::Misuse, reason::interactions::buffered_unexpected);
   body_seen_ = true;
   if (!close.normal) buffered_failure_ = Error{close.error, "abnormal response close"};
   bool decoded = document(body, {}, false); finish(close);
@@ -65,9 +64,9 @@ bool Codec::buffered(std::string_view body, Close close) {
 }
 bool Codec::frame(std::string_view event, std::string_view data) {
   if (closed_ || accumulator_.terminal()) return false;
-  if (mode_ != Mode::Sse) return fail(ErrorKind::Misuse, "unexpected interaction frame");
+  if (mode_ != Mode::Sse) return fail(ErrorKind::Misuse, reason::interactions::stream_frame_unexpected);
   if (event == "done" && data == "[DONE]") {
-    if (!terminal_ || done_) return fail(ErrorKind::ProtocolCorrupt, "unexpected stream sentinel");
+    if (!terminal_ || done_) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::stream_sentinel_unexpected);
     done_ = true; return true;
   }
   return document(data, event, true);
@@ -78,14 +77,14 @@ bool Codec::identity(json::Value resource, bool initial) {
   if (!resource.is_object() ||
       (!nonempty(status) && !(initial && mode_ == Mode::Sse && !status.valid())) ||
       (id.valid() && !id.is_null() && !id.is_string()))
-    return fail(ErrorKind::ProtocolCorrupt, "invalid interaction identity or status");
+    return fail(ErrorKind::ProtocolCorrupt, reason::interactions::identity_invalid);
   if (resource.get("environment").valid() || resource.get("environment_id").valid())
-    return fail(ErrorKind::Unsupported, "agent or environment interaction unsupported");
-  if (resource.get("error").valid() && !resource.get("error").is_null()) return fail(ErrorKind::RemoteFailure, "remote interaction error");
+    return fail(ErrorKind::Unsupported, reason::interactions::resource_agent_unsupported);
+  if (resource.get("error").valid() && !resource.get("error").is_null()) return fail(ErrorKind::RemoteFailure, reason::interactions::remote_error);
   auto model = resource.get("model");
-  if (model.valid() && !nonempty(model)) return fail(ErrorKind::ProtocolCorrupt, "invalid interaction model");
+  if (model.valid() && !nonempty(model)) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::model_invalid);
   if (!initial && !generation_.empty() && id.is_string() && id.as_string() != generation_)
-    return fail(ErrorKind::ProtocolCorrupt, "interaction identity changed");
+    return fail(ErrorKind::ProtocolCorrupt, reason::interactions::identity_changed);
   // The served name is recorded and classified, never refused (lyria-3-pro-preview answers as
   // lyria-3.5); it must stay the same for the whole interaction.
   if (model.valid()) {
@@ -93,7 +92,7 @@ bool Codec::identity(json::Value resource, bool initial) {
       served::observe(descriptor_, accumulator_, context_, model.as_string());
       model_ = model.as_string();
     } else if (model_ != model.as_string()) {
-      return fail(ErrorKind::ProtocolCorrupt, "interaction model changed");
+      return fail(ErrorKind::ProtocolCorrupt, reason::interactions::model_changed);
     }
   }
   unknown(resource, {"id", "model", "agent", "object", "created", "updated", "status", "steps", "usage", "service_tier", "error"});
@@ -101,32 +100,33 @@ bool Codec::identity(json::Value resource, bool initial) {
 }
 bool Codec::document(std::string_view bytes, std::string_view event, bool streaming) {
   const bool remote_error = streaming && event == "error";
-  auto reject = [&](ErrorKind kind, std::string label) {
-    return remote_error ? fail(ErrorKind::RemoteFailure, "remote interaction error") : fail(kind, std::move(label));
+  auto reject = [&](ErrorKind kind, const reason::Reason& label) {
+    return remote_error ? fail(ErrorKind::RemoteFailure, reason::interactions::remote_error) : fail(kind, std::move(label));
   };
   if (!context_ || descriptor_.family() != "google.interactions" || !context_->matches_descriptor(descriptor_))
-    return reject(ErrorKind::InvalidConfig, "Interactions request context required");
+    return reject(ErrorKind::InvalidConfig, reason::interactions::context_required);
   if (bytes.size() > limits_.max_content_bytes - std::min(input_bytes_, limits_.max_content_bytes))
-    return reject(ErrorKind::ResourceLimit, "interaction response byte limit");
+    return reject(ErrorKind::ResourceLimit, reason::interactions::response_byte_limit);
   input_bytes_ += bytes.size();
   auto parsed = json::parse(bytes, {limits_.max_content_bytes, limits_.max_json_depth});
   if (auto error = std::get_if<json::ParseError>(&parsed)) return reject(error->code == json::ParseCode::SizeExceeded ||
-      error->code == json::ParseCode::DepthExceeded ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, "invalid interaction JSON");
+      error->code == json::ParseCode::DepthExceeded ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, reason::interactions::response_json_invalid);
   auto wire = std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
   const auto root = wire->root();
-  if (!root.is_object()) return reject(ErrorKind::ProtocolCorrupt, "interaction object required");
+  if (!root.is_object()) return reject(ErrorKind::ProtocolCorrupt, reason::interactions::response_object_required);
   const auto type = root.get("event_type");
   std::string wire_type = streaming
       ? (nonempty(type) ? std::string(type.as_string()) : event.empty() ? "interaction" : std::string(event))
       : "interaction";
   const Event raw = RawWire{std::move(wire_type), wire};
   if (remote_error) {
-    const Error error{ErrorKind::RemoteFailure, "remote interaction error"};
+    // The classification takes precedence over a failure to retain the document, and carries no code there.
+    const Error error{ErrorKind::RemoteFailure, std::string(reason::interactions::remote_error.message)};
     if (!accumulator_.accept(raw, &error)) return false;
-    return fail(error.kind, error.safe_message);
+    return fail(error.kind, reason::interactions::remote_error);
   }
   if (!emit(raw)) return false;
-  if (root.get("error").valid() && !root.get("error").is_null()) return fail(ErrorKind::RemoteFailure, "remote interaction error");
+  if (root.get("error").valid() && !root.get("error").is_null()) return fail(ErrorKind::RemoteFailure, reason::interactions::remote_error);
   if (!streaming) {
     // Deleting a stored interaction answers {}: the outcome has no message, and its stop says what happened.
     if (context_->interaction_lifecycle() == static_cast<std::uint8_t>(interactions::Lifecycle::Delete)) {
@@ -134,12 +134,12 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
       if (!emit(Begin{{}}) || !emit(Stop{{StopKind::Unknown, "deleted"}})) return false;
       terminal_ = true; return true;
     }
-    if (!nonempty(root.get("model")) && !nonempty(root.get("agent"))) return fail(ErrorKind::ProtocolCorrupt, "buffered interaction model required");
+    if (!nonempty(root.get("model")) && !nonempty(root.get("agent"))) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::buffered_model_required);
     if (!identity(root, true)) return false;
     generation_ = root.get("id").as_string(); begun_ = true;
     if (!emit(Begin{generation_}) || !emit(MessageBegin{{0}, generation_.empty() ? std::optional<std::string>{} : generation_, Role::Assistant, context_})) return false;
     auto steps = root.get("steps");
-    if (steps.valid() && !steps.is_array()) return fail(ErrorKind::ProtocolCorrupt, "invalid buffered interaction steps");
+    if (steps.valid() && !steps.is_array()) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::buffered_steps_invalid);
     uint64_t index = 0;
     // A stored interaction read back lists the request's own input first; it is the caller's, not output.
     if (steps.valid()) for (auto step : steps.elements()) {
@@ -149,47 +149,47 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
     }
     return terminal(root, false);
   }
-  if (!type.is_string() || (!event.empty() && event != type.as_string())) return fail(ErrorKind::ProtocolCorrupt, "interaction event discriminator mismatch");
+  if (!type.is_string() || (!event.empty() && event != type.as_string())) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::event_discriminator_mismatch);
   auto name = type.as_string();
-  if (name == "error") return fail(ErrorKind::RemoteFailure, "remote interaction error");
-  if (terminal_ || done_) return fail(ErrorKind::ProtocolCorrupt, "event after terminal interaction");
+  if (name == "error") return fail(ErrorKind::RemoteFailure, reason::interactions::remote_error);
+  if (terminal_ || done_) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::stream_event_after_terminal);
   if (name == "interaction.created") {
     unknown(root, {"event_type", "event_id", "interaction"});
-    if (begun_ || !identity(root.get("interaction"), true)) return begun_ ? fail(ErrorKind::ProtocolCorrupt, "duplicate interaction creation") : false;
+    if (begun_ || !identity(root.get("interaction"), true)) return begun_ ? fail(ErrorKind::ProtocolCorrupt, reason::interactions::created_duplicate) : false;
     auto resource = root.get("interaction");
     if (resource.get("status").valid() && resource.get("status").as_string() != "in_progress")
-      return fail(ErrorKind::ProtocolCorrupt, "new interaction must be in progress");
+      return fail(ErrorKind::ProtocolCorrupt, reason::interactions::created_status_invalid);
     if (resource.get("steps").valid() && (!resource.get("steps").is_array() || resource.get("steps").size()))
-      return fail(ErrorKind::ProtocolCorrupt, "creation contains unexpected steps");
+      return fail(ErrorKind::ProtocolCorrupt, reason::interactions::created_steps_unexpected);
     generation_ = resource.get("id").as_string(); begun_ = true;
     return emit(Begin{generation_}) && emit(MessageBegin{{0}, generation_.empty() ? std::optional<std::string>{} : generation_, Role::Assistant, context_}) && usage(resource.get("usage"), false);
   }
-  if (!begun_) return fail(ErrorKind::ProtocolCorrupt, "event before interaction creation");
+  if (!begun_) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::stream_event_before_created);
   if (name == "interaction.status_update") {
     unknown(root, {"event_type", "event_id", "interaction_id", "status"});
     const auto id = root.get("interaction_id");
     if (!nonempty(root.get("status")) || (id.valid() && !id.is_null() && !id.is_string()) ||
         (!generation_.empty() && id.is_string() && id.as_string() != generation_))
-      return fail(ErrorKind::ProtocolCorrupt, "invalid interaction status update");
+      return fail(ErrorKind::ProtocolCorrupt, reason::interactions::status_update_invalid);
     // An update is not a terminal: only a failure-class status ends the stream (`incomplete` is a status of the
     // lifecycle). Any other status, one the codec does not know included, changes nothing and stays in the raw
     // events; the terminal resource decides the stop.
     auto status = root.get("status").as_string();
-    if (status == "failed") return fail(ErrorKind::RemoteFailure, "interaction failure status");
-    if (status == "cancelled") return fail(ErrorKind::Cancelled, "interaction cancelled status");
-    if (status != "incomplete" && descriptor::failure_stop(status)) return fail(ErrorKind::Unsupported, "unsupported interaction status update");
+    if (status == "failed") return fail(ErrorKind::RemoteFailure, reason::interactions::remote_failure_status);
+    if (status == "cancelled") return fail(ErrorKind::Cancelled, reason::interactions::status_cancelled);
+    if (status != "incomplete" && descriptor::failure_stop(status)) return fail(ErrorKind::Unsupported, reason::interactions::status_update_unsupported);
     return true;
   }
   if (name == "interaction.completed") { unknown(root, {"event_type", "event_id", "interaction"}); return terminal(root.get("interaction"), true); }
-  if (name != "step.start" && name != "step.delta" && name != "step.stop") return fail(ErrorKind::Unsupported, "unsupported interaction event");
+  if (name != "step.start" && name != "step.delta" && name != "step.stop") return fail(ErrorKind::Unsupported, reason::interactions::event_unsupported);
   auto index = root.get("index");
   if (!unsigned_count(index) || number(index) > static_cast<uint64_t>(std::numeric_limits<int32_t>::max()))
-    return fail(ErrorKind::ProtocolCorrupt, "invalid interaction step index");
+    return fail(ErrorKind::ProtocolCorrupt, reason::interactions::step_index_invalid);
   if (name == "step.start") { unknown(root, {"event_type", "event_id", "index", "step"}); return start(root.get("step"), number(index)); }
   if (name == "step.delta") {
     unknown(root, {"event_type", "event_id", "index", "delta", "metadata"});
     auto metadata = root.get("metadata");
-    if (metadata.valid() && !metadata.is_object()) return fail(ErrorKind::ProtocolCorrupt, "invalid step delta metadata");
+    if (metadata.valid() && !metadata.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::step_delta_metadata_invalid);
     if (metadata.valid() && !usage(metadata.get("total_usage"), false)) return false;
     return delta(root.get("delta"), number(index));
   }
@@ -226,26 +226,26 @@ bool server_result(std::string_view type) noexcept { return type != "function_re
 bool server_step(std::string_view type) noexcept { return server_call(type) || server_result(type); }
 }  // namespace
 bool Codec::start(json::Value value, uint64_t index) {
-  if (!value.is_object() || !value.get("type").is_string()) return fail(ErrorKind::ProtocolCorrupt, "step type required");
-  if (index >= limits_.max_parts || steps_.contains(index)) return fail(index >= limits_.max_parts ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, "invalid or repeated step index");
+  if (!value.is_object() || !value.get("type").is_string()) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::step_type_required);
+  if (index >= limits_.max_parts || steps_.contains(index)) return fail(index >= limits_.max_parts ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, reason::interactions::step_index_repeated);
   auto type = value.get("type").as_string();
   if (type != "thought" && type != "function_call" && type != "model_output" && !server_step(type))
-    return fail(ErrorKind::Unsupported, "unsupported critical interaction step");
-  if (value.get("error").valid() && !value.get("error").is_null()) return fail(ErrorKind::RemoteFailure, "remote step error");
+    return fail(ErrorKind::Unsupported, reason::interactions::step_type_unsupported);
+  if (value.get("error").valid() && !value.get("error").is_null()) return fail(ErrorKind::RemoteFailure, reason::interactions::remote_step_error);
   Step step; step.type = type; step.original = own(value); if (!step.original) return false;
   auto begin_part = [&](PartKind kind, PartHeader header, uint64_t offset) { return begin(step, index, kind, std::move(header), offset); };
   if (type == "thought") {
     unknown(value, {"type", "signature", "summary"});
     auto signature = value.get("signature"), summary = value.get("summary");
-    if (signature.valid()) { if (!signature.is_string()) return fail(ErrorKind::ProtocolCorrupt, "invalid thought signature"); step.signature = signature.as_string(); }
-    if (summary.valid() && !summary.is_array()) return fail(ErrorKind::ProtocolCorrupt, "invalid thought summary");
+    if (signature.valid()) { if (!signature.is_string()) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::thought_signature_invalid); step.signature = signature.as_string(); }
+    if (summary.valid() && !summary.is_array()) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::thought_summary_invalid);
     if (!begin_part(PartKind::Thought, {}, 0)) return false;
     if (summary.valid()) for (auto content : summary.elements())
       if (!thought_content(step, content)) return false;
   } else if (server_step(type)) {
     const bool call = server_call(type);
     const auto id = value.get(call ? "id" : "call_id");
-    if (!nonempty(id)) return fail(ErrorKind::ProtocolCorrupt, "invalid service tool step identity");
+    if (!nonempty(id)) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::service_step_identity_invalid);
     PartHeader header; header.wire_id = id.as_string(); header.wire_type = std::string(type);
     if (call) {
       header.name = std::string(type.substr(0, type.size() - 5));
@@ -256,19 +256,19 @@ bool Codec::start(json::Value value, uint64_t index) {
     unknown(value, {"type", "id", "name", "arguments"});
     auto id = value.get("id"), name = value.get("name"), arguments = value.get("arguments");
     if (!nonempty(id) || !nonempty(name) || !arguments.is_object() || !calls_.insert(std::string(id.as_string())).second)
-      return fail(ErrorKind::ProtocolCorrupt, "invalid function step identity");
-    if (!context_->client_tool_declared(name.as_string())) return fail(ErrorKind::Unsupported, "undeclared interaction function");
+      return fail(ErrorKind::ProtocolCorrupt, reason::interactions::function_identity_invalid);
+    if (!context_->client_tool_declared(name.as_string())) return fail(ErrorKind::Unsupported, reason::interactions::function_undeclared);
     PartHeader header; header.wire_id = id.as_string(); header.name = name.as_string(); header.wire_type = "function_call";
     if (!begin_part(PartKind::ToolCall, std::move(header), 0)) return false;
   } else {
     unknown(value, {"type", "content", "error"}); auto content = value.get("content");
-    if (content.valid() && !content.is_array()) return fail(ErrorKind::ProtocolCorrupt, "invalid model output content");
+    if (content.valid() && !content.is_array()) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::output_content_invalid);
     if (content.valid()) for (auto item : content.elements()) {
-      if (!item.is_object() || !item.get("type").is_string()) return fail(ErrorKind::ProtocolCorrupt, "invalid model output block");
+      if (!item.is_object() || !item.get("type").is_string()) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::output_block_invalid);
       const auto kind = item.get("type").as_string();
       if (media_type(kind)) { if (!media_item(step, index, item, false)) return false; continue; }
-      if (kind != "text") return fail(ErrorKind::Unsupported, "unsupported model output content");
-      if (!item.get("text").is_string()) return fail(ErrorKind::ProtocolCorrupt, "model output text required");
+      if (kind != "text") return fail(ErrorKind::Unsupported, reason::interactions::output_content_unsupported);
+      if (!item.get("text").is_string()) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::output_text_required);
       unknown(item, {"type", "text", "annotations"});
       Content text; text.type = "text"; text.text = std::string(item.get("text").as_string()); step.content.push_back(std::move(text));
       if (!annotate(step.content.back(), item.get("annotations"))) return false;
@@ -278,7 +278,7 @@ bool Codec::start(json::Value value, uint64_t index) {
   steps_.emplace(index, std::move(step)); return true;
 }
 bool Codec::begin(Step& step, uint64_t index, PartKind kind, PartHeader header, uint64_t offset) {
-  if (next_part_ >= limits_.max_parts || next_part_ == std::numeric_limits<uint32_t>::max()) return fail(ErrorKind::ResourceLimit, "interaction part limit");
+  if (next_part_ >= limits_.max_parts || next_part_ == std::numeric_limits<uint32_t>::max()) return fail(ErrorKind::ResourceLimit, reason::interactions::output_part_limit);
   LocalId id{next_part_++}; step.parts.push_back(id);
   return emit(PartBegin{{0}, id, kind, std::move(header), index * (static_cast<uint64_t>(limits_.max_parts) + 1) + offset});
 }
@@ -291,13 +291,13 @@ bool Codec::media_item(Step& step, uint64_t, json::Value item, bool streamed) {
   const auto mime = item.get("mime_type"), data = item.get("data"), uri = item.get("uri");
   if ((present(mime) && (!mime.is_string() || !mime_syntax(mime.as_string()))) || present(data) == present(uri) ||
       (present(data) && !data.is_string()) || (present(uri) && !uri.is_string()))
-    return fail(ErrorKind::ProtocolCorrupt, "model output media needs a valid MIME type and exactly one of data or uri");
+    return fail(ErrorKind::ProtocolCorrupt, reason::interactions::output_media_invalid);
   auto description = [&](Content& content) {
     for (auto member : item.members()) {
       if (member.key == "type" || member.key == "mime_type" || member.key == "data" || member.key == "uri") continue;
       auto [field, inserted] = content.fields.emplace(member.key, member.value);
       if (!inserted && media_description_field(member.key) && !json::equal(field->second, member.value))
-        return fail(ErrorKind::ProtocolCorrupt, "model output media description changed");
+        return fail(ErrorKind::ProtocolCorrupt, reason::interactions::output_media_changed);
       if (!inserted) field->second = member.value;
     }
     return true;
@@ -307,9 +307,9 @@ bool Codec::media_item(Step& step, uint64_t, json::Value item, bool streamed) {
     if (run.type == "audio" && run.uri.empty() && (!present(mime) || run.mime.empty() || mime.as_string() == run.mime)) {
       if (!description(run)) return false;
       if (present(mime) && run.mime.empty()) run.mime = mime.as_string();
-      if (!canonical_base64(data.as_string())) return fail(ErrorKind::ProtocolCorrupt, "model output audio must be canonical base64");
+      if (!canonical_base64(data.as_string())) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::output_audio_invalid);
       const auto size = base64_decoded_size(run.payload) + base64_decoded_size(data.as_string());
-      if (size > limits_.max_content_bytes / 4 * 3) return fail(ErrorKind::ResourceLimit, "model output audio limit");
+      if (size > limits_.max_content_bytes / 4 * 3) return fail(ErrorKind::ResourceLimit, reason::interactions::output_audio_limit);
       if (!run.audio_run) run.audio_run = std::make_unique<std::string>(run.payload);
       media_output::append_audio(*run.audio_run, data.as_string());
       run.payload = *run.audio_run;
@@ -320,23 +320,23 @@ bool Codec::media_item(Step& step, uint64_t, json::Value item, bool streamed) {
   if (present(mime)) content.mime = std::string(mime.as_string());
   const bool inline_data = present(data);
   if (inline_data) {
-    if (!canonical_base64(data.as_string())) return fail(ErrorKind::ProtocolCorrupt, "model output media must be canonical base64");
+    if (!canonical_base64(data.as_string())) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::output_media_data_invalid);
     content.payload = data.as_string();
   }
   else {
     content.uri = std::string(uri.as_string());
-    if (!reference_syntax(content.uri)) return fail(ErrorKind::ProtocolCorrupt, "model output media location is invalid");
+    if (!reference_syntax(content.uri)) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::output_media_location_invalid);
   }
   if (!description(content)) return false;
   step.content.push_back(std::move(content));
   // Delay the header until reconciliation: the final wire can supply a missing MIME type.
   if (next_part_ >= limits_.max_parts || next_part_ == std::numeric_limits<uint32_t>::max())
-    return fail(ErrorKind::ResourceLimit, "interaction part limit");
+    return fail(ErrorKind::ResourceLimit, reason::interactions::output_part_limit);
   step.parts.push_back(LocalId{next_part_++});
   return true;
 }
 bool Codec::thought_content(Step& step, json::Value content) {
-  if (!thought_shape(content)) return fail(ErrorKind::ProtocolCorrupt, "invalid thought summary content");
+  if (!thought_shape(content)) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::thought_summary_content_invalid);
   auto doc = own(content); if (!doc) return false;
   step.summary.push_back(std::move(doc));
   return content.get("type").as_string() != "text" ||
@@ -344,21 +344,21 @@ bool Codec::thought_content(Step& step, json::Value content) {
 }
 bool Codec::annotations(json::Value value, std::string_view text) {
   if (!value.valid()) return true;
-  if (!value.is_array()) return fail(ErrorKind::ProtocolCorrupt, "text annotations must be an array");
+  if (!value.is_array()) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::annotation_array_required);
   for (auto annotation : value.elements()) {
     if (!annotation.is_object() || !annotation.get("type").is_string())
-      return fail(ErrorKind::ProtocolCorrupt, "text annotation discriminator required");
+      return fail(ErrorKind::ProtocolCorrupt, reason::interactions::annotation_discriminator_required);
     const auto type = annotation.get("type").as_string();
     if (type != "word_info" && type != "speech_metadata" && type != "url_citation" &&
         type != "file_citation" && type != "place_citation")
-      return fail(ErrorKind::Unsupported, "unsupported critical text annotation");
+      return fail(ErrorKind::Unsupported, reason::interactions::annotation_type_unsupported);
     const auto start = annotation.get("start_index"), end = annotation.get("end_index");
     for (const auto position : {start, end})
       if (position.valid() && (!unsigned_count(position) ||
           number(position) > static_cast<uint64_t>(std::numeric_limits<int32_t>::max()) || number(position) > text.size()))
-        return fail(ErrorKind::ProtocolCorrupt, "text annotation byte index outside content");
+        return fail(ErrorKind::ProtocolCorrupt, reason::interactions::annotation_index_outside);
     if (start.valid() && end.valid() && number(start) > number(end))
-      return fail(ErrorKind::ProtocolCorrupt, "text annotation byte range reversed");
+      return fail(ErrorKind::ProtocolCorrupt, reason::interactions::annotation_range_reversed);
     for (auto member : annotation.members()) {
       const auto name = member.key;
       const bool string_field =
@@ -368,19 +368,19 @@ bool Codec::annotations(json::Value value, std::string_view text) {
           (type == "file_citation" && (name == "document_uri" || name == "file_name" || name == "media_id" || name == "source")) ||
           (type == "place_citation" && (name == "name" || name == "place_id" || name == "url"));
       if (string_field && !member.value.is_string())
-        return fail(ErrorKind::ProtocolCorrupt, "invalid text annotation string metadata");
+        return fail(ErrorKind::ProtocolCorrupt, reason::interactions::annotation_string_invalid);
       if ((type == "file_citation" && name == "custom_metadata" && !member.value.is_object()) ||
           (type == "place_citation" && name == "review_snippets" && !member.value.is_array()) ||
           (type == "file_citation" && name == "page_number" && !member.value.is_int() && !member.value.is_uint()))
-        return fail(ErrorKind::ProtocolCorrupt, "invalid text annotation metadata");
+        return fail(ErrorKind::ProtocolCorrupt, reason::interactions::annotation_metadata_invalid);
     }
     const auto word = annotation.get("text");
     if (type == "word_info" && word.is_string() && start.valid() && end.valid() &&
         text.substr(static_cast<size_t>(number(start)), static_cast<size_t>(number(end) - number(start))) != word.as_string())
-      return fail(ErrorKind::ProtocolCorrupt, "transcribed word contradicts annotated text");
+      return fail(ErrorKind::ProtocolCorrupt, reason::interactions::annotation_word_contradiction);
     if (type == "word_info" && word.is_string() && (!start.valid() || !end.valid()) &&
         text.find(word.as_string()) == std::string_view::npos)
-      return fail(ErrorKind::ProtocolCorrupt, "transcribed word missing from annotated text");
+      return fail(ErrorKind::ProtocolCorrupt, reason::interactions::annotation_word_missing);
   }
   return true;
 }
@@ -394,12 +394,12 @@ bool Codec::annotate(Content& content, json::Value value) {
 }
 bool Codec::delta(json::Value value, uint64_t index) {
   auto found = steps_.find(index);
-  if (found == steps_.end() || found->second.closed || !value.is_object() || !value.get("type").is_string()) return fail(ErrorKind::ProtocolCorrupt, "delta without open step");
+  if (found == steps_.end() || found->second.closed || !value.is_object() || !value.get("type").is_string()) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::delta_step_closed);
   auto& step = found->second; auto type = value.get("type").as_string();
-  if (step.signature_delta) return fail(ErrorKind::ProtocolCorrupt, "delta after final thought signature");
+  if (step.signature_delta) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::delta_after_signature);
   if (type == "thought_signature" && step.type == "thought") {
     unknown(value, {"type", "signature"}); auto signature = value.get("signature");
-    if (signature.valid() && !signature.is_string()) return fail(ErrorKind::ProtocolCorrupt, "invalid thought signature delta");
+    if (signature.valid() && !signature.is_string()) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::delta_signature_invalid);
     if (signature.valid()) step.signature = signature.as_string();
     step.signature_delta = true; return true;
   }
@@ -410,7 +410,7 @@ bool Codec::delta(json::Value value, uint64_t index) {
   }
   if (type == "text" && step.type == "model_output") {
     unknown(value, {"type", "text"}); auto text = value.get("text");
-    if (!text.is_string()) return fail(ErrorKind::ProtocolCorrupt, "text delta required");
+    if (!text.is_string()) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::delta_text_required);
     if (step.content.empty() || step.content.back().type != "text") {
       Content item; item.type = "text"; step.content.push_back(std::move(item));
       if (!begin(step, index, PartKind::Text, {}, step.content.size() - 1)) return false;
@@ -422,29 +422,29 @@ bool Codec::delta(json::Value value, uint64_t index) {
     // The schema supplies only a step index, not a content index. An annotation belongs to the
     // current text run; never reach backwards across intervening media or invent a text part.
     if (step.type != "model_output" || step.content.empty() || step.content.back().type != "text")
-      return fail(ErrorKind::ProtocolCorrupt, "text annotation without current model output text");
+      return fail(ErrorKind::ProtocolCorrupt, reason::interactions::delta_annotation_without_text);
     return annotate(step.content.back(), value.get("annotations"));
   }
   if (media_type(type) && step.type == "model_output") return media_item(step, index, value, true);
   if (server_step(step.type) && type == step.type) {
-    if (step.server) return fail(ErrorKind::ProtocolCorrupt, "repeated service tool step delta");
+    if (step.server) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::service_step_delta_repeated);
     step.server = own(value);
     return static_cast<bool>(step.server);
   }
   if (type == "arguments_delta" && step.type == "function_call") {
     unknown(value, {"type", "arguments"}); auto arguments = value.get("arguments");
-    if (arguments.valid() && !arguments.is_string()) return fail(ErrorKind::ProtocolCorrupt, "invalid arguments delta");
+    if (arguments.valid() && !arguments.is_string()) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::delta_arguments_invalid);
     if (!arguments.valid()) return true;
-    if (!step.argument_delta && step.original->root().get("arguments").size()) return fail(ErrorKind::ProtocolCorrupt, "arguments delta conflicts with complete initial object");
-    if (arguments.as_string().size() > limits_.max_tool_bytes - std::min(step.arguments.size(), limits_.max_tool_bytes)) return fail(ErrorKind::ResourceLimit, "function argument limit");
+    if (!step.argument_delta && step.original->root().get("arguments").size()) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::delta_arguments_conflict);
+    if (arguments.as_string().size() > limits_.max_tool_bytes - std::min(step.arguments.size(), limits_.max_tool_bytes)) return fail(ErrorKind::ResourceLimit, reason::interactions::delta_arguments_limit);
     step.argument_delta = true; step.arguments.append(arguments.as_string());
     return emit(PartDelta{step.parts[0], {PartKind::ToolCall, arguments.as_string()}});
   }
-  return fail(ErrorKind::Unsupported, "unsupported or mismatched critical step delta");
+  return fail(ErrorKind::Unsupported, reason::interactions::delta_step_mismatch);
 }
 bool Codec::stop(uint64_t index) {
   auto found = steps_.find(index);
-  if (found == steps_.end() || found->second.closed) return fail(ErrorKind::ProtocolCorrupt, "stop without open step");
+  if (found == steps_.end() || found->second.closed) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::step_stop_without_open);
   found->second.closed = true; return true;
 }
 std::shared_ptr<const json::Document> Codec::assembled(const Step& step) {
@@ -463,10 +463,10 @@ std::shared_ptr<const json::Document> Codec::assembled(const Step& step) {
       comma = true; writer.quoted(member.key).raw(":").value(member.value, 1);
     }
     writer.raw("}");
-    if (!writer.ok()) { fail(ErrorKind::ResourceLimit, "assembled step limit"); return {}; }
+    if (!writer.ok()) { fail(ErrorKind::ResourceLimit, reason::interactions::step_assembled_limit); return {}; }
     auto parsed = json::parse(bytes, {limits_.max_content_bytes, limits_.max_json_depth});
     if (auto doc = std::get_if<json::Document>(&parsed)) return std::make_shared<const json::Document>(std::move(*doc));
-    fail(ErrorKind::ProtocolCorrupt, "invalid assembled service tool step"); return {};
+    fail(ErrorKind::ProtocolCorrupt, reason::interactions::service_step_assembly_invalid); return {};
   }
   std::string bytes; json::BoundedWriter writer({limits_.max_content_bytes, limits_.max_json_depth}, &bytes);
   auto original = step.original->root(); writer.raw("{"); bool comma = false;
@@ -522,31 +522,31 @@ std::shared_ptr<const json::Document> Codec::assembled(const Step& step) {
     if (step.argument_delta) writer.raw(step.arguments); else writer.value(original.get("arguments"), 1);
   }
   writer.raw("}");
-  if (!writer.ok()) { fail(ErrorKind::ResourceLimit, "assembled step limit"); return {}; }
+  if (!writer.ok()) { fail(ErrorKind::ResourceLimit, reason::interactions::step_assembled_limit); return {}; }
   auto parsed = json::parse(bytes, {limits_.max_content_bytes, limits_.max_json_depth});
   if (auto doc = std::get_if<json::Document>(&parsed)) return std::make_shared<const json::Document>(std::move(*doc));
-  fail(ErrorKind::ProtocolCorrupt, "invalid assembled function arguments"); return {};
+  fail(ErrorKind::ProtocolCorrupt, reason::interactions::function_assembled_arguments_invalid); return {};
 }
 bool Codec::reconcile(Step& step, json::Value final) {
   if (!final.is_object() || !final.get("type").is_string() || final.get("type").as_string() != step.type)
-    return fail(ErrorKind::ProtocolCorrupt, "final step type mismatch");
-  if (final.get("error").valid() && !final.get("error").is_null()) return fail(ErrorKind::RemoteFailure, "final step error");
+    return fail(ErrorKind::ProtocolCorrupt, reason::interactions::final_step_type_mismatch);
+  if (final.get("error").valid() && !final.get("error").is_null()) return fail(ErrorKind::RemoteFailure, reason::interactions::remote_final_step_error);
   if (server_step(step.type)) {
     const auto key = server_call(step.type) ? "id" : "call_id";
     if (!nonempty(final.get(key)) || final.get(key).as_string() != step.original->root().get(key).as_string())
-      return fail(ErrorKind::ProtocolCorrupt, "final service tool step identity mismatch");
+      return fail(ErrorKind::ProtocolCorrupt, reason::interactions::service_step_final_mismatch);
     if (server_call(step.type) && final.get("arguments").valid() && !final.get("arguments").is_object())
-      return fail(ErrorKind::ProtocolCorrupt, "service tool arguments must be object");
+      return fail(ErrorKind::ProtocolCorrupt, reason::interactions::service_step_arguments_invalid);
     return true;
   }
   if (step.type == "thought") {
     auto summary = final.get("summary"), signature = final.get("signature");
-    if ((summary.valid() && !summary.is_array()) || (signature.valid() && !signature.is_string())) return fail(ErrorKind::ProtocolCorrupt, "invalid final thought");
-    if ((!summary.valid() && !step.summary.empty()) || (summary.valid() && summary.size() < step.summary.size())) return fail(ErrorKind::ProtocolCorrupt, "final thought summary lost");
+    if ((summary.valid() && !summary.is_array()) || (signature.valid() && !signature.is_string())) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::final_thought_invalid);
+    if ((!summary.valid() && !step.summary.empty()) || (summary.valid() && summary.size() < step.summary.size())) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::final_thought_summary_lost);
     if (summary.valid()) for (size_t i = 0; i < summary.size(); ++i) {
       auto item = summary.at(i);
       if (!thought_shape(item) || (i < step.summary.size() && !json::equal(item, step.summary[i]->root())))
-        return fail(ErrorKind::ProtocolCorrupt, "final thought summary mismatch");
+        return fail(ErrorKind::ProtocolCorrupt, reason::interactions::final_thought_summary_mismatch);
     }
     // The final resource signature replaces the streamed value; it is not prose.
     return true;
@@ -555,37 +555,37 @@ bool Codec::reconcile(Step& step, json::Value final) {
     auto original = step.original->root();
     if (!nonempty(final.get("id")) || !nonempty(final.get("name")) || final.get("id").as_string() != original.get("id").as_string() ||
         final.get("name").as_string() != original.get("name").as_string() || !final.get("arguments").is_object())
-      return fail(ErrorKind::ProtocolCorrupt, "final function ownership mismatch");
+      return fail(ErrorKind::ProtocolCorrupt, reason::interactions::final_function_ownership_mismatch);
     if (step.argument_delta) {
       auto parsed = json::parse(step.arguments, {limits_.max_tool_bytes, limits_.max_json_depth});
       if (auto doc = std::get_if<json::Document>(&parsed)) {
-        if (!json::equal(doc->root(), final.get("arguments"))) return fail(ErrorKind::ProtocolCorrupt, "final function arguments mismatch");
-      } else return fail(ErrorKind::ProtocolCorrupt, "invalid streamed function arguments");
-    } else if (!json::equal(original.get("arguments"), final.get("arguments"))) return fail(ErrorKind::ProtocolCorrupt, "final function arguments mismatch");
+        if (!json::equal(doc->root(), final.get("arguments"))) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::final_function_arguments_mismatch);
+      } else return fail(ErrorKind::ProtocolCorrupt, reason::interactions::function_streamed_arguments_invalid);
+    } else if (!json::equal(original.get("arguments"), final.get("arguments"))) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::final_function_arguments_mismatch);
     return true;
   }
   auto content = final.get("content");
   if (!content.valid() && step.content.empty()) return true;
-  if (!content.is_array() || content.size() != step.content.size()) return fail(ErrorKind::ProtocolCorrupt, "final output content mismatch");
+  if (!content.is_array() || content.size() != step.content.size()) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::final_output_content_mismatch);
   for (size_t i = 0; i < content.size(); ++i) {
     auto item = content.at(i);
-    if (!item.is_object() || !item.get("type").is_string()) return fail(ErrorKind::ProtocolCorrupt, "invalid final output block");
+    if (!item.is_object() || !item.get("type").is_string()) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::final_output_block_invalid);
     const auto type = item.get("type").as_string();
     const auto& entry = step.content[i];
-    if (type != "text" && !media_type(type)) return fail(ErrorKind::Unsupported, "unsupported final output content");
-    if (type != entry.type) return fail(ErrorKind::ProtocolCorrupt, "final output content type mismatch");
+    if (type != "text" && !media_type(type)) return fail(ErrorKind::Unsupported, reason::interactions::final_output_content_unsupported);
+    if (type != entry.type) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::final_output_type_mismatch);
     if (type == "text") {
-      if (!item.get("text").is_string() || !prefix(entry.text, item.get("text").as_string())) return fail(ErrorKind::ProtocolCorrupt, "final output prefix mismatch");
+      if (!item.get("text").is_string() || !prefix(entry.text, item.get("text").as_string())) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::final_output_prefix_mismatch);
       const auto supplied = item.get("annotations");
       if (!annotations(supplied, item.get("text").as_string())) return false;
       if ((!supplied.valid() && entry.annotations_present) ||
           (supplied.valid() && supplied.size() < entry.annotations.size()))
-        return fail(ErrorKind::ProtocolCorrupt, "final text annotations lost");
+        return fail(ErrorKind::ProtocolCorrupt, reason::interactions::final_annotations_lost);
       size_t j = 0;
       for (const auto annotation : supplied.elements()) {
         if (j == entry.annotations.size()) break;
         if (!json::equal(entry.annotations[j++], annotation))
-          return fail(ErrorKind::ProtocolCorrupt, "final text annotation prefix mismatch");
+          return fail(ErrorKind::ProtocolCorrupt, reason::interactions::final_annotation_prefix_mismatch);
       }
       continue;
     }
@@ -594,13 +594,13 @@ bool Codec::reconcile(Step& step, json::Value final) {
     const bool inline_data = data.valid() && !data.is_null(), location = uri.valid() && !uri.is_null();
     if ((mime.valid() && !mime.is_null() && (!mime.is_string() || !mime_syntax(mime.as_string()))) ||
         (!entry.mime.empty() && (!mime.is_string() || mime.as_string() != entry.mime)))
-      return fail(ErrorKind::ProtocolCorrupt, "final output media type mismatch");
+      return fail(ErrorKind::ProtocolCorrupt, reason::interactions::final_media_type_mismatch);
     if (inline_data == location || (entry.uri.empty() ? !data.is_string() || data.as_string() != entry.payload
                                                     : !uri.is_string() || uri.as_string() != entry.uri))
-      return fail(ErrorKind::ProtocolCorrupt, "final output media mismatch");
+      return fail(ErrorKind::ProtocolCorrupt, reason::interactions::final_media_mismatch);
     for (const auto& [name, value] : entry.fields)
       if (media_description_field(name) && !json::equal(value, item.get(name)))
-        return fail(ErrorKind::ProtocolCorrupt, "final output media description mismatch");
+        return fail(ErrorKind::ProtocolCorrupt, reason::interactions::final_media_description_mismatch);
   }
   return true;
 }
@@ -619,7 +619,7 @@ bool Codec::seal(Step& step, json::Value final, uint64_t index) {
   if (step.type == "thought") { auto metadata = own(final); return metadata && emit(PartSeal{step.parts[0], {}, std::move(metadata)}); }
   if (step.type == "function_call") {
     auto arguments = final.get("arguments");
-    if (!arguments.is_object()) return fail(ErrorKind::ProtocolCorrupt, "function arguments must be object");
+    if (!arguments.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::function_arguments_object_required);
     std::string bytes = step.argument_delta ? step.arguments : arguments.dump(); auto metadata = own(final);
     return metadata && emit(PartSeal{step.parts[0], bytes, std::move(metadata)});
   }
@@ -647,9 +647,9 @@ bool Codec::terminal(json::Value resource, bool streaming) {
   if (!identity(resource, false)) return false;
   auto status = resource.get("status").as_string();
   const bool cancelling = context_->interaction_lifecycle() == static_cast<std::uint8_t>(interactions::Lifecycle::Cancel);
-  if (status == "failed") return fail(ErrorKind::RemoteFailure, "interaction failed");
+  if (status == "failed") return fail(ErrorKind::RemoteFailure, reason::interactions::remote_failed);
   // Cancelled is the outcome a cancel request asked for; anywhere else the interaction did not finish.
-  if (status == "cancelled" && !cancelling) return fail(ErrorKind::Cancelled, "interaction cancelled");
+  if (status == "cancelled" && !cancelling) return fail(ErrorKind::Cancelled, reason::interactions::terminal_cancelled);
   // The statuses of the interaction lifecycle are mapped here, not by the stop table, which may list neither
   // `incomplete` nor `cancelled`. A status the codec does not know is delivered as Unknown, with the status as its raw
   // value.
@@ -661,24 +661,24 @@ bool Codec::terminal(json::Value resource, bool streaming) {
   // does not end on a running interaction, and no terminal ends on a failure-class word (`cancelled` answers a cancel
   // request here).
   else if (status == "in_progress" || status == "queued") {
-    if (streaming) return fail(ErrorKind::Unsupported, "unsupported terminal interaction status");
+    if (streaming) return fail(ErrorKind::Unsupported, reason::interactions::terminal_status_unsupported);
     kind = StopKind::Pending;
   } else if (status != "cancelled" && descriptor::failure_stop(status))
-    return fail(ErrorKind::Unsupported, "unsupported terminal interaction status");
+    return fail(ErrorKind::Unsupported, reason::interactions::terminal_status_unsupported);
   if ((kind == StopKind::ToolUse && calls_.empty()) || (kind == StopKind::EndTurn && !calls_.empty()))
-    return fail(ErrorKind::ProtocolCorrupt, "terminal status disagrees with client action");
+    return fail(ErrorKind::ProtocolCorrupt, reason::interactions::terminal_action_mismatch);
   // The echoed input of a stored interaction is not output, as above.
   std::vector<json::Value> final_list;
   auto final_steps = resource.get("steps");
-  if (final_steps.valid() && !final_steps.is_array()) return fail(ErrorKind::ProtocolCorrupt, "terminal step count mismatch");
+  if (final_steps.valid() && !final_steps.is_array()) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::terminal_step_count_mismatch);
   if (final_steps.valid())
     for (auto step : final_steps.elements())
       if (!(step.get("type").is_string() && step.get("type").as_string() == "user_input")) final_list.push_back(step);
-  if (final_steps.valid() && final_list.size() != steps_.size()) return fail(ErrorKind::ProtocolCorrupt, "terminal step count mismatch");
+  if (final_steps.valid() && final_list.size() != steps_.size()) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::terminal_step_count_mismatch);
   std::string bytes; json::BoundedWriter writer({limits_.max_content_bytes, limits_.max_json_depth}, &bytes); writer.raw("[");
   uint64_t expected = 0;
   for (auto& [index, step] : steps_) {
-    if (index != expected++ || !step.closed) return fail(ErrorKind::ProtocolCorrupt, "terminal with missing or open steps");
+    if (index != expected++ || !step.closed) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::terminal_steps_open);
     std::shared_ptr<const json::Document> assembled_step;
     json::Value final;
     if (final_steps.valid()) final = final_list[index];
@@ -691,9 +691,9 @@ bool Codec::terminal(json::Value resource, bool streaming) {
     writer.value(final, 1);
   }
   writer.raw("]");
-  if (!writer.ok()) return fail(ErrorKind::ResourceLimit, "atomic interaction output limit");
+  if (!writer.ok()) return fail(ErrorKind::ResourceLimit, reason::interactions::atomic_output_limit);
   auto parsed = json::parse(bytes, {limits_.max_content_bytes, limits_.max_json_depth});
-  auto doc = std::get_if<json::Document>(&parsed); if (!doc) return fail(ErrorKind::ProtocolCorrupt, "invalid atomic interaction output");
+  auto doc = std::get_if<json::Document>(&parsed); if (!doc) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::atomic_output_invalid);
   if (!usage(resource.get("usage"), kind != StopKind::Pending) || !emit(MessageSeal{{0}, std::make_shared<const json::Document>(std::move(*doc))}) ||
       !emit(Stop{{kind, std::string(status)}})) return false;
   terminal_ = true; (void)streaming; return true;
@@ -704,7 +704,7 @@ void Codec::conflict(std::string_view key, std::string_view detail) {
 }
 bool Codec::count(json::Value value, std::optional<Count>& target, std::string_view name) {
   target.reset(); if (!value.valid() || value.is_null()) return true;
-  if (!unsigned_count(value)) return fail(ErrorKind::ProtocolCorrupt, "invalid interaction usage count");
+  if (!unsigned_count(value)) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::usage_count_invalid);
   target = Count{number(value), Evidence::Reported}; (void)name; return true;
 }
 bool Codec::leaves(json::Value value, std::string path) {
@@ -725,12 +725,12 @@ bool Codec::leaves(json::Value value, std::string path) {
         continue;
       }
       const auto keyed = path + "." + std::string(modality.as_string());
-      if (usage_.extra.contains(keyed)) return fail(ErrorKind::ProtocolCorrupt, "duplicate interaction modality usage");
+      if (usage_.extra.contains(keyed)) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::usage_modality_duplicate);
       for (auto member : item.members())
         if (member.key != "modality" && !leaves(member.value, member.key == "tokens" ? keyed : keyed + "." + std::string(member.key))) return false;
     }
   } else if (value.is_number()) {
-    if (!unsigned_count(value)) return fail(ErrorKind::ProtocolCorrupt, "invalid numeric usage leaf");
+    if (!unsigned_count(value)) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::usage_leaf_invalid);
     usage_.extra.emplace(std::move(path), Count{number(value), Evidence::Reported});
   }
   return true;
@@ -741,7 +741,7 @@ bool Codec::usage(json::Value value, bool final) {
     if (usage_.stage != UsageStage::Missing) usage_.stage = UsageStage::Partial;
     return true;
   }
-  if (!value.is_object()) return fail(ErrorKind::ProtocolCorrupt, "interaction usage object required");
+  if (!value.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::interactions::usage_object_required);
   usage_ = Usage{}; usage_.stage = final ? UsageStage::Final : UsageStage::Partial;
   std::optional<Count> response, tool;
   if (!count(value.get("total_input_tokens"), usage_.input_total, "input") ||
@@ -768,7 +768,7 @@ void Codec::finish(Close close) {
   if (closed_ || accumulator_.terminal()) return;
   closed_ = true;
   if (!close.normal) { emit(Fail{{close.error, "abnormal interaction close"}}); return; }
-  if (!terminal_) { fail(ErrorKind::Truncated, "interaction lacks terminal resource"); return; }
+  if (!terminal_) { fail(ErrorKind::Truncated, reason::interactions::terminal_missing); return; }
   emit(Commit{"normal interaction close"});
 }
 } // namespace sp::interactions

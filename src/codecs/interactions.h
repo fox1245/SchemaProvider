@@ -6,6 +6,7 @@
 #include <memory>
 #include <set>
 
+namespace sp::reason { struct Reason; }
 namespace sp::descriptor { class ValidatedDescriptor; }
 namespace sp::json { class Value; }
 namespace sp::interactions {
@@ -63,7 +64,7 @@ class Codec {
   bool count(json::Value, std::optional<Count>&, std::string_view);
   void conflict(std::string_view, std::string_view);
   bool emit(const Event&);
-  bool fail(ErrorKind, std::string);
+  bool fail(ErrorKind, const reason::Reason&);
   void unknown(json::Value, std::initializer_list<std::string_view>);
   std::shared_ptr<const json::Document> own(json::Value);
   std::shared_ptr<const json::Document> assembled(const Step&);
