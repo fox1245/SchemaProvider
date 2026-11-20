@@ -1071,7 +1071,9 @@ descriptor::CatalogueSnapshot variable_beside_fixed() {
     {"id":"vendor/ceiling","context_window":5000,"pricing":{"prompt":"0.0000001","completion":"0.0000004","ceiling_input":"-1",
       "ceiling_output":"0.0000096","ceiling_request":"-1"}},
     {"id":"vendor/half-ceiling","context_window":5000,"pricing":{"prompt":"0.0000001","completion":"0.0000004","ceiling_input":"-1"}},
-    {"id":"vendor/no-ceiling","context_window":5000,"pricing":{"prompt":"0.0000001","completion":"0.0000004","request":"-1"}}]})");
+    {"id":"vendor/no-ceiling","context_window":5000,"pricing":{"prompt":"0.0000001","completion":"0.0000004","request":"-1"}},
+    {"id":"vendor/output-ceiling","context_window":5000,"pricing":{"prompt":"0.0000001","completion":"0.0000004","ceiling_output":"0.0000096",
+      "request":"-1"}}]})");
 }
 
 // A dearest price from an entry with a variable row that applies, beside a fixed row of the same unit: before, the
@@ -1168,8 +1170,14 @@ void variable_ceilings() {
   CHECK(!w.total && !w.pin && reasons(w) == Reasons({{ceiling_reason, ""}, {price_reason, "ceiling_input"}}));
   CHECK(unpriced_of(at_ceiling("vendor/no-ceiling")) == Names({"ceiling"}));
   b = pricing::upper_bound(*more->entry("vendor/no-ceiling"), {}, {1'000, 1'000, true, {}});
-  CHECK(!b.total && b.unpriced == Names({"ceiling", "request"}));
+  CHECK(!b.total && b.unpriced == Names({"ceiling"}));
   w = routed("vendor/no-ceiling");
+  CHECK(!w.total && reasons(w) == Reasons({{ceiling_reason, ""}}));
+  // One ceiling listed and the other not: "ceiling" alone in all three, the variable fee not named.
+  CHECK(unpriced_of(at_ceiling("vendor/output-ceiling")) == Names({"ceiling"}));
+  b = pricing::upper_bound(*more->entry("vendor/output-ceiling"), {}, {1'000, 1'000, true, {}});
+  CHECK(!b.total && b.unpriced == Names({"ceiling"}));
+  w = routed("vendor/output-ceiling");
   CHECK(!w.total && reasons(w) == Reasons({{ceiling_reason, ""}}));
   std::cout << "case passed: a variable route ceiling is named, and an absent one keeps its answer\n";
 }
