@@ -104,9 +104,9 @@ std::optional<ExtensionPricing> extension_pricing(const ExtensionFact& fact, jso
 // `audio/pcmu`), the samples per second and the bytes of one sample.
 struct AudioFormatFact { std::string mime; std::uint32_t rate = 0, sample_bytes = 0; };
 // A WebSocket close code a realtime provider ends a session with to report a failure, and the HTTP status that the
-// runtime error policy classifies it as (1007 with "API key not valid" is a 401). A `reason` must appear in the
-// close reason; an empty one matches any.
-struct CloseCodeFact { std::uint16_t code = 0; std::string reason{}; int status = 0; };
+// runtime error policy classifies it as (Google's 1007 is a 401). The code alone decides: the close reason is the
+// provider's free text.
+struct CloseCodeFact { std::uint16_t code = 0; int status = 0; };
 // The audio a transcription endpoint takes: each MIME type with the name the provider reads for it (the upload's
 // file extension, or `input_audio.format`), and the largest decoded size, zero to leave the descriptor's audio limit.
 struct AcceptedAudioFact {
