@@ -130,7 +130,6 @@ std::optional<Context> context_of(const Completion& completion) {
 // The outcome of a line the provider failed: its document stays in the raw events.
 sp::Outcome failed(std::shared_ptr<const json::Document> line, Error error) {
   Accumulator accumulator;
-  error.reason = std::string(reason::code(reason::Source::Batches, error.safe_message));
   accumulator.accept(RawWire{"batches.line", std::move(line)});
   accumulator.accept(Fail{std::move(error)});
   return *accumulator.outcome();
@@ -140,33 +139,32 @@ sp::Outcome failed(std::shared_ptr<const json::Document> line, Error error) {
 Codec::Codec(const descriptor::ValidatedDescriptor& descriptor, Accumulator& accumulator, Kind kind, std::string subject, SemanticLimits limits)
     : descriptor_(descriptor), accumulator_(accumulator), kind_(kind), subject_(std::move(subject)), limits_(limits) {}
 bool Codec::emit(const Event& event) { return accumulator_.accept(event); }
-bool Codec::fail(ErrorKind kind, std::string text) {
-  Error error{kind, std::move(text)};
-  error.reason = reason::code(reason::Source::Batches, error.safe_message);
+bool Codec::fail(ErrorKind kind, const reason::Reason& text) {
+  Error error = reason::error(kind, text);
   emit(Fail{std::move(error)});
   return false;
 }
 bool Codec::buffered(std::string_view body, Close close) {
-  if (!close.normal) return fail(close.error, "abnormal response close");
+  if (!close.normal) return fail(close.error, reason::transport::response_close);
   const auto* fact = descriptor_.policy()->endpoint("batches", descriptor_.base_url());
-  if (!fact) return fail(ErrorKind::Unsupported, "batch endpoints are not admitted at this origin");
+  if (!fact) return fail(ErrorKind::Unsupported, reason::batches::endpoint_not_admitted);
   auto parsed = json::parse(body.empty() ? std::string_view("{}") : body, {limits_.max_content_bytes, limits_.max_json_depth});
   if (auto* error = std::get_if<json::ParseError>(&parsed))
     return fail(error->code == json::ParseCode::SizeExceeded || error->code == json::ParseCode::DepthExceeded
-                    ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, "invalid response JSON");
+                    ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, reason::batches::response_json_invalid);
   auto wire = std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
   const auto root = wire->root();
-  if (!root.is_object()) return fail(ErrorKind::ProtocolCorrupt, "response must be object");
+  if (!root.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::batches::response_not_object);
   auto context = json::parse("{\"shape\":" + json::quote(fact->shape) + ",\"origin\":" + json::quote(descriptor_.base_url()) +
                              ",\"subject\":" + json::quote(subject_) + "}");
   if (!emit(RawWire{"batches.context", std::make_shared<const json::Document>(std::move(std::get<json::Document>(context)))}) ||
       !emit(RawWire{"batches.response", wire}))
     return false;
   Batch probe;
-  if (kind_ == Kind::Batch && !batch_of(root, fact->shape, descriptor_.base_url(), probe)) return fail(ErrorKind::ProtocolCorrupt, "a batch object names its id and status");
+  if (kind_ == Kind::Batch && !batch_of(root, fact->shape, descriptor_.base_url(), probe)) return fail(ErrorKind::ProtocolCorrupt, reason::batches::batch_id_required);
   // Anthropic answers a deletion with a `message_batch_deleted` object, Google with an empty one.
   if (kind_ == Kind::Deleted && fact->shape == "anthropic" && text_of(root.get("type")) != "message_batch_deleted")
-    return fail(ErrorKind::ProtocolCorrupt, "the response does not confirm the deletion");
+    return fail(ErrorKind::ProtocolCorrupt, reason::batches::delete_unconfirmed);
   if (!emit(Begin{}) || !emit(MessageBegin{{0}, std::nullopt, Role::Assistant, nullptr})) return false;
   return emit(UsageUpdate{probe.usage}) && emit(Stop{StopReason{StopKind::EndTurn, "completed"}}) && emit(MessageSeal{{0}}) &&
          emit(Commit{"batches.response+normal_close"});
@@ -212,7 +210,7 @@ std::optional<std::string> custom_id(std::string_view line) {
 
 std::variant<Line, Error> decode(const descriptor::ValidatedDescriptor& family, const Request& original, std::string_view line, SemanticLimits limits) {
   auto parsed = json::parse(line, {limits.max_content_bytes, limits.max_json_depth});
-  if (!std::holds_alternative<json::Document>(parsed)) return Error{ErrorKind::InvalidRequest, "a result line is not a batch result"};
+  if (!std::holds_alternative<json::Document>(parsed)) return reason::error(ErrorKind::InvalidRequest, reason::batches::line_invalid);
   auto document = std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
   const auto root = document->root();
   Line out;
@@ -222,12 +220,12 @@ std::variant<Line, Error> decode(const descriptor::ValidatedDescriptor& family, 
     out.custom_id = std::string(root.get("custom_id").as_string());
     const auto response = root.get("response");
     if (root.get("error").valid() && !root.get("error").is_null()) {
-      out.outcome = failed(document, Error{ErrorKind::RemoteFailure, "the provider failed the batch request"});
+      out.outcome = failed(document, reason::error(ErrorKind::RemoteFailure, reason::batches::line_failed));
       return out;
     }
     const auto status = response.get("status_code");
     if (!status.is_uint() || status.as_uint() < 200 || status.as_uint() >= 300) {
-      Error error{ErrorKind::RemoteFailure, "the provider failed the batch request"};
+      Error error = reason::error(ErrorKind::RemoteFailure, reason::batches::line_failed);
       if (status.is_uint()) error.http_status = static_cast<int>(status.as_uint());
       out.outcome = failed(document, std::move(error));
       return out;
@@ -237,21 +235,21 @@ std::variant<Line, Error> decode(const descriptor::ValidatedDescriptor& family, 
     out.custom_id = std::string(root.get("custom_id").as_string());
     const auto result = root.get("result");
     const auto type = text_of(result.get("type"));
-    if (type == "canceled") { out.outcome = failed(document, Error{ErrorKind::Cancelled, "the batch request was cancelled"}); return out; }
-    if (type == "expired") { out.outcome = failed(document, Error{ErrorKind::DeadlineExceeded, "the batch request expired"}); return out; }
-    if (type != "succeeded") { out.outcome = failed(document, Error{ErrorKind::RemoteFailure, "the provider failed the batch request"}); return out; }
+    if (type == "canceled") { out.outcome = failed(document, reason::error(ErrorKind::Cancelled, reason::batches::line_cancelled)); return out; }
+    if (type == "expired") { out.outcome = failed(document, reason::error(ErrorKind::DeadlineExceeded, reason::batches::line_expired)); return out; }
+    if (type != "succeeded") { out.outcome = failed(document, reason::error(ErrorKind::RemoteFailure, reason::batches::line_failed)); return out; }
     body = result.get("message");
   } else if (auto key = root.get("key").is_string() ? root.get("key") : root.get("metadata").get("key"); key.is_string()) {
     out.custom_id = std::string(key.as_string());
     if (root.get("error").is_object() || !root.get("response").is_object()) {
-      out.outcome = failed(document, Error{ErrorKind::RemoteFailure, "the provider failed the batch request"});
+      out.outcome = failed(document, reason::error(ErrorKind::RemoteFailure, reason::batches::line_failed));
       return out;
     }
     body = root.get("response");
   } else {
-    return Error{ErrorKind::InvalidRequest, "a result line is not a batch result"};
+    return reason::error(ErrorKind::InvalidRequest, reason::batches::line_invalid);
   }
-  if (!body.is_object()) return Error{ErrorKind::InvalidRequest, "a result line is not a batch result"};
+  if (!body.is_object()) return reason::error(ErrorKind::InvalidRequest, reason::batches::line_invalid);
   // The family codec decodes the answer against the request it answers, as it would a buffered call.
   const auto text = body.dump();
   return std::visit([&](const auto& typed) -> std::variant<Line, Error> {
@@ -278,7 +276,7 @@ std::variant<Line, Error> decode(const descriptor::ValidatedDescriptor& family, 
       gemini::Codec codec(family, gemini::Mode::Buffered, accumulator, std::get<0>(encoded).context, limits);
       codec.buffered(text, {});
     }
-    if (!accumulator.outcome()) return Error{ErrorKind::ProtocolCorrupt, "a result line did not decode to an outcome"};
+    if (!accumulator.outcome()) return reason::error(ErrorKind::ProtocolCorrupt, reason::batches::line_undecided);
     out.outcome = *accumulator.outcome();
     return std::move(out);
   }, original);
