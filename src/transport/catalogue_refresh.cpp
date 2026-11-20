@@ -475,7 +475,7 @@ std::variant<RefreshResult, ConfigError> refresh_catalogue(Transport& transport,
       // The origin scopes the generated entries and picks the listing's credential scheme, both compared byte for byte
       // with a descriptor's base URL, so it is the origin's serialization.
       if (!descriptor::canonical_origin_spelling(origin))
-        throw ConfigError{pointer + "/origin", "origin in its canonical spelling: lower-case host, no default port", 0, "listing source rejected"};
+        throw ConfigError{pointer + "/origin", std::string(descriptor::canonical_origin_expected), 0, "listing source rejected"};
       if (source.api_key.find_first_of("\r\n") != std::string::npos)
         throw ConfigError{pointer + "/api_key", "credential without line breaks", 0, "listing source rejected"};
       auto ceilings = source.ceiling_models;

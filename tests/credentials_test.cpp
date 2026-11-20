@@ -763,7 +763,12 @@ void origin_spellings() {
       {"https://openrouter.ai:08443", "https://openrouter.ai:8443"}, {"http://127.0.0.1:443", "http://127.0.0.1:443"},
       {"http://127.0.0.1:80", "http://127.0.0.1"}, {"http://127.0.0.1:080/", "http://127.0.0.1"},
       {"http://LocalHost:9", "http://localhost:9"}, {"http://[::1]:80", "http://[::1]"},
-      {"http://[0:0:0:0:0:0:0:1]:9", "http://[0:0:0:0:0:0:0:1]:9"}, {"https://[FE80::A1]:443", "https://[fe80::a1]"},
+      {"http://[0:0:0:0:0:0:0:1]:9", "http://[::1]:9"}, {"http://[::0001]", "http://[::1]"}, {"http://[0::1]:80", "http://[::1]"},
+      {"https://[FE80::A1]:443", "https://[fe80::a1]"}, {"https://[2001:db8:0:0:0:0:0:1]", "https://[2001:db8::1]"},
+      {"https://[2001:DB8::1]", "https://[2001:db8::1]"}, {"https://[2001:0DB8:0000::0001]:443", "https://[2001:db8::1]"},
+      {"https://[2001:db8:0:0:1:0:0:1]", "https://[2001:db8::1:0:0:1]"}, {"https://[2001:db8:0:1:1:1:1:1]", "https://[2001:db8:0:1:1:1:1:1]"},
+      {"https://[1:0:0:2:0:0:0:3]", "https://[1:0:0:2::3]"}, {"https://[0:0:0:0:0:0:0:0]", "https://[::]"},
+      {"http://[0:0:0:0:0:0:0:2]", "<refused>"},
       {"https://Api.Example.com:65535", "https://api.example.com:65535"}, {"HTTPS://api.example.com", "<refused>"},
       {"Https://api.example.com", "<refused>"}, {"https://api.example.com:0", "<refused>"}};
   for (const auto& [spelling, expected_base] : spellings) {
@@ -772,6 +777,47 @@ void origin_spellings() {
                                            static_cast<int>(expected_base.size()), expected_base.data(), got.c_str());
     CHECK(got == expected_base);
   }
+  // The function itself.
+  CHECK(descriptor::canonical_origin("").empty() && !descriptor::canonical_origin_spelling(""));
+  CHECK(descriptor::canonical_origin("ftp://a.com").empty() && !descriptor::canonical_origin_spelling("ftp://a.com"));
+  CHECK(descriptor::canonical_origin("https://a.com/path").empty() && !descriptor::canonical_origin_spelling("https://a.com/path"));
+  CHECK(descriptor::canonical_origin("https://a.com/") == "https://a.com" && !descriptor::canonical_origin_spelling("https://a.com/"));
+  CHECK(descriptor::canonical_origin("https://A.com:443") == "https://a.com" && !descriptor::canonical_origin_spelling("https://A.com:443"));
+  CHECK(descriptor::canonical_origin("https://a.com:08443") == "https://a.com:8443" && descriptor::canonical_origin_spelling("https://a.com:8443"));
+  CHECK(descriptor::canonical_origin_spelling("https://a.com") && descriptor::canonical_origin_spelling("http://[::1]:9"));
+  CHECK(!descriptor::canonical_origin_spelling("http://[0:0:0:0:0:0:0:1]:9"));
+  // A catalogue entry scoped to a provider's origin matches a descriptor that spells the origin another way.
+  const auto builtin = descriptor::builtin_catalogue();
+  const descriptor::CatalogueEntry* scoped_entry = nullptr;
+  for (const auto& entry : builtin->entries())
+    if (!scoped_entry && entry.origins == std::vector<std::string>{"https://api.anthropic.com"}) scoped_entry = &entry;
+  CHECK(scoped_entry != nullptr);
+  if (scoped_entry) {
+    const auto model = scoped_entry->prefix ? scoped_entry->id + "test" : scoped_entry->id;
+    for (const std::string_view spelling : {"https://api.anthropic.com", "https://API.Anthropic.com:443/"}) {
+      auto loaded = descriptor::presets::try_anthropic_messages({.base_url = std::string(spelling)});
+      const auto* d = std::get_if<descriptor::ValidatedDescriptor>(&loaded);
+      const auto match = d ? d->policy()->model(d->family(), d->base_url(), model) : descriptor::ModelMatch{};
+      CHECK(match.entry && match.entry->id == scoped_entry->id && match.entry->origins == scoped_entry->origins);
+    }
+    // Asked directly with another spelling, the query matches nothing scoped: its origin must be canonical.
+    const auto raw = builtin->find("anthropic.messages", "https://API.anthropic.com", model);
+    CHECK(!raw.entry || raw.entry->origins.empty());
+  }
+  // A realtime session opens at the canonical origin.
+  realtime::Setup live;
+  live.model = "test-realtime-model";
+  const auto wss = [&](std::string_view spelling) -> std::string {
+    auto loaded = descriptor::presets::try_openai_chat({.base_url = std::string(spelling)});
+    const auto* d = std::get_if<descriptor::ValidatedDescriptor>(&loaded);
+    if (!d) return "<refused>";
+    auto connection = realtime::connect(*d, live, key);
+    const auto* opened = std::get_if<realtime::Connection>(&connection);
+    return opened ? opened->url : std::string("<not opened>");
+  };
+  const auto canonical_wss = wss("https://api.openai.com");
+  CHECK(canonical_wss.starts_with("wss://api.openai.com/"));
+  for (const std::string_view spelling : {"https://api.openai.com:443", "https://API.OpenAI.com:443/"}) CHECK(wss(spelling) == canonical_wss);
   // A port that is not the default keeps the descriptor off the gateway's facts.
   const auto other_port = router("https://openrouter.ai:80");
   CHECK(other_port.loads && !other_port.gateway && other_port.embeddings_header == "<not sent>");

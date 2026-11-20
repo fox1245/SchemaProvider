@@ -238,10 +238,13 @@ class DescriptorPolicy final {
   const FamilyPolicy* family(std::string_view) const noexcept;
   // What the model catalogue says about `model` at `origin`: the family's defaults with the
   // matching entry's defaults over them, and the entry's limits. A model the catalogue does not
-  // know gets the family defaults and no limits; it is never refused for that.
+  // know gets the family defaults and no limits; it is never refused for that. Here and in every query below that takes
+  // an `origin`, the origin is compared byte for byte with the origins the policy and the catalogue list, so pass its
+  // canonical spelling (descriptor::canonical_origin), as a descriptor's base_url() is; another spelling matches nothing.
   const RequestDefaults& defaults(std::string_view family, std::string_view origin, std::string_view model) const noexcept;
   std::optional<std::uint64_t> output_limit(std::string_view family, std::string_view origin, std::string_view model) const noexcept;
   std::optional<std::uint64_t> input_limit(std::string_view family, std::string_view origin, std::string_view model) const noexcept;
+  // ModelCatalogue::find of the policy's catalogue, with `origin` canonical as above.
   ModelMatch model(std::string_view family, std::string_view origin, std::string_view model) const noexcept;
   const CatalogueSnapshot& catalogue() const noexcept { return catalogue_; }
   // This policy with another catalogue. The replay identity stays; the content digest changes.
@@ -293,9 +296,9 @@ class DescriptorPolicy final {
   std::string_view default_output_cap_member(std::string_view family, std::string_view origin) const noexcept;
   // What `family` does with a cache mark at `origin` for `model`: the first of the family's `cache` facts that matches.
   // nullopt when the family is not in the policy or no fact matches (a policy written before the facts existed): the
-  // policy then says nothing, and an encoder refuses a mark.
+  // policy then says nothing, and an encoder refuses a mark. `origin` is compared byte for byte: pass its canonical spelling (descriptor::canonical_origin), as a descriptor's base_url() is.
   std::optional<CacheCapabilities> cache_capabilities(std::string_view family, std::string_view origin, std::string_view model) const noexcept;
-  // The fact of a non-chat endpoint (`images`) at `origin`, or null.
+  // The fact of a non-chat endpoint (`images`) at `origin`, or null. `origin` is compared byte for byte: pass its canonical spelling (descriptor::canonical_origin), as a descriptor's base_url() is.
   const EndpointFact* endpoint(std::string_view endpoint, std::string_view origin) const noexcept;
   const std::vector<EndpointFact>& endpoints() const noexcept { return endpoints_; }
   // How the provider bills `operation` of the endpoint fact for `endpoint` at `origin`: Unstated when there is no such
@@ -308,7 +311,7 @@ class DescriptorPolicy final {
   // The credential scheme a chat call of `family` at `origin` sends the API key with: the first of the family's
   // `auth` facts that lists `origin`, else its last fact, which is for every origin. A policy that does not state
   // the facts for a family has the embedded policy's. Empty for a family the policy does not have. A descriptor's
-  // `connection.auth` wins over it (descriptor::auth_scheme).
+  // `connection.auth` wins over it (descriptor::auth_scheme). `origin` is compared byte for byte: pass its canonical spelling (descriptor::canonical_origin), as a descriptor's base_url() is.
   std::string_view auth_scheme(std::string_view family, std::string_view origin) const noexcept;
   // A provider limit of `family`'s encoder in force, by name: `document_title_chars`, `mcp_servers` and
   // `container_skills` for Messages; `transcription_vocabulary`, `audio_sample_rate` and `audio_bit_rate` for
@@ -316,7 +319,7 @@ class DescriptorPolicy final {
   // it does not state (the encoders refuse at the same value). nullopt for a family or a name that has no such limit.
   std::optional<std::uint64_t> limit(std::string_view family, std::string_view name) const noexcept;
   // The same for an endpoint fact at `origin`: `max_items` of the Anthropic and Google batch facts, the most requests
-  // one inline batch carries.
+  // one inline batch carries. `origin` is compared byte for byte: pass its canonical spelling (descriptor::canonical_origin), as a descriptor's base_url() is.
   std::optional<std::uint64_t> endpoint_limit(std::string_view endpoint, std::string_view origin, std::string_view name) const noexcept;
   // The family whose API a model listing belongs to, from the policy's `listings` facts (a policy that leaves a listing
   // out has the embedded policy's): the family whose credential scheme (`auth_scheme`) and Messages version header
@@ -327,7 +330,7 @@ class DescriptorPolicy final {
   // that states no `routes` for a family has the embedded policy's.
   const std::vector<RouteFact>& routes(std::string_view family) const noexcept;
   // The route fact for `family` at `origin`: the one that lists the origin, else the one without origins. Null when
-  // none applies, and then a descriptor there may have any valid pair of paths.
+  // none applies, and then a descriptor there may have any valid pair of paths. `origin` is compared byte for byte: pass its canonical spelling (descriptor::canonical_origin), as a descriptor's base_url() is.
   const RouteFact* route(std::string_view family, std::string_view origin) const noexcept;
  private:
   DescriptorPolicy() = default;

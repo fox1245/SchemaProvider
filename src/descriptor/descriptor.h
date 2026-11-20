@@ -103,13 +103,16 @@ LoadResult load_with_environment_headers(
     PolicySnapshot policy = {});
 bool valid_origin(std::string_view url);
 // The serialization (RFC 6454 section 6.2) of an origin valid_origin admits: the host's ASCII letters lower-cased, an
-// IPv6 literal kept in its brackets, a port that is the scheme's default (443 for https, 80 for http) left out and any
+// IPv6 literal in its brackets in its RFC 5952 text form (lower-case groups without leading zeros, the longest run of
+// two or more zero groups, the first of equal runs, as `::`), a port that is the scheme's default (443 for https, 80 for http) left out and any
 // other written as its decimal number, and no trailing slash. Empty when valid_origin refuses `url`. A descriptor holds
 // its base URL in this spelling (ValidatedDescriptor::base_url).
 std::string canonical_origin(std::string_view url);
 // True when `url` is an origin spelled as canonical_origin writes it. Every origin a policy, a catalogue or a listing
 // source names must be: it is compared byte for byte with a descriptor's base URL.
 bool canonical_origin_spelling(std::string_view url);
+// What a policy, catalogue or listing-source refusal of an origin in another spelling expects (ConfigError::expected).
+inline constexpr std::string_view canonical_origin_expected = "origin in its canonical spelling: lower-case host, no default port";
 // An origin-relative path as descriptor admission takes a literal one: segments of letters, digits, `-`, `_`,
 // `.`, `~` and `:`, none of them empty, `.` or `..`, and no query, URL escape or placeholder.
 bool valid_path(std::string_view path) noexcept;

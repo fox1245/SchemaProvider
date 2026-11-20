@@ -121,8 +121,64 @@ bool ipv6(std::string_view host) {
 }
 // Whether `url` is an origin a descriptor may name. Where it is and `canonical` is given, it receives the origin's
 // serialization (RFC 6454 section 6.2): the scheme as written (only lower-case `https://` and `http://` are taken),
-// the host with its ASCII letters lower-cased (an IPv6 literal in its brackets, not otherwise rewritten), and the port
+// the host with its ASCII letters lower-cased (an IPv6 literal in its brackets, in its RFC 5952 text form), and the port
 // as its decimal number unless it is the scheme's default, 443 or 80. A trailing slash is dropped.
+// The value of a hex digit ipv6() admits.
+unsigned hex_value(char c) {
+    if (digit(c)) return static_cast<unsigned>(c - '0');
+    return static_cast<unsigned>((c >= 'a' ? c - 'a' : c - 'A') + 10);
+}
+// The groups of a run of `:`-separated hex groups, written to `out` in order; their count.
+std::size_t ipv6_run(std::string_view run, unsigned* out) {
+    std::size_t count = 0;
+    while (!run.empty()) {
+        const auto colon = run.find(':');
+        unsigned value = 0;
+        for (const char c : run.substr(0, colon)) value = value * 16 + hex_value(c);
+        out[count++] = value;
+        if (colon == std::string_view::npos) break;
+        run.remove_prefix(colon + 1);
+    }
+    return count;
+}
+// The text form of an IPv6 literal ipv6() admits, as RFC 5952 section 4 writes it: each group in lower-case hex
+// without leading zeros, and the longest run of two or more zero groups (the first of equal runs) as `::`. A single
+// zero group is written `0`.
+std::string ipv6_text(std::string_view host) {
+    unsigned groups[8]{};
+    const auto compressed = host.find("::");
+    if (compressed == std::string_view::npos) {
+        ipv6_run(host, groups);
+    } else {
+        ipv6_run(host.substr(0, compressed), groups);
+        unsigned tail[8]{};
+        const auto count = ipv6_run(host.substr(compressed + 2), tail);
+        for (std::size_t i = 0; i < count; ++i) groups[8 - count + i] = tail[i];
+    }
+    std::size_t run_at = 8, run_length = 0;
+    for (std::size_t i = 0; i < 8;) {
+        if (groups[i]) { ++i; continue; }
+        std::size_t end = i;
+        while (end < 8 && !groups[end]) ++end;
+        if (end - i > run_length) { run_at = i; run_length = end - i; }
+        i = end;
+    }
+    if (run_length < 2) run_at = 8;
+    constexpr char digits[] = "0123456789abcdef";
+    std::string out;
+    for (std::size_t i = 0; i < 8; ++i) {
+        if (i == run_at) { out += "::"; i += run_length - 1; continue; }
+        if (!out.empty() && out.back() != ':') out += ':';
+        bool leading = true;
+        for (int shift = 12; shift >= 0; shift -= 4) {
+            const unsigned nibble = (groups[i] >> shift) & 15u;
+            if (leading && nibble == 0 && shift) continue;
+            leading = false;
+            out += digits[nibble];
+        }
+    }
+    return out;
+}
 bool origin(std::string_view url, bool https_only = false, std::string* canonical = nullptr) {
     bool secure = url.starts_with("https://");
     if (!secure && (https_only || !url.starts_with("http://"))) return false;
@@ -136,7 +192,7 @@ bool origin(std::string_view url, bool https_only = false, std::string* canonica
         if (close == std::string_view::npos) return false;
         host = authority.substr(1, close - 1);
         if (!ipv6(host)) return false;
-        loopback = host == "::1" || host == "0:0:0:0:0:0:0:1";
+        loopback = ipv6_text(host) == "::1";
         auto suffix = authority.substr(close + 1);
         if (!suffix.empty()) {
             if (suffix.front() != ':') return false;
@@ -175,7 +231,7 @@ bool origin(std::string_view url, bool https_only = false, std::string* canonica
         const bool bracketed = authority.front() == '[';
         *canonical = secure ? "https://" : "http://";
         if (bracketed) *canonical += '[';
-        *canonical += lower(host);
+        *canonical += bracketed ? ipv6_text(host) : lower(host);
         if (bracketed) *canonical += ']';
         if (has_port && number != (secure ? 443u : 80u)) *canonical += ':' + std::to_string(number);
     }
