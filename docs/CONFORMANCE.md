@@ -8,6 +8,23 @@ Scope: the cells and properties below cover the chat families and the artifacts 
 
 Current source scope is five typed buffered/SSE families, bounded prepare/start/complete lifecycle, owned nullable/raw outcomes, exact native binding and archive v3 custody, plus interface 4 controls, Responses cursor ownership and explicit Generate portable history. General sidecar fixture schema, constraints engine, generated support tables, SDK journal projection/kit, cross-origin equivalence and general Drop/Demote remain historical proposals. Generate's explicit imported-call sentinel is a narrow current path, not those historical treatments. WebSocket sessions have no chat cell; NeoGraph owns its outcome/checkpoint serializers.
 
+## 0.4.3 release record
+
+**Source.** The 0.4.3 release tree: interface revision 7, shared-library generation 7, with libsodium 1.0.22 (`SP_WITH_SODIUM=ON`). The sanitizer builds ran on git tree `531624973413526bef2d856797425f4d947d80b9`, the tree of `main` at `4d15b41` (after #215); the release commit changes from there version numbers and documents only, nothing under `src/`, `config/` or `cmake/`, and the Release build and the live matrix ran on the release commit itself. The native builds ran on Linux x86_64 (Ubuntu 24.04) with GCC 13.3, CMake 3.28, libcurl 8.5.0 and Node 24.19, on 2026-11-20, with `SP_BUILD_TESTS`, `SP_BUILD_CANARY` and `SP_BUILD_RUNTIME_TESTS` on and `SP_BUILD_BENCHMARKS` off (85 registered entries).
+
+| Build | Result |
+|---|---|
+| Release | 85 of 85 registered entries passed |
+| ASan+UBSan, RelWithDebInfo | 84 passed, none failed; `native_archive_key_residue` skipped because its scan does not run under an instrumented allocator, as in the earlier sanitizer cohorts. No AddressSanitizer, UndefinedBehaviorSanitizer or LeakSanitizer report |
+| TSan, RelWithDebInfo | 84 passed, none failed; `native_archive_key_residue` skipped for the same reason. No ThreadSanitizer report. The entries ran under the `setarch -R` runner |
+
+- **CI.** The project's CI (the native tests on macOS with libsodium, the installed custody consumer and a build without libsodium, the single-thread WebAssembly job, and CodeQL) passed on the head of each pull request merged since 0.4.2 (#206 to #215). CodeQL did not start on #212; it passed on the push of its merge to `main`.
+- **Live.** On 2026-11-20 the live matrix of the 0.4.1 record ran on the release build, with the same cells, models and settings, retries off: 58 passed and 1 failed. The failure is the Responses custody cell at reasoning effort low, as in the 0.4.1 and 0.4.2 records (the model returned no encrypted reasoning); the same cell at effort medium passed. The same day, through the routing gateway and at the providers' own origins, with price layers written from the providers' pricing pages:
+  - two-item batches at Anthropic (`claude-haiku-4-5`, inline), Google (`gemini-3.5-flash-lite`, inline) and OpenAI (`gpt-5-nano`, uploaded file): each ended and its estimate at the batch rates (42,500, 5,950 and 4,825 nano-USD) was within its bound;
+  - a chat request with image output at the routing gateway (`google/gemini-3.1-flash-lite-image`): bound 45,008,000 nano-USD over a reported 33,602,250, where the bound before #210 was 1,980,000;
+  - embeddings at the routing gateway with `provider.max_price.prompt` 0.03 and 0.02: bound 327,680 over a reported 380, the second `pinned`; a cap of 0 gave no bound and the gateway refused it.
+- **Not run here.** The installed-consumer configurations and the WebAssembly suite ran only in CI; aarch64, Windows and HTTP/3 were not run for this record. Video jobs have no live cell in the matrix (measured separately: 0.02 USD per second at 480p, reported only in the final poll).
+
 ## 0.4.2 release record
 
 **Source.** The 0.4.2 release tree: interface revision 7, shared-library generation 7, with libsodium 1.0.22 (`SP_WITH_SODIUM=ON`). Every build below ran on git tree `e42f09afd8d8f5d53c1bdf54b7d732de92b1cadc`, the tree of `main` at `16325f7` (after #202); the release commit changes from there version numbers and documents only, nothing under `src/`, `config/` or `cmake/`. The native builds ran on Linux x86_64 (Ubuntu 24.04) with GCC 13.3, CMake 3.28, libcurl 8.5.0 and Node 24.19, on 2026-11-20. Each native build configures the test suite with `SP_BUILD_TESTS`, `SP_BUILD_CANARY` and `SP_BUILD_RUNTIME_TESTS` on and `SP_BUILD_BENCHMARKS` off, which registers 85 entries (the seven `provider_benchmark_*` smoke entries of the 0.4.1 record are not among them).
