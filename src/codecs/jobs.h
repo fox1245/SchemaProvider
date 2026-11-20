@@ -9,6 +9,7 @@
 #include <variant>
 #include <vector>
 
+namespace sp::reason { struct Reason; }
 namespace sp::jobs {
 struct Handle {
   // The endpoint that started the job (`videos`), and the origin it was submitted to.
@@ -73,7 +74,7 @@ class StateCodec final : public endpoints::Codec {
              std::string job = {});
   bool buffered(std::string_view body, Close close) override;
  private:
-  bool fail(ErrorKind, std::string);
+  bool fail(ErrorKind, const reason::Reason&);
   bool emit(const Event&);
   const descriptor::ValidatedDescriptor& descriptor_;
   Accumulator& accumulator_;
@@ -87,7 +88,7 @@ class ContentCodec final : public endpoints::Codec {
   ContentCodec(Accumulator&, SemanticLimits = {}, bool documents = false);
   bool buffered(std::string_view body, Close close) override;
  private:
-  bool fail(ErrorKind, std::string);
+  bool fail(ErrorKind, const reason::Reason&);
   bool emit(const Event&);
   Accumulator& accumulator_;
   SemanticLimits limits_;
