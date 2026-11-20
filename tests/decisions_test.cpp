@@ -3,6 +3,7 @@
 #include "descriptor/descriptor.h"
 #include "descriptor/policy.h"
 #include "json/json.h"
+#include "sp/config_defaults.h"
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -201,6 +202,39 @@ void assets() {
   edit = request;
   edit.extensions = document(R"({"assets":{}})");
   refuse(router, edit, ErrorKind::InvalidRequest, "request.decisions.options_schema_invalid");
+  // The formats come from the policy fact, not from code: a fact that maps WebP to `webp` sends a WebP asset with that
+  // format, and one that states none refuses every asset.
+  {
+    const auto with_formats = [&](std::string_view member) {
+      auto parsed = json::parse(config_defaults::descriptor_policy_json);
+      CHECK(std::holds_alternative<json::Document>(parsed));
+      std::string text = "{";
+      for (auto entry : std::get<json::Document>(parsed).root().members()) {
+        if (text.size() > 1) text += ',';
+        text += json::quote(entry.key) + ":" +
+                (entry.key == "endpoints" ? R"([{"endpoint":"decisions","shape":"openrouter","origins":["https://openrouter.ai"],"paths":{"decide":"/api/alpha/decisions"})" +
+                                                std::string(member) + "}]"
+                                          : std::string(entry.value.dump()));
+      }
+      auto policy = descriptor::load_policy(text + "}", config_defaults::codec_defaults_json);
+      CHECK(std::holds_alternative<descriptor::PolicySnapshot>(policy));
+      auto loaded = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"assets-fixture","family":"openai.chat","connection":{"base_url":"https://openrouter.ai","paths":{"buffered":"/api/v1/chat/completions","streaming":"/api/v1/chat/completions"}}})",
+                                     std::get<descriptor::PolicySnapshot>(std::move(policy)));
+      CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
+      return std::get<descriptor::ValidatedDescriptor>(std::move(loaded));
+    };
+    const auto custom = with_formats(R"(,"asset_formats":{"image/webp":"webp"})");
+    auto webp = base();
+    webp.assets = {asset("w", "image/webp", "UklGRgAAAABXRUJQ")};
+    const auto sent_body = document(encoded(custom, webp).body);
+    const auto sent = sent_body->root().get("assets").get("w");
+    CHECK(sent.get("format").as_string() == "webp" && sent.get("data_base64").as_string() == "UklGRgAAAABXRUJQ");
+    // The fact lists WebP only, so a PNG has no format.
+    auto picture = base();
+    picture.assets = {asset("p", "image/png", png)};
+    refuse(custom, picture, ErrorKind::Unsupported, "request.decisions.asset_unsupported");
+    refuse(with_formats(""), picture, ErrorKind::Unsupported, "request.decisions.asset_unsupported");
+  }
   // Money: the call bills input tokens up to the model's input limit however they are written, so an asset counts as
   // the same image placed in `state` does; neither adds a quantity of its own.
   {

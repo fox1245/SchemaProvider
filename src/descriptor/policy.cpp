@@ -820,7 +820,7 @@ class PolicyLoader {
           fail("/endpoints/billing", "none, model, carried or unpriced");
         };
         for (auto e : endpoints.elements()) {
-          closed(e, {"endpoint","shape","origins","paths"}, "/endpoints", {"options","auth","charge_on_accept","headers","keep","audio","close_codes","max_response_bytes","accepted_audio","max_part_bytes","billing","carried_tier","max_items","output_cap","max_results"});
+          closed(e, {"endpoint","shape","origins","paths"}, "/endpoints", {"options","auth","charge_on_accept","headers","keep","audio","close_codes","max_response_bytes","accepted_audio","max_part_bytes","billing","carried_tier","max_items","output_cap","max_results","asset_formats"});
           EndpointFact fact{text(e.get("endpoint"), "/endpoints/endpoint"), text(e.get("shape"), "/endpoints/shape"),
                             strings(e.get("origins"), "/endpoints/origins")};
           const auto operations = operations_of(fact.endpoint, fact.shape);
@@ -888,6 +888,22 @@ class PolicyLoader {
                 fail("/endpoints/accepted_audio/max_bytes", "a positive size within the audio admission ceiling");
             }
             fact.accepted_audio = std::move(input);
+          }
+          if (const auto formats = e.get("asset_formats"); formats.valid()) {
+            if (fact.endpoint != "decisions" || fact.shape != "openrouter") fail("/endpoints/asset_formats", "an OpenRouter decisions fact");
+            if (!formats.is_object() || !formats.size() || formats.size() > 32) fail("/endpoints/asset_formats", "one to 32 image MIME types");
+            const auto word = [](char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'); };
+            for (auto member : formats.members()) {
+              std::string mime(member.key);
+              auto name = text(member.value, "/endpoints/asset_formats");
+              const auto subtype = std::string_view(mime).substr(std::min<std::size_t>(mime.size(), 6));
+              if (!mime.starts_with("image/") || subtype.empty() || subtype.size() > 64 ||
+                  !std::all_of(subtype.begin(), subtype.end(), [&](char c) { return word(c) || c == '-' || c == '.' || c == '+' || c == '_'; }))
+                fail("/endpoints/asset_formats", "lowercase image MIME essences");
+              if (name.empty() || name.size() > 16 || !std::all_of(name.begin(), name.end(), word))
+                fail("/endpoints/asset_formats", "format names of lowercase letters and digits");
+              fact.asset_formats.emplace_back(std::move(mime), std::move(name));
+            }
           }
           if (e.get("keep").valid()) {
             fact.keep = strings(e.get("keep"), "/endpoints/keep");

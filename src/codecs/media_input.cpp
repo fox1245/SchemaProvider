@@ -93,10 +93,9 @@ std::optional<Error> admit(const descriptor::ValidatedDescriptor& descriptor, co
   return std::nullopt;
 }
 
-std::optional<std::string_view> asset_image_format(std::string_view mime) noexcept {
-  struct Format { std::string_view mime, name; };
-  static constexpr Format formats[]{{"image/png", "png"}, {"image/jpeg", "jpg"}};
-  for (const auto& format : formats) if (lower_equal(format.mime, mime_essence(mime))) return format.name;
+std::optional<std::string_view> asset_format(const descriptor::EndpointFact& fact, std::string_view mime) noexcept {
+  const auto essence = mime_essence(mime);
+  for (const auto& [type, name] : fact.asset_formats) if (lower_equal(type, essence)) return std::string_view(name);
   return std::nullopt;
 }
 
