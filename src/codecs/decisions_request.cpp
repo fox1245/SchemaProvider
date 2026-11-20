@@ -1,4 +1,5 @@
 #include "codecs/decisions.h"
+#include "codecs/media_input.h"
 #include "codecs/reason.h"
 #include "descriptor/policy.h"
 #include "descriptor/value_schema.h"
@@ -66,6 +67,19 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
     if (question.when_true && (!guidance(question.when_true, true) || !guidance(question.when_false, true)))
       return bad(reason::decisions_request::guidance_invalid);
   }
+  if (!request.assets.empty()) {
+    if (openai) return reason::error(ErrorKind::Unsupported, reason::decisions_request::assets_unsupported);
+    std::set<std::string_view> keys;
+    for (const auto& asset : request.assets) {
+      if (asset.key.empty() || !media_input::valid_utf8(asset.key)) return bad(reason::decisions_request::asset_key_invalid);
+      if (!keys.insert(asset.key).second) return bad(reason::decisions_request::asset_key_duplicate);
+      // The member holds inline images; PNG and JPEG are the formats it names.
+      if (asset.media.kind != MediaKind::Image || asset.media.source != MediaSource::Inline)
+        return reason::error(ErrorKind::Unsupported, reason::decisions_request::asset_unsupported);
+      if (auto error = media_input::admit(descriptor, asset.media)) return *error;
+      if (!media_input::asset_image_format(asset.media.mime)) return reason::error(ErrorKind::Unsupported, reason::decisions_request::asset_unsupported);
+    }
+  }
   if (request.extensions) {
     if (!fact->options) return reason::error(ErrorKind::Unsupported, reason::decisions_request::options_not_admitted);
     if (!request.extensions->root().is_object() || descriptor::check_value(*fact->options, request.extensions->root()))
@@ -126,6 +140,17 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
     out.raw("}");
   }
   out.raw(openai ? "]" : "}");
+  if (!request.assets.empty()) {
+    out.raw(",\"assets\":{");
+    for (std::size_t i = 0; i < request.assets.size(); ++i) {
+      const auto& asset = request.assets[i];
+      if (i) out.raw(",");
+      // An admitted inline image has canonical base64 and a MIME type that has a format name.
+      out.quoted(asset.key).raw(":{\"type\":\"image\",\"format\":").quoted(*media_input::asset_image_format(asset.media.mime))
+          .raw(",\"data_base64\":").quoted(*asset.media.data).raw("}");
+    }
+    out.raw("}");
+  }
   if (request.extensions) for (auto member : request.extensions->root().members()) out.raw(",").quoted(member.key).raw(":").value(member.value, 1);
   out.raw("}");
   if (!out.ok()) return reason::error(ErrorKind::ResourceLimit, reason::decisions_request::json_limit);

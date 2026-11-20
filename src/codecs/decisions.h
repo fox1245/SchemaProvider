@@ -33,6 +33,14 @@ struct Question {
   // A predicate's guidance for a true and a false answer, both or neither (OpenRouter).
   std::shared_ptr<const json::Document> when_true{}, when_false{};
 };
+// An image sent once under the OpenRouter top-level `assets` member, keyed by `key`. The service resolves the key
+// wherever `input` (the `state`) or a question's guidance writes it, as a whole string and, at the models that read
+// them, inside longer text; the SDK does not read the text, so it does not check that a key is referred to, and the
+// service refuses a request with an asset nothing refers to. The image is inline PNG or JPEG data.
+struct Asset {
+  std::string key;
+  Media media;
+};
 struct Request {
   std::string model;
   // The evidence: OpenAI `input` (a string or message items), OpenRouter `state` (a string, object or array).
@@ -40,6 +48,8 @@ struct Request {
   std::vector<Question> questions;
   // Members the endpoint's policy fact admits (OpenAI `safety_identifier`, OpenRouter `provider`), sent as given.
   std::shared_ptr<const json::Document> extensions{};
+  // OpenRouter only; empty sends no `assets` member. Keys are non-empty and unique.
+  std::vector<Asset> assets{};
 };
 struct Answer {
   std::string name;

@@ -1293,11 +1293,16 @@ inline constexpr Reason predicate_guidance_unsupported{"request.decisions.predic
 inline constexpr Reason options_not_admitted{"request.decisions.options_not_admitted", "the decision endpoint admits no options"};
 inline constexpr Reason options_schema_invalid{"request.decisions.options_schema_invalid", "decision options do not match the policy's schema"};
 inline constexpr Reason json_limit{"request.decisions.json_limit", "decision request exceeds JSON limits"};
+inline constexpr Reason assets_unsupported{"request.decisions.assets_unsupported", "decision assets are OpenRouter only"};
+inline constexpr Reason asset_key_invalid{"request.decisions.asset_key_invalid", "a decision asset key is a non-empty UTF-8 string"};
+inline constexpr Reason asset_key_duplicate{"request.decisions.asset_key_duplicate", "decision asset keys need to be unique"};
+inline constexpr Reason asset_unsupported{"request.decisions.asset_unsupported", "a decision asset is an inline PNG or JPEG image"};
 // Every constant of the source, for the enumeration test.
 inline constexpr Reason all[]{
     endpoint_not_admitted, path_missing, model_and_questions_required, input_invalid, names_invalid, guidance_invalid,
     box_unsupported, options_count_invalid, option_invalid, option_values_duplicate, predicate_guidance_invalid,
-    predicate_guidance_unsupported, options_not_admitted, options_schema_invalid, json_limit,
+    predicate_guidance_unsupported, options_not_admitted, options_schema_invalid, json_limit, assets_unsupported,
+    asset_key_invalid, asset_key_duplicate, asset_unsupported,
 };
 }  // namespace decisions_request
 namespace embeddings {
