@@ -676,7 +676,8 @@ void listed_override_bounds() {
     CHECK(merged.entries.size() == 1 && merged.entries[0].pricing.empty());
     CHECK((merged.withheld == std::vector<WithheldUnit>{{"vendor/m", "completion"}, {"vendor/m", "input_cache_read"}, {"vendor/m", "prompt"}}));
     // Two copies of an id that price a unit with the same bands keep the dearer price of each; a unit whose bands differ
-    // between the copies, or that one copy leaves out, is not claimed (with the units its tokens would be billed at).
+    // between the copies, or that one copy leaves out, is not claimed (with the units its tokens would be billed at); a member
+    // no price unit reads (`image`) stays at a variable price instead.
     auto copies = parse_listing(Listing::OpenRouter, R"({"data":[)"
         R"({"id":"vendor/m","pricing":{"prompt":"0.000002","completion":"0.000004","input_cache_read":"0.0000002","image":"0.01",)"
         R"("overrides":[{"min_prompt_tokens":1000,"prompt":"0.000003"}]}},)"
@@ -684,7 +685,7 @@ void listed_override_bounds() {
         R"("overrides":[{"min_prompt_tokens":1000,"prompt":"0.000004"},{"min_prompt_tokens":2000,"completion":"0.000006"}]}}]})", "https://openrouter.ai");
     const auto& dearer = std::get<ListingPage>(copies);
     CHECK(dearer.entries.size() == 1 &&
-          dearer.entries[0].pricing == (Prices{{"input_cache_read", "0.0000002"}, {"prompt", "0.000002"}, {"prompt+1000", "0.000004"}}));
+          dearer.entries[0].pricing == (Prices{{"image", "-1"}, {"input_cache_read", "0.0000002"}, {"prompt", "0.000002"}, {"prompt+1000", "0.000004"}}));
     CHECK((dearer.withheld == std::vector<WithheldUnit>{{"vendor/m", "completion"}, {"vendor/m", "image"}}));
     // The generated entries load as a catalogue.
     CHECK(std::holds_alternative<CatalogueSnapshot>(make_catalogue(widest.entries)));

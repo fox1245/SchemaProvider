@@ -390,18 +390,19 @@ void read_ceilings(Transport& transport, const RefreshRequest& request, const de
     // An endpoints request that fails keeps the ceiling `previous` had for the model.
     const auto keep_previous = [&](std::string reason) {
       auto units = previous_ceiling(request.previous, id, plan.origin);
-      // A kept ceiling below a token price this listing gives for the model bounds nothing: it is not kept.
-      PriceUnits stale;
-      for (auto unit = units.begin(); unit != units.end();) {
-        const bool input = unit->first == ceiling_units[Input], output = unit->first == ceiling_units[Output];
-        const auto rate = pricing::per_million(unit->second);
-        if ((input || output) && (!rate || pricing::ceiling_below_listed(entry, input ? pricing::TokenSide::Input : pricing::TokenSide::Output, *rate))) {
-          stale.push_back(std::move(*unit));
-          unit = units.erase(unit);
-        } else ++unit;
+      // A kept ceiling below a token price this listing gives for the model bounds nothing, and half a ceiling is no
+      // better: the whole previous ceiling is dropped when either side is stale.
+      bool stale = false;
+      for (const auto& unit : units) {
+        const bool input = unit.first == ceiling_units[Input], output = unit.first == ceiling_units[Output];
+        const auto rate = pricing::per_million(unit.second);
+        stale = stale || ((input || output) &&
+                          (!rate || pricing::ceiling_below_listed(entry, input ? pricing::TokenSide::Input : pricing::TokenSide::Output, *rate)));
       }
+      PriceUnits dropped;
+      if (stale) dropped = std::exchange(units, PriceUnits{});
       gap({}, {}, std::move(reason), !units.empty() && hold(entry, units));
-      for (const auto& held : stale) gap(held.first, {}, "kept ceiling is below a price the listing gives");
+      for (const auto& unit : dropped) gap(unit.first, {}, "kept ceiling is dropped: a side of it is below a price the listing gives");
     };
     const auto now = std::chrono::steady_clock::now();
     if (now >= deadline) { keep_previous("refresh deadline passed"); continue; }

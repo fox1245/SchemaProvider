@@ -2295,13 +2295,13 @@ void hostile_route_models() {
 }
 // The prices a listing gives beyond tokens (#205). A gateway chat bound reads the route ceiling; a listing member that
 // prices something the ceiling does not cover, for something the request carries, leaves it without a total.
-descriptor::CatalogueSnapshot listed_catalogue(std::string_view listing, std::string_view ceiling_output) {
+descriptor::CatalogueSnapshot listed_catalogue(std::string_view listing, std::string_view ceiling_output, std::string_view ceiling_input = "0.0000003") {
   auto parsed = descriptor::parse_listing(descriptor::Listing::OpenRouter, listing, "https://openrouter.ai");
   if (auto* error = std::get_if<descriptor::ConfigError>(&parsed)) throw std::runtime_error("listing refused: " + error->expected);
   std::vector<descriptor::CatalogueEntry> entries;
   for (auto& entry : std::get<descriptor::ListingPage>(parsed).entries) {
     // What a refresh writes from the endpoints listing (transport/catalogue_refresh.cpp price_members).
-    entry.pricing.emplace_back("ceiling_input", "0.0000003");
+    entry.pricing.emplace_back("ceiling_input", std::string(ceiling_input));
     entry.pricing.emplace_back("ceiling_output", std::string(ceiling_output));
     std::sort(entry.pricing.begin(), entry.pricing.end());
     entries.push_back(std::move(entry));
@@ -2313,7 +2313,7 @@ descriptor::CatalogueSnapshot listed_catalogue(std::string_view listing, std::st
 void worst_case_listed_members() {
   const std::string_view listing = R"({"data":[
     {"id":"vendor/zz-image-out","context_length":32768,"architecture":{"input_modalities":["text","image"],"output_modalities":["image","text"]},
-     "pricing":{"prompt":"0.0000003","completion":"0.0000015","image_output":"0.00003","image":"0.0001","web_search":"0.01"}},
+     "pricing":{"prompt":"0.0000003","completion":"0.0000015","image_output":"0.00003","image":"0.0001","web_search":"0.01","image_token":"0.00002"}},
     {"id":"vendor/zz-free-image","context_length":32768,"architecture":{"input_modalities":["text","image"],"output_modalities":["text"]},
      "pricing":{"prompt":"0.0000003","completion":"0.0000015","image":"0","web_search":"0"}},
     {"id":"vendor/zz-variable-image","context_length":32768,"architecture":{"input_modalities":["text","image"],"output_modalities":["text"]},
@@ -2331,8 +2331,9 @@ void worst_case_listed_members() {
           descriptor::listed_members[2].feature == descriptor::ListedFeature::ImageInput &&
           descriptor::listed_members[3].member == "web_search" && descriptor::listed_members[3].feature == descriptor::ListedFeature::WebSearch);
   }
-  // The ceiling a refresh writes covers the image output tokens (the endpoints' `image_output` is on the output side).
-  const auto c = listed_catalogue(listing, "0.00003");
+  // The ceiling a refresh writes covers the image output tokens (the endpoints' `image_output` is on the output side) and
+  // the image tokens (`image_token`, on both): 0.00002 on the input side, 0.00003 on the output side.
+  const auto c = listed_catalogue(listing, "0.00003", "0.00002");
   auto gateway = client_of(openrouter_chat());
   const auto cost = [&](chat::Request request) {
     runtime::WorstCaseOptions options;
@@ -2341,12 +2342,13 @@ void worst_case_listed_members() {
   };
   auto image_request = chat_request("vendor/zz-image-out", 1120);
   image_request.modalities = {chat::OutputModality::Text, chat::OutputModality::Image};
-  // 1120 image output tokens bill at `image_output` 0.00003 (33'600'000 nano-USD), the input at the ceiling 0.0000003.
+  // 1120 image output tokens bill at `image_output` 0.00003 (33'600'000 nano-USD), the input at the ceiling 0.00002.
   auto wc = cost(image_request);
-  CHECK(wc.total && wc.total->nano_usd == 1000u * 300u + 1120u * 30'000u && wc.pin && wc.pin->completion_nano_usd == 30'000'000'000u);
+  CHECK(wc.total && wc.total->nano_usd == 1000u * 20'000u + 1120u * 30'000u && wc.pin && wc.pin->completion_nano_usd == 30'000'000'000u &&
+        wc.pin->prompt_nano_usd == 20'000'000'000u);
   // A ceiling written before `image_output` was listed (or kept from an earlier refresh) is below the price the entry
   // lists on that side: it bounds nothing, so the request has no total, and neither has the estimate at the ceiling.
-  const auto low = listed_catalogue(listing, "0.0000015");
+  const auto low = listed_catalogue(listing, "0.0000015", "0.00002");
   runtime::WorstCaseOptions options;
   options.measured_input_tokens = 1000;
   wc = runtime::worst_case_cost(prepared_ok(gateway, image_request), *low, options);
@@ -2359,7 +2361,30 @@ void worst_case_listed_members() {
   auto estimate = pricing::estimate(*low, "openai.chat", "https://openrouter.ai", image_model, spent, {}, true);
   CHECK(!estimate.total && estimate.unpriced == std::vector<std::string>({"ceiling"}));
   estimate = pricing::estimate(*c, "openai.chat", "https://openrouter.ai", image_model, spent, {}, true);
-  CHECK(estimate.total && estimate.total->nano_usd == 1000u * 300u + 1120u * 30'000u);
+  CHECK(estimate.total && estimate.total->nano_usd == 1000u * 20'000u + 1120u * 30'000u);
+  // The input side is checked the same way: a ceiling_input of 0.0000003 is below the listed image_token price 0.00002.
+  const auto input_low = listed_catalogue(listing, "0.00003", "0.0000003");
+  wc = runtime::worst_case_cost(prepared_ok(gateway, image_request), *input_low, options);
+  CHECK(!wc.total && has(wc, pricing::UnboundedBy::RouteCeiling, "vendor/zz-image-out") && wc.unbounded.size() == 1 &&
+        wc.unbounded[0].detail.find("ceiling_input") != std::string::npos);
+  estimate = pricing::estimate(*input_low, "openai.chat", "https://openrouter.ai", image_model, spent, {}, true);
+  CHECK(!estimate.total && estimate.unpriced == std::vector<std::string>({"ceiling"}));
+  // The reservation path: a price from dearest_price_of (or price_of) has no stale side, so the bound of that price
+  // reports the ceiling as absent, as does the entry's own bound.
+  for (const auto* catalogue : {&low, &input_low}) {
+    const auto& entry = *(*catalogue)->entry("vendor/zz-image-out");
+    const auto dearest = pricing::dearest_price_of(entry, {}, 1000);
+    CHECK((catalogue == &low ? !dearest.ceiling_output && dearest.ceiling_input : !dearest.ceiling_input && dearest.ceiling_output));
+    const auto reserved = pricing::upper_bound(dearest, {1000, 1120, true, {}});
+    CHECK(!reserved.total && reserved.unpriced == std::vector<std::string>({"ceiling"}));
+    const auto exact = pricing::price_of(entry);
+    CHECK(catalogue == &low ? !exact.ceiling_output : !exact.ceiling_input);
+    CHECK(!pricing::upper_bound(entry, {}, {1000, 1120, true, {}}).total);
+  }
+  // A ceiling that covers every listed token price keeps both sides.
+  CHECK(pricing::dearest_price_of(*c->entry("vendor/zz-image-out"), {}, 1000).ceiling_input == 20'000'000'000u &&
+        pricing::dearest_price_of(*c->entry("vendor/zz-image-out"), {}, 1000).ceiling_output == 30'000'000'000u);
+  CHECK(pricing::upper_bound(pricing::dearest_price_of(*c->entry("vendor/zz-image-out"), {}, 1000), {1000, 1120, true, {}}).total.has_value());
   // The same through the entry's reservation bound.
   CHECK(!pricing::upper_bound(*low->entry("vendor/zz-image-out"), {}, {1000, 1120, true, {}}).total);
   CHECK(pricing::upper_bound(*c->entry("vendor/zz-image-out"), {}, {1000, 1120, true, {}}).total);
@@ -2429,6 +2454,37 @@ void worst_case_listed_members() {
     const auto refused = bound_of(request);
     CHECK(!refused.total && has(refused, pricing::UnboundedBy::ModelPrice, "vendor/zz-dearer"));
   }
+  // A member only an override lists has no base row to keep, and is kept at a variable price all the same: a threshold
+  // override with a discount, a threshold and a time window together, and for a member of the table and one it does not
+  // know. An entry with no room for the marker leaves every price out.
+  {
+    const auto marked = [&](std::string_view overrides, std::string_view member, bool image_request_fails) {
+      const std::string listing_text = R"({"data":[{"id":"vendor/zz-only","context_length":32768,"architecture":{"input_modalities":["text","image"],"output_modalities":["text"]},
+        "pricing":{"prompt":"0.0000003","completion":"0.0000015","overrides":)" + std::string(overrides) + "}}]}";
+      auto parsed = descriptor::parse_listing(descriptor::Listing::OpenRouter, listing_text, "https://openrouter.ai");
+      const auto& entry = std::get<descriptor::ListingPage>(parsed).entries.at(0);
+      CHECK(std::find(entry.pricing.begin(), entry.pricing.end(), std::pair<std::string, std::string>{std::string(member), "-1"}) != entry.pricing.end());
+      const auto only = listed_catalogue(listing_text, "0.0000015");
+      auto request = chat_request("vendor/zz-only", 100);
+      runtime::WorstCaseOptions measured;
+      measured.measured_input_tokens = 1000;
+      if (image_request_fails) {
+        CHECK(runtime::worst_case_cost(prepared_ok(gateway, request), *only, measured).total.has_value());
+        request.messages.back().media.push_back(Media::image("image/png", std::make_shared<const std::string>("iVBORw0KGgo=")));
+      }
+      CHECK(!runtime::worst_case_cost(prepared_ok(gateway, request), *only, measured).total);
+    };
+    marked(R"([{"min_prompt_tokens":1000,"image":"0.0002","discount":0.5}])", "image", true);
+    marked(R"([{"min_prompt_tokens":1000,"image":"0.0002"},{"utc_start":0,"utc_end":600,"image":"0.0003"}])", "image", true);
+    marked(R"([{"min_prompt_tokens":1000,"video":"0.0002","discount":0.5}])", "video", false);
+    // No room: 62 listed units beside the two token prices fill the entry, so the marker has none and nothing is kept.
+    std::string full = R"({"data":[{"id":"vendor/zz-full","context_length":32768,"architecture":{"input_modalities":["text"],"output_modalities":["text"]},"pricing":{"prompt":"0.0000003","completion":"0.0000015")";
+    for (int i = 0; i < 62; ++i) full += ",\"unit_" + std::to_string(i) + "\":\"0\"";
+    full += R"(,"overrides":[{"utc_start":0,"utc_end":600,"image":"0.0002"}]}}]})";
+    auto parsed = descriptor::parse_listing(descriptor::Listing::OpenRouter, full, "https://openrouter.ai");
+    const auto& page = std::get<descriptor::ListingPage>(parsed);
+    CHECK(page.entries.at(0).pricing.empty() && std::find(page.withheld.begin(), page.withheld.end(), descriptor::WithheldUnit{"vendor/zz-full", ""}) != page.withheld.end());
+  }
   // A listed member the table does not know, above zero, gives no total whatever the request carries; at zero it gives one.
   {
     const auto unknown = listed_catalogue(R"({"data":[
@@ -2442,6 +2498,10 @@ void worst_case_listed_members() {
     CHECK(!refused.total && has(refused, pricing::UnboundedBy::ModelPrice, "vendor/zz-video") &&
           refused.unbounded[0].detail.find("'video'") != std::string::npos);
     CHECK(runtime::worst_case_cost(prepared_ok(gateway, chat_request("vendor/zz-video-free", 100)), *unknown, measured).total.has_value());
+    // The entry's reservation bound reads the same member.
+    const auto reserved = pricing::upper_bound(*unknown->entry("vendor/zz-video"), {}, {1000, 100, true, {}});
+    CHECK(!reserved.total && reserved.unpriced == std::vector<std::string>({"video"}));
+    CHECK(pricing::upper_bound(*unknown->entry("vendor/zz-video-free"), {}, {1000, 100, true, {}}).total.has_value());
   }
   // A web plugin is unbounded as before, and an entry that lists a web search price is named too.
   auto plugin = chat_request("vendor/zz-image-out", 100);

@@ -95,8 +95,47 @@ Selection select(const descriptor::CatalogueEntry& entry, std::string_view servi
 }
 }  // namespace detail
 
+namespace {
+// The listed price members the entry keeps and no unit, ceiling or tool fee reads, above zero or at no fixed amount in
+// any tier or band, that the request may bill (without `facts`, only a member the table does not know): an item member whose feature the request carries
+// (descriptor::listed_members), and a member the table does not know, which is taken to price something the request
+// carries. A token member the table lists is covered by the route ceiling (listed_floor). No bound reads them, so a bound
+// over such a member has no total.
+std::vector<std::string_view> unread_members_carried(const descriptor::CatalogueEntry& entry, const RequestFacts* facts) {
+  std::vector<std::string_view> out;
+  for (const auto& [text_unit, text] : entry.pricing) {
+    const auto unit = parse_unit(text_unit);
+    if (!unit) continue;
+    const auto name = canonical(unit->name);
+    if (held(name) || name.starts_with(descriptor::item_unit_prefix) || name.starts_with(descriptor::item_ceiling_prefix)) continue;
+    const auto rate = per_million(text);
+    if (rate && !*rate) continue;
+    bool carried = true;  // a member the table does not know
+    for (const auto& member : descriptor::listed_members) {
+      if (member.member != name) continue;
+      switch (member.feature) {
+        case descriptor::ListedFeature::None: carried = false; break;
+        case descriptor::ListedFeature::ImageInput: carried = facts && facts->image_input; break;
+        case descriptor::ListedFeature::WebSearch: carried = facts && facts->plugins; break;
+      }
+      break;
+    }
+    if (carried && std::find(out.begin(), out.end(), name) == out.end()) out.push_back(name);
+  }
+  return out;
+}
+// Takes a side's ceiling off the price when the entry lists a token price above it (ceiling_below_listed): the price
+// then has no ceiling on that side, as an entry without one.
+void drop_stale_ceilings(ModelPrice& price, const descriptor::CatalogueEntry& entry, std::string_view service_tier, std::uint64_t input_tokens) {
+  if (price.ceiling_input && ceiling_below_listed(entry, TokenSide::Input, *price.ceiling_input, service_tier, input_tokens)) price.ceiling_input.reset();
+  if (price.ceiling_output && ceiling_below_listed(entry, TokenSide::Output, *price.ceiling_output, service_tier, input_tokens)) price.ceiling_output.reset();
+}
+}  // namespace
+
 ModelPrice price_of(const descriptor::CatalogueEntry& entry, std::string_view service_tier, std::uint64_t input_tokens) {
-  return select(entry, service_tier, input_tokens, false).price;
+  auto price = select(entry, service_tier, input_tokens, false).price;
+  drop_stale_ceilings(price, entry, service_tier, input_tokens);
+  return price;
 }
 namespace {
 // Whether the entry has prices in a service tier other than `service_tier`.
@@ -113,7 +152,9 @@ bool priced_in_other_tier(const descriptor::CatalogueEntry& entry, std::string_v
 ModelPrice dearest_price_of(const descriptor::CatalogueEntry& entry, std::string_view service_tier,
                             std::uint64_t input_tokens) {
   auto selected = select(entry, service_tier, input_tokens, true);
-  return selected.variable.empty() ? std::move(selected.price) : ModelPrice{};
+  if (!selected.variable.empty()) return ModelPrice{};
+  drop_stale_ceilings(selected.price, entry, service_tier, input_tokens);
+  return std::move(selected.price);
 }
 
 namespace {
@@ -508,15 +549,16 @@ Bound bounded(const ModelPrice& price, const detail::UnitKeys& variable, const B
 Bound upper_bound(const ModelPrice& price, const BoundRequest& request) { return bounded(price, {}, request); }
 
 Bound upper_bound(const descriptor::CatalogueEntry& entry, std::string_view service_tier, const BoundRequest& request) {
-  const auto selected = select(entry, service_tier, request.input_tokens, true);
-  auto out = bounded(selected.price, selected.variable, request);
+  auto selected = select(entry, service_tier, request.input_tokens, true);
   // A ceiling below a price the entry lists bounds nothing.
-  if (request.route_ceiling && out.total &&
-      ((selected.price.ceiling_input && ceiling_below_listed(entry, TokenSide::Input, *selected.price.ceiling_input, service_tier, request.input_tokens)) ||
-       (selected.price.ceiling_output && ceiling_below_listed(entry, TokenSide::Output, *selected.price.ceiling_output, service_tier, request.input_tokens)))) {
-    out.total.reset();
-    out.unpriced.emplace_back("ceiling");
-  }
+  drop_stale_ceilings(selected.price, entry, service_tier, request.input_tokens);
+  auto out = bounded(selected.price, selected.variable, request);
+  // A listed member that no unit reads and the table does not know, above zero, is priced at no amount the bound can read.
+  if (out.total)
+    if (const auto unknown = unread_members_carried(entry, nullptr); !unknown.empty()) {
+      out.total.reset();
+      for (const auto member : unknown) out.unpriced.emplace_back(member);
+    }
   return out;
 }
 
@@ -559,34 +601,6 @@ bool same_max_price(const OpenRouterMaxPrice& left, const OpenRouterMaxPrice& ri
   for (const auto member : kMaxPriceFields)
     if (left.*member != right.*member) return false;
   return true;
-}
-// The listed price members the entry keeps and no unit, ceiling or tool fee reads, above zero or at no fixed amount in
-// any tier or band, that the request may bill: an item member whose feature the request carries
-// (descriptor::listed_members), and a member the table does not know, which is taken to price something the request
-// carries. A token member the table lists is covered by the route ceiling (listed_floor). No bound reads them, so a bound
-// over such a member has no total.
-std::vector<std::string_view> unread_members_carried(const descriptor::CatalogueEntry& entry, const RequestFacts& facts) {
-  std::vector<std::string_view> out;
-  for (const auto& [text_unit, text] : entry.pricing) {
-    const auto unit = parse_unit(text_unit);
-    if (!unit) continue;
-    const auto name = canonical(unit->name);
-    if (held(name) || name.starts_with(descriptor::item_unit_prefix) || name.starts_with(descriptor::item_ceiling_prefix)) continue;
-    const auto rate = per_million(text);
-    if (rate && !*rate) continue;
-    bool carried = true;  // a member the table does not know
-    for (const auto& member : descriptor::listed_members) {
-      if (member.member != name) continue;
-      switch (member.feature) {
-        case descriptor::ListedFeature::None: carried = false; break;
-        case descriptor::ListedFeature::ImageInput: carried = facts.image_input; break;
-        case descriptor::ListedFeature::WebSearch: carried = facts.plugins; break;
-      }
-      break;
-    }
-    if (carried && std::find(out.begin(), out.end(), name) == out.end()) out.push_back(name);
-  }
-  return out;
 }
 // Why a unit has no rate: a row of it that applies has a price that is not a fixed amount.
 std::string variable_rate(const descriptor::CatalogueEntry& entry, std::string_view unit, std::string_view key) {
@@ -659,7 +673,7 @@ WorstCase worst_case(const WorstCaseInput& in, const descriptor::ModelCatalogue&
       continue;
     }
     // A price beyond tokens that no unit reads, for something the request carries: the bound would be a total below the bill.
-    if (const auto unread = unread_members_carried(*entry, facts); !unread.empty()) {
+    if (const auto unread = unread_members_carried(*entry, &facts); !unread.empty()) {
       for (const auto member : unread)
         block(UnboundedBy::ModelPrice, model,
               "catalogue entry '" + entry->id + "' lists a price for '" + std::string(member) + "' that no bound reads, and the request carries what it prices");
