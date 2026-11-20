@@ -1290,7 +1290,7 @@ void batch_estimates() {
   partial.partial.usage = request_usage(900, 30);
   partial.partial.model.requested = "vendor/batched-fee";
   e = runtime::batch_estimate(facts, family, {batches::Line{"a-2", partial}}, *batch_priced);
-  EXPECT(estimated(e), "total " + std::to_string(second) + " | entry 'vendor/batched-fee' requested 0 lower 1 lines a-2:nano_usd=vendor/batched-fee:" +
+  EXPECT(estimated(e), "total " + std::to_string(second) + " | assumed a-1:no_line | entry 'vendor/batched-fee' requested 0 lower 1 lines a-2:nano_usd=vendor/batched-fee:" +
                            std::to_string(second) + "x1000000");
   // Two lines of one request: refused, not priced twice.
   e = runtime::batch_estimate(facts, family, {answered("a-1", "vendor/batched", request_usage(120, 7)), answered("a-1", "vendor/batched", request_usage(120, 7))},
@@ -1469,10 +1469,12 @@ void openrouter_batch_bound() {
   // Not at the standard rates, and not at the listed batch rates either.
   const auto at_sync = rounded(300 * router_sync_in + 16 * router_sync_out) + rounded(router_input * router_sync_in + 50 * router_sync_out);
   const auto at_listed = rounded(300 * router_batch_in + 16 * router_batch_out) + rounded(router_input * router_batch_in + 50 * router_batch_out);
-  CHECK(bound.total && bound.total->nano_usd != at_sync && bound.total->nano_usd != at_listed && !bound.pin);
+  CHECK(bound.total && bound.total->nano_usd != at_sync && bound.total->nano_usd != at_listed);
+  // A route-ceiling bound, with no pin: the batch path takes none.
+  CHECK(bound.route_ceiling && !bound.pinned && !bound.pin);
   EXPECT(describe(runtime::worst_case_cost(ok(submit), *router_priced)),
          "total " + std::to_string(rounded(router_input * router_ceiling_in + 16 * router_ceiling_out) + second) +
-             " Derived CeilingCatalogueProduct | entry 'vendor/routed' model '' tokens 0/0/0 fees 0 invocations 0 attempts 1 tools 0 ceiling 0 pinned 0 pin 0");
+             " Derived CeilingCatalogueProduct | entry 'vendor/routed' model '' tokens 0/0/0 fees 0 invocations 0 attempts 1 tools 0 ceiling 1 pinned 0 pin 0");
   // The estimate: each line at the listed batch rates.
   const EndpointFacts facts = ok(submit).endpoint_facts();
   const auto l1 = rounded(120 * router_batch_in + 7 * router_batch_out), l2 = rounded(900 * router_batch_in + 30 * router_batch_out);
@@ -1481,6 +1483,18 @@ void openrouter_batch_bound() {
   EXPECT(estimated(e), "total " + std::to_string(l1 + l2) + " | assumed listed rates | entry 'vendor/routed' requested 0 lower 0 lines r-1:nano_usd=vendor/routed:" +
                            std::to_string(l1) + "x1000000 r-2:nano_usd=vendor/routed:" + std::to_string(l2) + "x1000000");
   EXPECT(joined(pricing::beyond_bound(bound, e)), "");
+  // A request without a line: the estimate may be below the bill, and names it.
+  EXPECT(estimated(runtime::batch_estimate(facts, family, {answered("r-1", "vendor/routed", request_usage(120, 7))}, *router_priced)),
+         "total " + std::to_string(l1) + " | assumed listed rates | assumed r-2:no_line | entry 'vendor/routed' requested 0 lower 1 lines r-1:nano_usd=vendor/routed:" +
+             std::to_string(l1) + "x1000000");
+  // A route ceiling is not a billed unit: standard ceilings without batch ones leave the estimate its total, and the
+  // bound none (vendor/listed-only below). A stale batch ceiling, below the listed batch rate, bounds nothing.
+  const auto stale = catalogue_of("{\"version\":1,\"models\":[" +
+      entry("vendor/stale", limits(router_input), {{"input", router_sync_in}, {"output", router_sync_out}, {"input/batch", router_batch_in},
+            {"output/batch", router_batch_out}, {"ceiling_input/batch", router_batch_in - 1}, {"ceiling_output/batch", router_ceiling_out}}) + "]}");
+  const auto stale_submit = router.prepare(batches::Submit{{{"r-1", chat::Request::simple("vendor/stale", "Say: alpha", 16)}}});
+  const auto stale_bound = runtime::endpoint_worst_case_cost(ok(stale_submit), *stale);
+  CHECK(!stale_bound.total && reasons_of(stale_bound).starts_with("RouteCeiling [r-1:vendor/stale]"));
   // Without the variant's route ceiling the router may pick any batch endpoint: no bound, and the estimate stands.
   const auto listed_only = router.prepare(batches::Submit{{{"r-1", chat::Request::simple("vendor/listed-only", "Say: alpha", 16)}}});
   EXPECT(reasons_of(runtime::endpoint_worst_case_cost(ok(listed_only), *router_priced)),

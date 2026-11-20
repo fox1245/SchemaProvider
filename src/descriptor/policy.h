@@ -157,12 +157,14 @@ struct EndpointFact {
 };
 // What a batch fact whose items go inline in one call of one endpoint (`items` of an OpenRouter batches fact) states
 // about them: the path the batch names for the requests of each family (its `endpoint`), the media input an item may
-// carry (the family's own media policy still applies), the plugins and the model variant suffixes the batch path
-// refuses.
+// carry (the family's own media policy still applies), the plugins, the model variant suffixes and the hosted tools
+// the batch path refuses.
 struct BatchItemsFact {
   std::vector<std::pair<std::string, std::string>> paths;  // family, path
   MediaPolicy media{};
   std::vector<std::string> refused_plugins{}, refused_variants{};
+  // The hosted tools the batch path does not run, by their wire type (responses::tool_type).
+  std::vector<std::string> refused_tools{};
 };
 // The path of one operation of an endpoint fact, if it has one.
 std::optional<std::string_view> endpoint_path(const EndpointFact&, std::string_view operation) noexcept;

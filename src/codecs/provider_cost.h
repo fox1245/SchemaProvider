@@ -66,14 +66,14 @@ inline CostStatus usd_alias_amount(json::Value primary, json::Value alias, bool 
     return CostStatus::Malformed;
   return CostStatus::Conflict;
 }
-inline ProviderReportedCost provider_cost(json::Value usage, const descriptor::ValidatedDescriptor& descriptor) {
+// The cost a usage object reports: in USD when `usd` (an OpenRouter origin), with the upstream members under Chat's
+// names first when `chat`, else under the input/output names first.
+inline ProviderReportedCost provider_cost(json::Value usage, bool usd, bool chat) {
   ProviderReportedCost result;
   const auto details = usage.get("cost_details"), byok = usage.get("is_byok");
   const auto total = usage.get("cost");
   if (!total.valid() && !details.valid() && !byok.valid()) return result;
-  const bool usd = descriptor::contains(descriptor.family_policy().openrouter_origins, descriptor.base_url());
   result.source = usd ? CostSource::OpenRouterUsd : CostSource::UnknownCurrency;
-  const bool chat = descriptor.family() == "openai.chat";
   const std::array<json::Value, 4> fields{total, details.get("upstream_inference_cost"),
       details.get(chat ? "upstream_inference_prompt_cost" : "upstream_inference_input_cost"),
       details.get(chat ? "upstream_inference_completions_cost" : "upstream_inference_output_cost")};
@@ -95,5 +95,9 @@ inline ProviderReportedCost provider_cost(json::Value usage, const descriptor::V
     else { result.byok_status = CostStatus::Malformed; result.quality = UsageQuality::Inconsistent; }
   }
   return result;
+}
+inline ProviderReportedCost provider_cost(json::Value usage, const descriptor::ValidatedDescriptor& descriptor) {
+  return provider_cost(usage, descriptor::contains(descriptor.family_policy().openrouter_origins, descriptor.base_url()),
+                       descriptor.family() == "openai.chat");
 }
 } // namespace sp::codecs

@@ -376,6 +376,41 @@ void openrouter_requests() {
   CHECK(refusal(router_chat(), batches::Submit{{{"c-1", with_media(Media::audio("audio/wav", std::make_shared<const std::string>("UklGRg==")))}}}) == "request.batches.item_media");
   CHECK(refusal(router_chat(), batches::Submit{{{"c-1", with_media(url_media(MediaKind::Video, "video/mp4", "https://example.com/v.mp4"))}}}) ==
         "request.batches.item_media");
+  // Media in a Chat request's typed messages is held to the same policy.
+  auto typed_image = chat_item("Describe it.");
+  typed_image.messages.back().media.push_back(Media::image("image/png", std::make_shared<const std::string>("iVBORw0KGgo=")));
+  CHECK(refusal(router_chat(), batches::Submit{{{"c-1", typed_image}}}) == "request.batches.item_media");
+  auto typed_audio = chat_item("Transcribe it.");
+  typed_audio.messages.back().media.push_back(Media::audio("audio/wav", std::make_shared<const std::string>("UklGRg==")));
+  CHECK(refusal(router_chat(), batches::Submit{{{"c-1", typed_audio}}}) == "request.batches.item_media");
+  auto typed_url = chat_item("Describe it.");
+  typed_url.messages.back().media.push_back(url_media(MediaKind::Image, "image/png", "https://example.com/shoe.png"));
+  CHECK(document(encoded(router_chat(), batches::Submit{{{"c-1", typed_url}}}).body)->root().get("requests").size() == 1);
+  // Hosted tools the batch path does not run, by their wire type.
+  auto searching = responses::Request::simple("vendor/model", "x", 16);
+  searching.hosted_tools = {responses::OpenRouterServerTool{"openrouter:web_search", nullptr}};
+  CHECK(refusal(router_responses(), batches::Submit{{{"r-1", searching}}}) == "request.batches.item_tool");
+  auto drawing = responses::Request::simple("vendor/model", "x", 16);
+  drawing.hosted_tools = {responses::ImageGenerationTool{}};
+  CHECK(refusal(router_responses(), batches::Submit{{{"r-1", drawing}}}) == "request.batches.item_tool");
+  auto routed_drawing = responses::Request::simple("vendor/model", "x", 16);
+  routed_drawing.hosted_tools = {responses::OpenRouterServerTool{"openrouter:image_generation", nullptr}};
+  CHECK(refusal(router_responses(), batches::Submit{{{"r-1", routed_drawing}}}) == "request.batches.item_tool");
+  // The provider sorts and the batch variant itself.
+  for (const auto* model : {"vendor/model:nitro", "vendor/model:floor", "vendor/model:batch"})
+    CHECK(refusal(router_chat(), batches::Submit{{{"c-1", chat_item("x", model)}}}) == "request.batches.item_variant");
+  // A callback is an https URL without credentials.
+  for (const auto* url : {R"("http://example.com/hook")", R"("https://user:secret@example.com/hook")", R"("https://")", R"(7)"}) {
+    auto callback = batches::Submit{{{"c-1", chat_item("x")}}};
+    callback.extensions = document(std::string(R"({"callback_url":)") + url + "}");
+    const auto reason = refusal(router_chat(), callback);
+    CHECK(reason == "request.batches.callback_invalid" || reason == "request.batches.options_invalid");
+  }
+  {
+    auto callback = batches::Submit{{{"c-1", chat_item("x")}}};
+    callback.extensions = document(R"({"callback_url":"https://user@example.com/hook"})");
+    CHECK(refusal(router_chat(), callback) == "request.batches.callback_invalid");
+  }
   // No cancel: refused for that reason. A batch is read, listed and deleted by id.
   CHECK(refusal(router_chat(), batches::Cancel{"batch_123"}) == "request.batches.cancel_unsupported");
   const auto get = encoded(router_chat(), batches::Get{"batch-1794949632-xDGJGOegxjgSVABzTiky"});
@@ -416,6 +451,14 @@ void openrouter_batches() {
   // A failed batch names why, and carries no results.
   const auto failed = std::get<batches::Batch>(batch_of(router_chat(), R"({"id":"batch_456","object":"batch","status":"failed","request_counts":{"total":2,"completed":0,"failed":0},"usage":null,"results":null,"error":{"message":"Batch request 'review-2' contains unsupported 'input_audio' content."}})"));
   CHECK(failed.status == jobs::Status::Failed && !failed.results_ready && !failed.usage.input_total);
+  CHECK(batch.usage.stage == UsageStage::Final);
+  // With the account's own provider key: the BYOK flag and the provider's inference estimate are kept (quickstart, BYOK).
+  const auto byok = std::get<batches::Batch>(batch_of(router_chat(), R"({"id":"batch_7","status":"completed","request_counts":{"total":1,"completed":1,"failed":0},"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12,"cost":0.0000004,"is_byok":true,"cost_details":{"upstream_inference_cost":0.000002}},"results":[]})"));
+  CHECK(byok.usage.provider_cost.is_byok == true && byok.usage.provider_cost.total && byok.usage.provider_cost.total->nano_usd == 400 &&
+        byok.usage.provider_cost.upstream_total && byok.usage.provider_cost.upstream_total->nano_usd == 2000);
+  // The usage of a batch still running may grow.
+  const auto running = std::get<batches::Batch>(batch_of(router_chat(), R"({"id":"batch_8","status":"in_progress","request_counts":{"total":2,"completed":1,"failed":0},"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12,"cost":0.0000004}})"));
+  CHECK(running.usage.stage == UsageStage::Partial && running.usage.input_total->value == 10);
   // The results are inline: there is no file to download.
   CHECK(refused(router_chat(), batches::Results{batch}) == ErrorKind::InvalidRequest);
   // A deletion names the batch and what each deletion target did.
@@ -442,6 +485,8 @@ void openrouter_batches() {
         page.next == "batch_123" && page.batches[0].raw);
   CHECK(std::get<batches::Page>(paged(R"({"object":"list","data":[],"first_id":null,"last_id":null,"has_more":false})")).next.empty());
   CHECK(std::get<Failure>(paged(R"({"object":"list","data":{}})")).error.reason == "batches.page.invalid");
+  CHECK(std::get<Failure>(paged(R"({"object":"list","data":[],"has_more":true})")).error.reason == "batches.page.cursor_missing");
+  CHECK(std::get<Failure>(paged(R"({"object":"list","data":[],"has_more":true,"last_id":""})")).error.reason == "batches.page.cursor_missing");
   CHECK(std::get<Failure>(paged(R"({"object":"list","data":[{"object":"batch"}]})")).error.reason == "batches.page.invalid");
 }
 

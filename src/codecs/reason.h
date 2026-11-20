@@ -1623,11 +1623,12 @@ inline constexpr Reason page_invalid{"batches.page.invalid", "a page of batches 
 inline constexpr Reason results_missing{"batches.results.missing", "the batch carries no results"};
 inline constexpr Reason results_family{"batches.results.family", "the results are decoded through the family of the batch's requests"};
 inline constexpr Reason results_custom_id{"batches.results.custom_id", "a result answers one item of the batch"};
+inline constexpr Reason page_cursor_missing{"batches.page.cursor_missing", "a page that says more follow names its last id"};
 // Every constant of the source, for the enumeration test.
 inline constexpr Reason all[]{
     endpoint_not_admitted, response_json_invalid, response_not_object, batch_id_required, delete_unconfirmed,
     line_failed, line_cancelled, line_expired, line_invalid, line_undecided, page_invalid, results_missing,
-    results_family, results_custom_id,
+    results_family, results_custom_id, page_cursor_missing,
 };
 }  // namespace batches
 namespace batches_request {
@@ -1667,6 +1668,8 @@ inline constexpr Reason item_output{"request.batches.item_output", "a batch item
 inline constexpr Reason item_media{"request.batches.item_media", "a batch item carries media of a kind or source the batch endpoint refuses"};
 inline constexpr Reason limit_invalid{"request.batches.limit_invalid", "a page of batches needs a positive limit"};
 inline constexpr Reason cursor_invalid{"request.batches.cursor_invalid", "a page cursor is a batch id"};
+inline constexpr Reason item_tool{"request.batches.item_tool", "a batch item uses a hosted tool the batch endpoint refuses"};
+inline constexpr Reason callback_invalid{"request.batches.callback_invalid", "a batch callback is an https URL without credentials"};
 // Every constant of the source, for the enumeration test.
 inline constexpr Reason all[]{
     model_path, endpoint_not_admitted, path_missing, items_required, items_limit, custom_id_invalid, item_family,
@@ -1674,7 +1677,7 @@ inline constexpr Reason all[]{
     endpoint_invalid, item_beta, one_model, model_invalid, size_limit, download_limit_invalid, origin_mismatch,
     errors_unsupported, results_missing, results_file_invalid, cancel_unsupported, file_unsupported,
     display_name_unsupported, item_endpoint, model_mismatch, item_variant, item_routing, item_fallbacks, item_plugin,
-    item_output, item_media, limit_invalid, cursor_invalid,
+    item_output, item_media, limit_invalid, cursor_invalid, item_tool, callback_invalid,
 };
 }  // namespace batches_request
 namespace stores {
