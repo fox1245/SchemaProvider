@@ -44,8 +44,8 @@ Error ended_early(const transport::WsResult& result, const configuration::Runtim
   }
   return session_error(ErrorKind::Transport, "runtime.realtime.closed");
 }
-// A provider ends a session that failed after the handshake with a close code of its own (a wrong key: Google 1007,
-// OpenAI 3000). The endpoint's fact names those codes and the HTTP status each stands for; the entry with the close
+// A provider ends a session that failed after the handshake with a close code of its own (Google 1007, invalid frame
+// payload data, which it also sends for a wrong key; OpenAI 3000 for a wrong key). The endpoint's fact names those codes and the HTTP status each stands for; the entry with the close
 // code decides, and the runtime error policy classifies the status. The close reason is the provider's free text and
 // decides nothing.
 std::optional<Error> ended_by_provider(const transport::WsResult& result, const std::vector<descriptor::CloseCodeFact>& closes,
