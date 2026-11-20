@@ -237,4 +237,56 @@ EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const EndpointCou
 // none); and "total" when the estimate's total is above the bound's. Empty when either has no total.
 std::vector<std::string> beyond_bound(const EndpointBound& bound, const EndpointEstimate& estimate);
 
+// The input tokens of one model response of a realtime session, by modality, as the host counts them: what the provider
+// reads again of the conversation so far (the last committed turn's input and its output, which the conversation keeps,
+// as the turns' usage reports them, less what the provider drops), plus what the host sends since. A count must not
+// understate its modality; none is checked.
+struct RealtimeInputTokens {
+  std::uint64_t text = 0, audio = 0, image = 0;
+};
+// One model response of a realtime session, as realtime_response_bound reads it (realtime::response_bound fills it from
+// the session's setup and the origin's realtime fact). `family`, `origin` and `model` select the catalogue entry as
+// ModelCatalogue::find does.
+struct RealtimeResponseInput {
+  std::string_view family, origin, model;
+  // The response may answer with audio (realtime::Setup::output names it); text is always among what it may bill.
+  bool audio_output = false;
+  // The cap on the response's output tokens, which counts its reasoning as the usage's output total does (the
+  // origin fact's `output_cap`). Unset: no cap.
+  std::optional<std::uint64_t> output_tokens;
+  // The session's usage counts thinking beside the output total (Google Live `thoughtsTokenCount`), so the output cap
+  // does not bound it, and `thinking_tokens` must state the most a response may think.
+  bool thinking_beside_output = false;
+  std::optional<std::uint64_t> thinking_tokens;
+  // The response's input in tokens. Unset: not stated.
+  std::optional<RealtimeInputTokens> input_tokens;
+  // New input audio stated in seconds instead of tokens. No catalogue or policy fact states how many audio tokens a
+  // second of audio is, so seconds above zero leave no bound: state the audio in `input_tokens`.
+  std::optional<std::uint64_t> audio_seconds;
+};
+// A bound on what one model response of a realtime session can bill, from the host's statement of its input, the
+// response's caps and the catalogue's prices; a stateless function of its arguments. A response is one model invocation:
+// a tool call ends it, and the answer after the tool's result is another response with a bound of its own. The bound is
+// the sum, rounded up once to whole nano-USD, of:
+// - text input tokens at the dearest of `input`, `cache_read`, `cache_write` and `cache_write_1h` (the estimate bills
+//   the cache reads among them at `cache_read`);
+// - audio input tokens at `input_audio`, and image input tokens at the dearer of `input_image` and the text rate (the
+//   estimate of a Google Live turn, whose usage names image tokens only in its prompt breakdown, bills them as text);
+// - the output cap at the dearest of `output`, `reasoning`, `output_image` and, when the response may answer with
+//   audio, `output_audio`;
+// - beside the output, `thinking_tokens` at the dearer of `reasoning` and `output`;
+// - the request fee once.
+// The rates are the dearest over every input band the stated input reaches. A modality with tokens whose rate the entry
+// does not list is `ModelPrice` with the unit as subject (an audio output without `output_audio` included), never priced
+// at another modality's rate, and so is a unit the bound reads with a row at a price that is not a fixed amount. Also
+// refused: no output cap (`OutputCap`), thinking beside the output with no cap on it (`OutputCap`, subject
+// `reasoning`), no stated input (`InputBound`), audio stated in seconds (`Quantity`, subject `input_audio`), no entry
+// or one without prices (`ModelPrice`, subject the model), an entry with no fixed price at the standard rates
+// (`TierPrice`), a route ceiling (`RouteCeiling`: a realtime origin is not a routing gateway), a listed price no unit
+// reads for something the response carries (`ModelPrice`), an item unit above zero or at no fixed amount (`Unmodeled`,
+// subject its key), and a bound past 64 bits (`Overflow`). With any reason there is no total and no lines. For a
+// committed turn whose usage is within the stated input and the caps, `estimate` with the same entry is at most this
+// total. Nothing here is a reservation or a ledger.
+EndpointBound realtime_response_bound(const RealtimeResponseInput& input, const descriptor::ModelCatalogue& catalogue);
+
 } // namespace sp::pricing

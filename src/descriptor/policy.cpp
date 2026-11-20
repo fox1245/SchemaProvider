@@ -788,7 +788,7 @@ class PolicyLoader {
           fail("/endpoints/billing", "none, model or carried");
         };
         for (auto e : endpoints.elements()) {
-          closed(e, {"endpoint","shape","origins","paths"}, "/endpoints", {"options","auth","charge_on_accept","headers","keep","audio","close_codes","max_response_bytes","accepted_audio","max_part_bytes","billing","carried_tier","max_items"});
+          closed(e, {"endpoint","shape","origins","paths"}, "/endpoints", {"options","auth","charge_on_accept","headers","keep","audio","close_codes","max_response_bytes","accepted_audio","max_part_bytes","billing","carried_tier","max_items","output_cap"});
           EndpointFact fact{text(e.get("endpoint"), "/endpoints/endpoint"), text(e.get("shape"), "/endpoints/shape"),
                             strings(e.get("origins"), "/endpoints/origins")};
           const auto operations = operations_of(fact.endpoint, fact.shape);
@@ -887,6 +887,21 @@ class PolicyLoader {
           // A realtime session (D8) pins the formats of its audio and names the close codes that report a failure.
           if (fact.endpoint != "realtime" && (e.get("audio").valid() || e.get("close_codes").valid()))
             fail("/endpoints", "audio formats and close codes on realtime endpoints only");
+          if (fact.endpoint != "realtime" && e.get("output_cap").valid()) fail("/endpoints/output_cap", "an output cap on realtime endpoints only");
+          // The option that caps a response's output tokens: a property of `options` that admits an integer.
+          if (const auto cap = e.get("output_cap"); cap.valid()) {
+            fact.output_cap = text(cap, "/endpoints/output_cap");
+            const auto integer_schema = [](const ValueSchema& schema) {
+              if (schema.kind == ValueSchema::Kind::Integer) return true;
+              return schema.kind == ValueSchema::Kind::OneOf &&
+                     std::any_of(schema.children.begin(), schema.children.end(), [](const ValueSchema& c) { return c.kind == ValueSchema::Kind::Integer; });
+            };
+            const auto* options = fact.options ? &*fact.options : nullptr;
+            const auto at = options ? std::find(options->names.begin(), options->names.end(), fact.output_cap) : std::vector<std::string>::const_iterator{};
+            if (!options || at == options->names.end() ||
+                !integer_schema(options->children[static_cast<std::size_t>(at - options->names.begin())]))
+              fail("/endpoints/output_cap", "a property of options that admits an integer");
+          }
           if (fact.endpoint == "realtime") {
             const auto audio = e.get("audio");
             if (!audio.valid()) fail("/endpoints/audio", "the audio formats of a realtime endpoint");

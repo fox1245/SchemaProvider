@@ -937,7 +937,8 @@ InterfaceContract core_interface_contract() noexcept {
       capability::OpenRouterRoutingMaxPrice | capability::ErrorReason | capability::PolicyAdmittedExtensions |
       capability::CompletionSecret | capability::PartCacheMarks | capability::ServedByUpstream |
       capability::TransportConnectionCache | capability::ModelControlFacts | capability::TypedToolChoice |
-      capability::RealtimeRuntimeDefaults | capability::ChatVoiceId | capability::PricedExtensions | capability::EndpointTierAndPin;
+      capability::RealtimeRuntimeDefaults | capability::ChatVoiceId | capability::PricedExtensions | capability::EndpointTierAndPin |
+      capability::RealtimeResponseBound;
   if (json::retained_size_contract() == 1) capabilities |= capability::RetainedJsonSize;
   if (custody_ops::available()) capabilities |= capability::HostArchiveCustody;
 #if defined(__unix__) || defined(__APPLE__) || defined(_WIN32)

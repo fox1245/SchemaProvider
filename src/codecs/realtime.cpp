@@ -8,6 +8,7 @@
 #include "json/json.h"
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <map>
 
 namespace sp::realtime {
@@ -557,5 +558,68 @@ std::unique_ptr<Codec> make_codec(const descriptor::ValidatedDescriptor& descrip
   if (fact->shape == "google") return std::make_unique<GoogleCodec>(*fact, limits);
   if (fact->shape == "openai") return std::make_unique<OpenAICodec>(*fact, limits);
   return nullptr;
+}
+
+EndpointFacts transcription_facts(const descriptor::ValidatedDescriptor& descriptor, const Setup& setup) {
+  constexpr std::string_view operation = "connect";
+  auto facts = endpoints::call_facts(descriptor, "realtime", operation, setup.model);
+  facts.dimensions = endpoints::dimensions(operation, {}, setup.extensions);
+  auto seconds = endpoints::requested("item:second", std::nullopt);
+  seconds.source = EndpointQuantity::Source::StatedSeconds;
+  facts.quantities.push_back(std::move(seconds));
+  facts.quantities.push_back(endpoints::input_limited("input"));
+  facts.quantities.push_back(endpoints::output_limited());
+  return facts;
+}
+
+pricing::EndpointBound response_bound(const descriptor::ValidatedDescriptor& descriptor, const Setup& setup, const ResponseInput& input,
+                                      const descriptor::ModelCatalogue& catalogue) {
+  pricing::EndpointBound out;
+  const auto block = [&](pricing::UnboundedBy by, std::string subject, std::string detail) {
+    out.unbounded.push_back({by, std::move(subject), std::move(detail)});
+    return out;
+  };
+  const auto* fact = fact_of(descriptor);
+  if (!fact) return block(pricing::UnboundedBy::Unmodeled, "realtime", "the origin has no realtime fact");
+  if (setup.extensions && (!fact->options || !setup.extensions->root().is_object() || descriptor::check_value(*fact->options, setup.extensions->root())))
+    return block(pricing::UnboundedBy::Unmodeled, "extensions", "the origin's realtime fact does not admit the setup's extensions");
+  if (descriptor::routed_gateway(descriptor))
+    return block(pricing::UnboundedBy::RouteCeiling, setup.model, "a realtime session at a routing gateway has no route ceiling to pin");
+  if (setup.output.empty()) {
+    const auto facts = transcription_facts(descriptor, setup);
+    pricing::EndpointWorstCaseInput call;
+    call.facts = &facts;
+    call.stated_seconds = input.audio_seconds;
+    if (const auto& tokens = input.input_tokens) {
+      std::uint64_t sum = tokens->text;
+      if (tokens->audio > std::numeric_limits<std::uint64_t>::max() - sum) return block(pricing::UnboundedBy::Overflow, setup.model, "the input tokens do not fit 64 bits");
+      sum += tokens->audio;
+      if (tokens->image > std::numeric_limits<std::uint64_t>::max() - sum) return block(pricing::UnboundedBy::Overflow, setup.model, "the input tokens do not fit 64 bits");
+      call.measured_input_tokens = sum + tokens->image;
+    }
+    return pricing::endpoint_worst_case(call, catalogue);
+  }
+  const auto billing = descriptor.policy()->endpoint_billing("realtime", descriptor.base_url(), "connect");
+  if (billing == descriptor::EndpointBilling::None) {
+    out.total = UsdAmount{0, Evidence::Derived, CostRounding::CeilingCatalogueProduct};
+    out.model = setup.model;
+    out.attempts = 1;
+    return out;
+  }
+  if (billing != descriptor::EndpointBilling::Model)
+    return block(pricing::UnboundedBy::Billing, "realtime/connect", "the policy does not state whether the provider bills the operation");
+  pricing::RealtimeResponseInput response;
+  response.family = descriptor.family();
+  response.origin = descriptor.base_url();
+  response.model = setup.model;
+  response.audio_output = std::find(setup.output.begin(), setup.output.end(), Modality::Audio) != setup.output.end();
+  // The cap the fact names, sent as an extension of the setup: an unsigned integer is a cap, any other value none.
+  if (!fact->output_cap.empty() && setup.extensions)
+    if (const auto cap = setup.extensions->root().get(fact->output_cap); cap.is_uint()) response.output_tokens = cap.as_uint();
+  // The Google codec keeps Live's thoughts beside the output total (google_usage): the cap does not count them.
+  response.thinking_beside_output = fact->shape == "google";
+  response.input_tokens = input.input_tokens;
+  response.audio_seconds = input.audio_seconds;
+  return pricing::realtime_response_bound(response, catalogue);
 }
 }  // namespace sp::realtime
