@@ -28,7 +28,9 @@ struct File {
   std::string purpose{};
   // Anthropic: whether its content can be downloaded (only files the service made).
   std::optional<bool> downloadable{};
-  // Google's SHA-256 of the content, and that of the bytes this call uploaded, as lower-case hex.
+  // Google's SHA-256 of the content, and that of the file's bytes a files::Upload sent (from memory, or the file slice
+  // as it was read), as lower-case hex. The second is empty for a file a get or a listing returns, and for the file a
+  // chunked upload completes, whose bytes no single call sent.
   std::string sha256{}, uploaded_sha256{};
   // The provider's file object, kept whole.
   std::shared_ptr<const json::Document> raw{};
