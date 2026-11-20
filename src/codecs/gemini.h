@@ -3,6 +3,7 @@
 #include <initializer_list>
 #include <set>
 
+namespace sp::reason { struct Reason; }
 namespace sp::descriptor { class ValidatedDescriptor; }
 namespace sp::json { class Value; }
 namespace sp::gemini {
@@ -25,7 +26,7 @@ class Codec {
   bool usage(json::Value);
   bool emit(const Event&);
   // `vendor_code` is kept only when it has the shape of Google's UPPER_SNAKE reasons.
-  bool fail(ErrorKind, std::string, std::string_view vendor_code = {});
+  bool fail(ErrorKind, const reason::Reason&, std::string_view vendor_code = {});
   void unknown(json::Value, std::initializer_list<std::string_view>);
   // The id of a call or result the service sent without one: "gemini-local-<token>-<part>". The token is random and
   // drawn per response, so an id saved by one process is not minted again by another, nor by a forked worker.
