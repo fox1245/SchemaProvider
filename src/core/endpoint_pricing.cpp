@@ -255,7 +255,8 @@ EndpointBound carried_worst_case(const EndpointWorstCaseInput& in, const descrip
   // The requests are priced under the carried tier only: standard rates are not a bound on another tier's.
   if (facts.carried_tier.empty()) block(UnboundedBy::TierPrice, call, "the call names no tier for the requests it carries");
   // At a routing gateway each request is bounded at its entry's route ceiling under the carried tier (the dearest
-  // price of the endpoints that serve the tier), as worst_case bounds a routed chat request. A batch takes no
+  // price of the endpoints that serve the tier), as worst_case bounds a routed chat request, with its rules: no
+  // ceiling in the tier, or one below a price the entry lists in the tier (stale), is no bound. A batch takes no
   // `provider.max_price`, so the bound states no pin: it holds while the gateway runs the batch on an endpoint the
   // ceiling was read from.
   if (in.attempts == 0) block(UnboundedBy::Invocations, {}, "the call states no attempts");
@@ -341,6 +342,9 @@ EndpointBound carried_worst_case(const EndpointWorstCaseInput& in, const descrip
   if (one_entry && entry) out.entry = *entry;
   out.model = facts.model;
   out.attempts = attempts;
+  // At a routing gateway every request was bounded at its route ceiling under the carried tier. No pin goes with it:
+  // the batch path takes none, so `pin` stays unset and `pinned` false.
+  out.route_ceiling = facts.routed_gateway;
   return out;
 }
 }  // namespace

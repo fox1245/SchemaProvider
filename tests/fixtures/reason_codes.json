@@ -1272,5 +1272,8 @@
   ["batches.page.invalid", "a page of batches lists batch objects"],
   ["batches.results.missing", "the batch carries no results"],
   ["batches.results.family", "the results are decoded through the family of the batch's requests"],
-  ["batches.results.custom_id", "a result answers one item of the batch"]
+  ["batches.results.custom_id", "a result answers one item of the batch"],
+  ["request.batches.item_tool", "a batch item uses a hosted tool the batch endpoint refuses"],
+  ["request.batches.callback_invalid", "a batch callback is an https URL without credentials"],
+  ["batches.page.cursor_missing", "a page that says more follow names its last id"]
 ]

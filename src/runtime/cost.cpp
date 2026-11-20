@@ -323,6 +323,13 @@ pricing::EndpointEstimate estimate_lines(const EndpointFacts& submit, const desc
     out.lines.clear();
     return out;
   }
+  // A request without a line was not reported: whether the provider billed it is not stated, so the total may be
+  // below the bill, and the request is named.
+  for (const auto id : known)
+    if (!seen.contains(id)) {
+      out.lower_bound = true;
+      assume(std::string(id) + ":no_line");
+    }
   out.total = UsdAmount{sum, Evidence::Derived, CostRounding::CeilingCatalogueProduct};
   if (one_entry && entry) out.entry = *entry;
   return out;

@@ -1310,12 +1310,18 @@ void ceilings_count_listed_bands(transport::Transport& transport, Peer& peer) {
 // route ceiling (read from the variant's endpoints) included; the variant's entry stays as listed. A model with no
 // batch variant gets no batch row, and without the policy fact nothing is written.
 void batch_variants_price_the_batch_tier(transport::Transport& transport, Peer& peer) {
-  peer.command(R"({"set":"ceilings-batch","models":{"vendor/batched":[{"prompt":"0.000002","completion":"0.000008"}],)"
+  // A base entry listed with 63 prices has no room for the variant's two.
+  std::string full_units = "{";
+  for (int i = 0; i < 63; ++i) full_units += (i ? "," : "") + std::string("\"unit_") + std::to_string(i) + "\":\"0\"";
+  full_units += "}";
+  peer.command(std::string(R"({"set":"ceilings-batch","models":{"vendor/batched":[{"prompt":"0.000002","completion":"0.000008"}],)"
                R"("vendor/batched:batch":[{"prompt":"0.000001","completion":"0.000004"},{"prompt":"0.0000012","completion":"0.000003"}],)"
-               R"("vendor/sync-only":[{"prompt":"0.000002","completion":"0.000008"}]},)"
-               R"("listed":{"vendor/batched":{"prompt":"0.000002","completion":"0.000008"},)"
+               R"("vendor/sync-only":[{"prompt":"0.000002","completion":"0.000008"}],)"
+               R"("vendor/full-base":[{"prompt":"0.000002","completion":"0.000008"}],"vendor/full-base:batch":[{"prompt":"0.000001","completion":"0.000004"}]},)"
+               R"("listed":{"vendor/full-base":)" + full_units + R"(,"vendor/full-base:batch":{"prompt":"0.000001","completion":"0.000004"},)"
+               R"("vendor/batched":{"prompt":"0.000002","completion":"0.000008"},)"
                R"("vendor/batched:batch":{"prompt":"0.000001","completion":"0.000004","overrides":[{"min_prompt_tokens":200000,"prompt":"0.000002"}]},)"
-               R"("vendor/sync-only":{"prompt":"0.000002","completion":"0.000008"}}})");
+               R"("vendor/sync-only":{"prompt":"0.000002","completion":"0.000008"}}})"));
   transport::RefreshRequest request;
   request.sources = {ceiling_source(peer, "ceilings-batch", {"vendor/batched", "vendor/batched:batch"})};
   const auto result = refreshed(transport, request);
@@ -1330,6 +1336,11 @@ void batch_variants_price_the_batch_tier(transport::Transport& transport, Peer& 
           "the variant's own entry stays as listed, not " + pricing_text(c.entry("vendor/batched:batch")));
   require(pricing_text(c.entry("vendor/sync-only")) == "completion=0.000008 prompt=0.000002",
           "a model without a batch variant gets no batch row, not " + pricing_text(c.entry("vendor/sync-only")));
+  // A base entry that cannot hold the variant's rows gets none of them, and the report names the variant.
+  require(pricing_text(c.entry("vendor/full-base")).find("/batch") == std::string::npos, "an entry without room gets no batch row");
+  const auto lines = gap_lines(result.sources[0]);
+  require(std::find(lines.begin(), lines.end(), "vendor/full-base:batch|||the base entry cannot hold the variant's prices under tier 'batch'") != lines.end(),
+          "the report names the variant whose prices were not written");
   // A policy without the fact writes nothing.
   auto text = std::string(config_defaults::descriptor_policy_json);
   const auto at = text.find("\"tier_variants\"");

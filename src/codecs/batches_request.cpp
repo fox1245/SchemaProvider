@@ -1,4 +1,5 @@
 #include "codecs/batches.h"
+#include "core/media.h"
 #include "codecs/reason.h"
 #include "codecs/batches_internal.h"
 #include "descriptor/policy.h"
@@ -88,12 +89,14 @@ bool serves_results(const Batch& batch) { return batch.shape == "anthropic"; }
 
 // The family whose API a request is of.
 std::string_view family_of(const Request& request) noexcept {
-  switch (request.index()) {
-    case 0: return "openai.chat";
-    case 1: return "anthropic.messages";
-    case 2: return "openai.responses";
-    default: return "google.generate";
-  }
+  return std::visit([](const auto& typed) -> std::string_view {
+    using T = std::decay_t<decltype(typed)>;
+    if constexpr (std::is_same_v<T, chat::Request>) return "openai.chat";
+    else if constexpr (std::is_same_v<T, messages::Request>) return "anthropic.messages";
+    else if constexpr (std::is_same_v<T, responses::Request>) return "openai.responses";
+    else if constexpr (std::is_same_v<T, gemini::Request>) return "google.generate";
+    else static_assert(sizeof(T) == 0, "a family request has no family here");
+  }, request);
 }
 // The media type of `mime` without parameters, in lower case.
 std::string essence(std::string_view mime) {
@@ -133,14 +136,26 @@ bool refused_variant(const descriptor::BatchItemsFact& items, std::string_view m
   }
   return false;
 }
+// Typed Chat messages carry their media beside the text.
+bool media_admitted(const descriptor::BatchItemsFact& items, const std::vector<chat::InputMessage>& messages) {
+  return std::all_of(messages.begin(), messages.end(), [&](const chat::InputMessage& message) {
+    return std::all_of(message.media.begin(), message.media.end(), [&](const Media& media) { return admitted(items, media); });
+  });
+}
+// A hosted tool the batch path does not run, by the type it has on the wire.
+bool refused_tool(const descriptor::BatchItemsFact& items, const std::vector<responses::HostedTool>& tools) {
+  return std::any_of(tools.begin(), tools.end(), [&](const responses::HostedTool& tool) {
+    return std::find(items.refused_tools.begin(), items.refused_tools.end(), responses::tool_type(tool)) != items.refused_tools.end();
+  });
+}
 bool refused_plugin(const descriptor::BatchItemsFact& items, const std::vector<OpenRouterPlugin>& plugins) {
   return std::any_of(plugins.begin(), plugins.end(), [&](const OpenRouterPlugin& plugin) {
     return std::find(items.refused_plugins.begin(), items.refused_plugins.end(), plugin.id) != items.refused_plugins.end();
   });
 }
 // What the batch path of a gateway refuses in one item, before anything is sent: a request of another family than the
-// client's, a variant or a plugin the items fact names, routing of its own (an item's `provider` does not route the
-// batch), fallback models, image or audio output, and media the items fact does not admit.
+// client's, a variant, a plugin or a hosted tool the items fact names, routing of its own (an item's `provider` does
+// not route the batch), fallback models, image or audio output, and media the items fact does not admit.
 std::optional<Error> gateway_item(const descriptor::ValidatedDescriptor& descriptor, const descriptor::BatchItemsFact& items, const Request& request) {
   if (family_of(request) != descriptor.family()) return reason::error(ErrorKind::Unsupported, reason::batches_request::item_family);
   return std::visit([&](const auto& typed) -> std::optional<Error> {
@@ -156,12 +171,14 @@ std::optional<Error> gateway_item(const descriptor::ValidatedDescriptor& descrip
         const bool generated = typed.audio || typed.image_config ||
                                std::any_of(typed.modalities.begin(), typed.modalities.end(), [](chat::OutputModality m) { return m != chat::OutputModality::Text; });
         if (generated) return reason::error(ErrorKind::Unsupported, reason::batches_request::item_output);
-        if (!media_admitted(items, typed.canonical_messages)) return reason::error(ErrorKind::Unsupported, reason::batches_request::item_media);
+        if (!media_admitted(items, typed.canonical_messages) || !media_admitted(items, typed.messages))
+          return reason::error(ErrorKind::Unsupported, reason::batches_request::item_media);
       } else if constexpr (std::is_same_v<T, responses::Request>) {
         if (refused_plugin(items, typed.plugins)) return reason::error(ErrorKind::Unsupported, reason::batches_request::item_plugin);
         const bool generated = typed.image_config ||
                                std::any_of(typed.modalities.begin(), typed.modalities.end(), [](responses::OutputModality m) { return m != responses::OutputModality::Text; });
         if (generated) return reason::error(ErrorKind::Unsupported, reason::batches_request::item_output);
+        if (refused_tool(items, typed.hosted_tools)) return reason::error(ErrorKind::Unsupported, reason::batches_request::item_tool);
         if (!media_admitted(items, typed.messages)) return reason::error(ErrorKind::Unsupported, reason::batches_request::item_media);
       } else {
         // One batch call carries one set of headers: an item cannot ask for a beta of its own.
@@ -250,6 +267,14 @@ std::variant<EncodedSubmit, Error> encode_submit(const descriptor::ValidatedDesc
     if (!items_fact) return reason::error(ErrorKind::Unsupported, reason::batches_request::endpoint_not_admitted);
     if (!submit.input_file.empty() || !submit.endpoint.empty()) return bad(reason::batches_request::file_unsupported);
     if (!submit.display_name.empty()) return bad(reason::batches_request::display_name_unsupported);
+    // A callback is an https URL without credentials in it, checked as a media URL is.
+    if (submit.extensions) {
+      if (const auto callback = submit.extensions->root().get("callback_url"); callback.valid()) {
+        const auto url = callback.is_string() ? callback.as_string() : std::string_view{};
+        const auto authority = url.substr(0, url.find_first_of("/?#", 8));
+        if (!url_syntax(url) || authority.find('@') != std::string_view::npos) return bad(reason::batches_request::callback_invalid);
+      }
+    }
     if (submit.items.empty()) return bad(reason::batches_request::items_required);
     const auto limit = descriptor.policy()->endpoint_limit("batches", descriptor.base_url(), "max_items");
     if (limit && submit.items.size() > *limit) return bad(reason::batches_request::items_limit);

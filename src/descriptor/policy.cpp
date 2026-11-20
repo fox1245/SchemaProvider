@@ -1111,7 +1111,7 @@ class PolicyLoader {
           const bool gateway_batch = fact.endpoint == "batches" && fact.shape == "openrouter";
           if (const auto stated = e.get("items"); stated.valid()) {
             if (!gateway_batch) fail("/endpoints/items", "items on an OpenRouter batch fact");
-            closed(stated, {"paths", "media"}, "/endpoints/items", {"refused_plugins", "refused_variants"});
+            closed(stated, {"paths", "media"}, "/endpoints/items", {"refused_plugins", "refused_variants", "refused_tools"});
             BatchItemsFact out;
             const auto item_paths = stated.get("paths");
             if (!item_paths.is_object() || !item_paths.size() || item_paths.size() > 8) fail("/endpoints/items/paths", "object of one to eight family paths");
@@ -1130,15 +1130,16 @@ class PolicyLoader {
                 values = strings(list, "/endpoints/items");
                 if (values.size() > 64 || std::any_of(values.begin(), values.end(), [](const std::string& value) {
                       return value.empty() || value.size() > 128 || !std::all_of(value.begin(), value.end(), [](char c) {
-                        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+                        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' || c == ':';
                       });
                     }))
-                  fail("/endpoints/items", "at most 64 plugin ids or variant suffixes");
+                  fail("/endpoints/items", "at most 64 plugin ids, variant suffixes or tool types");
               }
               return values;
             };
             out.refused_plugins = names("refused_plugins");
             out.refused_variants = names("refused_variants");
+            out.refused_tools = names("refused_tools");
             items = std::move(out);
           } else if (gateway_batch) {
             fail("/endpoints/items", "the items of an OpenRouter batch fact");

@@ -470,8 +470,9 @@ void read_ceilings(Transport& transport, const RefreshRequest& request, const de
 // variant entry's prices, its bands and route ceilings included, are written onto the base entry under the tier
 // (`prompt/batch`, `completion/batch+200000`, `ceiling_input/batch`), in place of any it had there. The variant's own
 // entry stays as listed. A base entry the listing does not name gets nothing, and one that cannot hold the rows beside
-// its own prices gets none of them, so no tier price is ever partial or guessed.
-void write_tier_variants(const descriptor::DescriptorPolicy& policy, Listing listing, std::vector<CatalogueEntry>& entries) {
+// its own prices gets none of them, so no tier price is ever partial or guessed; the report names the variant
+// (SourceReport::ceiling_gaps, with no unit).
+void write_tier_variants(const descriptor::DescriptorPolicy& policy, Listing listing, std::vector<CatalogueEntry>& entries, SourceReport& report) {
   const auto& variants = policy.listing_tier_variants(listing);
   if (variants.empty()) return;
   for (std::size_t i = 0; i < entries.size(); ++i) {
@@ -499,7 +500,10 @@ void write_tier_variants(const descriptor::DescriptorPolicy& policy, Listing lis
       }
       std::sort(candidate.pricing.begin(), candidate.pricing.end());
       std::vector<CatalogueEntry> alone{candidate};
-      if (!written || std::holds_alternative<ConfigError>(descriptor::make_catalogue(std::move(alone)))) candidate = without;
+      if (!written || std::holds_alternative<ConfigError>(descriptor::make_catalogue(std::move(alone)))) {
+        candidate = without;
+        report.ceiling_gaps.push_back({variant.id, {}, {}, "the base entry cannot hold the variant's prices under tier '" + tier + "'", false});
+      }
       *base = std::move(candidate);
     }
   }
@@ -612,7 +616,7 @@ std::variant<RefreshResult, ConfigError> refresh_catalogue(Transport& transport,
               auto entries = listed->entries();
               if (!ceilings.empty()) read_ceilings(transport, request, *policy, plan, deadline, entries, report);
               // After the ceilings, so a variant's route ceiling is written under its tier too.
-              write_tier_variants(*policy, source.listing, entries);
+              write_tier_variants(*policy, source.listing, entries, report);
               listed = catalogue_of(std::move(entries));
             }
             // The catalogue has to hold this listing next to the others; if it cannot, only this source fails.

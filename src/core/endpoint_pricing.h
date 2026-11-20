@@ -78,7 +78,9 @@ struct EndpointBound {
   std::uint64_t attempts = 0;
   // Priced at a routing gateway, at the lower of the route ceiling and the request's own cap, and not at the listed
   // rates. The bound holds only if the request carries `pin` as `provider.max_price`: the request's own cap with each
-  // amount the bound reads lowered to the route ceiling. `pinned` is true when it already does.
+  // amount the bound reads lowered to the route ceiling. `pinned` is true when it already does. A batch submit's bound
+  // at a gateway (`Carried`) is at the route ceilings of its requests and has no `pin`, which the batch path cannot
+  // carry: it holds while the gateway runs the batch on endpoints the ceilings were read from.
   bool route_ceiling = false, pinned = false;
   std::optional<OpenRouterMaxPrice> pin;
 };
@@ -96,12 +98,16 @@ inline constexpr std::string_view unpriced_detail = "the provider bills the oper
 //   entry with no unit in that tier is `TierPrice`, never priced at other rates. Each request's reasons keep their kind
 //   with the subject `<custom_id>:<subject>` (`a-1:` for a reason without a subject). Also refused: no carried
 //   requests (`Unmodeled`, subject `<endpoint>/<operation>`; "the batch's requests are in an uploaded file" when the
-//   facts name an `input_file`), no `carried_tier` (`TierPrice`, same subject), a routing gateway (`RouteCeiling`, same
-//   subject), a custom id named by two requests or measured twice (`Unmodeled`, subject `<custom_id>:`), and a request
+//   facts name an `input_file`), no `carried_tier` (`TierPrice`, same subject), a custom id named by two requests or
+//   measured twice (`Unmodeled`, subject `<custom_id>:`), and a request
 //   whose facts name a service tier of its own (`TierPrice`, subject `<custom_id>:<model>`, "a batch item names its
 //   own service tier"). Each request's bound is rounded up on its own; their sum is exact, and one line per request
 //   holds it: unit `<custom_id>:nano_usd`, the entry that priced it, the request's bound in nano-USD as the quantity
-//   and a rate of one nano-USD per unit (1000000). The sum is multiplied by the attempts as below.
+//   and a rate of one nano-USD per unit (1000000). The sum is multiplied by the attempts as below. At a routing gateway
+//   each request is bounded as worst_case bounds a routed chat request, at its entry's route ceiling under the carried
+//   tier (`ceiling_input/batch`): an entry without one there, or with one below a price it lists in the tier, gives that
+//   request `RouteCeiling` (subject `<custom_id>:<model>`). Such a bound sets `route_ceiling`, and states no `pin`
+//   (`pinned` false), since a batch takes no `provider.max_price`.
 // - `Model`: by the entry ModelCatalogue::find gives for the facts' family, origin and model, under the call's tier: the
 //   facts' `service_tier`, else the input's `service_tier` (both named and different: `TierPrice`, subject the model).
 //   - No entry, or one without prices: `ModelPrice`, subject the model. An entry with no price unit in the tier:

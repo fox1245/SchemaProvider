@@ -113,17 +113,12 @@ bool batch_of(json::Value root, std::string_view shape, std::string_view origin,
       batch.usage.total = counter(usage.get("total_tokens"));
       batch.usage.cache_read = counter(usage.get("prompt_tokens_details").get("cached_tokens"));
       batch.usage.reasoning = counter(usage.get("completion_tokens_details").get("reasoning_tokens"));
-      auto& cost = batch.usage.provider_cost;
-      if (usage.get("cost").valid()) {
-        cost.source = CostSource::OpenRouterUsd;
-        cost.status[0] = codecs::usd_amount(usage.get("cost"), true, cost.total);
-        if (cost.status[0] != CostStatus::Available && cost.status[0] != CostStatus::Missing) cost.quality = UsageQuality::Inconsistent;
-      }
-      if (const auto byok = usage.get("is_byok"); byok.is_bool()) {
-        cost.is_byok = byok.as_bool();
-        cost.byok_status = CostStatus::Available;
-      }
-      batch.usage.stage = UsageStage::Final;
+      // The batch's usage counts Chat's way, in USD at the gateway, BYOK's upstream inference cost included.
+      batch.usage.provider_cost = codecs::provider_cost(usage, true, true);
+      // Final once the batch ended; the counts of a running batch may still grow.
+      const bool ended = batch.status == jobs::Status::Completed || batch.status == jobs::Status::Failed ||
+                         batch.status == jobs::Status::Expired || batch.status == jobs::Status::Cancelled;
+      batch.usage.stage = ended ? UsageStage::Final : UsageStage::Partial;
     }
     return true;
   }
@@ -200,6 +195,9 @@ bool Codec::buffered(std::string_view body, Close close) {
       Batch listed;
       if (!batch_of(element, fact->shape, descriptor_.base_url(), listed)) return fail(ErrorKind::ProtocolCorrupt, reason::batches::page_invalid);
     }
+    // A page that says more follow names the cursor of the next; without one the listing would read as ended.
+    if (root.get("has_more").is_bool() && root.get("has_more").as_bool() && (!root.get("last_id").is_string() || root.get("last_id").as_string().empty()))
+      return fail(ErrorKind::ProtocolCorrupt, reason::batches::page_cursor_missing);
   }
   // Anthropic answers a deletion with a `message_batch_deleted` object, Google with an empty one, OpenRouter with the
   // batch's id and what each deletion target did.
