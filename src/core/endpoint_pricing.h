@@ -106,15 +106,17 @@ struct EndpointBound {
 //     any band, since under the tier that unit would be priced at another's rate. An entry with a route ceiling at an
 //     origin that is not a routing gateway: `RouteCeiling`.
 //   - At a routing gateway, only a call whose every quantity is input tokens (`input`, an embeddings call) and whose
-//     facts state the request's cap on the router's prompt price (`max_price` with a prompt amount) has a bound; any
+//     facts state the request's cap on the router's prompt price (`max_price` with a prompt amount above zero) has a bound; any
 //     other is `RouteCeiling`, subject the model, since no route ceiling or pin covers its prices. The input tokens are
 //     priced at the lower of the entry's `ceiling_input` (the dearest row that applies, as for a token unit) and the
 //     cap, in a line whose row is `ceiling_input`'s key or, when the cap is lower, `provider.max_price.prompt`; the
 //     listed rates are not read. No `ceiling_input` row: `RouteCeiling`, subject the model; a variable one:
-//     `ModelPrice`, subject `ceiling_input`. A request fee above zero, listed (`request`) or as a route ceiling
+//     `ModelPrice`, subject `ceiling_input`; one below an input price the entry lists (ceiling_below_listed) while the
+//     cap is above it: `RouteCeiling`, subject the model. A request fee above zero, listed (`request`) or as a route ceiling
 //     (`ceiling_request`): `RouteCeiling`, subject `request`, since no amount of the cap is known to bind one; a
 //     variable one: `ModelPrice`, subject the unit. The bound then sets `route_ceiling`, the `pin` (the request's cap
-//     with its prompt amount lowered to the ceiling) and `pinned` (the cap is already at most the ceiling).
+//     with its prompt amount lowered to the ceiling) and `pinned` (the cap, as a host writes it, is already at most the
+//     pin: at most its amount, or the amount the JSON number nearest it reads as).
 //   - The call offers its dimensions and `operation` with the facts' operation; dimensions that are not sorted by key
 //     with each key once, or that name another operation, are `Unmodeled`.
 //   - Each quantity is its `at_most`, else by its source: the entry's input limit (the smaller of `input_limit` and
