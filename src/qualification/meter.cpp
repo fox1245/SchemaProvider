@@ -455,6 +455,18 @@ Claim& Claim::operator=(Claim&& other) noexcept {
 Meter::Meter(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 Meter::~Meter() = default;
 const Catalog& Meter::catalog() const noexcept { return *impl_->catalog; }
+Result<std::shared_ptr<const Catalog>> Meter::read_catalog(const std::string& project_root) {
+  try {
+    std::error_code ec;
+    auto path = std::filesystem::canonical(project_root, ec);
+    if (ec) fail(Denial::Storage);
+    Fd root(::open(path.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    directory(root.get());
+    Fd conf(::openat(root.get(), "config", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    directory(conf.get());
+    return Catalog::from_json(config(conf.get(), "model-catalog.json"));
+  } catch (const Failure& f) { return f.error; }
+}
 Result<std::unique_ptr<Meter>> Meter::open(const std::string& project_root) {
   try {
     std::error_code ec;

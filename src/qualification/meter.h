@@ -57,6 +57,9 @@ class Meter {
   // that same ledger, never a replacement grant. Its declaration remains pinned
   // by exact bytes and file identity; removal/replacement fails closed.
   static Result<std::unique_ptr<Meter>> open(const std::string& project_root);
+  // The catalogue open() would load from the same root, read and checked the
+  // same way, without opening the ledger or granting anything.
+  static Result<std::shared_ptr<const Catalog>> read_catalog(const std::string& project_root);
   ~Meter();
   Meter(const Meter&) = delete;
   Meter& operator=(const Meter&) = delete;

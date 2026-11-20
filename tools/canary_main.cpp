@@ -59,7 +59,11 @@ int main(int argc, char** argv) {
     if (help) { std::cout << help_text(); return 0; }
     if (!execute) { std::cout << plan_json() << '\n'; return 0; }
     if (!profile_path || !project_root) throw std::invalid_argument("invalid arguments");
-    auto profile = parse_profile(read_profile_file(*profile_path), loopback, output_tokens);
+    // The profile is checked against the catalogue the meter of this root reads.
+    auto catalog = sp::qualification::Meter::read_catalog(*project_root);
+    auto* prices = std::get_if<std::shared_ptr<const sp::qualification::Catalog>>(&catalog);
+    if (!prices) throw std::invalid_argument("invalid arguments");
+    auto profile = parse_profile(read_profile_file(*profile_path), **prices, loopback, output_tokens);
     if ((mode == ExecutionMode::BaselinePair && !vision_provider(profile.provider())) ||
         (mode == ExecutionMode::GoogleDiagnostics && profile.provider() != Provider::VisionGemini &&
          profile.provider() != Provider::VisionInteractions))

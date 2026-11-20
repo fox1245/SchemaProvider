@@ -32,11 +32,16 @@ class Profile {
   Bounds bounds_;
   std::uint64_t thinking_budget_{};
   bool loopback_{};
-  friend Profile parse_profile(std::string_view, bool, std::optional<std::uint64_t>);
+  friend Profile parse_profile(std::string_view, const qualification::Catalog&, bool, std::optional<std::uint64_t>);
 };
 // All exceptions have fixed, non-sensitive messages. Neither parser echoes input.
-Profile parse_profile(std::string_view, bool allow_test_loopback = false,
+// A live (non-loopback) profile must name a model of the catalogue in the
+// provider's family and reserve at least the window and rates it derives.
+Profile parse_profile(std::string_view, const qualification::Catalog&, bool allow_test_loopback = false,
                       std::optional<std::uint64_t> output_tokens = {});
+// The model catalogue embedded at build time (config/model-catalog.json), for
+// callers without a project root; the CLI passes the one its meter reads.
+const qualification::Catalog& embedded_catalog();
 std::string read_profile_file(const std::string& path);
 // An explicit file overrides the process environment. Only NAME=value syntax is
 // supported; no shell, expansion, export, quoting, or fallback on malformed input.
