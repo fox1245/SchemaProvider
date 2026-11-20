@@ -516,7 +516,7 @@ The fees and the tool uses are charged once per attempt, the tokens on every inv
 **Endpoint calls.** For a prepared [non-chat endpoint](#non-chat-endpoints) call, the bound follows what the policy states about the operation the call performs (`PreparedRequest::endpoint_facts().billing`):
 - **Not billed** (`EndpointBilling::None`: moderation, token counting, file calls, a job's poll and download, a batch's get, cancel, deletion and results, generation statistics). `total` is exactly zero (`Evidence::Derived`, `CostRounding::CeilingCatalogueProduct`) and nothing is unbounded. The catalogue is not consulted, so the model needs no entry. The usage a poll's or a generation read's answer reports is the cost of another call, the job or the generation it describes, and is not this call's.
 - **Not stated** (`Unstated`: a policy without the fact's `billing`, or a per-operation statement that does not name the operation). No total, and the reason is `Billing` with the subject `<endpoint>/<operation>` (`moderation/check`). A missing statement never reads as not billed.
-- **Billed by its model** (`Model`: images, decisions, embeddings, rerank, speech, transcription, a video submit). The bound is [`endpoint_worst_case_cost`](#the-bound-of-a-prepared-endpoint-call), given `WorstCaseOptions::measured_input_tokens` and no audio length, as a `WorstCase`: its `total`, `unbounded`, `entry`, `model` and `attempts`; its token lines as `input_tokens` (and `invocation_input_tokens`) and `output_tokens`; one invocation; no route ceiling and no pin. The item lines (images, seconds, characters) are only in `EndpointBound`. A transcription whose model prices seconds above zero needs the audio's length, which only `endpoint_worst_case_cost` takes, so here it has no total (`Quantity`, subject `item:second`).
+- **Billed by its model** (`Model`: images, decisions, embeddings, rerank, speech, transcription, a video submit). The bound is [`endpoint_worst_case_cost`](#the-bound-of-a-prepared-endpoint-call), given `WorstCaseOptions::measured_input_tokens` and no audio length, as a `WorstCase`: its `total`, `unbounded`, `entry`, `model` and `attempts`; its token lines as `input_tokens` (and `invocation_input_tokens`) and `output_tokens`; one invocation; and its `route_ceiling`, `pin` and `pinned`, set only for an embeddings call at a routing gateway bounded at its request's cap. The item lines (images, seconds, characters) are only in `EndpointBound`. A transcription whose model prices seconds above zero needs the audio's length, which only `endpoint_worst_case_cost` takes, so here it has no total (`Quantity`, subject `item:second`).
 - **Carried** (a batch submit). The bound is `endpoint_worst_case_cost`, without measured input, as a `WorstCase`: its `total`, `unbounded`, `entry`, `model` and `attempts`, with no tokens and no invocations of its own, since each request it carries is bounded on its own ([the bound of a batch](#the-bound-and-the-estimate-of-a-batch)). An inline batch (Anthropic, Google) is bounded from its requests; an OpenAI batch, whose requests are in an uploaded file, has no total here (`Unmodeled`, subject `batches/submit`), and `batch_worst_case_cost` bounds it from its items.
 
 **No bound.** `total` is unset and `unbounded` lists every reason, each with a kind, the subject and a phrase:
@@ -562,7 +562,7 @@ else for (const auto& why : bound.unbounded) log(sp::pricing::to_string(why.by),
 
 **What it takes.** `EndpointWorstCaseInput` holds:
 - `facts`: the call's facts.
-- `service_tier`: the catalogue tier the call is priced under, empty for the standard rates.
+- `service_tier`: the catalogue tier the call is priced under, empty for the standard rates. A tier the facts name (`EndpointFacts::service_tier`) is the call's; this may repeat it, and naming another is `TierPrice`.
 - `measured_input_tokens`: the host's count of the input. It must not understate it.
 - `stated_seconds`: the audio's length in whole seconds, rounded up, for a quantity whose source is `StatedSeconds`. It must not understate it.
 - `attempts`: the attempts the retry policy allows.
@@ -573,7 +573,7 @@ else for (const auto& why : bound.unbounded) log(sp::pricing::to_string(why.by),
 - **`None`.** Exactly zero, with no catalogue lookup.
 - **`Unstated`.** No total.
 - **`Carried`.** The sum of a bound of each request the call carries (`EndpointFacts::carried`), under the tier `carried_tier` ([the bound of a batch](#the-bound-and-the-estimate-of-a-batch)).
-- **`Model`.** Bounded by the entry `find(family, origin, model)` gives, under `service_tier`.
+- **`Model`.** Bounded by the entry `find(family, origin, model)` gives, under the call's tier: the facts' `service_tier`, else the input's. Under a tier, only the tier's rows price the call, and an entry that prices a unit the call may be priced by (a token unit, the request fee, a route ceiling, an item unit whatever its qualifier) at the standard rates without a row of it in the tier is `TierPrice`, as for a carried request: the standard rates are not the tier's, and pricing that unit at another of the tier's rates is not its price.
 
 **Quantities.** Each `EndpointQuantity` names a unit and its count, which is `at_most` when the request states it. Without `at_most`, the count comes from the quantity's source:
 - `InputLimit`: the entry's input limit (the smaller of `input_limit` and `context_window`) times `per`, the number of inputs when the limit counts per input. A measured count is capped at that product.
@@ -595,7 +595,14 @@ else for (const auto& why : bound.unbounded) log(sp::pricing::to_string(why.by),
 **Total.**
 - **Rounding.** The lines (`EndpointLine`: unit, price key, count, rate) and the fee are summed exactly and rounded up once to whole nano-USD.
 - **Attempts.** A charge-on-accept operation bounds one attempt, since the runtime sends such a call again only when the provider never accepted it. Any other operation multiplies by `attempts`.
-- **Result.** `EndpointBound` holds `total`, the `entry` and `model` that priced the call, the `lines` of one attempt and the `attempts` they were multiplied by. With any reason in `unbounded` there is no total and no lines, never a partial sum.
+- **Result.** `EndpointBound` holds `total`, the `entry` and `model` that priced the call, the `lines` of one attempt and the `attempts` they were multiplied by, and at a routing gateway `route_ceiling`, `pin` and `pinned` (below). With any reason in `unbounded` there is no total and no lines, never a partial sum.
+
+**At a routing gateway.** The router picks among endpoints at different prices, so the listed rates do not bound a call there. OpenRouter enforces a request's `provider.max_price.prompt` for embeddings (a cap below every endpoint's price was refused with "No endpoints found that satisfy the max price", 2026-11-20), and does not for images, transcription or rerank (a cap below the price was served at the price), so only an embeddings call is bounded there:
+- **Which calls.** A call whose every quantity is input tokens (`input`: an embeddings call without media inputs) and whose facts state the request's prompt cap (`EndpointFacts::max_price`, which `embeddings::endpoint_facts` reads from the request's `extensions`). Every other call at a routing gateway (decisions, images, rerank, speech, transcription, videos, and embeddings without the cap or with media inputs) is `RouteCeiling`, subject the model, "an endpoint call at a routing gateway has no per-item route ceiling and no pin".
+- **The price.** Every input token at the lower of the entry's route ceiling `ceiling_input` (the dearest row that applies in the tier, from a refresh or a host layer) and the cap. The line's row is `ceiling_input`'s key, or `provider.max_price.prompt` when the cap is lower. The listed rates are not read.
+- **The pin.** `route_ceiling` is set, `pin` is the request's cap with its prompt amount lowered to the ceiling, and `pinned` says the request's cap already is that pin. With a cap above the ceiling the bound is at the ceiling and holds only once the request carries `pin`, as for a chat request ([worst-case cost](#worst-case-cost-of-a-prepared-request)).
+- **Refused.** No `ceiling_input` row is `RouteCeiling`, subject the model; a variable one is `ModelPrice`, subject `ceiling_input`. A request fee above zero, listed (`request`) or as a route ceiling (`ceiling_request`), is `RouteCeiling`, subject `request`, since no amount of the cap is known to bind a fee there; declared zeros do not refuse.
+- **Units of the cap.** The cap is read in the unit `OpenRouterMaxPrice` holds and `OpenRouterRouting::max_price` sends, USD per million tokens; the live check above used a cap below the price in both that unit and per token, so it does not tell them apart.
 
 **Reasons.**
 
@@ -606,8 +613,10 @@ else for (const auto& why : bound.unbounded) log(sp::pricing::to_string(why.by),
 | `Unmodeled` | the endpoint, `dimensions`, a unit or a price key | the call names no operation; its dimensions are unsorted, repeat a key or name another operation; image tokens (`input_image`) without an `input` quantity, or more of them than its stated count; a quantity of a unit the bound does not price; a row that applies to the call, is not a declared zero, and is of an item kind none of the quantities count, such as output seconds of a speech model |
 | `ModelPrice` | model | no entry, or an entry without prices |
 | `ModelPrice` | unit | no rate for a quantity that can be above zero, a variable price on a row that applies, a row of the unit that names a dimension the call offers without a value, or, with the input length not stated, no row of the unit without a band; an item unit is named with the call's operation and each offered dimension whose key a row of the unit names, such as `item:image[operation=generate,quality=high]`; the other dimensions, which change no price, are not printed |
-| `RouteCeiling` | model | a routing gateway: no route ceiling or pin covers an endpoint call's prices; or an entry with a route ceiling at an origin that is not a gateway |
-| `TierPrice` | model | the entry prices no unit under `service_tier` |
+| `RouteCeiling` | model | a routing gateway: no route ceiling or pin covers the call's prices (any call but a capped embeddings call); a capped embeddings call whose entry lists no `ceiling_input`; or an entry with a route ceiling at an origin that is not a gateway |
+| `RouteCeiling` | `request` | a capped embeddings call at a routing gateway whose entry lists a request fee above zero |
+| `ModelPrice` | `ceiling_input` | a capped embeddings call at a routing gateway whose route ceiling is at a variable price |
+| `TierPrice` | model | the entry prices no unit under the call's tier, or prices a unit at the standard rates without a row of it in the tier; or the facts and the input name different tiers |
 | `InputBound` | `input` | no `at_most`, no measured count and no input limit, and an input rate above zero |
 | `OutputCap` | `output` | no `at_most` and no output limit, and an output rate above zero |
 | `Quantity` | unit | an item count the request does not state, and a rate above zero |
@@ -635,7 +644,7 @@ else for (const auto& why : bound.unbounded) log(sp::pricing::to_string(why.by),
 - `measured_carried_input_tokens`: a batch submit's count of each request's input, by custom id. Each must not understate it, and each is capped at its model's input limit.
 
 The prepared call supplies the rest:
-- **Tier.** The standard rates: an endpoint request names no service tier.
+- **Tier.** The facts' `service_tier`, which is empty: no endpoint request names a service tier (no request type has a tier member, and no endpoint fact of the built-in policy admits one as an option), so the call is priced at the standard rates.
 - **Attempts.** The retry policy's `max_attempts`, or one when retry is off.
 - **Charge on acceptance.** A billed operation of an endpoint fact with `charge_on_accept` is bounded at one attempt, since the runtime sends such a call again only when the provider did not accept it. Any other billed operation is bounded at every attempt the retry policy allows. Every billed endpoint call of the built-in policy is charged on acceptance.
 
@@ -645,7 +654,7 @@ The prepared call supplies the rest:
 |---|---|---|
 | images (`generate`; `edit` at OpenAI when the request has references) | `item:image`: `count`. `item:input_image`: the references. `input`: the input limit. `input_image`: the input limit, when there are references. `output`: the output limit | `background`, `output_compression`, `output_format`, `quality`, `size` |
 | decisions (`decide`) | `input`: the input limit. `output`: the output limit | |
-| embeddings (`embed`) | `input`: the input limit for each input. `input_image`: the same, when an input has media | `dimensions`, `task` |
+| embeddings (`embed`) | `input`: the input limit for each input. `input_image`: the same, when an input has media. At OpenRouter, the request's cap `provider.max_price.prompt` (`EndpointFacts::max_price`) | `dimensions`, `task` |
 | rerank (`rank`) | `item:document`: the documents. `item:search_unit`: not stated, so the entry must list it: unlisted, the call has no total (`ModelPrice`); listed above zero, none either (`Quantity`), since nothing bounds the count; listed as `"0"`, where the provider does not bill search units, it has one. `input`: the input limit for each document | `top` |
 | speech (`speak`) | `item:character`: the bytes of `input` in UTF-8. `input`: the input limit. `output`: the output limit | `format`, `speed` (its key alone), `voice` |
 | transcription (`transcribe`, `translate`) | `item:second`: `audio_seconds`. `input`: the input limit. `output`: the output limit | `language` |
@@ -671,7 +680,7 @@ The prepared call supplies the rest:
 | a model whose entry has no `output_limit`, at an output rate above zero | `OutputCap` | `output` |
 | a quantity whose unit the entry does not list; an item unit is named with the operation and the offered dimensions a row of the unit names | `ModelPrice` | the unit |
 | a member set to a value the qualifier grammar cannot hold, and a row of the priced unit qualified by it | `ModelPrice` | the unit, with the member's key alone |
-| a call at a routing gateway (rerank and videos are admitted only at OpenRouter in the built-in policy) | `RouteCeiling` | the model |
+| a call at a routing gateway, other than an embeddings call with `provider.max_price.prompt` and no media inputs (rerank and videos are admitted only at OpenRouter in the built-in policy) | `RouteCeiling` | the model |
 | a chat request, or a call that did not prepare | `Unmodeled` | `request` |
 
 **Limits.** The bound reads the request as it is sent:
@@ -680,11 +689,21 @@ The prepared call supplies the rest:
 - `audio_seconds` is an upper bound the host states. For a provider that rounds a length up to an increment, or bills a minimum, state the length it bills. A video's `duration` is priced as requested, so such rounding or minimum is not covered there.
 - The image output tokens are bounded once per call by the entry's output limit, whatever the number of images.
 
-**Capability.** `sp::capability::EndpointCostBounds` (bit 20) in the runtime's interface contract says that the loaded library bounds endpoint calls this way; a library without it answers `Unmodeled` for every billed endpoint call. A host that admits endpoint calls by their bound requires it with `require_interface_contract(EXPECTED_INTERFACE_REVISION, capability::EndpointCostBounds)`. It is not part of `RequiredProvider`.
+**Embeddings at OpenRouter.** The built-in policy admits `max_price` with a `prompt` amount (a non-negative JSON number, USD per million tokens) in the `provider` option of OpenRouter's embeddings fact only; a text value, another amount, or a cap on another endpoint is refused when the call is prepared (`InvalidRequest`), as any option outside the fact's schema is. The prepared facts hold the cap in nano-USD, rounded up from the exact value of the JSON number the request sends, so that the bound is not below the amount the gateway reads (`0.12` is 120000000, while `0.1`, whose binary value is just above it, is 100000001); an amount above `max_price_limit_nano_usd` is no cap.
+
+```cpp
+embeddings::Request request{"openai/text-embedding-3-small", {{"first"}, {"second"}}};
+request.extensions = cap;   // a json::Document holding {"provider":{"max_price":{"prompt":0.02}}}: USD per million tokens
+auto bound = sp::runtime::endpoint_worst_case_cost(router.prepare(request, run).prepared(), *refreshed);
+if (bound.total && bound.pinned) hold(bound.total->nano_usd);   // the cap is at most the route ceiling
+else if (bound.total) resend_with(*bound.pin);   // the bound is at the ceiling: send its pin as the cap
+```
+
+**Capability.** `sp::capability::EndpointCostBounds` (bit 20) in the runtime's interface contract says that the loaded library bounds endpoint calls this way; a library without it answers `Unmodeled` for every billed endpoint call. A host that admits endpoint calls by their bound requires it with `require_interface_contract(EXPECTED_INTERFACE_REVISION, capability::EndpointCostBounds)`. It is not part of `RequiredProvider`. `EndpointFacts::service_tier` and `max_price`, and `EndpointBound::route_ceiling`, `pinned` and `pin`, are advertised as `sp::capability::EndpointTierAndPin` (bit 23), which `RequiredProvider` includes.
 
 ### The estimate of an endpoint call
 
-`sp::pricing::endpoint_estimate(facts, counted, catalogue[, tier])` (`<core/endpoint_pricing.h>`) is what a finished non-chat endpoint call cost by the catalogue: the call's facts, as it was prepared (`PreparedRequest::endpoint_facts()`, which a host journals with the call, so that it can price a job that ends after a restart), and what its result counted. `sp::runtime::endpoint_estimate(facts, result, catalogue)` (`<runtime/cost.h>`) fills `EndpointCounted` from each typed result, at the standard rates. Where the provider reports the cost (`Usage::provider_cost`, at OpenRouter), prefer that figure; the estimate is a cross-check there, and the cost where the provider reports none.
+`sp::pricing::endpoint_estimate(facts, counted, catalogue[, tier])` (`<core/endpoint_pricing.h>`) is what a finished non-chat endpoint call cost by the catalogue: the call's facts, as it was prepared (`PreparedRequest::endpoint_facts()`, which a host journals with the call, so that it can price a job that ends after a restart), and what its result counted. `sp::runtime::endpoint_estimate(facts, result, catalogue)` (`<runtime/cost.h>`) fills `EndpointCounted` from each typed result, in the facts' tier (the standard rates, since no endpoint request names one). Where the provider reports the cost (`Usage::provider_cost`, at OpenRouter), prefer that figure; the estimate is a cross-check there, and the cost where the provider reports none.
 
 ```cpp
 #include <runtime/cost.h>
@@ -716,7 +735,7 @@ A state other than `Completed` has no total (`job`): whether a failed or cancell
 **How it prices.** By the operation's billing:
 - **`None`.** Exactly zero. Nothing of the result is read: a poll's or a generation read's usage is another call's.
 - **`Unstated`.** No total (`billing`). **`Carried`.** No total (`carried`): a batch is estimated from its result lines by [`batch_estimate`](#the-bound-and-the-estimate-of-a-batch).
-- **`Model`.** The served model's entry when the response names another model priced in the tier, else the requested model's (`requested_entry`); `model` or `tier` when neither has one. The dimensions and the operation as [the bound](#the-bound-of-an-endpoint-call) reads them (`operation` or `dimensions` when it would refuse them). At a routing gateway, whose bound is at the route ceiling, the entry's listed rates price the call (`listed rates`).
+- **`Model`.** The served model's entry when the response names another model priced in the tier, else the requested model's (`requested_entry`); `model` or `tier` when neither has one. The tier is the facts' `service_tier`, else the one passed; both named and different, or an entry that prices a unit at the standard rates without a row of it in the tier, is `tier`, as the bound refuses it. The dimensions and the operation as [the bound](#the-bound-of-an-endpoint-call) reads them (`operation` or `dimensions` when it would refuse them). At a routing gateway, whose bound is at the route ceiling, the entry's listed rates price the call (`listed rates`); for an embeddings call the bound prices at the request's cap, an input rate above the cap is priced at the cap, which the router does not exceed (`input at the pin`), so the estimate stays within the bound while the listed rates are at most the route ceiling.
 
 **Tokens.** When the usage reports a token counter (input, uncached input, cache reads or writes, output, reasoning), the tokens are priced exactly as [`estimate`](#pricing-by-the-catalogue) prices a usage: the band of the usage's input tokens, the cache, reasoning and modality rules, its `assumptions` and its `unpriced` names. The input's image tokens are carved out of the uncached input and billed at `input_image`; more of them than the uncached input, or none of that rate, is `input_image`. A side the operation counts (an `input` or `output` quantity that can be above zero) whose counter the usage lacks is unpriced (`input`, `output`). When the usage reports no counter, each side the operation counts needs all of its rates, in every band, to be declared zeros, with an `input` (or `output`) row without a band, since the call may be above no band, and the image tokens a declared zero `input_image`; otherwise the side is unpriced.
 
