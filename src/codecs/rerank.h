@@ -9,6 +9,7 @@
 #include <variant>
 #include <vector>
 
+namespace sp::reason { struct Reason; }
 namespace sp::rerank {
 struct Request {
   std::string model, query;
@@ -55,7 +56,7 @@ class Codec final : public endpoints::Codec {
         std::uint64_t top = 0);
   bool buffered(std::string_view body, Close close) override;
  private:
-  bool fail(ErrorKind, std::string);
+  bool fail(ErrorKind, const reason::Reason&);
   bool emit(const Event&);
   const descriptor::ValidatedDescriptor& descriptor_;
   Accumulator& accumulator_;
