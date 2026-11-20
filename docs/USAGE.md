@@ -273,6 +273,26 @@ The checks that run on a request's effective controls before anything is encoded
 - **Defaults.** A family's defaults and the defaults of each catalogue entry are checked with the same data when the policy loads, so a policy whose `controls` leave out a control its own defaults set is refused at `/defaults` or at the entry (`/model_catalogue/models/<id>/defaults/<family>`).
 - **Older policies.** A policy that does not state `controls`, or a rule member, for a family takes the embedded policy's value for that family, and a rule member the embedded policy does not state for it is off. Such a policy refuses and admits what it did before. `DescriptorPolicy::control_admitted` still answers `std::nullopt` for a family without `controls`. The values a policy takes are mixed into its content digest behind the marker `sp.descriptor-policy.borrowed.v1`, so a pinned older policy needs its pin refreshed once; a policy that takes nothing keeps its digest. None of these members is part of the replay identity: editing them leaves sealed history replayable and the native origin digests and archive bindings where they were.
 
+### Provider limits in the policy
+
+The counts and sizes a provider bounds are policy data, not numbers in the encoders. A request over one is refused before anything is sent.
+
+| Family | `limits` member | Bounds | Built-in policy |
+|---|---|---|---|
+| `anthropic.messages` | `document_title_chars` | the characters of a document title | 500 |
+| | `mcp_servers` | the MCP servers of one request | 20 |
+| | `container_skills` | the container skills of one request | 20 |
+| `google.generate` | `transcription_vocabulary` | the custom vocabulary terms of a transcription config | 1000 |
+| | `audio_sample_rate` | the largest audio sample rate | 384000 |
+| | `audio_bit_rate` | the largest audio bit rate | 1000000 |
+| `google.interactions` | `transcription_vocabulary` | the custom vocabulary terms of a transcription config | 1000 |
+
+A family states its limits in an optional `limits` object of positive integers, and may state only the names of its own rows: a name another family's encoder reads is a `ConfigError` at `/limits`, and a value that is not a positive integer is one at `/limits/<name>`. The batch endpoint facts of the shapes that send their requests inline (`anthropic`, `google`) state `max_items`, the most requests one batch carries (100000 in the built-in policy); on any other fact it is a `ConfigError` at `/endpoints/max_items`. A value a custom policy states is taken as stated: it is trusted input, and a gateway that admits more than the provider does can say so.
+
+- **Older policies.** A policy that states no `limits`, a `limits` that leaves a name out, or a batch fact without `max_items` takes the embedded policy's value for that family or shape, and refuses and admits what it did before. The values it takes are mixed into its content digest behind the marker `sp.descriptor-policy.borrowed.v1`, so a pinned older policy needs its pin refreshed once; a policy that states every limit takes nothing and keeps its digest. The limits are admission data: the replay identity, the native origin digests and the archive bindings do not change.
+- **Query.** `DescriptorPolicy::limit(family, name)` answers the limit in force for a family, stated or taken from the embedded policy, and `DescriptorPolicy::endpoint_limit(endpoint, origin, "max_items")` the bound of a batch fact. Both answer `std::nullopt` for a family, a name or a fact that has no such limit. A host that checks counts before it builds a request asks them instead of keeping the numbers, and `descriptor::over_limit(descriptor, name, count)` is the comparison the encoders make.
+- **Refusal texts.** The refusals keep their reason codes. Their texts no longer hold a number, because the number is the policy's (see [MIGRATION](MIGRATION.md)).
+
 ### Model catalogue
 
 What the SDK knows about models is data in a model catalogue (`<descriptor/catalogue.h>`), not code. A policy snapshot carries one. The embedded catalogue, `config/models.json`, holds only facts confirmed by live calls; it is not a provider listing.
@@ -1238,7 +1258,8 @@ if (auto* file = std::get_if<sp::files::File>(&uploaded)) {
   - `accepted_audio`, on a transcription fact, the audio it takes (see Transcription);
   - `max_part_bytes`, on a files fact, the largest part of a chunked upload (64 MiB at OpenAI);
   - `billing`, whether the provider bills each operation: `none` (it does not), `model` (the call bills the model its request names, by that model's catalogue entry) or `carried` (a batch submit, which bills the chat requests it carries). A string states one value for every call of the endpoint, the steps of Google's resumable upload included, which have no operation of their own; an object states one per operation, `{"submit":"model","poll":"none","download":"none"}`, and must name every operation of `paths`. Its keys are operations of the fact's shape. `carried` is admitted only for a batch submit, and `model` only for an operation whose request names a model (images, decisions, embeddings, rerank, moderation, speech, transcription, a video submit, token counting, a realtime connection). A fact with `charge_on_accept` must bill at least one operation. Without `billing` the policy states nothing, and every operation reads as `Unstated`, never as not billed;
-  - `carried_tier`, with `carried` billing only and then required: the catalogue tier the carried requests are priced under (`batch`).
+  - `carried_tier`, with `carried` billing only and then required: the catalogue tier the carried requests are priced under (`batch`);
+  - `max_items`, on an Anthropic or Google batch fact, the most requests one batch carries ([provider limits](#provider-limits-in-the-policy)).
 
   The built-in policy admits images, decisions and embeddings at `https://api.openai.com` and `https://openrouter.ai`, and also these:
   - embeddings at `https://generativelanguage.googleapis.com`;

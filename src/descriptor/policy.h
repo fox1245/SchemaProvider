@@ -310,6 +310,14 @@ class DescriptorPolicy final {
   // the facts for a family has the embedded policy's. Empty for a family the policy does not have. A descriptor's
   // `connection.auth` wins over it (descriptor::auth_scheme).
   std::string_view auth_scheme(std::string_view family, std::string_view origin) const noexcept;
+  // A provider limit of `family`'s encoder in force, by name: `document_title_chars`, `mcp_servers` and
+  // `container_skills` for Messages; `transcription_vocabulary`, `audio_sample_rate` and `audio_bit_rate` for
+  // Generate; `transcription_vocabulary` for Interactions. The policy's own value, or the embedded policy's for a limit
+  // it does not state (the encoders refuse at the same value). nullopt for a family or a name that has no such limit.
+  std::optional<std::uint64_t> limit(std::string_view family, std::string_view name) const noexcept;
+  // The same for an endpoint fact at `origin`: `max_items` of the Anthropic and Google batch facts, the most requests
+  // one inline batch carries.
+  std::optional<std::uint64_t> endpoint_limit(std::string_view endpoint, std::string_view origin, std::string_view name) const noexcept;
   // The route facts of `family` in the policy's order, empty for a family without any or not in the policy. A policy
   // that states no `routes` for a family has the embedded policy's.
   const std::vector<RouteFact>& routes(std::string_view family) const noexcept;
@@ -367,6 +375,10 @@ class DescriptorPolicy final {
   std::vector<std::pair<std::string, ValidationFacts>> validation_;  // family, facts
   const ValidationFacts* validation(std::string_view family) const noexcept;
   std::vector<std::pair<std::string, std::vector<RouteFact>>> routes_;  // family, facts
+  // The provider limits in force per family, by name, and the `max_items` of the endpoint fact at the same index of
+  // endpoints_. A limit a policy does not state is the embedded policy's, and its content digest covers it (borrowed_).
+  std::vector<std::pair<std::string, std::vector<std::pair<std::string, std::uint64_t>>>> limits_;  // family, (name, value)
+  std::vector<std::optional<std::uint64_t>> max_items_;
   static std::optional<std::string> check(const FamilyPolicy&, const ValidationFacts&, const EffectiveChoices&,
                                           std::optional<std::uint64_t> limit, bool require_cap);
   friend std::optional<std::string> validate_choices(const ValidatedDescriptor&, std::string_view, const EffectiveChoices&);
@@ -426,6 +438,9 @@ std::optional<std::string> literal_route_refusal(const ValidatedDescriptor&, std
 // The credential scheme this descriptor's chat calls send the API key with: its `connection.auth`, else its policy's
 // auth_scheme for its family and origin. Endpoint calls and realtime sessions use their endpoint fact's `auth`.
 std::string_view auth_scheme(const ValidatedDescriptor&) noexcept;
+// Whether `count` is above the limit `name` the descriptor's policy states for its family (DescriptorPolicy::limit).
+// False when the policy has no such limit.
+bool over_limit(const ValidatedDescriptor&, std::string_view name, std::uint64_t count) noexcept;
 // True when this descriptor targets an origin its family policy declares as a routing gateway
 // (openrouter_origins). Such a gateway may serve a different concrete model than the one requested.
 bool routed_gateway(const ValidatedDescriptor&) noexcept;

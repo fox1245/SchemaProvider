@@ -52,7 +52,8 @@ std::optional<Error> admit(const descriptor::ValidatedDescriptor& descriptor, co
   if (media.kind == MediaKind::Image && media.detail != ImageDetail::Auto)
     return Error{ErrorKind::Unsupported, "Messages images have no detail control"};
   if (media.kind != MediaKind::Document) return std::nullopt;
-  if (media.name.size() > 500) return Error{ErrorKind::InvalidRequest, "Messages document title is limited to 500 characters"};
+  if (descriptor::over_limit(descriptor, "document_title_chars", media.name.size()))
+    return Error{ErrorKind::InvalidRequest, "Messages document title length limit exceeded"};
   if (media.source == MediaSource::Url && !media.mime.empty() && !mime_equal(media.mime, "application/pdf"))
     return Error{ErrorKind::Unsupported, "Messages URL documents must be PDF"};
   if (media.source == MediaSource::Inline && plain_text(media)) {
@@ -192,7 +193,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         if (std::find(betas.begin(), betas.end(), beta) == betas.end()) betas.push_back(beta);
       }
   // MCP servers: bounded, unique names and https URLs, each named by exactly one `mcp_toolset` entry.
-  if (request.mcp_servers.size() > 20) return bad("MCP server count limit exceeded");
+  if (descriptor::over_limit(descriptor, "mcp_servers", request.mcp_servers.size())) return bad("MCP server count limit exceeded");
   std::set<std::string_view> server_names;
   const auto printable = [](std::string_view value, std::size_t limit) {
     return !value.empty() && value.size() <= limit && std::none_of(value.begin(), value.end(), [](unsigned char c) { return c < 0x20 || c == 0x7f; });
@@ -422,7 +423,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       });
     };
     std::set<std::pair<std::string_view, std::string_view>> skills;
-    if (request.skills.size() > 20) return bad("container skills are limited to 20");
+    if (descriptor::over_limit(descriptor, "container_skills", request.skills.size())) return bad("container skill count limit exceeded");
     // Skills load into the code-execution container, which only a declared code-execution tool provides.
     if (std::none_of(request.tools.begin(), request.tools.end(), [&](const auto& tool) {
           const auto* fact = tool.type.empty() ? nullptr : fact_of(tool.type);
