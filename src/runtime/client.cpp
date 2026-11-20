@@ -1925,6 +1925,60 @@ files::ProgressOutcome Client::complete(PreparedEndpoint<files::ProgressOutcome>
 EndpointCall<files::ProgressOutcome> Client::start(PreparedEndpoint<files::ProgressOutcome> call, std::function<void(files::ProgressOutcome)> on_outcome) {
   return start_endpoint(std::move(call), std::move(on_outcome));
 }
+// A search store call: the codec that reads its answer, and the operation of the stores fact it performs.
+#define SP_STORES_CALL(Request, Outcome, codec)                                                                                   \
+  PreparedEndpoint<stores::Outcome> Client::prepare(stores::Request request, RunOptions options) {                                \
+    auto client = state_;                                                                                                         \
+    return PreparedEndpoint<stores::Outcome>(prepare_endpoint<stores::Encoded>(std::move(options), codec,                        \
+        [&] { return stores::encode(client->descriptor, request); },                                                              \
+        [&] { return endpoints::call_facts(client->descriptor, "stores", stores::operation(stores::shape(client->descriptor), request), {}); })); \
+  }                                                                                                                               \
+  stores::Outcome Client::complete(stores::Request request, RunOptions options) { return complete(prepare(std::move(request), std::move(options))); }
+SP_STORES_CALL(Create, StoreOutcome, "stores")
+SP_STORES_CALL(Get, StoreOutcome, "stores")
+SP_STORES_CALL(List, PageOutcome, "stores.list")
+SP_STORES_CALL(Update, StoreOutcome, "stores")
+SP_STORES_CALL(Delete, DeleteOutcome, "stores.delete")
+SP_STORES_CALL(Search, SearchOutcome, "stores.search")
+SP_STORES_CALL(AddFile, FileOutcome, "stores.file")
+SP_STORES_CALL(GetFile, FileOutcome, "stores.file")
+SP_STORES_CALL(ListFiles, PageOutcome, "stores.files")
+SP_STORES_CALL(UpdateFile, FileOutcome, "stores.file")
+SP_STORES_CALL(DeleteFile, DeleteOutcome, "stores.delete")
+SP_STORES_CALL(FileContent, ContentOutcome, "stores.content")
+SP_STORES_CALL(CreateBatch, BatchOutcome, "stores.batch")
+SP_STORES_CALL(Import, BatchOutcome, "stores.batch")
+SP_STORES_CALL(Poll, BatchOutcome, "stores.batch")
+SP_STORES_CALL(Cancel, BatchOutcome, "stores.batch")
+#undef SP_STORES_CALL
+stores::StoreOutcome Client::complete(PreparedEndpoint<stores::StoreOutcome> call) { return complete_endpoint(std::move(call)); }
+EndpointCall<stores::StoreOutcome> Client::start(PreparedEndpoint<stores::StoreOutcome> call, std::function<void(stores::StoreOutcome)> on_outcome) {
+  return start_endpoint(std::move(call), std::move(on_outcome));
+}
+stores::FileOutcome Client::complete(PreparedEndpoint<stores::FileOutcome> call) { return complete_endpoint(std::move(call)); }
+EndpointCall<stores::FileOutcome> Client::start(PreparedEndpoint<stores::FileOutcome> call, std::function<void(stores::FileOutcome)> on_outcome) {
+  return start_endpoint(std::move(call), std::move(on_outcome));
+}
+stores::BatchOutcome Client::complete(PreparedEndpoint<stores::BatchOutcome> call) { return complete_endpoint(std::move(call)); }
+EndpointCall<stores::BatchOutcome> Client::start(PreparedEndpoint<stores::BatchOutcome> call, std::function<void(stores::BatchOutcome)> on_outcome) {
+  return start_endpoint(std::move(call), std::move(on_outcome));
+}
+stores::PageOutcome Client::complete(PreparedEndpoint<stores::PageOutcome> call) { return complete_endpoint(std::move(call)); }
+EndpointCall<stores::PageOutcome> Client::start(PreparedEndpoint<stores::PageOutcome> call, std::function<void(stores::PageOutcome)> on_outcome) {
+  return start_endpoint(std::move(call), std::move(on_outcome));
+}
+stores::SearchOutcome Client::complete(PreparedEndpoint<stores::SearchOutcome> call) { return complete_endpoint(std::move(call)); }
+EndpointCall<stores::SearchOutcome> Client::start(PreparedEndpoint<stores::SearchOutcome> call, std::function<void(stores::SearchOutcome)> on_outcome) {
+  return start_endpoint(std::move(call), std::move(on_outcome));
+}
+stores::ContentOutcome Client::complete(PreparedEndpoint<stores::ContentOutcome> call) { return complete_endpoint(std::move(call)); }
+EndpointCall<stores::ContentOutcome> Client::start(PreparedEndpoint<stores::ContentOutcome> call, std::function<void(stores::ContentOutcome)> on_outcome) {
+  return start_endpoint(std::move(call), std::move(on_outcome));
+}
+stores::DeleteOutcome Client::complete(PreparedEndpoint<stores::DeleteOutcome> call) { return complete_endpoint(std::move(call)); }
+EndpointCall<stores::DeleteOutcome> Client::start(PreparedEndpoint<stores::DeleteOutcome> call, std::function<void(stores::DeleteOutcome)> on_outcome) {
+  return start_endpoint(std::move(call), std::move(on_outcome));
+}
 PreparedEndpoint<batches::Outcome> Client::prepare(batches::Submit call, RunOptions options) {
   auto client = state_;
   // The caps the family encoder read from each inline item, kept from the one encoding the call sends.

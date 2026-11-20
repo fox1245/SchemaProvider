@@ -147,7 +147,7 @@ struct EndpointFact {
 // The path of one operation of an endpoint fact, if it has one.
 std::optional<std::string_view> endpoint_path(const EndpointFact&, std::string_view operation) noexcept;
 // Whether the provider bills an operation of an endpoint, as the fact's `billing` states it (`none`, `model`,
-// `carried`). `Unstated` when the policy does not say: a fact without `billing`, or a per-operation statement that does
+// `carried`, `unpriced`). `Unstated` when the policy does not say: a fact without `billing`, or a per-operation statement that does
 // not name the operation. Unstated never means not billed. New values go at the end.
 enum class EndpointBilling : std::uint8_t {
   Unstated,
@@ -157,7 +157,10 @@ enum class EndpointBilling : std::uint8_t {
   Model,
   // The call bills the chat requests it carries (a batch submit), each by its own model's entry under the fact's
   // `carried_tier`.
-  Carried
+  Carried,
+  // The provider bills what the call starts by a fee that is not per request (`unpriced`): a search store's storage per
+  // day, or the embeddings of indexing a file. No request states that amount, so the call has no bound and no estimate.
+  Unpriced
 };
 // How a call sends the API key, by the scheme a policy or a descriptor names: `bearer` as `Authorization: Bearer
 // <key>`, `x-api-key` and `x-goog-api-key` as a header of that name whose value is the key. The chat, endpoint and
@@ -338,7 +341,8 @@ class DescriptorPolicy final {
   // it does not state (the encoders refuse at the same value). nullopt for a family or a name that has no such limit.
   std::optional<std::uint64_t> limit(std::string_view family, std::string_view name) const noexcept;
   // The same for an endpoint fact at `origin`: `max_items` of the Anthropic and Google batch facts, the most requests
-  // one inline batch carries. `origin` is compared byte for byte: pass its canonical spelling (descriptor::canonical_origin), as a descriptor's base_url() is.
+  // one inline batch carries, and `max_results` of a stores fact, the most results one search may ask for (nullopt when
+  // the fact states none). `origin` is compared byte for byte: pass its canonical spelling (descriptor::canonical_origin), as a descriptor's base_url() is.
   std::optional<std::uint64_t> endpoint_limit(std::string_view endpoint, std::string_view origin, std::string_view name) const noexcept;
   // The family whose API a model listing belongs to, from the policy's `listings` facts (a policy that leaves a listing
   // out has the embedded policy's): the family whose credential scheme (`auth_scheme`) and Messages version header
@@ -415,6 +419,8 @@ class DescriptorPolicy final {
   std::vector<std::pair<Listing, std::string>> listings_;
   // The origin a source of each listing defaults to (listing_origin), empty for none, in the order of all_listings.
   std::vector<std::pair<Listing, std::string>> listing_origins_;
+  // The `max_results` of the endpoint fact at the same index of endpoints_ (a search store's most results per search).
+  std::vector<std::optional<std::uint64_t>> max_results_;
   static std::optional<reason::Reason> check(const FamilyPolicy&, const ValidationFacts&, const EffectiveChoices&,
                                              std::optional<std::uint64_t> limit, bool require_cap);
   friend std::optional<reason::Reason> choices_refusal(const ValidatedDescriptor&, std::string_view, const EffectiveChoices&);

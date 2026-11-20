@@ -1645,6 +1645,51 @@ inline constexpr Reason all[]{
     errors_unsupported, results_missing, results_file_invalid,
 };
 }  // namespace batches_request
+namespace stores {
+inline constexpr Reason endpoint_not_admitted{"stores.endpoint.not_admitted", "search store endpoints are not admitted at this origin"};
+inline constexpr Reason response_json_invalid{"stores.response.json_invalid", "invalid response JSON"};
+inline constexpr Reason response_not_object{"stores.response.not_object", "response must be object"};
+inline constexpr Reason store_id_required{"stores.store.id_required", "a store object names its id"};
+inline constexpr Reason file_id_required{"stores.file.id_required", "a store file object names its id"};
+inline constexpr Reason batch_id_required{"stores.batch.id_required", "a file batch or operation names its id"};
+inline constexpr Reason page_list_required{"stores.page.list_required", "a store listing holds a list"};
+inline constexpr Reason page_cursor_invalid{"stores.page.cursor_invalid", "a store listing cursor is a string"};
+inline constexpr Reason page_limit{"stores.page.limit", "a store listing exceeds the part limit"};
+inline constexpr Reason search_invalid{"stores.search.results_invalid", "search results are objects that name their file"};
+inline constexpr Reason content_invalid{"stores.content.parts_invalid", "a file content page holds text parts"};
+inline constexpr Reason delete_unconfirmed{"stores.delete.unconfirmed", "the response does not confirm the deletion"};
+// Every constant of the source, for the enumeration test.
+inline constexpr Reason all[]{
+    endpoint_not_admitted, response_json_invalid, response_not_object, store_id_required, file_id_required,
+    batch_id_required, page_list_required, page_cursor_invalid, page_limit, search_invalid, content_invalid,
+    delete_unconfirmed,
+};
+}  // namespace stores
+namespace stores_request {
+inline constexpr Reason endpoint_not_admitted{"request.stores.endpoint_not_admitted", "search store endpoints are not admitted at this origin"};
+inline constexpr Reason path_missing{"request.stores.path_missing", "the store endpoint has no path for this operation"};
+inline constexpr Reason store_invalid{"request.stores.store_invalid", "a store id is a token, or fileSearchStores/<token> at Google"};
+inline constexpr Reason id_invalid{"request.stores.id_invalid", "a store file id is a token, or <store>/documents/<token> at Google"};
+inline constexpr Reason file_invalid{"request.stores.file_invalid", "a file to index is a token, or files/<token> at Google"};
+inline constexpr Reason handle_origin_mismatch{"request.stores.handle_origin_mismatch", "a batch or operation is polled at the origin that started it"};
+inline constexpr Reason handle_invalid{"request.stores.handle_invalid", "a batch id is a token, or <store>/operations/<token> at Google"};
+inline constexpr Reason query_empty{"request.stores.query_empty", "a search names at least one query and none is empty"};
+inline constexpr Reason results_invalid{"request.stores.results_invalid", "max_num_results is positive and within the endpoint's bound"};
+inline constexpr Reason object_invalid{"request.stores.object_invalid", "a provider object member is of the kind the provider documents"};
+inline constexpr Reason member_unsupported{"request.stores.member_unsupported", "the store endpoint of this shape does not take the member"};
+inline constexpr Reason limit_invalid{"request.stores.limit_invalid", "a page limit is positive"};
+inline constexpr Reason cursor_invalid{"request.stores.cursor_invalid", "a page cursor is bounded"};
+inline constexpr Reason filter_invalid{"request.stores.filter_invalid", "a file status filter is a token"};
+inline constexpr Reason expiry_invalid{"request.stores.expiry_invalid", "a store expiry is a positive number of days"};
+inline constexpr Reason batch_files_invalid{"request.stores.batch_files_invalid", "a file batch names file_ids or files, one of them"};
+inline constexpr Reason update_empty{"request.stores.update_empty", "a store update changes a member"};
+// Every constant of the source, for the enumeration test.
+inline constexpr Reason all[]{
+    endpoint_not_admitted, path_missing, store_invalid, id_invalid, file_invalid, handle_origin_mismatch,
+    handle_invalid, query_empty, results_invalid, object_invalid, member_unsupported, limit_invalid, cursor_invalid,
+    filter_invalid, expiry_invalid, batch_files_invalid, update_empty,
+};
+}  // namespace stores_request
 namespace tokens {
 inline constexpr Reason response_json_invalid{"tokens.response.json_invalid", "invalid response JSON"};
 inline constexpr Reason response_not_object{"tokens.response.not_object", "response must be object"};
@@ -1749,6 +1794,8 @@ inline constexpr Constants sources[]{
     {"request.files", files_request::all},
     {"batches", batches::all},
     {"request.batches", batches_request::all},
+    {"stores", stores::all},
+    {"request.stores", stores_request::all},
     {"tokens", tokens::all},
     {"request.tokens", tokens_request::all},
     {"webhooks", webhooks::all},

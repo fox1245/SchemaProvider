@@ -18,6 +18,7 @@
 #include "codecs/videos.h"
 #include "codecs/files.h"
 #include "codecs/batches.h"
+#include "codecs/stores.h"
 #include "codecs/tokens.h"
 #include "codecs/generations.h"
 #include "descriptor/presets.h"
@@ -250,6 +251,13 @@ inline files::DeleteOutcome typed_outcome(const sp::Outcome& outcome, const file
 inline files::ProgressOutcome typed_outcome(const sp::Outcome& outcome, const files::ProgressOutcome*) { return files::typed_progress(outcome); }
 inline batches::Outcome typed_outcome(const sp::Outcome& outcome, const batches::Outcome*) { return batches::typed(outcome); }
 inline batches::DeleteOutcome typed_outcome(const sp::Outcome& outcome, const batches::DeleteOutcome*) { return batches::typed_deleted(outcome); }
+inline stores::StoreOutcome typed_outcome(const sp::Outcome& outcome, const stores::StoreOutcome*) { return stores::typed_store(outcome); }
+inline stores::FileOutcome typed_outcome(const sp::Outcome& outcome, const stores::FileOutcome*) { return stores::typed_file(outcome); }
+inline stores::BatchOutcome typed_outcome(const sp::Outcome& outcome, const stores::BatchOutcome*) { return stores::typed_batch(outcome); }
+inline stores::PageOutcome typed_outcome(const sp::Outcome& outcome, const stores::PageOutcome*) { return stores::typed_page(outcome); }
+inline stores::SearchOutcome typed_outcome(const sp::Outcome& outcome, const stores::SearchOutcome*) { return stores::typed_search(outcome); }
+inline stores::ContentOutcome typed_outcome(const sp::Outcome& outcome, const stores::ContentOutcome*) { return stores::typed_content(outcome); }
+inline stores::DeleteOutcome typed_outcome(const sp::Outcome& outcome, const stores::DeleteOutcome*) { return stores::typed_deleted(outcome); }
 inline tokens::Outcome typed_outcome(const sp::Outcome& outcome, const tokens::Outcome*) { return tokens::typed(outcome); }
 inline generations::Outcome typed_outcome(const sp::Outcome& outcome, const generations::Outcome*) { return generations::typed(outcome); }
 }  // namespace detail
@@ -396,6 +404,57 @@ class Client {
   batches::DeleteOutcome complete(PreparedEndpoint<batches::DeleteOutcome>);
   EndpointCall<batches::Outcome> start(PreparedEndpoint<batches::Outcome>, std::function<void(batches::Outcome)> on_outcome = {});
   EndpointCall<batches::DeleteOutcome> start(PreparedEndpoint<batches::DeleteOutcome>, std::function<void(batches::DeleteOutcome)> on_outcome = {});
+  // Provider-side search stores (D7): OpenAI vector stores and Google file search stores, each call resolved from the
+  // policy's `stores` facts by its operation. A create, an update, a search and a call that indexes a file (OpenAI
+  // file_add, file_update, batch_create; Google import) are billed by a fee that is not per request, so they have no
+  // cost bound; such a call is not sent again once it may have reached the provider. A read, a listing and a deletion
+  // are free, and retried as reads.
+  PreparedEndpoint<stores::StoreOutcome> prepare(stores::Create, RunOptions = {});
+  PreparedEndpoint<stores::StoreOutcome> prepare(stores::Get, RunOptions = {});
+  PreparedEndpoint<stores::PageOutcome> prepare(stores::List, RunOptions = {});
+  PreparedEndpoint<stores::StoreOutcome> prepare(stores::Update, RunOptions = {});
+  PreparedEndpoint<stores::DeleteOutcome> prepare(stores::Delete, RunOptions = {});
+  PreparedEndpoint<stores::SearchOutcome> prepare(stores::Search, RunOptions = {});
+  PreparedEndpoint<stores::FileOutcome> prepare(stores::AddFile, RunOptions = {});
+  PreparedEndpoint<stores::FileOutcome> prepare(stores::GetFile, RunOptions = {});
+  PreparedEndpoint<stores::PageOutcome> prepare(stores::ListFiles, RunOptions = {});
+  PreparedEndpoint<stores::FileOutcome> prepare(stores::UpdateFile, RunOptions = {});
+  PreparedEndpoint<stores::DeleteOutcome> prepare(stores::DeleteFile, RunOptions = {});
+  PreparedEndpoint<stores::ContentOutcome> prepare(stores::FileContent, RunOptions = {});
+  PreparedEndpoint<stores::BatchOutcome> prepare(stores::CreateBatch, RunOptions = {});
+  PreparedEndpoint<stores::BatchOutcome> prepare(stores::Import, RunOptions = {});
+  PreparedEndpoint<stores::BatchOutcome> prepare(stores::Poll, RunOptions = {});
+  PreparedEndpoint<stores::BatchOutcome> prepare(stores::Cancel, RunOptions = {});
+  stores::StoreOutcome complete(stores::Create, RunOptions = {});
+  stores::StoreOutcome complete(stores::Get, RunOptions = {});
+  stores::PageOutcome complete(stores::List, RunOptions = {});
+  stores::StoreOutcome complete(stores::Update, RunOptions = {});
+  stores::DeleteOutcome complete(stores::Delete, RunOptions = {});
+  stores::SearchOutcome complete(stores::Search, RunOptions = {});
+  stores::FileOutcome complete(stores::AddFile, RunOptions = {});
+  stores::FileOutcome complete(stores::GetFile, RunOptions = {});
+  stores::PageOutcome complete(stores::ListFiles, RunOptions = {});
+  stores::FileOutcome complete(stores::UpdateFile, RunOptions = {});
+  stores::DeleteOutcome complete(stores::DeleteFile, RunOptions = {});
+  stores::ContentOutcome complete(stores::FileContent, RunOptions = {});
+  stores::BatchOutcome complete(stores::CreateBatch, RunOptions = {});
+  stores::BatchOutcome complete(stores::Import, RunOptions = {});
+  stores::BatchOutcome complete(stores::Poll, RunOptions = {});
+  stores::BatchOutcome complete(stores::Cancel, RunOptions = {});
+  stores::StoreOutcome complete(PreparedEndpoint<stores::StoreOutcome>);
+  stores::FileOutcome complete(PreparedEndpoint<stores::FileOutcome>);
+  stores::BatchOutcome complete(PreparedEndpoint<stores::BatchOutcome>);
+  stores::PageOutcome complete(PreparedEndpoint<stores::PageOutcome>);
+  stores::SearchOutcome complete(PreparedEndpoint<stores::SearchOutcome>);
+  stores::ContentOutcome complete(PreparedEndpoint<stores::ContentOutcome>);
+  stores::DeleteOutcome complete(PreparedEndpoint<stores::DeleteOutcome>);
+  EndpointCall<stores::StoreOutcome> start(PreparedEndpoint<stores::StoreOutcome>, std::function<void(stores::StoreOutcome)> on_outcome = {});
+  EndpointCall<stores::FileOutcome> start(PreparedEndpoint<stores::FileOutcome>, std::function<void(stores::FileOutcome)> on_outcome = {});
+  EndpointCall<stores::BatchOutcome> start(PreparedEndpoint<stores::BatchOutcome>, std::function<void(stores::BatchOutcome)> on_outcome = {});
+  EndpointCall<stores::PageOutcome> start(PreparedEndpoint<stores::PageOutcome>, std::function<void(stores::PageOutcome)> on_outcome = {});
+  EndpointCall<stores::SearchOutcome> start(PreparedEndpoint<stores::SearchOutcome>, std::function<void(stores::SearchOutcome)> on_outcome = {});
+  EndpointCall<stores::ContentOutcome> start(PreparedEndpoint<stores::ContentOutcome>, std::function<void(stores::ContentOutcome)> on_outcome = {});
+  EndpointCall<stores::DeleteOutcome> start(PreparedEndpoint<stores::DeleteOutcome>, std::function<void(stores::DeleteOutcome)> on_outcome = {});
   // Token counting (D7): the input tokens of a chat request of this client's family, without running it. Free.
   PreparedEndpoint<tokens::Outcome> prepare(tokens::Count, RunOptions = {});
   tokens::Outcome complete(tokens::Count, RunOptions = {});

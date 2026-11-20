@@ -82,10 +82,14 @@ struct EndpointBound {
   bool route_ceiling = false, pinned = false;
   std::optional<OpenRouterMaxPrice> pin;
 };
+// The detail of the reason a call whose operation the policy states `unpriced` has no bound.
+inline constexpr std::string_view unpriced_detail = "the provider bills the operation by a fee that is not per request, such as storage or indexing";
 // A bound on what one endpoint call can bill, from the facts of the call and the catalogue's prices; a stateless
 // function of its arguments. By the billing of the call's operation:
 // - `None`: exactly zero, with no catalogue lookup, so the model needs no entry.
 // - `Unstated` (or a value this version does not know): no total, `Billing`, subject `<endpoint>/<operation>`.
+// - `Unpriced` (a search store's create, a file it indexes): no total, `Unmodeled`, subject `<endpoint>/<operation>`,
+//   with unpriced_detail; never a total of zero, since the provider bills what the call starts.
 // - `Carried` (a batch submit): the sum of a bound of each chat request it carries (`facts->carried`), each by
 //   worst_case with the facts' family and origin, the request's model, facts, output cap and invocations, its measured
 //   input tokens from `measured_carried_input_tokens`, one attempt, and the service tier `facts->carried_tier`: an
@@ -182,7 +186,7 @@ struct EndpointEstimate {
   // the route ceiling, and "input at the pin" where the request's cap is below a listed input rate.
   std::vector<std::string> assumptions;
   // Why there is no total: "billing" (the policy does not state how the operation bills), "carried" (the call bills
-  // the requests it carries), "model", "tier", "operation" or "dimensions" (as the bound refuses them), a token side
+  // the requests it carries), "unpriced" (the provider bills the operation by a fee that is not per request), "model", "tier", "operation" or "dimensions" (as the bound refuses them), a token side
   // or counter with no price or no count ("input", "output", "cache_read", "input_image", "request", ...), an item
   // unit with no row that applies, a row that applies at a variable price, or no count, a price key of an item unit
   // the operation cannot count, a quantity of a unit the estimate does not price, or "overflow".
@@ -195,7 +199,7 @@ struct EndpointEstimate {
 // prepared) and what its result counted, priced like the bound of the same call (endpoint_worst_case) but at the
 // result's own quantities. The provider's own figure, where it reports one (Usage::provider_cost), is the cost; this is
 // a cross-check. By the billing of the operation: `None` is exactly zero and reads nothing of the result; `Unstated`
-// is "billing"; `Carried` is "carried". For `Model`:
+// is "billing"; `Carried` is "carried"; `Unpriced` is "unpriced". For `Model`:
 // - The tier: the facts' `service_tier`, else `service_tier` ("tier" when both name one and they differ).
 // - The entry: the served model's when the response names another model and that model has an entry with a price
 //   under the tier, else the requested one's (`requested_entry`); "model" when neither has one, "tier" when one

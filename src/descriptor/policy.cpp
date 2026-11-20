@@ -784,10 +784,18 @@ class PolicyLoader {
           if (endpoint == "batches" && shape == "google") return {"submit", "get", "cancel", "delete"};
           if (endpoint == "tokens" && (shape == "openai" || shape == "anthropic" || shape == "google")) return {"count"};
           if (endpoint == "generations" && shape == "openrouter") return {"get"};
+          // Provider-side search stores: OpenAI vector stores (their files, file batches and search) and Google file
+          // search stores (their documents, and the operations an import starts).
+          if (endpoint == "stores" && shape == "openai")
+            return {"create", "get", "list", "update", "delete", "search", "file_add", "file_get", "file_list", "file_update",
+                    "file_delete", "file_content", "batch_create", "batch_get", "batch_cancel", "batch_files"};
+          if (endpoint == "stores" && shape == "google")
+            return {"create", "get", "list", "delete", "import", "document_get", "document_list", "document_delete", "operation_get"};
           return {};
         };
         // What an operation's billing may be: `none` for any; `model` where the call's request names the model it bills
-        // by; `carried` for the batch submit, which bills the chat requests it carries.
+        // by; `carried` for the batch submit, which bills the chat requests it carries; `unpriced` for any, a fee that is
+        // not per request (a store's storage, the embeddings of indexing), which no bound or estimate prices.
         const auto names_model = [](std::string_view endpoint, std::string_view operation) {
           return (endpoint == "images" && (operation == "generate" || operation == "edit")) || (endpoint == "decisions" && operation == "decide") ||
                  (endpoint == "embeddings" && operation == "embed") || (endpoint == "rerank" && operation == "rank") ||
@@ -799,17 +807,18 @@ class PolicyLoader {
         const auto admitted = [&](std::string_view endpoint, std::string_view operation, EndpointBilling value) {
           if (value == EndpointBilling::Model) return names_model(endpoint, operation);
           if (value == EndpointBilling::Carried) return endpoint == "batches" && operation == "submit";
-          return value == EndpointBilling::None;
+          return value == EndpointBilling::None || value == EndpointBilling::Unpriced;
         };
         const auto billing_value = [](Value v) {
           const auto name = v.is_string() ? v.as_string() : std::string_view{};
           if (name == "none") return EndpointBilling::None;
           if (name == "model") return EndpointBilling::Model;
           if (name == "carried") return EndpointBilling::Carried;
-          fail("/endpoints/billing", "none, model or carried");
+          if (name == "unpriced") return EndpointBilling::Unpriced;
+          fail("/endpoints/billing", "none, model, carried or unpriced");
         };
         for (auto e : endpoints.elements()) {
-          closed(e, {"endpoint","shape","origins","paths"}, "/endpoints", {"options","auth","charge_on_accept","headers","keep","audio","close_codes","max_response_bytes","accepted_audio","max_part_bytes","billing","carried_tier","max_items","output_cap"});
+          closed(e, {"endpoint","shape","origins","paths"}, "/endpoints", {"options","auth","charge_on_accept","headers","keep","audio","close_codes","max_response_bytes","accepted_audio","max_part_bytes","billing","carried_tier","max_items","output_cap","max_results"});
           EndpointFact fact{text(e.get("endpoint"), "/endpoints/endpoint"), text(e.get("shape"), "/endpoints/shape"),
                             strings(e.get("origins"), "/endpoints/origins")};
           const auto operations = operations_of(fact.endpoint, fact.shape);
@@ -997,7 +1006,8 @@ class PolicyLoader {
             }
             // A fact that charges once it accepts a call bills at least one of its operations.
             if (fact.charge_on_accept && std::none_of(billed.operations.begin(), billed.operations.end(), [](const auto& stated) {
-                  return stated.second == EndpointBilling::Model || stated.second == EndpointBilling::Carried;
+                  return stated.second == EndpointBilling::Model || stated.second == EndpointBilling::Carried ||
+                         stated.second == EndpointBilling::Unpriced;
                 }))
               fail("/endpoints/billing", "a billed operation on a fact that charges once it accepts a call");
           }
@@ -1034,7 +1044,15 @@ class PolicyLoader {
             if (existing.endpoint == fact.endpoint)
               for (const auto& origin : fact.origins)
                 if (contains(existing.origins, origin)) fail("/endpoints/origins", "one fact per endpoint and origin");
+          // The most results one search of a stores fact may ask for: none when the fact states no bound.
+          std::optional<std::uint64_t> max_results;
+          if (const auto stated = e.get("max_results"); stated.valid()) {
+            if (fact.endpoint != "stores") fail("/endpoints/max_results", "a bound on a stores fact");
+            max_results = integer(stated, "/endpoints/max_results");
+            if (!*max_results || *max_results > std::numeric_limits<std::uint32_t>::max()) fail("/endpoints/max_results", "a positive count");
+          }
           policy->max_items_.push_back(max_items);
+          policy->max_results_.push_back(max_results);
           policy->endpoints_.push_back(std::move(fact));
           policy->billing_.push_back(std::move(billed));
         }
@@ -1715,6 +1733,11 @@ std::optional<std::uint64_t> DescriptorPolicy::limit(std::string_view family, st
   return std::nullopt;
 }
 std::optional<std::uint64_t> DescriptorPolicy::endpoint_limit(std::string_view endpoint, std::string_view origin, std::string_view name) const noexcept {
+  if (name == "max_results") {
+    for (std::size_t i = 0; i < endpoints_.size() && i < max_results_.size(); ++i)
+      if (endpoints_[i].endpoint == endpoint && contains(endpoints_[i].origins, origin)) return max_results_[i];
+    return std::nullopt;
+  }
   if (name != "max_items") return std::nullopt;
   for (std::size_t i = 0; i < endpoints_.size() && i < max_items_.size(); ++i)
     if (endpoints_[i].endpoint == endpoint && contains(endpoints_[i].origins, origin)) return max_items_[i];

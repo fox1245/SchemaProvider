@@ -360,6 +360,10 @@ EndpointBound endpoint_worst_case(const EndpointWorstCaseInput& in, const descri
     return out;
   }
   if (facts.billing == descriptor::EndpointBilling::Carried) return carried_worst_case(in, catalogue, attempts);
+  if (facts.billing == descriptor::EndpointBilling::Unpriced) {
+    block(UnboundedBy::Unmodeled, facts.endpoint + "/" + facts.operation, std::string(unpriced_detail));
+    return out;
+  }
   if (facts.billing != descriptor::EndpointBilling::Model) {
     block(UnboundedBy::Billing, facts.endpoint + "/" + facts.operation, "the policy does not state whether the provider bills the operation");
     return out;
@@ -688,6 +692,10 @@ EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const EndpointCou
   }
   if (facts.billing == descriptor::EndpointBilling::Carried) {
     refuse("carried");
+    return out;
+  }
+  if (facts.billing == descriptor::EndpointBilling::Unpriced) {
+    refuse("unpriced");
     return out;
   }
   if (facts.billing != descriptor::EndpointBilling::Model) {
