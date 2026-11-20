@@ -165,6 +165,9 @@ void decoded_files() {
       R"({"object":"list","data":[{"id":"file-a","bytes":1},{"id":"file-b","bytes":2}],"has_more":true,"first_id":"file-a","last_id":"file-b"})")));
   CHECK(op.files.size() == 2 && op.files[1].id == "file-b" && op.next == "file-b" && op.files[0].raw);
   CHECK(std::get<files::Page>(files::typed_page(decoded(openai, Kind::Page, R"({"data":[],"has_more":false,"last_id":null})"))).next.empty());
+  // More pages with no last id would read as the last page: refused.
+  for (const char* body : {R"({"data":[],"has_more":true})", R"({"data":[],"has_more":true,"last_id":null})", R"({"data":[],"has_more":true,"last_id":""})"})
+    CHECK(std::get<Failure>(decoded(openai, Kind::Page, body)).error.reason == "files.page.cursor_missing");
   const auto ap = std::get<files::Page>(files::typed_page(decoded(anthropic, Kind::Page, R"({"data":[{"type":"file","id":"file_1","downloadable":true}],"next_page":"page_x"})")));
   CHECK(ap.files.size() == 1 && ap.files[0].downloadable == true && ap.next == "page_x");
   CHECK(std::get<files::Page>(files::typed_page(decoded(google, Kind::Page, "{}"))).files.empty());

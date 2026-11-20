@@ -200,6 +200,10 @@ bool Codec::buffered(std::string_view body, Close close) {
       for (auto item : items.elements()) if (!file_of(item, shape, descriptor_.base_url(), probe)) return fail(ErrorKind::ProtocolCorrupt, reason::files::file_id_required);
     for (const char* cursor : {"nextPageToken", "next_page", "last_id"})
       if (!optional_member(root.get(cursor), is_string)) return fail(ErrorKind::ProtocolCorrupt, reason::files::page_cursor_invalid);
+    // OpenAI says more follow after its last id: a page that says so without one would read as the last page.
+    if (shape != "google" && !root.get("next_page").valid() && root.get("has_more").is_bool() && root.get("has_more").as_bool() &&
+        !(root.get("last_id").is_string() && !root.get("last_id").as_string().empty()))
+      return fail(ErrorKind::ProtocolCorrupt, reason::files::page_cursor_missing);
   } else {
     // OpenAI says `deleted`, Anthropic answers a `file_deleted` object, Google an empty one.
     const bool refused = (shape == "openai" && !(root.get("deleted").is_bool() && root.get("deleted").as_bool())) ||

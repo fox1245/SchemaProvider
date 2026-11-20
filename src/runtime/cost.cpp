@@ -135,7 +135,8 @@ pricing::EndpointBound bound_of(const PreparedRequest& prepared, const descripto
   // The provider charges a billed operation of a charge-on-accept fact once it accepts the call, and the runtime sends
   // such a call again only when it never reached the provider or was refused before it was accepted: one attempt bounds
   // it. An operation the policy states is not billed charges nothing, and the runtime retries it as a read.
-  const bool billed = facts.billing == descriptor::EndpointBilling::Model || facts.billing == descriptor::EndpointBilling::Carried;
+  const bool billed = facts.billing == descriptor::EndpointBilling::Model || facts.billing == descriptor::EndpointBilling::Carried ||
+                      facts.billing == descriptor::EndpointBilling::Unpriced;
   const auto* fact = descriptor.policy()->endpoint(facts.endpoint, facts.origin);
   input.charge_on_accept = billed && fact && fact->charge_on_accept;
   auto bound = pricing::endpoint_worst_case(input, catalogue);

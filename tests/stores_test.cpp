@@ -26,14 +26,14 @@ using namespace sp::test;
 using namespace std::chrono_literals;
 #define CHECK(condition) do { if (!(condition)) throw std::runtime_error("line " + std::to_string(__LINE__) + ": " #condition); } while (false)
 constexpr std::string_view openai = "https://api.openai.com", google = "https://generativelanguage.googleapis.com";
-descriptor::ValidatedDescriptor at(std::string_view origin) {
+descriptor::ValidatedDescriptor at(std::string_view origin, descriptor::PolicySnapshot policy = descriptor::builtin_policy()) {
   const bool g = origin == google;
   const std::string family = g ? "google.generate" : "openai.chat";
   const std::string path = g ? "/v1beta/models/{model}:generateContent" : "/v1/chat/completions";
   const std::string stream = g ? "/v1beta/models/{model}:streamGenerateContent?alt=sse" : path;
   auto loaded = descriptor::load(R"({"descriptor_version":1,"revision":1,"id":"stores-fixture","family":)" + json::quote(family) +
                                  R"(,"connection":{"base_url":)" + json::quote(origin) + R"(,"paths":{"buffered":)" + json::quote(path) +
-                                 R"(,"streaming":)" + json::quote(stream) + "}}}");
+                                 R"(,"streaming":)" + json::quote(stream) + "}}}", std::move(policy));
   CHECK(std::holds_alternative<descriptor::ValidatedDescriptor>(loaded));
   return std::get<descriptor::ValidatedDescriptor>(std::move(loaded));
 }
@@ -77,7 +77,8 @@ void openai_requests() {
   CHECK(read(encoded(openai, stores::List{20, "vs_abc456"}), "/v1/vector_stores?limit=20&after=vs_abc456"));
   CHECK(read(encoded(openai, stores::List{}), "/v1/vector_stores"));
   const auto renamed = encoded(openai, stores::Update{"vs_abc123", "Support FAQ v2", 30});
-  CHECK(renamed.path == "/v1/vector_stores/vs_abc123" && renamed.method == "POST" &&
+  // Metadata, expiry and attributes changes are free (`none`), so they are retried as reads are.
+  CHECK(renamed.path == "/v1/vector_stores/vs_abc123" && renamed.method == "POST" && !renamed.charge_on_accept &&
         renamed.body == R"({"name":"Support FAQ v2","expires_after":{"anchor":"last_active_at","days":30}})");
   const auto gone = encoded(openai, stores::Delete{"vs_abc123"});
   CHECK(gone.method == "DELETE" && gone.path == "/v1/vector_stores/vs_abc123" && gone.body.empty() && !gone.charge_on_accept);
@@ -86,7 +87,7 @@ void openai_requests() {
   stores::Search search{"vs_abc123", {"What is the return policy?"}, 5, document(R"({"type":"eq","key":"author","value":"Jane Smith"})"),
                         document(R"({"ranker":"auto","score_threshold":0.5})"), true};
   const auto searched = encoded(openai, search);
-  CHECK(searched.path == "/v1/vector_stores/vs_abc123/search" && searched.method == "POST" && searched.model == "vs_abc123");
+  CHECK(searched.path == "/v1/vector_stores/vs_abc123/search" && searched.method == "POST" && searched.model == "vs_abc123" && searched.charge_on_accept);
   CHECK(searched.body == R"({"query":"What is the return policy?","max_num_results":5,"filters":{"type":"eq","key":"author","value":"Jane Smith"},)"
                          R"("ranking_options":{"ranker":"auto","score_threshold":0.5},"rewrite_query":true})");
   CHECK(encoded(openai, stores::Search{"vs_a", {"a", "b"}}).body == R"({"query":["a","b"]})");
@@ -103,7 +104,7 @@ void openai_requests() {
              "/v1/vector_stores/vs_abc123/files?limit=10&after=file-abc456&filter=completed"));
   CHECK(read(encoded(openai, stores::ListFiles{"vs_abc123", "vsfb_abc123"}), "/v1/vector_stores/vs_abc123/file_batches/vsfb_abc123/files"));
   const auto retagged = encoded(openai, stores::UpdateFile{"vs_abc123", "file-abc123", document(R"({"year":2026,"draft":false})")});
-  CHECK(retagged.path == "/v1/vector_stores/vs_abc123/files/file-abc123" && retagged.method == "POST" && retagged.body == R"({"attributes":{"year":2026,"draft":false}})");
+  CHECK(retagged.path == "/v1/vector_stores/vs_abc123/files/file-abc123" && retagged.method == "POST" && !retagged.charge_on_accept && retagged.body == R"({"attributes":{"year":2026,"draft":false}})");
   CHECK(encoded(openai, stores::UpdateFile{"vs_abc123", "file-abc123", nullptr}).body == R"({"attributes":null})");
   const auto removed = encoded(openai, stores::DeleteFile{"vs_abc123", "file-abc123"});
   CHECK(removed.method == "DELETE" && removed.path == "/v1/vector_stores/vs_abc123/files/file-abc123" && removed.model == "file-abc123");
@@ -118,17 +119,18 @@ void openai_requests() {
   CHECK(encoded(openai, listed).body == R"({"files":[{"file_id":"file-abc123","attributes":{"category":"finance"}}]})");
   const stores::Handle handle{std::string(openai), "openai", "vs_abc123", "vsfb_abc123"};
   const auto polled = encoded(openai, stores::Poll{handle});
-  CHECK(read(polled, "/v1/vector_stores/vs_abc123/file_batches/vsfb_abc123") && polled.model == "vsfb_abc123");
+  CHECK(read(polled, "/v1/vector_stores/vs_abc123/file_batches/vsfb_abc123") && polled.model == "vs_abc123/vsfb_abc123");
   const auto cancelled = encoded(openai, stores::Cancel{handle});
   CHECK(cancelled.method == "POST" && cancelled.path == "/v1/vector_stores/vs_abc123/file_batches/vsfb_abc123/cancel" && cancelled.body.empty() &&
-        cancelled.content_type.empty() && !cancelled.charge_on_accept);
+        cancelled.content_type.empty() && !cancelled.charge_on_accept && cancelled.model == "vs_abc123/vsfb_abc123");
 }
 
 // The Google file search store operations, as the REST reference documents each request
 // (https://ai.google.dev/api/file-search/file-search-stores and .../documents, and the file search guide).
 void google_requests() {
   const auto made = encoded(google, stores::Create{"My Store", {}, {}, {}, {}, {}, "models/fixture-embedding"});
-  CHECK(made.path == "/v1beta/fileSearchStores" && made.method == "POST" && made.auth == "x-goog-api-key" && made.charge_on_accept &&
+  // A create indexes nothing, so it is free and retried; an import is billed and is not.
+  CHECK(made.path == "/v1beta/fileSearchStores" && made.method == "POST" && made.auth == "x-goog-api-key" && !made.charge_on_accept &&
         made.body == R"({"displayName":"My Store","embeddingModel":"models/fixture-embedding"})");
   constexpr std::string_view store = "fileSearchStores/my-file-search-store-123a456b789c";
   CHECK(read(encoded(google, stores::Get{std::string(store)}), "/v1beta/fileSearchStores/my-file-search-store-123a456b789c"));
@@ -149,7 +151,8 @@ void google_requests() {
   CHECK(removed.method == "DELETE" && removed.path == "/v1beta/" + doc + "?force=true");
   // An import's operation, and an upload's, polled by name under the store.
   const std::string operation = std::string(store) + "/operations/op-1";
-  CHECK(read(encoded(google, stores::Poll{{std::string(google), "google", std::string(store), operation}}), "/v1beta/" + operation));
+  const auto polled = encoded(google, stores::Poll{{std::string(google), "google", std::string(store), operation}});
+  CHECK(read(polled, "/v1beta/" + operation) && polled.model == operation);
   const std::string upload = std::string(store) + "/upload/operations/op-2";
   CHECK(read(encoded(google, stores::Poll{{std::string(google), "google", std::string(store), upload}}), "/v1beta/" + upload));
 }
@@ -265,6 +268,21 @@ void decoded_openai() {
   // The handle polls the same batch.
   CHECK(encoded(openai, stores::Poll{b.handle}).path == "/v1/vector_stores/vs_abc123/file_batches/vsfb_abc123");
   CHECK(std::get<stores::Batch>(stores::typed_batch(decoded(openai, Kind::Batch, R"({"id":"vsfb_1","status":"cancelled"})"))).status == jobs::Status::Cancelled);
+  // An answer that omits the store is in the store the call named; one that names another store or batch is refused.
+  const auto omitted = std::get<stores::Batch>(stores::typed_batch(decoded(openai, Kind::Batch, R"({"id":"vsfb_1","status":"in_progress"})", "vs_abc123/vsfb_1")));
+  CHECK(omitted.handle.store == "vs_abc123" && omitted.handle.id == "vsfb_1");
+  CHECK(std::get<stores::Batch>(stores::typed_batch(decoded(openai, Kind::Batch, R"({"id":"vsfb_2"})", "vs_abc123"))).handle.store == "vs_abc123");
+  for (const auto& [body, subject] : std::initializer_list<std::pair<std::string_view, std::string>>{
+           {R"({"id":"vsfb_1","vector_store_id":"vs_other"})", "vs_abc123/vsfb_1"}, {R"({"id":"vsfb_1","vector_store_id":"vs_other"})", "vs_abc123"},
+           {R"({"id":"vsfb_2","vector_store_id":"vs_abc123"})", "vs_abc123/vsfb_1"}})
+    CHECK(std::get<Failure>(decoded(openai, Kind::Batch, body, subject)).error.reason == "stores.batch.id_required");
+  // A page that says more follow and names no last id is refused, never read as the last page.
+  for (const char* body : {R"({"data":[],"has_more":true})", R"({"data":[],"has_more":true,"last_id":null})", R"({"data":[],"has_more":true,"last_id":""})"})
+    for (const auto kind : {Kind::Stores, Kind::Files})
+      CHECK(std::get<Failure>(decoded(openai, kind, body)).error.reason == "stores.page.cursor_missing");
+  // Each shape's own status words; another is Unknown and kept as it came.
+  const auto foreign = std::get<stores::StoreFile>(stores::typed_file(decoded(openai, Kind::File, R"({"id":"file-a","status":"STATE_ACTIVE"})")));
+  CHECK(foreign.status == stores::Status::Unknown && foreign.raw_status == "STATE_ACTIVE");
 
   const auto found = std::get<stores::SearchPage>(stores::typed_search(decoded(openai, Kind::Search,
       R"({"object":"vector_store.search_results.page","search_query":["What is the return policy?"],"data":[)"
@@ -277,7 +295,8 @@ void decoded_openai() {
 
   const auto content = std::get<stores::Content>(stores::typed_content(decoded(openai, Kind::Content,
       R"({"object":"vector_store.file_content.page","data":[{"type":"text","text":"file content"}],"has_more":true,"next_page":"p2"})")));
-  CHECK(content.parts.size() == 1 && content.parts[0].type == "text" && content.parts[0].text == "file content" && content.has_more && content.next == "p2");
+  CHECK(content.parts.size() == 1 && content.parts[0].type == "text" && content.parts[0].text == "file content" && content.has_more &&
+        content.raw->root().get("next_page").as_string() == "p2");
 
   CHECK(std::get<stores::Deleted>(stores::typed_deleted(decoded(openai, Kind::Deleted, R"({"id":"vs_abc123","object":"vector_store.deleted","deleted":true})", "vs_abc123"))).id == "vs_abc123");
   CHECK(std::holds_alternative<Failure>(stores::typed_deleted(decoded(openai, Kind::Deleted, R"({"id":"vs_abc123","deleted":false})", "vs_abc123"))));
@@ -319,6 +338,17 @@ void decoded_google() {
   const auto done = std::get<stores::Batch>(stores::typed_batch(decoded(google, Kind::Batch,
       R"({"name":"fileSearchStores/s/operations/op-1","done":true,"response":{"parent":"fileSearchStores/s","documentName":"fileSearchStores/s/documents/doc-1"}})")));
   CHECK(done.status == jobs::Status::Completed && done.document == "fileSearchStores/s/documents/doc-1" && !done.error);
+  // As the live import answered on 2026-11-21: the document by its id alone, which is named under the operation's store.
+  const auto live = std::get<stores::Batch>(stores::typed_batch(decoded(google, Kind::Batch,
+      R"({"name":"fileSearchStores/s/operations/op-1","done":true,"response":{"parent":"fileSearchStores/s","documentName":"57gzoxi2tpag-mh7gsfipmor0"}})")));
+  CHECK(live.document == "fileSearchStores/s/documents/57gzoxi2tpag-mh7gsfipmor0");
+  CHECK(encoded(google, stores::GetFile{live.handle.store, live.document}).path == "/v1beta/fileSearchStores/s/documents/57gzoxi2tpag-mh7gsfipmor0");
+  CHECK(encoded(google, stores::DeleteFile{live.handle.store, live.document, true}).method == "DELETE");
+  for (const char* document : {"fileSearchStores/other/documents/d", "a/b", "..", "", "fileSearchStores/s/documents/d/x"})
+    CHECK(std::get<Failure>(decoded(google, Kind::Batch, std::string(R"({"name":"fileSearchStores/s/operations/op-1","done":true,"response":{"documentName":)") +
+                                                             json::quote(document) + "}}")).error.reason == "stores.batch.id_required");
+  const auto openai_word = std::get<stores::StoreFile>(stores::typed_file(decoded(google, Kind::File, R"({"name":"fileSearchStores/s/documents/d","state":"completed"})")));
+  CHECK(openai_word.status == stores::Status::Unknown && openai_word.raw_status == "completed");
   const auto failed = std::get<stores::Batch>(stores::typed_batch(decoded(google, Kind::Batch,
       R"({"name":"fileSearchStores/s/operations/op-1","done":true,"error":{"code":3,"message":"unsupported file"}})")));
   CHECK(failed.status == jobs::Status::Failed && failed.error && failed.error->code == "3" && failed.error->message == "unsupported file");
@@ -331,7 +361,8 @@ void malformed() {
   for (const auto& [origin, kind, body] : std::initializer_list<std::tuple<std::string_view, Kind, std::string_view>>{
            {openai, Kind::Store, R"({"name":"x"})"}, {openai, Kind::Store, R"({"id":"vs_a","usage_bytes":"1"})"},
            {openai, Kind::Store, R"({"id":"vs_a","file_counts":{"total":"3"}})"}, {google, Kind::Store, R"({"name":"corpora/x"})"},
-           {google, Kind::Store, R"({"name":"fileSearchStores/x","sizeBytes":30})"}, {openai, Kind::File, R"({"id":"file-a","last_error":"bad"})"},
+           {google, Kind::Store, R"({"name":"fileSearchStores/x","sizeBytes":30})"}, {google, Kind::Store, R"({"name":"fileSearchStores/a/b"})"},
+           {google, Kind::Store, R"({"name":"fileSearchStores/.."})"}, {openai, Kind::File, R"({"id":"file-a","last_error":"bad"})"},
            {google, Kind::File, R"({"name":"fileSearchStores/s"})"}, {openai, Kind::Batch, R"({"status":"completed"})"},
            {google, Kind::Batch, R"({"name":"fileSearchStores/s/operations/o","done":"yes"})"}, {openai, Kind::Stores, R"({"data":{}})"},
            {openai, Kind::Search, R"({"data":[{"filename":"x"}]})"}, {openai, Kind::Search, R"({"data":[{"file_id":"f","score":"high"}]})"},
@@ -346,12 +377,13 @@ void malformed() {
 void policy_facts() {
   const auto policy = descriptor::builtin_policy();
   using Billing = descriptor::EndpointBilling;
-  for (const char* operation : {"create", "update", "search", "file_add", "file_update", "batch_create"})
+  for (const char* operation : {"create", "search", "file_add", "batch_create"})
     CHECK(policy->endpoint_billing("stores", openai, operation) == Billing::Unpriced);
-  for (const char* operation : {"get", "list", "delete", "file_get", "file_list", "file_delete", "file_content", "batch_get", "batch_cancel", "batch_files"})
+  for (const char* operation : {"get", "list", "update", "delete", "file_get", "file_list", "file_update", "file_delete", "file_content", "batch_get",
+                                "batch_cancel", "batch_files"})
     CHECK(policy->endpoint_billing("stores", openai, operation) == Billing::None);
-  for (const char* operation : {"create", "import"}) CHECK(policy->endpoint_billing("stores", google, operation) == Billing::Unpriced);
-  for (const char* operation : {"get", "list", "delete", "document_get", "document_list", "document_delete", "operation_get"})
+  CHECK(policy->endpoint_billing("stores", google, "import") == Billing::Unpriced);
+  for (const char* operation : {"create", "get", "list", "delete", "document_get", "document_list", "document_delete", "operation_get"})
     CHECK(policy->endpoint_billing("stores", google, operation) == Billing::None);
   CHECK(policy->endpoint_limit("stores", openai, "max_results") == 50u && !policy->endpoint_limit("stores", google, "max_results"));
   CHECK(!policy->endpoint_limit("files", openai, "max_results"));
@@ -375,12 +407,21 @@ void policy_facts() {
   CHECK(pointer(edited(bound, R"("max_results":0,)")) == "/endpoints/max_results");
   CHECK(pointer(edited(bound, R"("max_results":"50",)")) == "/endpoints/max_results");
   CHECK(pointer(edited(R"("max_part_bytes":67108864,)", R"("max_part_bytes":67108864,"max_results":5,)")) == "/endpoints/max_results");
-  // Without the bound a search asks for any positive number of results.
-  const auto unbounded = descriptor::load_policy(edited(bound, ""), config_defaults::codec_defaults_json);
-  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(unbounded) &&
-        !std::get<descriptor::PolicySnapshot>(unbounded)->endpoint_limit("stores", openai, "max_results"));
+  // A stores fact without the bound has the embedded policy's for its shape, which its content digest covers, so a
+  // search past it is still refused before it is sent.
+  const auto borrowed = descriptor::load_policy(edited(bound, ""), config_defaults::codec_defaults_json);
+  CHECK(std::holds_alternative<descriptor::PolicySnapshot>(borrowed));
+  const auto& custom = std::get<descriptor::PolicySnapshot>(borrowed);
+  CHECK(custom->endpoint_limit("stores", openai, "max_results") == 50u && !custom->endpoint_limit("stores", google, "max_results"));
+  CHECK(custom->content_digest_hex() != policy->content_digest_hex());
+  const auto bounded = stores::encode(at(openai, custom), stores::Search{"vs_a", {"q"}, 500});
+  CHECK(std::holds_alternative<Error>(bounded) && std::get<Error>(bounded).reason == "request.stores.results_invalid");
+  CHECK(std::holds_alternative<endpoints::Encoded>(stores::encode(at(openai, custom), stores::Search{"vs_a", {"q"}, 50})));
   // `unpriced` is admitted for any operation, and a fact that charges once it accepts a call may bill by it alone.
-  CHECK(pointer(edited(R"("file_update":"unpriced","get":"none")", R"("file_update":"unpriced","get":"unpriced")")).empty());
+  CHECK(pointer(edited(R"("file_update":"none","get":"none")", R"("file_update":"none","get":"unpriced")")).empty());
+  // ... and only on a stores fact.
+  CHECK(pointer(edited(R"("billing":"none","endpoint":"files")", R"("billing":"unpriced","endpoint":"files")")) == "/endpoints/billing");
+  CHECK(pointer(edited(R"("billing":{"connect":"model"})", R"("billing":{"connect":"unpriced"})")) == "/endpoints/billing");
   CHECK(pointer(edited(R"("batch_get":"none","create":"unpriced")", R"("batch_get":"none","create":"model")")) == "/endpoints/billing");
   CHECK(pointer(edited(R"("batch_get":"none","create":"unpriced")", R"("batch_get":"none","create":"Unpriced")")) == "/endpoints/billing");
   // An operation the shape does not have.
@@ -413,9 +454,11 @@ void money() {
   CHECK(unbounded(client.prepare(stores::AddFile{"vs_a", "file-a"}, run), "stores/file_add"));
   CHECK(unbounded(client.prepare(stores::CreateBatch{"vs_a", {"file-a"}}, run), "stores/batch_create"));
   CHECK(unbounded(client.prepare(stores::Search{"vs_a", {"q"}}, run), "stores/search"));
-  CHECK(unbounded(gemini.prepare(stores::Create{"My Store"}, run), "stores/create"));
   CHECK(unbounded(gemini.prepare(stores::Import{"fileSearchStores/s", "files/a"}, run), "stores/import"));
   CHECK(zero(client.prepare(stores::Get{"vs_a"}, run)));
+  CHECK(zero(client.prepare(stores::Update{"vs_a", "renamed"}, run)));
+  CHECK(zero(client.prepare(stores::UpdateFile{"vs_a", "file-a", nullptr}, run)));
+  CHECK(zero(gemini.prepare(stores::Create{"My Store"}, run)));
   CHECK(zero(client.prepare(stores::ListFiles{"vs_a", "vsfb_1"}, run)));
   CHECK(zero(client.prepare(stores::Delete{"vs_a"}, run)));
   CHECK(zero(gemini.prepare(stores::Poll{{std::string(google), "google", "fileSearchStores/s", "fileSearchStores/s/operations/o"}}, run)));

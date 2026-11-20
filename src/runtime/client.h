@@ -405,10 +405,9 @@ class Client {
   EndpointCall<batches::Outcome> start(PreparedEndpoint<batches::Outcome>, std::function<void(batches::Outcome)> on_outcome = {});
   EndpointCall<batches::DeleteOutcome> start(PreparedEndpoint<batches::DeleteOutcome>, std::function<void(batches::DeleteOutcome)> on_outcome = {});
   // Provider-side search stores (D7): OpenAI vector stores and Google file search stores, each call resolved from the
-  // policy's `stores` facts by its operation. A create, an update, a search and a call that indexes a file (OpenAI
-  // file_add, file_update, batch_create; Google import) are billed by a fee that is not per request, so they have no
-  // cost bound; such a call is not sent again once it may have reached the provider. A read, a listing and a deletion
-  // are free, and retried as reads.
+  // policy's `stores` facts by its operation. A call that may store or index (OpenAI create, search, file_add,
+  // batch_create; Google import) is billed by a fee that is not per request, so it has no cost bound, and it is not sent
+  // again once it may have reached the provider. The others are free, and retried as reads.
   PreparedEndpoint<stores::StoreOutcome> prepare(stores::Create, RunOptions = {});
   PreparedEndpoint<stores::StoreOutcome> prepare(stores::Get, RunOptions = {});
   PreparedEndpoint<stores::PageOutcome> prepare(stores::List, RunOptions = {});
