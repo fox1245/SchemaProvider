@@ -76,11 +76,14 @@ void constants_are_the_fixture(const std::filesystem::path& path) {
     }
   }
   CHECK(constants == expected);
-  // The transport's texts have no code.
-  for (const auto* close : {&reason::transport::response_close, &reason::transport::gemini_response_close}) {
-    CHECK(close->code.empty() && !close->message.empty());
-    for (const auto& constant : constants) CHECK(constant.second != close->message);
+  // The transport's texts have no code, and none is the text of a check.
+  const std::set<std::string> transport_texts{"abnormal response close", "abnormal Gemini response close", "abnormal interaction close"};
+  std::set<std::string> transport;
+  for (const auto& close : reason::transport::all) {
+    CHECK(close.code.empty() && transport.insert(std::string(close.message)).second);
+    for (const auto& constant : constants) CHECK(constant.second != close.message);
   }
+  CHECK(transport == transport_texts);
 }
 // An error built from a constant carries both its text and its code.
 void error_carries_the_constant() {
