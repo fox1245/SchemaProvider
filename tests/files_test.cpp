@@ -664,15 +664,30 @@ void openrouter_files() {
     auto named = upload; named.filename = name;
     CHECK(std::holds_alternative<endpoints::Encoded>(files::encode(at(router), named)));
   }
-  for (const std::string name : {std::string(), std::string(256, 'n'), std::string("/a"), std::string("a/"), std::string("a//b"), std::string("."), std::string(".."),
-                                 std::string("./a"), std::string("a/./b"), std::string("a/../b"), std::string("../a"), std::string("a/.."), std::string("a<b"),
-                                 std::string("a>b"), std::string("a:b"), std::string("a\"b"), std::string("a|b"), std::string("a?b"), std::string("a*b"),
-                                 std::string("a\\b"), std::string("a\nb"), std::string("a\tb"), std::string("a\x01" "b"), std::string("a\x7f" "b")}) {
+  // The encoder's own checks (length, control characters, a quote or a backslash) refuse with `name_invalid`; the policy
+  // fact's rules (folders, forbidden characters) with `name_rejected`.
+  for (const std::string name : {std::string(), std::string(256, 'n'), std::string("a\"b"), std::string("a\\b"), std::string("a\rb"),
+                                 std::string("a\nb"), std::string("a\tb"), std::string("a\x01" "b"), std::string("a\x7f" "b")}) {
     auto named = upload; named.filename = name;
-    CHECK(refused(at(router), named) == ErrorKind::InvalidRequest);
+    CHECK(refused(at(router), named) == ErrorKind::InvalidRequest && reason_of(at(router), named) == "request.files.name_invalid");
   }
-  // The characters the provider refuses are the policy fact's, and its rules come on top of the encoder's own
-  // (a quote or a backslash would end the multipart parameter).
+  for (const std::string name : {std::string("/a"), std::string("a/"), std::string("a//b"), std::string("."), std::string(".."), std::string("./a"),
+                                 std::string("a/./b"), std::string("a/../b"), std::string("../a"), std::string("a/.."), std::string("a<b"),
+                                 std::string("a>b"), std::string("a:b"), std::string("a|b"), std::string("a?b"), std::string("a*b")}) {
+    auto named = upload; named.filename = name;
+    CHECK(refused(at(router), named) == ErrorKind::InvalidRequest && reason_of(at(router), named) == "request.files.name_rejected");
+  }
+  {
+    // The length is the fact's: a lower `max_bytes` refuses what the encoder's own 255 would admit.
+    const auto short_names = edited_policy(R"("max_bytes":255)", R"("max_bytes":10)");
+    CHECK(short_names->endpoint("files", router)->file_names->max_bytes == 10u);
+    auto ten = upload; ten.filename = std::string(10, 'n');
+    CHECK(std::holds_alternative<endpoints::Encoded>(files::encode(at(router, short_names), ten)));
+    auto eleven = upload; eleven.filename = std::string(11, 'n');
+    CHECK(reason_of(at(router, short_names), eleven) == "request.files.name_rejected");
+    CHECK(std::holds_alternative<endpoints::Encoded>(files::encode(at(router), eleven)));
+  }
+  // The characters the provider refuses are the policy fact's.
   for (const char* name : {"a<b", "a>b", "a:b", "a|b", "a?b", "a*b"}) {
     auto named = upload; named.filename = name;
     CHECK(reason_of(at(router), named) == "request.files.name_rejected");
@@ -776,6 +791,9 @@ void openrouter_responses() {
   const auto last = std::get<files::Page>(files::typed_page(decoded(router, Kind::Page,
       R"({"_shape":"openrouter","cursor":null,"data":)" + items + R"(,"first_id":"or_file_a","has_more":false,"last_id":"or_file_b"})")));
   CHECK(last.files.size() == 2 && last.next.empty());
+  // A cursor beside `has_more: false` is not followed.
+  CHECK(std::get<files::Page>(files::typed_page(decoded(router, Kind::Page,
+      R"({"_shape":"openrouter","cursor":"opaque-next","data":[],"first_id":null,"has_more":false,"last_id":null})"))).next.empty());
   CHECK(std::get<files::Page>(files::typed_page(decoded(router, Kind::Page, R"({"cursor":null,"data":[],"first_id":null,"has_more":false,"last_id":null})"))).files.empty());
   // A page that says more follow and names no cursor would read as the last page, whatever `last_id` holds.
   for (const char* tail : {R"("cursor":null,"has_more":true,"last_id":"or_file_b")", R"("has_more":true,"last_id":"or_file_b")", R"("cursor":"","has_more":true,"last_id":"or_file_b")"}) {
