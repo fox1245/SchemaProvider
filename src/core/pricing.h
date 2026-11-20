@@ -58,7 +58,9 @@ struct ModelPrice {
 ModelPrice price_of(const descriptor::CatalogueEntry& entry, std::string_view service_tier = {},
                     std::uint64_t input_tokens = 0);
 // Each unit at its dearest over every band a request of at most `input_tokens` input tokens may fall in: the
-// prices to reserve with. A unit with a row in any of those bands at a price that is not a fixed amount has none.
+// prices to reserve with. With a row in any of those bands at a price that is not a fixed amount, the price has no
+// rate at all (empty()): a bound over a price that only left that unit out would read the other units' rates and be
+// below the bill.
 ModelPrice dearest_price_of(const descriptor::CatalogueEntry& entry, std::string_view service_tier,
                             std::uint64_t input_tokens);
 
@@ -106,14 +108,19 @@ struct CostEstimate {
 // - A unit with a row that applies at a price that is not a fixed amount (price_of) prices none of the tokens it may
 //   bill, and they are not billed at another unit's rate: cache reads and writes are unpriced rather than billed at
 //   `input`, reasoning tokens rather than at `output`, cache writes the 1-hour split does not place, output tokens
-//   without a modality breakdown at a variable `output_image`, and every call at a variable `request`.
+//   without a modality breakdown at a variable `output_image`, and every call at a variable `request`. A Messages
+//   compaction iteration's cache writes and output tokens have no split and no breakdown: a variable
+//   `cache_write_1h` or `output_image` leaves them unpriced, the unit named once.
 // Server tool fees are not priced. Gemini's `toolUsePromptTokenCount` bills beyond the prompt count and is not
 // priced either: a usage that reports it has no total. With a `service_tier`, the entry's prices for that tier, and
 // the input band of the call's input tokens (`price_of`); the tier is matched exactly, so a response's `default` or
 // `auto` selects no rows unless the entry lists them, and the reason is "tier". The usage does not say which tier
 // billed the call: pass the one the request asked for. With `route_ceiling` (a routing gateway whose served
 // endpoint is unknown), every input token at `ceiling_input`, every output token at `ceiling_output`, and the
-// dearer of `request` and `ceiling_request`; an entry without a ceiling has no total ("ceiling").
+// dearer of `request` and `ceiling_request`; an entry without a ceiling has no total ("ceiling"). A ceiling row at a
+// variable price is named as its unit ("ceiling_input", "ceiling_output"), and then, when the entry lists both
+// ceilings, a variable "request" or "ceiling_request" as well; beside a ceiling the entry does not list, the fees are
+// not named.
 CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_view family, std::string_view origin,
                       const ServedModel& model, const Usage& usage, std::string_view service_tier = {},
                       bool route_ceiling = false);
@@ -138,15 +145,17 @@ struct Bound {
 // (output, reasoning, image output, audio output), the request fee, and each tool's fee times its uses. With
 // `route_ceiling` the ceiling rates replace the listed ones. For usage within the request, `estimate` with the same
 // prices never exceeds it. Messages compaction iterations and Gemini's tool-use prompt tokens bill outside the call's
-// counters and are not bounded here. A price from `price_of` or `dearest_price_of` leaves out a unit with a row at a
-// variable price, which this overload cannot tell from a unit the entry does not list; the overload that takes the
-// entry refuses it.
+// counters and are not bounded here. A price from `price_of` leaves out a unit with a row at a variable price, which
+// this overload cannot tell from a unit the entry does not list; a price from `dearest_price_of` with such a row has no
+// rate, so this overload has no total ("input", "output" for the sides with tokens, each tool fee). The overload that
+// takes the entry names the unit. At the route ceiling a missing ceiling is "ceiling".
 Bound upper_bound(const ModelPrice& price, const BoundRequest& request);
 // The bound with the entry's dearest prices over every input band the request may reach. A unit with a row in one of
 // them at a price that is not a fixed amount gives no total when the bound reads it: an input rate (`input`,
 // `cache_read`, `cache_write`, `cache_write_1h`, `input_audio`) when the request has input tokens, an output rate
 // (`output`, `reasoning`, `output_image`, `output_audio`) when it has output tokens, the request fee always, at the
-// route ceiling `ceiling_input`, `ceiling_output` and `ceiling_request`, and a tool's fee when it has uses.
+// route ceiling `ceiling_input`, `ceiling_output` and `ceiling_request`, and a tool's fee when it has uses. At the
+// route ceiling "ceiling" names only a ceiling the entry does not list; a variable ceiling row is named as its unit.
 Bound upper_bound(const descriptor::CatalogueEntry& entry, std::string_view service_tier, const BoundRequest& request);
 
 

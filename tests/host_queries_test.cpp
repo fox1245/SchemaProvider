@@ -1157,10 +1157,17 @@ void worst_case_route_ceiling() {
   fee = bound(gateway, chat_request("vendor/zz-fee-only", 100), 1000);
   CHECK(nano(fee) == 1000u * 2000u + 100u * 2000u + 200'000u && fee.pin && fee.pin->request_nano_usd == 200'000u && !fee.pinned);
   CHECK(!bound(gateway, chat_request("vendor/zz-routed", 100), 1000).pin->request_nano_usd);
-  // The route ceiling over the largest max_price amount.
-  const auto huge = catalogue_of(R"({"version":1,"models":[{"id":"vendor/zz-huge","input_limit":10,"pricing":{"input":"1","output":"1","ceiling_input":"10000000","ceiling_output":"1"}}]})");
+  // The route ceiling over the largest max_price amount: 10 USD a token is 10^16 nano-USD a million, above 2^53.
+  const auto huge = catalogue_of(R"({"version":1,"models":[{"id":"vendor/zz-huge","input_limit":10,"pricing":{"input":"1","output":"1","ceiling_input":"10","ceiling_output":"1"}}]})");
   auto prepared = prepared_ok(gateway, chat_request("vendor/zz-huge", 1), 1);
-  CHECK(has(runtime::worst_case_cost(prepared, *huge), pricing::UnboundedBy::RouteCeiling, "vendor/zz-huge"));
+  auto huge_bound = runtime::worst_case_cost(prepared, *huge);
+  CHECK(has(huge_bound, pricing::UnboundedBy::RouteCeiling, "vendor/zz-huge") && huge_bound.unbounded.size() == 1 &&
+        huge_bound.unbounded[0].detail.find("max_price") != std::string::npos);
+  // A ceiling past 64 bits is no fixed amount: the ceiling row is named, as a variable one is.
+  const auto past = catalogue_of(R"({"version":1,"models":[{"id":"vendor/zz-huge","input_limit":10,"pricing":{"input":"1","output":"1","ceiling_input":"10000000","ceiling_output":"1"}}]})");
+  huge_bound = runtime::worst_case_cost(prepared, *past);
+  CHECK(has(huge_bound, pricing::UnboundedBy::ModelPrice, "vendor/zz-huge") && huge_bound.unbounded.size() == 1 &&
+        huge_bound.unbounded[0].detail.find("ceiling_input") != std::string::npos);
 }
 
 // The bound never falls under what the catalogue would charge for usage that reaches the caps, counter by counter.
