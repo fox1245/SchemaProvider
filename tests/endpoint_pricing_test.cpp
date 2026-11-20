@@ -1705,7 +1705,9 @@ void carried_requests() {
       R"(","input/batch":")" + usd(in) + R"(","output/batch":")" + usd(out) + R"("}},)" +
       R"({"id":"vendor/other","input_limit":3000,"pricing":{"input/batch":")" + usd(cheap_in) + R"(","output/batch":")" + usd(cheap_out) +
       R"(","request/batch":")" + usd(fee) + R"("}},)" +
-      R"({"id":"vendor/standard","input_limit":2000,"pricing":{"input":")" + usd(1'000'000'000) + R"(","output":")" + usd(4'000'000'000) + R"("}}]})");
+      R"({"id":"vendor/standard","input_limit":2000,"pricing":{"input":")" + usd(1'000'000'000) + R"(","output":")" + usd(4'000'000'000) + R"("}},)" +
+      R"({"id":"vendor/cached","input_limit":2000,"pricing":{"input":")" + usd(1'000'000'000) + R"(","output":")" + usd(4'000'000'000) +
+      R"(","cache_read":")" + usd(100'000'000) + R"(","input/batch":")" + usd(in) + R"(","output/batch":")" + usd(out) + R"("}}]})");
   const auto first = rounded(300 * in + 16 * out), second = rounded(3000 * cheap_in + 50 * cheap_out + fee);
   auto call = submit({carried("b-1", "vendor/model", 16), carried("b-2", "vendor/other", 50)});
   call.attempts = 3;
@@ -1742,6 +1744,10 @@ void carried_requests() {
        "no total | TierPrice [b-1:vendor/standard] the entry prices no unit under service tier 'batch' | OutputCap [b-2:] the request states no "
        "output cap | ModelPrice [b-3:vendor/none] the catalogue has no price for the model at the origin | Invocations [b-4:] the request does not "
        "state how many model invocations it may bill | entry '' attempts 0 lines");
+  // A unit priced at the standard rates and not under the carried tier: not priced at the tier's other rates.
+  SAME(described(bounded(submit({carried("b-1", "vendor/cached", 16)}), {})),
+       "no total | TierPrice [b-1:vendor/cached] the entry prices cache_read at the standard rates but not under service tier 'batch' | entry '' "
+       "attempts 0 lines");
   // A request of its own service tier, a custom id twice, a measured input twice.
   SAME(described(bounded(submit({carried("b-1", "vendor/model", 16, 1, "flex"), carried("b-2", "vendor/model", 16), carried("b-2", "vendor/model", 16),
                                  carried("b-3", "vendor/model", 16)}), {{"b-3", 10}, {"b-3", 10}})),

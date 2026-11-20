@@ -63,8 +63,8 @@ pricing::EndpointBound endpoint_worst_case_cost(const PreparedRequest& prepared,
 pricing::EndpointBound endpoint_worst_case_cost(const PreparedRequest& prepared, const EndpointCostOptions& options = {});
 // Bounds an OpenAI batch submit, whose requests are in an uploaded file, from the items the host wrote that file from
 // with batches::jsonl(family, items), as endpoint_worst_case_cost bounds an inline batch. Only when the items are that
-// file: `input_file` is the file the submit names (its id) and its `uploaded_sha256`, the digest of the bytes the upload
-// sent (the files::File an upload returns), is the SHA-256 of jsonl(family, items). Otherwise no bound (`Unmodeled`,
+// file: `input_file` is the file the submit names (its id, at the submit's origin) and its `uploaded_sha256`, the digest
+// of the bytes the upload sent (the files::File an upload returns), is the SHA-256 of jsonl(family, items). Otherwise no bound (`Unmodeled`,
 // subject `<endpoint>/<operation>`): a call that reads no uploaded input file, a `family` at another origin than the
 // submit's, and items that are not the uploaded file, or that do not encode. The requests are priced by `family`'s family
 // at the submit's origin. Free of side effects, and nothing is reserved.
@@ -104,7 +104,8 @@ pricing::EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const jo
 // nano-USD per unit; `entry` is the one entry every line was priced by, empty when they were priced by several, and
 // `requested_entry` is set when any line was priced by its requested model's entry. A request the provider failed,
 // cancelled or let expire adds what its line reports (nothing, when it reports no usage), and sets `lower_bound`, since
-// whether the provider bills it is not stated. Two lines with one custom id are both priced. By the submit's billing:
+// whether the provider bills it is not stated. A custom id with more than one line is `<custom_id>:duplicate`, and none
+// of its later lines is priced. By the submit's billing:
 // `None` is exactly zero; any other value than `Carried` is "billing". Also unpriced: "tier" when the submit names no
 // carried tier, "origin" when `family` is at another origin, "family" when the submit carries inline requests of
 // another family than `family`'s, `<custom_id>:custom_id` for a line whose request the submit does not carry (inline
@@ -114,4 +115,9 @@ pricing::EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const jo
 // estimate is at most endpoint_worst_case_cost's (or batch_worst_case_cost's) total for one attempt.
 pricing::EndpointEstimate batch_estimate(const EndpointFacts& submit, const descriptor::ValidatedDescriptor& family,
                                          const std::vector<batches::Line>& lines, const descriptor::ModelCatalogue& catalogue);
+// The same for a batch whose requests are `items` (an OpenAI batch, whose submit carries none inline): a line whose
+// custom id names no item is `<custom_id>:custom_id`, and no items is "items".
+pricing::EndpointEstimate batch_estimate(const EndpointFacts& submit, const descriptor::ValidatedDescriptor& family,
+                                         const std::vector<batches::Item>& items, const std::vector<batches::Line>& lines,
+                                         const descriptor::ModelCatalogue& catalogue);
 } // namespace sp::runtime

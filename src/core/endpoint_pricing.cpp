@@ -2,6 +2,8 @@
 #include "core/pricing.h"
 #include "core/pricing_internal.h"
 #include <algorithm>
+#include <map>
+#include <set>
 #include <span>
 
 namespace sp::pricing {
@@ -208,21 +210,26 @@ EndpointBound carried_worst_case(const EndpointWorstCaseInput& in, const descrip
   bool overflow = false;
   std::optional<std::string> entry;
   bool one_entry = true;
-  for (std::size_t i = 0; i < facts.carried.size(); ++i) {
-    const auto& request = facts.carried[i];
+  // The measured inputs by custom id, and how many times each is stated.
+  std::map<std::string_view, std::pair<std::uint64_t, std::size_t>> measurements;
+  for (const auto& [named, tokens] : in.measured_carried_input_tokens) {
+    auto& [value, times] = measurements[named];
+    value = tokens;
+    ++times;
+  }
+  std::set<std::string_view> seen;
+  for (const auto& request : facts.carried) {
     const auto& id = request.custom_id;
-    if (std::any_of(facts.carried.begin(), facts.carried.begin() + static_cast<std::ptrdiff_t>(i),
-                    [&](const CarriedRequest& earlier) { return earlier.custom_id == id; })) {
+    if (!seen.insert(id).second) {
       block(UnboundedBy::Unmodeled, carried_subject(id, {}), "the custom id names more than one carried request");
       continue;
     }
     std::optional<std::uint64_t> measured;
     std::size_t stated = 0;
-    for (const auto& [named, tokens] : in.measured_carried_input_tokens)
-      if (named == id) {
-        measured = tokens;
-        ++stated;
-      }
+    if (const auto found = measurements.find(id); found != measurements.end()) {
+      measured = found->second.first;
+      stated = found->second.second;
+    }
     if (stated > 1) {
       block(UnboundedBy::Unmodeled, carried_subject(id, {}), "the request's measured input tokens are stated more than once");
       continue;
@@ -230,6 +237,18 @@ EndpointBound carried_worst_case(const EndpointWorstCaseInput& in, const descrip
     // A tier of the request's own is not the carried tier, and nothing states how the two combine.
     if (!request.facts.service_tier.empty()) {
       block(UnboundedBy::TierPrice, carried_subject(id, request.model), "a batch item names its own service tier");
+      continue;
+    }
+    // A unit the request's entry (or a fallback's) prices at the standard rates but not under the carried tier.
+    std::string outside;
+    std::vector<std::string_view> models{request.model};
+    for (const auto& fallback : request.facts.fallback_models) models.push_back(fallback);
+    for (const auto model : models)
+      if (const auto* found = catalogue.find(facts.family, facts.origin, model).entry; found && outside.empty())
+        outside = std::string(detail::unit_outside_tier(*found, facts.carried_tier));
+    if (!outside.empty()) {
+      block(UnboundedBy::TierPrice, carried_subject(id, request.model),
+            "the entry prices " + outside + " at the standard rates but not under service tier '" + facts.carried_tier + "'");
       continue;
     }
     WorstCaseInput item;

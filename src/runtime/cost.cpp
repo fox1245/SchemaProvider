@@ -5,6 +5,7 @@
 #include "descriptor/policy.h"
 #include "runtime/request_facts.h"
 #include <algorithm>
+#include <set>
 
 namespace sp::runtime {
 namespace {
@@ -175,7 +176,8 @@ pricing::EndpointBound batch_worst_case_cost(const PreparedRequest& submit, cons
   if (family.base_url() != facts.origin) return unmodeled_call(call, "the items' descriptor is not at the batch's origin");
   // The items are the requests the batch runs only when they are the bytes the submit's file was uploaded with.
   constexpr std::string_view not_the_file = "the items are not the uploaded input file";
-  if (input_file.id != facts.input_file || input_file.uploaded_sha256.empty()) return unmodeled_call(call, std::string(not_the_file));
+  if (input_file.origin != facts.origin || input_file.id != facts.input_file || input_file.uploaded_sha256.empty())
+    return unmodeled_call(call, std::string(not_the_file));
   auto lines = batches::detail::encode_lines(family, items);
   if (std::holds_alternative<Error>(lines)) return unmodeled_call(call, std::string(not_the_file));
   auto& encoded = std::get<batches::detail::EncodedLines>(lines);
@@ -198,8 +200,12 @@ namespace {
 constexpr std::uint64_t nano_usd_rate = 1'000'000;
 } // namespace
 
-pricing::EndpointEstimate batch_estimate(const EndpointFacts& submit, const descriptor::ValidatedDescriptor& family,
-                                         const std::vector<batches::Line>& lines, const descriptor::ModelCatalogue& catalogue) {
+namespace {
+// The estimate of a batch's lines; a line is priced only when its custom id is among `known` (every line when `known`
+// is empty).
+pricing::EndpointEstimate estimate_lines(const EndpointFacts& submit, const descriptor::ValidatedDescriptor& family,
+                                         const std::vector<batches::Line>& lines, const descriptor::ModelCatalogue& catalogue,
+                                         const std::set<std::string_view>& known) {
   pricing::EndpointEstimate out;
   const auto refuse = [&](std::string name) {
     if (std::find(out.unpriced.begin(), out.unpriced.end(), name) == out.unpriced.end()) out.unpriced.push_back(std::move(name));
@@ -225,10 +231,17 @@ pricing::EndpointEstimate batch_estimate(const EndpointFacts& submit, const desc
   bool overflow = false;
   std::optional<std::string> entry;
   bool one_entry = true;
+  std::set<std::string_view> seen;
   for (const auto& line : lines) {
     const auto& id = line.custom_id;
-    if (!submit.carried.empty() && std::none_of(submit.carried.begin(), submit.carried.end(), [&](const CarriedRequest& r) { return r.custom_id == id; })) {
+    if (!known.empty() && !known.contains(id)) {
       refuse(id + ":custom_id");
+      continue;
+    }
+    // One request answers once: a second line of its custom id is not a request the provider ran twice by any fact
+    // stated, so neither is priced.
+    if (!seen.insert(id).second) {
+      refuse(id + ":duplicate");
       continue;
     }
     const Usage* usage = nullptr;
@@ -247,6 +260,24 @@ pricing::EndpointEstimate batch_estimate(const EndpointFacts& submit, const desc
         continue;
       usage = &reported;
       model = &failure.partial.model;
+    }
+    // The entry the estimate prices the line by (the served model's when it has a price in the tier, else the
+    // requested one's) must price under the tier every unit it prices at the standard rates.
+    const auto entry_of = [&](std::string_view name) -> const descriptor::CatalogueEntry* {
+      const auto* found = name.empty() ? nullptr : catalogue.find(family.family(), submit.origin, name).entry;
+      if (!found || std::none_of(found->pricing.begin(), found->pricing.end(), [&](const auto& price) {
+            const auto unit = pricing::detail::parse_unit(price.first);
+            return unit && unit->tier == submit.carried_tier;
+          }))
+        return nullptr;
+      return found;
+    };
+    const bool served = model->relation != ServedRelation::NotReported && !model->served.empty() && model->served != model->requested;
+    const auto* pricing_entry = served ? entry_of(model->served) : nullptr;
+    if (!pricing_entry) pricing_entry = entry_of(model->requested);
+    if (pricing_entry && !pricing::detail::unit_outside_tier(*pricing_entry, submit.carried_tier).empty()) {
+      refuse(id + ":tier");
+      continue;
     }
     const auto priced = pricing::estimate(catalogue, family.family(), submit.origin, *model, *usage, submit.carried_tier);
     if (!priced.total) {
@@ -269,6 +300,27 @@ pricing::EndpointEstimate batch_estimate(const EndpointFacts& submit, const desc
   out.total = UsdAmount{sum, Evidence::Derived, CostRounding::CeilingCatalogueProduct};
   if (one_entry && entry) out.entry = *entry;
   return out;
+}
+} // namespace
+
+pricing::EndpointEstimate batch_estimate(const EndpointFacts& submit, const descriptor::ValidatedDescriptor& family,
+                                         const std::vector<batches::Line>& lines, const descriptor::ModelCatalogue& catalogue) {
+  std::set<std::string_view> known;
+  for (const auto& request : submit.carried) known.insert(request.custom_id);
+  return estimate_lines(submit, family, lines, catalogue, known);
+}
+pricing::EndpointEstimate batch_estimate(const EndpointFacts& submit, const descriptor::ValidatedDescriptor& family,
+                                         const std::vector<batches::Item>& items, const std::vector<batches::Line>& lines,
+                                         const descriptor::ModelCatalogue& catalogue) {
+  std::set<std::string_view> known;
+  for (const auto& item : items) known.insert(item.custom_id);
+  // No items is no request to price a line of.
+  if (known.empty() && submit.billing != descriptor::EndpointBilling::None) {
+    pricing::EndpointEstimate out;
+    out.unpriced.emplace_back("items");
+    return out;
+  }
+  return estimate_lines(submit, family, lines, catalogue, known);
 }
 
 namespace {

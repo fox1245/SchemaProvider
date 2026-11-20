@@ -164,4 +164,34 @@ struct UsageSum {
 // The token part and the request fee of `estimate`, with its rules, at the prices of `selection` (price_of): summed
 // exactly and not rounded, so a caller adds other parts before rounding once.
 UsageSum usage_sum(const Selection& selection, const Usage& usage, const UsageRules& rules);
+// The token units a chat request's bound and estimate read (by the plain name descriptor::plain_price_unit gives), and
+// the tool fees (`tool:<type>`).
+inline constexpr std::string_view chat_units[]{"input", "cache_read", "cache_write", "cache_write_1h", "input_audio",
+                                               "output", "reasoning", "output_image", "output_audio", "request"};
+// A unit a chat request is priced by that `entry` lists at the standard rates and not under `tier`, in any band: under
+// `tier` such a unit would be priced at another unit's rate, or not at all, which is not the tier's price for it.
+// Empty when every such unit has a row in the tier, and when `tier` is empty or the entry prices nothing under it (which
+// a bound refuses as a tier the entry does not price).
+inline std::string_view unit_outside_tier(const descriptor::CatalogueEntry& entry, std::string_view tier) {
+  if (tier.empty() || std::none_of(entry.pricing.begin(), entry.pricing.end(), [&](const auto& price) {
+        const auto unit = parse_unit(price.first);
+        return unit && unit->tier == tier;
+      }))
+    return {};
+  const auto read = [](std::string_view name) {
+    return name.starts_with(descriptor::tool_fee_prefix) || std::find(std::begin(chat_units), std::end(chat_units), name) != std::end(chat_units);
+  };
+  for (const auto& [key, text] : entry.pricing) {
+    const auto unit = parse_unit(key);
+    if (!unit || !unit->tier.empty()) continue;
+    const auto name = descriptor::plain_price_unit(unit->name);
+    if (!read(name)) continue;
+    const bool in_tier = std::any_of(entry.pricing.begin(), entry.pricing.end(), [&](const auto& other) {
+      const auto row = parse_unit(other.first);
+      return row && row->tier == tier && descriptor::plain_price_unit(row->name) == name;
+    });
+    if (!in_tier) return name;
+  }
+  return {};
+}
 }  // namespace sp::pricing::detail
