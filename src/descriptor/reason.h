@@ -9,8 +9,6 @@ namespace sp::reason {
 // wire can reach a code. A raise names its constant; no helper takes a bare string.
 struct Reason {
   std::string_view code, message;
-  // Transitional: lets a converted site reach a helper that still takes text.
-  operator std::string() const { return std::string(message); }
 };
 // The checks the request encoders share (policy choices, request controls, media, cache marks).
 namespace shared_request {

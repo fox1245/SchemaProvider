@@ -413,7 +413,7 @@ class Client {
   PreparedRequest prepare_call(RunOptions, const std::function<void(detail::OperationState&, std::optional<Error>&)>& encode);
   // An endpoint call's wire request from its encoder's result (D6). `endpoint` names the codec that reads the answer;
   // `facts` gives what endpoint_facts() reports once the call encoded.
-  template <class Encoded> PreparedRequest prepare_endpoint(RunOptions, std::string_view endpoint, int reason_source,
+  template <class Encoded> PreparedRequest prepare_endpoint(RunOptions, std::string_view endpoint,
                                                            const std::function<std::variant<Encoded, Error>()>& encode,
                                                            const std::function<EndpointFacts()>& facts);
   // `complete` and `start` for a prepared endpoint call of any typed outcome.

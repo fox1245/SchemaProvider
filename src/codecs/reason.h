@@ -1752,39 +1752,3 @@ inline constexpr Constants sources[]{
     {"request.generations", generations_request::all}
 };
 }  // namespace sp::reason
-
-// Transitional: the lookup by text, until every site names its constant.
-namespace sp::reason {
-// Stable codes for the fixed failure strings the decoders raise (Error::reason). Each decoder and the
-// accumulator has one table from its string to a code of lower-case dotted segments, "<source>.<subject>.<problem>".
-// The code is picked by the string the decoder source contains, never by anything from the response.
-enum class Source {
-  Chat, Messages, Responses, Gemini, Interactions, Accumulator,
-  // Request encoders, and the checks they share (policy choices, request controls, media, native replay).
-  ChatRequest, MessagesRequest, ResponsesRequest, GeminiRequest, InteractionsRequest, SharedRequest,
-  // Non-chat endpoints (D6): each decoder, then its request encoder.
-  Images, ImagesRequest, Decisions, DecisionsRequest, Embeddings, EmbeddingsRequest, Rerank, RerankRequest,
-  Moderation, ModerationRequest, Speech, SpeechRequest, Transcription, TranscriptionRequest,
-  // Provider jobs: the state and download decoder, poll and download requests, and the video submit.
-  Jobs, JobsRequest, VideosRequest,
-  // Realtime sessions (D8): the session codecs, and the setup and command checks.
-  Realtime, RealtimeRequest,
-  // Provider files (D7).
-  Files, FilesRequest,
-  // Batches (D7).
-  Batches, BatchesRequest,
-  // Token counting (D7).
-  Tokens, TokensRequest,
-  // The webhook verifier.
-  Webhooks,
-  // OpenRouter generation statistics.
-  Generations, GenerationsRequest,
-};
-struct Entry { std::string_view message, code; };
-std::span<const Entry> entries(Source) noexcept;
-// The code for one of the source's failure strings; empty for a string without one (an abnormal close
-// belongs to the transport, whose errors keep kind, http_status and vendor_code).
-std::string_view code(Source, std::string_view message) noexcept;
-// The code of an encoder refusal: the family encoder's table, then the shared table.
-std::string_view request_code(Source family_encoder, std::string_view message) noexcept;
-}  // namespace sp::reason

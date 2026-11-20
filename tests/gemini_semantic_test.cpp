@@ -1,6 +1,5 @@
 #include "codecs/gemini.h"
 #include "codecs/gemini_request.h"
-#include "codecs/reason.h"
 #include "core/enum_names.h"
 #include "core/native.h"
 #include "descriptor/descriptor.h"
@@ -616,7 +615,7 @@ void typed_generation_controls() {
   bad = r; bad.thinking_level = gemini::ThinkingLevel::XHigh;
   const auto unlisted = gemini::encode(desc_without_xhigh(), bad, false);
   CHECK(std::holds_alternative<Error>(unlisted) && std::get<Error>(unlisted).kind == ErrorKind::InvalidRequest);
-  CHECK(reason::request_code(reason::Source::GeminiRequest, std::get<Error>(unlisted).safe_message) == "request.choice.unsupported_typed_semantic_control");
+  CHECK(std::get<Error>(unlisted).reason == "request.choice.unsupported_typed_semantic_control");
   bad.thinking_level = gemini::ThinkingLevel::High; CHECK(std::holds_alternative<gemini::EncodedRequest>(gemini::encode(desc_without_xhigh(), bad, false)));
   bad = r; bad.temperature = 3; refuse(bad);
   bad = r; bad.safety_settings.push_back(bad.safety_settings[0]); refuse(bad);

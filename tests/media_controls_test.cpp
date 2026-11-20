@@ -3,7 +3,6 @@
 #include "codecs/gemini_request.h"
 #include "codecs/interactions.h"
 #include "codecs/interactions_request.h"
-#include "codecs/reason.h"
 #include "codecs/responses.h"
 #include "codecs/responses_request.h"
 #include "core/native.h"
@@ -481,7 +480,7 @@ void chat_audio_voice_slots() {
     for (const bool streaming : {false, true}) {
       const auto encoded = chat::encode(descriptor, value, streaming);
       invalid(encoded);
-      CHECK(reason::request_code(reason::Source::ChatRequest, std::get<Error>(encoded).safe_message) == code);
+      CHECK(std::get<Error>(encoded).reason == code);
     }
   };
   for (const bool streaming : {false, true}) {
