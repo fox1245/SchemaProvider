@@ -66,6 +66,51 @@ std::vector<std::string> strings(Value v, std::string_view path, bool nonempty =
   for (auto element : v.elements()) { auto s = text(element,path); if (contains(values,s)) fail(path,"unique strings"); values.push_back(std::move(s)); }
   return values;
 }
+// How an extension value is priced: `{"tier": <catalogue tier>}` or `{"unmodeled": true}`. A tier is the part of a
+// price key after `/`, so it holds neither `/` nor `+`.
+ExtensionPricing extension_pricing_of(Value v, std::string_view path) {
+  closed(v, {}, path, {"tier", "unmodeled"});
+  if (v.size() != 1) fail(path, "one of tier and unmodeled");
+  ExtensionPricing out;
+  if (const auto tier = v.get("tier"); tier.valid()) {
+    out.tier = text(tier, path);
+    if (out.tier.size() > 64 || !std::all_of(out.tier.begin(), out.tier.end(), [](char c) {
+          return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' || c == ':';
+        }))
+      fail(path, "a catalogue tier name");
+  } else {
+    if (!boolean(v.get("unmodeled"), path)) fail(path, "unmodeled true");
+    out.unmodeled = true;
+  }
+  return out;
+}
+// An extension fact's `prices`. Each value it lists must be one the fact's schema takes, when `schema` is given (a
+// policy's own facts; the embedded policy's prices a fact borrows are read without it).
+ExtensionPrices extension_prices(Value v, const ValueSchema* schema, std::string_view path) {
+  closed(v, {}, path, {"values", "standard", "other"});
+  const auto taken = [&](Value value) { if (schema && check_value(*schema, value)) fail(path, "values the extension takes"); };
+  ExtensionPrices out;
+  if (const auto values = v.get("values"); values.valid()) {
+    if (!values.is_object() || values.size() > 64) fail(path, "bounded object of value prices");
+    for (auto member : values.members()) {
+      const auto parsed = json::parse(json::quote(member.key));
+      const auto* value = std::get_if<json::Document>(&parsed);
+      if (!value || member.key.empty()) fail(path, "values the extension takes");
+      taken(value->root());
+      out.values.emplace_back(std::string(member.key), extension_pricing_of(member.value, path));
+    }
+  }
+  if (const auto standard = v.get("standard"); standard.valid()) {
+    if (!v.get("other").valid()) fail(path, "standard values beside a price for every other value");
+    out.standard = strings(standard, path, true);
+    for (auto element : standard.elements()) taken(element);
+    for (const auto& value : out.standard)
+      if (std::any_of(out.values.begin(), out.values.end(), [&](const auto& listed) { return listed.first == value; }))
+        fail(path, "a value either priced or standard");
+  }
+  if (const auto other = v.get("other"); other.valid()) out.other = extension_pricing_of(other, path);
+  return out;
+}
 // Media admission lists are policy data. Entries are lowercase `type/subtype` essences; the
 // top-level type must agree with the kind (documents are everything outside image/audio/video).
 // generateContent's Blob.mimeType documents three spellings whose top-level type is not their
@@ -451,7 +496,7 @@ class PolicyLoader {
         if (auto extensions = v.get("extensions"); extensions.valid()) {
           if (!extensions.is_array() || extensions.size() > 64) fail("/extensions", "bounded array of extension facts");
           for (auto e : extensions.elements()) {
-            closed(e, {"key","origins","value","replay_eligible"}, "/extensions", {"bound","beta"});
+            closed(e, {"key","origins","value","replay_eligible"}, "/extensions", {"bound","beta","prices"});
             ExtensionFact fact{text(e.get("key"), "/extensions/key"), strings(e.get("origins"), "/extensions/origins"),
                                schema_of(e.get("value"), "/extensions/value"), boolean(e.get("replay_eligible"), "/extensions/replay_eligible")};
             if (e.get("bound").valid()) fact.bound = boolean(e.get("bound"), "/extensions/bound");
@@ -472,6 +517,14 @@ class PolicyLoader {
               canonical_spelling(origin, "/extensions/origins");
             }
             for (const auto& existing : f.extensions) if (existing.key == fact.key) fail("/extensions/key", "unique extension keys");
+            // Which values change the price (#207). A fact that states none has the embedded policy's fact of the same
+            // key in the family, where it states some, and its content digest covers them (borrowed_).
+            if (const auto prices = e.get("prices"); prices.valid()) {
+              fact.prices = extension_prices(prices, &fact.value, "/extensions/prices");
+            } else if (const auto stated = embedded_extension_prices(f.family, fact.key); stated.valid()) {
+              fact.prices = extension_prices(stated, nullptr, "/extensions/prices");
+              borrowed.push_back({{f.family, "extensions." + fact.key + ".prices"}, stated.dump()});
+            }
             f.extensions.push_back(std::move(fact));
           }
         }
@@ -1182,6 +1235,14 @@ class PolicyLoader {
       if (entry.get("family").is_string() && entry.get("family").as_string() == family) return entry.get(key);
     return {};
   }
+  // The `prices` of the family's extension fact of `key` in the embedded policy, or an invalid value.
+  static Value embedded_extension_prices(std::string_view family, std::string_view key) {
+    const auto facts = embedded_member(family, "extensions");
+    if (facts.valid() && facts.is_array())
+      for (auto fact : facts.elements())
+        if (fact.get("key").is_string() && fact.get("key").as_string() == key) return fact.get("prices");
+    return {};
+  }
   // A member of the first endpoint fact of `endpoint` and `shape` in the embedded policy, or an invalid value.
   static Value embedded_endpoint_member(std::string_view endpoint, std::string_view shape, std::string_view key) {
     for (auto entry : embedded_root().get("endpoints").elements())
@@ -1498,6 +1559,16 @@ std::string_view DescriptorPolicy::billing_tier(std::string_view family, std::st
   for (const auto& [name, standard] : standard_tiers_)
     if (name == family && contains(standard, tier)) return {};
   return tier;
+}
+std::optional<ExtensionPricing> extension_pricing(const ExtensionFact& fact, json::Value value) {
+  if (!value.valid() || value.is_null()) return std::nullopt;
+  if (value.is_string()) {
+    const auto text = value.as_string();
+    for (const auto& [listed, pricing] : fact.prices.values)
+      if (listed == text) return pricing;
+    if (contains(fact.prices.standard, text)) return std::nullopt;
+  }
+  return fact.prices.other;
 }
 bool family_admits_routing(const FamilyPolicy& family) noexcept { return !family.openrouter_origins.empty(); }
 std::string tool_fee_unit(std::string_view type) { return std::string(tool_fee_prefix) + std::string(type); }

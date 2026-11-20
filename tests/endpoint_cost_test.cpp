@@ -1270,6 +1270,211 @@ void batch_estimate_within_the_bound() {
   std::cout << "case passed: batch estimates within the bound (" << both << " both, " << bound_only << " bound only, " << estimate_only
             << " estimate only, " << neither << " neither, " << tight << " at the bound)\n";
 }
+
+// ---- extension values that change the price: a tier's rows, or no bound --------------------------------------
+
+// Fast rates dearer than the standard ones, each with a fraction of a nano-USD per token so a bound rounds up.
+constexpr std::uint64_t fast_in = 2'000'000'001, fast_out = 8'000'000'003;
+const auto fast_priced = catalogue_of("{\"version\":1,\"models\":[" +
+    entry("vendor/fast", limits(batched_input, batched_output),
+          {{"input", standard_in}, {"output", standard_out}, {"input/fast", fast_in}, {"output/fast", fast_out}, {"input/batch", batch_in},
+           {"output/batch", batch_out}}) + "," +
+    // No fast rows: nothing prices a fast request.
+    entry("vendor/no-fast", limits(batched_input, batched_output),
+          {{"input", standard_in}, {"output", standard_out}, {"input/batch", batch_in}, {"output/batch", batch_out}}) + "]}");
+// The built-in policy with each Messages extension fact written by `edit` (its text; empty keeps the fact as it is).
+std::string messages_extensions_with(const std::function<std::string(json::Value)>& edit) {
+  auto parsed = json::parse(config_defaults::descriptor_policy_json);
+  const auto root = std::get<json::Document>(parsed).root();
+  std::string out = "{";
+  for (auto top : root.members()) {
+    out += (out.size() > 1 ? "," : "") + json::quote(top.key) + ":";
+    if (top.key != "families") { out += top.value.dump(); continue; }
+    std::string families = "[";
+    for (auto family : top.value.elements()) {
+      if (families.size() > 1) families += ",";
+      if (family.get("family").as_string() != "anthropic.messages") { families += family.dump(); continue; }
+      std::string object = "{";
+      for (auto field : family.members()) {
+        object += (object.size() > 1 ? "," : "") + json::quote(field.key) + ":";
+        if (field.key != "extensions") { object += field.value.dump(); continue; }
+        std::string facts = "[";
+        for (auto fact : field.value.elements()) {
+          const auto text = edit(fact);
+          facts += (facts.size() > 1 ? "," : "") + (text.empty() ? fact.dump() : text);
+        }
+        object += facts + "]";
+      }
+      families += object + "}";
+    }
+    out += families + "]";
+  }
+  return out + "}";
+}
+std::optional<descriptor::ValidatedDescriptor> anthropic_messages_with(const std::string& policy_text, std::string& refusal) {
+  auto loaded = descriptor::load_policy(policy_text, config_defaults::codec_defaults_json);
+  if (const auto* error = std::get_if<descriptor::ConfigError>(&loaded)) {
+    refusal = "policy refused at " + error->pointer + ": " + error->expected;
+    return std::nullopt;
+  }
+  descriptor::presets::PresetOptions options;
+  options.policy = std::get<descriptor::PolicySnapshot>(std::move(loaded));
+  auto made = descriptor::presets::try_anthropic_messages(options);
+  if (const auto* error = std::get_if<descriptor::ConfigError>(&made)) {
+    refusal = "descriptor refused at " + error->pointer;
+    return std::nullopt;
+  }
+  return std::get<descriptor::ValidatedDescriptor>(std::move(made));
+}
+messages::Request extended(std::string model, std::string_view extensions) {
+  auto request = messages::Request::simple(std::move(model), "Say: alpha", 16);
+  if (!extensions.empty()) request.extensions = document(extensions);
+  return request;
+}
+// A bound as its total, or as its reasons.
+std::string bounded_as(const std::optional<UsdAmount>& total, const std::vector<pricing::UnboundedReason>& unbounded) {
+  if (total) return "total " + std::to_string(total->nano_usd);
+  std::string out = "no total";
+  for (const auto& reason : unbounded) out += " | " + std::string(pricing::to_string(reason.by)) + " [" + reason.subject + "] " + reason.detail;
+  return out;
+}
+// An estimate as its total, or as the names it leaves unpriced.
+std::string estimated_as(const pricing::EndpointEstimate& e) {
+  if (e.total) return "total " + std::to_string(e.total->nano_usd);
+  std::string out = "no total";
+  for (const auto& name : e.unpriced) out += " | unpriced " + name;
+  return out;
+}
+
+void priced_extensions() {
+  constexpr std::string_view unmodeled_detail = "the extension's value changes the price in a way no catalogue row states";
+  const auto standard = "total " + std::to_string(rounded(300 * standard_in + 16 * standard_out));
+  const auto fast = "total " + std::to_string(rounded(300 * fast_in + 16 * fast_out));
+  const auto unmodeled_geo = "no total | Unmodeled [inference_geo] " + std::string(unmodeled_detail);
+  // A chat request: `speed: fast` under the fast rows, `inference_geo` other than `global` without a bound; a value the
+  // policy does not price, and null, at the standard rates.
+  const auto chat_bound = [&](runtime::Client& client, std::string model, std::string_view extensions) {
+    auto prepared = client.prepare(extended(std::move(model), extensions), run_with(1));
+    if (!prepared.valid() || prepared.error()) return "did not prepare: " + (prepared.error() ? prepared.error()->safe_message : std::string("invalid"));
+    const auto bound = runtime::worst_case_cost(prepared, *fast_priced, runtime::WorstCaseOptions{300});
+    return bounded_as(bound.total, bound.unbounded);
+  };
+  auto messages_api = client_of(anthropic_messages());
+  EXPECT(chat_bound(messages_api, "vendor/fast", ""), standard);
+  EXPECT(chat_bound(messages_api, "vendor/fast", R"({"speed":"standard"})"), standard);
+  EXPECT(chat_bound(messages_api, "vendor/fast", R"({"speed":null})"), standard);
+  EXPECT(chat_bound(messages_api, "vendor/fast", R"({"speed":"fast"})"), fast);
+  EXPECT(chat_bound(messages_api, "vendor/no-fast", R"({"speed":"fast"})"),
+         "no total | TierPrice [vendor/no-fast] the entry prices no unit under service tier 'fast'");
+  EXPECT(chat_bound(messages_api, "vendor/fast", R"({"inference_geo":"us"})"), unmodeled_geo);
+  EXPECT(chat_bound(messages_api, "vendor/fast", R"({"inference_geo":"eu"})"), unmodeled_geo);
+  EXPECT(chat_bound(messages_api, "vendor/fast", R"({"inference_geo":"global"})"), standard);
+  EXPECT(chat_bound(messages_api, "vendor/fast", R"({"inference_geo":null})"), standard);
+  EXPECT(chat_bound(messages_api, "vendor/fast", R"({"speed":"fast","inference_geo":"us"})"), unmodeled_geo);
+  EXPECT(chat_bound(messages_api, "vendor/fast", R"({"speed":"fast","inference_geo":"global"})"), fast);
+  // The prepared facts name each priced extension; a value at the standard rates is left out.
+  {
+    const auto prepared = messages_api.prepare(extended("vendor/fast", R"({"speed":"fast","inference_geo":"us","diagnostics":null})"), run_with(1));
+    std::string named;
+    for (const auto& priced : prepared.facts().priced_extensions) named += priced.key + "/" + priced.tier + "/" + std::to_string(priced.unmodeled) + " ";
+    EXPECT(named, "speed/fast/0 inference_geo//1 ");
+    EXPECT(std::to_string(messages_api.prepare(extended("vendor/fast", R"({"speed":"standard","inference_geo":"global"})"), run_with(1)).facts().priced_extensions.size()), "0");
+  }
+
+  // The estimate of a chat call, from the facts it was prepared with.
+  const auto chat_estimate = [&](std::string_view extensions) {
+    const auto prepared = messages_api.prepare(extended("vendor/fast", extensions), run_with(1));
+    ServedModel served;
+    served.requested = "vendor/fast";
+    const auto& facts = prepared.facts();
+    const auto e = pricing::estimate(*fast_priced, prepared.family(), prepared.descriptor()->base_url(), served, request_usage(120, 7), facts,
+                                     prepared.descriptor()->policy()->billing_tier(prepared.family(), facts.service_tier));
+    if (e.total) return "total " + std::to_string(e.total->nano_usd);
+    std::string out = "no total";
+    for (const auto& name : e.unpriced) out += " | unpriced " + name;
+    return out;
+  };
+  const auto standard_estimate = "total " + std::to_string(rounded(120 * standard_in + 7 * standard_out));
+  EXPECT(chat_estimate(""), standard_estimate);
+  EXPECT(chat_estimate(R"({"speed":"standard"})"), standard_estimate);
+  EXPECT(chat_estimate(R"({"speed":"fast"})"), "total " + std::to_string(rounded(120 * fast_in + 7 * fast_out)));
+  EXPECT(chat_estimate(R"({"inference_geo":"us"})"), "no total | unpriced extension:inference_geo");
+  EXPECT(chat_estimate(R"({"inference_geo":"global"})"), standard_estimate);
+
+  // Two tiers, a request's and an extension's or two extensions': no bound and no estimate. The same tier twice is it.
+  {
+    RequestFacts facts;
+    facts.priced_extensions = {{"speed", "fast", false}};
+    pricing::WorstCaseInput in;
+    in.family = "anthropic.messages";
+    in.origin = "https://api.anthropic.com";
+    in.model = "vendor/fast";
+    in.facts = &facts;
+    in.output_tokens = 16;
+    in.measured_input_tokens = 300;
+    in.invocations = 1;
+    in.attempts = 1;
+    const auto bound = [&](std::string_view tier) {
+      in.service_tier = tier;
+      const auto wc = pricing::worst_case(in, *fast_priced);
+      return bounded_as(wc.total, wc.unbounded);
+    };
+    EXPECT(bound("priority"), "no total | TierPrice [speed] the extension's value bills under service tier 'fast' and the request under service tier 'priority'");
+    EXPECT(bound("fast"), fast);
+    EXPECT(bound(""), fast);
+    ServedModel served;
+    served.requested = "vendor/fast";
+    const auto e = pricing::estimate(*fast_priced, in.family, in.origin, served, request_usage(120, 7), facts, "priority");
+    EXPECT(e.total ? std::string("total") : e.unpriced.empty() ? std::string("none") : e.unpriced.front(), "tier");
+    facts.priced_extensions.push_back({"other", "priority", false});
+    EXPECT(bound(""), "no total | TierPrice [other] the extension's value bills under service tier 'priority' and the request under service tier 'fast'");
+    facts.priced_extensions.back().tier = "fast";
+    EXPECT(bound(""), fast);
+  }
+
+  // A batch item: the batch tier is not the fast tier, and nothing states how the two combine; an unmodeled value has
+  // no bound there either. The estimate of the item's line likewise, from the submit's facts and from the items.
+  const auto batched = "total " + std::to_string(rounded(batched_input * batch_in + 16 * batch_out));
+  const auto line_total = "total " + std::to_string(rounded(120 * batch_in + 7 * batch_out));
+  const auto batch_of = [&](std::string_view extensions) {
+    const auto submit = messages_api.prepare(batches::Submit{{{"a-1", extended("vendor/fast", extensions)}}});
+    const auto bound = runtime::endpoint_worst_case_cost(ok(submit), *fast_priced);
+    const auto line = answered("a-1", "vendor/fast", request_usage(120, 7));
+    const auto& facts = ok(submit).endpoint_facts();
+    return bounded_as(bound.total, bound.unbounded) + " / " + estimated_as(runtime::batch_estimate(facts, anthropic_messages(), {line}, *fast_priced)) +
+           " / " + estimated_as(runtime::batch_estimate(facts, anthropic_messages(), {batches::Item{"a-1", extended("vendor/fast", extensions)}}, {line}, *fast_priced));
+  };
+  EXPECT(batch_of(""), batched + " / " + line_total + " / " + line_total);
+  EXPECT(batch_of(R"({"speed":"standard"})"), batched + " / " + line_total + " / " + line_total);
+  EXPECT(batch_of(R"({"speed":"fast"})"),
+         "no total | TierPrice [a-1:speed] the extension's value bills under service tier 'fast' and the request under service tier 'batch' / "
+         "no total | unpriced a-1:tier / no total | unpriced a-1:tier");
+  EXPECT(batch_of(R"({"inference_geo":"us"})"), "no total | Unmodeled [a-1:inference_geo] " + std::string(unmodeled_detail) +
+                                                    " / no total | unpriced a-1:extension:inference_geo / no total | unpriced a-1:extension:inference_geo");
+  EXPECT(batch_of(R"({"inference_geo":"global"})"), batched + " / " + line_total + " / " + line_total);
+
+  // A policy whose facts leave `prices` out takes the embedded policy's; one that states none (`{}`) prices no value.
+  const auto chat_bound_under = [&](const std::string& policy_text, std::string_view extensions) {
+    std::string refusal;
+    auto descriptor = anthropic_messages_with(policy_text, refusal);
+    if (!descriptor) return refusal;
+    auto client = client_of(std::move(*descriptor));
+    return chat_bound(client, "vendor/fast", extensions);
+  };
+  const auto left_out = messages_extensions_with([](json::Value fact) { return fact_text(fact, {"prices"}); });
+  EXPECT(chat_bound_under(left_out, R"({"speed":"fast"})"), fast);
+  EXPECT(chat_bound_under(left_out, R"({"inference_geo":"us"})"), unmodeled_geo);
+  const auto none_for_speed = messages_extensions_with([](json::Value fact) {
+    if (fact.get("key").as_string() != "speed") return std::string();
+    auto text = fact_text(fact, {"prices"});
+    text.pop_back();
+    return text + ",\"prices\":{}}";
+  });
+  EXPECT(chat_bound_under(none_for_speed, R"({"speed":"fast"})"), standard);
+  EXPECT(chat_bound_under(none_for_speed, R"({"inference_geo":"us"})"), unmodeled_geo);
+  report_mismatches("priced_extensions");
+  std::cout << "case passed: extension values that change the price\n";
+}
 }  // namespace
 
 int main() {
@@ -1293,6 +1498,7 @@ int main() {
     units_outside_the_tier();
     batch_estimates();
     batch_estimate_within_the_bound();
+    priced_extensions();
     std::cout << "endpoint cost passed\n";
     return 0;
   } catch (const std::exception& error) {

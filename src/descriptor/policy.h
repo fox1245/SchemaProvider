@@ -80,11 +80,25 @@ struct ResponseBlockFact { std::string type; std::string beta{}; std::string sig
 // A Messages content block the caller writes (`search_result`), as an Opaque part of a user message or of a tool
 // result, checked against the schema of the whole block and sent as given.
 struct InputBlockFact { std::string type; ValueSchema value; };
+// How an extension's value changes the price of a call (#207): the call bills under the catalogue tier `tier` (its
+// `input/<tier>`, `output/<tier>`, ... rows), or, when `unmodeled`, in a way no catalogue row states.
+struct ExtensionPricing { std::string tier; bool unmodeled = false; };
+// The values of an extension that change the price (the fact's `prices`): each of `values` as it states; with
+// `other`, every value but null and those of `values` and `standard` as `other` states. Null, and a value neither
+// names, bill at the standard rates. Empty: no value changes the price.
+struct ExtensionPrices {
+  std::vector<std::pair<std::string, ExtensionPricing>> values;
+  std::vector<std::string> standard;
+  std::optional<ExtensionPricing> other;
+};
 // A top-level request member the policy admits for the listed origins (#32). A replay-ineligible extension makes the
 // turn's answer not continuable natively; an eligible one joins the configuration digest unless it is unbound
 // (`bound` false): a per-request service control that does not change what the conversation means, which may change
 // from turn to turn (#96). A Messages extension may name the anthropic-beta value a request that sets it needs.
-struct ExtensionFact { std::string key; std::vector<std::string> origins; ValueSchema value; bool replay_eligible = false; bool bound = true; std::string beta{}; };
+// `prices` says which of its values change the price; `bound` is about native replay, not money.
+struct ExtensionFact { std::string key; std::vector<std::string> origins; ValueSchema value; bool replay_eligible = false; bool bound = true; std::string beta{}; ExtensionPrices prices{}; };
+// How `value`, an extension's value in a request, changes the price; empty for the standard rates (null always is).
+std::optional<ExtensionPricing> extension_pricing(const ExtensionFact& fact, json::Value value);
 // An audio format a realtime endpoint takes or sends: its media type as the provider spells it (`audio/pcm;rate=24000`,
 // `audio/pcmu`), the samples per second and the bytes of one sample.
 struct AudioFormatFact { std::string mime; std::uint32_t rate = 0, sample_bytes = 0; };

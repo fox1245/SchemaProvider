@@ -5,6 +5,7 @@
 #include "descriptor/policy.h"
 #include "runtime/request_facts.h"
 #include <algorithm>
+#include <map>
 #include <set>
 
 namespace sp::runtime {
@@ -202,10 +203,10 @@ constexpr std::uint64_t nano_usd_rate = 1'000'000;
 
 namespace {
 // The estimate of a batch's lines; a line is priced only when its custom id is among `known` (every line when `known`
-// is empty).
+// is empty), and under the tier its request bills under when `carried` has the request's facts (#207).
 pricing::EndpointEstimate estimate_lines(const EndpointFacts& submit, const descriptor::ValidatedDescriptor& family,
                                          const std::vector<batches::Line>& lines, const descriptor::ModelCatalogue& catalogue,
-                                         const std::set<std::string_view>& known) {
+                                         const std::set<std::string_view>& known, const std::map<std::string_view, const RequestFacts*>& carried) {
   pricing::EndpointEstimate out;
   const auto refuse = [&](std::string name) {
     if (std::find(out.unpriced.begin(), out.unpriced.end(), name) == out.unpriced.end()) out.unpriced.push_back(std::move(name));
@@ -279,7 +280,10 @@ pricing::EndpointEstimate estimate_lines(const EndpointFacts& submit, const desc
       refuse(id + ":tier");
       continue;
     }
-    const auto priced = pricing::estimate(catalogue, family.family(), submit.origin, *model, *usage, submit.carried_tier);
+    const auto facts = carried.find(id);
+    const auto priced = facts != carried.end()
+                            ? pricing::estimate(catalogue, family.family(), submit.origin, *model, *usage, *facts->second, submit.carried_tier)
+                            : pricing::estimate(catalogue, family.family(), submit.origin, *model, *usage, submit.carried_tier);
     if (!priced.total) {
       for (const auto& name : priced.unpriced) refuse(id + ":" + name);
       continue;
@@ -306,21 +310,31 @@ pricing::EndpointEstimate estimate_lines(const EndpointFacts& submit, const desc
 pricing::EndpointEstimate batch_estimate(const EndpointFacts& submit, const descriptor::ValidatedDescriptor& family,
                                          const std::vector<batches::Line>& lines, const descriptor::ModelCatalogue& catalogue) {
   std::set<std::string_view> known;
-  for (const auto& request : submit.carried) known.insert(request.custom_id);
-  return estimate_lines(submit, family, lines, catalogue, known);
+  std::map<std::string_view, const RequestFacts*> carried;
+  for (const auto& request : submit.carried) {
+    known.insert(request.custom_id);
+    carried.emplace(request.custom_id, &request.facts);
+  }
+  return estimate_lines(submit, family, lines, catalogue, known, carried);
 }
 pricing::EndpointEstimate batch_estimate(const EndpointFacts& submit, const descriptor::ValidatedDescriptor& family,
                                          const std::vector<batches::Item>& items, const std::vector<batches::Line>& lines,
                                          const descriptor::ModelCatalogue& catalogue) {
   std::set<std::string_view> known;
   for (const auto& item : items) known.insert(item.custom_id);
+  // Each item's facts, as the request is prepared.
+  std::vector<RequestFacts> facts;
+  facts.reserve(items.size());
+  for (const auto& item : items) facts.push_back(std::visit([&](const auto& typed) { return detail::request_facts(family, typed); }, item.request));
+  std::map<std::string_view, const RequestFacts*> carried;
+  for (std::size_t i = 0; i < items.size(); ++i) carried.emplace(items[i].custom_id, &facts[i]);
   // No items is no request to price a line of.
   if (known.empty() && submit.billing != descriptor::EndpointBilling::None) {
     pricing::EndpointEstimate out;
     out.unpriced.emplace_back("items");
     return out;
   }
-  return estimate_lines(submit, family, lines, catalogue, known);
+  return estimate_lines(submit, family, lines, catalogue, known, carried);
 }
 
 namespace {

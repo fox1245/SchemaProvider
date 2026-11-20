@@ -608,6 +608,36 @@ std::string variable_rate(const descriptor::CatalogueEntry& entry, std::string_v
 }
 }  // namespace
 
+BilledTier billed_tier(const RequestFacts& facts, std::string_view service_tier) {
+  BilledTier out{std::string(service_tier), std::nullopt};
+  for (const auto& priced : facts.priced_extensions)
+    if (priced.unmodeled) {
+      out.tier.clear();
+      out.refused = UnboundedReason{UnboundedBy::Unmodeled, priced.key, "the extension's value changes the price in a way no catalogue row states"};
+      return out;
+    }
+  for (const auto& priced : facts.priced_extensions) {
+    if (out.tier.empty()) out.tier = priced.tier;
+    else if (priced.tier != out.tier) {
+      out.refused = UnboundedReason{UnboundedBy::TierPrice, priced.key,
+                                    "the extension's value bills under service tier '" + priced.tier + "' and the request under service tier '" + out.tier + "'"};
+      out.tier.clear();
+      return out;
+    }
+  }
+  return out;
+}
+
+CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_view family, std::string_view origin, const ServedModel& model,
+                      const Usage& usage, const RequestFacts& facts, std::string_view service_tier, bool route_ceiling) {
+  const auto billed = billed_tier(facts, service_tier);
+  if (!billed.refused) return estimate(catalogue, family, origin, model, usage, billed.tier, route_ceiling);
+  CostEstimate out;
+  out.lower_bound = usage.stage == UsageStage::Partial || usage.quality == UsageQuality::Inconsistent;
+  out.unpriced.push_back(billed.refused->by == UnboundedBy::Unmodeled ? "extension:" + billed.refused->subject : std::string("tier"));
+  return out;
+}
+
 WorstCase worst_case(const WorstCaseInput& in, const descriptor::ModelCatalogue& catalogue) {
   static const RequestFacts no_facts;
   const auto& facts = in.facts ? *in.facts : no_facts;
@@ -629,6 +659,13 @@ WorstCase worst_case(const WorstCaseInput& in, const descriptor::ModelCatalogue&
                                  : "the request sets no " + group.member);
   }
   const std::uint64_t invocations = in.invocations && *in.invocations ? *in.invocations : 1;
+  // The tier the call bills under, the request's priced extensions included (#207).
+  const auto billed = billed_tier(facts, in.service_tier);
+  if (billed.refused) {
+    out.unbounded.push_back(*billed.refused);
+    return out;
+  }
+  const std::string_view tier = billed.tier;
 
   // Every model that may serve the call: the requested one, then the gateway's fallbacks.
   struct Candidate {
@@ -663,13 +700,13 @@ WorstCase worst_case(const WorstCaseInput& in, const descriptor::ModelCatalogue&
       block(UnboundedBy::Overflow, model, "the input tokens do not fit 64 bits");
       continue;
     }
-    auto selected = select(*entry, in.service_tier, candidate.invocation_input, true);
+    auto selected = select(*entry, tier, candidate.invocation_input, true);
     candidate.price = selected.price;
     candidate.variable = std::move(selected.variable);
     if (!selected.priced) {
       block(UnboundedBy::TierPrice, model,
-            in.service_tier.empty() ? "the entry prices no unit at the standard rates"
-                                    : "the entry prices no unit under service tier '" + std::string(in.service_tier) + "'");
+            tier.empty() ? "the entry prices no unit at the standard rates"
+                         : "the entry prices no unit under service tier '" + std::string(tier) + "'");
       continue;
     }
     // A price beyond tokens that no unit reads, for something the request carries: the bound would be a total below the bill.
@@ -708,7 +745,7 @@ WorstCase worst_case(const WorstCaseInput& in, const descriptor::ModelCatalogue&
       // kept from an earlier refresh.
       for (const auto side : {TokenSide::Input, TokenSide::Output}) {
         const auto ceiling = side == TokenSide::Input ? candidate.price.ceiling_input : candidate.price.ceiling_output;
-        if (ceiling && ceiling_below_listed(*entry, side, *ceiling, in.service_tier, candidate.invocation_input)) {
+        if (ceiling && ceiling_below_listed(*entry, side, *ceiling, tier, candidate.invocation_input)) {
           block(UnboundedBy::RouteCeiling, model,
                 std::string("the entry's ") + (side == TokenSide::Input ? "ceiling_input" : "ceiling_output") +
                     " is below a token price the entry lists on that side, so it bounds nothing; refresh the catalogue");
