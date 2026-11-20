@@ -524,7 +524,7 @@ The fees and the tool uses are charged once per attempt, the tokens on every inv
 | `TierPrice` | model | the entry prices no unit under the request's tier |
 | `ToolFee` | tool type | the entry lists no `tool:<type>` fee, or a fee row at a variable price |
 | `ToolCap` | tool type | the tool's uses are uncapped: the request sets none, the policy admits none (code execution takes no `max_uses`), or the family has none (Google's built-in tools) |
-| `RouteCeiling` | model | a gateway entry without a ceiling, a ceiling at an origin that is not a gateway, or one above the largest `max_price`; a ceiling row at a variable price is `ModelPrice` with the unit and the row, and so, when both ceilings are listed, is a variable request fee |
+| `RouteCeiling` | model | a gateway entry without a ceiling, a ceiling at an origin that is not a gateway, or one above the largest `max_price`; a ceiling row at a variable price, or at one past 64 bits, is `ModelPrice` with the unit and the row, and so, when both ceilings are listed, is a variable request fee |
 | `Unmodeled` | what | OpenRouter plugins, a batch submit or a request that did not prepare |
 | `Overflow` | | the bound does not fit 64 bits |
 | `Billing` | endpoint/operation | the policy does not state whether the provider bills the endpoint call's operation |
