@@ -12,6 +12,7 @@
 #include <variant>
 #include <vector>
 
+namespace sp::reason { struct Reason; }
 namespace sp::files {
 enum class State { Unknown, Processing, Active, Failed };
 struct File {
@@ -170,7 +171,7 @@ class Codec final : public endpoints::Codec {
   Codec(const descriptor::ValidatedDescriptor&, Accumulator&, Kind, std::string subject, SemanticLimits = {});
   bool buffered(std::string_view body, Close close) override;
  private:
-  bool fail(ErrorKind, std::string);
+  bool fail(ErrorKind, const reason::Reason&);
   bool emit(const Event&);
   const descriptor::ValidatedDescriptor& descriptor_;
   Accumulator& accumulator_;
@@ -186,7 +187,7 @@ class SessionCodec final : public endpoints::Codec {
   SessionCodec(const descriptor::ValidatedDescriptor&, Accumulator&, Step, std::string subject, SemanticLimits = {}, std::string url = {});
   bool buffered(std::string_view body, Close close) override;
  private:
-  bool fail(ErrorKind, std::string);
+  bool fail(ErrorKind, const reason::Reason&);
   bool emit(const Event&);
   const descriptor::ValidatedDescriptor& descriptor_;
   Accumulator& accumulator_;
