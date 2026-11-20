@@ -1,4 +1,6 @@
 #include "codecs/gemini_request.h"
+#include "codecs/reason.h"
+#include "descriptor/policy_refusals.h"
 #include "codecs/request_checks.h"
 #include "core/request_controls.h"
 #include "codecs/media_input.h"
@@ -154,15 +156,15 @@ void write_media(json::BoundedWriter& w, const Media& media) {
 }
 }
 EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request, bool streaming) {
-  auto bad = [](std::string message) -> EncodeResult { return Error{ErrorKind::InvalidRequest, std::move(message)}; };
-  auto replay_bad = []() -> EncodeResult { return Error{ErrorKind::ReplayIneligible, "native replay provenance, binding or content mismatch"}; };
-  if (descriptor.family() != "google.generate") return Error{ErrorKind::InvalidConfig, "Gemini encoder requires generate descriptor"};
-  if (!descriptor::route_model_name(request.model)) return bad("literal model name required");
-  if (auto refusal = descriptor::route_refusal(descriptor, request.model)) return bad(std::move(*refusal));
+  auto bad = [](const reason::Reason& message) -> EncodeResult { return reason::error(ErrorKind::InvalidRequest, message); };
+  auto replay_bad = []() -> EncodeResult { return reason::error(ErrorKind::ReplayIneligible, reason::gemini_request::native_replay_provenance_binding_or_content); };
+  if (descriptor.family() != "google.generate") return reason::error(ErrorKind::InvalidConfig, reason::gemini_request::gemini_encoder_requires_generate_descriptor);
+  if (!descriptor::route_model_name(request.model)) return bad(reason::gemini_request::literal_model_name_required);
+  if (auto refusal = descriptor::route_refusal_reason(descriptor, request.model)) return bad(std::move(*refusal));
   // descriptor::load holds a google.generate descriptor to {model} in both paths, or to one model where its origin's
   // route fact has the placeholder; a literal route serves only the request for its own model.
   if (!descriptor.model_routed() && request.model != descriptor.route_model())
-    return Error{ErrorKind::InvalidConfig, "Gemini descriptor paths must target the same literal model"};
+    return reason::error(ErrorKind::InvalidConfig, reason::gemini_request::gemini_descriptor_paths_must_target_the_same);
   const auto& resources = descriptor.policy()->resources();
   CacheMarkReport mark_report;
   if (auto error = cache_marks::drop(descriptor, request.model, request.messages, mark_report)) return std::move(*error);
@@ -171,11 +173,11 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (request.thinking_budget) effective.thinking_budget = request.thinking_budget;
   if (request.include_thoughts) effective.include_thoughts = request.include_thoughts;
   if (request.history_mode != HistoryMode::NativeOnly && request.history_mode != HistoryMode::PortableForeign)
-    return bad("invalid history mode");
+    return bad(reason::gemini_request::invalid_history_mode);
   if (request.thinking_level) {
     const auto level = thinking_level_name(*request.thinking_level);
-    if (level.empty()) return bad("invalid thinking level");
-    if (request.thinking_budget) return bad("thinking level and budget are mutually exclusive");
+    if (level.empty()) return bad(reason::gemini_request::invalid_thinking_level);
+    if (request.thinking_budget) return bad(reason::gemini_request::thinking_level_and_budget_are_mutually);
     effective.thinking_budget.reset();
     effective.thinking_level = level;
   }
@@ -183,59 +185,59 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   unsigned safety_categories = 0;
   for (const auto& setting : request.safety_settings) {
     if (safety_category_name(setting.category).empty() || safety_threshold_name(setting.threshold).empty())
-      return bad("safety settings require valid unique categories and thresholds");
+      return bad(reason::gemini_request::safety_settings_require_valid_unique);
     const auto category = 1U << static_cast<unsigned>(setting.category);
-    if (safety_categories & category) return bad("safety settings require valid unique categories and thresholds");
+    if (safety_categories & category) return bad(reason::gemini_request::safety_settings_require_valid_unique);
     safety_categories |= category;
   }
   if (request.tool_choice) {
-    if (request.required_tool) return bad("tool choice and required function are mutually exclusive");
-    if (tool_choice_name(request.tool_choice->mode).empty()) return bad("invalid tool choice mode");
+    if (request.required_tool) return bad(reason::gemini_request::tool_choice_and_required_function_are);
+    if (tool_choice_name(request.tool_choice->mode).empty()) return bad(reason::gemini_request::invalid_tool_choice_mode);
     if (!request.tool_choice->allowed_function_names.empty() &&
         request.tool_choice->mode != ToolChoiceMode::Any && request.tool_choice->mode != ToolChoiceMode::Validated)
-      return bad("allowed functions require ANY or VALIDATED mode");
+      return bad(reason::gemini_request::allowed_functions_require_any_or_validated);
   }
-  if (auto error = descriptor::validate_choices(descriptor, request.model, effective)) return bad(std::move(*error));
+  if (auto error = descriptor::choices_refusal(descriptor, request.model, effective)) return bad(std::move(*error));
   unsigned modalities = 0;
   for (auto modality : request.response_modalities) {
-    if (modality_name(modality).empty()) return bad("invalid response modality");
+    if (modality_name(modality).empty()) return bad(reason::gemini_request::invalid_response_modality);
     const auto bit = 1U << static_cast<unsigned>(modality);
-    if (modalities & bit) return bad("response modalities must be unique");
+    if (modalities & bit) return bad(reason::gemini_request::response_modalities_must_be_unique);
     modalities |= bit;
   }
   if (request.speech_config) {
     const auto& speech = *request.speech_config;
     if (speech.voice_config && !speech.speaker_voice_configs.empty())
-      return bad("single and multi-speaker voice configurations are mutually exclusive");
-    if (speech.voice_config && !voice_valid(*speech.voice_config)) return bad("voice alternatives are mutually exclusive");
-    if (speech.speaker_voice_configs.size() > resources.request_parts) return bad("speaker configuration count limit exceeded");
+      return bad(reason::gemini_request::single_and_multi_speaker_voice_configurations);
+    if (speech.voice_config && !voice_valid(*speech.voice_config)) return bad(reason::gemini_request::voice_alternatives_are_mutually_exclusive);
+    if (speech.speaker_voice_configs.size() > resources.request_parts) return bad(reason::gemini_request::speaker_configuration_count_limit_exceeded);
     for (const auto& speaker : speech.speaker_voice_configs)
-      if (speaker.speaker.empty() || !voice_valid(speaker.voice_config)) return bad("speaker name and exclusive voice configuration required");
+      if (speaker.speaker.empty() || !voice_valid(speaker.voice_config)) return bad(reason::gemini_request::speaker_name_and_exclusive_voice);
     if (speech.language_code && !request_controls::language_tag(*speech.language_code))
-      return bad("speech language code must be a language tag");
+      return bad(reason::gemini_request::speech_language_code_must_be_a_language_tag);
   }
   if (request.image_config) {
     const auto& image = *request.image_config;
-    if (image.aspect_ratio && !request_controls::aspect_ratio_syntax(*image.aspect_ratio)) return bad("image aspect ratio must be W:H");
-    if (image.image_size && !request_controls::size_token(*image.image_size)) return bad("image size must be a short token");
+    if (image.aspect_ratio && !request_controls::aspect_ratio_syntax(*image.aspect_ratio)) return bad(reason::gemini_request::image_aspect_ratio_must_be_w_h);
+    if (image.image_size && !request_controls::size_token(*image.image_size)) return bad(reason::gemini_request::image_size_must_be_a_short_token);
   }
   if (request.audio_transcription_config) {
     const auto& transcription = *request.audio_transcription_config;
     if (transcription.language_codes.size() > resources.request_parts || descriptor::over_limit(descriptor, "transcription_vocabulary", transcription.custom_vocabulary.size()) ||
-        transcription.custom_vocabulary.size() > resources.request_parts) return bad("transcription list count limit exceeded");
+        transcription.custom_vocabulary.size() > resources.request_parts) return bad(reason::gemini_request::transcription_list_count_limit_exceeded);
     if (transcription.mode && *transcription.mode != TranscriptionMode::Verbatim && *transcription.mode != TranscriptionMode::Smart)
-      return bad("invalid transcription mode");
+      return bad(reason::gemini_request::invalid_transcription_mode);
     const bool annotations = transcription.word_timestamp.value_or(false) || transcription.diarization.value_or(false);
     if (annotations && (transcription.mode == TranscriptionMode::Smart || !transcription.custom_vocabulary.empty()))
-      return bad("timestamps and diarization cannot combine with SMART or custom vocabulary");
+      return bad(reason::gemini_request::timestamps_and_diarization_cannot_combine);
   }
   if (request.messages.empty() || request.messages.size() > resources.request_messages || request.tools.size() > resources.request_tools)
-    return bad("request count limit exceeded");
+    return bad(reason::gemini_request::request_count_limit_exceeded);
   bool has_media = false;
   bool captured_history = false;
   std::optional<Error> tool_error;
   for (const auto& message : request.messages) {
-    if (message.parts.size() > resources.request_parts) return bad("request part count limit exceeded");
+    if (message.parts.size() > resources.request_parts) return bad(reason::gemini_request::request_part_count_limit_exceeded);
     captured_history = captured_history || static_cast<bool>(message.native);
     for (const auto& part : message.parts) if (std::holds_alternative<Media>(part)) has_media = true;
     else if (const auto* tool = std::get_if<ToolResult>(&part); tool && !tool_error) {
@@ -243,21 +245,21 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       // screenshot); beside text parts it would have no lane.
       if (!tool->content_parts.empty() && !tool->content.empty() &&
           std::any_of(tool->content_parts.begin(), tool->content_parts.end(), [](const auto& nested) { return std::holds_alternative<Text>(nested); }))
-        tool_error = Error{ErrorKind::InvalidRequest, "tool result content and content_parts are mutually exclusive"};
+        tool_error = reason::error(ErrorKind::InvalidRequest, reason::gemini_request::tool_result_content_and_content_parts_are);
       else if (tool->content_parts.size() > resources.request_parts)
-        tool_error = Error{ErrorKind::InvalidRequest, "tool result part count limit exceeded"};
+        tool_error = reason::error(ErrorKind::InvalidRequest, reason::gemini_request::tool_result_part_count_limit_exceeded);
       else if (std::any_of(tool->content_parts.begin(), tool->content_parts.end(), [](const auto& nested) { return std::holds_alternative<Opaque>(nested); }))
-        tool_error = Error{ErrorKind::Unsupported, "tool result blocks are not admitted for this family"};
+        tool_error = reason::error(ErrorKind::Unsupported, reason::gemini_request::tool_result_blocks_not_admitted);
       else for (const auto& nested : tool->content_parts) if (const auto* media = std::get_if<Media>(&nested)) {
         has_media = true;
         // Inline only, in any form the family's media policy admits; the service decides what a model reads.
         if (static_cast<unsigned>(media->kind) < media_kind_count && static_cast<unsigned>(media->source) <= 2 &&
             media->source != MediaSource::Inline)
-          tool_error = Error{ErrorKind::Unsupported, "function response media requires inline bytes"};
+          tool_error = reason::error(ErrorKind::Unsupported, reason::gemini_request::function_response_media_requires_inline_bytes);
         else tool_error = media_input::admit(descriptor, *media);
         if (!tool_error && (media->detail != ImageDetail::Auto || !media->name.empty() ||
                             !media->id.empty() || !media->transcript.empty()))
-          tool_error = Error{ErrorKind::Unsupported, "function response media has unsupported controls or metadata"};
+          tool_error = reason::error(ErrorKind::Unsupported, reason::gemini_request::function_response_media_has_unsupported);
         if (tool_error) break;
       }
     }
@@ -273,7 +275,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         }
       } else for (const auto& part : message.parts) {
         if (const auto* media = std::get_if<Media>(&part)) {
-          if (message.role != Role::User) return bad("media inputs require user role");
+          if (message.role != Role::User) return bad(reason::gemini_request::media_inputs_require_user_role);
           if (auto error = media_input::admit(descriptor, *media)) return *error;
         } else if (!std::holds_alternative<Text>(part) && !std::holds_alternative<ToolResult>(part))
           return replay_bad();
@@ -282,10 +284,10 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   }
   if (tool_error && !captured_history) return *tool_error;
   if (auto refusal = request_controls::validate_extensions(descriptor, request.extensions))
-    return Error{refusal->admitted ? ErrorKind::InvalidRequest : ErrorKind::Unsupported, refusal->cause};
+    return reason::error(refusal->admitted ? ErrorKind::InvalidRequest : ErrorKind::Unsupported, refusal->cause);
   auto context = std::shared_ptr<const NativeContext>(new NativeContext(descriptor, request, effective, streaming));
   if (!context->history_valid_) return replay_bad();
-  if (!context->valid_) return Error{ErrorKind::ResourceLimit, "native binding could not be captured"};
+  if (!context->valid_) return reason::error(ErrorKind::ResourceLimit, reason::gemini_request::native_binding_could_not_be_captured);
   if (tool_error) return *tool_error;
   EncodedRequest result{"POST", descriptor.resolved_path(streaming, request.model), {}, {}, {}};
   for (const auto& header : descriptor.headers()) {
@@ -296,7 +298,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   result.headers.emplace_back("Content-Type", "application/json");
   result.headers.emplace_back("Accept", streaming ? "text/event-stream" : "application/json");
   auto build = [&](json::BoundedWriter& w) -> std::optional<Error> {
-    auto invalid = [](const char* text) { return Error{ErrorKind::InvalidRequest, text}; };
+    auto invalid = [](const reason::Reason& text) { return reason::error(ErrorKind::InvalidRequest, text); };
     std::set<std::string_view> tool_names;
     w.raw("{\"generationConfig\":{");
     bool generation_comma = false;
@@ -370,10 +372,10 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     if (request.audio_format && (request.audio_format->mime_type || request.audio_format->sample_rate || request.audio_format->bit_rate || request.audio_format->delivery)) {
       const auto& format = *request.audio_format;
       if ((format.mime_type && !upper_token(*format.mime_type)) || (format.delivery && !upper_token(*format.delivery)))
-        return invalid("audio format must be an upper-case token");
+        return invalid(reason::gemini_request::audio_format_must_be_an_upper_case_token);
       if ((format.sample_rate && (!*format.sample_rate || descriptor::over_limit(descriptor, "audio_sample_rate", *format.sample_rate))) ||
           (format.bit_rate && (!*format.bit_rate || descriptor::over_limit(descriptor, "audio_bit_rate", *format.bit_rate))))
-        return invalid("audio sample or bit rate is out of range");
+        return invalid(reason::gemini_request::audio_sample_or_bit_rate_is_out_of_range);
       if (generation_comma) w.raw(",");
       w.raw("\"responseFormat\":{\"audio\":{");
       bool comma = false;
@@ -410,7 +412,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         next_tool().raw("{\"functionDeclarations\":[");
         bool comma = false;
         for (const auto& tool : request.tools) {
-          if (!name_valid(tool.name) || !tool_names.insert(tool.name).second || !tool.parameters || !tool.parameters->root().is_object()) return invalid("client functions require unique names and object schemas");
+          if (!name_valid(tool.name) || !tool_names.insert(tool.name).second || !tool.parameters || !tool.parameters->root().is_object()) return invalid(reason::gemini_request::client_functions_require_unique_names_and);
           if (comma) w.raw(",");
           comma = true;
           w.raw("{\"name\":").quoted(tool.name).raw(",\"description\":").quoted(tool.description).raw(",\"parametersJsonSchema\":").value(tool.parameters->root(), 4).raw("}");
@@ -419,17 +421,17 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       }
       std::set<std::size_t> builtin_kinds;
       for (const auto& tool : request.builtin_tools) {
-        if (!builtin_kinds.insert(tool.index()).second) return invalid("built-in tools must be unique");
+        if (!builtin_kinds.insert(tool.index()).second) return invalid(reason::gemini_request::built_in_tools_must_be_unique);
         auto strings = [&](const std::vector<std::string>& values) {
           w.raw("[");
           for (std::size_t i = 0; i < values.size(); ++i) { if (i) w.raw(","); w.quoted(values[i]); }
           w.raw("]");
         };
-        const char* refused = std::visit([&](const auto& value) -> const char* {
+        const reason::Reason* refused = std::visit([&](const auto& value) -> const reason::Reason* {
           using T = std::decay_t<decltype(value)>;
           if constexpr (std::is_same_v<T, GoogleSearchTool>) {
             if (value.start_time.has_value() != value.end_time.has_value() || (value.start_time && (!timestamp_syntax(*value.start_time) || !timestamp_syntax(*value.end_time))))
-              return "search time range requires both RFC 3339 ends";
+              return &reason::gemini_request::search_time_range_requires_both_rfc_3339_ends;
             next_tool().raw("{\"googleSearch\":{");
             if (value.start_time) w.raw("\"timeRangeFilter\":{\"startTime\":").quoted(*value.start_time).raw(",\"endTime\":").quoted(*value.end_time).raw("}");
             if (value.web_search || value.image_search) {
@@ -448,10 +450,10 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
             w.raw("}}");
           } else if constexpr (std::is_same_v<T, ComputerUseTool>) {
             if (!upper_token(value.environment) || !std::all_of(value.disabled_safety_policies.begin(), value.disabled_safety_policies.end(), upper_token))
-              return "computer use environment and policies must be upper-case tokens";
+              return &reason::gemini_request::computer_use_environment_and_policies_must_be;
             std::set<std::string_view> excluded;
             for (const auto& name : value.excluded_functions)
-              if (!name_valid(name) || !excluded.insert(name).second) return "excluded computer use functions require unique names";
+              if (!name_valid(name) || !excluded.insert(name).second) return &reason::gemini_request::excluded_computer_use_functions_require_unique;
             next_tool().raw("{\"computerUse\":{\"environment\":").quoted(value.environment);
             if (!value.excluded_functions.empty()) { w.raw(",\"excludedPredefinedFunctions\":"); strings(value.excluded_functions); }
             if (!value.disabled_safety_policies.empty()) { w.raw(",\"disabledSafetyPolicies\":"); strings(value.disabled_safety_policies); }
@@ -459,13 +461,13 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
             w.raw("}}");
           } else {
             std::set<std::string_view> stores;
-            if (value.store_names.empty()) return "file search requires unique store names";
+            if (value.store_names.empty()) return &reason::gemini_request::file_search_requires_unique_store_names;
             for (const auto& name : value.store_names)
               if (!name.starts_with("fileSearchStores/") || name.size() <= 17 || name.size() > 256 || !stores.insert(name).second ||
                   std::any_of(name.begin(), name.end(), [](unsigned char c) { return c <= 0x20 || c >= 0x7f; }))
-                return "file search requires unique store names";
+                return &reason::gemini_request::file_search_requires_unique_store_names;
             if ((value.metadata_filter && (value.metadata_filter->empty() || value.metadata_filter->size() > 8192)) || (value.top_k && !*value.top_k))
-              return "file search filter or count is out of range";
+              return &reason::gemini_request::file_search_filter_or_count_is_out_of_range;
             next_tool().raw("{\"fileSearch\":{\"fileSearchStoreNames\":"); strings(value.store_names);
             if (value.metadata_filter) w.raw(",\"metadataFilter\":").quoted(*value.metadata_filter);
             if (value.top_k) w.raw(",\"topK\":").raw(std::to_string(*value.top_k));
@@ -473,7 +475,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
           }
           return nullptr;
         }, tool);
-        if (refused) return invalid(refused);
+        if (refused) return invalid(*refused);
       }
       if (!request.mcp_servers.empty()) {
         next_tool().raw("{\"mcpServers\":[");
@@ -481,15 +483,15 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         for (std::size_t i = 0; i < request.mcp_servers.size(); ++i) {
           const auto& server = request.mcp_servers[i];
           if (!name_valid(server.name) || !servers.insert(server.name).second || !https_url(server.url))
-            return invalid("MCP servers require unique names and https URLs");
+            return invalid(reason::gemini_request::mcp_servers_require_unique_names_and_https_urls);
           std::set<std::string> header_names;
           for (const auto& [name, value] : server.headers) {
             std::string lower(name);
             for (auto& c : lower) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + ('a' - 'A'));
-            if (!header_name(name) || !header_value(value) || !header_names.insert(std::move(lower)).second) return invalid("MCP server headers require unique names and single-line values");
+            if (!header_name(name) || !header_value(value) || !header_names.insert(std::move(lower)).second) return invalid(reason::gemini_request::mcp_server_headers_require_unique_names_and);
           }
           if ((server.timeout && !duration_syntax(*server.timeout)) || (server.sse_read_timeout && !duration_syntax(*server.sse_read_timeout)))
-            return invalid("MCP server timeouts must be durations in seconds");
+            return invalid(reason::gemini_request::mcp_server_timeouts_must_be_durations_in);
           if (i) w.raw(",");
           w.raw("{\"name\":").quoted(server.name).raw(",\"streamableHttpTransport\":{\"url\":").quoted(server.url);
           if (!server.headers.empty()) {
@@ -509,27 +511,27 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     // The service refuses a built-in tool next to a client function unless it also returns the tool's invocations
     // (toolCall and toolResponse parts), so that combination turns them on by default. MCP servers do not need them.
     const bool server_invocations = request.server_tool_invocations.value_or(!request.tools.empty() && builtin_service_tools);
-    if (server_invocations && !service_runs_tools) return invalid("server tool invocations require a service-run tool");
+    if (server_invocations && !service_runs_tools) return invalid(reason::gemini_request::server_tool_invocations_require_a_service_run);
     const bool write_invocations = service_runs_tools && (request.server_tool_invocations || server_invocations);
     if (request.retrieval_config) {
       const auto& retrieval = *request.retrieval_config;
       if (retrieval.latitude.has_value() != retrieval.longitude.has_value() ||
           (retrieval.latitude && !(*retrieval.latitude >= -90.0 && *retrieval.latitude <= 90.0 && *retrieval.longitude >= -180.0 && *retrieval.longitude <= 180.0)) ||
           (retrieval.language_code && !language_tag(*retrieval.language_code)))
-        return invalid("retrieval location or language is invalid");
+        return invalid(reason::gemini_request::retrieval_location_or_language_is_invalid);
     }
     const bool retrieval = request.retrieval_config && (request.retrieval_config->latitude || request.retrieval_config->language_code);
     const bool tool_config = request.required_tool || request.tool_choice || write_invocations || retrieval;
     bool config_comma = false;
     if (tool_config) w.raw(",\"toolConfig\":{");
     if (request.required_tool) {
-      if (!tool_names.contains(*request.required_tool) && !(computer_use && name_valid(*request.required_tool))) return invalid("required function must be declared");
+      if (!tool_names.contains(*request.required_tool) && !(computer_use && name_valid(*request.required_tool))) return invalid(reason::gemini_request::required_function_must_be_declared);
       w.raw("\"functionCallingConfig\":{\"mode\":\"ANY\",\"allowedFunctionNames\":[").quoted(*request.required_tool).raw("]}");
       config_comma = true;
     }
     if (request.tool_choice) {
       const auto& choice = *request.tool_choice;
-      if (tool_names.empty() && !computer_use && choice.mode != ToolChoiceMode::None) return invalid("function choice requires declared functions");
+      if (tool_names.empty() && !computer_use && choice.mode != ToolChoiceMode::None) return invalid(reason::gemini_request::function_choice_requires_declared_functions);
       std::set<std::string_view> allowed;
       w.raw("\"functionCallingConfig\":{\"mode\":").quoted(tool_choice_name(choice.mode));
       if (!choice.allowed_function_names.empty()) {
@@ -538,7 +540,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         for (const auto& name : choice.allowed_function_names) {
           // Computer use's functions are the service's own: their names are not known here.
           if (!name_valid(name) || !(tool_names.contains(name) || computer_use) || !allowed.insert(name).second)
-            return invalid("allowed functions require unique declared names");
+            return invalid(reason::gemini_request::allowed_functions_require_unique_declared);
           if (comma) w.raw(",");
           comma = true;
           w.quoted(name);
@@ -568,23 +570,23 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     w.raw(",").quoted(descriptor.request_messages_member()).raw(":[");
     bool comma = false;
     for (const auto& m : request.messages) {
-      if (m.parts.empty()) return invalid("empty content message");
+      if (m.parts.empty()) return invalid(reason::gemini_request::empty_content_message);
       if (comma) w.raw(",");
       comma = true;
       if (m.role == Role::Assistant) {
-        if (!pending.empty()) return invalid("all function results must precede the next model message");
+        if (!pending.empty()) return invalid(reason::gemini_request::all_function_results_must_precede_the_next);
         if (m.native) {
-          if (!m.wire_output || !m.wire_output->root().is_array()) return Error{ErrorKind::ReplayIneligible, "native parts array required"};
+          if (!m.wire_output || !m.wire_output->root().is_array()) return reason::error(ErrorKind::ReplayIneligible, reason::gemini_request::native_parts_array_required);
           // The service refuses some of its own parts when they come back (an MCP toolCall has no toolType). The
           // policy lists those shapes, and such a message fails here instead of as the service's 400.
           for (const auto part : m.wire_output->root().elements())
             for (const auto& [member, missing] : descriptor.family_policy().unreplayable_parts)
               if (part.get(member).is_object() && !part.get(member).get(missing).valid())
-                return Error{ErrorKind::Unsupported, "captured part is one the service refuses to take back"};
+                return reason::error(ErrorKind::Unsupported, reason::gemini_request::captured_part_refused_by_the_service);
           for (const auto& part : m.parts) if (auto call = std::get_if<ToolCall>(&part)) {
             // The service ran its own calls and answered them in the same message; they replay with the wire.
             if (call->kind == ToolCallKind::ServerExecuted) continue;
-            if (call->kind != ToolCallKind::ClientExecuted || !(tool_names.contains(call->name) || computer_use) || !all_calls.insert(call->id).second || !call->wire_metadata) return invalid("function ownership mismatch");
+            if (call->kind != ToolCallKind::ClientExecuted || !(tool_names.contains(call->name) || computer_use) || !all_calls.insert(call->id).second || !call->wire_metadata) return invalid(reason::gemini_request::function_ownership_mismatch);
             const auto fc = call->wire_metadata->root().get("functionCall");
             pending.emplace(call->id, Pending{call->name, fc.get("id").valid()});
           }
@@ -598,7 +600,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
             if (const auto* text = std::get_if<Text>(&part)) w.raw("{\"text\":").quoted(text->value).raw("}");
             else if (const auto* call = std::get_if<ToolCall>(&part)) {
               if (call->id.empty() || !tool_names.contains(call->name) || !all_calls.insert(call->id).second ||
-                  !call->input || !call->input->root().is_object()) return invalid("portable function requires unique identity, declared name and object arguments");
+                  !call->input || !call->input->root().is_object()) return invalid(reason::gemini_request::portable_function_requires_unique_identity);
               pending.emplace(call->id, Pending{call->name, true});
               w.raw("{\"functionCall\":{\"id\":").quoted(call->id).raw(",\"name\":").quoted(call->name)
                   .raw(",\"args\":").value(call->input->root(), 6).raw("}");
@@ -607,27 +609,27 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
               if (first_call) w.raw(",\"thoughtSignature\":\"skip_thought_signature_validator\"");
               first_call = false;
               w.raw("}");
-            } else return Error{ErrorKind::ReplayIneligible, "portable assistant parts must be text or client functions"};
+            } else return reason::error(ErrorKind::ReplayIneligible, reason::gemini_request::portable_assistant_parts_must_be_text_or);
           }
           w.raw("]}");
         }
       } else if (m.role == Role::User || m.role == Role::Tool) {
         const bool results_only = !pending.empty();
-        if (m.role == Role::Tool && !results_only) return invalid("tool result lacks pending function");
+        if (m.role == Role::Tool && !results_only) return invalid(reason::gemini_request::tool_result_lacks_pending_function);
         w.raw("{\"role\":\"user\",\"parts\":[");
         bool pc = false;
         for (const auto& p : m.parts) {
           if (pc) w.raw(",");
           pc = true;
           if (auto text = std::get_if<Text>(&p)) {
-            if (results_only || m.role == Role::Tool) return invalid("function results must be immediate and complete");
+            if (results_only || m.role == Role::Tool) return invalid(reason::gemini_request::function_results_must_be_immediate_and);
             w.raw("{\"text\":").quoted(text->value).raw("}");
           } else if (auto media = std::get_if<Media>(&p)) {
-            if (results_only || m.role == Role::Tool) return invalid("media cannot appear among function results");
+            if (results_only || m.role == Role::Tool) return invalid(reason::gemini_request::media_cannot_appear_among_function_results);
             write_media(w, *media);
           } else if (auto tr = std::get_if<ToolResult>(&p)) {
             auto found = pending.find(tr->tool_use_id);
-            if (found == pending.end()) return invalid("function result lacks unique client ownership");
+            if (found == pending.end()) return invalid(reason::gemini_request::function_result_lacks_unique_client_ownership);
             w.raw("{\"functionResponse\":{\"name\":").quoted(found->second.name);
             if (found->second.wire_id) w.raw(",\"id\":").quoted(tr->tool_use_id);
             w.raw(",\"response\":");
@@ -635,8 +637,8 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
               // Legacy text content must be one JSON object, exactly as before typed parts existed.
               auto parsed = json::parse(tr->content, {resources.request_bytes, resources.json_depth});
               auto doc = std::get_if<json::Document>(&parsed);
-              if ((!doc || !doc->root().is_object()) && tr->content_parts.empty()) return invalid("function result must be JSON object");
-              if (!doc || !doc->root().is_object()) return invalid("tool result content must be a JSON object beside media parts");
+              if ((!doc || !doc->root().is_object()) && tr->content_parts.empty()) return invalid(reason::gemini_request::function_result_must_be_json_object);
+              if (!doc || !doc->root().is_object()) return invalid(reason::gemini_request::tool_result_content_must_be_a_json_object);
               if (tr->is_error) w.raw("{\"error\":").value(doc->root(), 6).raw("}");
               else w.value(doc->root(), 5);
               if (!tr->content_parts.empty()) {
@@ -647,7 +649,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
                   if (comma) w.raw(",");
                   comma = true;
                   w.raw("{\"inlineData\":{\"mimeType\":").quoted(media.mime).raw(",\"data\":\"").raw(*media.data).raw("\"}}");
-                  if (!w.ok()) return Error{ErrorKind::ResourceLimit, "request exceeds JSON limits or encoding"};
+                  if (!w.ok()) return reason::error(ErrorKind::ResourceLimit, reason::gemini_request::request_exceeds_json_limits_or_encoding);
                 }
                 w.raw("]");
               }
@@ -663,8 +665,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
                   comma = true;
                   w.quoted(text->value);
                 } else binary = true;
-                if (!w.ok()) return Error{has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest,
-                                         "request exceeds JSON limits or encoding"};
+                if (!w.ok()) return reason::error(has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest, reason::gemini_request::request_exceeds_json_limits_or_encoding);
               }
               w.raw("]}");
               if (binary) {
@@ -674,26 +675,24 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
                   comma = true;
                   w.raw("{\"inlineData\":{\"mimeType\":").quoted(media->mime)
                       .raw(",\"data\":\"").raw(*media->data).raw("\"}}");
-                  if (!w.ok()) return Error{ErrorKind::ResourceLimit, "request exceeds JSON limits or encoding"};
+                  if (!w.ok()) return reason::error(ErrorKind::ResourceLimit, reason::gemini_request::request_exceeds_json_limits_or_encoding);
                 }
                 w.raw("]");
               }
             }
             w.raw("}}"); pending.erase(found);
-          } else return Error{ErrorKind::Unsupported, "unsupported imported Gemini part"};
+          } else return reason::error(ErrorKind::Unsupported, reason::gemini_request::unsupported_imported_gemini_part);
         }
         w.raw("]}");
-        if (results_only && !pending.empty()) return invalid("all function results must appear together");
-      } else return Error{ErrorKind::Unsupported, "Gemini supports user, tool and captured model messages"};
-      if (!w.ok()) return Error{has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest,
-                               "request exceeds JSON limits or encoding"};
+        if (results_only && !pending.empty()) return invalid(reason::gemini_request::all_function_results_must_appear_together);
+      } else return reason::error(ErrorKind::Unsupported, reason::gemini_request::gemini_supports_user_tool_and_captured_model);
+      if (!w.ok()) return reason::error(has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest, reason::gemini_request::request_exceeds_json_limits_or_encoding);
     }
-    if (!pending.empty()) return invalid("function results required before dispatch");
+    if (!pending.empty()) return invalid(reason::gemini_request::function_results_required_before_dispatch);
     w.raw("]");
     request_controls::write_extensions(w, request.extensions);
     w.raw("}");
-    if (!w.ok()) return Error{has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest,
-                             "request exceeds JSON limits or encoding"};
+    if (!w.ok()) return reason::error(has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest, reason::gemini_request::request_exceeds_json_limits_or_encoding);
     return {};
   };
   json::BoundedWriter measured({resources.request_bytes, resources.json_depth});
