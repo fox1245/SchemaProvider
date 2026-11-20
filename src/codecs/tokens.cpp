@@ -18,26 +18,25 @@ std::optional<std::uint64_t> count_of(json::Value value) {
 Codec::Codec(const descriptor::ValidatedDescriptor& descriptor, Accumulator& accumulator, SemanticLimits limits)
     : descriptor_(descriptor), accumulator_(accumulator), limits_(limits) {}
 bool Codec::emit(const Event& event) { return accumulator_.accept(event); }
-bool Codec::fail(ErrorKind kind, std::string text) {
-  Error error{kind, std::move(text)};
-  error.reason = reason::code(reason::Source::Tokens, error.safe_message);
+bool Codec::fail(ErrorKind kind, const reason::Reason& text) {
+  Error error = reason::error(kind, text);
   emit(Fail{std::move(error)});
   return false;
 }
 bool Codec::buffered(std::string_view body, Close close) {
-  if (!close.normal) return fail(close.error, "abnormal response close");
+  if (!close.normal) return fail(close.error, reason::transport::response_close);
   auto parsed = json::parse(body, {limits_.max_content_bytes, limits_.max_json_depth});
   if (auto* error = std::get_if<json::ParseError>(&parsed))
     return fail(error->code == json::ParseCode::SizeExceeded || error->code == json::ParseCode::DepthExceeded
-                    ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, "invalid response JSON");
+                    ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, reason::tokens::response_json_invalid);
   auto wire = std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
   const auto root = wire->root();
-  if (!root.is_object()) return fail(ErrorKind::ProtocolCorrupt, "response must be object");
+  if (!root.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::tokens::response_not_object);
   if (!emit(RawWire{"tokens.response", wire})) return false;
   // Anthropic and OpenAI say `input_tokens`; Google `totalTokens`, which it leaves out when it is zero.
   const auto input = root.get("input_tokens").valid() ? root.get("input_tokens") : root.get("totalTokens");
   if (!(input.valid() ? count_of(input).has_value() : root.get("promptTokensDetails").valid() || root.size() == 0))
-    return fail(ErrorKind::ProtocolCorrupt, "a token count is a number");
+    return fail(ErrorKind::ProtocolCorrupt, reason::tokens::count_invalid);
   Usage usage;
   usage.input_total = sp::Count{input.valid() ? *count_of(input) : 0, Evidence::Reported};
   usage.stage = UsageStage::Final;
