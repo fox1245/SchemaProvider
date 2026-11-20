@@ -230,7 +230,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   }
   if (request.transcription_config) {
     const auto& transcription = *request.transcription_config;
-    if (transcription.language_codes.size() > resources.request_parts || transcription.custom_vocabulary.size() > 1000 ||
+    if (transcription.language_codes.size() > resources.request_parts || descriptor::over_limit(descriptor, "transcription_vocabulary", transcription.custom_vocabulary.size()) ||
         transcription.custom_vocabulary.size() > resources.request_parts) return bad("transcription list count limit exceeded");
     if (transcription.mode && *transcription.mode != TranscriptionMode::Verbatim && *transcription.mode != TranscriptionMode::Smart)
       return bad("invalid transcription mode");

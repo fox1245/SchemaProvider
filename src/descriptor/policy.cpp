@@ -212,6 +212,19 @@ const StopRows& embedded_stops(std::string_view family) {
 }
 // The model name the policy's own admission check puts in place of `{model}` in a route template.
 constexpr std::string_view admission_model = "policy-admission";
+// The provider limits a family's compiled encoder applies, by the names a policy states them under. A family states
+// only these (a name another family's encoder reads is refused), and a policy that leaves one out has the embedded
+// policy's value for it. The values are data; the names are the encoder's.
+struct LimitName { std::string_view family, name; };
+constexpr LimitName limit_names[]{
+    {"anthropic.messages", "document_title_chars"}, {"anthropic.messages", "mcp_servers"}, {"anthropic.messages", "container_skills"},
+    {"google.generate", "transcription_vocabulary"}, {"google.generate", "audio_sample_rate"}, {"google.generate", "audio_bit_rate"},
+    {"google.interactions", "transcription_vocabulary"}};
+bool limit_named(std::string_view family, std::string_view name) {
+  return std::any_of(std::begin(limit_names), std::end(limit_names), [&](const LimitName& limit) { return limit.family == family && limit.name == name; });
+}
+// Whether the batch fact of this shape sends its requests inline, so that `max_items` bounds them.
+bool inline_batch(std::string_view endpoint, std::string_view shape) { return endpoint == "batches" && (shape == "anthropic" || shape == "google"); }
 class PolicyLoader {
  public:
   PolicyResult run(std::string_view source,std::string_view resources,CatalogueSnapshot catalogue) {
@@ -239,7 +252,7 @@ class PolicyLoader {
         fail("", "configured policy depth limit");
       auto families=root.get("families"); if(!families.is_array() || families.size()!=5)fail("/families","all five typed families");
       for(auto v:families.elements()) {
-        closed(v,{"family","bindings","stop_reasons","defaults","required_output_cap","temperature_range","top_p_range","thinking_minimum","thinking_top_p_minimum","reasoning_efforts","reasoning_summaries","thinking_levels","service_tiers","header_versions","header_version","server_tools","openrouter_origins","media","openrouter_media"},"/families",{"temperature_forbidden_model_prefixes","temperature_forbidden_generations","max_completion_tokens_origins","unreplayable_parts","extensions","openrouter_plugins","openrouter_server_tools","betas","response_blocks","input_blocks","controls","standard_service_tiers","cache","auth","output_cap_maximum","thinking_budget_below_cap","thinking_budget_excludes_level","thinking_budget_excludes_temperature","routes"});
+        closed(v,{"family","bindings","stop_reasons","defaults","required_output_cap","temperature_range","top_p_range","thinking_minimum","thinking_top_p_minimum","reasoning_efforts","reasoning_summaries","thinking_levels","service_tiers","header_versions","header_version","server_tools","openrouter_origins","media","openrouter_media"},"/families",{"temperature_forbidden_model_prefixes","temperature_forbidden_generations","max_completion_tokens_origins","unreplayable_parts","extensions","openrouter_plugins","openrouter_server_tools","betas","response_blocks","input_blocks","controls","standard_service_tiers","cache","auth","output_cap_maximum","thinking_budget_below_cap","thinking_budget_excludes_level","thinking_budget_excludes_temperature","routes","limits"});
         FamilyPolicy f; f.family=text(v.get("family"),"/families");
         if(f.family!="openai.chat" && f.family!="anthropic.messages" && f.family!="openai.responses" && f.family!="google.generate" && f.family!="google.interactions")fail("/families","typed family");
         if(policy->family(f.family))fail("/families","unique families");
@@ -592,6 +605,32 @@ class PolicyLoader {
             fail("/thinking_budget_excludes_temperature", "Temperature and ThinkingBudget among the family's controls");
         }
         policy->validation_.emplace_back(f.family, rules);
+        // The provider limits the family's encoder applies. One the policy states is read as stated; one it leaves out
+        // is the embedded policy's for the family, and its content digest covers it (borrowed_).
+        {
+          const auto stated = v.get("limits");
+          if (stated.valid() && !stated.is_object()) fail("/limits", "object of limit values");
+          std::vector<std::pair<std::string, std::uint64_t>> in_force;
+          if (stated.valid())
+            for (auto member : stated.members()) {
+              if (!limit_named(f.family, member.key)) fail("/limits", "limits the family's encoder applies");
+              const auto pointer = "/limits/" + std::string(member.key);
+              const auto value = integer(member.value, pointer);
+              if (!value) fail(pointer, "positive integer");
+              in_force.emplace_back(std::string(member.key), value);
+            }
+          for (const auto& limit : limit_names) {
+            if (limit.family != f.family || std::any_of(in_force.begin(), in_force.end(), [&](const auto& listed) { return listed.first == limit.name; })) continue;
+            const auto embedded = embedded_member(f.family, "limits").get(limit.name);
+            const auto pointer = "/limits/" + std::string(limit.name);
+            if (!embedded.valid()) fail(pointer, "a value for every limit of the family in the embedded policy");
+            const auto value = integer(embedded, pointer);
+            if (!value) fail(pointer, "positive integer");
+            in_force.emplace_back(std::string(limit.name), value);
+            borrowed.push_back({{f.family, "limits." + std::string(limit.name)}, embedded.dump()});
+          }
+          policy->limits_.emplace_back(f.family, std::move(in_force));
+        }
         if (auto error = DescriptorPolicy::check(f, rules, choices(f.defaults), {}, false)) fail("/defaults", *error);
         if(f.defaults.strict_tools && f.family!="openai.responses") fail("/defaults/strict_tools","Responses strict tools only");
         policy->families_.push_back(std::move(f));
@@ -650,7 +689,7 @@ class PolicyLoader {
           fail("/endpoints/billing", "none, model or carried");
         };
         for (auto e : endpoints.elements()) {
-          closed(e, {"endpoint","shape","origins","paths"}, "/endpoints", {"options","auth","charge_on_accept","headers","keep","audio","close_codes","max_response_bytes","accepted_audio","max_part_bytes","billing","carried_tier"});
+          closed(e, {"endpoint","shape","origins","paths"}, "/endpoints", {"options","auth","charge_on_accept","headers","keep","audio","close_codes","max_response_bytes","accepted_audio","max_part_bytes","billing","carried_tier","max_items"});
           EndpointFact fact{text(e.get("endpoint"), "/endpoints/endpoint"), text(e.get("shape"), "/endpoints/shape"),
                             strings(e.get("origins"), "/endpoints/origins")};
           const auto operations = operations_of(fact.endpoint, fact.shape);
@@ -838,10 +877,26 @@ class PolicyLoader {
           } else if (carries) {
             fail("/endpoints/carried_tier", "the catalogue tier carried requests are priced under");
           }
+          // The most requests one inline batch carries. A fact that sends its requests inline and states no bound has the
+          // embedded policy's for its shape, and its content digest covers it (borrowed_).
+          std::optional<std::uint64_t> max_items;
+          if (const auto stated = e.get("max_items"); stated.valid()) {
+            if (!inline_batch(fact.endpoint, fact.shape)) fail("/endpoints/max_items", "a batch fact whose requests go inline");
+            max_items = integer(stated, "/endpoints/max_items");
+            if (!*max_items) fail("/endpoints/max_items", "positive integer");
+          } else if (inline_batch(fact.endpoint, fact.shape)) {
+            const auto embedded = embedded_endpoint_member(fact.endpoint, fact.shape, "max_items");
+            if (!embedded.valid()) fail("/endpoints/max_items", "a bound for the shape in the embedded policy");
+            max_items = integer(embedded, "/endpoints/max_items");
+            if (!*max_items) fail("/endpoints/max_items", "positive integer");
+            std::pair<std::pair<std::string, std::string>, std::string> entry{{"/endpoints/" + fact.endpoint + "/" + fact.shape, "max_items"}, embedded.dump()};
+            if (std::find(borrowed.begin(), borrowed.end(), entry) == borrowed.end()) borrowed.push_back(std::move(entry));
+          }
           for (const auto& existing : policy->endpoints_)
             if (existing.endpoint == fact.endpoint)
               for (const auto& origin : fact.origins)
                 if (contains(existing.origins, origin)) fail("/endpoints/origins", "one fact per endpoint and origin");
+          policy->max_items_.push_back(max_items);
           policy->endpoints_.push_back(std::move(fact));
           policy->billing_.push_back(std::move(billed));
         }
@@ -1055,15 +1110,25 @@ class PolicyLoader {
       if (name == family) return &auth;
     return nullptr;
   }
-  // A member of a family in the embedded policy, or an invalid value when it states none. The embedded text is
-  // parsed once; it never goes through builtin_policy(), which runs this loader.
-  static Value embedded_member(std::string_view family, std::string_view key) {
+  // The embedded policy's document. It is parsed once and never goes through builtin_policy(), which runs this loader.
+  static Value embedded_root() {
     static const auto parsed = json::parse(config_defaults::descriptor_policy_json,
                                            {config_defaults::codec_admission_policy_bytes, config_defaults::codec_admission_policy_depth});
     const auto* document = std::get_if<json::Document>(&parsed);
     if (!document) throw std::logic_error("the embedded descriptor policy is not admissible JSON");
-    for (auto entry : document->root().get("families").elements())
+    return document->root();
+  }
+  // A member of a family in the embedded policy, or an invalid value when it states none.
+  static Value embedded_member(std::string_view family, std::string_view key) {
+    for (auto entry : embedded_root().get("families").elements())
       if (entry.get("family").is_string() && entry.get("family").as_string() == family) return entry.get(key);
+    return {};
+  }
+  // A member of the first endpoint fact of `endpoint` and `shape` in the embedded policy, or an invalid value.
+  static Value embedded_endpoint_member(std::string_view endpoint, std::string_view shape, std::string_view key) {
+    for (auto entry : embedded_root().get("endpoints").elements())
+      if (entry.get("endpoint").is_string() && entry.get("endpoint").as_string() == endpoint &&
+          entry.get("shape").is_string() && entry.get("shape").as_string() == shape) return entry.get(key);
     return {};
   }
   static RequestDefaults over(const RequestDefaults& base, const DefaultsOverlay& o) {
@@ -1457,6 +1522,23 @@ EndpointBilling DescriptorPolicy::endpoint_billing(std::string_view endpoint, st
     return EndpointBilling::Unstated;
   }
   return EndpointBilling::Unstated;
+}
+std::optional<std::uint64_t> DescriptorPolicy::limit(std::string_view family, std::string_view name) const noexcept {
+  for (const auto& [listed, values] : limits_)
+    if (listed == family)
+      for (const auto& [limit, value] : values)
+        if (limit == name) return value;
+  return std::nullopt;
+}
+std::optional<std::uint64_t> DescriptorPolicy::endpoint_limit(std::string_view endpoint, std::string_view origin, std::string_view name) const noexcept {
+  if (name != "max_items") return std::nullopt;
+  for (std::size_t i = 0; i < endpoints_.size() && i < max_items_.size(); ++i)
+    if (endpoints_[i].endpoint == endpoint && contains(endpoints_[i].origins, origin)) return max_items_[i];
+  return std::nullopt;
+}
+bool over_limit(const ValidatedDescriptor& descriptor, std::string_view name, std::uint64_t count) noexcept {
+  const auto limit = descriptor.policy()->limit(descriptor.family(), name);
+  return limit && count > *limit;
 }
 std::string_view DescriptorPolicy::carried_tier(std::string_view endpoint, std::string_view origin) const noexcept {
   for (std::size_t i = 0; i < endpoints_.size() && i < billing_.size(); ++i)

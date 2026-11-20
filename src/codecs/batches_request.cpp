@@ -48,10 +48,12 @@ std::variant<ItemWire, Error> item_wire(const descriptor::ValidatedDescriptor& f
     return ItemWire{std::move(value.path), std::move(value.body), typed.model, std::move(value.headers)};
   }, request);
 }
-// The items of an inline batch, checked: valid and unique ids, the family the origin serves.
-template <class Family> std::optional<Error> check_items(const std::vector<Item>& items) {
+// The items of an inline batch, checked: no more than the endpoint fact's `max_items`, valid and unique ids, the family
+// the origin serves.
+template <class Family> std::optional<Error> check_items(const descriptor::ValidatedDescriptor& descriptor, const std::vector<Item>& items) {
   if (items.empty()) return bad("a batch has items");
-  if (items.size() > 100000) return bad("a batch has at most 100000 items");
+  const auto limit = descriptor.policy()->endpoint_limit("batches", descriptor.base_url(), "max_items");
+  if (limit && items.size() > *limit) return bad("batch item count limit exceeded");
   std::set<std::string_view> seen;
   for (const auto& item : items) {
     if (!custom_id_valid(item.custom_id) || !seen.insert(item.custom_id).second) return bad("a batch item has a unique custom id of up to 64 letters, digits, _ and -");
@@ -117,7 +119,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
     if (!descriptor::valid_path(submit.endpoint)) return bad("an OpenAI batch names the path its lines call");
     body = "{\"input_file_id\":" + json::quote(submit.input_file) + ",\"endpoint\":" + json::quote(submit.endpoint) + ",\"completion_window\":\"24h\"";
   } else if (shape == "anthropic") {
-    if (auto error = check_items<messages::Request>(submit.items)) return *error;
+    if (auto error = check_items<messages::Request>(descriptor, submit.items)) return *error;
     body = "{\"requests\":[";
     for (std::size_t i = 0; i < submit.items.size(); ++i) {
       auto wire = item_wire(descriptor, submit.items[i].request);
@@ -130,7 +132,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
     }
     body += "]";
   } else {
-    if (auto error = check_items<gemini::Request>(submit.items)) return *error;
+    if (auto error = check_items<gemini::Request>(descriptor, submit.items)) return *error;
     body = "{\"batch\":{";
     if (!submit.display_name.empty()) body += "\"display_name\":" + json::quote(submit.display_name) + ",";
     body += "\"input_config\":{\"requests\":{\"requests\":[";

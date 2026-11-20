@@ -220,7 +220,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   }
   if (request.audio_transcription_config) {
     const auto& transcription = *request.audio_transcription_config;
-    if (transcription.language_codes.size() > resources.request_parts || transcription.custom_vocabulary.size() > 1000 ||
+    if (transcription.language_codes.size() > resources.request_parts || descriptor::over_limit(descriptor, "transcription_vocabulary", transcription.custom_vocabulary.size()) ||
         transcription.custom_vocabulary.size() > resources.request_parts) return bad("transcription list count limit exceeded");
     if (transcription.mode && *transcription.mode != TranscriptionMode::Verbatim && *transcription.mode != TranscriptionMode::Smart)
       return bad("invalid transcription mode");
@@ -370,7 +370,8 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       const auto& format = *request.audio_format;
       if ((format.mime_type && !upper_token(*format.mime_type)) || (format.delivery && !upper_token(*format.delivery)))
         return invalid("audio format must be an upper-case token");
-      if ((format.sample_rate && (!*format.sample_rate || *format.sample_rate > 384000)) || (format.bit_rate && (!*format.bit_rate || *format.bit_rate > 1000000)))
+      if ((format.sample_rate && (!*format.sample_rate || descriptor::over_limit(descriptor, "audio_sample_rate", *format.sample_rate))) ||
+          (format.bit_rate && (!*format.bit_rate || descriptor::over_limit(descriptor, "audio_bit_rate", *format.bit_rate))))
         return invalid("audio sample or bit rate is out of range");
       if (generation_comma) w.raw(",");
       w.raw("\"responseFormat\":{\"audio\":{");
