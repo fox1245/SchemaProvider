@@ -9,31 +9,30 @@ namespace sp::moderation {
 Codec::Codec(const descriptor::ValidatedDescriptor& descriptor, Accumulator& accumulator, std::string requested, SemanticLimits limits)
     : descriptor_(descriptor), accumulator_(accumulator), requested_(std::move(requested)), limits_(limits) {}
 bool Codec::emit(const Event& event) { return accumulator_.accept(event); }
-bool Codec::fail(ErrorKind kind, std::string text) {
-  Error error{kind, std::move(text)};
-  error.reason = reason::code(reason::Source::Moderation, error.safe_message);
+bool Codec::fail(ErrorKind kind, const reason::Reason& text) {
+  Error error = reason::error(kind, text);
   emit(Fail{std::move(error)});
   return false;
 }
 bool Codec::buffered(std::string_view body, Close close) {
-  if (!close.normal) return fail(close.error, "abnormal response close");
+  if (!close.normal) return fail(close.error, reason::transport::response_close);
   auto parsed = json::parse(body, {limits_.max_content_bytes, limits_.max_json_depth});
   if (auto* error = std::get_if<json::ParseError>(&parsed))
     return fail(error->code == json::ParseCode::SizeExceeded || error->code == json::ParseCode::DepthExceeded
-                    ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, "invalid response JSON");
+                    ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, reason::moderation::response_json_invalid);
   auto wire = std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
   const auto root = wire->root();
-  if (!root.is_object()) return fail(ErrorKind::ProtocolCorrupt, "response must be object");
+  if (!root.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::moderation::response_not_object);
   if (!emit(RawWire{"moderation.response", wire})) return false;
-  if (root.get("error").valid() && !root.get("error").is_null()) return fail(ErrorKind::RemoteFailure, "remote error property");
+  if (root.get("error").valid() && !root.get("error").is_null()) return fail(ErrorKind::RemoteFailure, reason::moderation::response_remote_error);
   const auto results = root.get("results");
-  if (!results.is_array()) return fail(ErrorKind::ProtocolCorrupt, "moderation results required");
+  if (!results.is_array()) return fail(ErrorKind::ProtocolCorrupt, reason::moderation::results_required);
   for (auto item : results.elements()) {
-    if (!item.is_object() || !item.get("flagged").is_bool()) return fail(ErrorKind::ProtocolCorrupt, "a moderation result says whether it is flagged");
+    if (!item.is_object() || !item.get("flagged").is_bool()) return fail(ErrorKind::ProtocolCorrupt, reason::moderation::result_flag_missing);
     for (auto member : item.get("categories").members())
-      if (!member.value.is_bool()) return fail(ErrorKind::ProtocolCorrupt, "moderation categories are booleans");
+      if (!member.value.is_bool()) return fail(ErrorKind::ProtocolCorrupt, reason::moderation::result_categories_invalid);
     for (auto member : item.get("category_scores").members())
-      if (!member.value.is_number() || !std::isfinite(member.value.as_double())) return fail(ErrorKind::ProtocolCorrupt, "moderation scores are numbers");
+      if (!member.value.is_number() || !std::isfinite(member.value.as_double())) return fail(ErrorKind::ProtocolCorrupt, reason::moderation::result_scores_invalid);
   }
   const auto served = root.get("model");
   const std::string_view name = served.is_string() ? served.as_string() : std::string_view{};
