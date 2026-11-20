@@ -9,6 +9,7 @@
 #include <variant>
 #include <vector>
 
+namespace sp::reason { struct Reason; }
 namespace sp::moderation {
 // One input to check: text, images, or both.
 struct Input {
@@ -49,7 +50,7 @@ class Codec final : public endpoints::Codec {
   Codec(const descriptor::ValidatedDescriptor&, Accumulator&, std::string requested, SemanticLimits = {});
   bool buffered(std::string_view body, Close close) override;
  private:
-  bool fail(ErrorKind, std::string);
+  bool fail(ErrorKind, const reason::Reason&);
   bool emit(const Event&);
   const descriptor::ValidatedDescriptor& descriptor_;
   Accumulator& accumulator_;
