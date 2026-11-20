@@ -22,9 +22,12 @@
 #include "runtime/client.h"
 #include "sp/config_defaults.h"
 #include "support/endpoint_fakes.h"
+#include "support/policy_edit.h"
 
 #include <algorithm>
 #include <cstdio>
+#include <initializer_list>
+#include <iterator>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -369,6 +372,57 @@ void content_digests() {
   CHECK(scoped && scoped->identity_hex() == builtin->identity_hex());
 }
 
+// A policy's `listings` facts name the family each model listing belongs to (DescriptorPolicy::listing_family). The
+// embedded policy states every listing; a policy that leaves one out has the embedded policy's, and its content digest
+// takes the borrowed value in behind the marker. A listing the SDK does not read, a family the policy does not have, a
+// listing stated twice and a fact with other members are refused.
+void listing_facts() {
+  using descriptor::Listing;
+  const std::pair<Listing, std::string_view> embedded[]{{Listing::OpenRouter, "openai.chat"}, {Listing::Gemini, "google.generate"},
+                                                        {Listing::Anthropic, "anthropic.messages"}, {Listing::OpenAI, "openai.chat"}};
+  const auto builtin = descriptor::builtin_policy();
+  CHECK(descriptor::all_listings.size() == std::size(embedded));
+  for (const auto& [listing, family] : embedded) CHECK(builtin->listing_family(listing) == family && builtin->family(family));
+  // The embedded policy states every listing, so it borrows none.
+  CHECK(builtin->content_digest_hex() == plain_digest(config_defaults::descriptor_policy_json));
+  // Left out whole, or in part: the embedded value, behind the marker.
+  const auto borrowed_of = [&](std::initializer_list<Listing> listings) {
+    std::vector<std::pair<std::string, std::string>> rows;
+    for (const auto listing : listings)
+      for (const auto& [kind, family] : embedded)
+        if (kind == listing) rows.emplace_back("listing:" + std::string(descriptor::listing_name(listing)), "\"" + std::string(family) + "\"");
+    std::sort(rows.begin(), rows.end());
+    std::string out;
+    for (const auto& [member, value] : rows)
+      for (const std::string_view text : {std::string_view(), std::string_view(member), std::string_view(value)})
+        out += std::to_string(text.size()) + ":" + std::string(text);
+    return out;
+  };
+  const auto none_text = policy_edit::edited({}, "listings", {});
+  const auto none = loaded_policy(none_text);
+  CHECK(none && none->content_digest_hex() == plain_digest(none_text, borrowed_of({Listing::OpenRouter, Listing::Gemini, Listing::Anthropic, Listing::OpenAI})));
+  CHECK(none && none->content_digest_hex() != builtin->content_digest_hex());
+  for (const auto& [listing, family] : embedded) CHECK(none && none->listing_family(listing) == family);
+  const auto part_text = policy_edit::edited({}, "listings", R"([{"listing":"openrouter","family":"anthropic.messages"},{"listing":"gemini","family":"google.interactions"}])");
+  const auto part = loaded_policy(part_text);
+  CHECK(part && part->listing_family(Listing::OpenRouter) == "anthropic.messages" && part->listing_family(Listing::Gemini) == "google.interactions" &&
+        part->listing_family(Listing::Anthropic) == "anthropic.messages" && part->listing_family(Listing::OpenAI) == "openai.chat");
+  CHECK(part && part->content_digest_hex() == plain_digest(part_text, borrowed_of({Listing::Anthropic, Listing::OpenAI})));
+  // The facts are not part of the replay identity, and another catalogue keeps them.
+  CHECK(part && part->identity_hex() == builtin->identity_hex() && none->identity_hex() == builtin->identity_hex());
+  if (part) {
+    auto recatalogued = part->with_catalogue(descriptor::builtin_catalogue());
+    CHECK(std::holds_alternative<descriptor::PolicySnapshot>(recatalogued) &&
+          std::get<descriptor::PolicySnapshot>(recatalogued)->listing_family(Listing::OpenRouter) == "anthropic.messages");
+  }
+  policy_refused(policy_edit::edited({}, "listings", R"([{"listing":"cohere","family":"openai.chat"}])"), "/listings/listing");
+  policy_refused(policy_edit::edited({}, "listings", R"([{"listing":"openai","family":"no.such.family"}])"), "/listings/family");
+  policy_refused(policy_edit::edited({}, "listings", R"([{"listing":"openai","family":"openai.chat"},{"listing":"openai","family":"openai.responses"}])"), "/listings/listing");
+  policy_refused(policy_edit::edited({}, "listings", R"([{"listing":"openai","family":"openai.chat","scheme":"bearer"}])"), "/listings");
+  policy_refused(policy_edit::edited({}, "listings", R"({"openai":"openai.chat"})"), "/listings");
+  policy_refused(policy_edit::edited({}, "listings", R"([{"listing":"openai"}])"), "/listings");
+}
+
 // A descriptor states the scheme of its own calls with `connection.auth`, at any origin: the Messages or Generate
 // shape at a host that takes a bearer token.
 void descriptor_scheme() {
@@ -655,6 +709,7 @@ int main() {
   older_policy_without_facts();
   content_digests();
   route_content_digests();
+  listing_facts();
   descriptor_scheme();
   policy_scheme();
   policy_grammar();

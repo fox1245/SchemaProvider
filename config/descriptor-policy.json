@@ -556,6 +556,12 @@
       "server_tools": []
     }
   ],
+  "listings": [
+    {"listing": "openrouter", "family": "openai.chat"},
+    {"listing": "gemini", "family": "google.generate"},
+    {"listing": "anthropic", "family": "anthropic.messages"},
+    {"listing": "openai", "family": "openai.chat"}
+  ],
   "endpoints": [
     {"endpoint":"images","shape":"openai","origins":["https://api.openai.com"],"paths":{"generate":"/v1/images/generations","edit":"/v1/images/edits"},"billing":{"generate":"model","edit":"model"},"charge_on_accept":true,"max_response_bytes":50331648,
      "options":{"type":"object","properties":{"moderation":{"type":"string","max_length":32,"token":true},"safety_identifier":{"type":"string","max_length":128},"user":{"type":"string","max_length":256}}}},

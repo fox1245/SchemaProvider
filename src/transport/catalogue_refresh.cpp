@@ -55,18 +55,20 @@ std::string page_url(Listing listing, std::string base, const std::string& next)
   }
   return base;
 }
-std::vector<Header> listing_headers(Listing listing, const std::string& key) {
+// The headers of a listing request. The key goes the way the policy states for the family the listing belongs to
+// (not the family of an entry it lists: the OpenRouter listing lists Messages entries too, yet it is the gateway's
+// Chat-shaped listing, which takes Bearer where Messages takes x-api-key at the same origin), at the source's
+// origin. A family with a Messages version sends it in `anthropic-version`, a protocol header name.
+std::vector<Header> listing_headers(const descriptor::DescriptorPolicy& policy, Listing listing, std::string_view origin,
+                                    const std::string& key) {
   std::vector<Header> headers{{"accept", "application/json"}};
   if (key.empty()) return headers;
-  switch (listing) {
-    case Listing::OpenRouter:
-    case Listing::OpenAI: headers.push_back({"authorization", "Bearer " + key}); break;
-    case Listing::Gemini: headers.push_back({"x-goog-api-key", key}); break;
-    case Listing::Anthropic:
-      headers.push_back({"x-api-key", key});
-      headers.push_back({"anthropic-version", "2023-06-01"});
-      break;
+  const auto family = policy.listing_family(listing);
+  if (auto credential = descriptor::credential_header(policy.auth_scheme(family, origin), key)) {
+    for (auto& c : credential->first) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + ('a' - 'A'));
+    headers.push_back({std::move(credential->first), std::move(credential->second)});
   }
+  if (const auto* facts = policy.family(family); facts && facts->header_version) headers.push_back({"anthropic-version", *facts->header_version});
   return headers;
 }
 
@@ -361,7 +363,7 @@ struct Planned {
 };
 // Reads the route ceiling of each model asked for into the listed entries, in id order, one request per listed
 // model, and reports every model and unit it could not write.
-void read_ceilings(Transport& transport, const RefreshRequest& request, const Planned& plan,
+void read_ceilings(Transport& transport, const RefreshRequest& request, const descriptor::DescriptorPolicy& policy, const Planned& plan,
                    std::chrono::steady_clock::time_point deadline, std::vector<CatalogueEntry>& entries, SourceReport& report) {
   for (const auto& id : plan.ceilings) {
     const auto gap = [&](std::string_view unit, std::string_view price, std::string reason, bool kept = false) {
@@ -392,7 +394,7 @@ void read_ceilings(Transport& transport, const RefreshRequest& request, const Pl
     HttpRequest http;
     http.method = "GET";
     http.url = endpoints_url(plan.url, id);
-    http.headers = listing_headers(Listing::OpenRouter, plan.source.api_key);
+    http.headers = listing_headers(policy, Listing::OpenRouter, plan.origin, plan.source.api_key);
     http.deadline = std::min(after(now, request.page_timeout), deadline);
     http.ca_file = request.ca_file;
     auto page = fetch(transport, std::move(http));
@@ -490,6 +492,7 @@ std::variant<RefreshResult, ConfigError> refresh_catalogue(Transport& transport,
       planned.push_back({source, std::move(url), std::move(origin), std::move(ceilings)});
     }
 
+    const auto policy = request.policy ? request.policy : descriptor::builtin_policy();
     RefreshResult out;
     const auto deadline = after(std::chrono::steady_clock::now(), request.total_timeout);
     std::vector<CatalogueSnapshot> fresh;
@@ -509,7 +512,7 @@ std::variant<RefreshResult, ConfigError> refresh_catalogue(Transport& transport,
         HttpRequest http;
         http.method = "GET";
         http.url = page_url(source.listing, url, next);
-        http.headers = listing_headers(source.listing, source.api_key);
+        http.headers = listing_headers(*policy, source.listing, origin, source.api_key);
         http.deadline = std::min(after(now, request.page_timeout), deadline);
         http.ca_file = request.ca_file;
         auto page = fetch(transport, std::move(http));
@@ -550,7 +553,7 @@ std::variant<RefreshResult, ConfigError> refresh_catalogue(Transport& transport,
           else {
             if (!ceilings.empty()) {
               auto entries = listed->entries();
-              read_ceilings(transport, request, plan, deadline, entries, report);
+              read_ceilings(transport, request, *policy, plan, deadline, entries, report);
               listed = catalogue_of(std::move(entries));
             }
             // The catalogue has to hold this listing next to the others; if it cannot, only this source fails.

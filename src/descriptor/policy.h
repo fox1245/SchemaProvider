@@ -318,6 +318,11 @@ class DescriptorPolicy final {
   // The same for an endpoint fact at `origin`: `max_items` of the Anthropic and Google batch facts, the most requests
   // one inline batch carries.
   std::optional<std::uint64_t> endpoint_limit(std::string_view endpoint, std::string_view origin, std::string_view name) const noexcept;
+  // The family whose API a model listing belongs to, from the policy's `listings` facts (a policy that leaves a listing
+  // out has the embedded policy's): the family whose credential scheme (`auth_scheme`) and Messages version header
+  // the listing request sends. The OpenRouter listing is the OpenAI Chat listing of the gateway, so it sends Chat's
+  // scheme and not Messages' at the same origin. A family of the policy, never empty.
+  std::string_view listing_family(Listing listing) const noexcept;
   // The route facts of `family` in the policy's order, empty for a family without any or not in the policy. A policy
   // that states no `routes` for a family has the embedded policy's.
   const std::vector<RouteFact>& routes(std::string_view family) const noexcept;
@@ -379,6 +384,8 @@ class DescriptorPolicy final {
   // endpoints_. A limit a policy does not state is the embedded policy's, and its content digest covers it (borrowed_).
   std::vector<std::pair<std::string, std::vector<std::pair<std::string, std::uint64_t>>>> limits_;  // family, (name, value)
   std::vector<std::optional<std::uint64_t>> max_items_;
+  // The family each listing belongs to (listing_family), in the order of all_listings.
+  std::vector<std::pair<Listing, std::string>> listings_;
   static std::optional<std::string> check(const FamilyPolicy&, const ValidationFacts&, const EffectiveChoices&,
                                           std::optional<std::uint64_t> limit, bool require_cap);
   friend std::optional<std::string> validate_choices(const ValidatedDescriptor&, std::string_view, const EffectiveChoices&);
