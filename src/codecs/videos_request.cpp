@@ -1,4 +1,5 @@
 #include "codecs/videos.h"
+#include "codecs/reason.h"
 #include "codecs/media_input.h"
 #include "descriptor/policy.h"
 #include "descriptor/value_schema.h"
@@ -7,7 +8,7 @@
 
 namespace sp::videos {
 namespace {
-Error bad(std::string message) { return Error{ErrorKind::InvalidRequest, std::move(message)}; }
+Error bad(const reason::Reason& message) { return reason::error(ErrorKind::InvalidRequest, message); }
 bool token(std::string_view value) {
   return !value.empty() && value.size() <= 64 && std::all_of(value.begin(), value.end(), [](char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == ':' || c == '.' || c == '_' || c == '-';
@@ -30,21 +31,21 @@ EndpointFacts endpoint_facts(const descriptor::ValidatedDescriptor& descriptor, 
 }
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
   const auto* fact = descriptor.policy()->endpoint("videos", descriptor.base_url());
-  if (!fact) return Error{ErrorKind::Unsupported, "video endpoints are not admitted at this origin"};
+  if (!fact) return reason::error(ErrorKind::Unsupported, reason::videos_request::endpoint_not_admitted);
   const auto path = descriptor::endpoint_path(*fact, operation(request));
-  if (!path) return Error{ErrorKind::Unsupported, "the video endpoint has no submit path"};
-  if (request.model.empty() || request.prompt.empty()) return bad("a video needs a model and a prompt");
+  if (!path) return reason::error(ErrorKind::Unsupported, reason::videos_request::path_missing);
+  if (request.model.empty() || request.prompt.empty()) return bad(reason::videos_request::model_and_prompt_required);
   for (const auto* value : {&request.aspect_ratio, &request.resolution, &request.size})
-    if (*value && !token(**value)) return bad("video aspect ratio, resolution and size are tokens");
-  if (request.duration && !*request.duration) return bad("a video duration must be positive");
+    if (*value && !token(**value)) return bad(reason::videos_request::shape_invalid);
+  if (request.duration && !*request.duration) return bad(reason::videos_request::duration_invalid);
   for (const auto& media : request.references) {
-    if (media.kind != MediaKind::Image || media.source == MediaSource::File) return Error{ErrorKind::Unsupported, "video references are images inline or by URL"};
+    if (media.kind != MediaKind::Image || media.source == MediaSource::File) return reason::error(ErrorKind::Unsupported, reason::videos_request::reference_unsupported);
     if (auto error = media_input::admit(descriptor, media)) return *error;
   }
   if (request.extensions) {
-    if (!fact->options) return Error{ErrorKind::Unsupported, "the video endpoint admits no options"};
+    if (!fact->options) return reason::error(ErrorKind::Unsupported, reason::videos_request::options_not_admitted);
     if (!request.extensions->root().is_object() || descriptor::check_value(*fact->options, request.extensions->root()))
-      return bad("video options do not match the policy's schema");
+      return bad(reason::videos_request::options_invalid);
   }
   const auto& resources = descriptor.policy()->resources();
   std::string body;
@@ -67,7 +68,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   }
   if (request.extensions) for (auto member : request.extensions->root().members()) out.raw(",").quoted(member.key).raw(":").value(member.value, 1);
   out.raw("}");
-  if (!out.ok()) return Error{ErrorKind::ResourceLimit, "video request exceeds JSON limits"};
+  if (!out.ok()) return reason::error(ErrorKind::ResourceLimit, reason::videos_request::json_limit);
   Encoded encoded{std::string(*path), std::move(body), request.model, fact->charge_on_accept, fact->auth};
   endpoints::add_fact_headers(encoded, *fact);
   return encoded;
