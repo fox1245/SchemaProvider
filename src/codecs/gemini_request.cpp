@@ -1,4 +1,5 @@
 #include "codecs/gemini_request.h"
+#include "codecs/request_checks.h"
 #include "core/request_controls.h"
 #include "codecs/media_input.h"
 #include "core/cache_marks.h"
