@@ -113,10 +113,9 @@ Codec::Codec(const descriptor::ValidatedDescriptor& d, Mode mode, Accumulator& a
   served::observe(descriptor_, accumulator_, context_, {});
 }
 bool Codec::emit(const Event& event) { return accumulator_.accept(event, buffered_failure_ ? &*buffered_failure_ : nullptr); }
-bool Codec::fail(ErrorKind kind, std::string message) {
+bool Codec::fail(ErrorKind kind, const reason::Reason& message) {
   if (buffered_failure_ && !closed_) return false;
-  Error error{kind, std::move(message)};
-  error.reason = reason::code(reason::Source::Responses, error.safe_message);
+  Error error = reason::error(kind, message);
   emit(Fail{std::move(error)}); return false;
 }
 void Codec::unknown(json::Value v, std::initializer_list<std::string_view> known) {
@@ -126,12 +125,12 @@ std::shared_ptr<const json::Document> Codec::own(json::Value v) {
   const json::Limits bounds{limits_.max_content_bytes, limits_.max_json_depth};
   json::BoundedWriter measure(bounds); measure.value(v);
   if (!measure.ok() || measure.size() > limits_.max_content_bytes - std::min(retained_bytes_, limits_.max_content_bytes)) {
-    fail(ErrorKind::ResourceLimit, "retained response metadata limit"); return {};
+    fail(ErrorKind::ResourceLimit, reason::responses::retained_metadata_limit); return {};
   }
   std::string bytes; bytes.reserve(measure.size());
   json::BoundedWriter writer(bounds, &bytes); writer.value(v);
   auto parsed = json::parse(bytes, bounds);
-  if (!writer.ok() || !std::holds_alternative<json::Document>(parsed)) { fail(ErrorKind::ProtocolCorrupt, "invalid retained response metadata"); return {}; }
+  if (!writer.ok() || !std::holds_alternative<json::Document>(parsed)) { fail(ErrorKind::ProtocolCorrupt, reason::responses::retained_metadata_invalid); return {}; }
   retained_bytes_ += measure.size();
   return std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
 }
@@ -151,21 +150,21 @@ std::shared_ptr<const json::Document> Codec::own_completed_output() {
   json::BoundedWriter measure(bounds);
   build(measure);
   if (!measure.ok() || measure.size() > limits_.max_content_bytes - std::min(retained_bytes_, limits_.max_content_bytes)) {
-    fail(ErrorKind::ResourceLimit, "retained response metadata limit"); return {};
+    fail(ErrorKind::ResourceLimit, reason::responses::retained_metadata_limit); return {};
   }
   std::string bytes; bytes.reserve(measure.size());
   json::BoundedWriter writer(bounds, &bytes);
   build(writer);
   auto parsed = json::parse(bytes, bounds);
   if (!writer.ok() || !std::holds_alternative<json::Document>(parsed)) {
-    fail(ErrorKind::ProtocolCorrupt, "invalid retained response metadata"); return {};
+    fail(ErrorKind::ProtocolCorrupt, reason::responses::retained_metadata_invalid); return {};
   }
   retained_bytes_ += measure.size();
   return std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
 }
 bool Codec::buffered(std::string_view body, Close close) {
   if (closed_ || accumulator_.terminal()) return false;
-  if (mode_ != Mode::Buffered || body_seen_) return fail(ErrorKind::Misuse, "unexpected buffered response");
+  if (mode_ != Mode::Buffered || body_seen_) return fail(ErrorKind::Misuse, reason::responses::buffered_unexpected);
   body_seen_ = true;
   if (!close.normal) buffered_failure_ = Error{close.error, "abnormal response close"};
   const bool decoded = document(body, {}, false);
@@ -174,43 +173,43 @@ bool Codec::buffered(std::string_view body, Close close) {
 }
 bool Codec::frame(std::string_view event, std::string_view data) {
   if (closed_ || accumulator_.terminal()) return false;
-  if (mode_ != Mode::Sse) return fail(ErrorKind::Misuse, "unexpected stream frame");
+  if (mode_ != Mode::Sse) return fail(ErrorKind::Misuse, reason::responses::stream_frame_unexpected);
   if (data == "[DONE]" && event != "error")
-    return terminal_ ? true : fail(ErrorKind::Truncated, "Responses sentinel lacks terminal envelope");
+    return terminal_ ? true : fail(ErrorKind::Truncated, reason::responses::sentinel_terminal_missing);
   return document(data, event, true);
 }
 bool Codec::index(json::Value root, std::string_view key, uint64_t& target) {
   auto v = root.get(key);
-  if (!count_value(v)) return fail(ErrorKind::ProtocolCorrupt, "event index required");
+  if (!count_value(v)) return fail(ErrorKind::ProtocolCorrupt, reason::responses::event_index_required);
   target = number(v);
-  if (target >= limits_.max_parts || target >= std::numeric_limits<uint32_t>::max()) return fail(ErrorKind::ResourceLimit, "response index limit");
+  if (target >= limits_.max_parts || target >= std::numeric_limits<uint32_t>::max()) return fail(ErrorKind::ResourceLimit, reason::responses::event_index_limit);
   return true;
 }
 Codec::Item* Codec::event_item(json::Value root, uint64_t& position) {
   if (!index(root, "output_index", position)) return nullptr;
   auto found = items_.find(position);
   if (found == items_.end() || found->second.closed || !nonempty(root.get("item_id")) || root.get("item_id").as_string() != found->second.id) {
-    fail(ErrorKind::ProtocolCorrupt, "event item identity or lifecycle mismatch"); return nullptr;
+    fail(ErrorKind::ProtocolCorrupt, reason::responses::event_item_mismatch); return nullptr;
   }
   return &found->second;
 }
 bool Codec::document(std::string_view bytes, std::string_view event, bool streaming) {
   const bool named_error = streaming && event == "error";
-  if (!named_error && !context_valid_) return fail(ErrorKind::InvalidConfig, "Responses request context required");
+  if (!named_error && !context_valid_) return fail(ErrorKind::InvalidConfig, reason::responses::context_required);
   if (bytes.size() > limits_.max_content_bytes - std::min(input_bytes_, limits_.max_content_bytes))
     return fail(named_error ? ErrorKind::RemoteFailure : ErrorKind::ResourceLimit,
-                named_error ? "remote Responses error payload" : "response byte limit");
+                named_error ? reason::responses::remote_error_event : reason::responses::response_byte_limit);
   input_bytes_ += bytes.size();
   auto parsed = json::parse(bytes, {limits_.max_content_bytes, limits_.max_json_depth});
   if (auto* e = std::get_if<json::ParseError>(&parsed))
     return fail(named_error ? ErrorKind::RemoteFailure :
                 e->code == json::ParseCode::SizeExceeded || e->code == json::ParseCode::DepthExceeded ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt,
-                named_error ? "remote Responses error payload" : "invalid response JSON");
+                named_error ? reason::responses::remote_error_event : reason::responses::response_json_invalid);
   auto wire = std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
   const auto root = wire->root();
   if (!root.is_object())
     return fail(named_error ? ErrorKind::RemoteFailure : ErrorKind::ProtocolCorrupt,
-                named_error ? "remote Responses error payload" : "response object required");
+                named_error ? reason::responses::remote_error_event : reason::responses::response_object_required);
   const auto type = root.get("type");
   std::string wire_type = named_error ? std::string(event) : streaming
       ? (nonempty(type) ? std::string(type.as_string()) : std::string(event))
@@ -218,20 +217,21 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
   // The SSE error name is authoritative even when its payload type is absent
   // or contradictory, and remains so if raw retention rejects the document.
   if (named_error) {
-    const Error remote{ErrorKind::RemoteFailure, "remote Responses error payload"};
+    // The classification takes precedence over a failure to retain the document, and carries no code there.
+    const Error remote{ErrorKind::RemoteFailure, std::string(reason::responses::remote_error_event.message)};
     if (!accumulator_.accept(RawWire{std::move(wire_type), wire}, &remote)) return false;
-    return fail(remote.kind, remote.safe_message);
+    return fail(remote.kind, reason::responses::remote_error_event);
   }
   if (!emit(RawWire{std::move(wire_type), wire})) return false;
   if (!streaming) {
     if (!emit(ResponseEnvelope{wire})) return false;
     return response(root, {}, false);
   }
-  if (!nonempty(type)) return fail(ErrorKind::ProtocolCorrupt, "event type required");
+  if (!nonempty(type)) return fail(ErrorKind::ProtocolCorrupt, reason::responses::event_type_required);
   // Errors remain authoritative until the actual HTTP stream closes.
-  if (type.as_string() == "error") return fail(ErrorKind::RemoteFailure, "remote Responses error payload");
+  if (type.as_string() == "error") return fail(ErrorKind::RemoteFailure, reason::responses::remote_error_event);
   if (!event.empty() && event != "message" && type.as_string() != event)
-    return fail(ErrorKind::ProtocolCorrupt, "SSE event and payload type disagree");
+    return fail(ErrorKind::ProtocolCorrupt, reason::responses::event_type_mismatch);
   event = type.as_string();
   const auto envelope = root.get("response");
   const bool response_event = event == "response.created" || event == "response.in_progress" ||
@@ -243,13 +243,13 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
   }
   auto seq = root.get("sequence_number");
   if (seq.valid()) {
-    if (!count_value(seq) || (sequence_ && number(seq) <= *sequence_)) return fail(ErrorKind::ProtocolCorrupt, "event sequence regression or duplicate");
+    if (!count_value(seq) || (sequence_ && number(seq) <= *sequence_)) return fail(ErrorKind::ProtocolCorrupt, reason::responses::event_sequence_invalid);
     sequence_ = number(seq);
   }
   if (event == "response.failed" || event == "response.cancelled") {
     auto r = root.get("response");
     if (r.is_object() && !response(r, event, true)) return false;
-    return fail(event == "response.cancelled" ? ErrorKind::Cancelled : ErrorKind::RemoteFailure, "remote response failure");
+    return fail(event == "response.cancelled" ? ErrorKind::Cancelled : ErrorKind::RemoteFailure, reason::responses::remote_failure);
   }
   const bool supported = server_event(event) || event == "response.function_call_arguments.delta" || event == "response.function_call_arguments.done" ||
       event == "response.content_part.added" || event == "response.content_part.done" || event == "response.reasoning_summary_part.added" || event == "response.reasoning_summary_part.done" ||
@@ -264,10 +264,10 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
   // to be harmless.
   const bool progress = !supported && !lifecycle && !output_item && event.starts_with("response.") && root.get("item_id").is_string();
   if (!supported && !lifecycle && !output_item && !progress)
-    return fail(ErrorKind::Unsupported, "unsupported semantic Responses event");
-  if (terminal_) return fail(ErrorKind::ProtocolCorrupt, "output after response terminal");
+    return fail(ErrorKind::Unsupported, reason::responses::event_unsupported);
+  if (terminal_) return fail(ErrorKind::ProtocolCorrupt, reason::responses::stream_output_after_terminal);
   if (lifecycle) return response(root.get("response"), event, true);
-  if (!begun_) return fail(ErrorKind::ProtocolCorrupt, "event before response.created");
+  if (!begun_) return fail(ErrorKind::ProtocolCorrupt, reason::responses::stream_event_before_created);
   uint64_t position;
   if (output_item) {
     if (!index(root, "output_index", position)) return false;
@@ -276,18 +276,18 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
   Item* item = event_item(root, position);
   if (!item) return false;
   if (event == "response.function_call_arguments.delta" || event == "response.function_call_arguments.done") {
-    if (item->type != "function_call" || item->arguments_done) return fail(ErrorKind::ProtocolCorrupt, "arguments event lifecycle mismatch");
+    if (item->type != "function_call" || item->arguments_done) return fail(ErrorKind::ProtocolCorrupt, reason::responses::arguments_lifecycle_mismatch);
     const bool done = event.ends_with(".done");
     auto text = root.get(done ? "arguments" : "delta");
-    if (!text.is_string()) return fail(ErrorKind::ProtocolCorrupt, "argument string required");
+    if (!text.is_string()) return fail(ErrorKind::ProtocolCorrupt, reason::responses::arguments_string_required);
     if (done) {
-      if (!text.as_string().starts_with(item->arguments)) return fail(ErrorKind::ProtocolCorrupt, "argument snapshot contradicts prefix");
-      if (text.as_string().size() > limits_.max_tool_bytes) return fail(ErrorKind::ResourceLimit, "tool argument limit");
+      if (!text.as_string().starts_with(item->arguments)) return fail(ErrorKind::ProtocolCorrupt, reason::responses::arguments_snapshot_contradiction);
+      if (text.as_string().size() > limits_.max_tool_bytes) return fail(ErrorKind::ResourceLimit, reason::responses::arguments_limit);
       if (!emit(PartDelta{item->local, {PartKind::ToolCall, text.as_string().substr(item->arguments.size())}})) return false;
       if (item->arguments.size() != text.as_string().size()) item->arguments.assign(text.as_string());
       item->arguments_done = true;
     } else {
-      if (text.as_string().size() > limits_.max_tool_bytes - std::min(item->arguments.size(), limits_.max_tool_bytes)) return fail(ErrorKind::ResourceLimit, "tool argument limit");
+      if (text.as_string().size() > limits_.max_tool_bytes - std::min(item->arguments.size(), limits_.max_tool_bytes)) return fail(ErrorKind::ResourceLimit, reason::responses::arguments_limit);
       item->arguments.append(text.as_string());
       if (!emit(PartDelta{item->local, {PartKind::ToolCall, text.as_string()}})) return false;
     }
@@ -303,46 +303,46 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
       event == "response.reasoning_summary_text.delta" || event == "response.reasoning_summary_text.done" || event == "response.reasoning_text.delta" || event == "response.reasoning_text.done") return text_event(*item, root, event);
   if (event == "response.output_text.annotation.added") {
     uint64_t content, annotation;
-    if (item->type != "message") return fail(ErrorKind::ProtocolCorrupt, "annotation event on non-message item");
+    if (item->type != "message") return fail(ErrorKind::ProtocolCorrupt, reason::responses::annotation_item_mismatch);
     if (!index(root, "content_index", content) || !index(root, "annotation_index", annotation)) return false;
     auto found = item->content.find(content);
     if (found == item->content.end() || found->second.part_done || found->second.type != "output_text" ||
         !valid_annotation(root.get("annotation")) || found->second.annotations.contains(annotation))
-      return fail(ErrorKind::ProtocolCorrupt, "invalid annotation lifecycle or metadata");
+      return fail(ErrorKind::ProtocolCorrupt, reason::responses::annotation_invalid);
     auto metadata = own(root.get("annotation")); if (!metadata) return false;
     found->second.annotations.emplace(annotation, std::move(metadata)); return true;
   }
   if (server_event(event) || progress) {
     const auto prefix = std::string("response.") + item->type;
     const bool named = event.starts_with(prefix) && event.size() > prefix.size() && (event[prefix.size()] == '.' || event[prefix.size()] == '_');
-    if (progress && (!opaque(item->type) || !named)) return fail(ErrorKind::Unsupported, "unsupported semantic Responses event");
-    if (!opaque(item->type) || !named) return fail(ErrorKind::ProtocolCorrupt, "server event item type mismatch");
+    if (progress && (!opaque(item->type) || !named)) return fail(ErrorKind::Unsupported, reason::responses::event_unsupported);
+    if (!opaque(item->type) || !named) return fail(ErrorKind::ProtocolCorrupt, reason::responses::server_event_item_mismatch);
     // A preview frame is an observation retained as raw wire; the finished image arrives with the
     // completed item, so its payload is only checked for shape here.
     if (event == "response.image_generation_call.partial_image" &&
         (!root.get("partial_image_b64").is_string() || !count_value(root.get("partial_image_index"))))
-      return fail(ErrorKind::ProtocolCorrupt, "partial image requires payload and index");
+      return fail(ErrorKind::ProtocolCorrupt, reason::responses::server_event_partial_image_invalid);
     return true;
   }
-  return fail(ErrorKind::Unsupported, "unsupported semantic Responses event");
+  return fail(ErrorKind::Unsupported, reason::responses::event_unsupported);
 }
 bool Codec::identity(json::Value v) {
   auto id = v.get("id"), object = v.get("object"), model = v.get("model"), created = v.get("created_at");
   if (!nonempty(id) || !object.is_string() || object.as_string() != "response" || !nonempty(model) || !created.is_number() || !std::isfinite(created.as_double()) || created.as_double() < 0)
-    return fail(ErrorKind::ProtocolCorrupt, "invalid response identity metadata");
+    return fail(ErrorKind::ProtocolCorrupt, reason::responses::identity_invalid);
   if (!begun_) served::observe(descriptor_, accumulator_, context_, model.as_string());
-  if (begun_ && (id.as_string() != generation_ || model.as_string() != model_ || created.as_double() != created_at_)) return fail(ErrorKind::ProtocolCorrupt, "response identity changed");
+  if (begun_ && (id.as_string() != generation_ || model.as_string() != model_ || created.as_double() != created_at_)) return fail(ErrorKind::ProtocolCorrupt, reason::responses::identity_changed);
   return true;
 }
 bool Codec::response(json::Value v, std::string_view event, bool streaming) {
-  if (!v.is_object()) return fail(ErrorKind::ProtocolCorrupt, "response payload required");
+  if (!v.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::responses::response_payload_required);
   auto error = v.get("error");
-  if (error.valid() && !error.is_null() && !error.is_object()) return fail(ErrorKind::ProtocolCorrupt, "invalid response error metadata");
+  if (error.valid() && !error.is_null() && !error.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::responses::response_error_invalid);
   // A standalone HTTP-200 error envelope need not contain response identity.
-  if (error.is_object() && !v.get("id").valid()) return fail(ErrorKind::RemoteFailure, "remote error response");
+  if (error.is_object() && !v.get("id").valid()) return fail(ErrorKind::RemoteFailure, reason::responses::remote_error_response);
   if (!identity(v)) return false;
   auto status = v.get("status"), output = v.get("output"), details = v.get("incomplete_details");
-  if (!nonempty(status) || !output.is_array() || (details.valid() && !details.is_null() && !details.is_object())) return fail(ErrorKind::ProtocolCorrupt, "invalid response status or output");
+  if (!nonempty(status) || !output.is_array() || (details.valid() && !details.is_null() && !details.is_object())) return fail(ErrorKind::ProtocolCorrupt, reason::responses::response_status_or_output_invalid);
   const auto state = status.as_string();
   const bool final = state == "completed" || state == "incomplete";
   if (state == "failed" || state == "cancelled" || error.is_object()) {
@@ -359,23 +359,23 @@ bool Codec::response(json::Value v, std::string_view event, bool streaming) {
       }
     }
     if (!usage(usage_at(v))) return false;
-    return fail(state == "cancelled" ? ErrorKind::Cancelled : ErrorKind::RemoteFailure, "remote response failure status");
+    return fail(state == "cancelled" ? ErrorKind::Cancelled : ErrorKind::RemoteFailure, reason::responses::remote_failure_status);
   }
-  if (!final && state != "in_progress" && state != "queued") return fail(ErrorKind::Unsupported, "unsupported response status");
-  if (!streaming && !final) return fail(ErrorKind::Truncated, "buffered response is not terminal");
+  if (!final && state != "in_progress" && state != "queued") return fail(ErrorKind::Unsupported, reason::responses::response_status_unsupported);
+  if (!streaming && !final) return fail(ErrorKind::Truncated, reason::responses::buffered_not_terminal);
   if (streaming && event == "response.done" && !final)
-    return fail(ErrorKind::ProtocolCorrupt, "response.done requires a terminal response envelope");
+    return fail(ErrorKind::ProtocolCorrupt, reason::responses::done_envelope_required);
   if (streaming && ((event == "response.completed" && state != "completed") || (event == "response.incomplete" && state != "incomplete") ||
       (event == "response.in_progress" && state != "in_progress") ||
-      ((event == "response.created" || event == "response.in_progress") && final))) return fail(ErrorKind::ProtocolCorrupt, "event and response status disagree");
-  if (!final && details.is_object()) return fail(ErrorKind::ProtocolCorrupt, "incomplete details before terminal");
-  if (state == "completed" && details.is_object()) return fail(ErrorKind::ProtocolCorrupt, "completed response has incomplete details");
+      ((event == "response.created" || event == "response.in_progress") && final))) return fail(ErrorKind::ProtocolCorrupt, reason::responses::response_status_mismatch);
+  if (!final && details.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::responses::incomplete_details_early);
+  if (state == "completed" && details.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::responses::incomplete_details_unexpected);
   StopReason stop;
   if (state == "incomplete") {
-    if (!details.is_object() || !nonempty(details.get("reason"))) return fail(ErrorKind::ProtocolCorrupt, "incomplete reason required");
+    if (!details.is_object() || !nonempty(details.get("reason"))) return fail(ErrorKind::ProtocolCorrupt, reason::responses::incomplete_reason_required);
     const auto reason = details.get("reason").as_string();
     // A failure-class word is not an unknown reason: the response failed.
-    if (descriptor::failure_stop(reason)) return fail(ErrorKind::Unsupported, "unsupported incomplete reason");
+    if (descriptor::failure_stop(reason)) return fail(ErrorKind::Unsupported, reason::responses::incomplete_reason_unsupported);
     // The stop table gives the reason's kind, and a reason it does not list is Unknown. An incomplete response never
     // takes a kind that would seal it as a finished turn (EndTurn, ToolUse, Refusal); such a row reads as Unknown.
     const auto kind = table_stop(descriptor_, reason);
@@ -384,12 +384,12 @@ bool Codec::response(json::Value v, std::string_view event, bool streaming) {
     stop.details = own(details); if (!stop.details) return false;
   }
   if (!begun_) {
-    if (streaming && event != "response.created") return fail(ErrorKind::ProtocolCorrupt, "response.created required");
+    if (streaming && event != "response.created") return fail(ErrorKind::ProtocolCorrupt, reason::responses::created_required);
     generation_ = v.get("id").as_string(); model_ = v.get("model").as_string(); created_at_ = v.get("created_at").as_double();
     if (!emit(Begin{generation_}) || !emit(MessageBegin{{0}, generation_, Role::Assistant, context_})) return false;
     begun_ = true;
-  } else if (event == "response.created") return fail(ErrorKind::ProtocolCorrupt, "duplicate response.created");
-  if (status_ == "in_progress" && state == "queued") return fail(ErrorKind::ProtocolCorrupt, "response status regressed");
+  } else if (event == "response.created") return fail(ErrorKind::ProtocolCorrupt, reason::responses::created_duplicate);
+  if (status_ == "in_progress" && state == "queued") return fail(ErrorKind::ProtocolCorrupt, reason::responses::response_status_regressed);
   status_ = state;
   const auto reported_usage = usage_at(v);
   if (final && (!reported_usage.valid() || reported_usage.is_null())) {
@@ -398,17 +398,17 @@ bool Codec::response(json::Value v, std::string_view event, bool streaming) {
   } else if (!usage(reported_usage)) return false;
   unknown(v, {"id", "object", "model", "created_at", "status", "error", "incomplete_details", "output", "usage", "store", "instructions", "tools", "tool_choice", "parallel_tool_calls", "reasoning", "max_output_tokens", "temperature", "top_p", "text", "metadata", "previous_response_id", "service_tier", "background", "truncation", "user", "safety_identifier", "prompt_cache_key"});
   if (!final) {
-    if (output.size()) return fail(ErrorKind::ProtocolCorrupt, "initial response output must be empty");
+    if (output.size()) return fail(ErrorKind::ProtocolCorrupt, reason::responses::created_output_not_empty);
     return true;
   }
   if (streaming) {
-    if (output.size() != items_.size()) return fail(ErrorKind::ProtocolCorrupt, "aggregate output item count differs");
+    if (output.size() != items_.size()) return fail(ErrorKind::ProtocolCorrupt, reason::responses::output_count_mismatch);
     uint64_t position = 0;
     for (auto item : output.elements()) {
       auto found = items_.find(position++);
       if (found == items_.end() || !found->second.closed || !found->second.done ||
           !equal_completed_item(found->second.done->root(), item))
-        return fail(ErrorKind::ProtocolCorrupt, "aggregate output contradicts done item");
+        return fail(ErrorKind::ProtocolCorrupt, reason::responses::output_item_contradiction);
     }
   } else {
     uint64_t position = 0;
@@ -418,7 +418,7 @@ bool Codec::response(json::Value v, std::string_view event, bool streaming) {
     for (const auto& [position, item] : items_) {
       (void)position;
       auto item_state = item.done->root().get("status");
-      if (!opaque(item.type) && item_state.is_string() && item_state.as_string() != "completed") return fail(ErrorKind::ProtocolCorrupt, "completed response contains incomplete item");
+      if (!opaque(item.type) && item_state.is_string() && item_state.as_string() != "completed") return fail(ErrorKind::ProtocolCorrupt, reason::responses::output_incomplete_item);
     }
     // The stop table gives the kind of a completed response; under EndTurn its content decides a call or a refusal.
     const auto kind = table_stop(descriptor_, state);
@@ -429,77 +429,77 @@ bool Codec::response(json::Value v, std::string_view event, bool streaming) {
   terminal_ = true; return true;
 }
 bool Codec::begin_part(LocalId& id, PartKind kind, PartHeader header, uint64_t position) {
-  if (next_part_ > limits_.max_parts || next_part_ == std::numeric_limits<uint32_t>::max()) return fail(ErrorKind::ResourceLimit, "response part limit");
+  if (next_part_ > limits_.max_parts || next_part_ == std::numeric_limits<uint32_t>::max()) return fail(ErrorKind::ResourceLimit, reason::responses::output_part_limit);
   id = {next_part_++};
   return emit(PartBegin{{0}, id, kind, std::move(header), position});
 }
 bool Codec::item_fields(json::Value v, bool final) {
-  if (!v.is_object() || !nonempty(v.get("type")) || !nonempty(v.get("id"))) return fail(ErrorKind::ProtocolCorrupt, "output item identity required");
+  if (!v.is_object() || !nonempty(v.get("type")) || !nonempty(v.get("id"))) return fail(ErrorKind::ProtocolCorrupt, reason::responses::item_identity_required);
   const auto type = v.get("type").as_string();
   if (type == "message") {
     auto phase = v.get("phase");
     if (!v.get("role").is_string() || v.get("role").as_string() != "assistant" || !v.get("content").is_array() || !item_status(v.get("status"), false, final) ||
-        !nullable_string(phase) || (phase.is_string() && phase.as_string() != "commentary" && phase.as_string() != "final_answer")) return fail(ErrorKind::ProtocolCorrupt, "invalid message item fields");
+        !nullable_string(phase) || (phase.is_string() && phase.as_string() != "commentary" && phase.as_string() != "final_answer")) return fail(ErrorKind::ProtocolCorrupt, reason::responses::item_message_invalid);
     unknown(v, {"id", "type", "role", "status", "content", "phase"});
   } else if (type == "function_call") {
-    if (!nonempty(v.get("call_id")) || !nonempty(v.get("name")) || !v.get("arguments").is_string() || !item_status(v.get("status"), true, final)) return fail(ErrorKind::ProtocolCorrupt, "invalid function item fields");
-    if (v.get("arguments").as_string().size() > limits_.max_tool_bytes) return fail(ErrorKind::ResourceLimit, "tool argument limit");
+    if (!nonempty(v.get("call_id")) || !nonempty(v.get("name")) || !v.get("arguments").is_string() || !item_status(v.get("status"), true, final)) return fail(ErrorKind::ProtocolCorrupt, reason::responses::item_function_invalid);
+    if (v.get("arguments").as_string().size() > limits_.max_tool_bytes) return fail(ErrorKind::ResourceLimit, reason::responses::arguments_limit);
     unknown(v, {"id", "type", "call_id", "name", "arguments", "status"});
   } else if (type == "computer_call") {
     // A computer action for the caller to perform: one action or a batch of them.
     const auto action = v.get("action"), actions = v.get("actions"), checks = v.get("pending_safety_checks");
     if (!nonempty(v.get("call_id")) || !item_status(v.get("status"), true, final) || (action.valid() && !action.is_null() && !action.is_object()) ||
         (actions.valid() && !actions.is_null() && !actions.is_array()) || (checks.valid() && !checks.is_array()))
-      return fail(ErrorKind::ProtocolCorrupt, "invalid computer call item fields");
+      return fail(ErrorKind::ProtocolCorrupt, reason::responses::item_computer_call_invalid);
   } else if (type == "mcp_approval_request") {
     // An MCP call the service waits to have approved: the caller answers it with Request::mcp_approvals.
     if (!v.get("server_label").is_string() || !nonempty(v.get("name")) || !v.get("arguments").is_string())
-      return fail(ErrorKind::ProtocolCorrupt, "invalid MCP approval request fields");
-    if (v.get("arguments").as_string().size() > limits_.max_tool_bytes) return fail(ErrorKind::ResourceLimit, "tool argument limit");
+      return fail(ErrorKind::ProtocolCorrupt, reason::responses::item_mcp_approval_request_invalid);
+    if (v.get("arguments").as_string().size() > limits_.max_tool_bytes) return fail(ErrorKind::ResourceLimit, reason::responses::arguments_limit);
   } else if (type == "reasoning") {
     if (!v.get("summary").is_array() || !nullable_string(v.get("encrypted_content")) || !item_status(v.get("status"), true, final) ||
-        (v.get("content").valid() && !v.get("content").is_null() && !v.get("content").is_array())) return fail(ErrorKind::ProtocolCorrupt, "invalid reasoning item fields");
+        (v.get("content").valid() && !v.get("content").is_null() && !v.get("content").is_array())) return fail(ErrorKind::ProtocolCorrupt, reason::responses::item_reasoning_invalid);
     unknown(v, {"id", "type", "summary", "content", "encrypted_content", "status"});
   } else if (opaque(type)) {
     auto status = v.get("status");
-    if (status.valid() && !nonempty(status)) return fail(ErrorKind::ProtocolCorrupt, "invalid server item status");
+    if (status.valid() && !nonempty(status)) return fail(ErrorKind::ProtocolCorrupt, reason::responses::item_server_status_invalid);
     if (status.is_string()) {
       const auto state = status.as_string();
-      if (state.empty()) return fail(ErrorKind::ProtocolCorrupt, "empty server item status");
+      if (state.empty()) return fail(ErrorKind::ProtocolCorrupt, reason::responses::item_server_status_empty);
       if (final && (state == "in_progress" || state == "searching" || state == "interpreting"))
-        return fail(ErrorKind::ProtocolCorrupt, "nonterminal server item at done");
+        return fail(ErrorKind::ProtocolCorrupt, reason::responses::item_server_nonterminal);
     }
     // The entire server item remains immutable in native output and Opaque.
-  } else return fail(ErrorKind::Unsupported, "unsupported Responses output item type");
+  } else return fail(ErrorKind::Unsupported, reason::responses::item_type_unsupported);
   return true;
 }
 bool Codec::initial_metadata(json::Value initial, json::Value final, std::initializer_list<std::string_view> changing) {
   for (auto m : initial.members()) {
     if (std::find(changing.begin(), changing.end(), m.key) != changing.end()) continue;
     if (m.key == "phase" && m.value.is_null()) continue;
-    if (!json::equal(m.value, final.get(m.key))) return fail(ErrorKind::ProtocolCorrupt, "item metadata changed or disappeared");
+    if (!json::equal(m.value, final.get(m.key))) return fail(ErrorKind::ProtocolCorrupt, reason::responses::item_metadata_changed);
   }
   return true;
 }
 bool Codec::add_item(json::Value v, uint64_t position, bool streaming) {
-  if (position >= limits_.max_parts || items_.size() >= limits_.max_parts) return fail(ErrorKind::ResourceLimit, "output item limit");
-  if (items_.contains(position) || !item_fields(v, !streaming)) return items_.contains(position) ? fail(ErrorKind::ProtocolCorrupt, "duplicate output index") : false;
+  if (position >= limits_.max_parts || items_.size() >= limits_.max_parts) return fail(ErrorKind::ResourceLimit, reason::responses::item_limit);
+  if (items_.contains(position) || !item_fields(v, !streaming)) return items_.contains(position) ? fail(ErrorKind::ProtocolCorrupt, reason::responses::item_index_duplicate) : false;
   Item item; item.id = v.get("id").as_string(); item.type = v.get("type").as_string();
   item.index = position;
-  if (!ids_.insert(item.id).second) return fail(ErrorKind::ProtocolCorrupt, "duplicate output item id");
+  if (!ids_.insert(item.id).second) return fail(ErrorKind::ProtocolCorrupt, reason::responses::item_id_duplicate);
   if (streaming) { item.added = own(v); if (!item.added) return false; }
   PartHeader header; header.wire_type = item.type; header.wire_id = item.id;
   if (item.type == "computer_call") {
     // Its part opens when the item is done, with the final actions as the call's input.
     item.call_id = v.get("call_id").as_string();
-    if (!call_ids_.insert(item.call_id).second) return fail(ErrorKind::ProtocolCorrupt, "duplicate function call id");
+    if (!call_ids_.insert(item.call_id).second) return fail(ErrorKind::ProtocolCorrupt, reason::responses::item_call_id_duplicate);
     function_seen_ = true;
   } else if (item.type == "mcp_approval_request") {
     // An approval request waits for the caller like a client call does, so the stop is ToolUse.
     function_seen_ = true;
   } else if (item.type == "function_call") {
     item.call_id = v.get("call_id").as_string(); item.name = v.get("name").as_string();
-    if (!call_ids_.insert(item.call_id).second) return fail(ErrorKind::ProtocolCorrupt, "duplicate function call id");
+    if (!call_ids_.insert(item.call_id).second) return fail(ErrorKind::ProtocolCorrupt, reason::responses::item_call_id_duplicate);
     header.wire_id = item.call_id; header.name = item.name; function_seen_ = true;
     if (!begin_part(item.local, PartKind::ToolCall, std::move(header), order(position))) return false;
     item.arguments = v.get("arguments").as_string();
@@ -520,27 +520,27 @@ bool Codec::add_item(json::Value v, uint64_t position, bool streaming) {
   return streaming || done_item(v, position, false);
 }
 bool Codec::reconcile(TextState& text, std::string_view snapshot) {
-  if (text.text_done ? snapshot != text.bytes : !snapshot.starts_with(text.bytes)) return fail(ErrorKind::ProtocolCorrupt, "text snapshot contradicts streamed prefix");
+  if (text.text_done ? snapshot != text.bytes : !snapshot.starts_with(text.bytes)) return fail(ErrorKind::ProtocolCorrupt, reason::responses::text_snapshot_contradiction);
   if (text.bytes.size() != snapshot.size()) text.bytes.assign(snapshot);
   return true;
 }
 bool Codec::part(Item& item, uint64_t position, json::Value v, bool summary, bool done) {
-  if (position >= limits_.max_parts) return fail(ErrorKind::ResourceLimit, "content index limit");
-  if (!v.is_object() || !nonempty(v.get("type"))) return fail(ErrorKind::ProtocolCorrupt, "content part type required");
+  if (position >= limits_.max_parts) return fail(ErrorKind::ResourceLimit, reason::responses::content_index_limit);
+  if (!v.is_object() || !nonempty(v.get("type"))) return fail(ErrorKind::ProtocolCorrupt, reason::responses::content_type_required);
   const auto type = v.get("type").as_string();
   if ((summary && (item.type != "reasoning" || type != "summary_text")) || (!summary && item.type == "reasoning" && type != "reasoning_text") ||
-      (!summary && item.type != "reasoning" && (item.type != "message" || (type != "output_text" && type != "refusal")))) return fail(ErrorKind::Unsupported, "unsupported content part type");
+      (!summary && item.type != "reasoning" && (item.type != "message" || (type != "output_text" && type != "refusal")))) return fail(ErrorKind::Unsupported, reason::responses::content_type_unsupported);
   auto bytes = v.get(type == "refusal" ? "refusal" : "text");
-  if (!bytes.is_string()) return fail(ErrorKind::ProtocolCorrupt, "content text required");
+  if (!bytes.is_string()) return fail(ErrorKind::ProtocolCorrupt, reason::responses::content_text_required);
   if (type == "output_text") {
     auto annotations = v.get("annotations"), logprobs = v.get("logprobs");
     if (!valid_annotations(annotations) || !valid_logprobs(logprobs))
-      return fail(ErrorKind::ProtocolCorrupt, "invalid output text metadata");
+      return fail(ErrorKind::ProtocolCorrupt, reason::responses::content_text_metadata_invalid);
   }
   auto& parts = summary ? item.summary : item.content;
   auto found = parts.find(position);
   if (!done) {
-    if (found != parts.end()) return fail(ErrorKind::ProtocolCorrupt, "duplicate content part index");
+    if (found != parts.end()) return fail(ErrorKind::ProtocolCorrupt, reason::responses::content_index_duplicate);
     TextState text; text.type = type; text.kind = type == "refusal" ? PartKind::Refusal : PartKind::Text;
     text.bytes = bytes.as_string(); text.added = own(v); if (!text.added) return false;
     if (item.type == "message") {
@@ -551,13 +551,13 @@ bool Codec::part(Item& item, uint64_t position, json::Value v, bool summary, boo
     parts.emplace(position, std::move(text));
     return !summary || emit_summary(item);
   }
-  if (found == parts.end() || found->second.part_done || found->second.type != type) return fail(ErrorKind::ProtocolCorrupt, "content part done lifecycle mismatch");
+  if (found == parts.end() || found->second.part_done || found->second.type != type) return fail(ErrorKind::ProtocolCorrupt, reason::responses::content_done_mismatch);
   auto& text = found->second;
   if (!reconcile(text, bytes.as_string()) || !initial_metadata(text.added->root(), v, {"text", "refusal", "annotations", "logprobs"})) return false;
   auto annotations = v.get("annotations");
-  for (const auto& [n, metadata] : text.annotations) if (!annotations.is_array() || n >= annotations.size() || !json::equal(metadata->root(), annotations.at(n))) return fail(ErrorKind::ProtocolCorrupt, "annotation snapshot contradiction");
+  for (const auto& [n, metadata] : text.annotations) if (!annotations.is_array() || n >= annotations.size() || !json::equal(metadata->root(), annotations.at(n))) return fail(ErrorKind::ProtocolCorrupt, reason::responses::annotation_snapshot_contradiction);
   auto original_annotations = text.added->root().get("annotations");
-  if (original_annotations.is_array()) for (size_t n = 0; n < original_annotations.size(); ++n) if (!annotations.is_array() || n >= annotations.size() || !json::equal(original_annotations.at(n), annotations.at(n))) return fail(ErrorKind::ProtocolCorrupt, "initial annotation contradiction");
+  if (original_annotations.is_array()) for (size_t n = 0; n < original_annotations.size(); ++n) if (!annotations.is_array() || n >= annotations.size() || !json::equal(original_annotations.at(n), annotations.at(n))) return fail(ErrorKind::ProtocolCorrupt, reason::responses::annotation_initial_contradiction);
   if (!logprobs(text, v.get("logprobs"), true)) return false;
   text.done = own(v); if (!text.done) return false;
   text.part_done = true; text.text_done = true;
@@ -570,22 +570,22 @@ bool Codec::text_event(Item& item, json::Value root, std::string_view event) {
   const bool summary = event.starts_with("response.reasoning_summary_text");
   const bool reasoning = summary || event.starts_with("response.reasoning_text");
   const bool refusal = event.starts_with("response.refusal");
-  if ((reasoning && item.type != "reasoning") || (!reasoning && item.type != "message")) return fail(ErrorKind::ProtocolCorrupt, "text event item type mismatch");
+  if ((reasoning && item.type != "reasoning") || (!reasoning && item.type != "message")) return fail(ErrorKind::ProtocolCorrupt, reason::responses::text_item_mismatch);
   uint64_t position;
   if (!index(root, summary ? "summary_index" : "content_index", position)) return false;
   auto& parts = summary ? item.summary : item.content;
   auto found = parts.find(position);
-  if (found == parts.end()) return fail(ErrorKind::ProtocolCorrupt, "text event before part added");
+  if (found == parts.end()) return fail(ErrorKind::ProtocolCorrupt, reason::responses::text_before_part);
   auto& text = found->second;
   const auto expected = reasoning ? summary ? "summary_text" : "reasoning_text" : refusal ? "refusal" : "output_text";
-  if (text.type != expected || text.text_done || text.part_done) return fail(ErrorKind::ProtocolCorrupt, "text event lifecycle mismatch");
+  if (text.type != expected || text.text_done || text.part_done) return fail(ErrorKind::ProtocolCorrupt, reason::responses::text_lifecycle_mismatch);
   const bool done = event.ends_with(".done");
   auto bytes = root.get(done ? refusal ? "refusal" : "text" : "delta");
-  if (!bytes.is_string()) return fail(ErrorKind::ProtocolCorrupt, "text event string required");
+  if (!bytes.is_string()) return fail(ErrorKind::ProtocolCorrupt, reason::responses::text_string_required);
   if (!reasoning && !refusal) {
     auto probabilities = root.get("logprobs");
     if (probabilities.valid() && !probabilities.is_null()) {
-      if (!valid_logprobs(probabilities)) return fail(ErrorKind::ProtocolCorrupt, "invalid text event logprobs");
+      if (!valid_logprobs(probabilities)) return fail(ErrorKind::ProtocolCorrupt, reason::responses::text_logprobs_invalid);
       if (done) {
         if (!logprobs(text, probabilities, false)) return false;
         text.logprobs_done = own(probabilities); if (!text.logprobs_done) return false;
@@ -600,7 +600,7 @@ bool Codec::text_event(Item& item, json::Value root, std::string_view event) {
     if (!reconcile(text, bytes.as_string())) return false;
     text.text_done = true;
   } else {
-    if (bytes.as_string().size() > limits_.max_content_bytes - std::min(text.bytes.size(), limits_.max_content_bytes)) return fail(ErrorKind::ResourceLimit, "text byte limit");
+    if (bytes.as_string().size() > limits_.max_content_bytes - std::min(text.bytes.size(), limits_.max_content_bytes)) return fail(ErrorKind::ResourceLimit, reason::responses::text_byte_limit);
     text.bytes.append(bytes.as_string());
     if (!reasoning && !emit(PartDelta{text.local, {text.kind, bytes.as_string()}})) return false;
   }
@@ -611,7 +611,7 @@ bool Codec::emit_summary(Item& item) {
   size_t offset = 0;
   for (const auto& [position, text] : item.summary) {
     if (position != expected++) break;
-    if (offset > limits_.max_content_bytes || text.bytes.size() > limits_.max_content_bytes - offset) return fail(ErrorKind::ResourceLimit, "reasoning summary limit");
+    if (offset > limits_.max_content_bytes || text.bytes.size() > limits_.max_content_bytes - offset) return fail(ErrorKind::ResourceLimit, reason::responses::reasoning_summary_limit);
     const auto end = offset + text.bytes.size();
     if (end > item.summary_emitted) {
       const auto start = item.summary_emitted > offset ? item.summary_emitted - offset : 0;
@@ -633,17 +633,17 @@ bool Codec::logprobs(TextState& text, json::Value final, bool complete) {
     }
     return true;
   };
-  if (!prefix(initial)) return fail(ErrorKind::ProtocolCorrupt, "initial logprobs contradict snapshot");
-  for (const auto& probabilities : text.logprob_deltas) if (!prefix(probabilities->root())) return fail(ErrorKind::ProtocolCorrupt, "delta logprobs contradict snapshot");
-  if (complete && text.logprobs_done && !json::equal(text.logprobs_done->root(), final)) return fail(ErrorKind::ProtocolCorrupt, "done logprobs contradict part snapshot");
+  if (!prefix(initial)) return fail(ErrorKind::ProtocolCorrupt, reason::responses::logprobs_initial_contradiction);
+  for (const auto& probabilities : text.logprob_deltas) if (!prefix(probabilities->root())) return fail(ErrorKind::ProtocolCorrupt, reason::responses::logprobs_delta_contradiction);
+  if (complete && text.logprobs_done && !json::equal(text.logprobs_done->root(), final)) return fail(ErrorKind::ProtocolCorrupt, reason::responses::logprobs_done_contradiction);
   return true;
 }
 bool Codec::reconcile_parts(Item& item, json::Value array, bool summary, bool streaming) {
   auto& parts = summary ? item.summary : item.content;
-  if (!array.valid() || array.is_null()) return parts.empty() || fail(ErrorKind::ProtocolCorrupt, "content disappeared at item done");
-  if (!array.is_array()) return fail(ErrorKind::ProtocolCorrupt, "item content array required");
+  if (!array.valid() || array.is_null()) return parts.empty() || fail(ErrorKind::ProtocolCorrupt, reason::responses::content_disappeared);
+  if (!array.is_array()) return fail(ErrorKind::ProtocolCorrupt, reason::responses::content_array_required);
   (void)streaming;
-  if (array.size() < parts.size()) return fail(ErrorKind::ProtocolCorrupt, "done item content count differs");
+  if (array.size() < parts.size()) return fail(ErrorKind::ProtocolCorrupt, reason::responses::content_count_mismatch);
   uint64_t position = 0;
   for (auto v : array.elements()) {
     auto found = parts.find(position);
@@ -653,21 +653,21 @@ bool Codec::reconcile_parts(Item& item, json::Value array, bool summary, bool st
     }
     auto& text = found->second;
     if (text.part_done) {
-      if (!json::equal(text.done->root(), v)) return fail(ErrorKind::ProtocolCorrupt, "item done contradicts content done");
+      if (!json::equal(text.done->root(), v)) return fail(ErrorKind::ProtocolCorrupt, reason::responses::content_item_contradiction);
     } else {
       if (!part(item, position, v, summary, true)) return false;
     }
     ++position;
   }
-  if (parts.size() != array.size()) return fail(ErrorKind::ProtocolCorrupt, "content index gap");
+  if (parts.size() != array.size()) return fail(ErrorKind::ProtocolCorrupt, reason::responses::content_index_gap);
   return true;
 }
 bool Codec::done_item(json::Value v, uint64_t position, bool streaming) {
   auto found = items_.find(position);
-  if (found == items_.end() || found->second.closed) return fail(ErrorKind::ProtocolCorrupt, "output item done lifecycle mismatch");
+  if (found == items_.end() || found->second.closed) return fail(ErrorKind::ProtocolCorrupt, reason::responses::item_done_mismatch);
   auto& item = found->second;
   if (!item_fields(v, true)) return false;
-  if (v.get("id").as_string() != item.id || v.get("type").as_string() != item.type) return fail(ErrorKind::ProtocolCorrupt, "output item done identity mismatch");
+  if (v.get("id").as_string() != item.id || v.get("type").as_string() != item.type) return fail(ErrorKind::ProtocolCorrupt, reason::responses::item_done_identity_mismatch);
   // Hosted/unknown items have provider-defined evolving payload fields. Their
   // identity and terminal status are checked; retain each full wire observation
   // and the final opaque snapshot without inventing field-level semantics.
@@ -676,15 +676,15 @@ bool Codec::done_item(json::Value v, uint64_t position, bool streaming) {
   if (item.added) {
     auto previous = item.added->root().get("status"), next = v.get("status");
     if (previous.is_string() && (previous.as_string() == "completed" || previous.as_string() == "incomplete" || previous.as_string() == "failed") &&
-        (!next.is_string() || previous.as_string() != next.as_string())) return fail(ErrorKind::ProtocolCorrupt, "item terminal status changed");
+        (!next.is_string() || previous.as_string() != next.as_string())) return fail(ErrorKind::ProtocolCorrupt, reason::responses::item_status_changed);
     if (item.type == "image_generation_call" && previous.is_string() &&
         (previous.as_string() == "completed" || previous.as_string() == "incomplete" || previous.as_string() == "failed") &&
         !json::equal(item.added->root(), v))
-      return fail(ErrorKind::ProtocolCorrupt, "terminal image item snapshot changed");
+      return fail(ErrorKind::ProtocolCorrupt, reason::responses::item_image_snapshot_changed);
   }
   if (item.type == "function_call") {
     auto args = v.get("arguments").as_string();
-    if (v.get("call_id").as_string() != item.call_id || v.get("name").as_string() != item.name || (item.arguments_done ? args != item.arguments : !args.starts_with(item.arguments))) return fail(ErrorKind::ProtocolCorrupt, "function done snapshot contradiction");
+    if (v.get("call_id").as_string() != item.call_id || v.get("name").as_string() != item.name || (item.arguments_done ? args != item.arguments : !args.starts_with(item.arguments))) return fail(ErrorKind::ProtocolCorrupt, reason::responses::item_function_snapshot_contradiction);
     auto metadata = own(v); if (!metadata) return false;
     if (!emit(PartSeal{item.local, args, metadata})) return false;
     item.done = std::move(metadata);
@@ -696,7 +696,7 @@ bool Codec::done_item(json::Value v, uint64_t position, bool streaming) {
         !emit(PartSeal{item.local, v.get("arguments").as_string(), metadata})) return false;
     item.done = std::move(metadata);
   } else if (item.type == "computer_call") {
-    if (v.get("call_id").as_string() != item.call_id) return fail(ErrorKind::ProtocolCorrupt, "function done snapshot contradiction");
+    if (v.get("call_id").as_string() != item.call_id) return fail(ErrorKind::ProtocolCorrupt, reason::responses::item_function_snapshot_contradiction);
     auto metadata = own(v); if (!metadata) return false;
     PartHeader header; header.wire_type = item.type; header.wire_id = item.call_id; header.name = "computer";
     const auto input = v.dump();
@@ -721,7 +721,7 @@ bool Codec::done_item(json::Value v, uint64_t position, bool streaming) {
     if (payload.starts_with("data:")) {
       const auto comma = payload.find(',');
       const auto meta = comma == std::string_view::npos ? std::string_view{} : payload.substr(5, comma - 5);
-      if (!meta.ends_with(";base64") || !mime_syntax(meta.substr(0, meta.size() - 7))) return fail(ErrorKind::ProtocolCorrupt, "invalid image data URL");
+      if (!meta.ends_with(";base64") || !mime_syntax(meta.substr(0, meta.size() - 7))) return fail(ErrorKind::ProtocolCorrupt, reason::responses::item_image_data_url_invalid);
       url_mime = meta.substr(0, meta.size() - 7);
       payload = payload.substr(comma + 1);
     }
@@ -755,7 +755,7 @@ void Codec::conflict(std::string_view key, std::string_view detail) {
 }
 bool Codec::counter(json::Value v, std::optional<Count>& target, std::string_view key) {
   if (!v.valid() || v.is_null()) { target.reset(); return true; }
-  if (!count_value(v)) return fail(ErrorKind::ProtocolCorrupt, "usage counter must be nonnegative integer or null");
+  if (!count_value(v)) return fail(ErrorKind::ProtocolCorrupt, reason::responses::usage_counter_invalid);
   const auto n = number(v);
   if (target && n < target->value) conflict(key, "cumulative counter regressed");
   target = Count{n, Evidence::Reported}; return true;
@@ -769,7 +769,7 @@ bool Codec::usage_leaves(json::Value v, const std::string& prefix) {
   } else if (v.is_array()) {
     size_t n = 0; for (auto child : v.elements()) if (!usage_leaves(child, prefix + "." + std::to_string(n++))) return false;
   } else if (v.is_number()) {
-    if (!count_value(v)) return fail(ErrorKind::ProtocolCorrupt, "numeric usage leaf must be nonnegative integer");
+    if (!count_value(v)) return fail(ErrorKind::ProtocolCorrupt, reason::responses::usage_leaf_invalid);
     if (prefix != "input_tokens" && prefix != "output_tokens" && prefix != "total_tokens" && prefix != "input_tokens_details.cached_tokens" && prefix != "input_tokens_details.cache_write_tokens" && prefix != "output_tokens_details.reasoning_tokens") usage_.extra[prefix] = {number(v), Evidence::Reported};
   }
   return true;
@@ -783,9 +783,9 @@ json::Value Codec::usage_at(json::Value root) const {
 }
 bool Codec::usage(json::Value v) {
   if (!v.valid() || v.is_null()) return true;
-  if (!v.is_object()) return fail(ErrorKind::ProtocolCorrupt, "usage must be object or null");
+  if (!v.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::responses::usage_object_invalid);
   auto input = v.get("input_tokens_details"), output = v.get("output_tokens_details");
-  if ((input.valid() && !input.is_null() && !input.is_object()) || (output.valid() && !output.is_null() && !output.is_object())) return fail(ErrorKind::ProtocolCorrupt, "usage details must be object or null");
+  if ((input.valid() && !input.is_null() && !input.is_object()) || (output.valid() && !output.is_null() && !output.is_object())) return fail(ErrorKind::ProtocolCorrupt, reason::responses::usage_details_invalid);
   usage_.stage = UsageStage::Partial;
   usage_.extra.clear();
   usage_.provider_cost = codecs::provider_cost(v, descriptor_);
@@ -803,7 +803,7 @@ bool Codec::usage(json::Value v) {
     else if (usage_.cache_read) usage_.input_uncached = Count{usage_.input_total->value - read - written, Evidence::Derived};
   }
   if (usage_.input_total && usage_.output_total) {
-    if (usage_.output_total->value > std::numeric_limits<uint64_t>::max() - usage_.input_total->value) return fail(ErrorKind::ProtocolCorrupt, "usage total overflow");
+    if (usage_.output_total->value > std::numeric_limits<uint64_t>::max() - usage_.input_total->value) return fail(ErrorKind::ProtocolCorrupt, reason::responses::usage_total_overflow);
     usage_.total = Count{usage_.input_total->value + usage_.output_total->value, Evidence::Derived};
     if (usage_.provider_reported_total && usage_.total->value != usage_.provider_reported_total->value) conflict("total_tokens", "provider total differs from input plus output");
   } else usage_.total = usage_.provider_reported_total;
@@ -813,8 +813,8 @@ bool Codec::usage(json::Value v) {
 void Codec::finish(Close close) {
   if (closed_ || accumulator_.terminal()) { closed_ = true; return; }
   closed_ = true;
-  if (!close.normal) { fail(close.error, "abnormal response close"); return; }
-  if (!begun_ || !terminal_) { fail(ErrorKind::Truncated, "missing Responses terminal evidence"); return; }
+  if (!close.normal) { fail(close.error, reason::transport::response_close); return; }
+  if (!begun_ || !terminal_) { fail(ErrorKind::Truncated, reason::responses::terminal_missing); return; }
   emit(Commit{mode_ == Mode::Sse ? "responses.terminal+normal_close" : "responses.status+normal_close"});
 }
 } // namespace sp::responses
