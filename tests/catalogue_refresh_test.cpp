@@ -47,6 +47,8 @@ bool has(const std::vector<std::string>& values, std::string_view value) {
 struct Seen {
   std::uint64_t total = 0;
   std::vector<std::string> endpoints;
+  // The headers of each request, in the order received: (name, value) as sent, without `host`.
+  std::vector<std::vector<std::pair<std::string, std::string>>> headers;
 };
 Seen seen(Peer& peer, std::string_view scenario) {
   const auto answer = peer.command("{\"requests\":" + json::quote(scenario) + "}");
@@ -54,6 +56,10 @@ Seen seen(Peer& peer, std::string_view scenario) {
   Seen out;
   out.total = root.get("total").as_uint();
   for (auto id : root.get("endpoints").elements()) out.endpoints.emplace_back(id.as_string());
+  for (auto request : root.get("headers").elements()) {
+    auto& sent = out.headers.emplace_back();
+    for (auto header : request.elements()) sent.emplace_back(std::string(header.at(0).as_string()), std::string(header.at(1).as_string()));
+  }
   return out;
 }
 void passed(std::string_view name) { std::cout << "case passed: " << name << std::endl; }
@@ -105,6 +111,49 @@ void no_ceilings_change_nothing(transport::Transport& transport, Peer& peer) {
   pinned("openrouter-bare", openrouter_generated_text, openrouter_generated_sha256);
   pinned("openrouter-pinned", openrouter_override_text, openrouter_override_sha256);
   passed("no ceilings asked: the listing request only, and the pinned text and digest, with and without the override");
+}
+
+// The headers each listing request carries, byte for byte, with a key and without one, and those of OpenRouter's
+// endpoints request (scenarios `capture-*`).
+using Sent = std::vector<std::pair<std::string, std::string>>;
+std::string sent_text(const Sent& sent) {
+  std::string out;
+  for (const auto& [name, value] : sent) out += (out.empty() ? "" : "; ") + name + ": " + value;
+  return out;
+}
+void listing_headers_are_pinned(transport::Transport& transport, Peer& peer) {
+  struct Case { Listing listing; std::string_view scenario; bool key; Sent expected; };
+  const Sent accept{{"accept", "application/json"}};
+  const auto with = [&](Sent more) {
+    Sent out = accept;
+    out.insert(out.end(), more.begin(), more.end());
+    return out;
+  };
+  const Case cases[]{
+      {Listing::OpenRouter, "capture-openrouter-key", true, with({{"authorization", "Bearer pin-key"}})},
+      {Listing::OpenRouter, "capture-openrouter-nokey", false, accept},
+      {Listing::Gemini, "capture-gemini-key", true, with({{"x-goog-api-key", "pin-key"}})},
+      {Listing::Gemini, "capture-gemini-nokey", false, accept},
+      {Listing::Anthropic, "capture-anthropic-key", true, with({{"x-api-key", "pin-key"}, {"anthropic-version", "2023-06-01"}})},
+      {Listing::Anthropic, "capture-anthropic-nokey", false, accept},
+      {Listing::OpenAI, "capture-openai-key", true, with({{"authorization", "Bearer pin-key"}})},
+      {Listing::OpenAI, "capture-openai-nokey", false, accept},
+  };
+  for (const auto& c : cases) {
+    transport::RefreshRequest request;
+    auto listed = source(c.listing, base(peer, c.scenario), c.key ? "pin-key" : "");
+    // OpenRouter's endpoints request follows its listing request with the same credential.
+    if (c.listing == Listing::OpenRouter) listed.ceiling_models = {"vendor/text-model"};
+    request.sources = {listed};
+    (void)refreshed(transport, request);
+    const auto requests = seen(peer, c.scenario);
+    const bool endpoints = c.listing == Listing::OpenRouter;
+    require(requests.headers.size() == (endpoints ? 2u : 1u),
+            std::string(c.scenario) + " sends " + (endpoints ? "the listing request and the endpoints request" : "the listing request only"));
+    for (const auto& sent : requests.headers)
+      require(sent == c.expected, std::string(c.scenario) + " sends [" + sent_text(c.expected) + "], not [" + sent_text(sent) + "]");
+  }
+  passed("listing headers: every listing with and without a key, and OpenRouter's endpoints request, byte for byte");
 }
 
 // An entry's prices as "unit=price ...", in the entry's order.
@@ -1170,6 +1219,7 @@ int main(int argc, char** argv) {
     transport::Transport transport;
     descriptor::CatalogueSnapshot generated;
     no_ceilings_change_nothing(transport, peer);
+    listing_headers_are_pinned(transport, peer);
     overrides_become_bands(transport, peer);
     windows_give_one_entry_at_every_hour(transport, peer);
     listing_keys_are_unit_names(transport, peer);
