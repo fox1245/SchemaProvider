@@ -322,10 +322,15 @@ void refusals() {
                              {"output/flex", "0.000001"}, {"item:image/flex", "0.02"}});
   constexpr std::uint64_t flex_input = 500'000'000, flex_output = 1'000'000'000;
   CHECK(totals(bound(call, *tiered), rounded(100 * flex_input + 100 * flex_output + 2 * cent)));
-  // A tier with item rows only: the token units have no rate in it.
+  // A tier with item rows only: the token units it prices at the standard rates have no row in it, which is not the
+  // tier's price for them.
   const auto items_only = entry({{"input", "0.000001"}, {"output", "0.000002"}, {"item:image/flex", "0.02"}});
   const auto no_tokens = bound(call, *items_only);
-  CHECK(refuses(no_tokens, UnboundedBy::ModelPrice, "input") && refuses(no_tokens, UnboundedBy::ModelPrice, "output") && no_tokens.unbounded.size() == 2);
+  CHECK(only(no_tokens, UnboundedBy::TierPrice, "vendor/model") && no_tokens.unbounded[0].detail.find("input") != std::string::npos);
+  // With no standard rows of them either, the token units have no rate in the tier.
+  const auto flex_only = entry({{"item:image/flex", "0.02"}});
+  const auto unlisted = bound(call, *flex_only);
+  CHECK(refuses(unlisted, UnboundedBy::ModelPrice, "input") && refuses(unlisted, UnboundedBy::ModelPrice, "output") && unlisted.unbounded.size() == 2);
   call.tier.clear();
   // A unit the entry does not list is no price, never a free one.
   const auto no_image = entry({{"input", "0.000001"}, {"output", "0.000002"}});
@@ -656,8 +661,12 @@ void token_estimates() {
   // The same sum as the chat estimate of the same usage.
   const auto chat = pricing::estimate(*c, "vendor.endpoint", origin, ServedModel{"vendor/model", "vendor/model", ServedRelation::Exact}, u);
   CHECK(chat.total && chat.total->nano_usd == e.total->nano_usd && chat.assumptions == e.assumptions);
-  // A tier's own rates.
-  e = estimated(decide, &u, {}, *c, std::nullopt, "flex");
+  // A tier's own rates; a unit priced at the standard rates without a row in the tier (here the cache reads, the
+  // reasoning and the request fee) is not priced at another of the tier's rates.
+  CHECK(unpriced(estimated(decide, &u, {}, *c, std::nullopt, "flex"), {"tier"}));
+  const auto flex = entry({{"prompt", usd(input)}, {"completion", usd(output)}, {"input/flex", usd(input / 2)}, {"output/flex", usd(output / 2)}},
+                          R"("input_limit":50000,"output_limit":1000)");
+  e = estimated(decide, &u, {}, *flex, std::nullopt, "flex");
   CHECK(estimates(e, rounded(700 * (input / 2) + 300 * (output / 2))) && e.assumptions == Names({"cache_read at input"}));
   CHECK(unpriced(estimated(decide, &u, {}, *c, std::nullopt, "priority"), {"tier"}));
   // A counter the operation needs and the usage lacks.
@@ -1033,6 +1042,17 @@ struct Oracle {
       refuse(UnboundedBy::TierPrice, g.facts.model);
       return out;
     }
+    // Under a tier, a unit (a token unit, or an item kind whatever its qualifier) with a row at the standard rates and
+    // none in the tier.
+    const auto unit_of = [](const Row& r) { return r.item ? "item:" + r.name : r.name; };
+    if (!g.tier.empty() && std::any_of(g.rows.begin(), g.rows.end(), [&](const auto& item) {
+          return item.second.tier.empty() && std::none_of(g.rows.begin(), g.rows.end(), [&](const auto& other) {
+                   return other.second.tier == g.tier && unit_of(other.second) == unit_of(item.second);
+                 });
+        })) {
+      refuse(UnboundedBy::TierPrice, g.facts.model);
+      return out;
+    }
     std::optional<std::uint64_t> input_count;
     bool has_input = false, image_tokens = false;
     for (const auto& q : g.facts.quantities) {
@@ -1248,8 +1268,9 @@ void bound_covers_every_consistent_result() {
         return item ? (1 + next(49)) * 1'000'000'000'000u + next(999) : (1 + next(4999)) * 1'000'000 + next(999);
       };
       // Mostly the call's own tier, so that a fair share of calls is priced; now and then an entry priced only in the
-      // other tier.
-      const std::string other_tier = g.tier.empty() ? "flex" : "";
+      // other tier. A flex call's other tier is another tier than the standard rates, whose rows refuse it when the
+      // tier has no row of their unit; such a row is added below now and then.
+      const std::string other_tier = g.tier.empty() ? "flex" : "priority";
       const bool elsewhere = next(19) == 0;
       auto tier = [&]() { return elsewhere || next(4) == 0 ? other_tier : g.tier; };
       auto band = [&]() { return next(2) == 0 ? std::uint64_t{1000} : std::uint64_t{0}; };
@@ -1271,6 +1292,11 @@ void bound_covers_every_consistent_result() {
           if (next(5) == 0) r.qualifier["style"] = "vivid";
           g.rows[key_of(r)] = r;
         }
+      }
+      // A flex call's entry with a row at the standard rates: a refusal unless the tier has a row of its unit.
+      if (!g.tier.empty() && next(3) == 0) {
+        Row r{tokens[next(5)], false, {}, "", 0, rate(false)};
+        g.rows[key_of(r)] = r;
       }
       if (next(4)) g.input_limit = 500 + next(2500);
       if (next(4) == 0) g.context_window = 500 + next(2500);
@@ -1786,6 +1812,203 @@ void carried_requests() {
   std::cout << "case passed: carried requests\n";
 }
 
+// A tier the facts name: the call is priced at that tier's rows only, whether the input names the tier or not; an
+// entry with no row in it, a unit it prices at the standard rates and not in the tier, and another tier in the input
+// all refuse.
+void tier_from_facts() {
+  constexpr std::uint64_t input = 1'000'000'000, output = 2'000'000'000, flex_input = 500'000'000, flex_output = 1'000'000'000;
+  const auto tiered = entry({{"input", usd(input)}, {"output", usd(output)}, {"item:image", usd(4 * cent)}, {"input/flex", usd(flex_input)},
+                             {"output/flex", usd(flex_output)}, {"item:image/flex", usd(2 * cent)}});
+  const auto quantities = std::vector{quantity("item:image", 1), quantity("input", 100), quantity("output", 100)};
+  Call call{facts("images", "generate", quantities)};
+  CHECK(totals(bound(call, *tiered), rounded(100 * input + 100 * output + 4 * cent)));
+  call.facts.service_tier = "flex";
+  auto b = bound(call, *tiered);
+  CHECK(totals(b, rounded(100 * flex_input + 100 * flex_output + 2 * cent)));
+  CHECK(line(b, "input", "input/flex", 100, flex_input) && line(b, "output", "output/flex", 100, flex_output) &&
+        line(b, "item:image", "item:image/flex", 1, 2 * cent));
+  // The same tier named by the input too; another tier there.
+  call.tier = "flex";
+  CHECK(totals(bound(call, *tiered), rounded(100 * flex_input + 100 * flex_output + 2 * cent)));
+  call.tier = "priority";
+  CHECK(only(bound(call, *tiered), UnboundedBy::TierPrice, "vendor/model"));
+  call.tier.clear();
+  // A tier the entry prices nothing in.
+  call.facts.service_tier = "priority";
+  CHECK(only(bound(call, *tiered), UnboundedBy::TierPrice, "vendor/model"));
+  // A unit priced at the standard rates without a row in the tier: a token unit, the request fee and an item unit. A
+  // qualified row of a unit the tier prices is not one: the tier's own rows of the unit state its price.
+  call.facts.service_tier = "flex";
+  CHECK(totals(bound(call, *entry({{"input", usd(input)}, {"output", usd(output)}, {"item:image", usd(4 * cent)}, {"item:image[quality=high]", usd(8 * cent)},
+                                   {"input/flex", usd(flex_input)}, {"output/flex", usd(flex_output)}, {"item:image/flex", usd(2 * cent)}})),
+               rounded(100 * flex_input + 100 * flex_output + 2 * cent)));
+  for (const auto& [unit, rate] : std::vector<std::pair<std::string, std::uint64_t>>{{"cache_read", 100'000'000}, {"request", 1'000'000'000'000},
+                                                                                     {"item:input_image", cent}}) {
+    auto prices = std::vector<std::pair<std::string, std::string>>{{"input", usd(input)}, {"output", usd(output)}, {"item:image", usd(4 * cent)},
+                                                                   {"input/flex", usd(flex_input)}, {"output/flex", usd(flex_output)},
+                                                                   {"item:image/flex", usd(2 * cent)}, {unit, usd(rate)}};
+    const auto outside = entry(prices);
+    const auto refused = bound(call, *outside);
+    CHECK(only(refused, UnboundedBy::TierPrice, "vendor/model"));
+    CHECK(refused.unbounded[0].detail.find("under service tier 'flex'") != std::string::npos);
+    // At the standard rates the same entry is bounded.
+    Call standard = call;
+    standard.facts.service_tier.clear();
+    CHECK(bound(standard, *outside).total || unit == "item:input_image");
+  }
+  // The estimate prices at the facts' tier too, and refuses where the bound does.
+  auto f = facts("images", "generate", quantities);
+  f.service_tier = "flex";
+  auto u = tokens(100, 100);
+  auto e = estimated(f, &u, {{"item:image", 1}}, *tiered);
+  CHECK(estimates(e, rounded(100 * flex_input + 100 * flex_output + 2 * cent)));
+  CHECK(unpriced(estimated(f, &u, {{"item:image", 1}}, *tiered, std::nullopt, "priority"), {"tier"}));
+  CHECK(estimates(estimated(f, &u, {{"item:image", 1}}, *tiered, std::nullopt, "flex"), rounded(100 * flex_input + 100 * flex_output + 2 * cent)));
+  CHECK(unpriced(estimated(f, &u, {{"item:image", 1}}, *entry({{"input", usd(input)}, {"output", usd(output)}, {"item:image", usd(4 * cent)},
+                                                               {"cache_read", usd(100'000'000)}, {"input/flex", usd(flex_input)},
+                                                               {"output/flex", usd(flex_output)}, {"item:image/flex", usd(2 * cent)}})),
+                 {"tier"}));
+  f.service_tier = "priority";
+  CHECK(unpriced(estimated(f, &u, {{"item:image", 1}}, *tiered), {"tier"}));
+  std::cout << "case passed: a tier the facts name\n";
+}
+
+// Embeddings at a routing gateway: every input token at the lower of the route ceiling and the request's own cap
+// (`provider.max_price.prompt`), with the pin a host attaches; no cap, no ceiling, a request fee, image inputs and a
+// variable ceiling refuse.
+void gateway_embeddings() {
+  constexpr std::uint64_t listed = 20'000'000, ceiling = 30'000'000;
+  const auto c = entry({{"input", usd(listed)}, {"ceiling_input", usd(ceiling)}}, R"("input_limit":2048)");
+  Call call{facts("embeddings", "embed", {quantity("input", std::nullopt, Source::InputLimit, 3)})};
+  call.facts.routed_gateway = true;
+  const std::string unpinned = "an endpoint call at a routing gateway has no per-item route ceiling and no pin";
+  // No cap: today's refusal.
+  auto b = bound(call, *c);
+  CHECK(only(b, UnboundedBy::RouteCeiling, "vendor/model") && b.unbounded[0].detail == unpinned && !b.route_ceiling && !b.pin);
+  // A cap with no prompt amount is no cap on the input.
+  call.facts.max_price = OpenRouterMaxPrice{};
+  call.facts.max_price->completion_nano_usd = 1;
+  CHECK(only(bound(call, *c), UnboundedBy::RouteCeiling, "vendor/model"));
+  // A cap below the ceiling: the cap prices the input, and the request already carries the pin.
+  call.facts.max_price = OpenRouterMaxPrice{};
+  call.facts.max_price->prompt_nano_usd = 25'000'000;
+  b = bound(call, *c);
+  CHECK(totals(b, rounded(std::uint64_t{3 * 2048} * 25'000'000)) && b.lines.size() == 1 && line(b, "input", "provider.max_price.prompt", 3 * 2048, 25'000'000));
+  CHECK(b.route_ceiling && b.pinned && b.pin && b.pin->prompt_nano_usd == 25'000'000 && !b.pin->completion_nano_usd && b.attempts == 1 &&
+        b.entry == "vendor/model");
+  // A measured count, capped at the limit times the inputs.
+  call.measured = 1000;
+  CHECK(totals(bound(call, *c), rounded(std::uint64_t{1000} * 25'000'000)));
+  call.measured.reset();
+  // A cap above the ceiling: the ceiling prices it, and the pin the request must carry is the ceiling.
+  call.facts.max_price->prompt_nano_usd = 40'000'000;
+  b = bound(call, *c);
+  CHECK(totals(b, rounded(3 * 2048 * ceiling)) && line(b, "input", "ceiling_input", 3 * 2048, ceiling));
+  CHECK(b.route_ceiling && !b.pinned && b.pin && b.pin->prompt_nano_usd == ceiling);
+  // A cap equal to the ceiling; and the request's other amounts kept in the pin.
+  call.facts.max_price->prompt_nano_usd = ceiling;
+  call.facts.max_price->completion_nano_usd = 7;
+  b = bound(call, *c);
+  CHECK(totals(b, rounded(3 * 2048 * ceiling)) && b.pinned && b.pin->prompt_nano_usd == ceiling && b.pin->completion_nano_usd == 7);
+  // A cap of zero admits only a free endpoint.
+  call.facts.max_price = OpenRouterMaxPrice{};
+  call.facts.max_price->prompt_nano_usd = 0;
+  CHECK(totals(bound(call, *c), 0));
+  call.facts.max_price->prompt_nano_usd = 25'000'000;
+  // No route ceiling: the router may pick any price below the cap only if the ceiling is listed.
+  b = bound(call, *entry({{"input", usd(listed)}}, R"("input_limit":2048)"));
+  CHECK(only(b, UnboundedBy::RouteCeiling, "vendor/model") && b.unbounded[0].detail.find("ceiling_input") != std::string::npos);
+  // A variable ceiling.
+  CHECK(only(bound(call, *entry({{"input", usd(listed)}, {"ceiling_input", "-1"}}, R"("input_limit":2048)")), UnboundedBy::ModelPrice, "ceiling_input"));
+  // A request fee above zero, listed or as a ceiling, which no amount of the cap is known to bind; declared zeros do not refuse.
+  CHECK(only(bound(call, *entry({{"input", usd(listed)}, {"ceiling_input", usd(ceiling)}, {"request", "0.001"}}, R"("input_limit":2048)")),
+             UnboundedBy::RouteCeiling, "request"));
+  CHECK(only(bound(call, *entry({{"input", usd(listed)}, {"ceiling_input", usd(ceiling)}, {"ceiling_request", "0.001"}}, R"("input_limit":2048)")),
+             UnboundedBy::RouteCeiling, "request"));
+  CHECK(totals(bound(call, *entry({{"input", usd(listed)}, {"ceiling_input", usd(ceiling)}, {"request", "0"}, {"ceiling_request", "0"}},
+                                  R"("input_limit":2048)")),
+               rounded(std::uint64_t{3 * 2048} * 25'000'000)));
+  // No input limit and no measured count.
+  CHECK(only(bound(call, *entry({{"input", usd(listed)}, {"ceiling_input", usd(ceiling)}})), UnboundedBy::InputBound, "input"));
+  // Image inputs: the cap is not known to bind image tokens.
+  call.facts.quantities.push_back(quantity("input_image", std::nullopt, Source::InputLimit, 3));
+  b = bound(call, *entry({{"input", usd(listed)}, {"input_image", usd(listed)}, {"ceiling_input", usd(ceiling)}}, R"("input_limit":2048)"));
+  CHECK(only(b, UnboundedBy::RouteCeiling, "vendor/model") && b.unbounded[0].detail == unpinned);
+  call.facts.quantities.pop_back();
+  // The tier's own ceiling.
+  call.facts.service_tier = "flex";
+  CHECK(totals(bound(call, *entry({{"input/flex", usd(listed)}, {"ceiling_input/flex", usd(10'000'000)}}, R"("input_limit":2048)")),
+               rounded(std::uint64_t{3 * 2048} * 10'000'000)));
+  call.facts.service_tier.clear();
+
+  // The estimate: the reported tokens at the listed rate, and never above the cap, which the gateway enforces.
+  auto u = tokens(900, std::nullopt);
+  auto e = estimated(call.facts, &u, {}, *c);
+  CHECK(estimates(e, rounded(900 * listed)) && e.assumptions == Names({"listed rates"}));
+  CHECK(pricing::beyond_bound(bound(call, *c), e).empty() && e.total->nano_usd <= bound(call, *c).total->nano_usd);
+  call.facts.max_price->prompt_nano_usd = 10'000'000;
+  e = estimated(call.facts, &u, {}, *c);
+  CHECK(estimates(e, rounded(std::uint64_t{900} * 10'000'000)) && e.assumptions == Names({"listed rates", "input at the pin"}));
+  CHECK(pricing::beyond_bound(bound(call, *c), e).empty());
+  std::cout << "case passed: embeddings at a routing gateway\n";
+}
+
+// Every other endpoint at a routing gateway keeps no bound, with the request's cap and an entry that lists every unit
+// and every route ceiling: images, decisions, rerank, speech, transcription and videos.
+void gateway_refusals() {
+  const auto c = entry({{"input", "0.000001"}, {"input_image", "0.000001"}, {"output", "0.000002"}, {"item:image", "0.04"}, {"item:input_image", "0.01"},
+                        {"item:document", "0.001"}, {"item:search_unit", "0.002"}, {"item:character", "0.00001"}, {"item:second", "0.0001"},
+                        {"ceiling_input", "0.000002"}, {"ceiling_output", "0.000004"}},
+                       R"("input_limit":1000,"output_limit":1000)");
+  const auto in = quantity("input", std::nullopt, Source::InputLimit), out = quantity("output", std::nullopt, Source::OutputLimit);
+  const std::vector<EndpointFacts> calls{
+      facts("images", "generate", {quantity("item:image", 1), quantity("item:input_image", 0), in, quantity("input_image", 0), out}),
+      facts("decisions", "decide", {in, out}),
+      facts("rerank", "rank", {quantity("item:document", 2), quantity("item:search_unit", std::nullopt), in}),
+      facts("speech", "speak", {quantity("item:character", 12), in, out}),
+      facts("transcription", "transcribe", {quantity("item:second", std::nullopt, Source::StatedSeconds), in, out}),
+      facts("videos", "submit", {quantity("item:second", 5), in, out})};
+  for (auto f : calls) {
+    f.routed_gateway = true;
+    f.max_price = OpenRouterMaxPrice{1'000'000'000, 1'000'000'000, 1'000'000'000, 1'000'000'000, 1'000'000'000};
+    Call call{f};
+    call.seconds = 10;
+    const auto b = bound(call, *c);
+    CHECK(only(b, UnboundedBy::RouteCeiling, "vendor/model") &&
+          b.unbounded[0].detail == "an endpoint call at a routing gateway has no per-item route ceiling and no pin" && !b.route_ceiling && !b.pin);
+  }
+  std::cout << "case passed: other endpoints at a routing gateway\n";
+}
+
+// Over generated rates, caps, counts and usages within the bound's count: the estimate of a pinned embeddings call at a
+// routing gateway is never above its bound while the listed rate is at most the route ceiling.
+void gateway_estimate_within_the_bound() {
+  std::uint64_t seed = 20261120;
+  auto next = [&](std::uint64_t limit) { seed = seed * 6364136223846793005u + 1442695040888963407u; return (seed >> 33) % (limit + 1); };
+  std::size_t compared = 0;
+  for (int i = 0; i < 2000; ++i) {
+    const std::uint64_t listed = next(50'000'000), ceiling = listed + next(50'000'000), cap = next(120'000'000), limit = 1 + next(4096),
+                        inputs = 1 + next(8);
+    const auto c = entry({{"input", usd(listed)}, {"ceiling_input", usd(ceiling)}}, "\"input_limit\":" + std::to_string(limit));
+    Call call{facts("embeddings", "embed", {quantity("input", std::nullopt, Source::InputLimit, inputs)})};
+    call.facts.routed_gateway = true;
+    call.facts.max_price = OpenRouterMaxPrice{};
+    call.facts.max_price->prompt_nano_usd = cap;
+    if (next(1)) call.measured = next(limit * inputs);
+    const auto b = bound(call, *c);
+    CHECK(b.total && b.lines.size() == 1);
+    CHECK(b.lines[0].rate == std::min(ceiling, cap) && b.pinned == (cap <= ceiling));
+    const auto reported = next(b.lines[0].quantity);
+    auto u = tokens(reported, std::nullopt);
+    const auto e = estimated(call.facts, &u, {}, *c);
+    CHECK(e.total && e.total->nano_usd <= b.total->nano_usd && pricing::beyond_bound(b, e).empty());
+    CHECK(e.total->nano_usd == rounded(reported * std::min(listed, cap)));
+    ++compared;
+  }
+  CHECK(compared == 2000);
+  std::cout << "case passed: the estimate at a routing gateway within the bound\n";
+}
+
 int main() {
   const std::pair<const char*, void (*)()> cases[]{
       {"bound_covers_every_consistent_result", bound_covers_every_consistent_result}, {"estimate_within_the_bound", estimate_within_the_bound},
@@ -1795,7 +2018,9 @@ int main() {
       {"images_estimate", images_estimate}, {"estimate_rounds_once", estimate_rounds_once}, {"token_estimates", token_estimates},
       {"item_estimates", item_estimates}, {"estimate_refusals", estimate_refusals}, {"estimate_length_from_input", estimate_length_from_input},
       {"estimate_by_another_entry", estimate_by_another_entry}, {"estimate_zero_quantity", estimate_zero_quantity},
-      {"estimate_length_overflow", estimate_length_overflow}, {"carried_requests", carried_requests}};
+      {"estimate_length_overflow", estimate_length_overflow}, {"carried_requests", carried_requests}, {"tier_from_facts", tier_from_facts},
+      {"gateway_embeddings", gateway_embeddings}, {"gateway_refusals", gateway_refusals},
+      {"gateway_estimate_within_the_bound", gateway_estimate_within_the_bound}};
   int failed = 0;
   for (const auto& [name, run] : cases) {
     try {
