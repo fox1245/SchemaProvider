@@ -1,8 +1,9 @@
 // Error::reason: the fixed table behind it is complete, well formed and unique, an accumulator failure carries its code,
-// and a transport failure that takes precedence carries none. Usage: sp_error_reason_tests <src dir>
+// and a transport failure that takes precedence carries none. Usage: sp_error_reason_tests <src dir> <reason_codes.json>
 #include "codecs/accumulator.h"
 #include "codecs/reason.h"
 #include "descriptor/presets.h"
+#include "json/json.h"
 #include "runtime/client.h"
 #include <cctype>
 #include <filesystem>
@@ -91,6 +92,28 @@ void table_is_well_formed() {
     CHECK(reason::code(source, std::string(first.message) + " ").empty() && reason::code(source, first.message.substr(1)).empty() && reason::code(source, {}).empty());
   }
   CHECK(codes.size() > 700);
+}
+
+// The tables hold exactly the [code, message] pairs of the fixture, which pins every code and its text.
+void fixture_matches_tables(const std::filesystem::path& path) {
+  std::ifstream file(path, std::ios::binary);
+  CHECK(file.good());
+  const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+  auto parsed = json::parse(text, {text.size() + 1, 4});
+  CHECK(std::holds_alternative<json::Document>(parsed));
+  const auto root = std::get<json::Document>(parsed).root();
+  CHECK(root.is_array());
+  std::set<std::pair<std::string, std::string>> pinned;
+  for (const auto pair : root.elements()) {
+    CHECK(pair.is_array() && pair.size() == 2);
+    std::vector<std::string> fields;
+    for (const auto field : pair.elements()) { CHECK(field.is_string()); fields.emplace_back(field.as_string()); }
+    CHECK(pinned.insert({fields[0], fields[1]}).second);
+  }
+  std::set<std::pair<std::string, std::string>> tabled;
+  for (const auto& [source, prefix] : sources)
+    for (const auto& entry : reason::entries(source)) CHECK(tabled.insert({std::string(entry.code), std::string(entry.message)}).second);
+  CHECK(pinned.size() == root.size() && pinned == tabled);
 }
 
 // Literals of every failure a decoder source can raise: the arguments after the kind of fail() and reject(), and the
@@ -279,8 +302,9 @@ void accumulator_failures() {
 
 int main(int argc, char** argv) {
   try {
-    if (argc != 2) throw std::runtime_error("usage: sp_error_reason_tests <src dir>");
+    if (argc != 3) throw std::runtime_error("usage: sp_error_reason_tests <src dir> <reason_codes.json>");
     table_is_well_formed();
+    fixture_matches_tables(argv[2]);
     every_failure_string_has_a_code(argv[1]);
     every_refusal_has_a_code(argv[1]);
     prepare_keeps_the_refusing_check();
