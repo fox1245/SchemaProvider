@@ -1,5 +1,9 @@
 #include "runtime/cost.h"
+#include "codecs/batches_internal.h"
+#include "core/pricing_internal.h"
+#include "crypto/crypto.h"
 #include "descriptor/policy.h"
+#include "runtime/request_facts.h"
 #include <algorithm>
 
 namespace sp::runtime {
@@ -21,15 +25,17 @@ std::uint64_t allowed_attempts(const PreparedRequest& prepared) {
   if (!retry) return 0;
   return retry->enabled ? retry->max_attempts : 1;
 }
-// An endpoint call's bound as a chat request's: its token lines, one invocation and the attempts.
-pricing::WorstCase projected(pricing::EndpointBound bound) {
+// An endpoint call's bound as a chat request's: its token lines, one invocation and the attempts. A call that bills the
+// requests it carries states no tokens or invocations of its own: they are its requests', each bounded on its own
+// (the bound's lines).
+pricing::WorstCase projected(pricing::EndpointBound bound, bool carried = false) {
   pricing::WorstCase out;
   out.total = bound.total;
   out.unbounded = std::move(bound.unbounded);
   out.entry = std::move(bound.entry);
   out.model = std::move(bound.model);
   out.attempts = bound.attempts;
-  if (out.total) {
+  if (out.total && !carried) {
     for (const auto& line : bound.lines) {
       if (line.unit == "input") out.input_tokens = line.quantity;
       else if (line.unit == "output") out.output_tokens = line.quantity;
@@ -67,7 +73,7 @@ pricing::WorstCase worst_case_cost(const PreparedRequest& prepared, const descri
         return projected(endpoint_worst_case_cost(prepared, catalogue, endpoint_options));
       }
       case descriptor::EndpointBilling::Carried:
-        return unmodeled(std::string(prepared.endpoint()), "an endpoint call has no catalogue bound");
+        return projected(endpoint_worst_case_cost(prepared, catalogue), true);
       case descriptor::EndpointBilling::Unstated:
         break;
     }
@@ -100,12 +106,11 @@ pricing::WorstCase worst_case_cost(const PreparedRequest& prepared, const WorstC
   return worst_case_cost(prepared, *descriptor->policy()->catalogue(), options);
 }
 
-pricing::EndpointBound endpoint_worst_case_cost(const PreparedRequest& prepared, const descriptor::ModelCatalogue& catalogue,
-                                                const EndpointCostOptions& options) {
-  const auto* descriptor = prepared.descriptor();
-  if (!prepared.valid() || prepared.error() || !descriptor) return unmodeled_call("request", "the request did not prepare");
-  if (prepared.endpoint().empty()) return unmodeled_call("request", "a chat request is bounded by worst_case_cost");
-  const auto& facts = prepared.endpoint_facts();
+namespace {
+// The bound of the prepared endpoint call `prepared` over `facts`: its own, or those of an OpenAI batch whose carried
+// requests were read from the items of its input file.
+pricing::EndpointBound bound_of(const PreparedRequest& prepared, const descriptor::ValidatedDescriptor& descriptor, const EndpointFacts& facts,
+                                const descriptor::ModelCatalogue& catalogue, const EndpointCostOptions& options) {
   // Only the quantities a request states are priced: an operation that bills its model and states none (one the SDK
   // has no quantities for, such as a policy that bills moderation) would otherwise be bounded at its request fee.
   if (facts.billing == descriptor::EndpointBilling::Model && facts.quantities.empty())
@@ -120,7 +125,7 @@ pricing::EndpointBound endpoint_worst_case_cost(const PreparedRequest& prepared,
   // such a call again only when it never reached the provider or was refused before it was accepted: one attempt bounds
   // it. An operation the policy states is not billed charges nothing, and the runtime retries it as a read.
   const bool billed = facts.billing == descriptor::EndpointBilling::Model || facts.billing == descriptor::EndpointBilling::Carried;
-  const auto* fact = descriptor->policy()->endpoint(facts.endpoint, facts.origin);
+  const auto* fact = descriptor.policy()->endpoint(facts.endpoint, facts.origin);
   input.charge_on_accept = billed && fact && fact->charge_on_accept;
   auto bound = pricing::endpoint_worst_case(input, catalogue);
   // The audio's length is the host's to state: name where.
@@ -133,11 +138,139 @@ pricing::EndpointBound endpoint_worst_case_cost(const PreparedRequest& prepared,
         reason.detail = "the audio's length is not stated (EndpointCostOptions::audio_seconds)";
   return bound;
 }
+// Lower-case hex of the SHA-256 of `bytes`, the spelling of files::File::uploaded_sha256.
+std::string sha256_hex(std::string_view bytes) {
+  constexpr std::string_view digits = "0123456789abcdef";
+  std::string hex;
+  for (const auto byte : crypto::sha256(bytes)) {
+    hex += digits[byte >> 4];
+    hex += digits[byte & 15];
+  }
+  return hex;
+}
+} // namespace
+
+pricing::EndpointBound endpoint_worst_case_cost(const PreparedRequest& prepared, const descriptor::ModelCatalogue& catalogue,
+                                                const EndpointCostOptions& options) {
+  const auto* descriptor = prepared.descriptor();
+  if (!prepared.valid() || prepared.error() || !descriptor) return unmodeled_call("request", "the request did not prepare");
+  if (prepared.endpoint().empty()) return unmodeled_call("request", "a chat request is bounded by worst_case_cost");
+  return bound_of(prepared, *descriptor, prepared.endpoint_facts(), catalogue, options);
+}
 pricing::EndpointBound endpoint_worst_case_cost(const PreparedRequest& prepared, const EndpointCostOptions& options) {
   const auto* descriptor = prepared.descriptor();
   if (!prepared.valid() || prepared.error() || !descriptor) return unmodeled_call("request", "the request did not prepare");
   return endpoint_worst_case_cost(prepared, *descriptor->policy()->catalogue(), options);
 }
+pricing::EndpointBound batch_worst_case_cost(const PreparedRequest& submit, const descriptor::ValidatedDescriptor& family,
+                                             const std::vector<batches::Item>& items, const files::File& input_file,
+                                             const descriptor::ModelCatalogue& catalogue, const EndpointCostOptions& options) {
+  const auto* descriptor = submit.descriptor();
+  if (!submit.valid() || submit.error() || !descriptor) return unmodeled_call("request", "the request did not prepare");
+  if (submit.endpoint().empty()) return unmodeled_call("request", "a chat request is bounded by worst_case_cost");
+  const auto& facts = submit.endpoint_facts();
+  const std::string call = facts.endpoint + "/" + facts.operation;
+  if (facts.billing != descriptor::EndpointBilling::Carried || facts.input_file.empty() || !facts.carried.empty())
+    return unmodeled_call(call, "the call reads no uploaded input file");
+  if (family.base_url() != facts.origin) return unmodeled_call(call, "the items' descriptor is not at the batch's origin");
+  // The items are the requests the batch runs only when they are the bytes the submit's file was uploaded with.
+  constexpr std::string_view not_the_file = "the items are not the uploaded input file";
+  if (input_file.id != facts.input_file || input_file.uploaded_sha256.empty()) return unmodeled_call(call, std::string(not_the_file));
+  auto lines = batches::detail::encode_lines(family, items);
+  if (std::holds_alternative<Error>(lines)) return unmodeled_call(call, std::string(not_the_file));
+  auto& encoded = std::get<batches::detail::EncodedLines>(lines);
+  if (sha256_hex(encoded.text) != input_file.uploaded_sha256 || encoded.items.size() != items.size()) return unmodeled_call(call, std::string(not_the_file));
+  auto bounded = facts;
+  bounded.family = std::string(family.family());
+  for (std::size_t i = 0; i < items.size(); ++i) bounded.carried.push_back(detail::carried_request(family, items[i].request, encoded.items[i]));
+  return bound_of(submit, *descriptor, bounded, catalogue, options);
+}
+pricing::EndpointBound batch_worst_case_cost(const PreparedRequest& submit, const descriptor::ValidatedDescriptor& family,
+                                             const std::vector<batches::Item>& items, const files::File& input_file, const EndpointCostOptions& options) {
+  const auto* descriptor = submit.descriptor();
+  if (!submit.valid() || submit.error() || !descriptor) return unmodeled_call("request", "the request did not prepare");
+  return batch_worst_case_cost(submit, family, items, input_file, *descriptor->policy()->catalogue(), options);
+}
+
+namespace {
+// The rate of a batch line: one nano-USD per unit, in nano-USD per million units, so that the line's quantity is the
+// request's estimate in nano-USD, as the bound's lines are.
+constexpr std::uint64_t nano_usd_rate = 1'000'000;
+} // namespace
+
+pricing::EndpointEstimate batch_estimate(const EndpointFacts& submit, const descriptor::ValidatedDescriptor& family,
+                                         const std::vector<batches::Line>& lines, const descriptor::ModelCatalogue& catalogue) {
+  pricing::EndpointEstimate out;
+  const auto refuse = [&](std::string name) {
+    if (std::find(out.unpriced.begin(), out.unpriced.end(), name) == out.unpriced.end()) out.unpriced.push_back(std::move(name));
+  };
+  const auto assume = [&](std::string rule) {
+    if (std::find(out.assumptions.begin(), out.assumptions.end(), rule) == out.assumptions.end()) out.assumptions.push_back(std::move(rule));
+  };
+  if (submit.billing == descriptor::EndpointBilling::None) {
+    out.total = UsdAmount{0, Evidence::Derived, CostRounding::CeilingCatalogueProduct};
+    return out;
+  }
+  if (submit.billing != descriptor::EndpointBilling::Carried) refuse("billing");
+  // The requests are priced under the carried tier only, as the bound prices them.
+  if (submit.carried_tier.empty()) refuse("tier");
+  if (family.base_url() != submit.origin) refuse("origin");
+  // Inline requests are of the batch client's family, as the bound prices them.
+  if (!submit.carried.empty() && family.family() != submit.family) refuse("family");
+  if (!out.unpriced.empty()) return out;
+  // The bound at a routing gateway is at the route ceiling; the estimate takes the entries' listed rates.
+  if (submit.routed_gateway) assume("listed rates");
+
+  std::uint64_t sum = 0;
+  bool overflow = false;
+  std::optional<std::string> entry;
+  bool one_entry = true;
+  for (const auto& line : lines) {
+    const auto& id = line.custom_id;
+    if (!submit.carried.empty() && std::none_of(submit.carried.begin(), submit.carried.end(), [&](const CarriedRequest& r) { return r.custom_id == id; })) {
+      refuse(id + ":custom_id");
+      continue;
+    }
+    const Usage* usage = nullptr;
+    const ServedModel* model = nullptr;
+    if (const auto* completion = std::get_if<Completion>(&line.outcome)) {
+      usage = &completion->usage;
+      model = &completion->model;
+    } else {
+      // Whether the provider bills a request it failed, cancelled or let expire is not stated: what its line reports is
+      // priced, and the provider may bill more.
+      const auto& failure = std::get<Failure>(line.outcome);
+      out.lower_bound = true;
+      const auto& reported = failure.partial.usage;
+      if (!reported.input_total && !reported.input_uncached && !reported.cache_read && !reported.cache_write && !reported.output_total &&
+          !reported.reasoning)
+        continue;
+      usage = &reported;
+      model = &failure.partial.model;
+    }
+    const auto priced = pricing::estimate(catalogue, family.family(), submit.origin, *model, *usage, submit.carried_tier);
+    if (!priced.total) {
+      for (const auto& name : priced.unpriced) refuse(id + ":" + name);
+      continue;
+    }
+    for (const auto& rule : priced.assumptions) assume(id + ":" + rule);
+    out.lower_bound = out.lower_bound || priced.lower_bound;
+    out.requested_entry = out.requested_entry || priced.requested_entry;
+    out.lines.push_back({id + ":nano_usd", priced.entry, priced.total->nano_usd, nano_usd_rate});
+    if (!pricing::detail::checked_add(sum, priced.total->nano_usd, sum)) overflow = true;
+    if (!entry) entry = priced.entry;
+    else if (*entry != priced.entry) one_entry = false;
+  }
+  if (overflow) refuse("overflow");
+  if (!out.unpriced.empty()) {
+    out.lines.clear();
+    return out;
+  }
+  out.total = UsdAmount{sum, Evidence::Derived, CostRounding::CeilingCatalogueProduct};
+  if (one_entry && entry) out.entry = *entry;
+  return out;
+}
+
 namespace {
 // The count a usage's `extra` holds under `counter`, when it holds one.
 std::optional<std::uint64_t> counted(const Usage& usage, std::string_view counter) {

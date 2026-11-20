@@ -24,7 +24,10 @@ struct EndpointQuantity {
   // The request fixes the quantity.
   bool exact = false;
 };
-// A chat request a call carries (an item of a batch submit).
+// A chat request a call carries (an item of a batch submit), as pricing::worst_case reads it: its custom id and the
+// model it names, the output cap and the model invocations its family encoder read from it, and its facts. Its
+// `facts.service_tier` is the catalogue tier the request itself names (DescriptorPolicy::billing_tier: empty for a
+// standard tier of its family), not the tier as written.
 struct CarriedRequest {
   std::string custom_id, model;
   std::optional<std::uint64_t> output_tokens, invocations;
@@ -50,8 +53,10 @@ struct EndpointFacts {
   // pricing::dearest_item_price and item_price over them give the rates the bound prices at. A member that is set but
   // whose value no dimension can hold (a floating-point number, a signed integer, null, an array, an object, text outside
   // the qualifier grammar) has its key with an empty value: no row matches it, and a row of a priced unit that names
-  // the key leaves that unit without a bound. The chat requests it carries, and the uploaded file whose lines are those
-  // requests: empty in every prepared call, since the SDK does not fill them yet.
+  // the key leaves that unit without a bound. The chat requests it carries: those of an inline batch submit (Anthropic,
+  // Google), in order; and the uploaded file whose lines are those requests: the file an OpenAI batch submit names,
+  // whose requests are not in the facts (runtime::batch_worst_case_cost reads them from the items). Both are empty for
+  // every other call.
   std::vector<std::pair<std::string, std::string>> dimensions;
   std::vector<EndpointQuantity> quantities;
   std::vector<CarriedRequest> carried;
