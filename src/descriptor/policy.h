@@ -345,6 +345,11 @@ class DescriptorPolicy final {
   // the listing request sends. The OpenRouter listing is the OpenAI Chat listing of the gateway, so it sends Chat's
   // scheme and not Messages' at the same origin. A family of the policy, never empty.
   std::string_view listing_family(Listing listing) const noexcept;
+  // The origin a source of a model listing defaults to (transport::ListingSource `url` and `origin`), from the policy's
+  // `listings` facts (`default_origin`): a fact without it, or a listing the policy leaves out, has the embedded
+  // policy's, which states each provider's API origin. Empty when the policy states `null`: the listing has no default,
+  // and a source of it names its `url` and its `origin`. A canonical origin (descriptor::canonical_origin_spelling).
+  std::string_view listing_origin(Listing listing) const noexcept;
   // The route facts of `family` in the policy's order, empty for a family without any or not in the policy. A policy
   // that states no `routes` for a family has the embedded policy's.
   const std::vector<RouteFact>& routes(std::string_view family) const noexcept;
@@ -408,6 +413,8 @@ class DescriptorPolicy final {
   std::vector<std::optional<std::uint64_t>> max_items_;
   // The family each listing belongs to (listing_family), in the order of all_listings.
   std::vector<std::pair<Listing, std::string>> listings_;
+  // The origin a source of each listing defaults to (listing_origin), empty for none, in the order of all_listings.
+  std::vector<std::pair<Listing, std::string>> listing_origins_;
   static std::optional<reason::Reason> check(const FamilyPolicy&, const ValidationFacts&, const EffectiveChoices&,
                                              std::optional<std::uint64_t> limit, bool require_cap);
   friend std::optional<reason::Reason> choices_refusal(const ValidatedDescriptor&, std::string_view, const EffectiveChoices&);

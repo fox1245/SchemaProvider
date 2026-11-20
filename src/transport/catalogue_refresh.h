@@ -18,12 +18,13 @@ namespace sp::transport {
 struct ListingSource {
   descriptor::Listing listing = descriptor::Listing::OpenRouter;
   // Where the listing is served: an https URL (http only on a loopback host) to which the
-  // listing's path is appended. Empty: the provider's public API.
+  // listing's path is appended. Empty: the listing's default origin in RefreshRequest::policy
+  // (DescriptorPolicy::listing_origin), and a source of a listing without one is refused.
   std::string url;
   // Sent as the listing's credential header, which RefreshRequest::policy states. OpenRouter's listing needs none. Never written to a
   // report or an error.
   std::string api_key;
-  // The descriptor origin the generated entries are scoped to. Empty: the provider's API origin.
+  // The descriptor origin the generated entries are scoped to. Empty: the listing's default origin, as for `url`.
   std::string origin;
   // OpenRouter only: the models whose route ceilings (`ceiling_input`, `ceiling_output`, `ceiling_request`) to
   // read from their endpoints listings, GET /api/v1/models/{author}/{slug}/endpoints at `url`, one request per
@@ -115,7 +116,7 @@ struct RefreshResult {
 // `min_kept_percent` percent of the entries it gave before (unless `allow_drop`), a page token
 // cannot continue the listing, the listing does not fit the catalogue's bounds, or the refresh's
 // deadline passes. A ConfigError means the request itself is invalid (a non-https URL, an origin
-// that is not canonical, ceiling ids that are malformed, repeated, too many or not on an OpenRouter
+// that is not canonical, a source without a url or an origin of a listing the policy states no default origin for, ceiling ids that are malformed, repeated, too many or not on an OpenRouter
 // source) or the overlays do not merge.
 // With ListingSource::ceiling_models, each listed model named there gets the route ceiling its endpoints
 // listing gives, every unit at the dearest price of its side over every endpoint, or no ceiling for a unit
@@ -123,7 +124,8 @@ struct RefreshResult {
 // request fails keeps the ceiling `previous` had and does not fail the source.
 std::variant<RefreshResult, descriptor::ConfigError> refresh_catalogue(Transport& transport, const RefreshRequest& request);
 
-// The provider's public API URL and origin for a listing.
+// The default origin the built-in policy states for a listing (DescriptorPolicy::listing_origin): the provider's public
+// API URL and origin. refresh_catalogue reads the request's own policy instead.
 std::string default_listing_url(descriptor::Listing listing);
 
 } // namespace sp::transport

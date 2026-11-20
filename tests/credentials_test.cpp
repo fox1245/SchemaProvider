@@ -412,10 +412,12 @@ void content_digests() {
   CHECK(scoped && scoped->identity_hex() == builtin->identity_hex());
 }
 
-// A policy's `listings` facts name the family each model listing belongs to (DescriptorPolicy::listing_family). The
-// embedded policy states every listing; a policy that leaves one out has the embedded policy's, and its content digest
-// takes the borrowed value in behind the marker. A listing the SDK does not read, a family the policy does not have, a
-// listing stated twice and a fact with other members are refused.
+// A policy's `listings` facts name the family each model listing belongs to (DescriptorPolicy::listing_family) and the
+// origin a source of it defaults to (`default_origin`, #221). The embedded policy states both for every listing; a
+// policy that leaves a listing out has the embedded policy's family and origin, one that states a listing without
+// `default_origin` the embedded origin, and its content digest takes each borrowed value in behind the marker. A
+// `null` origin is none, and borrows nothing. A listing the SDK does not read, a family the policy does not have, a
+// listing stated twice, a fact with other members and an origin that is not canonical are refused.
 void listing_facts() {
   using descriptor::Listing;
   const std::pair<Listing, std::string_view> embedded[]{{Listing::OpenRouter, "openai.chat"}, {Listing::Gemini, "google.generate"},
@@ -423,14 +425,26 @@ void listing_facts() {
   const auto builtin = descriptor::builtin_policy();
   CHECK(descriptor::all_listings.size() == std::size(embedded));
   for (const auto& [listing, family] : embedded) CHECK(builtin->listing_family(listing) == family && builtin->family(family));
+  for (const auto& [listing, origin] : std::initializer_list<std::pair<Listing, std::string_view>>{
+           {Listing::OpenRouter, "https://openrouter.ai"}, {Listing::Gemini, "https://generativelanguage.googleapis.com"},
+           {Listing::Anthropic, "https://api.anthropic.com"}, {Listing::OpenAI, "https://api.openai.com"}})
+    CHECK(builtin->listing_origin(listing) == origin);
   // The embedded policy states every listing, so it borrows none.
   CHECK(builtin->content_digest_hex() == plain_digest(config_defaults::descriptor_policy_json));
   // Left out whole, or in part: the embedded value, behind the marker.
-  const auto borrowed_of = [&](std::initializer_list<Listing> listings) {
+  const std::pair<Listing, std::string_view> origins[]{{Listing::OpenRouter, "https://openrouter.ai"},
+                                                       {Listing::Gemini, "https://generativelanguage.googleapis.com"},
+                                                       {Listing::Anthropic, "https://api.anthropic.com"}, {Listing::OpenAI, "https://api.openai.com"}};
+  // The rows of the listings left out (`listings`: family and origin) and of the listings stated without an origin.
+  const auto borrowed_of = [&](std::initializer_list<Listing> listings, std::initializer_list<Listing> origins_only = {}) {
     std::vector<std::pair<std::string, std::string>> rows;
     for (const auto listing : listings)
       for (const auto& [kind, family] : embedded)
         if (kind == listing) rows.emplace_back("listing:" + std::string(descriptor::listing_name(listing)), "\"" + std::string(family) + "\"");
+    for (const auto& group : {listings, origins_only})
+      for (const auto listing : group)
+        for (const auto& [kind, origin] : origins)
+          if (kind == listing) rows.emplace_back("listing_origin:" + std::string(descriptor::listing_name(listing)), "\"" + std::string(origin) + "\"");
     std::sort(rows.begin(), rows.end());
     std::string out;
     for (const auto& [member, value] : rows)
@@ -447,7 +461,24 @@ void listing_facts() {
   const auto part = loaded_policy(part_text);
   CHECK(part && part->listing_family(Listing::OpenRouter) == "anthropic.messages" && part->listing_family(Listing::Gemini) == "google.interactions" &&
         part->listing_family(Listing::Anthropic) == "anthropic.messages" && part->listing_family(Listing::OpenAI) == "openai.chat");
-  CHECK(part && part->content_digest_hex() == plain_digest(part_text, borrowed_of({Listing::Anthropic, Listing::OpenAI})));
+  CHECK(part && part->content_digest_hex() == plain_digest(part_text, borrowed_of({Listing::Anthropic, Listing::OpenAI}, {Listing::OpenRouter, Listing::Gemini})));
+  // Every listing stated with its origin, the embedded values: nothing is borrowed. A `null` origin borrows nothing either.
+  const auto stated_text = policy_edit::edited({}, "listings",
+      R"([{"listing":"openrouter","family":"openai.chat","default_origin":"https://openrouter.ai"},)"
+      R"({"listing":"gemini","family":"google.generate","default_origin":"https://generativelanguage.googleapis.com"},)"
+      R"({"listing":"anthropic","family":"anthropic.messages","default_origin":"https://api.anthropic.com"},)"
+      R"({"listing":"openai","family":"openai.chat","default_origin":"https://api.openai.com"}])");
+  const auto stated = loaded_policy(stated_text);
+  CHECK(stated && stated->content_digest_hex() == plain_digest(stated_text));
+  const auto no_default_text = policy_edit::edited({}, "listings",
+      R"([{"listing":"openrouter","family":"openai.chat","default_origin":"https://openrouter.ai"},)"
+      R"({"listing":"gemini","family":"google.generate","default_origin":"https://generativelanguage.googleapis.com"},)"
+      R"({"listing":"anthropic","family":"anthropic.messages","default_origin":"https://api.anthropic.com"},)"
+      R"({"listing":"openai","family":"openai.chat","default_origin":null}])");
+  const auto no_default = loaded_policy(no_default_text);
+  CHECK(no_default && no_default->content_digest_hex() == plain_digest(no_default_text));
+  CHECK(no_default && no_default->listing_origin(Listing::OpenAI).empty() && no_default->listing_origin(Listing::Gemini) == "https://generativelanguage.googleapis.com");
+  CHECK(part && part->listing_origin(Listing::OpenRouter) == "https://openrouter.ai" && none && none->listing_origin(Listing::Anthropic) == "https://api.anthropic.com");
   // The facts are not part of the replay identity, and another catalogue keeps them.
   CHECK(part && part->identity_hex() == builtin->identity_hex() && none->identity_hex() == builtin->identity_hex());
   if (part) {
@@ -461,6 +492,9 @@ void listing_facts() {
   policy_refused(policy_edit::edited({}, "listings", R"([{"listing":"openai","family":"openai.chat","scheme":"bearer"}])"), "/listings");
   policy_refused(policy_edit::edited({}, "listings", R"({"openai":"openai.chat"})"), "/listings");
   policy_refused(policy_edit::edited({}, "listings", R"([{"listing":"openai"}])"), "/listings");
+  for (const auto* origin : {R"("https://API.openai.com")", R"("https://api.openai.com:443")", R"("https://api.openai.com/v1")", R"("api.openai.com")", R"("")", "5"})
+    policy_refused(policy_edit::edited({}, "listings", std::string(R"([{"listing":"openai","family":"openai.chat","default_origin":)") + origin + "}]"),
+                   "/listings/default_origin");
 }
 
 // A descriptor states the scheme of its own calls with `connection.auth`, at any origin: the Messages or Generate

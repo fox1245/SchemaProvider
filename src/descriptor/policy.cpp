@@ -703,15 +703,18 @@ class PolicyLoader {
         if(f.defaults.strict_tools && f.family!="openai.responses") fail("/defaults/strict_tools","Responses strict tools only");
         policy->families_.push_back(std::move(f));
       }
-      // The family each model listing belongs to. A listing the policy leaves out (or every listing, for a policy
-      // written before the facts) has the embedded policy's, and its content digest covers them (borrowed_). The
-      // embedded policy states every listing.
+      // The family each model listing belongs to, and the origin a source of it defaults to (#221). A listing the policy
+      // leaves out (or every listing, for a policy written before the facts) has the embedded policy's family and
+      // origin, and a listing stated without `default_origin` the embedded origin; its content digest covers them
+      // (borrowed_). A `null` origin states that the listing has none. The embedded policy states every listing.
       {
         std::vector<std::optional<std::string>> stated(all_listings.size());
+        // The origin each fact states: empty for `null`, nothing where the fact does not state it.
+        std::vector<std::optional<std::string>> stated_origins(all_listings.size());
         if (const auto facts = root.get("listings"); facts.valid()) {
           if (!facts.is_array() || facts.size() > all_listings.size()) fail("/listings", "array of at most one fact per listing");
           for (auto item : facts.elements()) {
-            closed(item, {"listing", "family"}, "/listings");
+            closed(item, {"listing", "family"}, "/listings", {"default_origin"});
             const auto name = item.get("listing");
             const auto at = std::find_if(all_listings.begin(), all_listings.end(),
                                          [&](Listing listing) { return name.is_string() && listing_name(listing) == name.as_string(); });
@@ -720,18 +723,36 @@ class PolicyLoader {
             if (slot) fail("/listings/listing", "each listing once");
             slot = text(item.get("family"), "/listings/family");
             if (!policy->family(*slot)) fail("/listings/family", "a family of the policy");
+            if (const auto origin = item.get("default_origin"); origin.valid()) {
+              auto& stated_origin = stated_origins[static_cast<std::size_t>(at - all_listings.begin())];
+              if (origin.is_null()) {
+                stated_origin = std::string();
+              } else {
+                stated_origin = text(origin, "/listings/default_origin");
+                if (!valid_origin(*stated_origin) || stated_origin->ends_with('/')) fail("/listings/default_origin", "canonical origin without path");
+                canonical_spelling(*stated_origin, "/listings/default_origin");
+              }
+            }
           }
         }
         for (std::size_t i = 0; i < all_listings.size(); ++i) {
+          const std::string name(listing_name(all_listings[i]));
           if (stated[i]) {
             policy->listings_.emplace_back(all_listings[i], *stated[i]);
-            continue;
+          } else {
+            const auto embedded = embedded_listing(all_listings[i]);
+            if (!embedded) fail("/listings", "a family for every listing in the embedded policy");
+            if (!policy->family(*embedded)) fail("/listings/family", "a family of the policy");
+            policy->listings_.emplace_back(all_listings[i], *embedded);
+            borrowed.push_back({{std::string(), "listing:" + name}, "\"" + *embedded + "\""});
           }
-          const auto embedded = embedded_listing(all_listings[i]);
-          if (!embedded) fail("/listings", "a family for every listing in the embedded policy");
-          if (!policy->family(*embedded)) fail("/listings/family", "a family of the policy");
-          policy->listings_.emplace_back(all_listings[i], *embedded);
-          borrowed.push_back({{std::string(), "listing:" + std::string(listing_name(all_listings[i]))}, "\"" + *embedded + "\""});
+          if (stated_origins[i]) {
+            policy->listing_origins_.emplace_back(all_listings[i], *stated_origins[i]);
+          } else {
+            const auto embedded = embedded_listing_origin(all_listings[i]);
+            policy->listing_origins_.emplace_back(all_listings[i], embedded.value_or(std::string()));
+            if (embedded) borrowed.push_back({{std::string(), "listing_origin:" + name}, json::quote(*embedded)});
+          }
         }
       }
       // Non-chat endpoints (D6): each names a compiled codec shape, its origins, the path of each operation and
@@ -1238,6 +1259,15 @@ class PolicyLoader {
           return std::string(item.get("family").as_string());
     return std::nullopt;
   }
+  // The origin the embedded policy states for a listing (`default_origin`), if it states one.
+  static std::optional<std::string> embedded_listing_origin(Listing listing) {
+    const auto facts = embedded_root().get("listings");
+    if (facts.valid() && facts.is_array())
+      for (auto item : facts.elements())
+        if (item.get("listing").is_string() && item.get("listing").as_string() == listing_name(listing) && item.get("default_origin").is_string())
+          return std::string(item.get("default_origin").as_string());
+    return std::nullopt;
+  }
   // The embedded policy's document. It is parsed once and never goes through builtin_policy(), which runs this loader.
   static Value embedded_root() {
     static const auto parsed = json::parse(config_defaults::descriptor_policy_json,
@@ -1286,6 +1316,10 @@ class PolicyLoader {
 };
 std::string_view DescriptorPolicy::listing_family(Listing listing) const noexcept {
   for (const auto& [kind, family] : listings_) if (kind == listing) return family;
+  return {};
+}
+std::string_view DescriptorPolicy::listing_origin(Listing listing) const noexcept {
+  for (const auto& [kind, origin] : listing_origins_) if (kind == listing) return origin;
   return {};
 }
 const std::vector<RouteFact>& DescriptorPolicy::routes(std::string_view family) const noexcept {

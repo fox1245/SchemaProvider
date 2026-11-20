@@ -93,6 +93,12 @@ const server = http.createServer((req, res) => {
     if (after === null) return send(res, 200, anthropic.first);
     return after === 'claude-test-a' ? send(res, 200, anthropic.second) : send(res, 400, {});
   }
+  // The OpenAI listing at the root of the origin, where a policy's default origin names the peer itself (no scenario
+  // prefix, so the first segment `v1` stands in for it).
+  if (scenario === 'v1' && path === '/models') {
+    if (h.authorization !== `Bearer ${keys.openai}`) return send(res, 401, {});
+    return send(res, 200, openai);
+  }
   if (scenario === 'openai' || scenario === 'openai-builtin') {
     if (path !== '/v1/models') return send(res, 404, {});
     if (h.authorization !== `Bearer ${keys.openai}`) return send(res, 401, {});
