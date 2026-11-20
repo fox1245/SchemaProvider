@@ -70,10 +70,9 @@ Codec::Codec(const descriptor::ValidatedDescriptor& descriptor, Mode mode, Accum
   served::observe(descriptor_, accumulator_, context_, {});
 }
 bool Codec::emit(const Event& e) { return accumulator_.accept(e, buffered_failure_ ? &*buffered_failure_ : nullptr); }
-bool Codec::fail(ErrorKind kind, std::string text) {
+bool Codec::fail(ErrorKind kind, const reason::Reason& text) {
   if (buffered_failure_ && !closed_) return false;
-  Error error{kind, std::move(text)};
-  error.reason = reason::code(reason::Source::Messages, error.safe_message);
+  Error error = reason::error(kind, text);
   emit(Fail{std::move(error)}); return false;
 }
 void Codec::unknown(json::Value v, std::initializer_list<std::string_view> known) {
@@ -82,11 +81,11 @@ void Codec::unknown(json::Value v, std::initializer_list<std::string_view> known
 std::shared_ptr<const json::Document> Codec::own(json::Value v) {
   auto parsed = json::parse(v.dump(), {limits_.max_content_bytes, limits_.max_json_depth});
   if (auto* doc = std::get_if<json::Document>(&parsed)) return std::make_shared<const json::Document>(std::move(*doc));
-  fail(ErrorKind::ProtocolCorrupt, "invalid retained JSON"); return {};
+  fail(ErrorKind::ProtocolCorrupt, reason::messages::retained_json_invalid); return {};
 }
 bool Codec::buffered(std::string_view body, Close close) {
   if (closed_ || accumulator_.terminal()) return false;
-  if (mode_ != Mode::Buffered || body_seen_) return fail(ErrorKind::Misuse, "unexpected buffered response");
+  if (mode_ != Mode::Buffered || body_seen_) return fail(ErrorKind::Misuse, reason::messages::buffered_unexpected);
   body_seen_ = true;
   if (!close.normal) buffered_failure_ = Error{close.error, "abnormal response close"};
   const bool decoded = document(body, {}, false);
@@ -95,7 +94,7 @@ bool Codec::buffered(std::string_view body, Close close) {
 }
 bool Codec::frame(std::string_view event, std::string_view data) {
   if (closed_ || accumulator_.terminal()) return false;
-  if (mode_ != Mode::Sse) return fail(ErrorKind::Misuse, "unexpected stream frame");
+  if (mode_ != Mode::Sse) return fail(ErrorKind::Misuse, reason::messages::stream_frame_unexpected);
   // A declared routing gateway appends one `[DONE]` sentinel after message_stop. Anything
   // else after message_stop, a repeated sentinel, or a sentinel elsewhere stays corrupt.
   if (done_ && !sentinel_ && data == "[DONE]" && (event.empty() || event == "message" || event == "data") && descriptor::routed_gateway(descriptor_)) {
@@ -105,9 +104,9 @@ bool Codec::frame(std::string_view event, std::string_view data) {
 }
 bool Codec::document(std::string_view bytes, std::string_view event, bool streaming) {
   const bool named_error = streaming && event == "error";
-  if (!named_error && !context_valid_) return fail(ErrorKind::InvalidConfig, "Messages request context required");
+  if (!named_error && !context_valid_) return fail(ErrorKind::InvalidConfig, reason::messages::context_required);
   if (bytes.size() > limits_.max_content_bytes - std::min(input_bytes_, limits_.max_content_bytes))
-    return fail(named_error ? ErrorKind::RemoteFailure : ErrorKind::ResourceLimit, named_error ? "remote error event" : "response byte limit");
+    return fail(named_error ? ErrorKind::RemoteFailure : ErrorKind::ResourceLimit, named_error ? reason::messages::remote_error_event : reason::messages::response_byte_limit);
   input_bytes_ += bytes.size();
   auto parsed = json::parse(bytes, {limits_.max_content_bytes, limits_.max_json_depth});
   std::shared_ptr<const json::Document> wire;
@@ -115,39 +114,41 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
     if (!streaming && e->code == json::ParseCode::DuplicateKey && e->context.root().is_object() && unique_envelope(e->context.root(), true))
       wire = std::make_shared<const json::Document>(std::move(e->context));
     else return fail(named_error ? ErrorKind::RemoteFailure : e->code == json::ParseCode::SizeExceeded || e->code == json::ParseCode::DepthExceeded ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt,
-                     named_error ? "remote error event" : "invalid response JSON");
+                     named_error ? reason::messages::remote_error_event : reason::messages::response_json_invalid);
   } else wire = std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
   const auto root = wire->root();
-  if (!root.is_object()) return fail(named_error ? ErrorKind::RemoteFailure : ErrorKind::ProtocolCorrupt, named_error ? "remote error event" : "response must be object");
+  if (!root.is_object()) return fail(named_error ? ErrorKind::RemoteFailure : ErrorKind::ProtocolCorrupt, named_error ? reason::messages::remote_error_event : reason::messages::response_object_required);
   const auto payload_type = root.get("type");
   std::string wire_type = named_error ? std::string(event)
       : nonempty(payload_type) ? std::string(payload_type.as_string())
       : !streaming ? "messages.buffered" : std::string(event);
   if (named_error) {
-    const Error remote{ErrorKind::RemoteFailure, "remote error event"};
+    // The classification takes precedence over a failure to retain the document, and carries no code there.
+    const Error remote{ErrorKind::RemoteFailure, std::string(reason::messages::remote_error_event.message)};
     if (!accumulator_.accept(RawWire{std::move(wire_type), wire}, &remote)) return false;
-    return fail(remote.kind, remote.safe_message);
+    return fail(remote.kind, reason::messages::remote_error_event);
   }
   if (root.get("error").valid() || (payload_type.is_string() && payload_type.as_string() == "error")) {
-    const Error remote{ErrorKind::RemoteFailure, "remote error response"};
+    // The classification takes precedence over a failure to retain the document, and carries no code there.
+    const Error remote{ErrorKind::RemoteFailure, std::string(reason::messages::remote_error_response.message)};
     if (!accumulator_.accept(RawWire{std::move(wire_type), wire},
                              buffered_failure_ ? &*buffered_failure_ : &remote)) return false;
-    return fail(remote.kind, remote.safe_message);
+    return fail(remote.kind, reason::messages::remote_error_response);
   }
   if (!emit(RawWire{std::move(wire_type), wire})) return false;
-  if (!root.get("type").is_string()) return fail(ErrorKind::ProtocolCorrupt, "response type required");
+  if (!root.get("type").is_string()) return fail(ErrorKind::ProtocolCorrupt, reason::messages::response_type_required);
   const auto type = root.get("type").as_string();
   if (!streaming) return message(root, false);
-  if (event != type) return fail(ErrorKind::ProtocolCorrupt, "SSE event and payload type disagree");
+  if (event != type) return fail(ErrorKind::ProtocolCorrupt, reason::messages::event_type_mismatch);
   if (type == "ping") { unknown(root, {"type"}); return true; }
-  if (done_) return fail(ErrorKind::ProtocolCorrupt, "event after message_stop");
+  if (done_) return fail(ErrorKind::ProtocolCorrupt, reason::messages::stream_event_after_stop);
   if (type == "message_start") {
     unknown(root, {"type", "message"});
-    if (begun_) return fail(ErrorKind::ProtocolCorrupt, "duplicate message_start");
+    if (begun_) return fail(ErrorKind::ProtocolCorrupt, reason::messages::message_start_duplicate);
     return message(root.get("message"), true);
   }
-  if (type != "content_block_start" && type != "content_block_delta" && type != "content_block_stop" && type != "message_delta" && type != "message_stop") return fail(ErrorKind::Unsupported, "unknown Messages event");
-  if (!begun_) return fail(ErrorKind::ProtocolCorrupt, "event before message_start");
+  if (type != "content_block_start" && type != "content_block_delta" && type != "content_block_stop" && type != "message_delta" && type != "message_stop") return fail(ErrorKind::Unsupported, reason::messages::event_unknown);
+  if (!begun_) return fail(ErrorKind::ProtocolCorrupt, reason::messages::stream_event_before_start);
   if (!identity(root, false)) return false;
   if (type == "message_delta") {
     // Threshold compaction reports `context_management` beside the delta, not in it.
@@ -155,7 +156,7 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
     if (!all_blocks_closed()) return false;
     message_delta_ = true;
     auto d = root.get("delta");
-    if (!d.is_object()) return fail(ErrorKind::ProtocolCorrupt, "message delta required");
+    if (!d.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::messages::message_delta_required);
     unknown(d, {"stop_reason", "stop_sequence", "stop_details", "container", "id", "model", "role", "input_transformations", "context_management", served::upstream_key(descriptor_)});
     if (!identity(d, false) || !metadata(d) || !metadata(root) || !usage(usage_at(root), false)) return false;
     return terminal(d);
@@ -165,11 +166,11 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
     if (!all_blocks_closed()) return false;
     done_ = true; return true;
   }
-  if (message_delta_ || stopped_) return fail(ErrorKind::ProtocolCorrupt, "content after message delta");
+  if (message_delta_ || stopped_) return fail(ErrorKind::ProtocolCorrupt, reason::messages::stream_content_after_delta);
   auto index = root.get("index");
-  if (!count_value(index)) return fail(ErrorKind::ProtocolCorrupt, "block index required");
+  if (!count_value(index)) return fail(ErrorKind::ProtocolCorrupt, reason::messages::block_index_required);
   const auto position = number(index);
-  if (position >= limits_.max_parts || position >= std::numeric_limits<uint32_t>::max()) return fail(ErrorKind::ResourceLimit, "block index limit");
+  if (position >= limits_.max_parts || position >= std::numeric_limits<uint32_t>::max()) return fail(ErrorKind::ResourceLimit, reason::messages::block_index_limit);
   if (type == "content_block_start") { unknown(root, {"type", "index", "content_block", "id", "model", served::upstream_key(descriptor_)}); return block(root.get("content_block"), position, true); }
   if (type == "content_block_delta") { unknown(root, {"type", "index", "delta", "id", "model", served::upstream_key(descriptor_)}); return delta(root.get("delta"), position); }
   unknown(root, {"type", "index", "id", "model", served::upstream_key(descriptor_)}); return end_block(position);
@@ -178,14 +179,14 @@ bool Codec::identity(json::Value v, bool required) {
   auto id = v.get("id"), model = v.get("model"), role = v.get("role");
   if ((required && (!id.valid() || !model.valid() || !role.valid())) ||
       (id.valid() && !nonempty(id)) || (model.valid() && !nonempty(model)) ||
-      (role.valid() && (!role.is_string() || role.as_string() != "assistant"))) return fail(ErrorKind::ProtocolCorrupt, "invalid message identity");
+      (role.valid() && (!role.is_string() || role.as_string() != "assistant"))) return fail(ErrorKind::ProtocolCorrupt, reason::messages::identity_invalid);
   // Another name than the request never fails a billed response; it is recorded and classified,
   // and an unexplained one withholds replay authority. The name must stay stable, below.
   if (model.valid() && !begun_) served::observe(descriptor_, accumulator_, context_, model.as_string());
-  if (begun_ && ((id.valid() && id.as_string() != generation_) || (model.valid() && model.as_string() != model_))) return fail(ErrorKind::ProtocolCorrupt, "inconsistent message identity");
+  if (begun_ && ((id.valid() && id.as_string() != generation_) || (model.valid() && model.as_string() != model_))) return fail(ErrorKind::ProtocolCorrupt, reason::messages::identity_changed);
   // A gateway names the serving upstream in the message object; the first usable name is kept and another one is a different message.
   switch (served::observe_upstream(descriptor_, v, upstream_, accumulator_)) {
-    case served::UpstreamSeen::Conflict: return fail(ErrorKind::ProtocolCorrupt, "inconsistent message identity");
+    case served::UpstreamSeen::Conflict: return fail(ErrorKind::ProtocolCorrupt, reason::messages::identity_changed);
     case served::UpstreamSeen::Unusable: ++diagnostics_.unknown_properties; break;
     case served::UpstreamSeen::Fine: break;
   }
@@ -196,7 +197,7 @@ bool Codec::metadata(json::Value v) {
     auto item = v.get(key);
     if (!item.valid() || item.is_null()) continue;
     const bool array = std::string_view(key) == "input_transformations";
-    if (array ? !item.is_array() : !item.is_object()) return fail(ErrorKind::ProtocolCorrupt, "invalid known message metadata");
+    if (array ? !item.is_array() : !item.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::messages::metadata_invalid);
     if (array && item.size() == 0) continue;
     // The code-execution container (also opened by dynamic filtering in the web tools) and
     // cache diagnostics describe the response; they do not change its content. They stay in
@@ -208,21 +209,21 @@ bool Codec::metadata(json::Value v) {
       unknown(item, {"applied_edits"});
       const auto edits = item.get("applied_edits");
       if (!edits.valid() || edits.is_null() || (edits.is_array() && edits.size() == 0)) continue;
-      if (!edits.is_array()) return fail(ErrorKind::ProtocolCorrupt, "invalid known message metadata");
+      if (!edits.is_array()) return fail(ErrorKind::ProtocolCorrupt, reason::messages::metadata_invalid);
     }
-    return fail(ErrorKind::Unsupported, "unsupported semantic message metadata");
+    return fail(ErrorKind::Unsupported, reason::messages::metadata_unsupported);
   }
   return true;
 }
 bool Codec::message(json::Value v, bool streaming) {
-  if (!v.is_object() || !v.get("type").is_string()) return fail(ErrorKind::ProtocolCorrupt, "message object required");
-  if (v.get("type").as_string() != "message") return fail(ErrorKind::Unsupported, "unknown response object type");
-  if (begun_) return fail(ErrorKind::ProtocolCorrupt, "duplicate message");
+  if (!v.is_object() || !v.get("type").is_string()) return fail(ErrorKind::ProtocolCorrupt, reason::messages::message_object_required);
+  if (v.get("type").as_string() != "message") return fail(ErrorKind::Unsupported, reason::messages::message_type_unknown);
+  if (begun_) return fail(ErrorKind::ProtocolCorrupt, reason::messages::message_duplicate);
   unknown(v, {"id", "type", "role", "model", "content", "usage", "stop_reason", "stop_sequence", "stop_details", "container", "diagnostics", "context_management", "input_transformations", descriptor_.usage_path().front(), served::upstream_key(descriptor_)});
   if (!identity(v, true) || !metadata(v)) return false;
   auto content = v.get("content");
-  if (!content.is_array() || (streaming && content.size())) return fail(ErrorKind::ProtocolCorrupt, "invalid initial content");
-  if (!usage_at(v).is_object()) return fail(ErrorKind::ProtocolCorrupt, "usage object required");
+  if (!content.is_array() || (streaming && content.size())) return fail(ErrorKind::ProtocolCorrupt, reason::messages::message_content_invalid);
+  if (!usage_at(v).is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::messages::usage_object_required);
   generation_ = v.get("id").as_string(); model_ = v.get("model").as_string();
   if (!emit(Begin{generation_}) || !emit(MessageBegin{{0}, generation_, Role::Assistant, context_})) return false;
   begun_ = true;
@@ -237,33 +238,33 @@ bool Codec::message(json::Value v, bool streaming) {
 }
 bool Codec::all_blocks_closed() {
   uint64_t expected = 0;
-  for (const auto& [index, b] : blocks_) if (index != expected++ || !b.closed) return fail(ErrorKind::ProtocolCorrupt, "incomplete block lifecycle or index gap");
+  for (const auto& [index, b] : blocks_) if (index != expected++ || !b.closed) return fail(ErrorKind::ProtocolCorrupt, reason::messages::block_lifecycle_incomplete);
   return true;
 }
 bool Codec::terminal(json::Value v, bool initial) {
   auto reason = v.get("stop_reason"), sequence = v.get("stop_sequence"), details = v.get("stop_details");
-  if (!reason.valid() || (!reason.is_null() && !nonempty(reason)) || !nullable_string(sequence) || (details.valid() && !details.is_null() && !details.is_object())) return fail(ErrorKind::ProtocolCorrupt, "invalid stop fields");
+  if (!reason.valid() || (!reason.is_null() && !nonempty(reason)) || !nullable_string(sequence) || (details.valid() && !details.is_null() && !details.is_object())) return fail(ErrorKind::ProtocolCorrupt, reason::messages::stop_fields_invalid);
   if (details.is_object()) {
-    if (!nonempty(details.get("type")) || !nullable_string(details.get("category")) || !nullable_string(details.get("explanation"))) return fail(ErrorKind::ProtocolCorrupt, "invalid stop details");
-    if (details.get("type").as_string() != "refusal") return fail(ErrorKind::Unsupported, "unknown stop details type");
+    if (!nonempty(details.get("type")) || !nullable_string(details.get("category")) || !nullable_string(details.get("explanation"))) return fail(ErrorKind::ProtocolCorrupt, reason::messages::stop_details_invalid);
+    if (details.get("type").as_string() != "refusal") return fail(ErrorKind::Unsupported, reason::messages::stop_details_unknown);
   }
-  if (initial && (!reason.is_null() || sequence.is_string() || details.is_object())) return fail(ErrorKind::ProtocolCorrupt, "terminal fields in message_start");
+  if (initial && (!reason.is_null() || sequence.is_string() || details.is_object())) return fail(ErrorKind::ProtocolCorrupt, reason::messages::message_start_terminal_fields);
   if (reason.is_null()) {
-    if (sequence.is_string() || details.is_object()) return fail(ErrorKind::ProtocolCorrupt, "stop metadata without reason");
+    if (sequence.is_string() || details.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::messages::stop_reason_missing);
     return true;
   }
   // A failure-class word (no stop table may list one) fails the call before a stop is emitted.
   if (const auto failure = descriptor::failure_stop_class(reason.as_string())) {
-    if (*failure == descriptor::FailureStop::Cancelled) return fail(ErrorKind::Cancelled, "cancelled stop reason");
-    if (*failure == descriptor::FailureStop::Incomplete) return fail(ErrorKind::Unsupported, "unsupported stop reason");
-    return fail(ErrorKind::RemoteFailure, "remote failure stop");
+    if (*failure == descriptor::FailureStop::Cancelled) return fail(ErrorKind::Cancelled, reason::messages::stop_cancelled);
+    if (*failure == descriptor::FailureStop::Incomplete) return fail(ErrorKind::Unsupported, reason::messages::stop_reason_unsupported);
+    return fail(ErrorKind::RemoteFailure, reason::messages::remote_failure_stop);
   }
   StopReason next{table_stop(descriptor_, reason.as_string()), std::string(reason.as_string())};
   if (sequence.is_string()) next.sequence = std::string(sequence.as_string());
   if (details.is_object()) next.details = own(details);
-  if ((next.kind == StopKind::StopSequence) != next.sequence.has_value() || (next.details && next.kind != StopKind::Refusal)) return fail(ErrorKind::ProtocolCorrupt, "contradictory stop metadata");
+  if ((next.kind == StopKind::StopSequence) != next.sequence.has_value() || (next.details && next.kind != StopKind::Refusal)) return fail(ErrorKind::ProtocolCorrupt, reason::messages::stop_metadata_contradiction);
   if (stop_) {
-    if (stop_->raw != next.raw || stop_->sequence != next.sequence || bool(stop_->details) != bool(next.details) || (next.details && !json::equal(stop_->details->root(), next.details->root()))) return fail(ErrorKind::ProtocolCorrupt, "contradictory stop reason");
+    if (stop_->raw != next.raw || stop_->sequence != next.sequence || bool(stop_->details) != bool(next.details) || (next.details && !json::equal(stop_->details->root(), next.details->root()))) return fail(ErrorKind::ProtocolCorrupt, reason::messages::stop_reason_contradiction);
     return true;
   }
   if (!emit(Stop{next})) return false;
@@ -271,22 +272,22 @@ bool Codec::terminal(json::Value v, bool initial) {
 }
 bool Codec::caller(json::Value v) {
   if (!v.valid()) return true;
-  if (!v.is_object() || !nonempty(v.get("type"))) return fail(ErrorKind::ProtocolCorrupt, "invalid tool caller");
+  if (!v.is_object() || !nonempty(v.get("type"))) return fail(ErrorKind::ProtocolCorrupt, reason::messages::caller_invalid);
   const auto type = v.get("type").as_string();
   if (type == "direct") {
-    if (v.get("tool_id").valid()) return fail(ErrorKind::ProtocolCorrupt, "direct caller has tool id");
+    if (v.get("tool_id").valid()) return fail(ErrorKind::ProtocolCorrupt, reason::messages::caller_direct_with_id);
     return true;
   }
   // A server tool calling a client tool (programmatic calling) is named by its type, which the policy admits.
   const auto& tools = descriptor_.family_policy().server_tools;
   if (std::none_of(tools.begin(), tools.end(), [&](const auto& fact) { return !fact.client && fact.type == type; }))
-    return fail(ErrorKind::Unsupported, "unknown tool caller type");
-  return nonempty(v.get("tool_id")) || fail(ErrorKind::ProtocolCorrupt, "server caller id required");
+    return fail(ErrorKind::Unsupported, reason::messages::caller_type_unknown);
+  return nonempty(v.get("tool_id")) || fail(ErrorKind::ProtocolCorrupt, reason::messages::caller_id_required);
 }
 bool Codec::block(json::Value v, uint64_t index, bool streaming) {
-  if (index >= limits_.max_parts || index >= std::numeric_limits<uint32_t>::max() || blocks_.size() >= limits_.max_parts) return fail(ErrorKind::ResourceLimit, "block count limit");
-  if (blocks_.contains(index)) return fail(ErrorKind::ProtocolCorrupt, "duplicate block index");
-  if (!v.is_object() || !nonempty(v.get("type"))) return fail(ErrorKind::ProtocolCorrupt, "content block type required");
+  if (index >= limits_.max_parts || index >= std::numeric_limits<uint32_t>::max() || blocks_.size() >= limits_.max_parts) return fail(ErrorKind::ResourceLimit, reason::messages::block_count_limit);
+  if (blocks_.contains(index)) return fail(ErrorKind::ProtocolCorrupt, reason::messages::block_index_duplicate);
+  if (!v.is_object() || !nonempty(v.get("type"))) return fail(ErrorKind::ProtocolCorrupt, reason::messages::block_type_required);
   const auto type = v.get("type").as_string();
   PartKind kind;
   PartHeader header;
@@ -297,41 +298,41 @@ bool Codec::block(json::Value v, uint64_t index, bool streaming) {
   if (type == "text") {
     kind = PartKind::Text;
     unknown(v, {"type", "text", "citations"});
-    if (!v.get("text").is_string()) return fail(ErrorKind::ProtocolCorrupt, "text required");
+    if (!v.get("text").is_string()) return fail(ErrorKind::ProtocolCorrupt, reason::messages::block_text_required);
     // Citations (web_search_result_location, char_location, ...) become citations of the text; the retained wire
     // keeps them as received.
     auto citations = v.get("citations");
     if (citations.valid() && !citations.is_null()) {
-      if (!citations.is_array()) return fail(ErrorKind::ProtocolCorrupt, "invalid citations");
-      if (citations.size() > limits_.max_parts) return fail(ErrorKind::ResourceLimit, "citation count limit");
+      if (!citations.is_array()) return fail(ErrorKind::ProtocolCorrupt, reason::messages::block_citations_invalid);
+      if (citations.size() > limits_.max_parts) return fail(ErrorKind::ResourceLimit, reason::messages::block_citation_limit);
       for (auto citation : citations.elements()) {
-        if (!citation.is_object() || !nonempty(citation.get("type"))) return fail(ErrorKind::ProtocolCorrupt, "invalid citation");
+        if (!citation.is_object() || !nonempty(citation.get("type"))) return fail(ErrorKind::ProtocolCorrupt, reason::messages::block_citation_invalid);
         block_citations.push_back(citation_of(citation));
       }
     }
     bytes = v.get("text").as_string();
   } else if (type == "thinking") {
     kind = PartKind::Thinking; unknown(v, {"type", "thinking", "signature"});
-    if (!v.get("thinking").is_string() || (v.get("signature").valid() && !v.get("signature").is_string())) return fail(ErrorKind::ProtocolCorrupt, "invalid thinking fields");
+    if (!v.get("thinking").is_string() || (v.get("signature").valid() && !v.get("signature").is_string())) return fail(ErrorKind::ProtocolCorrupt, reason::messages::block_thinking_invalid);
     bytes = v.get("thinking").as_string();
   } else if (type == "redacted_thinking") {
     kind = PartKind::RedactedThinking; unknown(v, {"type", "data"});
-    if (!v.get("data").is_string()) return fail(ErrorKind::ProtocolCorrupt, "redacted data required");
+    if (!v.get("data").is_string()) return fail(ErrorKind::ProtocolCorrupt, reason::messages::block_redacted_data_required);
     bytes = v.get("data").as_string();
   } else if (type == "tool_use" || type == "server_tool_use" || type == "mcp_tool_use") {
     kind = PartKind::ToolCall;
-    if (!nonempty(v.get("id")) || !nonempty(v.get("name")) || !v.get("input").is_object()) return fail(ErrorKind::ProtocolCorrupt, "invalid tool block");
-    if (type == "mcp_tool_use" && !nonempty(v.get("server_name"))) return fail(ErrorKind::ProtocolCorrupt, "MCP call names no server");
+    if (!nonempty(v.get("id")) || !nonempty(v.get("name")) || !v.get("input").is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::messages::block_tool_invalid);
+    if (type == "mcp_tool_use" && !nonempty(v.get("server_name"))) return fail(ErrorKind::ProtocolCorrupt, reason::messages::block_mcp_server_missing);
     if (!caller(v.get("caller"))) return false;
     const auto toolset = v.get("toolset_name");
     if (type == "tool_use" && (!nullable_string(toolset) || (toolset.is_string() &&
         (toolset.as_string().empty() || toolset.as_string().size() > 64 ||
          !std::all_of(toolset.as_string().begin(), toolset.as_string().end(), [](unsigned char c) {
            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
-         }))))) return fail(ErrorKind::ProtocolCorrupt, "invalid toolset name");
+         }))))) return fail(ErrorKind::ProtocolCorrupt, reason::messages::block_toolset_invalid);
     header.wire_id = v.get("id").as_string(); header.name = v.get("name").as_string(); header.wire_type = type;
     header.tool_kind = type == "tool_use" ? ToolCallKind::ClientExecuted : ToolCallKind::ServerExecuted;
-    if (calls_.contains(header.wire_id) || context_->server_tool_name(header.wire_id)) return fail(ErrorKind::ProtocolCorrupt, "duplicate tool id");
+    if (calls_.contains(header.wire_id) || context_->server_tool_name(header.wire_id)) return fail(ErrorKind::ProtocolCorrupt, reason::messages::block_tool_id_duplicate);
     std::string extras = "{";
     for (auto m : v.members()) if (m.key != "type" && m.key != "id" && m.key != "name" && m.key != "input") {
       if (extras.size() > 1) extras += ',';
@@ -339,7 +340,7 @@ bool Codec::block(json::Value v, uint64_t index, bool streaming) {
     }
     if (extras.size() > 1) {
       extras += '}'; auto doc = json::parse(extras, {limits_.max_content_bytes, limits_.max_json_depth});
-      if (!std::holds_alternative<json::Document>(doc)) return fail(ErrorKind::ProtocolCorrupt, "invalid tool metadata");
+      if (!std::holds_alternative<json::Document>(doc)) return fail(ErrorKind::ProtocolCorrupt, reason::messages::block_tool_metadata_invalid);
       header.wire_metadata = std::make_shared<const json::Document>(std::move(std::get<json::Document>(doc)));
     }
     // An MCP call is answered by `mcp_tool_result`, so it pairs as a call of the tool `mcp`.
@@ -348,14 +349,14 @@ bool Codec::block(json::Value v, uint64_t index, bool streaming) {
     if (!streaming || initial_input) { storage = v.get("input").dump(); bytes = storage; }
   } else if (!result_name(type).empty()) {
     kind = PartKind::ServerToolResult;
-    if (!nonempty(v.get("tool_use_id"))) return fail(ErrorKind::ProtocolCorrupt, "invalid server result identity");
+    if (!nonempty(v.get("tool_use_id"))) return fail(ErrorKind::ProtocolCorrupt, reason::messages::block_server_result_identity_invalid);
     if (!caller(v.get("caller"))) return false;
     header.wire_id = v.get("tool_use_id").as_string(); header.wire_type = type;
     auto call = calls_.find(header.wire_id);
     bool correlated = false;
     if (call != calls_.end()) correlated = call->second.kind == ToolCallKind::ServerExecuted && call->second.index < index && result_matches(type, call->second.name);
     else if (auto name = context_->server_tool_name(header.wire_id)) correlated = result_matches(type, *name);
-    if (!correlated || !results_.insert(header.wire_id).second) return fail(ErrorKind::ProtocolCorrupt, "uncorrelated server result");
+    if (!correlated || !results_.insert(header.wire_id).second) return fail(ErrorKind::ProtocolCorrupt, reason::messages::block_server_result_uncorrelated);
     if (!server_content(type, v.get("content"))) return false;
     storage = v.dump(); bytes = storage;
   } else if (std::any_of(descriptor_.family_policy().response_blocks.begin(), descriptor_.family_policy().response_blocks.end(),
@@ -365,7 +366,7 @@ bool Codec::block(json::Value v, uint64_t index, bool streaming) {
     header.wire_type = type;
     header.wire_metadata = own(v);
     if (!header.wire_metadata) return false;
-  } else return fail(ErrorKind::Unsupported, "unsupported content block type");
+  } else return fail(ErrorKind::Unsupported, reason::messages::block_type_unsupported);
   Block binding{LocalId{static_cast<uint32_t>(index + 1)}, kind};
   binding.initial_input = initial_input;
   binding.citations = std::move(block_citations);
@@ -381,8 +382,8 @@ bool Codec::block(json::Value v, uint64_t index, bool streaming) {
 }
 bool Codec::delta(json::Value v, uint64_t index) {
   auto found = blocks_.find(index);
-  if (found == blocks_.end() || found->second.closed) return fail(ErrorKind::ProtocolCorrupt, "delta outside open block");
-  if (!v.is_object() || !nonempty(v.get("type"))) return fail(ErrorKind::ProtocolCorrupt, "delta type required");
+  if (found == blocks_.end() || found->second.closed) return fail(ErrorKind::ProtocolCorrupt, reason::messages::delta_block_closed);
+  if (!v.is_object() || !nonempty(v.get("type"))) return fail(ErrorKind::ProtocolCorrupt, reason::messages::delta_type_required);
   auto& b = found->second;
   auto type = v.get("type").as_string();
   if (b.kind == PartKind::Opaque && !b.kept_type.empty() && type == b.kept_type + "_delta") {
@@ -400,7 +401,7 @@ bool Codec::delta(json::Value v, uint64_t index) {
       if (member.value.is_string()) {
         if (!kept->text) kept->text.emplace();
         if (member.value.as_string().size() > limits_.max_content_bytes - std::min(kept->text->size(), limits_.max_content_bytes))
-          return fail(ErrorKind::ResourceLimit, "kept block limit");
+          return fail(ErrorKind::ResourceLimit, reason::messages::delta_kept_block_limit);
         kept->text->append(member.value.as_string());
       } else { kept->raw = member.value.dump(); kept->text.reset(); }
     }
@@ -411,33 +412,33 @@ bool Codec::delta(json::Value v, uint64_t index) {
   DeltaChannel channel = DeltaChannel::Content;
   if (type == "text_delta" && b.kind == PartKind::Text) field = "text";
   else if (type == "thinking_delta" && b.kind == PartKind::Thinking) {
-    if (b.signature_started) return fail(ErrorKind::ProtocolCorrupt, "thinking after signature");
+    if (b.signature_started) return fail(ErrorKind::ProtocolCorrupt, reason::messages::delta_thinking_after_signature);
     field = "thinking";
   } else if (type == "signature_delta" && b.kind == PartKind::Thinking) { field = "signature"; channel = DeltaChannel::Signature; b.signature_started = true; }
   else if (type == "input_json_delta" && b.kind == PartKind::ToolCall) field = "partial_json";
   else if (type == "citations_delta" && b.kind == PartKind::Text) {
     unknown(v, {"type", "citation"});
     const auto citation = v.get("citation");
-    if (!citation.is_object() || !nonempty(citation.get("type"))) return fail(ErrorKind::ProtocolCorrupt, "invalid citation");
-    if (b.citations.size() >= limits_.max_parts) return fail(ErrorKind::ResourceLimit, "citation count limit");
+    if (!citation.is_object() || !nonempty(citation.get("type"))) return fail(ErrorKind::ProtocolCorrupt, reason::messages::block_citation_invalid);
+    if (b.citations.size() >= limits_.max_parts) return fail(ErrorKind::ResourceLimit, reason::messages::block_citation_limit);
     b.citations.push_back(citation_of(citation));
     return true;
   }
-  else if (type == "citations_delta" || type == "refusal_delta") return fail(ErrorKind::Unsupported, "unsupported semantic delta");
-  else if (type == "text_delta" || type == "thinking_delta" || type == "signature_delta" || type == "input_json_delta") return fail(ErrorKind::ProtocolCorrupt, "delta kind differs from block");
-  else return fail(ErrorKind::Unsupported, "unknown content delta");
+  else if (type == "citations_delta" || type == "refusal_delta") return fail(ErrorKind::Unsupported, reason::messages::delta_unsupported);
+  else if (type == "text_delta" || type == "thinking_delta" || type == "signature_delta" || type == "input_json_delta") return fail(ErrorKind::ProtocolCorrupt, reason::messages::delta_kind_mismatch);
+  else return fail(ErrorKind::Unsupported, reason::messages::delta_unknown);
   unknown(v, {"type", field});
   auto text = v.get(field);
-  if (!text.is_string()) return fail(ErrorKind::ProtocolCorrupt, "delta string required");
+  if (!text.is_string()) return fail(ErrorKind::ProtocolCorrupt, reason::messages::delta_string_required);
   if (b.kind == PartKind::ToolCall && !text.as_string().empty()) {
-    if (b.initial_input) return fail(ErrorKind::ProtocolCorrupt, "tool snapshot mixed with argument deltas");
+    if (b.initial_input) return fail(ErrorKind::ProtocolCorrupt, reason::messages::delta_tool_snapshot_mixed);
     b.argument_bytes = true;
   }
   return emit(PartDelta{b.local, {b.kind, text.as_string(), channel}});
 }
 bool Codec::end_block(uint64_t index) {
   auto found = blocks_.find(index);
-  if (found == blocks_.end() || found->second.closed) return fail(ErrorKind::ProtocolCorrupt, "stop outside open block");
+  if (found == blocks_.end() || found->second.closed) return fail(ErrorKind::ProtocolCorrupt, reason::messages::block_stop_without_open);
   auto& b = found->second;
   // The empty initial object is not an argument prefix. Supply it only for a call
   // that never received actual JSON bytes (empty delta strings do not count).
@@ -452,14 +453,14 @@ bool Codec::end_block(uint64_t index) {
     }
     text += '}';
     auto parsed = json::parse(text, {limits_.max_content_bytes, limits_.max_json_depth});
-    if (!std::holds_alternative<json::Document>(parsed)) return fail(ErrorKind::ResourceLimit, "kept block limit");
+    if (!std::holds_alternative<json::Document>(parsed)) return fail(ErrorKind::ResourceLimit, reason::messages::delta_kept_block_limit);
     kept = std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
   }
   if (!emit(PartSeal{b.local, {}, std::move(kept), b.kind == PartKind::Text ? std::move(b.citations) : std::vector<Citation>{}})) return false;
   b.closed = true; return true;
 }
 bool Codec::server_content(std::string_view outer, json::Value v) {
-  auto corrupt = [&] { return fail(ErrorKind::ProtocolCorrupt, "invalid server result content"); };
+  auto corrupt = [&] { return fail(ErrorKind::ProtocolCorrupt, reason::messages::server_result_content_invalid); };
   auto strings = [](json::Value item, std::initializer_list<std::string_view> keys) {
     for (auto key : keys) if (!item.get(key).is_string()) return false;
     return true;
@@ -550,7 +551,7 @@ void Codec::conflict(std::string_view key, std::string_view detail) {
 }
 bool Codec::counter(json::Value v, std::optional<Count>& target, std::string_view key, bool nullable) {
   if (!v.valid() || (nullable && v.is_null())) return true;
-  if (!count_value(v)) return fail(ErrorKind::ProtocolCorrupt, "usage counter must be unsigned integer");
+  if (!count_value(v)) return fail(ErrorKind::ProtocolCorrupt, reason::messages::usage_counter_invalid);
   const auto n = number(v);
   if (target && n < target->value) conflict(key, "cumulative counter regressed");
   else target = Count{n, Evidence::Reported};
@@ -588,7 +589,7 @@ json::Value Codec::usage_at(json::Value root) const {
   return root;
 }
 bool Codec::usage(json::Value v, bool initial, bool placeholder_output) {
-  if (!v.is_object() || !v.get("output_tokens").valid() || (initial && !v.get("input_tokens").valid())) return fail(ErrorKind::ProtocolCorrupt, "required usage counters missing");
+  if (!v.is_object() || !v.get("output_tokens").valid() || (initial && !v.get("input_tokens").valid())) return fail(ErrorKind::ProtocolCorrupt, reason::messages::usage_counters_missing);
   usage_.stage = UsageStage::Partial;
   // A compaction iteration summarized the conversation inside this request: message_start counted the input before
   // it, and the top-level counters that follow count what remained. They replace the earlier ones.
@@ -615,7 +616,7 @@ bool Codec::usage(json::Value v, bool initial, bool placeholder_output) {
   for (auto key : {"cache_creation", "server_tool_use", "output_tokens_details"}) {
     auto detail = v.get(key);
     if (!detail.valid() || detail.is_null()) continue;
-    if (!detail.is_object()) return fail(ErrorKind::ProtocolCorrupt, "usage details must be object");
+    if (!detail.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::messages::usage_details_invalid);
     for (auto member : detail.members()) {
       if (std::string_view(key) == "output_tokens_details" && member.key == "thinking_tokens") {
         if (!counter(member.value, usage_.reasoning, "thinking_tokens")) return false;
@@ -637,19 +638,19 @@ bool Codec::usage(json::Value v, bool initial, bool placeholder_output) {
     }
   }
   if (iterations.valid() && !iterations.is_null()) {
-    if (!iterations.is_array()) return fail(ErrorKind::ProtocolCorrupt, "usage iterations must be array");
+    if (!iterations.is_array()) return fail(ErrorKind::ProtocolCorrupt, reason::messages::usage_iterations_invalid);
     // Compaction iterations are billed beside the top-level counters, which leave them out. Their sums are kept
     // as compaction.<counter> for pricing.
     std::map<std::string, std::uint64_t, std::less<>> compaction;
     for (auto iteration : iterations.elements()) {
-      if (!iteration.is_object()) return fail(ErrorKind::ProtocolCorrupt, "usage iteration must be object");
+      if (!iteration.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::messages::usage_iteration_invalid);
       const bool summary = iteration.get("type").is_string() && iteration.get("type").as_string() == "compaction";
       for (auto key : {"input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"}) {
         auto n = iteration.get(key);
-        if (n.valid() && !n.is_null() && !count_value(n)) return fail(ErrorKind::ProtocolCorrupt, "invalid iteration counter");
+        if (n.valid() && !n.is_null() && !count_value(n)) return fail(ErrorKind::ProtocolCorrupt, reason::messages::usage_iteration_counter_invalid);
         if (!summary || !n.valid() || n.is_null()) continue;
         auto& total = compaction[key];
-        if (number(n) > std::numeric_limits<uint64_t>::max() - total) return fail(ErrorKind::ProtocolCorrupt, "usage sum overflow");
+        if (number(n) > std::numeric_limits<uint64_t>::max() - total) return fail(ErrorKind::ProtocolCorrupt, reason::messages::usage_sum_overflow);
         total += number(n);
       }
     }
@@ -661,12 +662,12 @@ bool Codec::usage(json::Value v, bool initial, bool placeholder_output) {
       else usage_.extra[address] = Count{total, Evidence::Derived};
     }
   }
-  for (auto key : {"service_tier", "inference_geo", "speed"}) if (!nullable_string(v.get(key))) return fail(ErrorKind::ProtocolCorrupt, "invalid usage metadata");
+  for (auto key : {"service_tier", "inference_geo", "speed"}) if (!nullable_string(v.get(key))) return fail(ErrorKind::ProtocolCorrupt, reason::messages::usage_metadata_invalid);
   // Monetary members are typed provider cost, never token leaves or unknown counters.
   usage_.provider_cost = codecs::provider_cost(v, descriptor_);
   unknown(v, {"input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "cache_creation", "server_tool_use", "output_tokens_details", "iterations", "service_tier", "inference_geo", "speed", "cost", "cost_details", "is_byok"});
   auto sum = [&](uint64_t a, uint64_t b, uint64_t& out) {
-    if (b > std::numeric_limits<uint64_t>::max() - a) return fail(ErrorKind::ProtocolCorrupt, "usage sum overflow");
+    if (b > std::numeric_limits<uint64_t>::max() - a) return fail(ErrorKind::ProtocolCorrupt, reason::messages::usage_sum_overflow);
     out = a + b; return true;
   };
   if (usage_.input_uncached && usage_.cache_read && usage_.cache_write) {
@@ -692,20 +693,18 @@ bool Codec::usage(json::Value v, bool initial, bool placeholder_output) {
 void Codec::finish(Close close) {
   if (closed_ || accumulator_.terminal()) { closed_ = true; return; }
   closed_ = true;
-  if (!close.normal) { fail(close.error, "abnormal response close"); return; }
-  if (!begun_ || !stopped_ || (mode_ == Mode::Sse && !done_)) { fail(ErrorKind::Truncated, "missing Messages terminal evidence"); return; }
+  if (!close.normal) { fail(close.error, reason::transport::response_close); return; }
+  if (!begun_ || !stopped_ || (mode_ == Mode::Sse && !done_)) { fail(ErrorKind::Truncated, reason::messages::terminal_missing); return; }
   if (!all_blocks_closed() || !emit(MessageSeal{{0}})) return;
   emit(Commit{mode_ == Mode::Sse ? "messages.stop_reason+message_stop+normal_close" : "messages.stop_reason+normal_close"});
 }
 std::variant<Usage, Error> decode_usage(const descriptor::ValidatedDescriptor& descriptor, std::string_view usage_json) {
   const auto required = [] {
-    Error error{ErrorKind::ProtocolCorrupt, "usage object required"};
-    error.reason = std::string(reason::code(reason::Source::Messages, error.safe_message));
+    Error error = reason::error(ErrorKind::ProtocolCorrupt, reason::messages::usage_object_required);
     return error;
   };
   if (descriptor.family() != "anthropic.messages") {
-    Error error{ErrorKind::Misuse, "usage decoding is for the Messages family"};
-    error.reason = std::string(reason::code(reason::Source::Messages, error.safe_message));
+    Error error = reason::error(ErrorKind::Misuse, reason::messages::usage_wrong_family);
     return error;
   }
   const auto& resources = descriptor.policy()->resources();
