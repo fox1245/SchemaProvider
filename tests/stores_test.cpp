@@ -228,7 +228,9 @@ sp::Outcome decoded(std::string_view origin, stores::Codec::Kind kind, std::stri
   CHECK(accumulator.outcome());
   return *accumulator.outcome();
 }
-// The documented response objects (the examples of the same reference pages), and what each becomes.
+// The documented response objects, and what each becomes. OpenAI: the response examples of
+// https://developers.openai.com/api/reference/resources/vector_stores/methods/{create,list,search} and of
+// .../vector_stores/subresources/{files,file_batches}/methods/{retrieve,list,create,content}.
 void decoded_openai() {
   using Kind = stores::Codec::Kind;
   const auto s = std::get<stores::Store>(stores::typed_store(decoded(openai, Kind::Store,
@@ -280,6 +282,8 @@ void decoded_openai() {
   CHECK(std::get<stores::Deleted>(stores::typed_deleted(decoded(openai, Kind::Deleted, R"({"id":"vs_abc123","object":"vector_store.deleted","deleted":true})", "vs_abc123"))).id == "vs_abc123");
   CHECK(std::holds_alternative<Failure>(stores::typed_deleted(decoded(openai, Kind::Deleted, R"({"id":"vs_abc123","deleted":false})", "vs_abc123"))));
 }
+// Google: the resources of https://aistudio.google.com/api-reference/file-search/file-search-stores (FileSearchStore, the
+// operation of .../import-file and .../get-file-search-store-operation) and .../file-search/documents (Document).
 void decoded_google() {
   using Kind = stores::Codec::Kind;
   const auto s = std::get<stores::Store>(stores::typed_store(decoded(google, Kind::Store,

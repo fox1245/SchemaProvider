@@ -1414,7 +1414,7 @@ void endpoint_billing_refusals() {
                          R"(,"billing":{"generate":"model","edit":"model"})"), billing));
   CHECK(refused(one_fact(images_fact, R"(,"billing":{"generate":"model"})"), billing));
   CHECK(refused(one_fact(images_fact, R"(,"billing":{})"), billing));
-  // A value other than none, model or carried.
+  // A value other than none, model, carried or unpriced.
   for (const auto value : {R"("free")", R"("Model")", R"("unstated")", "1", "null", "true", R"(["none"])", R"("")"})
     CHECK(refused(one_fact(moderation_fact, std::string(R"(,"billing":)") + value), billing));
   CHECK(refused(one_fact(images_fact, R"(,"billing":{"generate":"model","edit":"free"})"), billing));
