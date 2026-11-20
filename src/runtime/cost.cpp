@@ -202,11 +202,20 @@ constexpr std::uint64_t nano_usd_rate = 1'000'000;
 } // namespace
 
 namespace {
+// Whether the policy of `family` prices a value of an extension it admits at the descriptor's origin (#207).
+bool prices_extensions(const descriptor::ValidatedDescriptor& family) {
+  return std::any_of(family.family_policy().extensions.begin(), family.family_policy().extensions.end(), [&](const descriptor::ExtensionFact& fact) {
+    return descriptor::contains(fact.origins, family.base_url()) && (!fact.prices.values.empty() || fact.prices.other);
+  });
+}
 // The estimate of a batch's lines; a line is priced only when its custom id is among `known` (every line when `known`
-// is empty), and under the tier its request bills under when `carried` has the request's facts (#207).
+// is empty), and under the tier its request bills under when `carried` has the request's facts (#207). A custom id
+// `carried` maps to no facts names more than one request. Without `stated` (an OpenAI submit's facts, which carry no
+// request), a family whose policy prices an extension value has no estimate: only the items state the extensions.
 pricing::EndpointEstimate estimate_lines(const EndpointFacts& submit, const descriptor::ValidatedDescriptor& family,
                                          const std::vector<batches::Line>& lines, const descriptor::ModelCatalogue& catalogue,
-                                         const std::set<std::string_view>& known, const std::map<std::string_view, const RequestFacts*>& carried) {
+                                         const std::set<std::string_view>& known, const std::map<std::string_view, const RequestFacts*>& carried,
+                                         bool stated) {
   pricing::EndpointEstimate out;
   const auto refuse = [&](std::string name) {
     if (std::find(out.unpriced.begin(), out.unpriced.end(), name) == out.unpriced.end()) out.unpriced.push_back(std::move(name));
@@ -224,6 +233,9 @@ pricing::EndpointEstimate estimate_lines(const EndpointFacts& submit, const desc
   if (family.base_url() != submit.origin) refuse("origin");
   // Inline requests are of the batch client's family, as the bound prices them.
   if (!submit.carried.empty() && family.family() != submit.family) refuse("family");
+  for (const auto& [id, facts] : carried)
+    if (!facts) refuse(std::string(id) + ":duplicate");
+  if (!stated && prices_extensions(family)) refuse("extensions");
   if (!out.unpriced.empty()) return out;
   // The bound at a routing gateway is at the route ceiling; the estimate takes the entries' listed rates.
   if (submit.routed_gateway) assume("listed rates");
@@ -313,9 +325,9 @@ pricing::EndpointEstimate batch_estimate(const EndpointFacts& submit, const desc
   std::map<std::string_view, const RequestFacts*> carried;
   for (const auto& request : submit.carried) {
     known.insert(request.custom_id);
-    carried.emplace(request.custom_id, &request.facts);
+    if (!carried.emplace(request.custom_id, &request.facts).second) carried[request.custom_id] = nullptr;
   }
-  return estimate_lines(submit, family, lines, catalogue, known, carried);
+  return estimate_lines(submit, family, lines, catalogue, known, carried, !submit.carried.empty());
 }
 pricing::EndpointEstimate batch_estimate(const EndpointFacts& submit, const descriptor::ValidatedDescriptor& family,
                                          const std::vector<batches::Item>& items, const std::vector<batches::Line>& lines,
@@ -327,14 +339,15 @@ pricing::EndpointEstimate batch_estimate(const EndpointFacts& submit, const desc
   facts.reserve(items.size());
   for (const auto& item : items) facts.push_back(std::visit([&](const auto& typed) { return detail::request_facts(family, typed); }, item.request));
   std::map<std::string_view, const RequestFacts*> carried;
-  for (std::size_t i = 0; i < items.size(); ++i) carried.emplace(items[i].custom_id, &facts[i]);
+  for (std::size_t i = 0; i < items.size(); ++i)
+    if (!carried.emplace(items[i].custom_id, &facts[i]).second) carried[items[i].custom_id] = nullptr;
   // No items is no request to price a line of.
   if (known.empty() && submit.billing != descriptor::EndpointBilling::None) {
     pricing::EndpointEstimate out;
     out.unpriced.emplace_back("items");
     return out;
   }
-  return estimate_lines(submit, family, lines, catalogue, known, carried);
+  return estimate_lines(submit, family, lines, catalogue, known, carried, true);
 }
 
 namespace {
