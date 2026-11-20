@@ -1,4 +1,5 @@
 #include "codecs/tokens.h"
+#include "codecs/reason.h"
 #include "descriptor/policy.h"
 #include "json/json.h"
 #include <algorithm>
@@ -20,15 +21,15 @@ std::string lower(std::string text) {
 std::string_view operation(const Count&) noexcept { return "count"; }
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Count& count) {
   const auto* fact = descriptor.policy()->endpoint("tokens", descriptor.base_url());
-  if (!fact) return Error{ErrorKind::Unsupported, "token counting is not admitted at this origin"};
+  if (!fact) return reason::error(ErrorKind::Unsupported, reason::tokens_request::endpoint_not_admitted);
   const auto path = descriptor::endpoint_path(*fact, operation(count));
-  if (!path) return Error{ErrorKind::Unsupported, "the token count endpoint has no path"};
+  if (!path) return reason::error(ErrorKind::Unsupported, reason::tokens_request::path_missing);
   // The family request the shape counts, encoded as a buffered call would send it.
   const auto& shape = fact->shape;
   const bool family_matches = (shape == "anthropic" && std::holds_alternative<messages::Request>(count.request)) ||
                               (shape == "openai" && std::holds_alternative<responses::Request>(count.request)) ||
                               (shape == "google" && std::holds_alternative<gemini::Request>(count.request));
-  if (!family_matches) return Error{ErrorKind::Unsupported, "this origin counts the tokens of another family's request"};
+  if (!family_matches) return reason::error(ErrorKind::Unsupported, reason::tokens_request::family_mismatch);
   struct Wire { std::string body, model; std::vector<std::pair<std::string, std::string>> headers; };
   auto wire = std::visit([&](const auto& typed) -> std::variant<Wire, Error> {
     using T = std::decay_t<decltype(typed)>;
@@ -46,7 +47,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   auto& [family_body, model, family_headers] = std::get<Wire>(wire);
   auto parsed = json::parse(family_body);
   if (!std::holds_alternative<json::Document>(parsed) || !std::get<json::Document>(parsed).root().is_object())
-    return Error{ErrorKind::InvalidRequest, "the request does not encode to a JSON object"};
+    return reason::error(ErrorKind::InvalidRequest, reason::tokens_request::body_invalid);
   const auto root = std::get<json::Document>(parsed).root();
   // The members the count takes, in the family's order.
   std::string members;
@@ -58,7 +59,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   std::string body;
   if (shape == "google") {
     // Google counts a whole generate request, which names its model.
-    if (!token(model)) return Error{ErrorKind::InvalidRequest, "a Google model is a path segment"};
+    if (!token(model)) return reason::error(ErrorKind::InvalidRequest, reason::tokens_request::model_invalid);
     body = "{\"generateContentRequest\":{\"model\":" + json::quote("models/" + model) + (members.empty() ? "" : ",") + members + "}}";
   } else {
     body = "{" + members + "}";
@@ -66,8 +67,8 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   // A model takes the place of {model} in the path, at any shape, through the check every path shares
   // (descriptor::model_path).
   auto resolved = descriptor::model_path(*path, model);
-  if (resolved.empty()) return Error{ErrorKind::InvalidRequest, "a model name cannot take the place of {model} in the endpoint's path"};
-  if (body.size() > descriptor.policy()->resources().request_bytes) return Error{ErrorKind::ResourceLimit, "the count request exceeds the request limit"};
+  if (resolved.empty()) return reason::error(ErrorKind::InvalidRequest, reason::tokens_request::model_path);
+  if (body.size() > descriptor.policy()->resources().request_bytes) return reason::error(ErrorKind::ResourceLimit, reason::tokens_request::size_limit);
   Encoded encoded{std::move(resolved), std::move(body), std::move(model), fact->charge_on_accept, fact->auth};
   endpoints::add_fact_headers(encoded, *fact);
   // A beta the request needs (an Anthropic MCP server) is needed to count it too.
