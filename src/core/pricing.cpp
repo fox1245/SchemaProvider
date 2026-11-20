@@ -119,8 +119,15 @@ ModelPrice dearest_price_of(const descriptor::CatalogueEntry& entry, std::string
 namespace {
 // The Usage::extra keys of a modality breakdown: Generate `<group>Details.<MODALITY>` and Interactions
 // `<group>_by_modality.<modality>`.
+// The Google Live codec writes the output breakdown under `responseTokensDetails.`.
 constexpr std::array<std::string_view, 2> input_breakdown{"promptTokensDetails.", "input_tokens_by_modality."};
-constexpr std::array<std::string_view, 2> output_breakdown{"candidatesTokensDetails.", "output_tokens_by_modality."};
+constexpr std::array<std::string_view, 3> output_breakdown{"candidatesTokensDetails.", "responseTokensDetails.", "output_tokens_by_modality."};
+// The counters that hold the tokens of one modality when the usage has no breakdown, the first one present winning:
+// Chat's own (`input_audio`, `audio_tokens`, `completion_tokens_details.image_tokens`) and the OpenAI realtime codec's
+// dotted paths.
+constexpr std::array<std::string_view, 2> input_audio_counters{"input_audio", "input_token_details.audio_tokens"};
+constexpr std::array<std::string_view, 2> output_audio_counters{"audio_tokens", "output_token_details.audio_tokens"};
+constexpr std::array<std::string_view, 1> output_image_counters{"completion_tokens_details.image_tokens"};
 // The tokens of one modality in a breakdown, matched without regard to case. Empty when the usage has none.
 std::optional<std::uint64_t> modality_tokens(const Usage& usage, std::span<const std::string_view> prefixes,
                                              std::string_view modality) {
@@ -173,10 +180,16 @@ UsageSum usage_sum(const Selection& selection, const Usage& usage, const UsageRu
     const auto found = usage.extra.find(std::string(counter));
     return found == usage.extra.end() ? 0 : found->second.value;
   };
-  // The audio tokens of the input or the output: a modality breakdown, else Chat's own audio counter.
-  auto audio_of = [&](std::string_view chat_counter, std::span<const std::string_view> prefixes) {
+  // The tokens a usage reports in one of `counters`, the first one present; nothing when it reports none.
+  auto counter_tokens = [&](std::span<const std::string_view> counters) -> std::optional<std::uint64_t> {
+    for (const std::string_view counter : counters)
+      if (const auto found = usage.extra.find(std::string(counter)); found != usage.extra.end()) return found->second.value;
+    return std::nullopt;
+  };
+  // The audio tokens of the input or the output: a modality breakdown, else a counter that holds them.
+  auto audio_of = [&](std::span<const std::string_view> counters, std::span<const std::string_view> prefixes) {
     const auto breakdown = modality_tokens(usage, prefixes, "audio");
-    return breakdown ? *breakdown : extra(chat_counter);
+    return breakdown ? *breakdown : counter_tokens(counters).value_or(0);
   };
   // Gemini bills the tool-use prompt beyond the prompt count; no price here covers it.
   if (extra("toolUsePromptTokenCount")) { out.unpriced.emplace_back("toolUsePromptTokenCount"); complete = false; }
@@ -223,7 +236,7 @@ UsageSum usage_sum(const Selection& selection, const Usage& usage, const UsageRu
   } else {
     // Audio input bills at its own rate, out of the uncached input. Audio the cache counters hold has no split.
     std::uint64_t audio_in = 0;
-    if (const auto audio = audio_of("input_audio", input_breakdown); audio && uncached) {
+    if (const auto audio = audio_of(input_audio_counters, input_breakdown); audio && uncached) {
       if (price.input_audio && audio <= *uncached) audio_in = audio;
       else { out.unpriced.emplace_back("input_audio"); complete = false; }
     }
@@ -281,8 +294,10 @@ UsageSum usage_sum(const Selection& selection, const Usage& usage, const UsageRu
       const auto reasoning = price.reasoning ? std::min(count(usage.reasoning).value_or(0), output) : 0;
       charge("reasoning", reasoning, price.reasoning, "reasoning", price.output);
       // Gemini reports image output tokens by modality (Generate `candidatesTokensDetails.IMAGE`, Interactions
-      // `output_tokens_by_modality.image`). Without that breakdown, all output bills at the dearer rate.
+      // `output_tokens_by_modality.image`) and a gateway's Chat in `completion_tokens_details.image_tokens`. Without
+      // either, all output bills at the dearer rate.
       auto image = modality_tokens(usage, output_breakdown, "image");
+      if (!image) image = counter_tokens(output_image_counters);
       // Without a breakdown, any output token may be an image token at the variable rate.
       if (selection.is_variable("output_image") && !image && output > reasoning) { out.unpriced.emplace_back("output_image"); complete = false; }
       if (!price.output_image) {
@@ -298,7 +313,7 @@ UsageSum usage_sum(const Selection& selection, const Usage& usage, const UsageRu
       charge("output_image", images, price.output_image, "output_image", price.output);
       // Audio output bills at its own rate, out of what is left.
       std::uint64_t audio_out = 0;
-      if (const auto audio = audio_of("audio_tokens", output_breakdown)) {
+      if (const auto audio = audio_of(output_audio_counters, output_breakdown)) {
         if (price.output_audio) audio_out = std::min(audio, output - reasoning - images);
         else { out.unpriced.emplace_back("output_audio"); complete = false; }
       }

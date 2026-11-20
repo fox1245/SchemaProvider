@@ -5,6 +5,8 @@
 // Usage: sp_realtime_tests <fixture directory>
 #include "codecs/realtime.h"
 #include "core/media.h"
+#include "core/pricing.h"
+#include "descriptor/catalogue.h"
 #include "descriptor/policy.h"
 #include "descriptor/presets.h"
 #include "json/json.h"
@@ -566,11 +568,40 @@ void transcription() {
   }
 }
 
+// A turn's usage prices at the audio rates: the estimate reads the audio counts under the names the codecs write
+// (OpenAI `input_token_details.audio_tokens` and `output_token_details.audio_tokens`, Google `promptTokensDetails.AUDIO`
+// and `responseTokensDetails.AUDIO`). The recordings' turns carry 100 text and 20 audio tokens in and 40 audio tokens
+// out. At the rates below that is 100 x 4e-6 + 20 x 32e-6 + 40 x 64e-6 USD = 3'600'000 nano-USD; at the text rates it
+// would be 1'120'000.
+void turn_usage_is_priced() {
+  auto loaded = descriptor::load_catalogue(R"({"version":1,"models":[
+    {"id":"audio-model","pricing":{"input":"0.000004","output":"0.000016","input_audio":"0.000032","output_audio":"0.000064"}},
+    {"id":"text-only-model","pricing":{"input":"0.000004","output":"0.000016"}}]})");
+  CHECK(std::holds_alternative<descriptor::CatalogueSnapshot>(loaded));
+  const auto catalogue = std::get<descriptor::CatalogueSnapshot>(loaded);
+  const ServedModel audio{"audio-model", "audio-model", ServedRelation::Exact}, text_only{"text-only-model", "text-only-model", ServedRelation::Exact};
+  const auto openai_events = inbound(descriptor::presets::openai_chat(), "openai-server.jsonl");
+  const auto openai = all<realtime::TurnCommitted>(openai_events);
+  CHECK(openai.size() == 1);
+  auto estimate = pricing::estimate(*catalogue, "openai.chat", "", audio, openai[0]->turn.usage);
+  CHECK(estimate.total && estimate.total->nano_usd == 3'600'000u && estimate.unpriced.empty());
+  // Audio without an audio rate has no total, as in a Chat usage.
+  estimate = pricing::estimate(*catalogue, "openai.chat", "", text_only, openai[0]->turn.usage);
+  CHECK(!estimate.total && estimate.unpriced == std::vector<std::string>({"input_audio", "output_audio"}));
+  const auto google_events = inbound(descriptor::presets::google_generate(), "google-server.jsonl");
+  const auto google = all<realtime::TurnCommitted>(google_events);
+  CHECK(google.size() == 2);
+  estimate = pricing::estimate(*catalogue, "google.generate", "", audio, google[1]->turn.usage);
+  CHECK(estimate.total && estimate.total->nano_usd == 3'600'000u && estimate.unpriced.empty());
+  estimate = pricing::estimate(*catalogue, "google.generate", "", text_only, google[1]->turn.usage);
+  CHECK(!estimate.total && estimate.unpriced == std::vector<std::string>({"input_audio", "output_audio"}));
+}
+
 int main(int argc, char** argv) {
   try {
     if (argc != 2) throw std::runtime_error("usage: sp_realtime_tests <fixture directory>");
     fixtures = argv[1];
-    google_live(); openai_realtime(); response_statuses(); usage_details(); tool_turn_usage(); audio_formats(); policy_facts(); transcription();
+    google_live(); openai_realtime(); response_statuses(); usage_details(); tool_turn_usage(); turn_usage_is_priced(); audio_formats(); policy_facts(); transcription();
     std::cout << "realtime properties passed\n";
     return 0;
   } catch (const std::exception& error) { std::cerr << "realtime test failed: " << error.what() << '\n'; return 1; }

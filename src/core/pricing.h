@@ -97,12 +97,16 @@ struct CostEstimate {
 //   the cache counters) at the same rates, since the top-level counters leave them out.
 // - Cache writes: Messages' 5-minute writes at `cache_write` and 1-hour writes at `cache_write_1h`. Without that
 //   split, all of them at the dearer rate.
-// - Image output: Gemini's image output tokens (Generate `candidatesTokensDetails.IMAGE`, Interactions
-//   `output_tokens_by_modality.image`) at `output_image`. Without a modality breakdown, all output that is not
-//   reasoning at the dearer of `output` and `output_image`.
+// - Image output: the image output tokens (Generate `candidatesTokensDetails.IMAGE`, Interactions
+//   `output_tokens_by_modality.image`, Chat `completion_tokens_details.image_tokens`) at `output_image`. Without
+//   any of them, all output that is not reasoning at the dearer of `output` and `output_image`. A usage with image
+//   tokens and an entry without an `output_image` rate leaves no total ("output_image").
 // - Audio: the audio part of the input (Chat `input_audio`, Generate `promptTokensDetails.AUDIO`, Interactions
-//   `input_tokens_by_modality.audio`) at `input_audio`, and of the output at `output_audio`. Audio tokens without
-//   that rate, or more audio input than uncached input, leave no total ("input_audio", "output_audio").
+//   `input_tokens_by_modality.audio`, realtime `input_token_details.audio_tokens`) at `input_audio`, and of the
+//   output (Chat `audio_tokens`, Generate `candidatesTokensDetails.AUDIO`, Interactions
+//   `output_tokens_by_modality.audio`, realtime `output_token_details.audio_tokens` and
+//   `responseTokensDetails.AUDIO`) at `output_audio`. Audio tokens without that rate, or more audio input than
+//   uncached input, leave no total ("input_audio", "output_audio").
 // - A zero rate for a unit whose base unit has a price is applied and named in `assumptions` ("<unit> at zero").
 // - `request` is charged once.
 // - A unit with a row that applies at a price that is not a fixed amount (price_of) prices none of the tokens it may
