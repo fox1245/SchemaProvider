@@ -35,27 +35,26 @@ StateCodec::StateCodec(const descriptor::ValidatedDescriptor& descriptor, Accumu
     : descriptor_(descriptor), accumulator_(accumulator), requested_(std::move(requested)), endpoint_(std::move(endpoint)),
       job_(std::move(job)), limits_(limits) {}
 bool StateCodec::emit(const Event& event) { return accumulator_.accept(event); }
-bool StateCodec::fail(ErrorKind kind, std::string text) {
-  Error error{kind, std::move(text)};
-  error.reason = reason::code(reason::Source::Jobs, error.safe_message);
+bool StateCodec::fail(ErrorKind kind, const reason::Reason& text) {
+  Error error = reason::error(kind, text);
   emit(Fail{std::move(error)});
   return false;
 }
 bool StateCodec::buffered(std::string_view body, Close close) {
-  if (!close.normal) return fail(close.error, "abnormal response close");
+  if (!close.normal) return fail(close.error, reason::transport::response_close);
   auto parsed = json::parse(body, {limits_.max_content_bytes, limits_.max_json_depth});
   if (auto* error = std::get_if<json::ParseError>(&parsed))
     return fail(error->code == json::ParseCode::SizeExceeded || error->code == json::ParseCode::DepthExceeded
-                    ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, "invalid response JSON");
+                    ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, reason::jobs::response_json_invalid);
   auto wire = std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
   const auto root = wire->root();
-  if (!root.is_object()) return fail(ErrorKind::ProtocolCorrupt, "response must be object");
+  if (!root.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::jobs::response_not_object);
   if (!emit(RawWire{"job.response", wire})) return false;
   const auto id = root.get("id"), status = root.get("status");
-  if (!id.is_string() || id.as_string().empty() || !status.is_string()) return fail(ErrorKind::ProtocolCorrupt, "a job names its id and status");
-  if (!job_.empty() && id.as_string() != job_) return fail(ErrorKind::ProtocolCorrupt, "a poll answers for the job it names");
+  if (!id.is_string() || id.as_string().empty() || !status.is_string()) return fail(ErrorKind::ProtocolCorrupt, reason::jobs::state_id_and_status_required);
+  if (!job_.empty() && id.as_string() != job_) return fail(ErrorKind::ProtocolCorrupt, reason::jobs::state_id_mismatch);
   for (const char* key : {"urls", "unsigned_urls"})
-    if (root.get(key).valid() && !root.get(key).is_null() && !root.get(key).is_array()) return fail(ErrorKind::ProtocolCorrupt, "job outputs are a list");
+    if (root.get(key).valid() && !root.get(key).is_null() && !root.get(key).is_array()) return fail(ErrorKind::ProtocolCorrupt, reason::jobs::state_outputs_invalid);
   // Which job this is, for the typed state: the endpoint and origin the call reached.
   auto handle = json::parse("{\"endpoint\":" + json::quote(endpoint_) + ",\"origin\":" + json::quote(descriptor_.base_url()) +
                             ",\"model\":" + json::quote(requested_) + "}");
@@ -77,29 +76,28 @@ bool StateCodec::buffered(std::string_view body, Close close) {
 ContentCodec::ContentCodec(Accumulator& accumulator, SemanticLimits limits, bool documents)
     : accumulator_(accumulator), limits_(limits), documents_(documents) {}
 bool ContentCodec::emit(const Event& event) { return accumulator_.accept(event); }
-bool ContentCodec::fail(ErrorKind kind, std::string text) {
-  Error error{kind, std::move(text)};
-  error.reason = reason::code(reason::Source::Jobs, error.safe_message);
+bool ContentCodec::fail(ErrorKind kind, const reason::Reason& text) {
+  Error error = reason::error(kind, text);
   emit(Fail{std::move(error)});
   return false;
 }
 bool ContentCodec::buffered(std::string_view body, Close close) {
-  if (!close.normal) return fail(close.error, "abnormal response close");
+  if (!close.normal) return fail(close.error, reason::transport::response_close);
   // Only a 200 carries the content: 202 says it is not ready, 206 gives part of it.
-  if (close.status && close.status != 200) return fail(ErrorKind::ProtocolCorrupt, "a download is the body of a 200 response");
+  if (close.status && close.status != 200) return fail(ErrorKind::ProtocolCorrupt, reason::jobs::download_status);
   // A job's output is media. A document in its place is the provider's answer about the job, not the output; a
   // file's content or a batch's results may be any type.
   const auto type = essence(header(close, "content-type"));
-  if (!documents_ && (type.starts_with("application/json") || type.starts_with("text/"))) return fail(ErrorKind::ProtocolCorrupt, "a download is not a document");
+  if (!documents_ && (type.starts_with("application/json") || type.starts_with("text/"))) return fail(ErrorKind::ProtocolCorrupt, reason::jobs::download_is_document);
   std::string record = "{\"content_type\":" + json::quote(type);
   std::string encoded;
   if (close.sink) {
-    if (!close.sink->bytes) return fail(ErrorKind::ProtocolCorrupt, "a download is empty");
+    if (!close.sink->bytes) return fail(ErrorKind::ProtocolCorrupt, reason::jobs::download_empty);
     record += ",\"path\":" + json::quote(close.sink->path) + ",\"bytes\":" + std::to_string(close.sink->bytes) + ",\"sha256\":\"" + close.sink->sha256 + "\"";
   } else {
-    if (body.empty()) return fail(ErrorKind::ProtocolCorrupt, "a download is empty");
+    if (body.empty()) return fail(ErrorKind::ProtocolCorrupt, reason::jobs::download_empty);
     encoded = base64_encode(body);
-    if (encoded.size() > limits_.max_content_bytes) return fail(ErrorKind::ResourceLimit, "a download exceeds the content limit");
+    if (encoded.size() > limits_.max_content_bytes) return fail(ErrorKind::ResourceLimit, reason::jobs::download_limit);
     const auto digest = crypto::sha256(body);
     std::string hex;
     for (const auto byte : digest) { hex += "0123456789abcdef"[byte >> 4]; hex += "0123456789abcdef"[byte & 15]; }
