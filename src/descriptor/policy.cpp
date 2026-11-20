@@ -1,4 +1,5 @@
 #include "descriptor/policy.h"
+#include "descriptor/policy_refusals.h"
 #include "descriptor/owned_keys.h"
 #include "descriptor/stop_facts.h"
 #include "crypto/crypto.h"
@@ -698,7 +699,7 @@ class PolicyLoader {
           }
           policy->limits_.emplace_back(f.family, std::move(in_force));
         }
-        if (auto error = DescriptorPolicy::check(f, rules, choices(f.defaults), {}, false)) fail("/defaults", *error);
+        if (auto error = DescriptorPolicy::check(f, rules, choices(f.defaults), {}, false)) fail("/defaults", std::string(error->message));
         if(f.defaults.strict_tools && f.family!="openai.responses") fail("/defaults/strict_tools","Responses strict tools only");
         policy->families_.push_back(std::move(f));
       }
@@ -1067,7 +1068,7 @@ class PolicyLoader {
         if (!f) fail("/model_catalogue", "declared family");
         const auto pointer = pointer_of(overlay.family);
         auto resolved = over(f->defaults, overlay);
-        if (auto error = DescriptorPolicy::check(*f, *policy.validation(f->family), choices(resolved), entries[i].output_limit, false)) fail(pointer, *error);
+        if (auto error = DescriptorPolicy::check(*f, *policy.validation(f->family), choices(resolved), entries[i].output_limit, false)) fail(pointer, std::string(error->message));
         if (resolved.strict_tools && f->family != "openai.responses") fail(pointer + "/strict_tools", "Responses strict tools only");
         policy.resolved_.push_back({i, overlay.family, std::move(resolved)});
       }
@@ -1282,15 +1283,15 @@ const RouteFact* DescriptorPolicy::route(std::string_view family, std::string_vi
   for (const auto& fact : facts) if (fact.origins.empty()) return &fact;
   return nullptr;
 }
-std::optional<std::string> route_refusal(const ValidatedDescriptor& descriptor, std::string_view model) {
+std::optional<reason::Reason> route_refusal_reason(const ValidatedDescriptor& descriptor, std::string_view model) {
   // The model takes the place of {model} in the path, so it may not add, remove or replace a segment, and the path
   // stays within its bound.
   if (descriptor.model_routed() && (descriptor.resolved_path(false, model).empty() || descriptor.resolved_path(true, model).empty()))
-    return "model name cannot take the place of {model} in the descriptor's paths";
+    return reason::shared_request::route_model_name;
   return std::nullopt;
 }
-std::optional<std::string> literal_route_refusal(const ValidatedDescriptor& descriptor, std::string_view model) {
-  if (const auto named = descriptor.route_model(); !named.empty() && named != model) return "the descriptor's paths name another model";
+std::optional<reason::Reason> literal_route_refusal_reason(const ValidatedDescriptor& descriptor, std::string_view model) {
+  if (const auto named = descriptor.route_model(); !named.empty() && named != model) return reason::shared_request::route_literal_model;
   return std::nullopt;
 }
 const DescriptorPolicy::ValidationFacts* DescriptorPolicy::validation(std::string_view name) const noexcept {
@@ -1300,30 +1301,30 @@ const DescriptorPolicy::ValidationFacts* DescriptorPolicy::validation(std::strin
 // The checks of the effective controls that need no model: the family's own lists and ranges, the rules that bind the
 // members to each other, and the controls the family's typed request carries. They run in this order, and the first
 // failure is the answer.
-std::optional<std::string> DescriptorPolicy::check(const FamilyPolicy& f, const ValidationFacts& rules, const EffectiveChoices& c, std::optional<std::uint64_t> limit, bool require_cap) {
+std::optional<reason::Reason> DescriptorPolicy::check(const FamilyPolicy& f, const ValidationFacts& rules, const EffectiveChoices& c, std::optional<std::uint64_t> limit, bool require_cap) {
   const auto carries = [&](Control control) { return (rules.controls >> static_cast<unsigned>(control) & 1u) != 0; };
-  if ((require_cap && f.required_output_cap && !c.max_output_tokens) || (c.max_output_tokens && !*c.max_output_tokens)) return "positive output cap required";
-  if (limit && c.max_output_tokens && *c.max_output_tokens > *limit) return "output cap exceeds admitted model limit";
-  if (rules.output_cap_maximum && c.max_output_tokens && *c.max_output_tokens > *rules.output_cap_maximum) return "output cap is not representable as int32";
+  if ((require_cap && f.required_output_cap && !c.max_output_tokens) || (c.max_output_tokens && !*c.max_output_tokens)) return reason::shared_request::choice_positive_output_cap_required;
+  if (limit && c.max_output_tokens && *c.max_output_tokens > *limit) return reason::shared_request::choice_output_cap_exceeds_admitted_model_limit;
+  if (rules.output_cap_maximum && c.max_output_tokens && *c.max_output_tokens > *rules.output_cap_maximum) return reason::shared_request::choice_output_cap_is_not_representable_as_int32;
   auto valid_number=[](const auto& value,const auto& bounds){return !value || (std::isfinite(*value) && *value>=bounds[0] && *value<=bounds[1]);};
-  if(!valid_number(c.temperature,f.temperature_range) || !valid_number(c.top_p,f.top_p_range)) return "sampling parameter outside admitted range";
-  if(c.thinking_budget && (*c.thinking_budget<f.thinking_minimum || (c.max_output_tokens && (rules.thinking_budget_below_cap ? *c.thinking_budget>=*c.max_output_tokens : *c.thinking_budget>*c.max_output_tokens)))) return "thinking budget incompatible with output cap";
-  if (rules.thinking_budget_excludes_level && c.thinking_budget && c.thinking_level) return "thinking budget and level are mutually exclusive";
-  if(rules.thinking_budget_excludes_temperature && c.thinking_budget && (c.temperature || (c.top_p && *c.top_p<f.thinking_top_p_minimum))) return "manual thinking sampling parameters are incompatible";
+  if(!valid_number(c.temperature,f.temperature_range) || !valid_number(c.top_p,f.top_p_range)) return reason::shared_request::choice_sampling_parameter_outside_admitted_range;
+  if(c.thinking_budget && (*c.thinking_budget<f.thinking_minimum || (c.max_output_tokens && (rules.thinking_budget_below_cap ? *c.thinking_budget>=*c.max_output_tokens : *c.thinking_budget>*c.max_output_tokens)))) return reason::shared_request::choice_thinking_budget_incompatible_with_output_cap;
+  if (rules.thinking_budget_excludes_level && c.thinking_budget && c.thinking_level) return reason::shared_request::choice_thinking_budget_and_level_are_mutually;
+  if(rules.thinking_budget_excludes_temperature && c.thinking_budget && (c.temperature || (c.top_p && *c.top_p<f.thinking_top_p_minimum))) return reason::shared_request::choice_manual_thinking_sampling_parameters_are;
   auto valid_text=[](const auto& value,const auto& allowed){return !value || contains(allowed,*value);};
   // A family that carries neither sampling control refuses either; one that carries temperature only refuses top_p.
-  if ((c.temperature && !carries(Control::Temperature)) || (c.top_p && !carries(Control::Temperature) && !carries(Control::TopP))) return "sampling control unsupported by typed request";
-  if (c.top_p && !carries(Control::TopP)) return "top_p unsupported by typed Generate request";
-  if(!valid_text(c.reasoning_effort,f.reasoning_efforts) || !valid_text(c.reasoning_summary,f.reasoning_summaries) || !valid_text(c.thinking_level,f.thinking_levels) || !valid_text(c.service_tier,f.service_tiers)) return "unsupported typed semantic control";
-  if(c.reasoning_enabled && !(carries(Control::ReasoningEffort) && carries(Control::ReasoningSummary))) return "reasoning object unsupported for family";
-  if(c.reasoning_enabled && (!c.reasoning_effort || !c.reasoning_summary)) return "complete effective reasoning options required";
-  if(c.include_thoughts && !carries(Control::IncludeThoughts))return "includeThoughts unsupported for family";
-  if(c.thinking_summaries && !carries(Control::ThinkingSummaries))return "thinking summaries unsupported for family";
-  if(c.thinking_budget && !carries(Control::ThinkingBudget))return "thinking budget unsupported for family";
-  if(c.reasoning_effort && !carries(Control::ReasoningEffort)) return "reasoning effort unsupported for family";
-  if(c.reasoning_summary && !carries(Control::ReasoningSummary)) return "reasoning summary unsupported for family";
-  if(c.thinking_level && !carries(Control::ThinkingLevel)) return "thinking level unsupported for family";
-  if(c.service_tier && !carries(Control::ServiceTier)) return "service tier unsupported for family";
+  if ((c.temperature && !carries(Control::Temperature)) || (c.top_p && !carries(Control::Temperature) && !carries(Control::TopP))) return reason::shared_request::choice_sampling_control_unsupported_by_typed_request;
+  if (c.top_p && !carries(Control::TopP)) return reason::shared_request::choice_top_p_unsupported_by_typed_generate_request;
+  if(!valid_text(c.reasoning_effort,f.reasoning_efforts) || !valid_text(c.reasoning_summary,f.reasoning_summaries) || !valid_text(c.thinking_level,f.thinking_levels) || !valid_text(c.service_tier,f.service_tiers)) return reason::shared_request::choice_unsupported_typed_semantic_control;
+  if(c.reasoning_enabled && !(carries(Control::ReasoningEffort) && carries(Control::ReasoningSummary))) return reason::shared_request::choice_reasoning_object_unsupported_for_family;
+  if(c.reasoning_enabled && (!c.reasoning_effort || !c.reasoning_summary)) return reason::shared_request::choice_complete_effective_reasoning_options_required;
+  if(c.include_thoughts && !carries(Control::IncludeThoughts))return reason::shared_request::choice_includethoughts_unsupported_for_family;
+  if(c.thinking_summaries && !carries(Control::ThinkingSummaries))return reason::shared_request::choice_thinking_summaries_unsupported_for_family;
+  if(c.thinking_budget && !carries(Control::ThinkingBudget))return reason::shared_request::choice_thinking_budget_unsupported_for_family;
+  if(c.reasoning_effort && !carries(Control::ReasoningEffort)) return reason::shared_request::choice_reasoning_effort_unsupported_for_family;
+  if(c.reasoning_summary && !carries(Control::ReasoningSummary)) return reason::shared_request::choice_reasoning_summary_unsupported_for_family;
+  if(c.thinking_level && !carries(Control::ThinkingLevel)) return reason::shared_request::choice_thinking_level_unsupported_for_family;
+  if(c.service_tier && !carries(Control::ServiceTier)) return reason::shared_request::choice_service_tier_unsupported_for_family;
   return {};
 }
 const FamilyPolicy* DescriptorPolicy::family(std::string_view name) const noexcept { for(const auto& f:families_)if(f.family==name)return &f; return nullptr; }
@@ -1687,8 +1688,8 @@ std::string_view DescriptorPolicy::default_output_cap_member(std::string_view fa
 bool temperature_forbidden(const ValidatedDescriptor& d, std::string_view model) {
   return d.policy()->temperature_admitted(d.family(), d.base_url(), model) == false;
 }
-std::optional<std::string> validate_choices(const ValidatedDescriptor& d,std::string_view model,const EffectiveChoices& c) {
-  if (c.temperature && temperature_forbidden(d, model)) return "temperature is prohibited for the admitted model";
+std::optional<reason::Reason> choices_refusal(const ValidatedDescriptor& d, std::string_view model, const EffectiveChoices& c) {
+  if (c.temperature && temperature_forbidden(d, model)) return reason::shared_request::choice_temperature_is_prohibited_for_the_admitted;
   // A family the policy has no facts for carries no control, so every control set is refused.
   static const DescriptorPolicy::ValidationFacts none{};
   const auto* rules = d.policy()->validation(d.family());
@@ -1697,8 +1698,21 @@ std::optional<std::string> validate_choices(const ValidatedDescriptor& d,std::st
   for (const auto& valued : valued_controls)
     if (const auto& chosen = c.*valued.chosen;
         chosen && d.policy()->control_value_admitted(d.family(), d.base_url(), model, valued.control, *chosen) == false)
-      return "control value is not admitted for the model";
+      return reason::shared_request::choice_control_value_not_admitted_for_the_model;
   return {};
+}
+// The public checks give the text of the constant.
+std::optional<std::string> validate_choices(const ValidatedDescriptor& d, std::string_view model, const EffectiveChoices& c) {
+  if (const auto refusal = choices_refusal(d, model, c)) return std::string(refusal->message);
+  return std::nullopt;
+}
+std::optional<std::string> route_refusal(const ValidatedDescriptor& descriptor, std::string_view model) {
+  if (const auto refusal = route_refusal_reason(descriptor, model)) return std::string(refusal->message);
+  return std::nullopt;
+}
+std::optional<std::string> literal_route_refusal(const ValidatedDescriptor& descriptor, std::string_view model) {
+  if (const auto refusal = literal_route_refusal_reason(descriptor, model)) return std::string(refusal->message);
+  return std::nullopt;
 }
 std::uint32_t interface_revision() noexcept { return 7; }
 } // namespace sp::descriptor

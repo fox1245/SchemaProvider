@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+namespace sp::reason { struct Reason; }
 namespace sp::descriptor {
 struct EffectiveChoices;
 // Decoded-byte ceilings per media kind are the *_decoded_bytes members, in sp::MediaKind order
@@ -403,9 +404,9 @@ class DescriptorPolicy final {
   std::vector<std::optional<std::uint64_t>> max_items_;
   // The family each listing belongs to (listing_family), in the order of all_listings.
   std::vector<std::pair<Listing, std::string>> listings_;
-  static std::optional<std::string> check(const FamilyPolicy&, const ValidationFacts&, const EffectiveChoices&,
-                                          std::optional<std::uint64_t> limit, bool require_cap);
-  friend std::optional<std::string> validate_choices(const ValidatedDescriptor&, std::string_view, const EffectiveChoices&);
+  static std::optional<reason::Reason> check(const FamilyPolicy&, const ValidationFacts&, const EffectiveChoices&,
+                                             std::optional<std::uint64_t> limit, bool require_cap);
+  friend std::optional<reason::Reason> choices_refusal(const ValidatedDescriptor&, std::string_view, const EffectiveChoices&);
   friend class PolicyLoader;
 };
 // Without a catalogue argument, a policy uses builtin_catalogue().

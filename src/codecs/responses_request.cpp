@@ -360,7 +360,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (!request.plugins.empty()) {
     if (!router) return Error{ErrorKind::Unsupported, "OpenRouter plugins require a declared OpenRouter origin"};
     if (auto refusal = request_controls::validate_plugins(descriptor.family_policy(), request.plugins, resources.request_tools))
-      return Error{refusal->admitted ? ErrorKind::InvalidRequest : ErrorKind::Unsupported, std::move(refusal->message)};
+      return Error{refusal->admitted ? ErrorKind::InvalidRequest : ErrorKind::Unsupported, refusal->cause};
   }
   if (!request.modalities.empty() || request.image_config) {
     if (!router) return Error{ErrorKind::Unsupported, "output modalities and image_config require a declared OpenRouter origin"};
@@ -494,7 +494,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   // captured history, but reject invalid ordinary input before hashing.
   if (media_error && !captured_history) return *media_error;
   if (auto refusal = request_controls::validate_extensions(descriptor, request.extensions))
-    return Error{refusal->admitted ? ErrorKind::InvalidRequest : ErrorKind::Unsupported, std::move(refusal->message)};
+    return Error{refusal->admitted ? ErrorKind::InvalidRequest : ErrorKind::Unsupported, refusal->cause};
   auto context = std::shared_ptr<const NativeContext>(new NativeContext(descriptor, request, effective, streaming));
   if (!context->history_valid_) return replay_bad();
   if (!context->valid_) return Error{ErrorKind::ResourceLimit, "native binding could not be captured"};
