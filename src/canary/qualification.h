@@ -84,7 +84,10 @@ class Qualification {
       if (auto* error = std::get_if<qualification::Error>(&opened)) return deny(*error, item, report);
       meter_ = std::get<std::unique_ptr<qualification::Meter>>(std::move(opened));
     }
-    const auto* model = meter_->catalog().find(prepared.model(), prepared.family());
+    // The profile may declare the catalogue family that prices it; the ledger records that family.
+    const std::string_view priced_family = profile.catalog_family().empty() ?
+        std::string_view(prepared.family()) : std::string_view(profile.catalog_family());
+    const auto* model = meter_->catalog().find(prepared.model(), priced_family);
     if (!model) return deny({qualification::Denial::UnknownModel, {}}, item, report);
     const auto output = profile.bounds().output_tokens;
     // Model context and max-input are hard bounds, not character estimates.
@@ -104,7 +107,7 @@ class Qualification {
         std::to_string(prepared.deadline().time_since_epoch().count()),
         "qualification:no-provider-or-semantic-retries", std::to_string(input), std::to_string(output)});
     auto reserved = meter_->reserve({identity, fingerprint, std::string(prepared.model()),
-                                    std::string(prepared.family()), input, output});
+                                    std::string(priced_family), input, output});
     if (auto* error = std::get_if<qualification::Error>(&reserved)) return deny(*error, item, report);
     claim_.emplace(std::get<qualification::Claim>(std::move(reserved)));
     body_digest_ = digest({prepared.encoded_body()});
