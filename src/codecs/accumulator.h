@@ -4,6 +4,7 @@
 #include <map>
 #include <utility>
 
+namespace sp::reason { struct Reason; }
 namespace sp {
 class Accumulator {
  public:
@@ -65,7 +66,7 @@ class Accumulator {
   bool apply(const PartDelta&); bool apply(const PartSeal&); bool apply(const MessageSeal&);
   bool apply(const UsageUpdate&); bool apply(const Stop&); bool apply(const Commit&); bool apply(const Fail&);
   bool apply(const RawWire&); bool apply(const ResponseEnvelope&);
-  bool reject(ErrorKind kind, std::string message);
+  bool reject(ErrorKind kind, const reason::Reason& message);
   std::vector<Message> take_messages(bool partial);
   Part seal_value(Cursor&, bool partial);
   SemanticLimits limits_;
