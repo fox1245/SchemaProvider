@@ -13,13 +13,12 @@
 namespace sp::realtime {
 namespace {
 // A refusal of the setup or a command, with the code of the check.
-Error refusal(ErrorKind kind, std::string message) {
-  Error error{kind, std::move(message)};
-  error.reason = std::string(reason::request_code(reason::Source::RealtimeRequest, error.safe_message));
+Error refusal(ErrorKind kind, const reason::Reason& message) {
+  Error error = reason::error(kind, message);
   return error;
 }
-Error bad(std::string message) { return refusal(ErrorKind::InvalidRequest, std::move(message)); }
-Error unsupported(std::string message) { return refusal(ErrorKind::Unsupported, std::move(message)); }
+Error bad(const reason::Reason& message) { return refusal(ErrorKind::InvalidRequest, message); }
+Error unsupported(const reason::Reason& message) { return refusal(ErrorKind::Unsupported, message); }
 bool token(std::string_view value) {
   return !value.empty() && value.size() <= 128 && std::all_of(value.begin(), value.end(), [](char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
@@ -99,9 +98,8 @@ std::shared_ptr<const json::Document> document(std::string_view text, SemanticLi
 }
 
 // A failure of the session the server's messages caused.
-Error reject(ErrorKind kind, std::string text) {
-  Error error{kind, std::move(text)};
-  error.reason = std::string(reason::code(reason::Source::Realtime, error.safe_message));
+Error reject(ErrorKind kind, const reason::Reason& text) {
+  Error error = reason::error(kind, text);
   return error;
 }
 // One model turn, assembled into the chat outcome a consumer reads.
@@ -152,7 +150,7 @@ class Turn {
     ok = ok && accumulator.accept(UsageUpdate{usage_}) && accumulator.accept(Stop{std::move(stop)}) && accumulator.accept(MessageSeal{{0}}) &&
          accumulator.accept(Commit{"realtime.turn"});
     *this = Turn{};
-    if (!accumulator.outcome()) return reject(ErrorKind::ProtocolCorrupt, "a turn did not assemble");
+    if (!accumulator.outcome()) return reject(ErrorKind::ProtocolCorrupt, reason::realtime::turn_unassembled);
     if (auto* failure = std::get_if<Failure>(&*accumulator.outcome())) return failure->error;
     (void)ok;
     return std::get<Completion>(*accumulator.outcome());
@@ -178,7 +176,7 @@ class FormatCodec : public Codec {
   std::optional<Error> choose(const Setup& setup) {
     const auto* in = format_of(inputs_, setup.input_audio);
     const auto* out = format_of(outputs_, setup.output_audio);
-    if (!in || !out) return bad("a realtime audio format is one the endpoint's fact lists");
+    if (!in || !out) return bad(reason::realtime_request::audio_format_invalid);
     input_ = *in;
     output_ = *out;
     return std::nullopt;
@@ -233,17 +231,17 @@ class GoogleCodec final : public FormatCodec {
     if (const auto* text = std::get_if<Text>(&command))
       return std::vector<Frame>{{false, "{\"clientContent\":{\"turns\":[{\"role\":\"user\",\"parts\":[{\"text\":" + json::quote(text->text) + "}]}],\"turnComplete\":true}}"}};
     if (const auto* result = std::get_if<ToolResult>(&command)) {
-      if (!token(result->call_id) || result->name.empty()) return bad("a tool result names its call and tool");
+      if (!token(result->call_id) || result->name.empty()) return bad(reason::realtime_request::tool_result_invalid);
       return std::vector<Frame>{{false, "{\"toolResponse\":{\"functionResponses\":[{\"id\":" + json::quote(result->call_id) + ",\"name\":" + json::quote(result->name) +
                                             ",\"response\":" + (result->output ? result->output->root().dump() : std::string("{}")) + "}]}}"}};
     }
     // Google answers by itself.
     if (std::holds_alternative<Respond>(command)) return std::vector<Frame>{};
-    return unsupported("Google Live has no cancel; speaking over the model interrupts it");
+    return unsupported(reason::realtime_request::cancel_unsupported);
   }
   std::variant<std::vector<Event>, Error> decode(bool, std::string_view data) override {
     auto wire = document(data, limits_);
-    if (!wire || !wire->root().is_object()) return reject(ErrorKind::ProtocolCorrupt, "a realtime message is a JSON object");
+    if (!wire || !wire->root().is_object()) return reject(ErrorKind::ProtocolCorrupt, reason::realtime::message_invalid);
     const auto root = wire->root();
     std::vector<Event> events;
     // A tool-call turn is committed by the message that ends it, which carries its usage; content of another turn
@@ -270,7 +268,7 @@ class GoogleCodec final : public FormatCodec {
         for (auto part : parts.elements()) {
           if (const auto inline_data = part.get("inlineData"); inline_data.is_object()) {
             std::string pcm;
-            if (!base64_decode(text_of(inline_data.get("data")), pcm)) return reject(ErrorKind::ProtocolCorrupt, "realtime audio is base64");
+            if (!base64_decode(text_of(inline_data.get("data")), pcm)) return reject(ErrorKind::ProtocolCorrupt, reason::realtime::audio_not_base64);
             const auto mime = text_of(inline_data.get("mimeType"));
             turn_.audio(pcm, mime);
             events.push_back(AudioDelta{std::move(pcm), mime});
@@ -380,7 +378,7 @@ class OpenAICodec final : public FormatCodec {
     for (std::size_t i = 0; i < setup.output.size(); ++i) session.append(i ? "," : "").append(setup.output[i] == Modality::Audio ? "\"audio\"" : "\"text\"");
     session += "],\"audio\":{\"input\":{\"format\":" + wire_format(input_);
     if (setup.input_transcription) {
-      if (setup.transcription_model.empty()) return bad("OpenAI transcribes the input with a transcription model");
+      if (setup.transcription_model.empty()) return bad(reason::realtime_request::transcription_model_required);
       session += ",\"transcription\":{\"model\":" + json::quote(setup.transcription_model) + "}";
     }
     session += "},\"output\":{\"format\":" + wire_format(output_);
@@ -397,7 +395,7 @@ class OpenAICodec final : public FormatCodec {
       session += "]";
     }
     if (setup.extensions) for (auto member : setup.extensions->root().members()) session += "," + json::quote(member.key) + ":" + member.value.dump();
-    if (setup.resume) return unsupported("OpenAI Realtime sessions do not resume");
+    if (setup.resume) return unsupported(reason::realtime_request::resume_unsupported);
     return std::vector<Frame>{{false, "{\"type\":\"session.update\",\"session\":" + session + "}}"}};
   }
   std::variant<std::vector<Frame>, Error> encode(const Command& command) override {
@@ -408,7 +406,7 @@ class OpenAICodec final : public FormatCodec {
       return std::vector<Frame>{{false, "{\"type\":\"conversation.item.create\",\"item\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":" +
                                             json::quote(text->text) + "}]}}"}};
     if (const auto* result = std::get_if<ToolResult>(&command)) {
-      if (!token(result->call_id)) return bad("a tool result names its call and tool");
+      if (!token(result->call_id)) return bad(reason::realtime_request::tool_result_invalid);
       // OpenAI takes the output as a string.
       return std::vector<Frame>{{false, "{\"type\":\"conversation.item.create\",\"item\":{\"type\":\"function_call_output\",\"call_id\":" + json::quote(result->call_id) +
                                             ",\"output\":" + json::quote(result->output ? result->output->root().dump() : std::string("{}")) + "}}"}};
@@ -418,14 +416,14 @@ class OpenAICodec final : public FormatCodec {
   }
   std::variant<std::vector<Event>, Error> decode(bool, std::string_view data) override {
     auto wire = document(data, limits_);
-    if (!wire || !wire->root().is_object() || !wire->root().get("type").is_string()) return reject(ErrorKind::ProtocolCorrupt, "a realtime message is a JSON object");
+    if (!wire || !wire->root().is_object() || !wire->root().get("type").is_string()) return reject(ErrorKind::ProtocolCorrupt, reason::realtime::message_invalid);
     const auto root = wire->root();
     const auto type = root.get("type").as_string();
     std::vector<Event> events;
     if (type == "session.created") events.push_back(Ready{text_of(root.get("session").get("id"))});
     else if (type == "error") {
       const auto error = root.get("error");
-      Error value = reject(ErrorKind::RemoteFailure, "the provider reported an error in the session");
+      Error value = reject(ErrorKind::RemoteFailure, reason::realtime::session_provider_error);
       value.vendor_code = text_of(error.get("code"));
       events.push_back(ProviderError{std::move(value)});
     } else if (type == "input_audio_buffer.speech_started") events.push_back(SpeechStarted{});
@@ -449,7 +447,7 @@ class OpenAICodec final : public FormatCodec {
     else if (type == "response.created") response_ = text_of(root.get("response").get("id"));
     else if (type == "response.output_audio.delta") {
       std::string pcm;
-      if (!base64_decode(text_of(root.get("delta")), pcm)) return reject(ErrorKind::ProtocolCorrupt, "realtime audio is base64");
+      if (!base64_decode(text_of(root.get("delta")), pcm)) return reject(ErrorKind::ProtocolCorrupt, reason::realtime::audio_not_base64);
       turn_.audio(pcm, output_.mime);
       events.push_back(AudioDelta{std::move(pcm), output_.mime});
     } else if (type == "response.output_text.delta") {
@@ -473,7 +471,7 @@ class OpenAICodec final : public FormatCodec {
       // but `cancelled`, which aborts the turn, are the provider's error.
       const bool failure_class = status != "incomplete" && descriptor::failure_stop(status);
       if (failure_class && status != "cancelled") {
-        events.push_back(ProviderError{reject(ErrorKind::RemoteFailure, "the provider reported an error in the session")});
+        events.push_back(ProviderError{reject(ErrorKind::RemoteFailure, reason::realtime::session_provider_error)});
         // Apart from `failed`, whose turn is committed below, such a response commits no turn, and what it carried
         // does not reach the next one.
         if (status != "failed") {
@@ -520,24 +518,24 @@ class OpenAICodec final : public FormatCodec {
 
 std::variant<Connection, Error> connect(const descriptor::ValidatedDescriptor& descriptor, const Setup& setup, std::string_view api_key) {
   const auto* fact = fact_of(descriptor);
-  if (!fact) return unsupported("realtime sessions are not admitted at this origin");
+  if (!fact) return unsupported(reason::realtime_request::endpoint_not_admitted);
   const auto path = descriptor::endpoint_path(*fact, "connect");
-  if (!path) return unsupported("the realtime endpoint has no path");
+  if (!path) return unsupported(reason::realtime_request::path_missing);
   // The model is a path segment at Google (`models/<model>`) and a query parameter at OpenAI.
-  if (!token(setup.model)) return bad("a realtime model is a token");
+  if (!token(setup.model)) return bad(reason::realtime_request::model_invalid);
   if (setup.output.empty() && (!setup.voice.empty() || !setup.instructions.empty() || !setup.tools.empty() || setup.output_transcription ||
                                !setup.transcription_model.empty() || setup.resume || !setup.output_audio.empty()))
-    return bad("a transcription session takes no voice, instructions, tools, output transcription, output audio format or resumption");
+    return bad(reason::realtime_request::transcription_setup_invalid);
   if (!format_of(fact->audio_input, setup.input_audio) || !format_of(fact->audio_output, setup.output_audio))
-    return bad("a realtime audio format is one the endpoint's fact lists");
+    return bad(reason::realtime_request::audio_format_invalid);
   if (setup.voice.size() > 128 || setup.instructions.size() > descriptor.policy()->resources().request_bytes)
-    return bad("realtime setup values are bounded");
+    return bad(reason::realtime_request::setup_bounds);
   for (const auto& tool : setup.tools)
-    if (tool.name.empty() || tool.name.size() > 128 || (tool.parameters && !tool.parameters->root().is_object())) return bad("a realtime tool names itself and an object schema");
+    if (tool.name.empty() || tool.name.size() > 128 || (tool.parameters && !tool.parameters->root().is_object())) return bad(reason::realtime_request::tool_invalid);
   if (setup.extensions) {
-    if (!fact->options) return unsupported("the realtime endpoint admits no setup options");
+    if (!fact->options) return unsupported(reason::realtime_request::options_not_admitted);
     if (!setup.extensions->root().is_object() || descriptor::check_value(*fact->options, setup.extensions->root()))
-      return bad("realtime setup options do not match the policy's schema");
+      return bad(reason::realtime_request::options_invalid);
   }
   // The endpoint fact's scheme: a descriptor's connection.auth is for its chat calls.
   auto credential = endpoints::credential(fact->auth, api_key);
