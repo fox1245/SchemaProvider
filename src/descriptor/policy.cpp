@@ -794,8 +794,9 @@ class PolicyLoader {
           return {};
         };
         // What an operation's billing may be: `none` for any; `model` where the call's request names the model it bills
-        // by; `carried` for the batch submit, which bills the chat requests it carries; `unpriced` for any, a fee that is
-        // not per request (a store's storage, the embeddings of indexing), which no bound or estimate prices.
+        // by; `carried` for the batch submit, which bills the chat requests it carries; `unpriced` for an operation of a
+        // search store, a fee that is not per request (a store's storage, the embeddings of indexing), which no bound or
+        // estimate prices.
         const auto names_model = [](std::string_view endpoint, std::string_view operation) {
           return (endpoint == "images" && (operation == "generate" || operation == "edit")) || (endpoint == "decisions" && operation == "decide") ||
                  (endpoint == "embeddings" && operation == "embed") || (endpoint == "rerank" && operation == "rank") ||
@@ -807,7 +808,8 @@ class PolicyLoader {
         const auto admitted = [&](std::string_view endpoint, std::string_view operation, EndpointBilling value) {
           if (value == EndpointBilling::Model) return names_model(endpoint, operation);
           if (value == EndpointBilling::Carried) return endpoint == "batches" && operation == "submit";
-          return value == EndpointBilling::None || value == EndpointBilling::Unpriced;
+          if (value == EndpointBilling::Unpriced) return endpoint == "stores";
+          return value == EndpointBilling::None;
         };
         const auto billing_value = [](Value v) {
           const auto name = v.is_string() ? v.as_string() : std::string_view{};
@@ -991,7 +993,7 @@ class PolicyLoader {
                   fail("/endpoints/billing", "operations of the endpoint's shape");
                 const auto value = billing_value(member.value);
                 if (!admitted(fact.endpoint, member.key, value))
-                  fail("/endpoints/billing", "model where the request names a model, carried for a batch submit");
+                  fail("/endpoints/billing", "model where the request names a model, carried for a batch submit, unpriced on a stores fact");
                 billed.operations.emplace_back(std::string(member.key), value);
               }
               for (const auto& [operation, path] : fact.paths)
@@ -1044,12 +1046,23 @@ class PolicyLoader {
             if (existing.endpoint == fact.endpoint)
               for (const auto& origin : fact.origins)
                 if (contains(existing.origins, origin)) fail("/endpoints/origins", "one fact per endpoint and origin");
-          // The most results one search of a stores fact may ask for: none when the fact states no bound.
+          // The most results one search of a stores fact may ask for. A stores fact that states none has the embedded
+          // policy's for its shape, and its content digest covers it (borrowed_); a shape the embedded policy bounds
+          // nowhere has none.
           std::optional<std::uint64_t> max_results;
+          const auto results_bound = [&](Value value) {
+            max_results = integer(value, "/endpoints/max_results");
+            if (!*max_results || *max_results > std::numeric_limits<std::uint32_t>::max()) fail("/endpoints/max_results", "a positive count");
+          };
           if (const auto stated = e.get("max_results"); stated.valid()) {
             if (fact.endpoint != "stores") fail("/endpoints/max_results", "a bound on a stores fact");
-            max_results = integer(stated, "/endpoints/max_results");
-            if (!*max_results || *max_results > std::numeric_limits<std::uint32_t>::max()) fail("/endpoints/max_results", "a positive count");
+            results_bound(stated);
+          } else if (fact.endpoint == "stores") {
+            if (const auto embedded = embedded_endpoint_member(fact.endpoint, fact.shape, "max_results"); embedded.valid()) {
+              results_bound(embedded);
+              std::pair<std::pair<std::string, std::string>, std::string> entry{{"/endpoints/" + fact.endpoint + "/" + fact.shape, "max_results"}, embedded.dump()};
+              if (std::find(borrowed.begin(), borrowed.end(), entry) == borrowed.end()) borrowed.push_back(std::move(entry));
+            }
           }
           policy->max_items_.push_back(max_items);
           policy->max_results_.push_back(max_results);

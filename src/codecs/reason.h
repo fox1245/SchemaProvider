@@ -1538,6 +1538,7 @@ inline constexpr Reason file_id_required{"files.file.id_required", "a file objec
 inline constexpr Reason page_list_required{"files.page.list_required", "a file listing holds a list"};
 inline constexpr Reason page_limit{"files.page.limit", "a file listing exceeds the part limit"};
 inline constexpr Reason page_cursor_invalid{"files.page.cursor_invalid", "a page cursor is a string"};
+inline constexpr Reason page_cursor_missing{"files.page.cursor_missing", "a page that says more follow names its last id"};
 inline constexpr Reason delete_unconfirmed{"files.delete.unconfirmed", "the response does not confirm the deletion"};
 inline constexpr Reason media_origin_mismatch{"files.media.origin_mismatch", "a file is named only at the origin that holds it"};
 inline constexpr Reason media_not_active{"files.media.not_active", "a file is named once it is active"};
@@ -1552,7 +1553,7 @@ inline constexpr Reason session_id_required{"files.session.id_required", "an upl
 // Every constant of the source, for the enumeration test.
 inline constexpr Reason all[]{
     endpoint_not_admitted, response_json_invalid, response_not_object, file_id_required, page_list_required,
-    page_limit, page_cursor_invalid, delete_unconfirmed, media_origin_mismatch, media_not_active, media_expired,
+    page_limit, page_cursor_invalid, page_cursor_missing, delete_unconfirmed, media_origin_mismatch, media_not_active, media_expired,
     session_unreadable, session_status_required, session_url_required, session_file_required, session_size_invalid,
     session_cancel_unconfirmed, session_id_required,
 };
@@ -1654,6 +1655,7 @@ inline constexpr Reason file_id_required{"stores.file.id_required", "a store fil
 inline constexpr Reason batch_id_required{"stores.batch.id_required", "a file batch or operation names its id"};
 inline constexpr Reason page_list_required{"stores.page.list_required", "a store listing holds a list"};
 inline constexpr Reason page_cursor_invalid{"stores.page.cursor_invalid", "a store listing cursor is a string"};
+inline constexpr Reason page_cursor_missing{"stores.page.cursor_missing", "a store listing that says more follow names its last id"};
 inline constexpr Reason page_limit{"stores.page.limit", "a store listing exceeds the part limit"};
 inline constexpr Reason search_invalid{"stores.search.results_invalid", "search results are objects that name their file"};
 inline constexpr Reason content_invalid{"stores.content.parts_invalid", "a file content page holds text parts"};
@@ -1661,7 +1663,7 @@ inline constexpr Reason delete_unconfirmed{"stores.delete.unconfirmed", "the res
 // Every constant of the source, for the enumeration test.
 inline constexpr Reason all[]{
     endpoint_not_admitted, response_json_invalid, response_not_object, store_id_required, file_id_required,
-    batch_id_required, page_list_required, page_cursor_invalid, page_limit, search_invalid, content_invalid,
+    batch_id_required, page_list_required, page_cursor_invalid, page_cursor_missing, page_limit, search_invalid, content_invalid,
     delete_unconfirmed,
 };
 }  // namespace stores

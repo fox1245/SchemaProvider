@@ -99,10 +99,10 @@ struct SearchPage {
   std::vector<RawWire> raw_events;
 };
 using SearchOutcome = std::variant<SearchPage, Failure>;
-// The parsed content of a file in a store (OpenAI `file_content`); `next` is the provider's next page token.
+// The parsed content of a file in a store (OpenAI `file_content`). `has_more` says the provider holds more of it; no
+// request member asks for the following page, so the provider's `next_page` stays in `raw`.
 struct Content {
   std::vector<ContentPart> parts;
-  std::string next;
   bool has_more = false;
   std::shared_ptr<const json::Document> raw{};
   AttemptEvidence attempt{};
@@ -210,7 +210,8 @@ struct Import {
   std::string store, file;
   std::shared_ptr<const json::Document> custom_metadata{}, chunking_config{};
 };
-// A batch's or an operation's state, and an OpenAI batch's cancellation.
+// A batch's or an operation's state, and an OpenAI batch's cancellation. At OpenAI the call's `model()` is
+// `<store>/<batch>`, and its answer must be that batch of that store; at Google it is the operation's name.
 struct Poll { Handle handle; };
 struct Cancel { Handle handle; };
 

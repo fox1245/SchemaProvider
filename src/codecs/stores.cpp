@@ -2,6 +2,7 @@
 #include "codecs/reason.h"
 #include "descriptor/policy.h"
 #include "json/json.h"
+#include <algorithm>
 #include <charconv>
 
 namespace sp::stores {
@@ -41,10 +42,24 @@ std::string google_store(std::string_view name) {
   if (!name.starts_with(google_stores)) return {};
   return std::string(name.substr(0, name.find('/', google_stores.size())));
 }
-Status status_word(std::string_view word) {
-  if (word == "completed" || word == "STATE_ACTIVE") return Status::Completed;
-  if (word == "in_progress" || word == "STATE_PENDING") return Status::InProgress;
-  if (word == "failed" || word == "STATE_FAILED") return Status::Failed;
+// One path segment of a resource name: letters, digits, `.`, `_` and `-`, and not `.` or `..`.
+bool segment(std::string_view value) {
+  return !value.empty() && value != "." && value != ".." && std::all_of(value.begin(), value.end(), [](char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+  });
+}
+// The status a shape's own word names: OpenAI's `status`, Google's document `state`. Another word is Unknown, and the
+// caller keeps it as the raw status.
+Status status_word(std::string_view shape, std::string_view word) {
+  if (shape == "google") {
+    if (word == "STATE_ACTIVE") return Status::Completed;
+    if (word == "STATE_PENDING") return Status::InProgress;
+    if (word == "STATE_FAILED") return Status::Failed;
+    return Status::Unknown;
+  }
+  if (word == "completed") return Status::Completed;
+  if (word == "in_progress") return Status::InProgress;
+  if (word == "failed") return Status::Failed;
   if (word == "cancelled") return Status::Cancelled;
   if (word == "expired") return Status::Expired;
   return Status::Unknown;
@@ -67,7 +82,7 @@ bool store_of(json::Value item, std::string_view shape, std::string_view origin,
   store.origin = std::string(origin);
   if (shape == "google") {
     const auto name = item.get("name");
-    if (!name.is_string() || !name.as_string().starts_with(google_stores) || name.as_string().size() == google_stores.size() ||
+    if (!name.is_string() || !name.as_string().starts_with(google_stores) || !segment(name.as_string().substr(google_stores.size())) ||
         !optional_member(item.get("displayName"), is_string) || !optional_member(item.get("createTime"), is_time) ||
         !optional_member(item.get("updateTime"), is_time) || !optional_member(item.get("sizeBytes"), is_digits))
       return false;
@@ -93,7 +108,7 @@ bool store_of(json::Value item, std::string_view shape, std::string_view origin,
   store.id = std::string(id.as_string());
   store.name = text_of(item.get("name"));
   store.raw_status = text_of(item.get("status"));
-  store.status = status_word(store.raw_status);
+  store.status = status_word(shape, store.raw_status);
   store.files = counts_of(item.get("file_counts"));
   store.bytes = uint_of(item.get("usage_bytes"));
   store.created_at = uint_of(item.get("created_at"));
@@ -119,7 +134,7 @@ bool file_of(json::Value item, std::string_view shape, std::string_view origin, 
     file.name = text_of(item.get("displayName"));
     file.mime = text_of(item.get("mimeType"));
     file.raw_status = text_of(item.get("state"));
-    file.status = status_word(file.raw_status);
+    file.status = status_word(shape, file.raw_status);
     file.bytes = digits_of(item.get("sizeBytes"));
     file.created_at = time_of(item.get("createTime"));
     if (item.get("customMetadata").is_array()) file.attributes = copy(item.get("customMetadata"));
@@ -136,15 +151,16 @@ bool file_of(json::Value item, std::string_view shape, std::string_view origin, 
   file.id = std::string(id.as_string());
   file.store = text_of(item.get("vector_store_id"));
   file.raw_status = text_of(item.get("status"));
-  file.status = status_word(file.raw_status);
+  file.status = status_word(shape, file.raw_status);
   if (error.is_object()) file.last_error = FileError{text_of(error.get("code")), text_of(error.get("message"))};
   if (item.get("attributes").is_object()) file.attributes = copy(item.get("attributes"));
   file.bytes = uint_of(item.get("usage_bytes"));
   file.created_at = uint_of(item.get("created_at"));
   return true;
 }
-// An OpenAI file batch, or a Google long-running operation.
-bool batch_of(json::Value item, std::string_view shape, std::string_view origin, Batch& batch) {
+// An OpenAI file batch, or a Google long-running operation. `subject` is what the call named: at OpenAI the store a
+// create names, or `<store>/<batch>` for a poll and a cancel, whose answer must be that batch of that store.
+bool batch_of(json::Value item, std::string_view shape, std::string_view origin, std::string_view subject, Batch& batch) {
   if (!item.is_object()) return false;
   batch.handle.origin = std::string(origin);
   batch.handle.shape = std::string(shape);
@@ -168,15 +184,29 @@ bool batch_of(json::Value item, std::string_view shape, std::string_view origin,
       batch.error = FileError{code.is_int() ? std::to_string(code.as_int()) : code.is_uint() ? std::to_string(code.as_uint()) : std::string(),
                               text_of(error.get("message"))};
     }
-    if (response.is_object()) batch.document = text_of(response.get("documentName"));
+    // Google names the document an import made by its id alone, or by its full name under the store.
+    if (response.is_object() && response.get("documentName").is_string()) {
+      const auto document = response.get("documentName").as_string();
+      const std::string under = batch.handle.store + "/documents/";
+      if (segment(document)) batch.document = under + std::string(document);
+      else if (document.starts_with(under) && segment(document.substr(under.size()))) batch.document = std::string(document);
+      else return false;
+    }
     return true;
   }
   const auto id = item.get("id");
   if (!id.is_string() || id.as_string().empty() || !optional_member(item.get("vector_store_id"), is_string) ||
       !optional_member(item.get("status"), is_string) || !counts_valid(item.get("file_counts")) || !optional_member(item.get("created_at"), is_uint))
     return false;
+  const auto slash = subject.find('/');
+  const auto called_store = subject.substr(0, slash);
+  const auto called_batch = slash == std::string_view::npos ? std::string_view{} : subject.substr(slash + 1);
+  const auto stated_store = text_of(item.get("vector_store_id"));
+  // The answer is about the store and batch the call named; one that omits the store is in the call's.
+  if ((!stated_store.empty() && !called_store.empty() && stated_store != called_store) || (!called_batch.empty() && id.as_string() != called_batch))
+    return false;
   batch.handle.id = std::string(id.as_string());
-  batch.handle.store = text_of(item.get("vector_store_id"));
+  batch.handle.store = stated_store.empty() ? std::string(called_store) : stated_store;
   batch.raw_status = text_of(item.get("status"));
   const auto& word = batch.raw_status;
   batch.status = word == "in_progress" ? jobs::Status::Running : word == "completed" ? jobs::Status::Completed
@@ -262,7 +292,7 @@ bool Codec::buffered(std::string_view body, Close close) {
     }
     case Kind::Batch: {
       Batch probe;
-      if (!batch_of(root, shape, origin, probe)) return fail(ErrorKind::ProtocolCorrupt, why::batch_id_required);
+      if (!batch_of(root, shape, origin, subject_, probe)) return fail(ErrorKind::ProtocolCorrupt, why::batch_id_required);
       break;
     }
     case Kind::Stores:
@@ -281,6 +311,10 @@ bool Codec::buffered(std::string_view body, Close close) {
       for (const char* cursor : {"nextPageToken", "last_id"})
         if (!optional_member(root.get(cursor), is_string)) return fail(ErrorKind::ProtocolCorrupt, why::page_cursor_invalid);
       if (!optional_member(root.get("has_more"), is_bool)) return fail(ErrorKind::ProtocolCorrupt, why::page_cursor_invalid);
+      // A page that says more follow names where they start: without `last_id` it would read as the last page.
+      if (root.get("has_more").is_bool() && root.get("has_more").as_bool() &&
+          !(root.get("last_id").is_string() && !root.get("last_id").as_string().empty()))
+        return fail(ErrorKind::ProtocolCorrupt, why::page_cursor_missing);
       break;
     }
     case Kind::Search: {
@@ -349,7 +383,7 @@ BatchOutcome typed_batch(const sp::Outcome& internal) {
   const auto& completion = std::get<Completion>(internal);
   Batch batch;
   if (const auto context = context_of(completion)) {
-    batch_of(context->response, context->shape, context->origin, batch);
+    batch_of(context->response, context->shape, context->origin, context->subject, batch);
     batch.raw = copy(context->response);
   }
   batch.attempt = completion.attempt;
@@ -419,7 +453,6 @@ ContentOutcome typed_content(const sp::Outcome& internal) {
   if (const auto context = context_of(completion)) {
     const auto& root = context->response;
     content.parts = parts_of(root.get("data"));
-    content.next = text_of(root.get("next_page"));
     content.has_more = root.get("has_more").is_bool() && root.get("has_more").as_bool();
     content.raw = copy(root);
   }

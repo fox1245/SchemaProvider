@@ -1244,5 +1244,7 @@
   ["request.stores.filter_invalid", "a file status filter is a token"],
   ["request.stores.expiry_invalid", "a store expiry is a positive number of days"],
   ["request.stores.batch_files_invalid", "a file batch names file_ids or files, one of them"],
-  ["request.stores.update_empty", "a store update changes a member"]
+  ["request.stores.update_empty", "a store update changes a member"],
+  ["files.page.cursor_missing", "a page that says more follow names its last id"],
+  ["stores.page.cursor_missing", "a store listing that says more follow names its last id"]
 ]

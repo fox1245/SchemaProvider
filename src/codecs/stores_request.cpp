@@ -110,6 +110,8 @@ std::optional<Error> handle_checks(const descriptor::ValidatedDescriptor& descri
   if (!named(rest, "/operations/") && !named(rest, "/upload/operations/")) return bad(why::handle_invalid);
   return std::nullopt;
 }
+// What a poll or a cancel names for its decoder: an OpenAI batch with its store, a Google operation by its name.
+std::string handle_subject(const Handle& handle) { return handle.shape == "google" ? handle.id : handle.store + "/" + handle.id; }
 }  // namespace
 
 std::string_view shape(const descriptor::ValidatedDescriptor& descriptor) noexcept {
@@ -321,13 +323,13 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
 }
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Poll& poll) {
   if (auto error = handle_checks(descriptor, poll.handle)) return *error;
-  auto found = call(descriptor, operation(shape(descriptor), poll), "GET", poll.handle.store, poll.handle.id, poll.handle.id);
+  auto found = call(descriptor, operation(shape(descriptor), poll), "GET", poll.handle.store, poll.handle.id, handle_subject(poll.handle));
   if (auto* error = std::get_if<Error>(&found)) return *error;
   return std::move(std::get<Call>(found).encoded);
 }
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Cancel& cancel) {
   if (auto error = handle_checks(descriptor, cancel.handle)) return *error;
-  auto found = call(descriptor, operation(shape(descriptor), cancel), "POST", cancel.handle.store, cancel.handle.id, cancel.handle.id);
+  auto found = call(descriptor, operation(shape(descriptor), cancel), "POST", cancel.handle.store, cancel.handle.id, handle_subject(cancel.handle));
   if (auto* error = std::get_if<Error>(&found)) return *error;
   auto& encoded = std::get<Call>(found).encoded;
   encoded.content_type.clear();
