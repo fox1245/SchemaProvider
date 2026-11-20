@@ -37,6 +37,19 @@ bool carries_image(const std::vector<Message>& messages) {
     }
   return false;
 }
+// The extension members whose value changes the price (descriptor::ExtensionFact::prices), each read as a typed value
+// against the fact the policy admits for the descriptor's origin.
+void price_extensions(RequestFacts& facts, const descriptor::ValidatedDescriptor& d, const std::shared_ptr<const json::Document>& extensions) {
+  if (!extensions || !extensions->root().is_object()) return;
+  for (auto member : extensions->root().members())
+    for (const auto& fact : d.family_policy().extensions) {
+      if (fact.key != member.key || !descriptor::contains(fact.origins, d.base_url())) continue;
+      const auto pricing = descriptor::extension_pricing(fact, member.value);
+      if (!pricing) continue;
+      PricedExtension priced{fact.key, std::string(d.policy()->billing_tier(d.family(), pricing->tier)), pricing->unmodeled};
+      if (priced.unmodeled || !priced.tier.empty()) facts.priced_extensions.push_back(std::move(priced));
+    }
+}
 } // namespace
 
 RequestFacts request_facts(const descriptor::ValidatedDescriptor& d, const chat::Request& request) {
@@ -48,6 +61,7 @@ RequestFacts request_facts(const descriptor::ValidatedDescriptor& d, const chat:
                       std::any_of(request.messages.begin(), request.messages.end(), [](const chat::InputMessage& message) {
                         return std::any_of(message.media.begin(), message.media.end(), [](const Media& media) { return media.kind == MediaKind::Image; });
                       });
+  price_extensions(facts, d, request.extensions);
   return facts;
 }
 RequestFacts request_facts(const descriptor::ValidatedDescriptor& d, const messages::Request& request) {
@@ -58,6 +72,7 @@ RequestFacts request_facts(const descriptor::ValidatedDescriptor& d, const messa
   for (const auto& tool : request.tools)
     if (const auto tool_facts = descriptor::tool_facts(d.family_policy(), tool.type); !tool.type.empty() && !tool_facts.client)
       facts.tools.push_back({{tool.type}, tool.max_uses, "max_uses", tool_facts.admits_max_uses});
+  price_extensions(facts, d, request.extensions);
   return facts;
 }
 RequestFacts request_facts(const descriptor::ValidatedDescriptor& d, const responses::Request& request) {
@@ -73,6 +88,7 @@ RequestFacts request_facts(const descriptor::ValidatedDescriptor& d, const respo
     if (service_runs(d, type)) hosted.types.emplace_back(type);
   }
   if (!hosted.types.empty()) facts.tools.push_back(std::move(hosted));
+  price_extensions(facts, d, request.extensions);
   return facts;
 }
 RequestFacts request_facts(const descriptor::ValidatedDescriptor& d, const gemini::Request& request) {
@@ -81,12 +97,14 @@ RequestFacts request_facts(const descriptor::ValidatedDescriptor& d, const gemin
   // No cap bounds a built-in tool or an MCP server.
   for (const auto& tool : request.builtin_tools) facts.tools.push_back({{std::string(gemini::tool_type(tool))}, std::nullopt, {}, false});
   for (const auto& server : request.mcp_servers) facts.tools.push_back({{gemini::tool_type(server)}, std::nullopt, {}, false});
+  price_extensions(facts, d, request.extensions);
   return facts;
 }
 RequestFacts request_facts(const descriptor::ValidatedDescriptor& d, const interactions::Request& request) {
   auto facts = common(d, request.model, request.service_tier);
   facts.image_input = request.previous_interaction_id || carries_image(request.messages);
   for (const auto& tool : request.builtin_tools) facts.tools.push_back({{std::string(interactions::tool_type(tool))}, std::nullopt, {}, false});
+  price_extensions(facts, d, request.extensions);
   return facts;
 }
 CarriedRequest carried_request(const descriptor::ValidatedDescriptor& family, const FamilyRequest& request, const batches::detail::ItemCaps& caps) {

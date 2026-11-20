@@ -168,6 +168,43 @@ void policy_facts() {
   refused_at("anthropic.messages", R"("response_blocks":[{"type":"compaction","opens_history":"yes"}])", "/response_blocks/opens_history");
   refused_at("anthropic.messages", R"("extensions":[{"key":"compaction","origins":["https://api.anthropic.com"],"value":{"type":"null"},"replay_eligible":true,"bound":false,"beta":"fixture-missing"}])", "/extensions/beta");
   refused_at("openai.chat", R"("extensions":[{"key":"fixture","origins":["https://api.openai.com"],"value":{"type":"null"},"replay_eligible":true,"beta":"compact-2026-09-04"}])", "/extensions/beta");
+  // Extension prices (#207): each listed value one the fact's schema takes, priced under a catalogue tier or as no
+  // catalogue row states; values at the standard rates are listed only beside a price for every other value.
+  const auto priced_fact = [](std::string_view prices) {
+    return R"("extensions":[{"key":"speed","origins":["https://api.anthropic.com"],"value":{"one_of":[{"type":"enum","values":["standard","fast"]},{"type":"null"}]},"replay_eligible":true,"bound":false,"prices":)" +
+           std::string(prices) + "}]";
+  };
+  for (const auto* good : {R"({})", R"({"values":{"fast":{"tier":"fast"}}})", R"({"values":{"fast":{"unmodeled":true}}})",
+                           R"({"standard":["standard"],"other":{"unmodeled":true}})", R"({"other":{"tier":"priority"}})",
+                           R"({"values":{"fast":{"tier":"fast"}},"standard":["standard"],"other":{"unmodeled":true}})"})
+    CHECK(std::holds_alternative<descriptor::PolicySnapshot>(policy_with("anthropic.messages", priced_fact(good))));
+  for (const auto* bad : {R"([])", R"({"values":{"warp":{"tier":"fast"}}})", R"({"values":{"fast":{"tier":"fast","unmodeled":true}}})",
+                          R"({"values":{"fast":{}}})", R"({"values":{"fast":{"unmodeled":false}}})", R"({"values":{"fast":{"tier":"has space"}}})",
+                          R"({"values":{"fast":{"tier":""}}})", R"({"values":{"fast":"fast"}})", R"({"values":[]})", R"({"standard":["standard"]})",
+                          R"({"standard":["warp"],"other":{"unmodeled":true}})", R"({"standard":["standard","standard"],"other":{"unmodeled":true}})",
+                          R"({"values":{"fast":{"tier":"fast"}},"standard":["fast"],"other":{"unmodeled":true}})", R"({"other":"fast"})", R"({"extra":1})"})
+    refused_at("anthropic.messages", priced_fact(bad), "/extensions/prices");
+  {
+    // The built-in prices: `speed: fast` under the fast tier; `inference_geo` other than `global` as no row states.
+    const auto& facts = descriptor::builtin_policy()->family("anthropic.messages")->extensions;
+    const auto of = [&](std::string_view key) {
+      const auto found = std::find_if(facts.begin(), facts.end(), [&](const auto& f) { return f.key == key; });
+      CHECK(found != facts.end()); return *found;
+    };
+    const auto speed = of("speed"), geo = of("inference_geo");
+    CHECK(speed.prices.values.size() == 1 && speed.prices.values[0].first == "fast" && speed.prices.values[0].second.tier == "fast" &&
+          !speed.prices.values[0].second.unmodeled && speed.prices.standard.empty() && !speed.prices.other);
+    CHECK(geo.prices.values.empty() && geo.prices.standard == std::vector<std::string>{"global"} && geo.prices.other && geo.prices.other->unmodeled &&
+          geo.prices.other->tier.empty());
+    const auto fast = parse(R"("fast")"), standard = parse(R"("standard")"), null = parse("null"), us = parse(R"("us")"), global = parse(R"("global")");
+    CHECK(descriptor::extension_pricing(speed, fast.root())->tier == "fast");
+    CHECK(!descriptor::extension_pricing(speed, standard.root()) && !descriptor::extension_pricing(speed, null.root()));
+    CHECK(descriptor::extension_pricing(geo, us.root())->unmodeled);
+    CHECK(!descriptor::extension_pricing(geo, global.root()) && !descriptor::extension_pricing(geo, null.root()));
+    // Every other fact prices nothing.
+    for (const auto& fact : facts)
+      if (fact.key != "speed" && fact.key != "inference_geo") CHECK(fact.prices.values.empty() && fact.prices.standard.empty() && !fact.prices.other);
+  }
   // Input blocks (#53) belong to Messages, never name a typed block, and declare the whole block in an object schema.
   refused_at("openai.chat", R"("input_blocks":[{"type":"search_result","value":{"type":"object","properties":{"type":{"type":"enum","values":["search_result"]}}}}])", "/input_blocks");
   refused_at("anthropic.messages", R"("input_blocks":[{"type":"text","value":{"type":"object","properties":{"type":{"type":"enum","values":["text"]}}}}])", "/input_blocks/type");

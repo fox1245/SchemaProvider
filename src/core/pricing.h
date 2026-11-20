@@ -130,6 +130,13 @@ struct CostEstimate {
 CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_view family, std::string_view origin,
                       const ServedModel& model, const Usage& usage, std::string_view service_tier = {},
                       bool route_ceiling = false);
+// As above, under the tier the request bills under (billed_tier(facts, service_tier), #207): the facts the request
+// was prepared with (PreparedRequest::facts()) and its service tier as DescriptorPolicy::billing_tier maps it. With no
+// such tier there is no total: "extension:<key>" for an extension whose value no catalogue row prices, "tier" for two
+// tiers.
+CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_view family, std::string_view origin,
+                      const ServedModel& model, const Usage& usage, const RequestFacts& facts, std::string_view service_tier,
+                      bool route_ceiling = false);
 
 // A side of a call's tokens.
 enum class TokenSide : std::uint8_t { Input, Output };
@@ -209,6 +216,16 @@ struct UnboundedReason {
   // Why, in a short phrase for a person; not a key.
   std::string detail;
 };
+// The tier a request bills under (#207): `service_tier`, the request's as DescriptorPolicy::billing_tier maps it (or a
+// batch's carried tier), together with the tiers its priced extensions name (RequestFacts::priced_extensions). There
+// is none (`refused`) when an extension's value changes the price in a way no catalogue row states (`Unmodeled`,
+// subject the extension's key), or when two different tiers are named (`TierPrice`, subject the extension's key):
+// nothing states how two tiers combine. The same tier named twice is that tier.
+struct BilledTier {
+  std::string tier;
+  std::optional<UnboundedReason> refused;
+};
+BilledTier billed_tier(const RequestFacts& facts, std::string_view service_tier);
 // The request, as the bound reads it. `family`, `origin` and `model` select catalogue entries as
 // ModelCatalogue::find does, so `origin` is in its canonical spelling (descriptor::canonical_origin), as a descriptor's
 // base_url() is.

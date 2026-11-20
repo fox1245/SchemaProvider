@@ -346,6 +346,46 @@ void route_content_digests() {
   // The facts are not part of the replay identity.
   CHECK(older && older->identity_hex() == descriptor::builtin_policy()->identity_hex());
 }
+// The prices of extension facts a policy takes from the embedded policy join its content digest in the same form: per
+// fact in key order, the family, `extensions.<key>.prices` and the member's canonical JSON, each with its length. A
+// policy that states `prices`, even as `{}`, takes none.
+void extension_price_digests() {
+  auto parsed = json::parse(config_defaults::descriptor_policy_json, {config_defaults::codec_admission_policy_bytes, config_defaults::codec_admission_policy_depth});
+  const auto root = std::get<json::Document>(parsed).root();
+  constexpr std::string_view family = "anthropic.messages";
+  std::vector<std::pair<std::string, std::string>> stated;
+  std::string without = "[", empty = "[";
+  for (auto entry : root.get("families").elements()) {
+    if (entry.get("family").as_string() != family) continue;
+    for (auto fact : entry.get("extensions").elements()) {
+      std::string object = "{";
+      for (auto field : fact.members())
+        if (field.key != "prices") object += (object.size() > 1 ? "," : "") + json::quote(field.key) + ':' + field.value.dump();
+      if (const auto prices = fact.get("prices"); prices.valid()) stated.emplace_back("extensions." + std::string(fact.get("key").as_string()) + ".prices", prices.dump());
+      without += (without.size() > 1 ? "," : "") + object + '}';
+      empty += (empty.size() > 1 ? "," : "") + object + ",\"prices\":{}}";
+    }
+  }
+  without += ']';
+  empty += ']';
+  // The embedded policy prices `speed` and `inference_geo`.
+  CHECK(std::any_of(stated.begin(), stated.end(), [](const auto& s) { return s.first == "extensions.speed.prices"; }));
+  CHECK(std::any_of(stated.begin(), stated.end(), [](const auto& s) { return s.first == "extensions.inference_geo.prices"; }));
+  std::sort(stated.begin(), stated.end());
+  std::string borrowed;
+  const auto put = [&](std::string_view text) { borrowed += std::to_string(text.size()) + ":" + std::string(text); };
+  for (const auto& [member, value] : stated) { put(family); put(member); put(value); }
+  const auto left_out_text = edited(family, "extensions", without);
+  const auto left_out = loaded_policy(left_out_text);
+  CHECK(left_out && left_out->content_digest_hex() == plain_digest(left_out_text, borrowed));
+  CHECK(left_out && left_out->content_digest_hex() != plain_digest(left_out_text));
+  const auto empty_text = edited(family, "extensions", empty);
+  const auto declared = loaded_policy(empty_text);
+  CHECK(declared && declared->content_digest_hex() == plain_digest(empty_text));
+  // The prices are not part of the replay identity.
+  CHECK(left_out && left_out->identity_hex() == descriptor::builtin_policy()->identity_hex());
+  CHECK(declared && declared->identity_hex() == descriptor::builtin_policy()->identity_hex());
+}
 void content_digests() {
   const auto builtin = descriptor::builtin_policy();
   CHECK(builtin->content_digest_hex() == plain_digest(config_defaults::descriptor_policy_json));
@@ -901,6 +941,7 @@ int main() {
   older_policy_without_facts();
   content_digests();
   route_content_digests();
+  extension_price_digests();
   listing_facts();
   descriptor_scheme();
   policy_scheme();

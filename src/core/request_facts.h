@@ -21,6 +21,14 @@ struct ToolCap {
   // `max_uses`), so a cap cannot be set and the tools' use stays unbounded.
   bool cap_admitted = false;
 };
+// A request member the policy admits whose value changes the price (descriptor::ExtensionFact::prices, #207): its key,
+// and the catalogue tier the value bills under (as DescriptorPolicy::billing_tier maps it), or `unmodeled` when no
+// catalogue row states its price.
+struct PricedExtension {
+  std::string key;
+  std::string tier;
+  bool unmodeled = false;
+};
 struct RequestFacts {
   // The service tier the call bills under: the request's, else the policy default for the model; empty when neither
   // names one. As written: DescriptorPolicy::billing_tier maps the standard tier to the catalogue's unlabelled rates.
@@ -38,5 +46,8 @@ struct RequestFacts {
   // continuation (a Responses `previous_response_id`, an Interactions `previous_interaction_id`), whose images are not
   // visible here. An entry that prices an image beyond its tokens (`image` in a models listing) has no bound for it.
   bool image_input = false;
+  // The extension members the request sends whose value changes the price, in the request's order. A value the policy
+  // prices at the standard rates is left out.
+  std::vector<PricedExtension> priced_extensions;
 };
 } // namespace sp
