@@ -39,32 +39,31 @@ Codec::Codec(const descriptor::ValidatedDescriptor& descriptor, Accumulator& acc
              std::uint64_t inputs)
     : descriptor_(descriptor), accumulator_(accumulator), requested_(std::move(requested)), limits_(limits), inputs_(inputs) {}
 bool Codec::emit(const Event& event) { return accumulator_.accept(event); }
-bool Codec::fail(ErrorKind kind, std::string text) {
-  Error error{kind, std::move(text)};
-  error.reason = reason::code(reason::Source::Embeddings, error.safe_message);
+bool Codec::fail(ErrorKind kind, const reason::Reason& text) {
+  Error error = reason::error(kind, text);
   emit(Fail{std::move(error)});
   return false;
 }
 bool Codec::buffered(std::string_view body, Close close) {
-  if (!close.normal) return fail(close.error, "abnormal response close");
+  if (!close.normal) return fail(close.error, reason::transport::response_close);
   auto parsed = json::parse(body, {limits_.max_content_bytes, limits_.max_json_depth});
   if (auto* error = std::get_if<json::ParseError>(&parsed))
     return fail(error->code == json::ParseCode::SizeExceeded || error->code == json::ParseCode::DepthExceeded
-                    ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, "invalid response JSON");
+                    ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, reason::embeddings::response_json_invalid);
   auto wire = std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
   const auto root = wire->root();
-  if (!root.is_object()) return fail(ErrorKind::ProtocolCorrupt, "response must be object");
+  if (!root.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::embeddings::response_not_object);
   if (!emit(RawWire{"embeddings.response", wire})) return false;
-  if (root.get("error").valid() && !root.get("error").is_null()) return fail(ErrorKind::RemoteFailure, "remote error property");
-  if (!root.get("data").is_array() && !root.get("embeddings").is_array()) return fail(ErrorKind::ProtocolCorrupt, "embedding vectors required");
+  if (root.get("error").valid() && !root.get("error").is_null()) return fail(ErrorKind::RemoteFailure, reason::embeddings::response_remote_error);
+  if (!root.get("data").is_array() && !root.get("embeddings").is_array()) return fail(ErrorKind::ProtocolCorrupt, reason::embeddings::vectors_required);
   if (inputs_ && (root.get("data").is_array() ? root.get("data") : root.get("embeddings")).size() != inputs_)
-    return fail(ErrorKind::ProtocolCorrupt, "the response holds one embedding per input");
+    return fail(ErrorKind::ProtocolCorrupt, reason::embeddings::vectors_count_mismatch);
   const auto vectors = vectors_of(root, inputs_);
-  if (!vectors) return fail(ErrorKind::ProtocolCorrupt, "an embedding names its input once");
+  if (!vectors) return fail(ErrorKind::ProtocolCorrupt, reason::embeddings::vector_index_invalid);
   for (auto vector : *vectors) {
-    if (!vector.is_array() || !vector.size()) return fail(ErrorKind::ProtocolCorrupt, "an embedding is an array of numbers");
+    if (!vector.is_array() || !vector.size()) return fail(ErrorKind::ProtocolCorrupt, reason::embeddings::vector_invalid);
     for (auto value : vector.elements())
-      if (!value.is_number() || !std::isfinite(value.as_double())) return fail(ErrorKind::ProtocolCorrupt, "an embedding is an array of numbers");
+      if (!value.is_number() || !std::isfinite(value.as_double())) return fail(ErrorKind::ProtocolCorrupt, reason::embeddings::vector_invalid);
   }
   const auto served = root.get("model");
   const std::string_view name = served.is_string() ? served.as_string() : std::string_view{};
