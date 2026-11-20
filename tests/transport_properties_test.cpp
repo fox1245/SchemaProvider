@@ -1554,17 +1554,26 @@ TEST(backpressure_http2_paused_stream_buffering_is_bounded) {
   };
   HttpRequest req = post("http://127.0.0.1:" + std::to_string(node.h2) + "/flood?total=" + std::to_string(kTotal), "{}", 60000);
   req.http_version = HttpVersion::Http2PriorKnowledge;
-  const long long rss_before = rss_bytes();
+  // The bound is on what the paused stream buffers. Under ThreadSanitizer, resident pages also count the sanitizer's
+  // shadow memory, which put this check near its bound; there the live heap the sanitizer reports is measured instead.
+#ifdef SP_TRANSPORT_TEST_TSAN
+  const auto memory = [] { return static_cast<long long>(__sanitizer_get_current_allocated_bytes()); };
+  const char* const measured = "live heap";
+#else
+  const auto memory = [] { return rss_bytes(); };
+  const char* const measured = "RSS";
+#endif
+  const long long rss_before = memory();
   Operation op = t.start(std::move(req), std::move(cb));
   CHECK(wait_until([&] { return received.load() >= kAccept - (32 << 10); }, 5000));
   std::this_thread::sleep_for(milliseconds(1000));
   const long w1 = node.stat("written");
   std::this_thread::sleep_for(milliseconds(500));
   const long w2 = node.stat("written");
-  const long long rss_growth = rss_bytes() - rss_before;
-  note("h2 paused: client consumed %ld B; server handed %ld then %ld B of %ld to its socket; RSS +%lld B", received.load(),
-       w1, w2, kTotal, rss_growth);
-  CHECK_MSG(rss_growth < (32L << 20), "paused HTTP/2 stream grew client RSS by %lld B", rss_growth);
+  const long long rss_growth = memory() - rss_before;
+  note("h2 paused: client consumed %ld B; server handed %ld then %ld B of %ld to its socket; %s +%lld B", received.load(),
+       w1, w2, kTotal, measured, rss_growth);
+  CHECK_MSG(rss_growth < (32L << 20), "paused HTTP/2 stream grew client %s by %lld B", measured, rss_growth);
   CHECK(!c->done);
   CHECK(c->head && c->head->framing == BodyFraming::Stream);
 
