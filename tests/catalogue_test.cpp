@@ -657,10 +657,11 @@ void listed_override_bounds() {
                                R"("prompt/flex":"2","prompt+1000":"3","prompt":"0.000003"}]})");
     CHECK(reserved.entries[0].pricing == (Prices{{"completion", "0.000002"}, {"prompt", "0.000003"}}));
     CHECK(reserved.skipped_prices == 3 + 4 && reserved.skipped_override_prices == 0 && reserved.window_prices_at_dearest == 1 && reserved.withheld.empty());
-    // A band whose unit name is too long to hold is not held.
+    // A band whose unit name is too long to hold is not held. The unit is a member no price unit reads, so the entry keeps
+    // it at a variable price rather than losing it: a bound over a request it prices has no total.
     const std::string wide(60, 'x');
     CHECK(page(R"({")" + wide + R"(":"0.000001","completion":"0.000002","overrides":[{"min_prompt_tokens":1000,")" + wide + R"(":"0.000002"}]})")
-              .entries[0].pricing == (Prices{{"completion", "0.000002"}}));
+              .entries[0].pricing == (Prices{{"completion", "0.000002"}, {wide, "-1"}}));
     // Overrides that are not an array, or an entry that is not an object, cannot be read: every price is left out.
     for (const char* overrides : {R"({"min_prompt_tokens":1000})", R"("0.1")", R"([{"min_prompt_tokens":1000,"prompt":"0.000002"},7])"}) {
         const auto read = page(std::string(R"({"prompt":"0.000001","completion":"0.000002","overrides":)") + overrides + "}");

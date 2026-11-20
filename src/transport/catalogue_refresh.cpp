@@ -222,8 +222,8 @@ bool ceiling_unit(std::string_view unit) noexcept {
 // the base price. `request` is the exception: nothing says what a fee left out costs, so a fee that some endpoints
 // list, in their base pricing or in an override, and others leave out is missing where the others have it. The
 // prices per input image and per web search are per item, which no usage counter counts, so no ceiling covers them
-// (descriptor::unread_listed_members names them for the bound). The prices the models listing gives for the model on a side count too, its input bands included, so a
-// ceiling is never below a price the same refresh lists; a side with a listed price the entry leaves out for an
+// (descriptor::listed_members names them for the bound). The prices the models listing gives for the model on a side
+// count too, its input bands included, so a ceiling is never below a price the same refresh lists; a side with a listed price the entry leaves out for an
 // override it cannot hold (descriptor::ListingPage::withheld) has no known floor and gets no ceiling.
 struct PriceMember {
   std::string_view name;
@@ -389,8 +389,19 @@ void read_ceilings(Transport& transport, const RefreshRequest& request, const de
     }
     // An endpoints request that fails keeps the ceiling `previous` had for the model.
     const auto keep_previous = [&](std::string reason) {
-      const auto units = previous_ceiling(request.previous, id, plan.origin);
+      auto units = previous_ceiling(request.previous, id, plan.origin);
+      // A kept ceiling below a token price this listing gives for the model bounds nothing: it is not kept.
+      PriceUnits stale;
+      for (auto unit = units.begin(); unit != units.end();) {
+        const bool input = unit->first == ceiling_units[Input], output = unit->first == ceiling_units[Output];
+        const auto rate = pricing::per_million(unit->second);
+        if ((input || output) && (!rate || pricing::ceiling_below_listed(entry, input ? pricing::TokenSide::Input : pricing::TokenSide::Output, *rate))) {
+          stale.push_back(std::move(*unit));
+          unit = units.erase(unit);
+        } else ++unit;
+      }
       gap({}, {}, std::move(reason), !units.empty() && hold(entry, units));
+      for (const auto& held : stale) gap(held.first, {}, "kept ceiling is below a price the listing gives");
     };
     const auto now = std::chrono::steady_clock::now();
     if (now >= deadline) { keep_previous("refresh deadline passed"); continue; }

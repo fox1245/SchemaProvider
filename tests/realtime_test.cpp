@@ -576,7 +576,9 @@ void transcription() {
 void turn_usage_is_priced() {
   auto loaded = descriptor::load_catalogue(R"({"version":1,"models":[
     {"id":"audio-model","pricing":{"input":"0.000004","output":"0.000016","input_audio":"0.000032","output_audio":"0.000064"}},
-    {"id":"text-only-model","pricing":{"input":"0.000004","output":"0.000016"}}]})");
+    {"id":"text-only-model","pricing":{"input":"0.000004","output":"0.000016"}},
+    {"id":"thinking-model","pricing":{"input":"0.000004","output":"0.000016","reasoning":"0.00004"}},
+    {"id":"image-model","pricing":{"input":"0.000004","output":"0.000016","input_image":"0.00001"}}]})");
   CHECK(std::holds_alternative<descriptor::CatalogueSnapshot>(loaded));
   const auto catalogue = std::get<descriptor::CatalogueSnapshot>(loaded);
   const ServedModel audio{"audio-model", "audio-model", ServedRelation::Exact}, text_only{"text-only-model", "text-only-model", ServedRelation::Exact};
@@ -595,6 +597,30 @@ void turn_usage_is_priced() {
   CHECK(estimate.total && estimate.total->nano_usd == 3'600'000u && estimate.unpriced.empty());
   estimate = pricing::estimate(*catalogue, "google.generate", "", text_only, google[1]->turn.usage);
   CHECK(!estimate.total && estimate.unpriced == std::vector<std::string>({"input_audio", "output_audio"}));
+  // Live's thoughts are counted beside the response tokens, not within them: 100 input, 40 response and 500 thought
+  // tokens bill 400'000 + 640'000 nano-USD and the thoughts at the reasoning rate 4e-5, else at the output rate 1.6e-5.
+  auto live = realtime::make_codec(descriptor::presets::google_generate());
+  std::get<std::vector<realtime::Event>>(live->decode(false, R"({"serverContent":{"modelTurn":{"parts":[{"text":"hi"}]}}})"));
+  const auto thinking_events = std::get<std::vector<realtime::Event>>(live->decode(false,
+      R"({"serverContent":{"turnComplete":true},"usageMetadata":{"promptTokenCount":100,"responseTokenCount":40,"thoughtsTokenCount":500,"totalTokenCount":140}})"));
+  const auto thinking = all<realtime::TurnCommitted>(thinking_events);
+  CHECK(thinking.size() == 1 && thinking[0]->turn.usage.extra.at("thoughtsTokenCount").value == 500 && !thinking[0]->turn.usage.reasoning);
+  const ServedModel thinks{"thinking-model", "thinking-model", ServedRelation::Exact};
+  estimate = pricing::estimate(*catalogue, "google.generate", "", thinks, thinking[0]->turn.usage);
+  CHECK(estimate.total && estimate.total->nano_usd == 400'000u + 640'000u + 20'000'000u && estimate.unpriced.empty());
+  estimate = pricing::estimate(*catalogue, "google.generate", "", text_only, thinking[0]->turn.usage);
+  CHECK(estimate.total && estimate.total->nano_usd == 400'000u + 640'000u + 8'000'000u);
+  // OpenAI realtime counts image input tokens under `input_token_details.image_tokens`: 100 of 1000 input tokens at the
+  // image input rate 1e-5, or no total where the entry has none.
+  auto image_turn = openai[0]->turn.usage;
+  image_turn.input_total = Count{1000, Evidence::Reported};
+  image_turn.extra.clear();
+  image_turn.extra["input_token_details.image_tokens"] = Count{100, Evidence::Reported};
+  image_turn.output_total = Count{10, Evidence::Reported};
+  estimate = pricing::estimate(*catalogue, "openai.chat", "", ServedModel{"image-model", "image-model", ServedRelation::Exact}, image_turn);
+  CHECK(estimate.total && estimate.total->nano_usd == 900u * 4000u + 100u * 10'000u + 10u * 16'000u);
+  estimate = pricing::estimate(*catalogue, "openai.chat", "", text_only, image_turn);
+  CHECK(!estimate.total && estimate.unpriced == std::vector<std::string>({"input_image"}));
 }
 
 int main(int argc, char** argv) {
