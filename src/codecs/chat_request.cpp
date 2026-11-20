@@ -1,4 +1,6 @@
 #include "codecs/chat.h"
+#include "codecs/reason.h"
+#include "descriptor/policy_refusals.h"
 #include "codecs/request_checks.h"
 #include "core/cache_marks.h"
 #include "core/native.h"
@@ -46,7 +48,7 @@ void write_media(json::BoundedWriter& body, const Media& media) {
 std::optional<Error> admit(const descriptor::ValidatedDescriptor& descriptor, const Media& media) {
   if (auto error = media_input::admit(descriptor, media)) return error;
   if (media.kind == MediaKind::Audio && !media_input::audio_format(media.mime))
-    return Error{ErrorKind::Unsupported, "Chat input_audio has no format name for this MIME type"};
+    return reason::error(ErrorKind::Unsupported, reason::chat_request::chat_input_audio_has_no_format_name_for_this_mime);
   return std::nullopt;
 }
 std::string_view modality_name(OutputModality modality) noexcept {
@@ -77,27 +79,27 @@ std::string_view tool_choice_name(ToolChoiceMode mode) noexcept {
   }
 }
 // Everything a tool choice names is a function the request declares.
-std::optional<std::string> validate_tool_choice(const Request& request) {
+std::optional<reason::Reason> validate_tool_choice(const Request& request) {
   const auto& choice = *request.tool_choice;
   std::set<std::string_view> functions;
   for (const auto& tool : request.tools) functions.insert(tool.name);
   switch (choice.mode) {
     case ToolChoiceMode::Auto: case ToolChoiceMode::Required: case ToolChoiceMode::None:
-      if (!choice.name.empty()) return "only a function tool choice takes a name";
+      if (!choice.name.empty()) return reason::chat_request::only_a_function_tool_choice_takes_a_name;
       break;
     case ToolChoiceMode::Function:
-      if (!functions.contains(choice.name)) return "a function tool choice must name a declared function";
+      if (!functions.contains(choice.name)) return reason::chat_request::function_tool_choice_must_be_declared;
       break;
-    default: return "invalid tool choice mode";
+    default: return reason::chat_request::invalid_tool_choice_mode;
   }
   if (!choice.allowed) return std::nullopt;
   if (choice.mode != ToolChoiceMode::Auto && choice.mode != ToolChoiceMode::Required)
-    return "allowed functions require the auto or required mode";
-  if (choice.allowed->empty()) return "allowed functions require at least one function";
+    return reason::chat_request::allowed_functions_require_auto_or_required;
+  if (choice.allowed->empty()) return reason::chat_request::allowed_functions_require_at_least_one;
   std::set<std::string_view> seen;
   for (const auto& name : *choice.allowed) {
-    if (!functions.contains(name)) return "allowed functions must be declared functions";
-    if (!seen.insert(name).second) return "allowed functions must name each function once";
+    if (!functions.contains(name)) return reason::chat_request::allowed_functions_must_be_declared;
+    if (!seen.insert(name).second) return reason::chat_request::allowed_functions_must_be_unique;
   }
   return std::nullopt;
 }
@@ -116,40 +118,40 @@ void write_tool_choice(json::BoundedWriter& body, const ToolChoice& choice) {
   else body.quoted(tool_choice_name(choice.mode));
 }
 // Output media controls: modalities, the OpenAI audio parameters and the OpenRouter image_config.
-std::optional<std::string> validate_output(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
+std::optional<reason::Reason> validate_output(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {
   unsigned mask = 0;
   for (const auto modality : request.modalities) {
     if (static_cast<unsigned>(modality) > static_cast<unsigned>(OutputModality::Image) || (mask & (1U << static_cast<unsigned>(modality))))
-      return "output modalities require unique valid values";
+      return reason::chat_request::output_modalities_require_unique_valid_values;
     mask |= 1U << static_cast<unsigned>(modality);
   }
   const bool audio = mask & (1U << static_cast<unsigned>(OutputModality::Audio));
   const bool image = mask & (1U << static_cast<unsigned>(OutputModality::Image));
-  if (audio != request.audio.has_value()) return "audio output needs both the audio modality and audio parameters";
+  if (audio != request.audio.has_value()) return reason::chat_request::audio_output_needs_both_the_audio_modality_and;
   if (request.audio) {
     const auto& output = *request.audio;
     const bool preset = !output.voice.empty(), custom = !output.voice_id.empty();
-    if (preset && custom) return "audio output takes a voice or a voice id, not both";
-    if (!preset && !custom) return "audio output needs a voice or a voice id";
+    if (preset && custom) return reason::chat_request::audio_output_takes_a_voice_or_a_voice_id_not_both;
+    if (!preset && !custom) return reason::chat_request::audio_output_needs_a_voice_or_a_voice_id;
     if (!config_token(preset ? output.voice : output.voice_id, 128) || !audio_format_name(output.format))
-      return "audio output needs a voice and a supported format";
+      return reason::chat_request::audio_output_needs_a_voice_and_a_supported_format;
   }
-  if (request.image_config && !image) return "image_config needs the image modality";
+  if (request.image_config && !image) return reason::chat_request::image_config_needs_the_image_modality;
   if (image && !descriptor::contains(descriptor.family_policy().openrouter_origins, descriptor.base_url()))
-    return "image output requires a declared OpenRouter origin";
+    return reason::chat_request::image_output_requires_a_declared_openrouter;
   if (request.image_config) return request_controls::validate_image_config(*request.image_config);
   return std::nullopt;
 }
 } // namespace
 EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request, bool streaming) {
-  auto bad = [](std::string message) { return Error{ErrorKind::InvalidRequest, std::move(message)}; };
-  if (descriptor.family() != "openai.chat") return Error{ErrorKind::InvalidConfig, "descriptor family does not match Chat codec"};
+  auto bad = [](const reason::Reason& message) { return reason::error(ErrorKind::InvalidRequest, message); };
+  if (descriptor.family() != "openai.chat") return reason::error(ErrorKind::InvalidConfig, reason::chat_request::descriptor_family_does_not_match_chat_codec);
   if (request.model.empty() || (request.messages.empty() && request.canonical_messages.empty()))
-    return bad("model and messages are required");
+    return bad(reason::chat_request::model_and_messages_are_required);
   if (!request.messages.empty() && !request.canonical_messages.empty())
-    return bad("choose one message representation");
-  if (auto refusal = descriptor::route_refusal(descriptor, request.model)) return bad(std::move(*refusal));
-  if (auto refusal = descriptor::literal_route_refusal(descriptor, request.model)) return Error{ErrorKind::InvalidConfig, std::move(*refusal)};
+    return bad(reason::chat_request::choose_one_message_representation);
+  if (auto refusal = descriptor::route_refusal_reason(descriptor, request.model)) return bad(std::move(*refusal));
+  if (auto refusal = descriptor::literal_route_refusal_reason(descriptor, request.model)) return reason::error(ErrorKind::InvalidConfig, *refusal);
   const auto& resources = descriptor.policy()->resources();
   auto effective = descriptor::effective_defaults(descriptor, request.model);
   if (request.max_output_tokens) effective.max_output_tokens = request.max_output_tokens;
@@ -157,38 +159,38 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   if (request.top_p) effective.top_p = request.top_p;
   if (request.reasoning_effort) effective.reasoning_effort = *request.reasoning_effort;
   if (request.service_tier) effective.service_tier = *request.service_tier;
-  if (auto error = descriptor::validate_choices(descriptor, request.model, effective)) return bad(std::move(*error));
+  if (auto error = descriptor::choices_refusal(descriptor, request.model, effective)) return bad(std::move(*error));
   if (request.reasoning || request.include_reasoning || request.usage_include || !request.models.empty() || !request.plugins.empty()) {
     if (!descriptor::contains(descriptor.family_policy().openrouter_origins, descriptor.base_url()))
-      return bad("gateway controls require declared OpenRouter origin");
+      return bad(reason::chat_request::gateway_controls_require_declared_openrouter);
   }
   if (auto refusal = request_controls::validate_plugins(descriptor.family_policy(), request.plugins, resources.request_tools))
-    return Error{refusal->admitted ? ErrorKind::InvalidRequest : ErrorKind::Unsupported, refusal->cause};
+    return reason::error(refusal->admitted ? ErrorKind::InvalidRequest : ErrorKind::Unsupported, refusal->cause);
   if (request.reasoning) {
     const auto& reasoning = *request.reasoning;
     if (!reasoning.effort && !reasoning.max_tokens && !reasoning.exclude && !reasoning.enabled)
-      return bad("reasoning options must not be empty");
+      return bad(reason::chat_request::reasoning_options_must_not_be_empty);
     if (reasoning.effort && !descriptor::contains(descriptor.family_policy().reasoning_efforts, *reasoning.effort))
-      return bad("unsupported reasoning effort");
+      return bad(reason::chat_request::unsupported_reasoning_effort);
     if (reasoning.effort && reasoning.max_tokens)
-      return bad("reasoning effort and max_tokens are mutually exclusive");
+      return bad(reason::chat_request::reasoning_effort_and_max_tokens_are_mutually);
     if (reasoning.max_tokens && (!*reasoning.max_tokens ||
         *reasoning.max_tokens > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) ||
         (effective.max_output_tokens && *reasoning.max_tokens > *effective.max_output_tokens)))
-      return bad("reasoning max_tokens outside output budget");
+      return bad(reason::chat_request::reasoning_max_tokens_outside_output_budget);
     if (reasoning.enabled == false && (reasoning.effort || reasoning.max_tokens))
-      return bad("disabled reasoning cannot specify effort or budget");
+      return bad(reason::chat_request::disabled_reasoning_cannot_specify_effort_or);
     if (effective.reasoning_effort)
-      return bad("scalar and nested reasoning controls conflict");
+      return bad(reason::chat_request::scalar_and_nested_reasoning_controls_conflict);
     if (reasoning.exclude == true && request.include_reasoning == true)
-      return bad("excluded reasoning cannot be included");
+      return bad(reason::chat_request::excluded_reasoning_cannot_be_included);
   }
-  if (request.models.size() > resources.request_tools) return bad("alternative model count limit exceeded");
+  if (request.models.size() > resources.request_tools) return bad(reason::chat_request::alternative_model_count_limit_exceeded);
   std::set<std::string_view> alternative_models;
   for (const auto& model : request.models) {
     if (model.empty() || !alternative_models.insert(model).second)
-      return bad("alternative models require unique nonempty names");
-    if (auto error = descriptor::validate_choices(descriptor, model, effective)) return bad(std::move(*error));
+      return bad(reason::chat_request::alternative_models_require_unique_nonempty_names);
+    if (auto error = descriptor::choices_refusal(descriptor, model, effective)) return bad(std::move(*error));
   }
   if (request.provider)
     if (auto error = request_controls::validate_routing(descriptor, *request.provider))
@@ -198,19 +200,19 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       return bad(std::move(*error));
   if (auto error = validate_output(descriptor, request)) return bad(std::move(*error));
   if (std::max(request.messages.size(), request.canonical_messages.size()) > resources.request_messages || request.tools.size() > resources.request_tools)
-    return bad("request count limit exceeded");
+    return bad(reason::chat_request::request_count_limit_exceeded);
   if (request.tool_choice)
     if (auto error = validate_tool_choice(request)) return bad(std::move(*error));
   bool has_media = false;
   const bool router = descriptor::contains(descriptor.family_policy().openrouter_origins, descriptor.base_url());
   for (const auto& message : request.messages) {
     if (message.media.size() > resources.request_parts || message.tool_calls.size() > resources.request_parts)
-      return bad("request part count limit exceeded");
+      return bad(reason::chat_request::request_part_count_limit_exceeded);
     if (!message.media.empty() && message.role != Role::User && message.role != Role::Assistant)
-      return bad("media inputs require user or supported assistant role");
+      return bad(reason::chat_request::media_inputs_require_user_or_supported_assistant);
     for (const auto& media : message.media) {
       if (message.role == Role::Assistant && (!router || media.kind != MediaKind::Image))
-        return Error{ErrorKind::Unsupported, "assistant media inputs require OpenRouter images"};
+        return reason::error(ErrorKind::Unsupported, reason::chat_request::assistant_media_inputs_require_openrouter_images);
       if (auto error = admit(descriptor, media)) return std::move(*error);
       has_media = true;
     }
@@ -225,7 +227,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         has_media = true;
       } else if (message.role == Role::Assistant && media->kind == MediaKind::Image) {
         if (!media_error) media_error = router ? admit(descriptor, *media) :
-            std::optional<Error>{Error{ErrorKind::Unsupported, "assistant images require declared OpenRouter origin"}};
+            std::optional<Error>{reason::error(ErrorKind::Unsupported, reason::chat_request::assistant_images_require_declared_openrouter)};
         has_media = true;
       }
     }
@@ -234,7 +236,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   // still retain replay-mismatch precedence.
   if (media_error && !captured_history) return *media_error;
   if (auto refusal = request_controls::validate_extensions(descriptor, request.extensions))
-    return Error{refusal->admitted ? ErrorKind::InvalidRequest : ErrorKind::Unsupported, refusal->cause};
+    return reason::error(refusal->admitted ? ErrorKind::InvalidRequest : ErrorKind::Unsupported, refusal->cause);
   // Cache marks (core/cache_marks.h) ride the text parts of the ordered conversation, where the policy says the origin
   // and the model's route take them; elsewhere they are dropped and reported, or refused, as the policy says.
   CacheMarkReport mark_report;
@@ -246,7 +248,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     const auto& admission = std::get<cache_marks::Admission>(admitted);
     mark_report.requested = marks.all;
     if (admission.disposition == cache_marks::Disposition::Emit) {
-      if (marks.all != marks.text) return Error{ErrorKind::Unsupported, "Chat carries cache marks on text parts only"};
+      if (marks.all != marks.text) return reason::error(ErrorKind::Unsupported, reason::chat_request::cache_marks_text_only);
       std::vector<std::optional<CacheTtl>> lifetimes;
       for (const auto& message : request.canonical_messages)
         for (const auto& part : message.parts)
@@ -261,14 +263,14 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   }
   auto context = std::shared_ptr<const NativeContext>(new NativeContext(descriptor, request, effective, streaming));
   if (!context->history_valid_)
-    return Error{ErrorKind::ReplayIneligible, "native replay provenance, binding or content mismatch"};
+    return reason::error(ErrorKind::ReplayIneligible, reason::chat_request::native_replay_provenance_binding_or_content);
   if (!context->valid_)
-    return Error{ErrorKind::ResourceLimit, "native Chat binding could not be captured"};
+    return reason::error(ErrorKind::ResourceLimit, reason::chat_request::native_chat_binding_could_not_be_captured);
   if (media_error) return *media_error;
   for (const auto& message : request.canonical_messages) {
     if (message.wire_output || (message.native && message.role != Role::Assistant))
-      return Error{ErrorKind::ReplayIneligible, "invalid native Chat history representation"};
-    if (message.parts.size() > resources.request_parts) return bad("request part count limit exceeded");
+      return reason::error(ErrorKind::ReplayIneligible, reason::chat_request::invalid_native_chat_history_representation);
+    if (message.parts.size() > resources.request_parts) return bad(reason::chat_request::request_part_count_limit_exceeded);
     bool has_thinking = false;
     bool has_details = false;
     bool has_frames = false;
@@ -277,53 +279,52 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       if (const auto* media = std::get_if<Media>(&part)) {
         // A generated audio reply is replayed by its provider-held id, never by its bytes.
         if (message.role == Role::Assistant && media->kind == MediaKind::Audio && !media->id.empty()) {
-          if (audio_reply) return bad("one audio reply per assistant message");
+          if (audio_reply) return bad(reason::chat_request::one_audio_reply_per_assistant_message);
           audio_reply = true;
         } else if (message.role == Role::Assistant && media->kind == MediaKind::Image && router) {
           has_media = true;
         } else if (message.role != Role::User) {
-          return Error{ErrorKind::Unsupported, "Chat assistant media requires an audio reply id or OpenRouter image"};
+          return reason::error(ErrorKind::Unsupported, reason::chat_request::chat_assistant_media_requires_an_audio_reply_id);
         } else {
           has_media = true;
         }
       } else if (const auto* thinking = std::get_if<Thinking>(&part)) {
         if (message.role != Role::Assistant || has_thinking || thinking->signature)
-          return Error{ErrorKind::ReplayIneligible, "Chat requires one plain unsigned assistant thinking part"};
+          return reason::error(ErrorKind::ReplayIneligible, reason::chat_request::chat_requires_one_plain_unsigned_assistant);
         has_thinking = true;
       } else if (const auto* opaque = std::get_if<Opaque>(&part)) {
         // History captured while a stream kept each reasoning frame as a part carries these parts and a `frames` member; it still replays.
         if (opaque->wire_type == "reasoning_details.frame") {
           if (!message.native || !opaque->wire_metadata)
-            return Error{ErrorKind::ReplayIneligible, "reasoning frame lacks native authority"};
+            return reason::error(ErrorKind::ReplayIneligible, reason::chat_request::reasoning_frame_lacks_native_authority);
           const auto metadata = opaque->wire_metadata->root();
           if (!metadata.is_object() || metadata.size() != 2 ||
               metadata.get("type").as_string() != "reasoning_details.frame" ||
               !metadata.get("details").is_array())
-            return Error{ErrorKind::ReplayIneligible, "invalid retained reasoning frame"};
+            return reason::error(ErrorKind::ReplayIneligible, reason::chat_request::invalid_retained_reasoning_frame);
           has_frames = true;
           continue;
         }
         if (opaque->wire_type != "reasoning_details" || !message.native ||
             message.role != Role::Assistant || has_details || !opaque->wire_metadata ||
             !descriptor::contains(descriptor.family_policy().openrouter_origins, descriptor.base_url()))
-          return Error{ErrorKind::ReplayIneligible, "Chat reasoning details require authenticated native replay"};
+          return reason::error(ErrorKind::ReplayIneligible, reason::chat_request::chat_reasoning_details_require_authenticated);
         const auto metadata = opaque->wire_metadata->root();
         if (!metadata.is_object() || (metadata.size() != 2 && metadata.size() != 3) ||
             metadata.get("type").as_string() != "reasoning_details" ||
             !metadata.get("details").is_array() ||
             (metadata.size() == 3 && !metadata.get("frames").is_array()))
-          return Error{ErrorKind::ReplayIneligible, "invalid captured reasoning details snapshot"};
+          return reason::error(ErrorKind::ReplayIneligible, reason::chat_request::invalid_captured_reasoning_details_snapshot);
         has_details = true;
       } else if (!std::holds_alternative<Text>(part) && !std::holds_alternative<ToolCall>(part) &&
                  !std::holds_alternative<ToolResult>(part) && !std::holds_alternative<Refusal>(part))
-        return Error{ErrorKind::Unsupported, "Chat cannot represent this ordered part"};
+        return reason::error(ErrorKind::Unsupported, reason::chat_request::chat_cannot_represent_this_ordered_part);
     }
     if (has_frames && !has_details)
-      return Error{ErrorKind::ReplayIneligible, "reasoning stream lacks complete reconstructed details"};
+      return reason::error(ErrorKind::ReplayIneligible, reason::chat_request::reasoning_stream_lacks_complete_reconstructed);
   }
   const json::Limits limits{has_media ? resources.request_bytes : resources.chat_text_request_bytes, resources.json_depth};
-  auto limit_error = [&] { return Error{has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest,
-                                       "request exceeds JSON limits or encoding"}; };
+  auto limit_error = [&] { return reason::error(has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest, reason::chat_request::request_exceeds_json_limits_or_encoding); };
   auto build = [&](json::BoundedWriter& body, bool validate) -> std::optional<Error> {
     std::set<std::string_view> pending, names;
     body.raw("{").quoted(descriptor.request_model_member()).raw(":").quoted(request.model);
@@ -337,23 +338,23 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         case Role::User: role = "user"; break;
         case Role::Assistant: role = "assistant"; break;
         case Role::Tool: role = "tool"; break;
-        default: return bad("invalid message role");
+        default: return bad(reason::chat_request::invalid_message_role);
       }
       if (validate && message.role != Role::Tool && !pending.empty())
-        return bad("tool results must precede the next message");
+        return bad(reason::chat_request::tool_results_must_precede_the_next_message);
       if (message.role == Role::Tool) {
         // The other families take every result of a tool turn in one Tool message. This API
         // wants one wire message per result, so a message of several results is split here,
         // in the caller's order. Nothing else may share the message.
         if (message.parts.empty() || !std::all_of(message.parts.begin(), message.parts.end(),
             [](const Part& part) { return std::holds_alternative<ToolResult>(part); }))
-          return bad("a Tool message holds only tool results, one or more");
+          return bad(reason::chat_request::a_tool_message_holds_only_tool_results_one_or);
         for (const auto& part : message.parts) {
           const auto& result = std::get<ToolResult>(part);
           if (!result.content_parts.empty())
-            return Error{ErrorKind::Unsupported, "Chat tool results do not support typed media content"};
+            return reason::error(ErrorKind::Unsupported, reason::chat_request::chat_tool_results_do_not_support_typed_media);
           if (validate && (result.tool_use_id.empty() || pending.erase(result.tool_use_id) != 1))
-            return bad("tool result must resolve one pending call");
+            return bad(reason::chat_request::tool_result_must_resolve_one_pending_call);
           if (comma) body.raw(",");
           comma = true;
           body.raw("{\"role\":\"tool\",\"content\":").quoted(result.content)
@@ -389,7 +390,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
               if (part_comma) body.raw(",");
               part_comma = true;
               write_media(body, *media);
-            } else if (std::holds_alternative<ToolResult>(part)) return bad("tool result requires tool role");
+            } else if (std::holds_alternative<ToolResult>(part)) return bad(reason::chat_request::tool_result_requires_tool_role);
           }
           body.raw("]");
         }
@@ -403,19 +404,19 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         bool call_comma = false, calls = false, refusal = false;
         for (const auto& part : message.parts) if (const auto* value = std::get_if<Refusal>(&part)) {
           if (message.role != Role::Assistant || refusal || !value->raw_code.empty())
-            return Error{ErrorKind::Unsupported, "refusal cannot be represented by Chat"};
+            return reason::error(ErrorKind::Unsupported, reason::chat_request::refusal_cannot_be_represented_by_chat);
           refusal = true;
           body.raw(",\"refusal\":").quoted(value->text);
         }
         for (const auto& part : message.parts) if (const auto* call = std::get_if<ToolCall>(&part)) {
-          if (message.role != Role::Assistant) return bad("tool calls require assistant role");
+          if (message.role != Role::Assistant) return bad(reason::chat_request::tool_calls_require_assistant_role);
           if (validate) {
             if (call->kind != ToolCallKind::ClientExecuted ||
                 (!call->wire_type.empty() && call->wire_type != "function") || call->wire_metadata)
-              return Error{ErrorKind::Unsupported, "only plain client function calls can be replayed"};
+              return reason::error(ErrorKind::Unsupported, reason::chat_request::only_plain_client_function_calls_can_be_replayed);
             if (call->id.empty() || call->name.empty() || !call->input || !call->input->root().is_object() ||
                 !pending.insert(call->id).second)
-              return bad("tool calls require unique ids, names and object arguments");
+              return bad(reason::chat_request::tool_calls_require_unique_ids_names_and_object);
           }
           if (!calls) { body.raw(",\"tool_calls\":["); calls = true; }
           if (call_comma) body.raw(",");
@@ -436,17 +437,17 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
         case Role::User: role = "user"; break;
         case Role::Assistant: role = "assistant"; break;
         case Role::Tool: role = "tool"; break;
-        default: return bad("invalid message role");
+        default: return bad(reason::chat_request::invalid_message_role);
       }
       if (validate) {
         if (message.role == Role::Tool) {
           if (message.tool_call_id.empty() || !message.tool_calls.empty() || pending.erase(message.tool_call_id) != 1)
-            return bad("tool result must resolve one pending call");
+            return bad(reason::chat_request::tool_result_must_resolve_one_pending_call);
         } else {
-          if (!pending.empty()) return bad("tool results must precede the next message");
-          if (!message.tool_call_id.empty()) return bad("tool_call_id is only valid on tool results");
+          if (!pending.empty()) return bad(reason::chat_request::tool_results_must_precede_the_next_message);
+          if (!message.tool_call_id.empty()) return bad(reason::chat_request::tool_call_id_is_only_valid_on_tool_results);
           if (!message.tool_calls.empty() && message.role != Role::Assistant)
-            return bad("tool calls require an assistant message");
+            return bad(reason::chat_request::tool_calls_require_an_assistant_message);
         }
       }
       if (comma) body.raw(",");
@@ -476,10 +477,10 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
           if (validate) {
             if (call.kind != ToolCallKind::ClientExecuted ||
                 (!call.wire_type.empty() && call.wire_type != "function") || call.wire_metadata)
-              return Error{ErrorKind::Unsupported, "only plain client function calls can be replayed"};
+              return reason::error(ErrorKind::Unsupported, reason::chat_request::only_plain_client_function_calls_can_be_replayed);
             if (call.id.empty() || call.name.empty() || !call.input || !call.input->root().is_object() ||
                 !pending.insert(call.id).second)
-              return bad("tool calls require unique ids, names and object arguments");
+              return bad(reason::chat_request::tool_calls_require_unique_ids_names_and_object);
           }
           if (call_comma) body.raw(",");
           call_comma = true;
@@ -492,7 +493,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       body.raw("}");
       if (!body.ok()) return limit_error();
     }
-    if (validate && !pending.empty()) return bad("missing tool results");
+    if (validate && !pending.empty()) return bad(reason::chat_request::missing_tool_results);
     body.raw("],").quoted(descriptor.request_stream_member()).raw(streaming ? ":true" : ":false");
     if (streaming) body.raw(",\"stream_options\":{\"include_usage\":true}");
     if (!request.tools.empty()) {
@@ -500,7 +501,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       for (const auto& tool : request.tools) {
         if (validate && (tool.name.empty() || !tool.parameters || !tool.parameters->root().is_object() ||
                          !names.insert(tool.name).second))
-          return bad("tools require unique names and object schemas");
+          return bad(reason::chat_request::tools_require_unique_names_and_object_schemas);
         if (comma) body.raw(",");
         comma = true;
         body.raw("{\"type\":\"function\",\"function\":{\"name\":").quoted(tool.name)
