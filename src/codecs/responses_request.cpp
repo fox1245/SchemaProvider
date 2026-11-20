@@ -1,4 +1,6 @@
 #include "codecs/responses_request.h"
+#include "codecs/reason.h"
+#include "descriptor/policy_refusals.h"
 #include "codecs/request_checks.h"
 #include "codecs/media_input.h"
 #include "core/cache_marks.h"
@@ -80,8 +82,8 @@ bool unique_texts(const std::vector<std::string>& values, std::size_t limit, boo
   for (const auto& value : values) if (!request_controls::bounded_text(value, 256) || !seen.insert(value).second) return false;
   return true;
 }
-std::optional<std::string> filter_error(const McpToolFilter& filter, std::size_t limit) {
-  if (!unique_texts(filter.tool_names, limit) || (filter.tool_names.empty() && !filter.read_only)) return "MCP tool filters require unique names or read_only";
+std::optional<reason::Reason> filter_error(const McpToolFilter& filter, std::size_t limit) {
+  if (!unique_texts(filter.tool_names, limit) || (filter.tool_names.empty() && !filter.read_only)) return reason::responses_request::mcp_tool_filters_require_unique_names_or_read;
   return std::nullopt;
 }
 std::string_view verbosity_name(Verbosity value) {
@@ -150,7 +152,7 @@ void write_media(json::BoundedWriter& body, const Media& media) {
 std::optional<Error> admit(const descriptor::ValidatedDescriptor& descriptor, const Media& media) {
   if (auto error = media_input::admit(descriptor, media)) return error;
   if (media.kind == MediaKind::Audio && !media_input::audio_format(media.mime))
-    return Error{ErrorKind::Unsupported, "Responses input_audio has no format name for this MIME type"};
+    return reason::error(ErrorKind::Unsupported, reason::responses_request::responses_input_audio_has_no_format_name_for);
   return std::nullopt;
 }
 std::string_view tool_choice_name(ToolChoiceMode mode) {
@@ -200,12 +202,12 @@ void write_tool_choice(json::BoundedWriter& body, const ToolChoice& choice, cons
 }
 } // namespace
 EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request, bool streaming) {
-  auto bad = [](std::string message) -> EncodeResult { return Error{ErrorKind::InvalidRequest, std::move(message)}; };
-  auto replay_bad = []() -> EncodeResult { return Error{ErrorKind::ReplayIneligible, "native replay provenance, binding or content mismatch"}; };
-  if (descriptor.family() != "openai.responses") return Error{ErrorKind::InvalidConfig, "Responses encoder requires Responses descriptor"};
-  if (request.model.empty() || request.messages.empty()) return bad("model and messages are required");
-  if (auto refusal = descriptor::route_refusal(descriptor, request.model)) return bad(std::move(*refusal));
-  if (auto refusal = descriptor::literal_route_refusal(descriptor, request.model)) return Error{ErrorKind::InvalidConfig, std::move(*refusal)};
+  auto bad = [](const reason::Reason& message) -> EncodeResult { return reason::error(ErrorKind::InvalidRequest, message); };
+  auto replay_bad = []() -> EncodeResult { return reason::error(ErrorKind::ReplayIneligible, reason::responses_request::native_replay_provenance_binding_or_content); };
+  if (descriptor.family() != "openai.responses") return reason::error(ErrorKind::InvalidConfig, reason::responses_request::responses_encoder_requires_responses);
+  if (request.model.empty() || request.messages.empty()) return bad(reason::responses_request::model_and_messages_are_required);
+  if (auto refusal = descriptor::route_refusal_reason(descriptor, request.model)) return bad(std::move(*refusal));
+  if (auto refusal = descriptor::literal_route_refusal_reason(descriptor, request.model)) return reason::error(ErrorKind::InvalidConfig, *refusal);
   CacheMarkReport mark_report;
   if (auto error = cache_marks::drop(descriptor, request.model, request.messages, mark_report)) return std::move(*error);
   const auto& resources = descriptor.policy()->resources();
@@ -220,34 +222,34 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     if (request.reasoning->effort) effective.reasoning_effort = *request.reasoning->effort;
     if (request.reasoning->summary) effective.reasoning_summary = *request.reasoning->summary;
   }
-  if (auto error = descriptor::validate_choices(descriptor, request.model, effective)) return bad(std::move(*error));
+  if (auto error = descriptor::choices_refusal(descriptor, request.model, effective)) return bad(std::move(*error));
   if (request.messages.size() > resources.request_messages || request.tools.size() > resources.request_tools ||
       request.hosted_tools.size() > resources.request_tools - request.tools.size())
-    return bad("request count limit exceeded");
-  if (request.previous_response_id && !cursor_valid(*request.previous_response_id)) return bad("invalid previous response cursor");
-  if (!request.previous_response_id && !request.previous_response_history.empty()) return bad("previous response history requires a cursor");
-  if (request.previous_response_history.size() > resources.request_messages) return bad("previous response history count limit exceeded");
+    return bad(reason::responses_request::request_count_limit_exceeded);
+  if (request.previous_response_id && !cursor_valid(*request.previous_response_id)) return bad(reason::responses_request::invalid_previous_response_cursor);
+  if (!request.previous_response_id && !request.previous_response_history.empty()) return bad(reason::responses_request::previous_response_history_requires_a_cursor);
+  if (request.previous_response_history.size() > resources.request_messages) return bad(reason::responses_request::previous_response_history_count_limit);
   for (const auto& message : request.previous_response_history)
-    if (message.parts.size() > resources.request_parts) return bad("previous response part count limit exceeded");
+    if (message.parts.size() > resources.request_parts) return bad(reason::responses_request::previous_response_part_count_limit_exceeded);
   if (!request.previous_response_history.empty()) {
     const auto& previous = request.previous_response_history.back();
     if (previous.role != Role::Assistant || !previous.native || !previous.wire_output ||
         !previous.wire_output->root().is_array() || previous.id != *request.previous_response_id) return replay_bad();
   }
-  if (request.verbosity && verbosity_name(*request.verbosity).empty()) return bad("invalid verbosity");
-  if (request.truncation && truncation_name(*request.truncation).empty()) return bad("invalid truncation");
+  if (request.verbosity && verbosity_name(*request.verbosity).empty()) return bad(reason::responses_request::invalid_verbosity);
+  if (request.truncation && truncation_name(*request.truncation).empty()) return bad(reason::responses_request::invalid_truncation);
   if (request.include) {
     std::set<Include> selections;
     for (const auto selection : *request.include)
-      if (include_name(selection).empty() || !selections.insert(selection).second) return bad("invalid or duplicate include selection");
+      if (include_name(selection).empty() || !selections.insert(selection).second) return bad(reason::responses_request::invalid_or_duplicate_include_selection);
   }
   {
     std::set<std::string_view> names;
     if (request.include) for (const auto selection : *request.include) names.insert(include_name(selection));
     else names.insert("reasoning.encrypted_content");
-    if (request.include_names.size() > resources.request_parts) return bad("request count limit exceeded");
+    if (request.include_names.size() > resources.request_parts) return bad(reason::responses_request::request_count_limit_exceeded);
     for (const auto& name : request.include_names)
-      if (!lower_token(name, 128) || !names.insert(name).second) return bad("invalid or duplicate include selection");
+      if (!lower_token(name, 128) || !names.insert(name).second) return bad(reason::responses_request::invalid_or_duplicate_include_selection);
   }
   if (request.provider)
     if (auto error = request_controls::validate_routing(descriptor, *request.provider)) return bad(std::move(*error));
@@ -260,140 +262,140 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     const auto type = tool_type(tool);
     if (const auto* routed = std::get_if<OpenRouterServerTool>(&tool)) {
       // OpenRouter's server tools are its own catalogue: any openrouter: type is sent, at a declared origin.
-      if (!router) return Error{ErrorKind::Unsupported, "OpenRouter server tools require a declared OpenRouter origin"};
+      if (!router) return reason::error(ErrorKind::Unsupported, reason::responses_request::openrouter_server_tools_require_a_declared);
       if (!routed->type.starts_with("openrouter:") || routed->type.size() <= 11 || !request_controls::config_token(routed->type, 128) ||
           (routed->parameters && !routed->parameters->root().is_object()))
-        return bad("OpenRouter server tools require an openrouter: type and object parameters");
+        return bad(reason::responses_request::openrouter_server_tools_require_an_openrouter);
       // The policy admits the tool and the schema of its parameters (#32).
       const auto& tools = descriptor.family_policy().openrouter_server_tools;
       const auto fact = std::find_if(tools.begin(), tools.end(), [&](const auto& f) { return f.name == routed->type; });
-      if (fact == tools.end()) return Error{ErrorKind::Unsupported, "an OpenRouter server tool is not admitted by the policy"};
-      if (auto error = request_controls::validate_options(fact->options, routed->parameters)) return bad("OpenRouter server tool parameters do not match the policy's schema");
+      if (fact == tools.end()) return reason::error(ErrorKind::Unsupported, reason::responses_request::an_openrouter_server_tool_is_not_admitted_by);
+      if (auto error = request_controls::validate_options(fact->options, routed->parameters)) return bad(reason::responses_request::openrouter_server_tool_parameters_do_not_match);
     } else {
       // A typed tool needs a typed fact, and a generic one a generic fact whose schema its options match.
       const auto& facts = descriptor.family_policy().server_tools;
       const auto generic = std::get_if<GenericHostedTool>(&tool);
       const auto fact = std::find_if(facts.begin(), facts.end(), [&](const auto& f) { return f.type == type && f.generic == (generic != nullptr); });
-      if (fact == facts.end()) return Error{ErrorKind::Unsupported, "hosted Responses tool is not admitted by policy"};
-      if (generic && request_controls::validate_options(fact->options, generic->options)) return bad("a generic hosted tool's options do not match the policy's schema");
+      if (fact == facts.end()) return reason::error(ErrorKind::Unsupported, reason::responses_request::hosted_responses_tool_is_not_admitted_by);
+      if (generic && request_controls::validate_options(fact->options, generic->options)) return bad(reason::responses_request::a_generic_hosted_tool_s_options_do_not_match);
     }
     if (const auto* mcp = std::get_if<McpTool>(&tool)) {
-      if (!function_name(mcp->server_label) || !mcp_labels.insert(mcp->server_label).second) return bad("MCP tools require unique server labels");
+      if (!function_name(mcp->server_label) || !mcp_labels.insert(mcp->server_label).second) return bad(reason::responses_request::mcp_tools_require_unique_server_labels);
       server_types.insert(type);
-    } else if (!hosted_types.insert(type).second) return bad("hosted tool types must be unique");
+    } else if (!hosted_types.insert(type).second) return bad(reason::responses_request::hosted_tool_types_must_be_unique);
     if (const auto* image = std::get_if<ImageGenerationTool>(&tool)) {
-      if (image->size && !image_size(*image->size)) return bad("image generation size must be auto or WIDTHxHEIGHT");
+      if (image->size && !image_size(*image->size)) return bad(reason::responses_request::image_generation_size_must_be_auto_or);
       for (const auto* field : {&image->quality, &image->output_format, &image->action, &image->background, &image->moderation, &image->input_fidelity})
-        if (*field && !lower_token(**field)) return bad("image generation options must be lower-case tokens");
+        if (*field && !lower_token(**field)) return bad(reason::responses_request::image_generation_options_must_be_lower_case);
       if ((image->model && !request_controls::config_token(*image->model, 128)) || (image->output_compression && *image->output_compression > 100))
-        return bad("image generation model or compression is invalid");
+        return bad(reason::responses_request::image_generation_model_or_compression_is);
       if ((image->mask_file_id && !request_controls::bounded_text(*image->mask_file_id, 256)) ||
           (image->mask_image_url && !single_line(*image->mask_image_url, resources.request_bytes)) ||
           (image->mask_image_url && image->mask_image_url->empty()))
-        return bad("image generation mask requires a file id or an image URL");
+        return bad(reason::responses_request::image_generation_mask_requires_a_file_id_or_an);
     }
     if (const auto* files = std::get_if<FileSearchTool>(&tool)) {
       if (files->vector_store_ids.empty() || files->vector_store_ids.size() > resources.request_parts)
-        return bad("file search requires bounded vector store ids");
+        return bad(reason::responses_request::file_search_requires_bounded_vector_store);
       std::set<std::string_view> ids;
       for (const auto& id : files->vector_store_ids)
-        if (id.empty() || !ids.insert(id).second) return bad("vector store ids must be nonempty and unique");
-      if (files->max_num_results && !*files->max_num_results) return bad("file search result count must be positive");
+        if (id.empty() || !ids.insert(id).second) return bad(reason::responses_request::vector_store_ids_must_be_nonempty_and_unique);
+      if (files->max_num_results && !*files->max_num_results) return bad(reason::responses_request::file_search_result_count_must_be_positive);
     }
     if (const auto* search = std::get_if<WebSearchTool>(&tool)) {
       if (!unique_texts(search->allowed_domains, resources.request_parts) || (search->search_context_size && !lower_token(*search->search_context_size)))
-        return bad("web search domains or context size are invalid");
+        return bad(reason::responses_request::web_search_domains_or_context_size_are_invalid);
       if (search->user_location) {
         const auto& at = *search->user_location;
         for (const auto* field : {&at.city, &at.country, &at.region, &at.timezone})
-          if (*field && !request_controls::bounded_text(**field, 128)) return bad("web search location fields must be short text");
+          if (*field && !request_controls::bounded_text(**field, 128)) return bad(reason::responses_request::web_search_location_fields_must_be_short_text);
       }
     }
     if (const auto* code = std::get_if<CodeInterpreterTool>(&tool)) {
       if (code->container_id && (!request_controls::bounded_text(*code->container_id, 256) || !code->file_ids.empty() || code->memory_limit || code->network_policy))
-        return bad("a code interpreter container id excludes automatic container settings");
+        return bad(reason::responses_request::a_code_interpreter_container_id_excludes);
       if (!unique_texts(code->file_ids, resources.request_parts) || (code->memory_limit && !lower_token(*code->memory_limit)))
-        return bad("code interpreter files or memory limit are invalid");
+        return bad(reason::responses_request::code_interpreter_files_or_memory_limit_are);
       if (code->network_policy) {
         const auto& policy = *code->network_policy;
         if (policy.disabled ? !policy.allowed_domains.empty() || !policy.domain_secrets.empty() : !unique_texts(policy.allowed_domains, resources.request_parts, false))
-          return bad("a network policy is disabled or lists unique allowed domains");
+          return bad(reason::responses_request::a_network_policy_is_disabled_or_lists_unique);
         std::set<std::pair<std::string_view, std::string_view>> secrets;
         for (const auto& secret : policy.domain_secrets)
           if (std::find(policy.allowed_domains.begin(), policy.allowed_domains.end(), secret.domain) == policy.allowed_domains.end() ||
               !header_name(secret.name) || !single_line(secret.value, 8192) || !secrets.emplace(secret.domain, secret.name).second)
-            return bad("domain secrets require an allowed domain, a unique name and a single-line value");
+            return bad(reason::responses_request::domain_secrets_require_an_allowed_domain_a);
       }
     }
     if (const auto* mcp = std::get_if<McpTool>(&tool)) {
       const int sources = mcp->server_url.has_value() + mcp->connector_id.has_value() + mcp->tunnel_id.has_value();
       if (sources != 1 || (mcp->server_url && !https_url(*mcp->server_url)) || (mcp->connector_id && !lower_token(*mcp->connector_id, 64)) ||
           (mcp->tunnel_id && !request_controls::config_token(*mcp->tunnel_id, 128)))
-        return bad("MCP tools require one https server URL, connector or tunnel");
+        return bad(reason::responses_request::mcp_tools_require_one_https_server_url);
       if (mcp->authorization && (mcp->authorization->empty() || !single_line(*mcp->authorization, 8192)))
-        return bad("MCP authorization and headers require single-line values");
+        return bad(reason::responses_request::mcp_authorization_and_headers_require_single);
       std::set<std::string> header_names;
       for (const auto& [name, value] : mcp->headers) {
         std::string folded(name);
         for (auto& c : folded) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + ('a' - 'A'));
         if (!header_name(name) || !single_line(value, 8192) || !header_names.insert(std::move(folded)).second)
-          return bad("MCP authorization and headers require single-line values");
+          return bad(reason::responses_request::mcp_authorization_and_headers_require_single);
       }
-      if (mcp->require_approval && (mcp->approval_always || mcp->approval_never)) return bad("MCP approval is a mode or filters, not both");
-      if (mcp->require_approval && !lower_token(*mcp->require_approval)) return bad("MCP approval mode must be a lower-case token");
+      if (mcp->require_approval && (mcp->approval_always || mcp->approval_never)) return bad(reason::responses_request::mcp_approval_is_a_mode_or_filters_not_both);
+      if (mcp->require_approval && !lower_token(*mcp->require_approval)) return bad(reason::responses_request::mcp_approval_mode_must_be_a_lower_case_token);
       for (const auto* filter : {&mcp->allowed_tools, &mcp->approval_always, &mcp->approval_never})
         if (*filter) if (auto error = filter_error(**filter, resources.request_parts)) return bad(std::move(*error));
       if (mcp->server_description && !request_controls::bounded_text(*mcp->server_description, 4096, true))
-        return bad("MCP server description must be text");
+        return bad(reason::responses_request::mcp_server_description_must_be_text);
     }
     if (const auto* screen = std::get_if<ComputerUsePreviewTool>(&tool))
       if (!lower_token(screen->environment) || !screen->display_width || !screen->display_height)
-        return bad("computer use requires an environment and a display size");
+        return bad(reason::responses_request::computer_use_requires_an_environment_and_a);
     if (const auto* shell = std::get_if<ShellTool>(&tool)) {
-      if (shell->environment.skills.size() > resources.request_parts) return bad("shell skill count limit exceeded");
+      if (shell->environment.skills.size() > resources.request_parts) return bad(reason::responses_request::shell_skill_count_limit_exceeded);
       std::set<std::string_view> ids;
       for (const auto& skill : shell->environment.skills)
         if (skill.skill_id.empty() || !ids.insert(skill.skill_id).second)
-          return bad("shell skill references must be nonempty and unique");
+          return bad(reason::responses_request::shell_skill_references_must_be_nonempty_and);
     }
   }
   if (!request.plugins.empty()) {
-    if (!router) return Error{ErrorKind::Unsupported, "OpenRouter plugins require a declared OpenRouter origin"};
+    if (!router) return reason::error(ErrorKind::Unsupported, reason::responses_request::openrouter_plugins_require_a_declared);
     if (auto refusal = request_controls::validate_plugins(descriptor.family_policy(), request.plugins, resources.request_tools))
-      return Error{refusal->admitted ? ErrorKind::InvalidRequest : ErrorKind::Unsupported, refusal->cause};
+      return reason::error(refusal->admitted ? ErrorKind::InvalidRequest : ErrorKind::Unsupported, refusal->cause);
   }
   if (!request.modalities.empty() || request.image_config) {
-    if (!router) return Error{ErrorKind::Unsupported, "output modalities and image_config require a declared OpenRouter origin"};
+    if (!router) return reason::error(ErrorKind::Unsupported, reason::responses_request::output_modalities_and_image_config_require_a);
     unsigned mask = 0;
     for (const auto modality : request.modalities) {
       const auto bit = 1U << static_cast<unsigned>(modality);
-      if (static_cast<unsigned>(modality) > static_cast<unsigned>(OutputModality::Image) || (mask & bit)) return bad("output modalities require unique valid values");
+      if (static_cast<unsigned>(modality) > static_cast<unsigned>(OutputModality::Image) || (mask & bit)) return bad(reason::responses_request::output_modalities_require_unique_valid_values);
       mask |= bit;
     }
-    if (request.image_config && !(mask & (1U << static_cast<unsigned>(OutputModality::Image)))) return bad("image_config needs the image modality");
+    if (request.image_config && !(mask & (1U << static_cast<unsigned>(OutputModality::Image)))) return bad(reason::responses_request::image_config_needs_the_image_modality);
     if (request.image_config)
       if (auto error = request_controls::validate_image_config(*request.image_config)) return bad(std::move(*error));
   }
   {
     std::set<std::string_view> approvals;
-    if (request.mcp_approvals.size() > resources.request_parts) return bad("request count limit exceeded");
+    if (request.mcp_approvals.size() > resources.request_parts) return bad(reason::responses_request::request_count_limit_exceeded);
     for (const auto& approval : request.mcp_approvals)
       if (!request_controls::bounded_text(approval.request_id, 256) || !approvals.insert(approval.request_id).second ||
           (approval.reason && !request_controls::bounded_text(*approval.reason, 4096, true)))
-        return bad("MCP approvals require unique request ids and text reasons");
-      else if (approval.reason && approval.approve) return bad("an MCP approval gives a reason only when it refuses");
+        return bad(reason::responses_request::mcp_approvals_require_unique_request_ids_and);
+      else if (approval.reason && approval.approve) return bad(reason::responses_request::an_mcp_approval_gives_a_reason_only_when_it);
   }
   bool deferred = false;
   for (const auto& tool : request.tools) deferred = deferred || tool.defer_loading.value_or(false);
   if (deferred && !hosted_types.contains("tool_search"))
-    return bad("deferred functions require tool_search");
+    return bad(reason::responses_request::deferred_functions_require_tool_search);
   if (hosted_types.contains("tool_search") && !deferred)
-    return bad("tool_search requires a deferred function definition");
+    return bad(reason::responses_request::tool_search_requires_a_deferred_function);
   if (request.tool_choice) {
     // Everything a choice names is declared by this request: a function, an MCP server by its label, or a hosted tool
     // by its type, which the policy's server-tool facts admitted above.
     const auto& choice = *request.tool_choice;
-    if (request.required_tool) return bad("tool choice and required_tool are mutually exclusive");
+    if (request.required_tool) return bad(reason::responses_request::tool_choice_and_required_tool_exclusive);
     std::set<std::string_view> functions;
     for (const auto& tool : request.tools) functions.insert(tool.name);
     const auto hosted = [&](std::string_view type) {
@@ -404,27 +406,27 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     const auto server_only = [&](std::string_view type) { return server_types.contains(type) && !hosted_types.contains(type); };
     switch (choice.mode) {
       case ToolChoiceMode::Auto: case ToolChoiceMode::Required: case ToolChoiceMode::None:
-        if (!choice.name.empty()) return bad("only a named tool choice takes a name");
+        if (!choice.name.empty()) return bad(reason::responses_request::only_a_named_tool_choice_takes_a_name);
         break;
       case ToolChoiceMode::Function:
-        if (!functions.contains(choice.name)) return bad("a function tool choice must name a declared function");
+        if (!functions.contains(choice.name)) return bad(reason::responses_request::function_tool_choice_must_be_declared);
         break;
       case ToolChoiceMode::Hosted:
-        if (server_only(choice.name)) return bad("an MCP server is chosen by its label, not as a hosted tool");
-        if (!hosted(choice.name)) return bad("a hosted tool choice must name a declared hosted tool");
+        if (server_only(choice.name)) return bad(reason::responses_request::mcp_server_is_not_a_hosted_tool_choice);
+        if (!hosted(choice.name)) return bad(reason::responses_request::hosted_tool_choice_must_be_declared);
         break;
       case ToolChoiceMode::Mcp:
-        if (!mcp_labels.contains(choice.name)) return bad("an MCP tool choice must name a declared MCP server");
+        if (!mcp_labels.contains(choice.name)) return bad(reason::responses_request::mcp_tool_choice_must_be_declared);
         break;
-      default: return bad("invalid tool choice mode");
+      default: return bad(reason::responses_request::invalid_tool_choice_mode);
     }
-    if (choice.mcp_tool && choice.mode != ToolChoiceMode::Mcp) return bad("only an MCP tool choice names one tool of its server");
+    if (choice.mcp_tool && choice.mode != ToolChoiceMode::Mcp) return bad(reason::responses_request::only_an_mcp_tool_choice_names_a_server_tool);
     if (choice.mcp_tool && !request_controls::bounded_text(*choice.mcp_tool, 256))
-      return bad("an MCP tool choice's tool name must be short text");
+      return bad(reason::responses_request::mcp_tool_choice_tool_name_must_be_short_text);
     if (choice.allowed) {
       if (choice.mode != ToolChoiceMode::Auto && choice.mode != ToolChoiceMode::Required)
-        return bad("allowed tools require the auto or required mode");
-      if (choice.allowed->empty()) return bad("allowed tools require at least one tool");
+        return bad(reason::responses_request::allowed_tools_require_auto_or_required);
+      if (choice.allowed->empty()) return bad(reason::responses_request::allowed_tools_require_at_least_one);
       std::set<std::pair<AllowedToolKind, std::string_view>> seen;
       for (const auto& tool : *choice.allowed) {
         bool declared = false;
@@ -432,13 +434,13 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
           case AllowedToolKind::Function: declared = functions.contains(tool.name); break;
           case AllowedToolKind::Mcp: declared = mcp_labels.contains(tool.name); break;
           case AllowedToolKind::Hosted:
-            if (server_only(tool.name)) return bad("an MCP server is chosen by its label, not as a hosted tool");
+            if (server_only(tool.name)) return bad(reason::responses_request::mcp_server_is_not_a_hosted_tool_choice);
             declared = hosted(tool.name);
             break;
-          default: return bad("invalid allowed tool kind");
+          default: return bad(reason::responses_request::invalid_allowed_tool_kind);
         }
-        if (!declared) return bad("allowed tools must be declared tools");
-        if (!seen.emplace(tool.kind, tool.name).second) return bad("allowed tools must name each tool once");
+        if (!declared) return bad(reason::responses_request::allowed_tools_must_be_declared);
+        if (!seen.emplace(tool.kind, tool.name).second) return bad(reason::responses_request::allowed_tools_must_be_unique);
       }
     }
   }
@@ -447,7 +449,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   bool captured_history = false;
   std::optional<Error> media_error;
   for (const auto& message : request.messages) {
-    if (message.parts.size() > resources.request_parts) return bad("request part count limit exceeded");
+    if (message.parts.size() > resources.request_parts) return bad(reason::responses_request::request_part_count_limit_exceeded);
     if (request.previous_response_id && (message.native || message.wire_output || message.role == Role::Assistant)) return replay_bad();
     if (message.native) {
       if (message.role != Role::Assistant || !message.wire_output || !message.wire_output->root().is_array()) return replay_bad();
@@ -461,29 +463,29 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     captured_history = captured_history || static_cast<bool>(message.native);
     for (const auto& part : message.parts) {
       if (const auto* media = std::get_if<Media>(&part); media && !media_error && !message.native) {
-        if (message.role != Role::User) media_error = Error{ErrorKind::InvalidRequest, "media inputs require user role"};
+        if (message.role != Role::User) media_error = reason::error(ErrorKind::InvalidRequest, reason::responses_request::media_inputs_require_user_role);
         else media_error = admit(descriptor, *media);
       } else if (const auto* tool = std::get_if<ToolResult>(&part); tool && !media_error) {
         // Content beside media-only parts is a computer call result's acknowledgement; the call's kind is checked
         // when the result is encoded.
         if (!tool->content_parts.empty() && !tool->content.empty() &&
             std::any_of(tool->content_parts.begin(), tool->content_parts.end(), [](const auto& nested) { return std::holds_alternative<Text>(nested); }))
-          media_error = Error{ErrorKind::InvalidRequest, "tool result content and content_parts are mutually exclusive"};
+          media_error = reason::error(ErrorKind::InvalidRequest, reason::responses_request::tool_result_content_and_content_parts_are);
         else if (tool->content_parts.size() > resources.request_parts)
-          media_error = Error{ErrorKind::InvalidRequest, "tool result part count limit exceeded"};
+          media_error = reason::error(ErrorKind::InvalidRequest, reason::responses_request::tool_result_part_count_limit_exceeded);
         else if (std::any_of(tool->content_parts.begin(), tool->content_parts.end(), [](const auto& nested) { return std::holds_alternative<Opaque>(nested); }))
-          media_error = Error{ErrorKind::Unsupported, "tool result blocks are not admitted for this family"};
+          media_error = reason::error(ErrorKind::Unsupported, reason::responses_request::tool_result_blocks_not_admitted);
         else for (const auto& nested : tool->content_parts) {
           if (const auto* media = std::get_if<Media>(&nested)) {
             if ((media->kind == MediaKind::Audio || media->kind == MediaKind::Video) &&
                 static_cast<unsigned>(media->source) <= 2)
-              media_error = Error{ErrorKind::Unsupported, "Responses function output supports images and files only"};
+              media_error = reason::error(ErrorKind::Unsupported, reason::responses_request::responses_function_output_supports_images);
             else media_error = admit(descriptor, *media);
             if (!media_error && (!media->id.empty() || !media->transcript.empty() ||
                 (media->kind == MediaKind::Image && !media->name.empty()) ||
                 (media->kind == MediaKind::Document && media->detail != ImageDetail::Auto) ||
                 (media->kind == MediaKind::Document && media->source != MediaSource::Inline && !media->name.empty())))
-              media_error = Error{ErrorKind::Unsupported, "function output media contains unsupported controls or metadata"};
+              media_error = reason::error(ErrorKind::Unsupported, reason::responses_request::function_output_media_contains_unsupported);
             if (media_error) break;
           }
         }
@@ -494,10 +496,10 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   // captured history, but reject invalid ordinary input before hashing.
   if (media_error && !captured_history) return *media_error;
   if (auto refusal = request_controls::validate_extensions(descriptor, request.extensions))
-    return Error{refusal->admitted ? ErrorKind::InvalidRequest : ErrorKind::Unsupported, refusal->cause};
+    return reason::error(refusal->admitted ? ErrorKind::InvalidRequest : ErrorKind::Unsupported, refusal->cause);
   auto context = std::shared_ptr<const NativeContext>(new NativeContext(descriptor, request, effective, streaming));
   if (!context->history_valid_) return replay_bad();
-  if (!context->valid_) return Error{ErrorKind::ResourceLimit, "native binding could not be captured"};
+  if (!context->valid_) return reason::error(ErrorKind::ResourceLimit, reason::responses_request::native_binding_could_not_be_captured);
   if (media_error) return *media_error;
   EncodedRequest result{"POST", descriptor.resolved_path(streaming, request.model), {}, {}, {}};
   for (const auto& header : descriptor.headers()) {
@@ -509,10 +511,10 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   // Over the size limit, a request with media is a resource limit; one of text alone is invalid.
   const bool has_media = media_input::carries_media(request.messages);
   const auto limit_error = [&] {
-    return Error{has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest, "request exceeds JSON byte, depth or encoding limits"};
+    return reason::error(has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest, reason::responses_request::request_exceeds_json_byte_depth_or_encoding);
   };
   auto build = [&](json::BoundedWriter& body) -> std::optional<Error> {
-    auto invalid = [](std::string message) { return Error{ErrorKind::InvalidRequest, std::move(message)}; };
+    auto invalid = [](const reason::Reason& message) { return reason::error(ErrorKind::InvalidRequest, message); };
     body.raw("{").quoted(descriptor.request_model_member()).raw(":").quoted(request.model);
     body.raw(",").quoted(descriptor.request_stream_member()).raw(streaming ? ":true" : ":false");
     body.raw(",\"store\":").raw(request.store.value_or(false) ? "true" : "false");
@@ -560,16 +562,17 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       body.raw(",\"tools\":[");
       bool comma = false;
       for (const auto& tool : request.tools) {
-        if (!function_name(tool.name) || !tool_names.insert(tool.name).second) return invalid("tools require unique valid function names");
-        if (!tool.parameters || !tool.parameters->root().is_object()) return invalid("function parameters must be an object schema");
+        if (!function_name(tool.name) || !tool_names.insert(tool.name).second) return invalid(reason::responses_request::tools_require_unique_valid_function_names);
+        if (!tool.parameters || !tool.parameters->root().is_object()) return invalid(reason::responses_request::function_parameters_must_be_an_object_schema);
         // A policy strict default applies only to strict-compatible schemas and is
         // otherwise sent as false. An explicit strict request on an incompatible
         // schema fails here, naming the schema location, instead of as a vendor 400.
         auto strict = tool.strict ? tool.strict : defaults.strict_tools;
         if (strict && *strict) {
           if (const auto violation = request_controls::strict_schema_violation(tool.parameters->root())) {
-            if (tool.strict) return invalid("strict function " + json::quote(tool.name) + " parameters are not strict-compatible at " +
-                                            json::quote(violation->pointer) + ": " + std::string(violation->reason));
+            // A text composed from the function name and the schema location has no code, as before.
+            if (tool.strict) return Error{ErrorKind::InvalidRequest, "strict function " + json::quote(tool.name) + " parameters are not strict-compatible at " +
+                                          json::quote(violation->pointer) + ": " + std::string(violation->reason)};
             strict = false;
           }
         }
@@ -713,7 +716,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     }
     if (!request.plugins.empty()) { body.raw(",\"plugins\":"); request_controls::write_plugins(body, request.plugins); }
     if (request.required_tool) {
-      if (!tool_names.contains(*request.required_tool)) return invalid("required_tool must name a declared client function");
+      if (!tool_names.contains(*request.required_tool)) return invalid(reason::responses_request::required_tool_must_name_a_declared_client);
       body.raw(",\"tool_choice\":{\"type\":\"function\",\"name\":").quoted(*request.required_tool).raw("}");
     } else if (request.tool_choice) {
       body.raw(",\"tool_choice\":");
@@ -725,7 +728,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     bool input_comma = false;
     auto separator = [&] { if (input_comma) body.raw(","); input_comma = true; };
     auto captured = [&](const Message& message, bool emit_items) -> std::optional<Error> {
-        if (!pending.empty()) return invalid("client tool results must precede the next captured assistant group");
+        if (!pending.empty()) return invalid(reason::responses_request::client_tool_results_must_precede_the_next);
         std::map<std::string_view, const ToolCall*> calls;
         for (const auto& part : message.parts) {
           if (const auto* call = std::get_if<ToolCall>(&part); call && call->kind == ToolCallKind::ApprovalRequest && call->wire_type == "mcp_approval_request") {
@@ -733,41 +736,41 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
             approval_requests.insert(call->id);
           } else if (call) {
             const bool action = call->wire_type == "computer_call";
-            if (call->kind != ToolCallKind::ClientExecuted || (call->wire_type != "function_call" && !action)) return Error{ErrorKind::Unsupported, "only client function calls authorize tool results"};
-            if (action && !computer) return invalid("captured computer call requires a declared computer tool");
+            if (call->kind != ToolCallKind::ClientExecuted || (call->wire_type != "function_call" && !action)) return reason::error(ErrorKind::Unsupported, reason::responses_request::only_client_function_calls_authorize_tool);
+            if (action && !computer) return invalid(reason::responses_request::captured_computer_call_requires_a_declared);
             if (call->id.empty() || !(action || tool_names.contains(call->name)) || !call->input || !call->input->root().is_object() ||
-                !call_ids.insert(call->id).second || !calls.emplace(call->id, call).second) return invalid("captured client call has invalid or duplicate ownership");
+                !call_ids.insert(call->id).second || !calls.emplace(call->id, call).second) return invalid(reason::responses_request::captured_client_call_has_invalid_or);
             pending.insert(call->id);
             if (action) computer_pending.insert(call->id);
           } else if (!std::holds_alternative<Text>(part) && !std::holds_alternative<Refusal>(part) &&
               !std::holds_alternative<Reasoning>(part) && !std::holds_alternative<Opaque>(part) &&
               !std::holds_alternative<Media>(part)) {
-            return Error{ErrorKind::Unsupported, "foreign or invalid part cannot be replayed as Responses output"};
+            return reason::error(ErrorKind::Unsupported, reason::responses_request::foreign_or_invalid_part_cannot_be_replayed);
           }
         }
         // Keep the entire generation in its original order, including opaque
         // server items, reasoning, function item id/call_id and assistant phase.
         for (const auto item : message.wire_output->root().elements()) {
-          if (!item.is_object() || !item.get("type").is_string()) return invalid("captured output item must have a type");
+          if (!item.is_object() || !item.get("type").is_string()) return invalid(reason::responses_request::captured_output_item_must_have_a_type);
           const auto id = item.get("id");
-          if (id.valid() && (!id.is_string() || id.as_string().empty() || !item_ids.insert(id.as_string()).second)) return invalid("captured output item ids must be unique and nonempty");
+          if (id.valid() && (!id.is_string() || id.as_string().empty() || !item_ids.insert(id.as_string()).second)) return invalid(reason::responses_request::captured_output_item_ids_must_be_unique_and);
           if (item.get("type").as_string() == "function_call") {
             const auto call_id = item.get("call_id"), name = item.get("name"), arguments = item.get("arguments");
-            if (!id.is_string() || !call_id.is_string() || !name.is_string() || !arguments.is_string()) return invalid("captured function item lacks its original identity");
+            if (!id.is_string() || !call_id.is_string() || !name.is_string() || !arguments.is_string()) return invalid(reason::responses_request::captured_function_item_lacks_its_original);
             const auto found = calls.find(call_id.as_string());
-            if (found == calls.end() || found->second->name != name.as_string()) return invalid("captured function item lacks unique client ownership");
+            if (found == calls.end() || found->second->name != name.as_string()) return invalid(reason::responses_request::captured_function_item_lacks_unique_client);
             calls.erase(found);
           } else if (item.get("type").as_string() == "computer_call") {
             const auto call_id = item.get("call_id");
             const auto found = call_id.is_string() ? calls.find(call_id.as_string()) : calls.end();
-            if (!id.is_string() || found == calls.end() || found->second->wire_type != "computer_call") return invalid("captured function item lacks unique client ownership");
+            if (!id.is_string() || found == calls.end() || found->second->wire_type != "computer_call") return invalid(reason::responses_request::captured_function_item_lacks_unique_client);
             calls.erase(found);
           } else if (item.get("type").as_string() == "mcp_approval_request" && id.is_string()) {
             approval_requests.insert(id.as_string());
           }
           if (emit_items) { separator(); body.value(item, 2); }
         }
-        if (!calls.empty()) return invalid("captured function call is missing its output item");
+        if (!calls.empty()) return invalid(reason::responses_request::captured_function_call_is_missing_its_output);
         return std::nullopt;
     };
     if (!request.previous_response_history.empty())
@@ -776,26 +779,26 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       if (message.native) {
         if (auto error = captured(message, true)) return error;
       } else {
-        if (message.parts.empty()) return invalid("plain input messages require content");
+        if (message.parts.empty()) return invalid(reason::responses_request::plain_input_messages_require_content);
         const auto role = role_name(message.role);
         const bool results = std::holds_alternative<ToolResult>(message.parts.front());
         if (results) {
-          if (message.role != Role::Tool && message.role != Role::User) return invalid("tool results require tool or user role");
+          if (message.role != Role::Tool && message.role != Role::User) return invalid(reason::responses_request::tool_results_require_tool_or_user_role);
           for (const auto& part : message.parts) {
             const auto* tool_result = std::get_if<ToolResult>(&part);
-            if (!tool_result || tool_result->tool_use_id.empty() || pending.erase(tool_result->tool_use_id) != 1) return invalid("tool result lacks exactly one pending client call_id");
-            if (tool_result->is_error) return Error{ErrorKind::Unsupported, "Responses tool results have no typed is_error field"};
+            if (!tool_result || tool_result->tool_use_id.empty() || pending.erase(tool_result->tool_use_id) != 1) return invalid(reason::responses_request::tool_result_lacks_exactly_one_pending_client);
+            if (tool_result->is_error) return reason::error(ErrorKind::Unsupported, reason::responses_request::responses_tool_results_have_no_typed_is);
             if (computer_pending.erase(tool_result->tool_use_id)) {
               // A computer action answers with one screenshot, and optionally the acknowledged safety checks.
               if (tool_result->content_parts.size() != 1 || !std::holds_alternative<Media>(tool_result->content_parts.front()) ||
                   std::get<Media>(tool_result->content_parts.front()).kind != MediaKind::Image)
-                return invalid("a computer call result is one screenshot image");
+                return invalid(reason::responses_request::a_computer_call_result_is_one_screenshot_image);
               std::optional<json::Document> extra;
               if (!tool_result->content.empty()) {
                 auto parsed = json::parse(tool_result->content, {resources.request_bytes, resources.json_depth});
                 auto* doc = std::get_if<json::Document>(&parsed);
                 if (!doc || !doc->root().is_object() || doc->root().size() != 1 || !doc->root().get("acknowledged_safety_checks").is_array())
-                  return invalid("a computer call result's content may only acknowledge safety checks");
+                  return invalid(reason::responses_request::a_computer_call_result_s_content_may_only);
                 extra = std::move(*doc);
               }
               const auto& shot = std::get<Media>(tool_result->content_parts.front());
@@ -810,7 +813,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
               continue;
             }
             if (!tool_result->content_parts.empty() && !tool_result->content.empty())
-              return invalid("tool result content and content_parts are mutually exclusive");
+              return invalid(reason::responses_request::tool_result_content_and_content_parts_are);
             separator(); body.raw("{\"type\":\"function_call_output\",\"call_id\":").quoted(tool_result->tool_use_id).raw(",\"output\":");
             if (tool_result->content_parts.empty()) body.quoted(tool_result->content);
             else {
@@ -828,7 +831,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
             body.raw("}");
           }
         } else {
-          if (role.empty() || !pending.empty()) return invalid("plain input role or pending client tool results are invalid");
+          if (role.empty() || !pending.empty()) return invalid(reason::responses_request::plain_input_role_or_pending_client_tool);
           separator(); body.raw("{\"role\":").quoted(role).raw(",\"content\":[");
           bool comma = false;
           for (const auto& part : message.parts) {
@@ -838,7 +841,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
               body.raw("{\"type\":\"input_text\",\"text\":").quoted(text->value).raw("}");
             } else if (const auto* media = std::get_if<Media>(&part)) {
               write_media(body, *media);
-            } else return Error{ErrorKind::Unsupported, "plain Responses input supports typed text and media only"};
+            } else return reason::error(ErrorKind::Unsupported, reason::responses_request::plain_responses_input_supports_typed_text);
             if (!body.ok()) return limit_error();
           }
           body.raw("]}");
@@ -846,10 +849,10 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       }
       if (!body.ok()) return limit_error();
     }
-    if (!pending.empty()) return invalid("all client function calls require results before dispatch");
+    if (!pending.empty()) return invalid(reason::responses_request::all_client_function_calls_require_results);
     for (const auto& approval : request.mcp_approvals) {
       if (!request.previous_response_id && !approval_requests.contains(approval.request_id))
-        return invalid("an MCP approval answers a captured approval request");
+        return invalid(reason::responses_request::an_mcp_approval_answers_a_captured_approval);
       separator(); body.raw("{\"type\":\"mcp_approval_response\",\"approval_request_id\":").quoted(approval.request_id)
           .raw(",\"approve\":").raw(approval.approve ? "true" : "false");
       if (approval.reason) body.raw(",\"reason\":").quoted(*approval.reason);
