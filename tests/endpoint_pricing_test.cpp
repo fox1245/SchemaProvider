@@ -824,6 +824,103 @@ void estimate_refusals() {
   std::cout << "case passed: estimate refusals\n";
 }
 
+// The input length picks the bands only when the usage reports an input counter (input, uncached input, cache reads or
+// writes). Output counters alone do not state it, so a banded row of the output, the request fee or an item unit leaves
+// no total, as it does when the usage reports no counter.
+void estimate_length_from_input() {
+  constexpr std::uint64_t output = 2'000'000'000, long_output = 6'000'000'000, image = 4 * cent, long_image = 8 * cent, request = 1'000'000'000'000;
+  auto images_asked = quantity("item:image", 2);
+  images_asked.exact = true;
+  const auto pictures = facts("images", "generate", {images_asked, quantity("output", 1000)});
+  const auto banded = entry({{"input", "0"}, {"output", usd(output)}, {"output+128000", usd(long_output)}, {"item:image", usd(image)},
+                             {"item:image+128000", usd(long_image)}});
+  const auto output_only = tokens(std::nullopt, 1000);
+  CHECK(unpriced(estimated(pictures, &output_only, {{"item:image", 2}}, *banded), {"input"}));
+  // With an input counter the length picks the band: below it, above it, and from the uncached input alone.
+  auto u = tokens(100, 1000);
+  CHECK(estimates(estimated(pictures, &u, {{"item:image", 2}}, *banded), rounded(1000 * output + 2 * image)));
+  u = tokens(200'000, 1000);
+  CHECK(estimates(estimated(pictures, &u, {{"item:image", 2}}, *banded), rounded(1000 * long_output + 2 * long_image)));
+  u = tokens(std::nullopt, 1000);
+  u.input_uncached = Count{200'000, Evidence::Reported};
+  CHECK(estimates(estimated(pictures, &u, {{"item:image", 2}}, *banded), rounded(1000 * long_output + 2 * long_image)));
+  // A banded output row alone, and a banded request fee alone.
+  const auto decide = facts("decisions", "decide", {quantity("output", 1000)});
+  CHECK(unpriced(estimated(decide, &output_only, {}, *entry({{"output", usd(output)}, {"output+128000", usd(long_output)}})), {"input"}));
+  CHECK(unpriced(estimated(decide, &output_only, {}, *entry({{"output", usd(output)}, {"request", usd(request)}, {"request+128000", usd(2 * request)}})),
+                 {"input"}));
+  // Without a band the output counter alone prices the call.
+  CHECK(estimates(estimated(decide, &output_only, {}, *entry({{"output", usd(output)}, {"request", usd(request)}})), rounded(1000 * output + request)));
+  std::cout << "case passed: the input length is known only from an input counter\n";
+}
+
+// The estimate prices the served model's entry and the bound the requested one: when they differ, beyond_bound names
+// `entry`, whether the estimate is above the bound or not.
+void estimate_by_another_entry() {
+  constexpr std::uint64_t cheap = 1'000'000'000, dear = 8'000'000'000;
+  const auto c = catalogue(R"({"version":1,"models":[{"id":"vendor/model","pricing":{"input":")" + usd(cheap) + R"(","output":"0"}},
+    {"id":"vendor/served","pricing":{"input":")" + usd(dear) + R"(","output":"0"}},
+    {"id":"vendor/cheaper","pricing":{"input":")" + usd(cheap / 2) + R"(","output":"0"}}]})");
+  const auto f = facts("embeddings", "embed", {quantity("input", 2'000'000)});
+  const auto b = bound(Call{f}, *c);
+  CHECK(totals(b, rounded(2'000'000 * cheap)) && b.entry == "vendor/model");
+  const auto u = tokens(2'000'000, std::nullopt);
+  pricing::EndpointCounted counted;
+  counted.usage = &u;
+  counted.model = ServedModel{"vendor/model", "vendor/served", ServedRelation::Routed};
+  auto e = pricing::endpoint_estimate(f, counted, *c);
+  CHECK(e.total && e.entry == "vendor/served" && !e.requested_entry && e.total->nano_usd == rounded(2'000'000 * dear));
+  CHECK(pricing::beyond_bound(b, e) == Names({"entry", "total"}));
+  counted.model.served = "vendor/cheaper";
+  e = pricing::endpoint_estimate(f, counted, *c);
+  CHECK(e.total && e.entry == "vendor/cheaper" && e.total->nano_usd == rounded(2'000'000 * (cheap / 2)) && pricing::beyond_bound(b, e) == Names({"entry"}));
+  // The requested model's entry, served as it is or because the served model has none: nothing is named.
+  counted.model = ServedModel{"vendor/model", "vendor/model", ServedRelation::Exact};
+  CHECK(pricing::beyond_bound(b, pricing::endpoint_estimate(f, counted, *c)).empty());
+  counted.model = ServedModel{"vendor/model", "vendor/elsewhere", ServedRelation::Routed};
+  e = pricing::endpoint_estimate(f, counted, *c);
+  CHECK(e.total && e.requested_entry && pricing::beyond_bound(b, e).empty());
+  std::cout << "case passed: an estimate by another entry than the bound's is named\n";
+}
+
+// A quantity of at most zero on a token side: tokens the usage reports on that side are priced as reported and named
+// beyond the bound, whose line of the side has none.
+void estimate_zero_quantity() {
+  constexpr std::uint64_t input = 2'000'000'000, output = 3'000'000'000;
+  const auto c = entry({{"input", usd(input)}, {"output", usd(output)}});
+  auto f = facts("decisions", "decide", {quantity("input", 0), quantity("output", 100)});
+  auto b = bound(Call{f}, *c);
+  CHECK(totals(b, rounded(100 * output)));
+  auto u = tokens(1'000'000, 50);
+  auto e = estimated(f, &u, {}, *c);
+  CHECK(estimates(e, rounded(1'000'000 * input + 50 * output)) && line(e, "input", "input", 1'000'000, input));
+  CHECK(pricing::beyond_bound(b, e) == Names({"input", "total"}));
+  f = facts("decisions", "decide", {quantity("input", 100), quantity("output", 0)});
+  b = bound(Call{f}, *c);
+  CHECK(totals(b, rounded(100 * input)));
+  u = tokens(50, 1000);
+  e = estimated(f, &u, {}, *c);
+  CHECK(estimates(e, rounded(50 * input + 1000 * output)) && line(e, "output", "output", 1000, output));
+  CHECK(pricing::beyond_bound(b, e) == Names({"output", "total"}));
+  std::cout << "case passed: tokens on a side of at most zero are priced and named\n";
+}
+
+// The input length rebuilt from the uncached input, the cache reads and the cache writes past 64 bits is above every
+// band, not the wrapped remainder.
+void estimate_length_overflow() {
+  constexpr std::uint64_t output = 1'000'000'000, long_output = 3'000'000'000;
+  const auto c = entry({{"input", "0"}, {"output", usd(output)}, {"output+1000", usd(long_output)}});
+  const auto f = facts("decisions", "decide", {quantity("input", std::nullopt, Source::InputLimit), quantity("output", std::nullopt, Source::OutputLimit)});
+  Usage u;
+  u.input_uncached = Count{most - 499, Evidence::Reported};
+  u.cache_read = Count{1000, Evidence::Reported};
+  u.output_total = Count{1'000'000, Evidence::Reported};
+  u.stage = UsageStage::Final;
+  const auto e = estimated(f, &u, {}, *c);
+  CHECK(estimates(e, rounded(1'000'000 * long_output)) && line(e, "output", "output+1000", 1'000'000, long_output));
+  std::cout << "case passed: an input length past 64 bits is above every band\n";
+}
+
 // The property: generated catalogues and calls for every kind of quantity, priced here from the generated rows' own
 // facts. ---------------------------------------------------------------------------------------------------------
 struct Row {
@@ -1244,6 +1341,10 @@ void bound_covers_every_consistent_result() {
 void estimate_within_the_bound() {
   std::uint64_t seed = 20261125;
   auto next = [&](std::uint64_t limit) { seed = seed * 6364136223846793005u + 1442695040888963407u; return (seed >> 33) % (limit + 1); };
+  // A second stream for the calls a model other than the requested one serves, so the calls above are generated as before.
+  std::uint64_t side_seed = 20261120;
+  auto side = [&](std::uint64_t limit) { side_seed = side_seed * 6364136223846793005u + 1442695040888963407u; return (side_seed >> 33) % (limit + 1); };
+  std::size_t served_calls = 0, served_above = 0, served_named = 0;
   struct Shape {
     const char* endpoint;
     std::vector<const char*> operations;
@@ -1414,6 +1515,8 @@ void estimate_within_the_bound() {
       }
       if (b.total && e.total) {
         ++both;
+        // The invariant holds for a result priced by the entry the bound used, the requested model's.
+        if (e.entry != b.entry) throw std::runtime_error(describe("the estimate is priced by another entry than the bound's"));
         if (e.total->nano_usd > b.total->nano_usd) throw std::runtime_error(describe("the estimate is above the bound"));
         if (!pricing::beyond_bound(b, e).empty()) throw std::runtime_error(describe("a result within the request is named beyond the bound"));
       } else if (b.total) {
@@ -1477,6 +1580,43 @@ void estimate_within_the_bound() {
         else ++explained["a unit the bound cannot price is counted zero by the result"];
       }
 
+      // The same result served by another model: its entry has the requested entry's rows at other rates (half, the
+      // same, twice or three times), or prices only another tier, so that the requested entry prices the call.
+      if (side(3) == 0) {
+        ++served_calls;
+        const auto factor = side(3);
+        const bool other_only = side(5) == 0;
+        std::string rows;
+        for (const auto& [key, r] : g.rows) {
+          // Moved to the other tier, a row of the call's tier keeps a key of its own; the rows already there are left out.
+          if (other_only && r.tier != g.tier) continue;
+          Row moved = r;
+          if (other_only) moved.tier = other_tier;
+          const auto rate = r.rate ? std::optional<std::uint64_t>(factor == 0 ? *r.rate / 2 : *r.rate * factor) : std::nullopt;
+          rows += (rows.empty() ? "\"" : ",\"") + key_of(moved) + "\":\"" + (rate ? usd(*rate) : std::string("-1")) + "\"";
+        }
+        const std::string served = R"({"id":"vendor/served")" + (rows.empty() ? std::string() : R"(,"pricing":{)" + rows + "}");
+        const auto with_served = catalogue(json + "}," + served + "}]}");
+        auto by_served = counted;
+        by_served.model = ServedModel{g.facts.model, "vendor/served", ServedRelation::Routed};
+        const auto s = pricing::endpoint_estimate(g.facts, by_served, *with_served, g.tier);
+        const auto sb = bound(Call{g.facts, g.tier, g.measured, g.seconds, g.attempts, g.charge_on_accept}, *with_served);
+        if (sb.total && s.total) {
+          const auto names = pricing::beyond_bound(sb, s);
+          if (s.entry == sb.entry) {
+            if (s.total->nano_usd > sb.total->nano_usd || !names.empty())
+              throw std::runtime_error(describe("a result priced by the bound's entry, the served model having none in the tier, exceeds the bound"));
+          } else {
+            ++served_named;
+            if (names.empty() || names.front() != "entry") throw std::runtime_error(describe("an estimate by another entry than the bound's is not named"));
+            const bool above = s.total->nano_usd > sb.total->nano_usd;
+            served_above += above ? 1 : 0;
+            if (above != (std::find(names.begin(), names.end(), "total") != names.end()))
+              throw std::runtime_error(describe("an estimate by another entry above the bound is not named so"));
+          }
+        }
+      }
+
       // A result beyond its request: more images than asked, more seconds than stated, more input than counted.
       if (next(3) == 0) {
         auto more = counted;
@@ -1518,21 +1658,34 @@ void estimate_within_the_bound() {
   for (const auto& [why, n] : explained) std::cout << "  estimate only, " << n << ": " << why << "\n";
   if (both < calls / 5) throw std::runtime_error("too few calls with both totals: " + counts);
   if (beyond == 0 || tight < calls / 5) throw std::runtime_error("too few results checked: " + counts);
+  std::cout << "estimate property, served by another model: " << served_calls << " calls, " << served_named << " named by entry, " << served_above
+            << " above the bound\n";
+  if (served_named == 0 || served_above == 0) throw std::runtime_error("too few calls served by another model");
   std::cout << "case passed: the estimate stays within the bound\n";
 }
 }  // namespace
 
+// Every case runs, and each failing one is reported, so one failure does not hide the cases after it.
 int main() {
-  try {
-    bound_covers_every_consistent_result();
-    estimate_within_the_bound();
-    images(); decisions(); embeddings(); rerank(); speech(); transcription(); videos();
-    billing(); refusals(); zeros(); image_tokens(); bands(); unstated_length(); attempts(); overflow();
-    images_estimate(); estimate_rounds_once(); token_estimates(); item_estimates(); estimate_refusals();
-    std::cout << "endpoint pricing properties passed\n";
-    return 0;
-  } catch (const std::exception& error) {
-    std::cerr << "endpoint pricing test failed: " << error.what() << '\n';
-    return 1;
+  const std::pair<const char*, void (*)()> cases[]{
+      {"bound_covers_every_consistent_result", bound_covers_every_consistent_result}, {"estimate_within_the_bound", estimate_within_the_bound},
+      {"images", images}, {"decisions", decisions}, {"embeddings", embeddings}, {"rerank", rerank}, {"speech", speech},
+      {"transcription", transcription}, {"videos", videos}, {"billing", billing}, {"refusals", refusals}, {"zeros", zeros},
+      {"image_tokens", image_tokens}, {"bands", bands}, {"unstated_length", unstated_length}, {"attempts", attempts}, {"overflow", overflow},
+      {"images_estimate", images_estimate}, {"estimate_rounds_once", estimate_rounds_once}, {"token_estimates", token_estimates},
+      {"item_estimates", item_estimates}, {"estimate_refusals", estimate_refusals}, {"estimate_length_from_input", estimate_length_from_input},
+      {"estimate_by_another_entry", estimate_by_another_entry}, {"estimate_zero_quantity", estimate_zero_quantity},
+      {"estimate_length_overflow", estimate_length_overflow}};
+  int failed = 0;
+  for (const auto& [name, run] : cases) {
+    try {
+      run();
+    } catch (const std::exception& error) {
+      std::cerr << "endpoint pricing test failed: " << name << ": " << error.what() << '\n';
+      ++failed;
+    }
   }
+  if (failed) return 1;
+  std::cout << "endpoint pricing properties passed\n";
+  return 0;
 }
