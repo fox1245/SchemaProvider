@@ -170,8 +170,9 @@ void interaction_jobs() {
   // A status the SDK does not know is not a finished job; the status word is kept.
   auto unknown = pending; unknown.stop = StopReason{StopKind::Unknown, "paused_for_review"};
   CHECK(std::get<jobs::State>(state(unknown)).status == jobs::Status::Unknown && std::get<jobs::State>(state(unknown)).raw_status == "paused_for_review");
-  Error failed{ErrorKind::RemoteFailure, "interaction failed"};
-  failed.reason = std::string(reason::interactions::remote_failed.code);
+  // The failure the Interactions codec raises for a failed interaction: its text and its code, from the constant.
+  const Error failed = reason::error(ErrorKind::RemoteFailure, reason::interactions::remote_failed);
+  CHECK(failed.safe_message == "interaction failed" && failed.reason == "interactions.remote.failed");
   CHECK(std::get<jobs::State>(state(Failure{failed, {pending.messages}})).status == jobs::Status::Failed);
   Error lost{ErrorKind::Transport, "transport failure"};
   CHECK(std::holds_alternative<Failure>(state(Failure{lost, {}})));

@@ -191,6 +191,11 @@ template <class Result> std::string refusal_of(const Result& result) {
   const auto* error = std::get_if<Error>(&result);
   return error ? error->safe_message : std::string();
 }
+// The code the refusal carries.
+template <class Result> std::string code_of(const Result& result) {
+  const auto* error = std::get_if<Error>(&result);
+  return error ? error->reason : std::string();
+}
 messages::Request messages_request() { return messages::Request::simple("fixture-model", "hello", 64); }
 messages::Request with_servers(std::size_t count) {
   auto request = messages_request();
@@ -365,6 +370,17 @@ void embedded_limits_apply() {
   CHECK(listed(reason::gemini_request::all, vocabulary_text, "request.generate.transcription_list_count_limit_exceeded"));
   CHECK(listed(reason::gemini_request::all, rate_text, "request.generate.audio_sample_or_bit_rate_is_out_of_range"));
   CHECK(listed(reason::interactions_request::all, vocabulary_text, "request.interactions.transcription_list_count_limit_exceeded"));
+  // And each refusal carries its code.
+  CHECK(code_of(messages::encode(messages, with_servers(21), false)) == "request.messages.mcp_server_count_limit");
+  CHECK(code_of(messages::encode(messages, with_skills(21), false)) == "request.messages.skills_count_limit");
+  CHECK(code_of(messages::encode(messages, with_title(501), false)) == "request.messages.messages_document_title_is_limited_to_500");
+  batches::Submit over;
+  over.items = batch_items(100001);
+  CHECK(code_of(batches::encode(messages, over)) == "request.batches.items_limit");
+  CHECK(code_of(gemini::encode(generate, with_vocabulary(1001), false)) == "request.generate.transcription_list_count_limit_exceeded");
+  CHECK(code_of(gemini::encode(generate, with_rates(384001, std::nullopt), false)) == "request.generate.audio_sample_or_bit_rate_is_out_of_range");
+  CHECK(code_of(interactions::encode(interactions, with_interaction_vocabulary(1001), false)) ==
+        "request.interactions.transcription_list_count_limit_exceeded");
 }
 
 // Case 3: a policy written before the limits has the embedded policy's, and its content digest covers them.
