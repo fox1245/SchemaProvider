@@ -1467,7 +1467,7 @@ while (auto event = session.next_event(std::chrono::milliseconds(200))) {
 
 Also on 2026-10-20 a transcription session at each provider transcribed a spoken question. `gemini-3.5-transcribe-live` and `gpt-live-transcribe` each streamed partial transcripts and committed one turn, "What is the capital of France?". OpenAI reported 4 seconds of audio, and both closed cleanly.
 
-On 2026-10-20 `gemini-3.8-live` and `gpt-realtime-2.1-mini` each answered a text turn in audio with its transcript, then heard a spoken question ("What is the capital of France?", OpenAI TTS PCM) and answered "Paris", committing each turn with its usage. The Google session sent a resumption handle, and both closed cleanly.
+On 2026-10-20 `gemini-3.8-live` and `gpt-realtime-2.1-mini` each answered a text turn in audio with its transcript, then heard a spoken question ("What is the capital of France?", OpenAI TTS PCM) and answered "Paris", committing each turn with its usage. The Google session sent a resumption handle, and both closed cleanly. On 2026-11-20 `gpt-realtime-2.1-mini` with `Setup::turn_detection = false` heard the same spoken question, sent with `EndAudio` and no `Respond`, and started no response in the 12 seconds after it; a `Respond` then started exactly one, answered in text. The same audio with turn detection on (the default) started a response by itself, after the provider's speech-started event, with no `Respond`.
 
 ## Responses provider-held continuation
 
