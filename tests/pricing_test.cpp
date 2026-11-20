@@ -485,7 +485,7 @@ bool has_unit(const descriptor::CatalogueEntry& entry, std::string_view name) {
 void left_out_units_refuse() {
   const std::string base = R"("prompt":"0.000001","completion":"0.000002","input_cache_read":"0.0000001","input_cache_write":"0.00000125",)"
                            R"("input_cache_write_1h":"0.000002","internal_reasoning":"0.000002","audio":"0.000004","audio_output":"0.000008",)"
-                           R"("request":"0.001")";
+                           R"("input_audio_cache":"0.000003","request":"0.001")";
   auto with = [](Usage u, std::initializer_list<std::pair<const char*, std::uint64_t>> extra) {
     for (const auto& [key, value] : extra) u.extra[key] = Count{value, Evidence::Reported};
     return u;
@@ -502,6 +502,8 @@ void left_out_units_refuse() {
       {"internal_reasoning", {0, 1'000, false, {}}, usage(0, 1'000, 0, 0, 1'000), "prompt"},
       {"audio", {1'000, 0, false, {}}, with(usage(1'000, 0), {{"input_audio", 1'000}}), "completion"},
       {"audio_output", {0, 1'000, false, {}}, with(usage(0, 1'000), {{"audio_tokens", 1'000}}), "prompt"},
+      {"input_audio_cache", {1'000, 0, false, {}},
+       with(usage(1'000, 0, 1'000), {{"promptTokensDetails.AUDIO", 1'000}, {"cacheTokensDetails.AUDIO", 1'000}}), "completion"},
       {"request", {1, 1, false, {}}, usage(1, 1), "input_cache_read"}};
   const ServedModel model{"vendor/m", "vendor/m", ServedRelation::Exact};
   const auto plain = listed_model("{" + base + "}");
@@ -516,6 +518,18 @@ void left_out_units_refuse() {
     if (pricing::upper_bound(entry, {}, test.bound).total) throw std::runtime_error(std::string("the bound priced a call that bills ") + test.member);
     if (pricing::estimate(*c, "anthropic.messages", listing_origin, model, test.usage).total)
       throw std::runtime_error(std::string("the estimate priced a call that bills ") + test.member);
+    // A realtime response bound reserves audio input at the dearer of `input_audio` and `cache_read_audio`, so a cached
+    // audio price left out takes the audio input price with it.
+    if (std::string_view(test.member) == "input_audio_cache" || std::string_view(test.member) == "audio") {
+      pricing::RealtimeResponseInput response;
+      response.family = "anthropic.messages";
+      response.origin = listing_origin;
+      response.model = "vendor/m";
+      response.output_tokens = 1;
+      response.input_tokens = pricing::RealtimeInputTokens{0, 1'000, 0};
+      if (!pricing::realtime_response_bound(response, *plain).total) throw std::runtime_error(std::string("no realtime bound without the override of ") + test.member);
+      if (pricing::realtime_response_bound(response, *c).total) throw std::runtime_error(std::string("the realtime bound priced audio input without ") + test.member);
+    }
   }
   std::cout << "case passed: a unit left out for an override leaves every call that bills it unpriced (" << std::size(cases) << " units)\n";
 }
@@ -1250,6 +1264,142 @@ void sums_past_64_bits() {
   CHECK(total_of(pricing::estimate(*c, "openai.chat", "", exact("split"), v)) == 400'000u);
   std::cout << "case passed: token sums past 64 bits\n";
 }
+
+// The total and the reasons of an estimate, for a failure message.
+std::string described(const pricing::CostEstimate& e) {
+  std::string out = "total " + (e.total ? std::to_string(e.total->nano_usd) : std::string("none")) + ", unpriced [";
+  for (const auto& name : e.unpriced) out += name + ";";
+  return out + "]";
+}
+// Failures a case collects so that one run reports every value it computed, not only the first that differs.
+std::vector<std::string> soft_failures;
+#define SOFT(x) do { if (!(x)) soft_failures.push_back("line " + std::to_string(__LINE__) + ": " #x); } while (false)
+void expect_total(const pricing::CostEstimate& e, std::uint64_t nano_usd, int line) {
+  if (!e.total || e.total->nano_usd != nano_usd || !e.unpriced.empty())
+    soft_failures.push_back("line " + std::to_string(line) + ": expected total " + std::to_string(nano_usd) + ", got " + described(e));
+}
+void expect_unpriced(const pricing::CostEstimate& e, const std::vector<std::string>& unpriced, int line) {
+  if (e.total || e.unpriced != unpriced) soft_failures.push_back("line " + std::to_string(line) + ": expected no total, got " + described(e));
+}
+
+// Cached input by modality (#219). The modality counters of a usage hold every token of their modality, cached or not,
+// and the cached breakdowns (OpenAI realtime `input_token_details.cached_tokens_details`, Gemini `cacheTokensDetails`,
+// Interactions `cached_tokens_by_modality`) the cached share of each: cached text bills at `cache_read`, cached audio at
+// `cache_read_audio` (OpenRouter's `input_audio_cache`), never at another rate.
+void cached_audio_input() {
+  const auto c = catalogue(R"({"version":1,"models":[
+    {"id":"cached-audio","pricing":{"input":"0.0000006","cache_read":"0.00000006","input_audio":"0.00001","cache_read_audio":"0.0000003","output":"0.0000024","input_image":"0.000005"}},
+    {"id":"vendor/listed-cache","pricing":{"prompt":"0.0000006","input_cache_read":"0.00000006","audio":"0.00001","input_audio_cache":"0.0000003","completion":"0.0000024"}},
+    {"id":"no-cached-audio","pricing":{"input":"0.0000006","cache_read":"0.00000006","input_audio":"0.00001","output":"0.0000024"}},
+    {"id":"variable-cached-audio","pricing":{"input":"0.0000006","cache_read":"0.00000006","input_audio":"0.00001","cache_read_audio":"-1","output":"0.0000024"}},
+    {"id":"dear-cached-audio","pricing":{"input":"0.0000006","cache_read":"0.00000006","input_audio":"0.00001","cache_read_audio":"0.0001","output":"0.0000024"}}]})");
+  const auto model = [](const char* id) { return ServedModel{id, id, ServedRelation::Exact}; };
+  const auto with = [](Usage u, std::initializer_list<std::pair<const char*, std::uint64_t>> extra) {
+    for (const auto& [key, value] : extra) u.extra[key] = Count{value, Evidence::Reported};
+    return u;
+  };
+  soft_failures.clear();
+  // The OpenRouter member is the unit, and no longer a listed member that only a route ceiling covers.
+  SOFT(descriptor::plain_price_unit("input_audio_cache") == "cache_read_audio");
+  SOFT(std::none_of(std::begin(descriptor::listed_members), std::end(descriptor::listed_members),
+                    [](const descriptor::ListedMember& m) { return m.member == "input_audio_cache"; }));
+  SOFT(pricing::price_of(*c->entry("vendor/listed-cache")).cache_read_audio == 300'000'000u);
+  SOFT(pricing::price_of(*c->entry("cached-audio")).cache_read_audio == 300'000'000u);
+  {
+    pricing::ModelPrice only_cached_audio;
+    only_cached_audio.cache_read_audio = 1;
+    SOFT(!only_cached_audio.empty());
+  }
+  // The turn of the issue: 100 text and 900 audio tokens in, 700 of them cached (50 text, 650 audio), 10 out. 50 text at
+  // 6e-7, 50 cached text at 6e-8, 250 audio at 1e-5, 650 cached audio at 3e-7 and the output at 2.4e-6 USD.
+  constexpr std::uint64_t issue_turn = 30'000u + 3'000u + 2'500'000u + 195'000u + 24'000u;
+  const auto openai = with(usage(1'000, 10, 700), {{"input_token_details.text_tokens", 100}, {"input_token_details.audio_tokens", 900},
+                                                   {"input_token_details.cached_tokens_details.text_tokens", 50},
+                                                   {"input_token_details.cached_tokens_details.audio_tokens", 650}});
+  expect_total(pricing::estimate(*c, "openai.chat", "", model("cached-audio"), openai), issue_turn, __LINE__);
+  expect_total(pricing::estimate(*c, "openai.chat", "", model("vendor/listed-cache"), openai), issue_turn, __LINE__);
+  const auto google = with(usage(1'000, 10, 700), {{"promptTokensDetails.TEXT", 100}, {"promptTokensDetails.AUDIO", 900},
+                                                   {"cacheTokensDetails.TEXT", 50}, {"cacheTokensDetails.AUDIO", 650}});
+  expect_total(pricing::estimate(*c, "google.generate", "", model("cached-audio"), google), issue_turn, __LINE__);
+  const auto interactions = with(usage(1'000, 10, 700), {{"input_tokens_by_modality.text", 100}, {"input_tokens_by_modality.audio", 900},
+                                                         {"cached_tokens_by_modality.text", 50}, {"cached_tokens_by_modality.audio", 650}});
+  expect_total(pricing::estimate(*c, "google.interactions", "", model("cached-audio"), interactions), issue_turn, __LINE__);
+  // Without the unit, or at a variable price, cached audio has no price, and is not billed at the cached text rate.
+  for (const auto* usage_of : {&openai, &google, &interactions}) {
+    expect_unpriced(pricing::estimate(*c, "openai.chat", "", model("no-cached-audio"), *usage_of), {"cache_read_audio"}, __LINE__);
+    expect_unpriced(pricing::estimate(*c, "openai.chat", "", model("variable-cached-audio"), *usage_of), {"cache_read_audio"}, __LINE__);
+  }
+  // Cached audio below the text tokens was billed as cached text, and its audio at the uncached audio rate: 800 text and
+  // 200 audio in, 100 of each cached. 700 text at 6e-7, 100 cached text at 6e-8, 100 audio at 1e-5, 100 cached audio
+  // at 3e-7.
+  const auto smaller = with(usage(1'000, 10, 200), {{"input_token_details.text_tokens", 800}, {"input_token_details.audio_tokens", 200},
+                                                    {"input_token_details.cached_tokens_details.text_tokens", 100},
+                                                    {"input_token_details.cached_tokens_details.audio_tokens", 100}});
+  expect_total(pricing::estimate(*c, "openai.chat", "", model("cached-audio"), smaller), 420'000u + 6'000u + 1'000'000u + 30'000u + 24'000u, __LINE__);
+  // No cached audio: every entry prices the turn, the variable unit included, since nothing bills it.
+  const auto text_cached = with(usage(1'000, 10, 100), {{"input_token_details.text_tokens", 800}, {"input_token_details.audio_tokens", 200},
+                                                        {"input_token_details.cached_tokens_details.text_tokens", 100},
+                                                        {"input_token_details.cached_tokens_details.audio_tokens", 0}});
+  for (const char* id : {"cached-audio", "no-cached-audio", "variable-cached-audio"})
+    expect_total(pricing::estimate(*c, "openai.chat", "", model(id), text_cached), 420'000u + 6'000u + 2'000'000u + 24'000u, __LINE__);
+  // Counters that contradict each other price nothing: more cached audio than audio, or than cache reads.
+  expect_unpriced(pricing::estimate(*c, "openai.chat", "", model("cached-audio"),
+                                    with(usage(1'000, 10, 700), {{"input_token_details.audio_tokens", 600},
+                                                                 {"input_token_details.cached_tokens_details.audio_tokens", 650}})),
+                  {"cache_read_audio"}, __LINE__);
+  expect_unpriced(pricing::estimate(*c, "openai.chat", "", model("cached-audio"),
+                                    with(usage(1'000, 10, 600), {{"input_token_details.audio_tokens", 900},
+                                                                 {"input_token_details.cached_tokens_details.audio_tokens", 650}})),
+                  {"cache_read_audio"}, __LINE__);
+  // A realtime turn bills its image tokens at `input_image`, and no unit prices cached image tokens: unpriced, not billed
+  // as cached text. 500 text and 500 image tokens in.
+  const auto images = with(usage(1'000, 10, 300), {{"input_token_details.text_tokens", 500}, {"input_token_details.image_tokens", 500},
+                                                   {"input_token_details.cached_tokens_details.text_tokens", 100},
+                                                   {"input_token_details.cached_tokens_details.image_tokens", 200}});
+  expect_unpriced(pricing::estimate(*c, "openai.chat", "", model("cached-audio"), images), {"cache_read_image"}, __LINE__);
+  const auto uncached_images = with(usage(1'000, 10, 100), {{"input_token_details.text_tokens", 500}, {"input_token_details.image_tokens", 500},
+                                                            {"input_token_details.cached_tokens_details.text_tokens", 100},
+                                                            {"input_token_details.cached_tokens_details.image_tokens", 0}});
+  expect_total(pricing::estimate(*c, "openai.chat", "", model("cached-audio"), uncached_images), 240'000u + 6'000u + 2'500'000u + 24'000u, __LINE__);
+  // A Generate usage bills its image tokens at the input rates, so its cached image tokens stay cached input.
+  const auto generate_images = with(usage(1'000, 10, 300), {{"promptTokensDetails.TEXT", 500}, {"promptTokensDetails.IMAGE", 500},
+                                                            {"cacheTokensDetails.TEXT", 100}, {"cacheTokensDetails.IMAGE", 200}});
+  expect_total(pricing::estimate(*c, "google.generate", "", model("cached-audio"), generate_images), 420'000u + 18'000u + 24'000u, __LINE__);
+
+  // The bounds reserve at the dearest input rate, the cached audio rate included: at 1e-4 it is dearer than the audio
+  // rate, and the estimate of the issue's turn at that rate stays below each bound.
+  const auto& dear = *c->entry("dear-cached-audio");
+  const auto dear_turn = pricing::estimate(*c, "openai.chat", "", model("dear-cached-audio"), openai);
+  expect_total(dear_turn, 30'000u + 3'000u + 2'500'000u + 65'000'000u + 24'000u, __LINE__);
+  const auto bound = pricing::upper_bound(pricing::dearest_price_of(dear, {}, 1'000), {1'000, 10, false, {}});
+  SOFT(bound.total && bound.total->nano_usd == 100'000'000u + 24'000u && dear_turn.total && bound.total->nano_usd >= dear_turn.total->nano_usd);
+  {
+    const auto from_entry = pricing::upper_bound(dear, {}, {1'000, 10, false, {}});
+    SOFT(from_entry.total && bound.total && from_entry.total->nano_usd == bound.total->nano_usd);
+  }
+  SOFT(pricing::listed_floor(dear, pricing::TokenSide::Input).rate == 100'000'000'000u);
+  pricing::RealtimeResponseInput response;
+  response.family = "openai.chat";
+  response.model = "dear-cached-audio";
+  response.output_tokens = 10;
+  response.input_tokens = pricing::RealtimeInputTokens{100, 900, 0};
+  const auto realtime = pricing::realtime_response_bound(response, *c);
+  if (!realtime.total || realtime.total->nano_usd != 60'000u + 90'000'000u + 24'000u)
+    soft_failures.push_back("realtime bound " + (realtime.total ? std::to_string(realtime.total->nano_usd) : std::string("none")));
+  // A variable cached audio rate leaves both bounds without a total, the unit named.
+  const auto variable = pricing::upper_bound(*c->entry("variable-cached-audio"), {}, {1'000, 10, false, {}});
+  SOFT(!variable.total && std::find(variable.unpriced.begin(), variable.unpriced.end(), "cache_read_audio") != variable.unpriced.end());
+  response.model = "variable-cached-audio";
+  const auto variable_realtime = pricing::realtime_response_bound(response, *c);
+  if (variable_realtime.total || variable_realtime.unbounded.size() != 1 || variable_realtime.unbounded[0].subject != "cache_read_audio")
+    soft_failures.push_back("variable realtime bound: " + (variable_realtime.unbounded.empty() ? std::string("none") : variable_realtime.unbounded[0].subject));
+  if (!soft_failures.empty()) {
+    std::string all;
+    for (const auto& failure : soft_failures) all += "\n  " + failure;
+    throw std::runtime_error(std::to_string(soft_failures.size()) + " checks failed:" + all);
+  }
+  std::cout << "case passed: cached input is priced by modality\n";
+}
 } // namespace
 
 // Every case runs, and each failing one is reported, so one failure does not hide the cases after it.
@@ -1263,7 +1413,7 @@ int main() {
       {"listed_overrides_bound_every_call", listed_overrides_bound_every_call}, {"item_rows_change_no_token_price", item_rows_change_no_token_price},
       {"item_prices", item_prices}, {"item_prices_follow_the_rows", item_prices_follow_the_rows}, {"variable_rows", variable_rows},
       {"variable_dearest_price", variable_dearest_price}, {"variable_compaction", variable_compaction}, {"variable_ceilings", variable_ceilings},
-      {"sums_past_64_bits", sums_past_64_bits}};
+      {"sums_past_64_bits", sums_past_64_bits}, {"cached_audio_input", cached_audio_input}};
   int failed = 0;
   for (const auto& [name, run] : cases) {
     try {

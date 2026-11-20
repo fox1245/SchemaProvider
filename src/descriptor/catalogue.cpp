@@ -731,7 +731,7 @@ std::string_view plain_price_unit(std::string_view name) noexcept {
       {"input_cache_read", "cache_read"}, {"input_cache_write", "cache_write"},
       {"input_cache_write_1h", "cache_write_1h"}, {"internal_reasoning", "reasoning"},
       {"audio", "input_audio"},     {"audio_output", "output_audio"},
-      {"image_output", "output_image"}};
+      {"input_audio_cache", "cache_read_audio"}, {"image_output", "output_image"}};
   for (const auto& [listed, plain] : names)
     if (name == listed) return plain;
   return name;
@@ -818,13 +818,15 @@ bool supported(Value capabilities, std::string_view name) {
 }
 
 // How pricing (core/pricing.h) bills the tokens of a unit it reads, by plain unit name: at the input or the output price
-// of the call; as a part of the input or of the output, at the input or output price where the part has none; as a
+// of the call; as a part of the input or of the output, at the input or output price where the part has none; as the
+// cached part of the audio input, which a bound reserves at the dearer of the audio input price and its own; as a
 // cache write, whose 5-minute and 1-hour prices also stand in for each other; or as the request fee, which nothing
-// stands in for. A unit left out takes with it the units its tokens would otherwise be billed at, so that a bound or an
-// estimate of a call that bills it finds no price rather than a lower one.
-enum class Bills : std::uint8_t { Input, InputPart, CacheWrite, Output, OutputPart, Request };
+// stands in for. A unit left out takes with it the units its tokens would otherwise be billed or reserved at, so that a
+// bound or an estimate of a call that bills it finds no price rather than a lower one.
+enum class Bills : std::uint8_t { Input, InputPart, AudioCache, CacheWrite, Output, OutputPart, Request };
 constexpr std::pair<std::string_view, Bills> billed_units[]{
     {"input", Bills::Input},             {"cache_read", Bills::InputPart},      {"input_audio", Bills::InputPart},
+    {"cache_read_audio", Bills::AudioCache},
     {"cache_write", Bills::CacheWrite},  {"cache_write_1h", Bills::CacheWrite}, {"output", Bills::Output},
     {"reasoning", Bills::OutputPart},    {"output_image", Bills::OutputPart},   {"output_audio", Bills::OutputPart},
     {"request", Bills::Request}};
@@ -836,6 +838,7 @@ std::vector<std::string_view> left_out_with(std::string_view unit) {
   switch (found->second) {
     case Bills::Input: return {"input"};
     case Bills::InputPart: return {plain, "input"};
+    case Bills::AudioCache: return {plain, "input_audio", "input"};
     case Bills::CacheWrite: return {"cache_write", "cache_write_1h", "input"};
     case Bills::Output: return {"output"};
     case Bills::OutputPart: return {plain, "output"};
@@ -849,7 +852,8 @@ bool falls_back(std::string_view unit) {
   const auto plain = plain_price_unit(unit);
   const auto found = std::find_if(std::begin(billed_units), std::end(billed_units), [&](const auto& item) { return item.first == plain; });
   return found != std::end(billed_units) &&
-         (found->second == Bills::InputPart || found->second == Bills::CacheWrite || found->second == Bills::OutputPart);
+         (found->second == Bills::InputPart || found->second == Bills::AudioCache || found->second == Bills::CacheWrite ||
+          found->second == Bills::OutputPart);
 }
 // Whether a listed price member is one no price unit of the catalogue reads: not a unit of the estimate and the bound
 // (billed_units), a route ceiling, a tool fee, an item unit or the image tokens of an input.

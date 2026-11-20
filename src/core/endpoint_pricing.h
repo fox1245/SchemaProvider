@@ -277,7 +277,8 @@ struct RealtimeResponseInput {
 // the sum, rounded up once to whole nano-USD, of:
 // - text input tokens at the dearest of `input`, `cache_read`, `cache_write` and `cache_write_1h` (the estimate bills
 //   the cache reads among them at `cache_read`);
-// - audio input tokens at `input_audio`, image input tokens at `input_image`;
+// - audio input tokens at the dearer of `input_audio` and `cache_read_audio` (the estimate bills the cached audio among
+//   them at `cache_read_audio`), image input tokens at `input_image`;
 // - the output cap at the dearest of `output`, `reasoning`, `output_image` and, when the response may answer with
 //   audio, `output_audio`;
 // - beside the output, `thinking_tokens` at the dearer of `reasoning` and `output`;

@@ -102,11 +102,15 @@ inline constexpr std::uint64_t EndpointTierAndPin = 1ULL << 24;
 // library built before the members has a smaller EndpointFact and Setup, which a consumer built with this header would
 // read past, so it lacks this bit and a require_interface_contract call with RequiredProvider refuses it.
 inline constexpr std::uint64_t RealtimeResponseBound = 1ULL << 25;
+// pricing::ModelPrice carries `cache_read_audio`, the rate of a cached audio input token, which the estimate and the
+// bounds read. A library built before the member has a smaller ModelPrice, which a consumer built with this header would
+// read past, so it lacks this bit and a require_interface_contract call with RequiredProvider refuses it.
+inline constexpr std::uint64_t CachedAudioPrice = 1ULL << 26;
 inline constexpr std::uint64_t RequiredProvider = TypedRuntime | PreparedAdmission |
     NullableUsage | All5Native | TrustedArchive | OrderedWireEvents | NativeSocketRuntime |
     RetainedJsonSize | CompleteAttemptEvidence | OpenRouterRoutingMaxPrice | ErrorReason | PolicyAdmittedExtensions |
     CompletionSecret | PartCacheMarks | ServedByUpstream | TransportConnectionCache | ModelControlFacts | TypedToolChoice |
-    RealtimeRuntimeDefaults | ChatVoiceId | PricedExtensions | EndpointTierAndPin | RealtimeResponseBound;
+    RealtimeRuntimeDefaults | ChatVoiceId | PricedExtensions | EndpointTierAndPin | RealtimeResponseBound | CachedAudioPrice;
 }
 InterfaceContract core_interface_contract() noexcept;
 std::uint32_t codec_interface_revision() noexcept;

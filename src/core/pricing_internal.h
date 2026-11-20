@@ -212,7 +212,7 @@ UsageSum usage_sum(const Selection& selection, const Usage& usage, const UsageRu
 // The token units a chat request's bound and estimate read (by the plain name descriptor::plain_price_unit gives), and
 // the tool fees (`tool:<type>`).
 inline constexpr std::string_view chat_units[]{"input", "cache_read", "cache_write", "cache_write_1h", "input_audio",
-                                               "output", "reasoning", "output_image", "output_audio", "request"};
+                                               "output", "reasoning", "output_image", "output_audio", "request", "cache_read_audio"};
 // A unit a chat request is priced by that `entry` lists at the standard rates and not under `tier`, in any band: under
 // `tier` such a unit would be priced at another unit's rate, or not at all, which is not the tier's price for it.
 // Empty when every such unit has a row in the tier, and when `tier` is empty or the entry prices nothing under it (which
