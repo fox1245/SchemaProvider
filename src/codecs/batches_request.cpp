@@ -1,4 +1,5 @@
 #include "codecs/batches.h"
+#include "codecs/reason.h"
 #include "codecs/batches_internal.h"
 #include "descriptor/policy.h"
 #include "descriptor/value_schema.h"
@@ -9,7 +10,7 @@
 
 namespace sp::batches {
 namespace {
-Error bad(std::string message) { return Error{ErrorKind::InvalidRequest, std::move(message)}; }
+Error bad(const reason::Reason& message) { return reason::error(ErrorKind::InvalidRequest, message); }
 // A path segment the caller names; `.` and `..` would move the request elsewhere.
 bool token(std::string_view value, std::size_t limit = 128) {
   return !value.empty() && value.size() <= limit && value != "." && value != ".." && std::all_of(value.begin(), value.end(), [](char c) {
@@ -28,9 +29,9 @@ std::string lower(std::string text) {
 struct Route { const descriptor::EndpointFact* fact; std::string path; };
 std::variant<Route, Error> route(const descriptor::ValidatedDescriptor& descriptor, std::string_view endpoint, std::string_view operation) {
   const auto* fact = descriptor.policy()->endpoint(endpoint, descriptor.base_url());
-  if (!fact) return Error{ErrorKind::Unsupported, "batch endpoints are not admitted at this origin"};
+  if (!fact) return reason::error(ErrorKind::Unsupported, reason::batches_request::endpoint_not_admitted);
   const auto path = descriptor::endpoint_path(*fact, operation);
-  if (!path) return Error{ErrorKind::Unsupported, "the batch endpoint has no path for this operation"};
+  if (!path) return reason::error(ErrorKind::Unsupported, reason::batches_request::path_missing);
   return Route{fact, std::string(*path)};
 }
 // One item as its family encodes it for a buffered call: the path, the body and the headers, with the output cap and
@@ -58,13 +59,13 @@ std::variant<ItemWire, Error> item_wire(const descriptor::ValidatedDescriptor& f
 // The items of an inline batch, checked: no more than the endpoint fact's `max_items`, valid and unique ids, the family
 // the origin serves.
 template <class Family> std::optional<Error> check_items(const descriptor::ValidatedDescriptor& descriptor, const std::vector<Item>& items) {
-  if (items.empty()) return bad("a batch has items");
+  if (items.empty()) return bad(reason::batches_request::items_required);
   const auto limit = descriptor.policy()->endpoint_limit("batches", descriptor.base_url(), "max_items");
-  if (limit && items.size() > *limit) return bad("batch item count limit exceeded");
+  if (limit && items.size() > *limit) return bad(reason::batches_request::items_limit);
   std::set<std::string_view> seen;
   for (const auto& item : items) {
-    if (!custom_id_valid(item.custom_id) || !seen.insert(item.custom_id).second) return bad("a batch item has a unique custom id of up to 64 letters, digits, _ and -");
-    if (!std::holds_alternative<Family>(item.request)) return Error{ErrorKind::Unsupported, "a batch item is a request of the origin's family"};
+    if (!custom_id_valid(item.custom_id) || !seen.insert(item.custom_id).second) return bad(reason::batches_request::custom_id_invalid);
+    if (!std::holds_alternative<Family>(item.request)) return reason::error(ErrorKind::Unsupported, reason::batches_request::item_family);
   }
   return std::nullopt;
 }
@@ -73,7 +74,7 @@ std::variant<Encoded, Error> by_id(const descriptor::ValidatedDescriptor& descri
   if (auto* error = std::get_if<Error>(&found)) return *error;
   auto& [fact, path] = std::get<Route>(found);
   if (fact->shape == "google" ? !(id.starts_with("batches/") && token(id.substr(8))) : !token(id))
-    return bad("a batch id is a token, or batches/<token> at Google");
+    return bad(reason::batches_request::id_invalid);
   if (const auto at = path.find("{id}"); at != std::string::npos) path.replace(at, 4, id);
   Encoded encoded{std::move(path), {}, std::string(id), false, fact->auth};
   endpoints::add_fact_headers(encoded, *fact);
@@ -106,12 +107,12 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
 
 namespace detail {
 std::variant<EncodedLines, Error> encode_lines(const descriptor::ValidatedDescriptor& family, const std::vector<Item>& items) {
-  if (family.family() != "openai.chat" && family.family() != "openai.responses") return Error{ErrorKind::Unsupported, "an OpenAI batch file holds Chat or Responses requests"};
-  if (items.empty()) return bad("a batch has items");
+  if (family.family() != "openai.chat" && family.family() != "openai.responses") return reason::error(ErrorKind::Unsupported, reason::batches_request::file_family);
+  if (items.empty()) return bad(reason::batches_request::items_required);
   std::set<std::string_view> seen;
   EncodedLines out;
   for (const auto& item : items) {
-    if (!custom_id_valid(item.custom_id) || !seen.insert(item.custom_id).second) return bad("a batch item has a unique custom id of up to 64 letters, digits, _ and -");
+    if (!custom_id_valid(item.custom_id) || !seen.insert(item.custom_id).second) return bad(reason::batches_request::custom_id_invalid);
     auto wire = item_wire(family, item.request);
     if (auto* error = std::get_if<Error>(&wire)) return *error;
     auto& value = std::get<ItemWire>(wire);
@@ -127,17 +128,17 @@ std::variant<EncodedSubmit, Error> encode_submit(const descriptor::ValidatedDesc
   auto& [fact, path] = std::get<Route>(found);
   const auto& shape = fact->shape;
   if (submit.extensions) {
-    if (!fact->options) return Error{ErrorKind::Unsupported, "the batch endpoint admits no options"};
+    if (!fact->options) return reason::error(ErrorKind::Unsupported, reason::batches_request::options_not_admitted);
     if (!submit.extensions->root().is_object() || descriptor::check_value(*fact->options, submit.extensions->root()))
-      return bad("batch options do not match the policy's schema");
+      return bad(reason::batches_request::options_invalid);
   }
   std::string body;
   std::string model;
   std::vector<ItemCaps> items;
   if (shape == "openai") {
-    if (!submit.items.empty()) return bad("an OpenAI batch reads its items from an uploaded file");
-    if (!token(submit.input_file)) return bad("an OpenAI batch names its uploaded input file");
-    if (!descriptor::valid_path(submit.endpoint)) return bad("an OpenAI batch names the path its lines call");
+    if (!submit.items.empty()) return bad(reason::batches_request::items_unsupported);
+    if (!token(submit.input_file)) return bad(reason::batches_request::input_file_required);
+    if (!descriptor::valid_path(submit.endpoint)) return bad(reason::batches_request::endpoint_invalid);
     body = "{\"input_file_id\":" + json::quote(submit.input_file) + ",\"endpoint\":" + json::quote(submit.endpoint) + ",\"completion_window\":\"24h\"";
   } else if (shape == "anthropic") {
     if (auto error = check_items<messages::Request>(descriptor, submit.items)) return *error;
@@ -148,7 +149,7 @@ std::variant<EncodedSubmit, Error> encode_submit(const descriptor::ValidatedDesc
       auto& value = std::get<ItemWire>(wire);
       // One batch call carries one set of headers: an item cannot ask for a beta of its own.
       for (const auto& header : value.headers)
-        if (lower(header.first) == "anthropic-beta") return Error{ErrorKind::Unsupported, "a batch item needs no beta header"};
+        if (lower(header.first) == "anthropic-beta") return reason::error(ErrorKind::Unsupported, reason::batches_request::item_beta);
       body.append(i ? "," : "").append("{\"custom_id\":").append(json::quote(submit.items[i].custom_id)).append(",\"params\":").append(value.body).append("}");
       items.push_back({submit.items[i].custom_id, value.model, value.max_output_tokens, value.model_invocation_limit});
     }
@@ -162,21 +163,21 @@ std::variant<EncodedSubmit, Error> encode_submit(const descriptor::ValidatedDesc
       auto wire = item_wire(descriptor, submit.items[i].request);
       if (auto* error = std::get_if<Error>(&wire)) return *error;
       auto& value = std::get<ItemWire>(wire);
-      if (i && value.model != model) return bad("a Google batch runs one model");
+      if (i && value.model != model) return bad(reason::batches_request::one_model);
       model = value.model;
       body.append(i ? "," : "").append("{\"request\":").append(value.body).append(",\"metadata\":{\"key\":").append(json::quote(submit.items[i].custom_id)).append("}}");
       items.push_back({submit.items[i].custom_id, value.model, value.max_output_tokens, value.model_invocation_limit});
     }
     body += "]}}}";
     // Google names the model in the path.
-    if (!token(model)) return bad("a Google batch model is a path segment");
+    if (!token(model)) return bad(reason::batches_request::model_invalid);
     // It takes the place of {model} through the check every path shares (descriptor::model_path).
     path = descriptor::model_path(path, model);
-    if (path.empty()) return bad("a model name cannot take the place of {model} in the endpoint's path");
+    if (path.empty()) return bad(reason::batches_request::model_path);
   }
   if (submit.extensions) for (auto member : submit.extensions->root().members()) body += "," + json::quote(member.key) + ":" + member.value.dump();
   body += "}";
-  if (body.size() > descriptor.policy()->resources().request_bytes) return Error{ErrorKind::ResourceLimit, "a batch exceeds the request limit"};
+  if (body.size() > descriptor.policy()->resources().request_bytes) return reason::error(ErrorKind::ResourceLimit, reason::batches_request::size_limit);
   Encoded encoded{std::move(path), std::move(body), std::move(model), fact->charge_on_accept, fact->auth};
   endpoints::add_fact_headers(encoded, *fact);
   return EncodedSubmit{std::move(encoded), std::move(items)};
@@ -193,12 +194,12 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   return by_id(descriptor, del.id, operation(del), "DELETE");
 }
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Results& results) {
-  if (!results.max_bytes) return bad("a download needs a positive byte limit");
+  if (!results.max_bytes) return bad(reason::batches_request::download_limit_invalid);
   const auto& batch = results.batch;
-  if (batch.origin != descriptor.base_url()) return bad("a batch is reached at the origin that started it");
+  if (batch.origin != descriptor.base_url()) return bad(reason::batches_request::origin_mismatch);
   const auto target = results_operation(results);
   if (serves_results(batch)) {
-    if (results.errors) return Error{ErrorKind::Unsupported, "only an OpenAI batch has a separate error file"};
+    if (results.errors) return reason::error(ErrorKind::Unsupported, reason::batches_request::errors_unsupported);
     auto found = by_id(descriptor, batch.id, target.second, "GET");
     if (auto* error = std::get_if<Error>(&found)) return *error;
     auto& encoded = std::get<Encoded>(found);
@@ -209,13 +210,13 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   }
   // OpenAI's output and error files, and Google's responses file, are files of the origin.
   const auto& file = results.errors ? batch.error_file : batch.output_file;
-  if (results.errors && batch.shape != "openai") return Error{ErrorKind::Unsupported, "only an OpenAI batch has a separate error file"};
-  if (file.empty()) return bad("the batch has no results file yet");
+  if (results.errors && batch.shape != "openai") return reason::error(ErrorKind::Unsupported, reason::batches_request::errors_unsupported);
+  if (file.empty()) return bad(reason::batches_request::results_missing);
   const auto* fact = descriptor.policy()->endpoint(target.first, descriptor.base_url());
-  if (!fact) return Error{ErrorKind::Unsupported, "batch endpoints are not admitted at this origin"};
+  if (!fact) return reason::error(ErrorKind::Unsupported, reason::batches_request::endpoint_not_admitted);
   const auto content = descriptor::endpoint_path(*fact, target.second);
-  if (!content) return Error{ErrorKind::Unsupported, "the batch endpoint has no path for this operation"};
-  if (fact->shape == "google" ? !(file.starts_with("files/") && token(file.substr(6))) : !token(file)) return bad("a batch results file is a file id");
+  if (!content) return reason::error(ErrorKind::Unsupported, reason::batches_request::path_missing);
+  if (fact->shape == "google" ? !(file.starts_with("files/") && token(file.substr(6))) : !token(file)) return bad(reason::batches_request::results_file_invalid);
   std::string path(*content);
   if (const auto at = path.find("{id}"); at != std::string::npos) path.replace(at, 4, file);
   if (fact->shape == "google") path += "?alt=media";
