@@ -110,7 +110,9 @@ Result<std::shared_ptr<const Catalog>> Catalog::from_json(std::string_view raw) 
       (void)nullable(object.get("cache_minimum_tokens"));
       (void)nullable(object.get("cache_ttl_seconds"));
       auto activation = text(object.get("cache_activation"));
-      if (activation != "implicit_default" && activation != "cache_control_required") fail();
+      if (activation == "implicit_default") m.cache_activation = CacheActivation::ImplicitDefault;
+      else if (activation == "cache_control_required") m.cache_activation = CacheActivation::CacheControlRequired;
+      else fail();
       auto thinking = object.get("output_includes_thinking");
       if (!thinking.is_bool() || !thinking.as_bool()) fail();
       m.model_url = text(object.get("model_url"));

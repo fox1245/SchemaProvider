@@ -32,6 +32,9 @@ struct Usage {
   bool operator==(const Usage&) const = default;
 };
 enum class PriceKind { Exact, UpperBound };
+// ImplicitDefault: the provider may cache (and charge cache writes) without a
+// request asking for it. CacheControlRequired: only an explicit request does.
+enum class CacheActivation { ImplicitDefault, CacheControlRequired };
 struct PricedUsage { std::uint64_t micro_usd{}; PriceKind kind = PriceKind::Exact; };
 struct ModelPrice {
   std::string model;
@@ -42,6 +45,7 @@ struct ModelPrice {
       long_context_threshold;
   // Exact rational numerator / 2; no floating-point cost arithmetic.
   std::uint64_t long_input_numerator{}, long_output_numerator{};
+  CacheActivation cache_activation = CacheActivation::CacheControlRequired;
   std::string model_url, pricing_url, caching_url;
 };
 class Catalog {

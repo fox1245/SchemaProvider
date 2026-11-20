@@ -1,6 +1,7 @@
 #include "canary/canary.h"
 #include "canary/io.h"
 #include "json/json.h"
+#include "sp/config_defaults.h"
 #include <algorithm>
 #include <charconv>
 #include <cstdlib>
@@ -44,8 +45,35 @@ void valid_secret(std::string_view value) {
   for (unsigned char c : value)
     if (c < 0x21 || c > 0x7e || c == '"' || c == '\'' || c == '$' || c == '`' || c == '\\') fail();
 }
+// The family a campaign's requests are sent and metered under: the process
+// Gemini campaign uses the OpenAI-compatible chat endpoint (runner.cpp).
+std::string_view family(Provider provider) {
+  switch (provider) {
+    case Provider::OpenAI: case Provider::Gemini: case Provider::VisionChat: return "openai.chat";
+    case Provider::OpenAIResponses: case Provider::VisionResponses: return "openai.responses";
+    case Provider::Anthropic: case Provider::VisionMessages: return "anthropic.messages";
+    case Provider::VisionGemini: return "google.generate";
+    case Provider::VisionInteractions: return "google.interactions";
+  }
+  fail();
+}
+// rate x numerator / 2, rounded up so a floor never falls below the catalogue.
+// The catalogue refuses at load a rate whose product with a numerator overflows.
+std::uint64_t scaled(std::uint64_t rate, std::uint64_t numerator) {
+  const auto product = rate * numerator;
+  return product / 2 + product % 2;
+}
 } // namespace
-Profile parse_profile(std::string_view source, bool allow_test_loopback,
+const qualification::Catalog& embedded_catalog() {
+  static const auto catalog = [] {
+    auto loaded = qualification::Catalog::from_json(config_defaults::model_catalog_json);
+    auto* value = std::get_if<std::shared_ptr<const qualification::Catalog>>(&loaded);
+    if (!value) fail();
+    return std::move(*value);
+  }();
+  return *catalog;
+}
+Profile parse_profile(std::string_view source, const qualification::Catalog& catalog, bool allow_test_loopback,
                       std::optional<std::uint64_t> output_tokens) {
   auto parsed = json::parse(source, {16384, 8});
   auto* doc = std::get_if<json::Document>(&parsed);
@@ -97,29 +125,23 @@ Profile parse_profile(std::string_view source, bool allow_test_loopback,
     result.thinking_budget_ = number(root, "thinking_budget");
     if (result.thinking_budget_ < 1024 || result.thinking_budget_ >= b.output_tokens) fail();
   } else if (root.get("thinking_budget").valid()) fail();
-  // Live campaign targets have independently sourced model-window/rate floors.
-  // A profile may over-reserve, but cannot substitute a character-token guess.
+  // Live campaign targets take their model-window/rate floors from the model
+  // catalogue. A profile may over-reserve, but cannot substitute a character-token guess.
   if (!result.loopback_) {
-    if (vision && openai_provider) {
-      // Full-context reservation includes long-context/cache-write maximum rate.
-      if (result.model_ != "gpt-6-luna" || b.input_tokens < 1050000 ||
-          b.input_rate < 250000 || b.output_rate < 750000) fail();
-    } else if (result.provider_ == Provider::VisionMessages) {
-      if (result.model_ != "claude-haiku-4-5-20251001" || b.input_tokens < 200000 ||
-          b.input_rate < 1000000 || b.output_rate < 5000000) fail();
-    } else if (result.provider_ == Provider::VisionGemini || result.provider_ == Provider::VisionInteractions) {
-      if (result.model_ != "gemini-2.5-flash-lite" || b.input_tokens < 1048576 ||
-          b.input_rate < 100000 || b.output_rate < 400000) fail();
-    } else if (openai_provider) {
-      if (result.model_ != "gpt-6-luna" || b.input_tokens < 922000 ||
-          b.input_rate < 250000 || b.output_rate < 750000) fail();
-    } else if (result.provider_ == Provider::Anthropic) {
-      if (result.model_ != "claude-haiku-4-5-20251001" || b.input_tokens < 200000 ||
-          b.output_tokens > 64000 || b.input_rate < 2000000 || b.output_rate < 5000000) fail();
-    } else {
-      if (result.model_ != "gemini-2.5-flash-lite" || b.input_tokens < 1048576 ||
-          b.input_rate < 100000 || b.output_rate < 400000) fail();
-    }
+    const auto* price = catalog.find(result.model_, family(result.provider_));
+    if (!price) fail();
+    const bool long_context = price->long_context_threshold && b.input_tokens > *price->long_context_threshold;
+    const auto writes = std::max(price->cache_write_5m_rate.value_or(0), price->cache_write_1h_rate.value_or(0));
+    // Process campaigns reserve the highest input band. Full-context vision
+    // campaigns add cache writes only when the provider may make them unasked.
+    const auto input_rate = vision ?
+        std::max(price->input_rate, price->cache_activation == qualification::CacheActivation::ImplicitDefault ? writes : 0) :
+        std::max({price->input_rate, price->cache_read_rate, writes});
+    if (b.input_tokens < (vision ? price->context_window : price->max_input) ||
+        // The meter refuses the same output bound at admission; this refuses it before any I/O.
+        b.output_tokens > price->max_output ||
+        b.input_rate < scaled(input_rate, long_context ? price->long_input_numerator : 2) ||
+        b.output_rate < scaled(price->output_rate, long_context ? price->long_output_numerator : 2)) fail();
   }
   auto provenance = root.get("provenance");
   keys(provenance, {"model_url", "pricing_url", "verified_at"});

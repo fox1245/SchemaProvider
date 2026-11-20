@@ -157,7 +157,7 @@ void selector_modes(runtime_test::Peer& peer, const std::filesystem::path& sourc
     peer.count(model, 15, lane == 3 ? 6 : 7); privacy(observed.text); campaign.preserved();
   }
   const auto model = peer.arm("campaign"); qualification_test::Campaign campaign(source, {model});
-  const auto bounded = run(parse_profile(profile(4, model, peer.port), true), campaign.root.string(), "VISION_SYNTHETIC_KEY",
+  const auto bounded = run(parse_profile(profile(4, model, peer.port), embedded_catalog(), true), campaign.root.string(), "VISION_SYNTHETIC_KEY",
       {ExecutionMode::GoogleDiagnostics, 0, 2});
   require(bounded.cases[4].attempts == 1 && bounded.cases[5].attempts == 1 &&
       bounded.cases[6].reason == Reason::DiagnosticLimit && bounded.cases[6].attempts == 0,
