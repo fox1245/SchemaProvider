@@ -5,7 +5,6 @@
 #include "codecs/interactions_request.h"
 #include "codecs/messages.h"
 #include "codecs/messages_request.h"
-#include "codecs/reason.h"
 #include "codecs/responses_request.h"
 #include "core/cache_marks.h"
 #include "core/native.h"
@@ -95,7 +94,7 @@ Error refused(const descriptor::ValidatedDescriptor& descriptor, const messages:
   CHECK(std::holds_alternative<Error>(result));
   const auto& error = std::get<Error>(result);
   CHECK(error.kind == kind);
-  if (!code.empty()) CHECK(reason::request_code(reason::Source::MessagesRequest, error.safe_message) == code);
+  if (!code.empty()) CHECK(error.reason == code);
   return error;
 }
 chat::Request chat_request(std::string model, std::vector<Message> history) {
@@ -111,7 +110,7 @@ Error refused(const descriptor::ValidatedDescriptor& descriptor, const chat::Req
   CHECK(std::holds_alternative<Error>(result));
   const auto& error = std::get<Error>(result);
   CHECK(error.kind == kind);
-  if (!code.empty()) CHECK(reason::request_code(reason::Source::ChatRequest, error.safe_message) == code);
+  if (!code.empty()) CHECK(error.reason == code);
   return error;
 }
 std::string replaced(std::string body, std::string_view from, std::string_view to) {

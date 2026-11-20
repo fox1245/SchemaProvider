@@ -22,6 +22,10 @@
 namespace {
 using namespace sp;
 #define CHECK(x) do { if (!(x)) throw std::runtime_error("line " + std::to_string(__LINE__) + ": " #x); } while (false)
+// The constant of a source whose text is `text` has `code`.
+bool listed(std::span<const reason::Reason> source, std::string_view text, std::string_view code) {
+  return std::any_of(source.begin(), source.end(), [&](const reason::Reason& r) { return r.message == text && r.code == code; });
+}
 
 std::string policy_text() { return std::string(config_defaults::descriptor_policy_json); }
 descriptor::PolicySnapshot load(const std::string& text) {
@@ -354,13 +358,13 @@ void embedded_limits_apply() {
   CHECK(submitted(generate, gemini_batch_items(100001)) == items_text);
   CHECK(submitted(messages, {}) == "a batch has items");
   // The codes are the ones the refusals have always had.
-  CHECK(reason::code(reason::Source::MessagesRequest, servers_text) == "request.messages.mcp_server_count_limit");
-  CHECK(reason::code(reason::Source::MessagesRequest, skills_text) == "request.messages.skills_count_limit");
-  CHECK(reason::code(reason::Source::MessagesRequest, title_text) == "request.messages.messages_document_title_is_limited_to_500");
-  CHECK(reason::code(reason::Source::BatchesRequest, items_text) == "request.batches.items_limit");
-  CHECK(reason::code(reason::Source::GeminiRequest, vocabulary_text) == "request.generate.transcription_list_count_limit_exceeded");
-  CHECK(reason::code(reason::Source::GeminiRequest, rate_text) == "request.generate.audio_sample_or_bit_rate_is_out_of_range");
-  CHECK(reason::code(reason::Source::InteractionsRequest, vocabulary_text) == "request.interactions.transcription_list_count_limit_exceeded");
+  CHECK(listed(reason::messages_request::all, servers_text, "request.messages.mcp_server_count_limit"));
+  CHECK(listed(reason::messages_request::all, skills_text, "request.messages.skills_count_limit"));
+  CHECK(listed(reason::messages_request::all, title_text, "request.messages.messages_document_title_is_limited_to_500"));
+  CHECK(listed(reason::batches_request::all, items_text, "request.batches.items_limit"));
+  CHECK(listed(reason::gemini_request::all, vocabulary_text, "request.generate.transcription_list_count_limit_exceeded"));
+  CHECK(listed(reason::gemini_request::all, rate_text, "request.generate.audio_sample_or_bit_rate_is_out_of_range"));
+  CHECK(listed(reason::interactions_request::all, vocabulary_text, "request.interactions.transcription_list_count_limit_exceeded"));
 }
 
 // Case 3: a policy written before the limits has the embedded policy's, and its content digest covers them.

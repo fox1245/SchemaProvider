@@ -171,7 +171,7 @@ void interaction_jobs() {
   auto unknown = pending; unknown.stop = StopReason{StopKind::Unknown, "paused_for_review"};
   CHECK(std::get<jobs::State>(state(unknown)).status == jobs::Status::Unknown && std::get<jobs::State>(state(unknown)).raw_status == "paused_for_review");
   Error failed{ErrorKind::RemoteFailure, "interaction failed"};
-  failed.reason = std::string(reason::code(reason::Source::Interactions, "interaction failed"));
+  failed.reason = std::string(reason::interactions::remote_failed.code);
   CHECK(std::get<jobs::State>(state(Failure{failed, {pending.messages}})).status == jobs::Status::Failed);
   Error lost{ErrorKind::Transport, "transport failure"};
   CHECK(std::holds_alternative<Failure>(state(Failure{lost, {}})));

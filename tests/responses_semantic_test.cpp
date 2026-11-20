@@ -1,4 +1,3 @@
-#include "codecs/reason.h"
 #include "codecs/responses.h"
 #include "codecs/responses_request.h"
 #include "core/enum_names.h"
@@ -1368,7 +1367,7 @@ void typed_tool_choice() {
     const auto result = responses::encode(desc(), q, false);
     if (!std::holds_alternative<Error>(result) || std::get<Error>(result).kind != ErrorKind::InvalidRequest)
       throw std::runtime_error("tool choice not refused at line " + std::to_string(at.line()));
-    const auto refused_by = reason::request_code(reason::Source::ResponsesRequest, std::get<Error>(result).safe_message);
+    const std::string refused_by = std::get<Error>(result).reason;
     if (!code.empty() && refused_by != code)
       throw std::runtime_error("tool choice refused by " + std::string(refused_by) + " at line " + std::to_string(at.line()));
   };
@@ -1385,7 +1384,7 @@ void typed_tool_choice() {
   auto serverless = r; serverless.hosted_tools = {responses::WebSearchTool{}};
   serverless.tool_choice = ToolChoice{ToolChoiceMode::Hosted, server_type, {}, {}};
   const auto undeclared_server = responses::encode(desc(), serverless, false);
-  CHECK(std::holds_alternative<Error>(undeclared_server) && reason::request_code(reason::Source::ResponsesRequest, std::get<Error>(undeclared_server).safe_message) ==
+  CHECK(std::holds_alternative<Error>(undeclared_server) && std::get<Error>(undeclared_server).reason ==
         "request.responses.hosted_tool_choice_must_be_declared");
   refuse(ToolChoice{ToolChoiceMode::Mcp, "other", {}, {}});
   refuse(ToolChoice{static_cast<ToolChoiceMode>(99), {}, {}, {}});

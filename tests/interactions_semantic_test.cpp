@@ -1,7 +1,6 @@
 #include "codecs/interaction_jobs.h"
 #include "codecs/interactions.h"
 #include "codecs/interactions_request.h"
-#include "codecs/reason.h"
 #include "core/native.h"
 #include "json/json.h"
 #include "sp/config_defaults.h"
@@ -273,7 +272,7 @@ void thinking_level_xhigh() {
   CHECK(wire.root().get("generation_config").get("thinking_level").as_string() == "xhigh");
   const auto unlisted = interactions::encode(desc_without_xhigh(), r, false);
   CHECK(std::holds_alternative<Error>(unlisted) && std::get<Error>(unlisted).kind == ErrorKind::InvalidRequest);
-  CHECK(reason::request_code(reason::Source::InteractionsRequest, std::get<Error>(unlisted).safe_message) == "request.choice.unsupported_typed_semantic_control");
+  CHECK(std::get<Error>(unlisted).reason == "request.choice.unsupported_typed_semantic_control");
   r.thinking_level = "high"; CHECK(std::holds_alternative<interactions::EncodedRequest>(interactions::encode(desc_without_xhigh(), r, false)));
 }
 void lifecycle_and_errors() {

@@ -10,7 +10,6 @@
 #include "codecs/responses.h"
 #include "codecs/gemini.h"
 #include "codecs/interactions.h"
-#include "codecs/reason.h"
 #include "crypto/crypto.h"
 #include "sp/build_config.h"
 
@@ -1549,12 +1548,7 @@ PreparedRequest Client::prepare(Request request, RunOptions options) {
       }();
       if (auto* failure = std::get_if<Error>(&encoded)) {
         error = std::move(*failure);
-        // The encoder's text is replaced by the generic text of its kind below; the code keeps the check.
-        constexpr auto encoder = std::is_same_v<T, chat::Request> ? reason::Source::ChatRequest :
-            std::is_same_v<T, messages::Request> ? reason::Source::MessagesRequest :
-            std::is_same_v<T, responses::Request> ? reason::Source::ResponsesRequest :
-            std::is_same_v<T, gemini::Request> ? reason::Source::GeminiRequest : reason::Source::InteractionsRequest;
-        if (error->reason.empty()) error->reason = std::string(reason::request_code(encoder, error->safe_message));
+        // The encoder's text is replaced by the generic text of its kind below; its reason names the check.
         return;
       }
       auto& value = std::get<0>(encoded);
@@ -1602,7 +1596,7 @@ std::string_view counted_model(const tokens::Count& count) {
 }
 }  // namespace
 template <class Encoded>
-PreparedRequest Client::prepare_endpoint(RunOptions options, std::string_view endpoint, int reason_source,
+PreparedRequest Client::prepare_endpoint(RunOptions options, std::string_view endpoint,
                                          const std::function<std::variant<Encoded, Error>()>& encode,
                                          const std::function<EndpointFacts()>& facts) {
   auto client = state_;
@@ -1611,7 +1605,6 @@ PreparedRequest Client::prepare_endpoint(RunOptions options, std::string_view en
     auto encoded = encode();
     if (auto* failure = std::get_if<Error>(&encoded)) {
       error = std::move(*failure);
-      if (error->reason.empty()) error->reason = std::string(reason::request_code(static_cast<reason::Source>(reason_source), error->safe_message));
       return;
     }
     auto& value = std::get<Encoded>(encoded);
@@ -1656,38 +1649,38 @@ PreparedRequest Client::prepare_endpoint(RunOptions options, std::string_view en
 PreparedEndpoint<images::Outcome> Client::prepare(images::Request request, RunOptions options) {
   auto client = state_;
   return PreparedEndpoint<images::Outcome>(prepare_endpoint<images::Encoded>(std::move(options), "images",
-      static_cast<int>(reason::Source::ImagesRequest), [&] { return images::encode(client->descriptor, request); },
+      [&] { return images::encode(client->descriptor, request); },
       [&] { return images::endpoint_facts(client->descriptor, request); }));
 }
 PreparedEndpoint<decisions::Outcome> Client::prepare(decisions::Request request, RunOptions options) {
   auto client = state_;
   return PreparedEndpoint<decisions::Outcome>(prepare_endpoint<decisions::Encoded>(std::move(options), "decisions",
-      static_cast<int>(reason::Source::DecisionsRequest), [&] { return decisions::encode(client->descriptor, request); }, [&] { return decisions::endpoint_facts(client->descriptor, request); }));
+      [&] { return decisions::encode(client->descriptor, request); }, [&] { return decisions::endpoint_facts(client->descriptor, request); }));
 }
 PreparedEndpoint<embeddings::Outcome> Client::prepare(embeddings::Request request, RunOptions options) {
   auto client = state_;
   return PreparedEndpoint<embeddings::Outcome>(prepare_endpoint<embeddings::Encoded>(std::move(options), "embeddings",
-      static_cast<int>(reason::Source::EmbeddingsRequest), [&] { return embeddings::encode(client->descriptor, request); }, [&] { return embeddings::endpoint_facts(client->descriptor, request); }));
+      [&] { return embeddings::encode(client->descriptor, request); }, [&] { return embeddings::endpoint_facts(client->descriptor, request); }));
 }
 PreparedEndpoint<rerank::Outcome> Client::prepare(rerank::Request request, RunOptions options) {
   auto client = state_;
   return PreparedEndpoint<rerank::Outcome>(prepare_endpoint<rerank::Encoded>(std::move(options), "rerank",
-      static_cast<int>(reason::Source::RerankRequest), [&] { return rerank::encode(client->descriptor, request); }, [&] { return rerank::endpoint_facts(client->descriptor, request); }));
+      [&] { return rerank::encode(client->descriptor, request); }, [&] { return rerank::endpoint_facts(client->descriptor, request); }));
 }
 PreparedEndpoint<moderation::Outcome> Client::prepare(moderation::Request request, RunOptions options) {
   auto client = state_;
   return PreparedEndpoint<moderation::Outcome>(prepare_endpoint<moderation::Encoded>(std::move(options), "moderation",
-      static_cast<int>(reason::Source::ModerationRequest), [&] { return moderation::encode(client->descriptor, request); }, [&] { return endpoints::call_facts(client->descriptor, "moderation", moderation::operation(request), request.model); }));
+      [&] { return moderation::encode(client->descriptor, request); }, [&] { return endpoints::call_facts(client->descriptor, "moderation", moderation::operation(request), request.model); }));
 }
 PreparedEndpoint<speech::Outcome> Client::prepare(speech::Request request, RunOptions options) {
   auto client = state_;
   return PreparedEndpoint<speech::Outcome>(prepare_endpoint<speech::Encoded>(std::move(options), "speech",
-      static_cast<int>(reason::Source::SpeechRequest), [&] { return speech::encode(client->descriptor, request); }, [&] { return speech::endpoint_facts(client->descriptor, request); }));
+      [&] { return speech::encode(client->descriptor, request); }, [&] { return speech::endpoint_facts(client->descriptor, request); }));
 }
 PreparedEndpoint<transcription::Outcome> Client::prepare(transcription::Request request, RunOptions options) {
   auto client = state_;
   return PreparedEndpoint<transcription::Outcome>(prepare_endpoint<transcription::Encoded>(std::move(options), "transcription",
-      static_cast<int>(reason::Source::TranscriptionRequest), [&] { return transcription::encode(client->descriptor, request); }, [&] { return transcription::endpoint_facts(client->descriptor, request); }));
+      [&] { return transcription::encode(client->descriptor, request); }, [&] { return transcription::endpoint_facts(client->descriptor, request); }));
 }
 images::Outcome Client::complete(images::Request request, RunOptions options) {
   return complete(prepare(std::move(request), std::move(options)));
@@ -1790,18 +1783,18 @@ EndpointCall<transcription::Outcome> Client::start(PreparedEndpoint<transcriptio
 PreparedEndpoint<jobs::Outcome> Client::prepare(videos::Request request, RunOptions options) {
   auto client = state_;
   return PreparedEndpoint<jobs::Outcome>(prepare_endpoint<videos::Encoded>(std::move(options), "videos",
-      static_cast<int>(reason::Source::VideosRequest), [&] { return videos::encode(client->descriptor, request); }, [&] { return videos::endpoint_facts(client->descriptor, request); }));
+      [&] { return videos::encode(client->descriptor, request); }, [&] { return videos::endpoint_facts(client->descriptor, request); }));
 }
 PreparedEndpoint<jobs::Outcome> Client::prepare(jobs::Poll poll, RunOptions options) {
   auto client = state_;
   // The poll answers with the job's state, which the codec of the endpoint that started it reads.
   return PreparedEndpoint<jobs::Outcome>(prepare_endpoint<jobs::Encoded>(std::move(options), poll.handle.endpoint,
-      static_cast<int>(reason::Source::JobsRequest), [&] { return jobs::encode(client->descriptor, poll); }, [&] { return endpoints::call_facts(client->descriptor, poll.handle.endpoint, jobs::operation(poll), poll.handle.model); }));
+      [&] { return jobs::encode(client->descriptor, poll); }, [&] { return endpoints::call_facts(client->descriptor, poll.handle.endpoint, jobs::operation(poll), poll.handle.model); }));
 }
 PreparedEndpoint<jobs::DownloadOutcome> Client::prepare(jobs::Download download, RunOptions options) {
   auto client = state_;
   return PreparedEndpoint<jobs::DownloadOutcome>(prepare_endpoint<jobs::Encoded>(std::move(options), "content",
-      static_cast<int>(reason::Source::JobsRequest), [&] { return jobs::encode(client->descriptor, download); }, [&] { return endpoints::call_facts(client->descriptor, download.handle.endpoint, jobs::operation(download), download.handle.model); }));
+      [&] { return jobs::encode(client->descriptor, download); }, [&] { return endpoints::call_facts(client->descriptor, download.handle.endpoint, jobs::operation(download), download.handle.model); }));
 }
 jobs::Outcome Client::complete(videos::Request request, RunOptions options) {
   return complete(prepare(std::move(request), std::move(options)));
@@ -1850,7 +1843,7 @@ template <class Outcome> EndpointCall<Outcome> Client::start_endpoint(PreparedEn
 PreparedEndpoint<files::Outcome> Client::prepare(files::Upload upload, RunOptions options) {
   auto client = state_;
   PreparedEndpoint<files::Outcome> call(prepare_endpoint<files::Encoded>(std::move(options), "files",
-      static_cast<int>(reason::Source::FilesRequest), [&] { return files::encode(client->descriptor, upload); }, [&] { return endpoints::call_facts(client->descriptor, "files", files::operation(upload), {}); }));
+      [&] { return files::encode(client->descriptor, upload); }, [&] { return endpoints::call_facts(client->descriptor, "files", files::operation(upload), {}); }));
   // The bytes in memory are sent whole in one request, so the file's digest is theirs (files::File::uploaded_sha256).
   if (auto& state = call.prepared_.state_; state && call.prepared_.valid() && !call.prepared_.error() && upload.source.bytes) {
     static constexpr char digits[] = "0123456789abcdef";
@@ -1864,22 +1857,22 @@ PreparedEndpoint<files::Outcome> Client::prepare(files::Upload upload, RunOption
 PreparedEndpoint<files::Outcome> Client::prepare(files::Get get, RunOptions options) {
   auto client = state_;
   return PreparedEndpoint<files::Outcome>(prepare_endpoint<files::Encoded>(std::move(options), "files",
-      static_cast<int>(reason::Source::FilesRequest), [&] { return files::encode(client->descriptor, get); }, [&] { return endpoints::call_facts(client->descriptor, "files", files::operation(get), {}); }));
+      [&] { return files::encode(client->descriptor, get); }, [&] { return endpoints::call_facts(client->descriptor, "files", files::operation(get), {}); }));
 }
 PreparedEndpoint<files::PageOutcome> Client::prepare(files::List list, RunOptions options) {
   auto client = state_;
   return PreparedEndpoint<files::PageOutcome>(prepare_endpoint<files::Encoded>(std::move(options), "files.list",
-      static_cast<int>(reason::Source::FilesRequest), [&] { return files::encode(client->descriptor, list); }, [&] { return endpoints::call_facts(client->descriptor, "files", files::operation(list), {}); }));
+      [&] { return files::encode(client->descriptor, list); }, [&] { return endpoints::call_facts(client->descriptor, "files", files::operation(list), {}); }));
 }
 PreparedEndpoint<files::DeleteOutcome> Client::prepare(files::Delete del, RunOptions options) {
   auto client = state_;
   return PreparedEndpoint<files::DeleteOutcome>(prepare_endpoint<files::Encoded>(std::move(options), "files.delete",
-      static_cast<int>(reason::Source::FilesRequest), [&] { return files::encode(client->descriptor, del); }, [&] { return endpoints::call_facts(client->descriptor, "files", files::operation(del), {}); }));
+      [&] { return files::encode(client->descriptor, del); }, [&] { return endpoints::call_facts(client->descriptor, "files", files::operation(del), {}); }));
 }
 PreparedEndpoint<jobs::DownloadOutcome> Client::prepare(files::Download download, RunOptions options) {
   auto client = state_;
   return PreparedEndpoint<jobs::DownloadOutcome>(prepare_endpoint<files::Encoded>(std::move(options), "content.document",
-      static_cast<int>(reason::Source::FilesRequest), [&] { return files::encode(client->descriptor, download); }, [&] { return endpoints::call_facts(client->descriptor, "files", files::operation(download), {}); }));
+      [&] { return files::encode(client->descriptor, download); }, [&] { return endpoints::call_facts(client->descriptor, "files", files::operation(download), {}); }));
 }
 files::Outcome Client::complete(files::Upload upload, RunOptions options) { return complete(prepare(std::move(upload), std::move(options))); }
 files::Outcome Client::complete(files::Get get, RunOptions options) { return complete(prepare(std::move(get), std::move(options))); }
@@ -1901,31 +1894,31 @@ EndpointCall<files::DeleteOutcome> Client::start(PreparedEndpoint<files::DeleteO
 PreparedEndpoint<files::ProgressOutcome> Client::prepare(files::Start step, RunOptions options) {
   auto client = state_;
   return PreparedEndpoint<files::ProgressOutcome>(prepare_endpoint<files::Encoded>(std::move(options), "files.start",
-      static_cast<int>(reason::Source::FilesRequest), [&] { return files::encode(client->descriptor, step); }, [&] { return endpoints::call_facts(client->descriptor, "files", files::operation(step), {}); }));
+      [&] { return files::encode(client->descriptor, step); }, [&] { return endpoints::call_facts(client->descriptor, "files", files::operation(step), {}); }));
 }
 files::ProgressOutcome Client::complete(files::Start step, RunOptions options) { return complete(prepare(std::move(step), std::move(options))); }
 PreparedEndpoint<files::ProgressOutcome> Client::prepare(files::Part step, RunOptions options) {
   auto client = state_;
   return PreparedEndpoint<files::ProgressOutcome>(prepare_endpoint<files::Encoded>(std::move(options), "files.part",
-      static_cast<int>(reason::Source::FilesRequest), [&] { return files::encode(client->descriptor, step); }, [&] { return endpoints::call_facts(client->descriptor, "files", files::operation(step), {}); }));
+      [&] { return files::encode(client->descriptor, step); }, [&] { return endpoints::call_facts(client->descriptor, "files", files::operation(step), {}); }));
 }
 files::ProgressOutcome Client::complete(files::Part step, RunOptions options) { return complete(prepare(std::move(step), std::move(options))); }
 PreparedEndpoint<files::ProgressOutcome> Client::prepare(files::Complete step, RunOptions options) {
   auto client = state_;
   return PreparedEndpoint<files::ProgressOutcome>(prepare_endpoint<files::Encoded>(std::move(options), "files.complete",
-      static_cast<int>(reason::Source::FilesRequest), [&] { return files::encode(client->descriptor, step); }, [&] { return endpoints::call_facts(client->descriptor, "files", files::operation(step), {}); }));
+      [&] { return files::encode(client->descriptor, step); }, [&] { return endpoints::call_facts(client->descriptor, "files", files::operation(step), {}); }));
 }
 files::ProgressOutcome Client::complete(files::Complete step, RunOptions options) { return complete(prepare(std::move(step), std::move(options))); }
 PreparedEndpoint<files::ProgressOutcome> Client::prepare(files::Query step, RunOptions options) {
   auto client = state_;
   return PreparedEndpoint<files::ProgressOutcome>(prepare_endpoint<files::Encoded>(std::move(options), "files.query",
-      static_cast<int>(reason::Source::FilesRequest), [&] { return files::encode(client->descriptor, step); }, [&] { return endpoints::call_facts(client->descriptor, "files", files::operation(step), {}); }));
+      [&] { return files::encode(client->descriptor, step); }, [&] { return endpoints::call_facts(client->descriptor, "files", files::operation(step), {}); }));
 }
 files::ProgressOutcome Client::complete(files::Query step, RunOptions options) { return complete(prepare(std::move(step), std::move(options))); }
 PreparedEndpoint<files::ProgressOutcome> Client::prepare(files::Cancel step, RunOptions options) {
   auto client = state_;
   return PreparedEndpoint<files::ProgressOutcome>(prepare_endpoint<files::Encoded>(std::move(options), "files.cancel",
-      static_cast<int>(reason::Source::FilesRequest), [&] { return files::encode(client->descriptor, step); }, [&] { return endpoints::call_facts(client->descriptor, "files", files::operation(step), {}); }));
+      [&] { return files::encode(client->descriptor, step); }, [&] { return endpoints::call_facts(client->descriptor, "files", files::operation(step), {}); }));
 }
 files::ProgressOutcome Client::complete(files::Cancel step, RunOptions options) { return complete(prepare(std::move(step), std::move(options))); }
 files::ProgressOutcome Client::complete(PreparedEndpoint<files::ProgressOutcome> call) { return complete_endpoint(std::move(call)); }
@@ -1953,32 +1946,32 @@ PreparedEndpoint<batches::Outcome> Client::prepare(batches::Submit call, RunOpti
     return out;
   };
   return PreparedEndpoint<batches::Outcome>(prepare_endpoint<batches::Encoded>(std::move(options), "batches",
-      static_cast<int>(reason::Source::BatchesRequest), encode, facts));
+      encode, facts));
 }
 batches::Outcome Client::complete(batches::Submit call, RunOptions options) { return complete(prepare(std::move(call), std::move(options))); }
 PreparedEndpoint<batches::Outcome> Client::prepare(batches::Get call, RunOptions options) {
   auto client = state_;
   return PreparedEndpoint<batches::Outcome>(prepare_endpoint<batches::Encoded>(std::move(options), "batches",
-      static_cast<int>(reason::Source::BatchesRequest), [&] { return batches::encode(client->descriptor, call); }, [&] { return endpoints::call_facts(client->descriptor, "batches", batches::operation(call), {}); }));
+      [&] { return batches::encode(client->descriptor, call); }, [&] { return endpoints::call_facts(client->descriptor, "batches", batches::operation(call), {}); }));
 }
 batches::Outcome Client::complete(batches::Get call, RunOptions options) { return complete(prepare(std::move(call), std::move(options))); }
 PreparedEndpoint<batches::Outcome> Client::prepare(batches::Cancel call, RunOptions options) {
   auto client = state_;
   return PreparedEndpoint<batches::Outcome>(prepare_endpoint<batches::Encoded>(std::move(options), "batches",
-      static_cast<int>(reason::Source::BatchesRequest), [&] { return batches::encode(client->descriptor, call); }, [&] { return endpoints::call_facts(client->descriptor, "batches", batches::operation(call), {}); }));
+      [&] { return batches::encode(client->descriptor, call); }, [&] { return endpoints::call_facts(client->descriptor, "batches", batches::operation(call), {}); }));
 }
 batches::Outcome Client::complete(batches::Cancel call, RunOptions options) { return complete(prepare(std::move(call), std::move(options))); }
 PreparedEndpoint<batches::DeleteOutcome> Client::prepare(batches::Delete call, RunOptions options) {
   auto client = state_;
   return PreparedEndpoint<batches::DeleteOutcome>(prepare_endpoint<batches::Encoded>(std::move(options), "batches.delete",
-      static_cast<int>(reason::Source::BatchesRequest), [&] { return batches::encode(client->descriptor, call); }, [&] { return endpoints::call_facts(client->descriptor, "batches", batches::operation(call), {}); }));
+      [&] { return batches::encode(client->descriptor, call); }, [&] { return endpoints::call_facts(client->descriptor, "batches", batches::operation(call), {}); }));
 }
 batches::DeleteOutcome Client::complete(batches::Delete call, RunOptions options) { return complete(prepare(std::move(call), std::move(options))); }
 PreparedEndpoint<jobs::DownloadOutcome> Client::prepare(batches::Results call, RunOptions options) {
   auto client = state_;
   const auto results = batches::results_operation(call);
   return PreparedEndpoint<jobs::DownloadOutcome>(prepare_endpoint<batches::Encoded>(std::move(options), "content.document",
-      static_cast<int>(reason::Source::BatchesRequest), [&] { return batches::encode(client->descriptor, call); },
+      [&] { return batches::encode(client->descriptor, call); },
       [&] { return endpoints::call_facts(client->descriptor, results.first, results.second, {}); }));
 }
 jobs::DownloadOutcome Client::complete(batches::Results call, RunOptions options) { return complete(prepare(std::move(call), std::move(options))); }
@@ -1993,7 +1986,7 @@ EndpointCall<batches::DeleteOutcome> Client::start(PreparedEndpoint<batches::Del
 PreparedEndpoint<tokens::Outcome> Client::prepare(tokens::Count count, RunOptions options) {
   auto client = state_;
   return PreparedEndpoint<tokens::Outcome>(prepare_endpoint<tokens::Encoded>(std::move(options), "tokens",
-      static_cast<int>(reason::Source::TokensRequest), [&] { return tokens::encode(client->descriptor, count); }, [&] { return endpoints::call_facts(client->descriptor, "tokens", tokens::operation(count), counted_model(count)); }));
+      [&] { return tokens::encode(client->descriptor, count); }, [&] { return endpoints::call_facts(client->descriptor, "tokens", tokens::operation(count), counted_model(count)); }));
 }
 tokens::Outcome Client::complete(tokens::Count count, RunOptions options) { return complete(prepare(std::move(count), std::move(options))); }
 tokens::Outcome Client::complete(PreparedEndpoint<tokens::Outcome> call) { return complete_endpoint(std::move(call)); }
@@ -2003,7 +1996,7 @@ EndpointCall<tokens::Outcome> Client::start(PreparedEndpoint<tokens::Outcome> ca
 PreparedEndpoint<generations::Outcome> Client::prepare(generations::Get get, RunOptions options) {
   auto client = state_;
   return PreparedEndpoint<generations::Outcome>(prepare_endpoint<generations::Encoded>(std::move(options), "generations",
-      static_cast<int>(reason::Source::GenerationsRequest), [&] { return generations::encode(client->descriptor, get); }, [&] { return endpoints::call_facts(client->descriptor, "generations", generations::operation(get), {}); }));
+      [&] { return generations::encode(client->descriptor, get); }, [&] { return endpoints::call_facts(client->descriptor, "generations", generations::operation(get), {}); }));
 }
 generations::Outcome Client::complete(generations::Get get, RunOptions options) { return complete(prepare(std::move(get), std::move(options))); }
 generations::Outcome Client::complete(PreparedEndpoint<generations::Outcome> call) { return complete_endpoint(std::move(call)); }

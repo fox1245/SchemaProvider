@@ -32,6 +32,10 @@
 namespace {
 using namespace sp;
 #define CHECK(x) do { if (!(x)) throw std::runtime_error("line " + std::to_string(__LINE__) + ": " #x); } while (false)
+// The constant of a source whose text is `text` has `code`.
+bool listed(std::span<const reason::Reason> source, std::string_view text, std::string_view code) {
+  return std::any_of(source.begin(), source.end(), [&](const reason::Reason& r) { return r.message == text && r.code == code; });
+}
 
 // Every enumerator from zero has a distinct name that reads back, and the one past the last has none. `count` is the
 // number of enumerators; a new enumerator makes it differ and fails here until the table and this count follow.
@@ -446,7 +450,7 @@ std::string choice_mismatches(const descriptor::PolicySnapshot& policy) {
 void request_checks_by_family() {
   const auto mismatches = choice_mismatches(descriptor::builtin_policy());
   if (!mismatches.empty()) throw std::runtime_error("built-in policy:\n" + mismatches);
-  for (const auto& [text, code] : choice_codes) CHECK(reason::code(reason::Source::SharedRequest, text) == code);
+  for (const auto& [text, code] : choice_codes) CHECK(listed(reason::shared_request::all, text, code));
   for (const auto& entry : choice_cases)
     if (!entry.refusal.empty()) {
       bool known = false;
@@ -2135,8 +2139,9 @@ void literal_routes_name_their_model() {
   CHECK(wire_path(interactions::encode(interactions, interactions::Request::simple("gem-a", "hi", 64), false)) == "/v2/gem-a/interactions");
   CHECK(refusal_kind(interactions::encode(interactions, interactions::Request::simple("gem-b", "hi", 64), false)) == ErrorKind::InvalidConfig);
   // The refusal is one check every family shares, and Generate keeps its own.
-  const auto refused_text = std::get<Error>(chat::encode(chat, chat::Request::simple("gpt-b", "hi", 64), false)).safe_message;
-  CHECK(!reason::code(reason::Source::SharedRequest, refused_text).empty());
+  const auto refused = std::get<Error>(chat::encode(chat, chat::Request::simple("gpt-b", "hi", 64), false));
+  const auto refused_text = refused.safe_message;
+  CHECK(listed(reason::shared_request::all, refused_text, refused.reason));
   CHECK(std::get<Error>(responses::encode(responses, responses::Request::simple("gpt-b", "hi", 64), false)).safe_message == refused_text);
   // Without a `{model}` fact at the origin a path names no model: the presets and a literal loopback path take any.
   namespace presets = descriptor::presets;
@@ -2190,7 +2195,7 @@ void resolved_paths_are_checked() {
       CHECK(refusal_kind(messages_refusal) == ErrorKind::InvalidRequest && std::get<Error>(messages_refusal).safe_message == route_text);
     }
   }
-  CHECK(reason::request_code(reason::Source::ChatRequest, route_text) == "request.route.model_name");
+  CHECK(listed(reason::shared_request::all, route_text, "request.route.model_name"));
   CHECK(messages.resolved_path(true, "claude-x") == "/v1/models/claude-x:streamRawPredict");
   // A descriptor that is not model-routed returns its own path, whatever the model.
   const auto plain = descriptor::presets::openai_chat();
@@ -2219,9 +2224,8 @@ void endpoint_model_paths() {
     CHECK(refusal_kind(embeddings::encode(chat_api, embeddings::Request{model, {{"a"}}})) == ErrorKind::InvalidRequest);
   }
   const auto refused_text = std::get<Error>(tokens::encode(responses_api, tokens::Count{responses::Request::simple("a..b", "hi", 16)})).safe_message;
-  CHECK(reason::code(reason::Source::TokensRequest, refused_text) == "request.tokens.model_path");
-  CHECK(reason::code(reason::Source::EmbeddingsRequest, std::get<Error>(embeddings::encode(chat_api, embeddings::Request{"a..b", {{"a"}}})).safe_message) ==
-        "request.embeddings.model_path");
+  CHECK(listed(reason::tokens_request::all, refused_text, "request.tokens.model_path"));
+  CHECK(std::get<Error>(embeddings::encode(chat_api, embeddings::Request{"a..b", {{"a"}}})).reason == "request.embeddings.model_path");
   // Google names the model in the path of each: the built-in paths take a model and refuse the same names. A literal
   // Generate route may name `.`, `..` or `a..b` itself, so such a model reaches the endpoint's own path.
   const auto any = presets::google_generate();
@@ -2235,8 +2239,7 @@ void endpoint_model_paths() {
     CHECK(refusal_kind(embeddings::encode(any, embeddings::Request{model, {{"a"}}})) == ErrorKind::InvalidRequest);
     CHECK(refusal_kind(batches::encode(d, batches::Submit{{{"g-1", gemini::Request::simple(model, "hi")}}})) == ErrorKind::InvalidRequest);
   }
-  CHECK(reason::code(reason::Source::BatchesRequest,
-                     std::get<Error>(batches::encode(presets::google_generate("a..b"), batches::Submit{{{"g-1", gemini::Request::simple("a..b", "hi")}}})).safe_message) ==
+  CHECK(std::get<Error>(batches::encode(presets::google_generate("a..b"), batches::Submit{{{"g-1", gemini::Request::simple("a..b", "hi")}}})).reason ==
         "request.batches.model_path");
 }
 
@@ -2281,7 +2284,7 @@ void hostile_route_models() {
   // The refusal is one check that every family shares.
   const auto refusal = chat::encode(chat, chat::Request::simple("a/b", "hi", 64), false);
   const auto message = std::get<Error>(refusal).safe_message;
-  CHECK(!reason::code(reason::Source::SharedRequest, message).empty());
+  CHECK(listed(reason::shared_request::all, message, std::get<Error>(refusal).reason));
   CHECK(std::get<Error>(messages::encode(messages, messages::Request::simple("a/b", "hi", 64), false)).safe_message == message);
   // An Interactions agent request has no model to put in the path.
   auto agent = interactions::Request::simple("", "hi", 64);
