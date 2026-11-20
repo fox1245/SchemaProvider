@@ -5,6 +5,7 @@
 // admitted with the family defaults, and a lookup only says how the id matched. A fact an entry
 // states (an output limit, temperature, control values) may refuse a request that contradicts it.
 #include "descriptor/descriptor.h"
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -158,6 +159,8 @@ enum class Listing : std::uint8_t {
 };
 // "openrouter", "gemini", "anthropic" or "openai": the `source` of the entries a listing gives.
 std::string_view listing_name(Listing) noexcept;
+// Every listing, in declaration order.
+inline constexpr std::array<Listing, 4> all_listings{Listing::OpenRouter, Listing::Gemini, Listing::Anthropic, Listing::OpenAI};
 // Whether an entry can have `id`: printable ASCII without spaces, at most 256 bytes.
 bool valid_model_name(std::string_view id) noexcept;
 // Whether an entry can hold `price` as a price: digits with an optional fraction, at most 24 digits in each part,

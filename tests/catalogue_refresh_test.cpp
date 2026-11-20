@@ -2,6 +2,7 @@
 #include "descriptor/catalogue.h"
 #include "descriptor/policy.h"
 #include "sp/config_defaults.h"
+#include "support/policy_edit.h"
 #include "support/runtime_peer.h"
 #include "transport/catalogue_refresh.h"
 #include <algorithm>
@@ -114,46 +115,101 @@ void no_ceilings_change_nothing(transport::Transport& transport, Peer& peer) {
 }
 
 // The headers each listing request carries, byte for byte, with a key and without one, and those of OpenRouter's
-// endpoints request (scenarios `capture-*`).
+// endpoints request (scenarios `capture-*`; `tag` keeps the requests of one policy apart from another's).
 using Sent = std::vector<std::pair<std::string, std::string>>;
 std::string sent_text(const Sent& sent) {
   std::string out;
   for (const auto& [name, value] : sent) out += (out.empty() ? "" : "; ") + name + ": " + value;
   return out;
 }
-void listing_headers_are_pinned(transport::Transport& transport, Peer& peer) {
-  struct Case { Listing listing; std::string_view scenario; bool key; Sent expected; };
-  const Sent accept{{"accept", "application/json"}};
-  const auto with = [&](Sent more) {
-    Sent out = accept;
-    out.insert(out.end(), more.begin(), more.end());
-    return out;
-  };
-  const Case cases[]{
-      {Listing::OpenRouter, "capture-openrouter-key", true, with({{"authorization", "Bearer pin-key"}})},
-      {Listing::OpenRouter, "capture-openrouter-nokey", false, accept},
-      {Listing::Gemini, "capture-gemini-key", true, with({{"x-goog-api-key", "pin-key"}})},
-      {Listing::Gemini, "capture-gemini-nokey", false, accept},
-      {Listing::Anthropic, "capture-anthropic-key", true, with({{"x-api-key", "pin-key"}, {"anthropic-version", "2023-06-01"}})},
-      {Listing::Anthropic, "capture-anthropic-nokey", false, accept},
-      {Listing::OpenAI, "capture-openai-key", true, with({{"authorization", "Bearer pin-key"}})},
-      {Listing::OpenAI, "capture-openai-nokey", false, accept},
-  };
-  for (const auto& c : cases) {
-    transport::RefreshRequest request;
-    auto listed = source(c.listing, base(peer, c.scenario), c.key ? "pin-key" : "");
-    // OpenRouter's endpoints request follows its listing request with the same credential.
-    if (c.listing == Listing::OpenRouter) listed.ceiling_models = {"vendor/text-model"};
-    request.sources = {listed};
-    (void)refreshed(transport, request);
-    const auto requests = seen(peer, c.scenario);
-    const bool endpoints = c.listing == Listing::OpenRouter;
-    require(requests.headers.size() == (endpoints ? 2u : 1u),
-            std::string(c.scenario) + " sends " + (endpoints ? "the listing request and the endpoints request" : "the listing request only"));
-    for (const auto& sent : requests.headers)
-      require(sent == c.expected, std::string(c.scenario) + " sends [" + sent_text(c.expected) + "], not [" + sent_text(sent) + "]");
+// The headers of the requests a refresh of one source sent: the listing request and, for OpenRouter, the endpoints
+// request that follows it.
+std::vector<Sent> captured(transport::Transport& transport, Peer& peer, Listing listing, std::string_view tag, bool with_key,
+                           const descriptor::PolicySnapshot& policy) {
+  const std::string scenario = "capture-" + std::string(descriptor::listing_name(listing)) + (with_key ? "-key-" : "-nokey-") + std::string(tag);
+  transport::RefreshRequest request;
+  auto listed = source(listing, base(peer, scenario), with_key ? "pin-key" : "");
+  if (listing == Listing::OpenRouter) listed.ceiling_models = {"vendor/text-model"};
+  request.sources = {listed};
+  request.policy = policy;
+  (void)refreshed(transport, request);
+  auto requests = seen(peer, scenario);
+  require(requests.headers.size() == (listing == Listing::OpenRouter ? 2u : 1u), scenario + " sends the requests of its listing");
+  return std::move(requests.headers);
+}
+void require_sent(const std::vector<Sent>& requests, const Sent& expected, std::string_view what) {
+  for (const auto& sent : requests)
+    require(sent == expected, std::string(what) + " sends [" + sent_text(expected) + "], not [" + sent_text(sent) + "]");
+}
+const Sent accept_only{{"accept", "application/json"}};
+Sent with_accept(Sent more) {
+  Sent out = accept_only;
+  out.insert(out.end(), more.begin(), more.end());
+  return out;
+}
+// What the built-in policy has each listing send with `pin-key`.
+Sent builtin_listing_headers(Listing listing) {
+  switch (listing) {
+    case Listing::OpenRouter:
+    case Listing::OpenAI: return with_accept({{"authorization", "Bearer pin-key"}});
+    case Listing::Gemini: return with_accept({{"x-goog-api-key", "pin-key"}});
+    case Listing::Anthropic: return with_accept({{"x-api-key", "pin-key"}, {"anthropic-version", "2023-06-01"}});
   }
+  return {};
+}
+void pin_every_listing(transport::Transport& transport, Peer& peer, std::string_view tag, const descriptor::PolicySnapshot& policy) {
+  for (const Listing listing : descriptor::all_listings) {
+    const auto name = std::string(descriptor::listing_name(listing));
+    require_sent(captured(transport, peer, listing, tag, true, policy), builtin_listing_headers(listing), name + " listing with a key");
+    require_sent(captured(transport, peer, listing, tag, false, policy), accept_only, name + " listing without a key");
+  }
+}
+void listing_headers_are_pinned(transport::Transport& transport, Peer& peer) {
+  pin_every_listing(transport, peer, "builtin", nullptr);
   passed("listing headers: every listing with and without a key, and OpenRouter's endpoints request, byte for byte");
+}
+
+descriptor::PolicySnapshot policy_of(const std::string& text) {
+  auto loaded = descriptor::load_policy(text, config_defaults::codec_defaults_json);
+  if (auto* error = std::get_if<descriptor::ConfigError>(&loaded)) throw std::runtime_error("policy refused at " + error->pointer);
+  return std::get<descriptor::PolicySnapshot>(std::move(loaded));
+}
+// The headers come from the policy: the family a listing belongs to, that family's scheme at the source's origin and
+// its Messages version.
+void listing_headers_follow_the_policy(transport::Transport& transport, Peer& peer) {
+  // A policy without `listings` is the embedded one for every listing, and so are the requests.
+  pin_every_listing(transport, peer, "unlisted", policy_of(policy_edit::edited({}, "listings", {})));
+  // The OpenRouter listing is Messages-shaped when the policy says so: x-api-key and the version header, on both of its requests.
+  const auto routed = policy_of(policy_edit::edited(
+      {}, "listings",
+      R"([{"listing":"openrouter","family":"anthropic.messages"},{"listing":"openai","family":"openai.chat"}])"));
+  require_sent(captured(transport, peer, Listing::OpenRouter, "as-messages", true, routed),
+               with_accept({{"x-api-key", "pin-key"}, {"anthropic-version", "2023-06-01"}}), "an OpenRouter listing of the Messages family");
+  require_sent(captured(transport, peer, Listing::Gemini, "as-messages", true, routed), builtin_listing_headers(Listing::Gemini),
+               "a listing the policy leaves out stays with the embedded family");
+  // The scheme of the family's `auth` fact: OpenAI's listing sends what Chat sends, here x-goog-api-key.
+  const auto chat_scheme = policy_of(policy_edit::edited("openai.chat", "auth", R"([{"scheme":"x-goog-api-key"}])"));
+  require_sent(captured(transport, peer, Listing::OpenAI, "scheme", true, chat_scheme), with_accept({{"x-goog-api-key", "pin-key"}}),
+               "an OpenAI listing under Chat's x-goog-api-key scheme");
+  require_sent(captured(transport, peer, Listing::OpenRouter, "scheme", true, chat_scheme), with_accept({{"x-goog-api-key", "pin-key"}}),
+               "an OpenRouter listing under Chat's x-goog-api-key scheme");
+  require_sent(captured(transport, peer, Listing::Anthropic, "scheme", true, chat_scheme), builtin_listing_headers(Listing::Anthropic),
+               "an Anthropic listing keeps Messages' scheme");
+  // The scheme at the source's origin, not at the URL the listing is fetched from.
+  const auto scoped = policy_of(policy_edit::edited(
+      "openai.chat", "auth", R"([{"origins":["https://openrouter.ai"],"scheme":"x-api-key"},{"scheme":"bearer"}])"));
+  require_sent(captured(transport, peer, Listing::OpenRouter, "origin", true, scoped), with_accept({{"x-api-key", "pin-key"}}),
+               "an OpenRouter listing at the origin the fact names");
+  require_sent(captured(transport, peer, Listing::OpenAI, "origin", true, scoped), builtin_listing_headers(Listing::OpenAI),
+               "an OpenAI listing at another origin");
+  // The Messages version is the family's.
+  const auto versions = policy_edit::edited("anthropic.messages", "header_versions", R"(["2023-06-01","2099-01-01"])");
+  const auto newer = policy_of(policy_edit::edited(versions, "anthropic.messages", "header_version", R"("2099-01-01")"));
+  require_sent(captured(transport, peer, Listing::Anthropic, "version", true, newer),
+               with_accept({{"x-api-key", "pin-key"}, {"anthropic-version", "2099-01-01"}}), "an Anthropic listing under the policy's Messages version");
+  // A key-less listing sends no version.
+  require_sent(captured(transport, peer, Listing::Anthropic, "version", false, newer), accept_only, "an Anthropic listing without a key");
+  passed("listing headers: the family, the scheme, the origin and the Messages version come from the policy");
 }
 
 // An entry's prices as "unit=price ...", in the entry's order.
@@ -1220,6 +1276,7 @@ int main(int argc, char** argv) {
     descriptor::CatalogueSnapshot generated;
     no_ceilings_change_nothing(transport, peer);
     listing_headers_are_pinned(transport, peer);
+    listing_headers_follow_the_policy(transport, peer);
     overrides_become_bands(transport, peer);
     windows_give_one_entry_at_every_hour(transport, peer);
     listing_keys_are_unit_names(transport, peer);

@@ -357,6 +357,7 @@ request.sources = {{sp::descriptor::Listing::OpenRouter},                       
                    {sp::descriptor::Listing::OpenAI, {}, openai_key}};
 request.sources[0].ceiling_models = {"vendor/model"};               // optional: route ceilings
 request.previous = last_generated;                                  // optional
+request.policy = my_policy;                                         // optional: how the keys are sent; null is the built-in policy
 request.overlays = {sp::descriptor::builtin_catalogue(), my_catalogue};  // verified facts, then yours
 auto refreshed = sp::transport::refresh_catalogue(transport, request);
 if (auto* result = std::get_if<sp::transport::RefreshResult>(&refreshed)) {
@@ -369,10 +370,12 @@ The four listings:
 
 | `Listing` | Request | Credential | Entries |
 |---|---|---|---|
-| `OpenRouter` | `GET /api/v1/models?output_modalities=all` | none needed (`authorization: Bearer` if given) | Name, context window, output limit, modalities, supported parameters, string prices with the input bands of their long-context overrides, canonical slug as `served_as`, alias target and expiration date. Text models list the Chat, Responses and Messages families. With `ceiling_models`, the route ceilings of the named models. |
-| `Gemini` | `GET /v1beta/models?pageSize=1000`, then `pageToken` | `x-goog-api-key` | Id without `models/`, display name, input and output limits and methods. Models with `generateContent` list the Generate and Interactions families. |
-| `Anthropic` | `GET /v1/models?limit=1000`, then `after_id` | `x-api-key`, `anthropic-version: 2023-06-01` | Display name, input and output limits, lifecycle, retirement date and image or PDF input. |
-| `OpenAI` | `GET /v1/models` | `authorization: Bearer` | Ids and shutdown dates only. |
+| `OpenRouter` | `GET /api/v1/models?output_modalities=all` | none needed (the Chat family's scheme, `authorization: Bearer`, if given) | Name, context window, output limit, modalities, supported parameters, string prices with the input bands of their long-context overrides, canonical slug as `served_as`, alias target and expiration date. Text models list the Chat, Responses and Messages families. With `ceiling_models`, the route ceilings of the named models. |
+| `Gemini` | `GET /v1beta/models?pageSize=1000`, then `pageToken` | `x-goog-api-key` (the Generate family's scheme) | Id without `models/`, display name, input and output limits and methods. Models with `generateContent` list the Generate and Interactions families. |
+| `Anthropic` | `GET /v1/models?limit=1000`, then `after_id` | `x-api-key`, `anthropic-version: 2023-06-01` (the Messages family's scheme and version) | Display name, input and output limits, lifecycle, retirement date and image or PDF input. |
+| `OpenAI` | `GET /v1/models` | `authorization: Bearer` (the Chat family's scheme) | Ids and shutdown dates only. |
+
+The credential column is the policy's, not a table of the refresh. The policy's `listings` facts name the family each listing belongs to, `[{"listing": "openrouter", "family": "openai.chat"}, ...]`, and a listing request sends the key as that family's [`auth` fact](#credential-schemes) for the source's `origin` states (`DescriptorPolicy::listing_family`, `auth_scheme`), in a header named in lower case. If the family has a `header_version` (Messages), the request also sends it as `anthropic-version`, and a request without a key sends neither. The built-in policy states `openrouter` and `openai` for `openai.chat`, `gemini` for `google.generate` and `anthropic` for `anthropic.messages`. The OpenRouter listing is the gateway's Chat-shaped listing: the entries it lists include Messages, but it sends Bearer, where a Messages call at the same origin sends `x-api-key`. A policy that leaves a listing out, or has no `listings`, takes the embedded policy's family for it, and its content digest then covers the facts it took (a pinned policy of that kind needs its pin refreshed once). A `listings` fact that names a listing the SDK does not read, a family the policy does not have, or a listing twice is a `ConfigError` at `/listings` when the policy loads. Pass the policy in `RefreshRequest::policy`.
 
 The rules of a refresh:
 - **Source URL and origin.** A source's `url` is where the listing is served (https, or http on a loopback host). Its `origin` is the descriptor origin the entries are scoped to. Both default to the provider's API.

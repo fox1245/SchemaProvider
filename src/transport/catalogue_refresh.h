@@ -4,6 +4,7 @@
 // start-up, from a scheduled job or by hand, then attaches the result to a policy
 // (DescriptorPolicy::with_catalogue) for the clients it builds next.
 #include "descriptor/catalogue.h"
+#include "descriptor/policy.h"
 #include "transport/http_transport.h"
 #include <chrono>
 #include <cstddef>
@@ -19,7 +20,7 @@ struct ListingSource {
   // Where the listing is served: an https URL (http only on a loopback host) to which the
   // listing's path is appended. Empty: the provider's public API.
   std::string url;
-  // Sent as the listing's credential header. OpenRouter's listing needs none. Never written to a
+  // Sent as the listing's credential header, which RefreshRequest::policy states. OpenRouter's listing needs none. Never written to a
   // report or an error.
   std::string api_key;
   // The descriptor origin the generated entries are scoped to. Empty: the provider's API origin.
@@ -66,6 +67,10 @@ struct RefreshRequest {
   // `allow_drop` takes such a listing as it is.
   std::uint32_t min_kept_percent = 50;
   bool allow_drop = false;
+  // The policy that states how a listing request sends the key: the credential scheme of the family the listing
+  // belongs to at the source's origin (DescriptorPolicy::listing_family, auth_scheme) and that family's Messages
+  // version header. Null: the built-in policy.
+  descriptor::PolicySnapshot policy;
 };
 
 struct SourceReport {

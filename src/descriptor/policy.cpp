@@ -239,7 +239,7 @@ class PolicyLoader {
       if(!pd || !rd)fail("","strict bounded JSON policy");
       auto policy=std::shared_ptr<DescriptorPolicy>(new DescriptorPolicy);
       auto root=pd->root(); auto rr=rd->root();
-      closed(root,{"version","revision","families"},"",{"endpoints"}); closed(rr,{"version","resources","admission"},"/resources");
+      closed(root,{"version","revision","families"},"",{"endpoints","listings"}); closed(rr,{"version","resources","admission"},"/resources");
       if(integer(root.get("version"),"/version")!=1 || integer(rr.get("version"),"/version")!=1 || !integer(root.get("revision"),"/revision"))fail("/version","version 1 and positive revision");
       auto rv=rr.get("resources"), av=rr.get("admission");
       closed(rv,{"json_bytes","json_depth","request_bytes","chat_text_request_bytes","request_messages","request_tools","request_parts","native_bytes","native_depth","native_members","image_decoded_bytes","audio_decoded_bytes","video_decoded_bytes","document_decoded_bytes","descriptor_bytes","descriptor_depth","policy_bytes","policy_depth"},"/resources");
@@ -634,6 +634,37 @@ class PolicyLoader {
         if (auto error = DescriptorPolicy::check(f, rules, choices(f.defaults), {}, false)) fail("/defaults", *error);
         if(f.defaults.strict_tools && f.family!="openai.responses") fail("/defaults/strict_tools","Responses strict tools only");
         policy->families_.push_back(std::move(f));
+      }
+      // The family each model listing belongs to. A listing the policy leaves out (or every listing, for a policy
+      // written before the facts) has the embedded policy's, and its content digest covers them (borrowed_). The
+      // embedded policy states every listing.
+      {
+        std::vector<std::optional<std::string>> stated(all_listings.size());
+        if (const auto facts = root.get("listings"); facts.valid()) {
+          if (!facts.is_array() || facts.size() > all_listings.size()) fail("/listings", "array of at most one fact per listing");
+          for (auto item : facts.elements()) {
+            closed(item, {"listing", "family"}, "/listings");
+            const auto name = item.get("listing");
+            const auto at = std::find_if(all_listings.begin(), all_listings.end(),
+                                         [&](Listing listing) { return name.is_string() && listing_name(listing) == name.as_string(); });
+            if (at == all_listings.end()) fail("/listings/listing", "a listing the SDK reads");
+            auto& slot = stated[static_cast<std::size_t>(at - all_listings.begin())];
+            if (slot) fail("/listings/listing", "each listing once");
+            slot = text(item.get("family"), "/listings/family");
+            if (!policy->family(*slot)) fail("/listings/family", "a family of the policy");
+          }
+        }
+        for (std::size_t i = 0; i < all_listings.size(); ++i) {
+          if (stated[i]) {
+            policy->listings_.emplace_back(all_listings[i], *stated[i]);
+            continue;
+          }
+          const auto embedded = embedded_listing(all_listings[i]);
+          if (!embedded) fail("/listings", "a family for every listing in the embedded policy");
+          if (!policy->family(*embedded)) fail("/listings/family", "a family of the policy");
+          policy->listings_.emplace_back(all_listings[i], *embedded);
+          borrowed.push_back({{std::string(), "listing:" + std::string(listing_name(all_listings[i]))}, "\"" + *embedded + "\""});
+        }
       }
       // Non-chat endpoints (D6): each names a compiled codec shape, its origins, the path of each operation and
       // the schema of the members a request may add beside the typed ones.
@@ -1110,6 +1141,15 @@ class PolicyLoader {
       if (name == family) return &auth;
     return nullptr;
   }
+  // The family the embedded policy states for a listing, if it does.
+  static std::optional<std::string> embedded_listing(Listing listing) {
+    const auto facts = embedded_root().get("listings");
+    if (facts.valid() && facts.is_array())
+      for (auto item : facts.elements())
+        if (item.get("listing").is_string() && item.get("listing").as_string() == listing_name(listing) && item.get("family").is_string())
+          return std::string(item.get("family").as_string());
+    return std::nullopt;
+  }
   // The embedded policy's document. It is parsed once and never goes through builtin_policy(), which runs this loader.
   static Value embedded_root() {
     static const auto parsed = json::parse(config_defaults::descriptor_policy_json,
@@ -1148,6 +1188,10 @@ class PolicyLoader {
     return r;
   }
 };
+std::string_view DescriptorPolicy::listing_family(Listing listing) const noexcept {
+  for (const auto& [kind, family] : listings_) if (kind == listing) return family;
+  return {};
+}
 const std::vector<RouteFact>& DescriptorPolicy::routes(std::string_view family) const noexcept {
   for (const auto& [name, facts] : routes_) if (name == family) return facts;
   static const std::vector<RouteFact> none;
