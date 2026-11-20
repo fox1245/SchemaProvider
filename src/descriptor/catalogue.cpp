@@ -730,7 +730,8 @@ std::string_view plain_price_unit(std::string_view name) noexcept {
       {"prompt", "input"},          {"completion", "output"},
       {"input_cache_read", "cache_read"}, {"input_cache_write", "cache_write"},
       {"input_cache_write_1h", "cache_write_1h"}, {"internal_reasoning", "reasoning"},
-      {"audio", "input_audio"},     {"audio_output", "output_audio"}};
+      {"audio", "input_audio"},     {"audio_output", "output_audio"},
+      {"image_output", "output_image"}};
   for (const auto& [listed, plain] : names)
     if (name == listed) return plain;
   return name;

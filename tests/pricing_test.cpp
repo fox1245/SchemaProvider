@@ -228,8 +228,8 @@ void dearer_rates() {
   e = pricing::estimate(*c, "anthropic.messages", "", direct, usage(1'000, 10, 0, 300));
   CHECK(e.total && e.total->nano_usd == 3'530'000u + 150'000u + 220'000u);
   CHECK(e.assumptions == std::vector<std::string>({"cache_write at cache_write_1h", "output at output_image"}));
-  // Four image tokens of ten, by either Gemini wire.
-  for (const char* key : {"candidatesTokensDetails.IMAGE", "output_tokens_by_modality.image"}) {
+  // Four image tokens of ten, by either Gemini wire or a gateway's Chat counter.
+  for (const char* key : {"candidatesTokensDetails.IMAGE", "output_tokens_by_modality.image", "completion_tokens_details.image_tokens"}) {
     auto images = usage(1'000, 10);
     images.extra[key] = Count{4, Evidence::Reported};
     e = pricing::estimate(*c, "google.generate", "", direct, images);
@@ -329,6 +329,22 @@ void unpriced_usage() {
   image.extra["candidatesTokensDetails.IMAGE"] = Count{4, Evidence::Reported};
   e = pricing::estimate(*c, "google.generate", "", plain, image);
   CHECK(!e.total && e.unpriced == std::vector<std::string>({"output_image"}));
+  auto chat_image = usage(100, 10);
+  chat_image.extra["completion_tokens_details.image_tokens"] = Count{4, Evidence::Reported};
+  e = pricing::estimate(*c, "openai.chat", "", plain, chat_image);
+  CHECK(!e.total && e.unpriced == std::vector<std::string>({"output_image"}));
+  // A reported zero is no image output.
+  chat_image.extra["completion_tokens_details.image_tokens"] = Count{0, Evidence::Reported};
+  e = pricing::estimate(*c, "openai.chat", "", plain, chat_image);
+  CHECK(e.total && e.unpriced.empty());
+  // OpenRouter lists the image output price as `image_output`, the unit `output_image`: 4 image tokens at 3e-5 and 6
+  // text tokens at 2e-6 beside 100 input tokens at 1e-6.
+  const auto listed = catalogue(R"({"version":1,"models":[
+    {"id":"vendor/listed","pricing":{"prompt":"0.000001","completion":"0.000002","image_output":"0.00003"}}]})");
+  CHECK(pricing::price_of(*listed->entry("vendor/listed")).output_image == 30'000'000'000u);
+  chat_image.extra["completion_tokens_details.image_tokens"] = Count{4, Evidence::Reported};
+  e = pricing::estimate(*listed, "openai.chat", "", ServedModel{"vendor/listed", "vendor/listed", ServedRelation::Exact}, chat_image);
+  CHECK(e.total && e.total->nano_usd == 100'000u + 120'000u + 12'000u && e.assumptions.empty());
 }
 
 // A zero rate under a priced base unit is applied and named.

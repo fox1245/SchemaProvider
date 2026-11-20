@@ -1042,7 +1042,8 @@ void ceilings_bound_every_endpoint(transport::Transport& transport, Peer& peer) 
   constexpr Member members[]{{"prompt", 0, "prompt"}, {"input_cache_read", 0, "input_cache_read"}, {"input_cache_write", 0, "input_cache_write"},
                              {"input_cache_write_1h", 0, "cache_write_1h"}, {"audio", 0, "audio"}, {"input_audio_cache", 0, ""},
                              {"image_token", 0, ""}, {"image_token", 1, ""}, {"completion", 1, "completion"},
-                             {"internal_reasoning", 1, "internal_reasoning"}, {"audio_output", 1, "audio_output"}, {"request", 2, "request"}};
+                             {"internal_reasoning", 1, "internal_reasoning"}, {"audio_output", 1, "audio_output"},
+                             {"image_output", 1, "image_output"}, {"request", 2, "request"}};
   using Prices = std::map<std::string, std::string>;
   struct Endpoint { Prices base; std::vector<Prices> overrides; };
   auto object = [](const Prices& prices) {
@@ -1151,6 +1152,7 @@ void ceilings_bound_every_endpoint(transport::Transport& transport, Peer& peer) 
           usage.reasoning = Count{pick(output + 1), Evidence::Reported};
           if (pick(3) == 0) usage.extra["input_audio"] = Count{pick(input / 4 + 1), Evidence::Reported};
           if (pick(3) == 0) usage.extra["audio_tokens"] = Count{pick(output / 4 + 1), Evidence::Reported};
+          if (pick(3) == 0) usage.extra["completion_tokens_details.image_tokens"] = Count{pick(output / 4 + 1), Evidence::Reported};
           const auto routed = pricing::estimate(c, "openai.chat", "https://openrouter.ai", served, usage, {}, true);
           const auto at_one = pricing::estimate(*one, "openai.chat", "https://openrouter.ai", served, usage);
           require(routed.total.has_value(), "the route ceiling prices every usage");

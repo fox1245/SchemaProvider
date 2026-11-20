@@ -213,14 +213,16 @@ bool ceiling_unit(std::string_view unit) noexcept {
 // The members of an endpoint's `pricing`, and of each entry of its `overrides`, that a route ceiling covers, by the
 // unit that covers them, as OpenRouter's endpoints listing documents them. The ceiling prices every input token at
 // `ceiling_input` and every output token at `ceiling_output` (pricing::estimate), so each is the dearest price per
-// token of its side: cache reads and writes, audio and reasoning included, not the prompt and completion prices
-// alone. `image_token` does not say which side it bills, so it counts on both. `prompt` and `completion` are
+// token of its side: cache reads and writes, audio, reasoning and image output tokens (`image_output`) included, not
+// the prompt and completion prices alone. One `ceiling_output` is the pin's `completion`, the only token price
+// `provider.max_price` states, so an image output token is covered by the same ceiling as a text one. `image_token`
+// does not say which side it bills, so it counts on both. `prompt` and `completion` are
 // required. An endpoint that leaves out an optional token price is read as billing those tokens at its prompt or
 // completion price, as pricing::estimate does for an entry without them, and an override that leaves one out keeps
 // the base price. `request` is the exception: nothing says what a fee left out costs, so a fee that some endpoints
 // list, in their base pricing or in an override, and others leave out is missing where the others have it. The
-// prices per image, per output image and per web search are per item, which no usage counter counts, so no ceiling
-// covers them. The prices the models listing gives for the model on a side count too, its input bands included, so a
+// prices per input image and per web search are per item, which no usage counter counts, so no ceiling covers them
+// (descriptor::unread_listed_members names them for the bound). The prices the models listing gives for the model on a side count too, its input bands included, so a
 // ceiling is never below a price the same refresh lists; a side with a listed price the entry leaves out for an
 // override it cannot hold (descriptor::ListingPage::withheld) has no known floor and gets no ceiling.
 struct PriceMember {
@@ -232,7 +234,8 @@ constexpr PriceMember price_members[]{
     {"prompt", Input, true},          {"input_cache_read", Input, false},   {"input_cache_write", Input, false},
     {"input_cache_write_1h", Input, false}, {"audio", Input, false},      {"input_audio_cache", Input, false},
     {"image_token", Input, false},     {"completion", Output, true},          {"internal_reasoning", Output, false},
-    {"audio_output", Output, false},   {"image_token", Output, false},        {"request", Request, false}};
+    {"audio_output", Output, false},   {"image_output", Output, false},       {"image_token", Output, false},
+    {"request", Request, false}};
 
 // Why a price cannot bound a ceiling: one of an endpoint, or one the models listing gives.
 enum class Unusable : std::uint8_t { Missing, Variable, NotDecimal, TooLarge, ListedVariable, ListedTooLarge, ListedLeftOut };

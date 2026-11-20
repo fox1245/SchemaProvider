@@ -34,5 +34,9 @@ struct RequestFacts {
   // The tools the service runs, grouped by cap. A tool the caller executes (the policy's `client` tools) bills tokens
   // only and is left out.
   std::vector<ToolCap> tools;
+  // The request takes an image as input: a message part, a tool result's part, or input the service holds for a
+  // continuation (a Responses `previous_response_id`, an Interactions `previous_interaction_id`), whose images are not
+  // visible here. An entry that prices an image beyond its tokens (`image` in a models listing) has no bound for it.
+  bool image_input = false;
 };
 } // namespace sp

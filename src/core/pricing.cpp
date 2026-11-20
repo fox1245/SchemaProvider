@@ -503,6 +503,23 @@ bool same_max_price(const OpenRouterMaxPrice& left, const OpenRouterMaxPrice& ri
     if (left.*member != right.*member) return false;
   return true;
 }
+// The listed members (descriptor::unread_listed_members) the entry prices above zero, or at a price that is not a fixed
+// amount, in any tier or band, whose feature the request carries: no bound reads them, so the bound has no total for
+// the request.
+std::vector<std::string_view> carried_unread_members(const descriptor::CatalogueEntry& entry, const RequestFacts& facts) {
+  std::vector<std::string_view> out;
+  for (const auto& [member, feature] : descriptor::unread_listed_members) {
+    const bool carried = feature == descriptor::ListedFeature::ImageInput ? facts.image_input : facts.plugins;
+    if (!carried) continue;
+    for (const auto& [text_unit, text] : entry.pricing) {
+      const auto unit = parse_unit(text_unit);
+      if (!unit || unit->name != member) continue;
+      const auto rate = per_million(text);
+      if (!rate || *rate) { out.push_back(member); break; }
+    }
+  }
+  return out;
+}
 // Why a unit has no rate: a row of it that applies has a price that is not a fixed amount.
 std::string variable_rate(const descriptor::CatalogueEntry& entry, std::string_view unit, std::string_view key) {
   return "catalogue entry '" + entry.id + "' prices " + std::string(unit) + " at a variable price (" + std::string(key) + ")";
@@ -571,6 +588,13 @@ WorstCase worst_case(const WorstCaseInput& in, const descriptor::ModelCatalogue&
       block(UnboundedBy::TierPrice, model,
             in.service_tier.empty() ? "the entry prices no unit at the standard rates"
                                     : "the entry prices no unit under service tier '" + std::string(in.service_tier) + "'");
+      continue;
+    }
+    // A price beyond tokens that no unit reads, for something the request carries: the bound would be a total below the bill.
+    if (const auto unread = carried_unread_members(*entry, facts); !unread.empty()) {
+      for (const auto member : unread)
+        block(UnboundedBy::ModelPrice, model,
+              "catalogue entry '" + entry->id + "' lists a price for '" + std::string(member) + "' that no bound reads, and the request carries what it prices");
       continue;
     }
     const bool has_ceiling = candidate.price.ceiling_input || candidate.price.ceiling_output || candidate.price.ceiling_request;
