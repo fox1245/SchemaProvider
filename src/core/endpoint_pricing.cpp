@@ -176,6 +176,98 @@ std::string with_dimensions(const descriptor::CatalogueEntry& entry, std::string
   }
   return out + "]";
 }
+
+// The rate of a carried request's line: one nano-USD per unit, in nano-USD per million units, so that the line's
+// quantity is the request's bound in nano-USD.
+constexpr std::uint64_t nano_usd_rate = 1'000'000;
+// The subject of a reason of the carried request `custom_id`: its custom id, then the reason's own subject.
+std::string carried_subject(std::string_view custom_id, std::string_view subject) {
+  return std::string(custom_id) + ":" + std::string(subject);
+}
+// A call that bills the chat requests it carries (a batch submit): each request bounded by worst_case under the facts'
+// carried tier, summed exactly, then times the attempts the submit itself may bill.
+EndpointBound carried_worst_case(const EndpointWorstCaseInput& in, const descriptor::ModelCatalogue& catalogue, std::uint64_t attempts) {
+  EndpointBound out;
+  const auto block = [&](UnboundedBy by, std::string subject, std::string detail) {
+    out.unbounded.push_back({by, std::move(subject), std::move(detail)});
+  };
+  const auto& facts = *in.facts;
+  const std::string call = facts.endpoint + "/" + facts.operation;
+  if (facts.carried.empty()) {
+    block(UnboundedBy::Unmodeled, call,
+          facts.input_file.empty() ? "the call states none of the requests it carries" : "the batch's requests are in an uploaded file");
+    return out;
+  }
+  // The requests are priced under the carried tier only: standard rates are not a bound on another tier's.
+  if (facts.carried_tier.empty()) block(UnboundedBy::TierPrice, call, "the call names no tier for the requests it carries");
+  if (facts.routed_gateway) block(UnboundedBy::RouteCeiling, call, "a request a call carries at a routing gateway takes no pin from this bound");
+  if (in.attempts == 0) block(UnboundedBy::Invocations, {}, "the call states no attempts");
+  if (!out.unbounded.empty()) return out;
+
+  std::uint64_t sum = 0;
+  bool overflow = false;
+  std::optional<std::string> entry;
+  bool one_entry = true;
+  for (std::size_t i = 0; i < facts.carried.size(); ++i) {
+    const auto& request = facts.carried[i];
+    const auto& id = request.custom_id;
+    if (std::any_of(facts.carried.begin(), facts.carried.begin() + static_cast<std::ptrdiff_t>(i),
+                    [&](const CarriedRequest& earlier) { return earlier.custom_id == id; })) {
+      block(UnboundedBy::Unmodeled, carried_subject(id, {}), "the custom id names more than one carried request");
+      continue;
+    }
+    std::optional<std::uint64_t> measured;
+    std::size_t stated = 0;
+    for (const auto& [named, tokens] : in.measured_carried_input_tokens)
+      if (named == id) {
+        measured = tokens;
+        ++stated;
+      }
+    if (stated > 1) {
+      block(UnboundedBy::Unmodeled, carried_subject(id, {}), "the request's measured input tokens are stated more than once");
+      continue;
+    }
+    // A tier of the request's own is not the carried tier, and nothing states how the two combine.
+    if (!request.facts.service_tier.empty()) {
+      block(UnboundedBy::TierPrice, carried_subject(id, request.model), "a batch item names its own service tier");
+      continue;
+    }
+    WorstCaseInput item;
+    item.family = facts.family;
+    item.origin = facts.origin;
+    item.model = request.model;
+    item.facts = &request.facts;
+    item.service_tier = facts.carried_tier;
+    item.output_tokens = request.output_tokens;
+    item.measured_input_tokens = measured;
+    item.invocations = request.invocations;
+    item.attempts = 1;
+    auto bound = worst_case(item, catalogue);
+    if (!bound.total) {
+      for (auto& reason : bound.unbounded) block(reason.by, carried_subject(id, reason.subject), std::move(reason.detail));
+      continue;
+    }
+    out.lines.push_back({carried_subject(id, "nano_usd"), bound.entry, bound.total->nano_usd, nano_usd_rate});
+    if (!checked_add(sum, bound.total->nano_usd, sum)) overflow = true;
+    if (!entry) entry = bound.entry;
+    else if (*entry != bound.entry) one_entry = false;
+  }
+  if (!out.unbounded.empty()) {
+    out.lines.clear();
+    return out;
+  }
+  std::uint64_t total = 0;
+  if (overflow || !checked_mul(sum, attempts, total)) {
+    block(UnboundedBy::Overflow, {}, overflow ? "the bound does not fit 64 bits" : "the bound over the attempts does not fit 64 bits");
+    out.lines.clear();
+    return out;
+  }
+  out.total = UsdAmount{total, Evidence::Derived, CostRounding::CeilingCatalogueProduct};
+  if (one_entry && entry) out.entry = *entry;
+  out.model = facts.model;
+  out.attempts = attempts;
+  return out;
+}
 }  // namespace
 
 EndpointBound endpoint_worst_case(const EndpointWorstCaseInput& in, const descriptor::ModelCatalogue& catalogue) {
@@ -196,10 +288,7 @@ EndpointBound endpoint_worst_case(const EndpointWorstCaseInput& in, const descri
     out.attempts = attempts;
     return out;
   }
-  if (facts.billing == descriptor::EndpointBilling::Carried) {
-    block(UnboundedBy::Unmodeled, facts.endpoint + "/" + facts.operation, "the call bills the chat requests it carries, which this bound does not price");
-    return out;
-  }
+  if (facts.billing == descriptor::EndpointBilling::Carried) return carried_worst_case(in, catalogue, attempts);
   if (facts.billing != descriptor::EndpointBilling::Model) {
     block(UnboundedBy::Billing, facts.endpoint + "/" + facts.operation, "the policy does not state whether the provider bills the operation");
     return out;

@@ -3,6 +3,7 @@
 // endpoint kind, the bound of a call prepared through a client, against amounts computed here with integers from a
 // small catalogue written here, with every refusal a request can cause.
 #include "core/enum_names.h"
+#include "crypto/crypto.h"
 #include "core/pricing.h"
 #include "descriptor/catalogue.h"
 #include "descriptor/policy.h"
@@ -335,11 +336,12 @@ void answers_per_billing() {
   CHECK(describe(runtime::worst_case_cost(ok(older.prepare(images::Request{"vendor/image", "A flat icon of a fox"})), *priced)) ==
         "no total | Billing [images/generate] the policy does not state whether the provider bills the operation | entry '' model '' tokens 0/0/0 fees 0 "
         "invocations 0 attempts 0 tools 0 ceiling 0 pinned 0 pin 0");
-  // Carried: a batch submit bills the requests it carries, which are not priced yet.
+  // Carried: a batch submit bills the requests it carries, each priced under the policy's carried tier, which this
+  // catalogue prices nothing under (batches_bound has the totals).
   auto messages_api = client_of(anthropic_messages());
   CHECK(describe(runtime::worst_case_cost(ok(messages_api.prepare(batches::Submit{{{"a-1", messages::Request::simple("vendor/decider", "Say: alpha", 16)}}})), *priced)) ==
-        "no total | Unmodeled [batches] an endpoint call has no catalogue bound | entry '' model '' tokens 0/0/0 fees 0 invocations 0 attempts 0 tools 0 "
-        "ceiling 0 pinned 0 pin 0");
+        "no total | TierPrice [a-1:vendor/decider] the entry prices no unit under service tier 'batch' | entry '' model '' tokens 0/0/0 fees 0 "
+        "invocations 0 attempts 0 tools 0 ceiling 0 pinned 0 pin 0");
 
   // The bound with its lines answers the same, and nothing for a chat request or a call that did not prepare.
   CHECK(nano(bound_of(direct.prepare(moderation::Request{"vendor/moderator", {{"a sentence"}}}))) == 0);
@@ -813,6 +815,406 @@ void estimates_per_result() {
   CHECK(e.total && e.total->nano_usd == 0);
   std::cout << "case passed: the estimate of each result type\n";
 }
+
+// ---- batches: the requests a submit carries, priced under the policy's carried tier ----------------------------
+
+// Comparisons that keep going and report every mismatch with both sides, so a red run states what the code answered.
+std::vector<std::string> mismatches;
+void expect(int line, const std::string& actual, const std::string& expected) {
+  if (actual != expected) mismatches.push_back("line " + std::to_string(line) + ":\n    got      " + actual + "\n    expected " + expected);
+}
+#define EXPECT(actual, expected) expect(__LINE__, (actual), (expected))
+void report_mismatches(const char* name) {
+  if (mismatches.empty()) return;
+  std::string all = std::string(name) + ": " + std::to_string(mismatches.size()) + " mismatch(es)";
+  for (const auto& m : mismatches) all += "\n  " + m;
+  mismatches.clear();
+  throw std::runtime_error(all);
+}
+// Every member of an endpoint bound, so that a test states the whole answer.
+std::string described(const pricing::EndpointBound& b) {
+  std::string out = b.total ? "total " + std::to_string(b.total->nano_usd) : std::string("no total");
+  for (const auto& reason : b.unbounded) out += " | " + std::string(pricing::to_string(reason.by)) + " [" + reason.subject + "] " + reason.detail;
+  out += " | entry '" + b.entry + "' model '" + b.model + "' attempts " + std::to_string(b.attempts) + " lines";
+  for (const auto& l : b.lines) out += " " + l.unit + "=" + l.row + ":" + std::to_string(l.quantity) + "x" + std::to_string(l.rate);
+  return out;
+}
+// What a submit carries, as `<custom_id>/<model>/<output cap>/<invocations>/<tier>`.
+std::string carried_of(const EndpointFacts& facts) {
+  std::string out;
+  const auto number = [](const std::optional<std::uint64_t>& value) { return value ? std::to_string(*value) : std::string("-"); };
+  for (const auto& r : facts.carried)
+    out += (out.empty() ? "" : " ") + r.custom_id + "/" + r.model + "/" + number(r.output_tokens) + "/" + number(r.invocations) + "/" + r.facts.service_tier;
+  return out + " file '" + facts.input_file + "'";
+}
+// Batch rates, in nano-USD per million tokens, each with a fraction of a nano-USD per token so a bound rounds up; the
+// standard rates of the same entries are dearer, so a bound at them is visible.
+constexpr std::uint64_t batch_in = 500'000'001, batch_out = 2'000'000'003, batch_fee = 1'500'000'000'007, standard_in = 1'000'000'000,
+                        standard_out = 4'000'000'000, fee_in = 250'000'000, fee_out = 1'000'000'000;
+constexpr std::uint64_t batched_input = 2000, batched_output = 100, fee_input = 3000;
+const auto batch_priced = catalogue_of("{\"version\":1,\"models\":[" +
+    entry("vendor/batched", limits(batched_input, batched_output),
+          {{"input", standard_in}, {"output", standard_out}, {"input/batch", batch_in}, {"output/batch", batch_out}}) + "," +
+    entry("vendor/batched-fee", limits(fee_input),
+          {{"input", standard_in}, {"output", standard_out}, {"input/batch", fee_in}, {"output/batch", fee_out}, {"request/batch", batch_fee}}) + "," +
+    // A Google batch names its model in the path, as one segment.
+    entry("vendor-batched", limits(batched_input, batched_output),
+          {{"input", standard_in}, {"output", standard_out}, {"input/batch", batch_in}, {"output/batch", batch_out}}) + "," +
+    // Standard rates only: nothing prices a batch.
+    entry("vendor/standard-only", limits(batched_input, batched_output), {{"input", standard_in}, {"output", standard_out}}) + "]}");
+descriptor::ValidatedDescriptor google_generate() {
+  auto loaded = descriptor::presets::try_google_generate();
+  if (auto* error = std::get_if<descriptor::ConfigError>(&loaded)) throw std::runtime_error("descriptor refused: " + error->pointer);
+  return std::get<descriptor::ValidatedDescriptor>(std::move(loaded));
+}
+
+void batches_bound() {
+  // Anthropic, inline: each request bounded at the batch rates, the first at its measured input, the second at its
+  // model's input limit; the submit is charged on acceptance, so one attempt of three.
+  auto messages_api = client_of(anthropic_messages());
+  const auto inline_submit = messages_api.prepare(batches::Submit{{{"a-1", messages::Request::simple("vendor/batched", "Say: alpha", 16)},
+                                                                   {"a-2", messages::Request::simple("vendor/batched-fee", "Say: beta", 50)}}},
+                                                  run_with(3));
+  EXPECT(carried_of(ok(inline_submit).endpoint_facts()), "a-1/vendor/batched/16/1/ a-2/vendor/batched-fee/50/1/ file ''");
+  runtime::EndpointCostOptions measured_first;
+  measured_first.measured_carried_input_tokens = {{"a-1", 300}};
+  const auto first = rounded(300 * batch_in + 16 * batch_out), second = rounded(fee_input * fee_in + 50 * fee_out + batch_fee);
+  EXPECT(described(runtime::endpoint_worst_case_cost(ok(inline_submit), *batch_priced, measured_first)),
+         "total " + std::to_string(first + second) + " | entry '' model '' attempts 1 lines a-1:nano_usd=vendor/batched:" + std::to_string(first) +
+         "x1000000 a-2:nano_usd=vendor/batched-fee:" + std::to_string(second) + "x1000000");
+  // worst_case_cost answers the same total and subjects, with no tokens or invocations of the submit's own.
+  const auto unmeasured_first = rounded(batched_input * batch_in + 16 * batch_out);
+  EXPECT(describe(runtime::worst_case_cost(ok(inline_submit), *batch_priced)),
+         "total " + std::to_string(unmeasured_first + second) + " Derived CeilingCatalogueProduct | entry '' model '' tokens 0/0/0 fees 0 invocations 0 "
+         "attempts 1 tools 0 ceiling 0 pinned 0 pin 0");
+
+  // Google, inline: one model for every request.
+  auto generate_api = client_of(google_generate());
+  const auto google_submit = generate_api.prepare(batches::Submit{{{"g-1", gemini::Request::simple("vendor-batched", "Say: alpha", 10)},
+                                                                   {"g-2", gemini::Request::simple("vendor-batched", "Say: beta", 20)}}});
+  EXPECT(carried_of(ok(google_submit).endpoint_facts()), "g-1/vendor-batched/10/1/ g-2/vendor-batched/20/1/ file ''");
+  const auto g1 = rounded(batched_input * batch_in + 10 * batch_out), g2 = rounded(batched_input * batch_in + 20 * batch_out);
+  EXPECT(described(runtime::endpoint_worst_case_cost(ok(google_submit), *batch_priced)),
+         "total " + std::to_string(g1 + g2) + " | entry 'vendor-batched' model '' attempts 1 lines g-1:nano_usd=vendor-batched:" + std::to_string(g1) +
+         "x1000000 g-2:nano_usd=vendor-batched:" + std::to_string(g2) + "x1000000");
+
+  // No batch rows: the standard rates are not a bound on a batch's; the reasons keep their kind, prefixed by the
+  // custom id. A request without a cap of its own takes the family's default cap, as it would on its own.
+  const auto unpriced_submit = messages_api.prepare(batches::Submit{{{"a-1", messages::Request::simple("vendor/standard-only", "Say: alpha", 16)},
+                                                                     {"a-2", messages::Request::simple("vendor/unlisted", "Say: beta")}}});
+  EXPECT(carried_of(ok(unpriced_submit).endpoint_facts()), "a-1/vendor/standard-only/16/1/ a-2/vendor/unlisted/1024/1/ file ''");
+  EXPECT(reasons_of(runtime::endpoint_worst_case_cost(ok(unpriced_submit), *batch_priced)),
+         "TierPrice [a-1:vendor/standard-only] the entry prices no unit under service tier 'batch'; ModelPrice [a-2:vendor/unlisted] the catalogue has no "
+         "price for the model at the origin; ");
+  EXPECT(describe(runtime::worst_case_cost(ok(unpriced_submit), *batch_priced)),
+         "no total | TierPrice [a-1:vendor/standard-only] the entry prices no unit under service tier 'batch' | ModelPrice [a-2:vendor/unlisted] the "
+         "catalogue has no price for the model at the origin | entry '' model '' tokens 0/0/0 fees 0 invocations 0 attempts 0 tools 0 ceiling 0 pinned 0 pin 0");
+
+  // OpenAI: the requests are in the uploaded file the submit names, which the prepared call does not read.
+  auto chat_api = client_of(openai_chat());
+  const auto file_submit = chat_api.prepare(batches::Submit{{}, "file-abc", "/v1/chat/completions"});
+  EXPECT(carried_of(ok(file_submit).endpoint_facts()), " file 'file-abc'");
+  EXPECT(reasons_of(runtime::endpoint_worst_case_cost(ok(file_submit), *batch_priced)),
+         "Unmodeled [batches/submit] the batch's requests are in an uploaded file; ");
+  EXPECT(describe(runtime::worst_case_cost(ok(file_submit), *batch_priced)),
+         "no total | Unmodeled [batches/submit] the batch's requests are in an uploaded file | entry '' model '' tokens 0/0/0 fees 0 invocations 0 "
+         "attempts 0 tools 0 ceiling 0 pinned 0 pin 0");
+
+  // The reads bill nothing.
+  EXPECT(described(runtime::endpoint_worst_case_cost(messages_api.prepare(batches::Get{"msgbatch_1"}).prepared(), *batch_priced)),
+         "total 0 | entry '' model '' attempts 1 lines");
+  EXPECT(described(runtime::endpoint_worst_case_cost(messages_api.prepare(batches::Cancel{"msgbatch_1"}).prepared(), *batch_priced)),
+         "total 0 | entry '' model '' attempts 1 lines");
+  EXPECT(described(runtime::endpoint_worst_case_cost(messages_api.prepare(batches::Delete{"msgbatch_1"}).prepared(), *batch_priced)),
+         "total 0 | entry '' model '' attempts 1 lines");
+  batches::Batch ended;
+  ended.origin = "https://api.anthropic.com";
+  ended.shape = "anthropic";
+  ended.id = "msgbatch_1";
+  EXPECT(described(runtime::endpoint_worst_case_cost(messages_api.prepare(batches::Results{ended}).prepared(), *batch_priced)),
+         "total 0 | entry '' model '' attempts 1 lines");
+  report_mismatches("batches_bound");
+  std::cout << "case passed: the bound of a batch submit\n";
+}
+
+// Lower-case hex SHA-256, written here as files::File::uploaded_sha256 spells it.
+std::string hex_sha256(std::string_view text) {
+  std::string out;
+  for (const auto byte : crypto::sha256(text)) {
+    out += "0123456789abcdef"[byte >> 4];
+    out += "0123456789abcdef"[byte & 15];
+  }
+  return out;
+}
+// The file an upload of `text` returns, under `id`.
+files::File uploaded(std::string id, std::string_view text) {
+  files::File file;
+  file.id = std::move(id);
+  file.uploaded_sha256 = hex_sha256(text);
+  return file;
+}
+
+void openai_batch_bound() {
+  // The items the host wrote the uploaded file from, bounded as an inline batch's: the first at its measured input.
+  auto chat_api = client_of(openai_chat());
+  const auto family = openai_chat();
+  std::vector<batches::Item> items{{"o-1", chat::Request::simple("vendor/batched", "Say: alpha", 16)},
+                                   {"o-2", chat::Request::simple("vendor/batched-fee", "Say: beta", 50)}};
+  const auto text = std::get<std::string>(batches::jsonl(family, items));
+  const auto file = uploaded("file-abc", text);
+  const auto submit = chat_api.prepare(batches::Submit{{}, "file-abc", "/v1/chat/completions"}, run_with(3));
+  runtime::EndpointCostOptions measured_first;
+  measured_first.measured_carried_input_tokens = {{"o-1", 300}};
+  const auto first = rounded(300 * batch_in + 16 * batch_out), second = rounded(fee_input * fee_in + 50 * fee_out + batch_fee);
+  const std::string bounded = "total " + std::to_string(first + second) + " | entry '' model '' attempts 1 lines o-1:nano_usd=vendor/batched:" +
+                              std::to_string(first) + "x1000000 o-2:nano_usd=vendor/batched-fee:" + std::to_string(second) + "x1000000";
+  EXPECT(described(runtime::batch_worst_case_cost(ok(submit), family, items, file, *batch_priced, measured_first)), bounded);
+  // Without a catalogue, the policy's, which prices neither model.
+  EXPECT(reasons_of(runtime::batch_worst_case_cost(ok(submit), family, items, file)),
+         "ModelPrice [o-1:vendor/batched] the catalogue has no price for the model at the origin; ModelPrice [o-2:vendor/batched-fee] the catalogue "
+         "has no price for the model at the origin; ");
+
+  // Not the uploaded file: other bytes, another file, a file whose upload digest is unknown (a get's), the items in
+  // another order, and items another family would write.
+  constexpr const char* not_the_file = "Unmodeled [batches/submit] the items are not the uploaded input file; ";
+  EXPECT(reasons_of(runtime::batch_worst_case_cost(ok(submit), family, items, uploaded("file-abc", text + "\n"), *batch_priced)), not_the_file);
+  EXPECT(reasons_of(runtime::batch_worst_case_cost(ok(submit), family, items, uploaded("file-other", text), *batch_priced)), not_the_file);
+  files::File fetched;
+  fetched.id = "file-abc";
+  EXPECT(reasons_of(runtime::batch_worst_case_cost(ok(submit), family, items, fetched, *batch_priced)), not_the_file);
+  const std::vector<batches::Item> reordered{items[1], items[0]};
+  EXPECT(reasons_of(runtime::batch_worst_case_cost(ok(submit), family, reordered, file, *batch_priced)), not_the_file);
+  auto responses_family = descriptor::presets::openai_responses();
+  EXPECT(reasons_of(runtime::batch_worst_case_cost(ok(submit), responses_family, items, file, *batch_priced)), not_the_file);
+  // Items whose bytes are the file, but under another family descriptor of another origin.
+  EXPECT(reasons_of(runtime::batch_worst_case_cost(ok(submit), anthropic_messages(), items, file, *batch_priced)),
+         "Unmodeled [batches/submit] the items' descriptor is not at the batch's origin; ");
+  // A call that reads no uploaded file: an inline submit, a read, a chat request.
+  auto messages_api = client_of(anthropic_messages());
+  const auto inline_submit = messages_api.prepare(batches::Submit{{{"a-1", messages::Request::simple("vendor/batched", "Say: alpha", 16)}}});
+  EXPECT(reasons_of(runtime::batch_worst_case_cost(ok(inline_submit), family, items, file, *batch_priced)),
+         "Unmodeled [batches/submit] the call reads no uploaded input file; ");
+  EXPECT(reasons_of(runtime::batch_worst_case_cost(ok(chat_api.prepare(batches::Get{"batch_1"})), family, items, file, *batch_priced)),
+         "Unmodeled [batches/get] the call reads no uploaded input file; ");
+  chat::Request chat = chat::Request::simple("vendor/batched", "hello", 10);
+  EXPECT(reasons_of(runtime::batch_worst_case_cost(chat_api.prepare(chat), family, items, file, *batch_priced)),
+         "Unmodeled [request] a chat request is bounded by worst_case_cost; ");
+
+  // An item's own tier: a standard tier is the standard rates' name and is bounded as none; another is refused.
+  auto tiered = items;
+  std::get<chat::Request>(tiered[0].request).service_tier = "default";
+  const auto tiered_text = std::get<std::string>(batches::jsonl(family, tiered));
+  CHECK(tiered_text != text);
+  EXPECT(described(runtime::batch_worst_case_cost(ok(submit), family, tiered, uploaded("file-abc", tiered_text), *batch_priced, measured_first)), bounded);
+  std::get<chat::Request>(tiered[0].request).service_tier = "flex";
+  const auto flex_text = std::get<std::string>(batches::jsonl(family, tiered));
+  EXPECT(reasons_of(runtime::batch_worst_case_cost(ok(submit), family, tiered, uploaded("file-abc", flex_text), *batch_priced)),
+         "TierPrice [o-1:vendor/batched] a batch item names its own service tier; ");
+  report_mismatches("openai_batch_bound");
+  std::cout << "case passed: the bound of an OpenAI batch from its uploaded file\n";
+}
+
+// A finished request's usage: input tokens (cache reads among them), output tokens (reasoning among them).
+Usage request_usage(std::uint64_t input, std::uint64_t output, std::uint64_t cache_read = 0, std::uint64_t reasoning = 0) {
+  Usage usage;
+  usage.stage = UsageStage::Final;
+  usage.input_total = Count{input};
+  usage.output_total = Count{output};
+  if (cache_read) usage.cache_read = Count{cache_read};
+  if (reasoning) usage.reasoning = Count{reasoning};
+  return usage;
+}
+batches::Line answered(std::string id, std::string model, Usage usage) {
+  Completion completion;
+  completion.model.requested = std::move(model);
+  completion.usage = std::move(usage);
+  return batches::Line{std::move(id), completion};
+}
+batches::Line failed_line(std::string id) {
+  Failure failure;
+  failure.error = Error{ErrorKind::RemoteFailure, "the provider failed the batch request"};
+  return batches::Line{std::move(id), failure};
+}
+std::string estimated(const pricing::EndpointEstimate& e) {
+  std::string out = e.total ? "total " + std::to_string(e.total->nano_usd) : std::string("no total");
+  for (const auto& name : e.unpriced) out += " | unpriced " + name;
+  for (const auto& rule : e.assumptions) out += " | assumed " + rule;
+  out += " | entry '" + e.entry + "' requested " + std::to_string(e.requested_entry) + " lower " + std::to_string(e.lower_bound) + " lines";
+  for (const auto& l : e.lines) out += " " + l.unit + "=" + l.row + ":" + std::to_string(l.quantity) + "x" + std::to_string(l.rate);
+  return out;
+}
+std::string joined(const std::vector<std::string>& names) {
+  std::string out;
+  for (const auto& name : names) out += (out.empty() ? "" : " ") + name;
+  return out;
+}
+
+void batch_estimates() {
+  auto messages_api = client_of(anthropic_messages());
+  const auto family = anthropic_messages();
+  const auto submit = messages_api.prepare(batches::Submit{{{"a-1", messages::Request::simple("vendor/batched", "Say: alpha", 16)},
+                                                            {"a-2", messages::Request::simple("vendor/batched-fee", "Say: beta", 50)}}});
+  const EndpointFacts facts = ok(submit).endpoint_facts();
+  runtime::EndpointCostOptions measured_first;
+  measured_first.measured_carried_input_tokens = {{"a-1", 300}};
+  const auto bound = runtime::endpoint_worst_case_cost(ok(submit), *batch_priced, measured_first);
+  // Each line priced as a chat call's usage under the carried tier and rounded on its own, the lines summed.
+  const auto first = rounded(120 * batch_in + 7 * batch_out), second = rounded(900 * fee_in + 30 * fee_out + batch_fee);
+  auto e = runtime::batch_estimate(facts, family, {answered("a-1", "vendor/batched", request_usage(120, 7)), answered("a-2", "vendor/batched-fee", request_usage(900, 30))},
+                                   *batch_priced);
+  EXPECT(estimated(e), "total " + std::to_string(first + second) + " | entry '' requested 0 lower 0 lines a-1:nano_usd=vendor/batched:" +
+                           std::to_string(first) + "x1000000 a-2:nano_usd=vendor/batched-fee:" + std::to_string(second) + "x1000000");
+  EXPECT(joined(pricing::beyond_bound(bound, e)), "");
+  // At the requests' caps the estimate reaches the bound, and no further.
+  e = runtime::batch_estimate(facts, family, {answered("a-1", "vendor/batched", request_usage(300, 16)), answered("a-2", "vendor/batched-fee", request_usage(fee_input, 50))},
+                              *batch_priced);
+  EXPECT(e.total ? std::to_string(e.total->nano_usd) : "none", std::to_string(nano(bound)));
+  EXPECT(joined(pricing::beyond_bound(bound, e)), "");
+  // Beyond its request (more input than the host measured): named by the request's line, and the total.
+  e = runtime::batch_estimate(facts, family, {answered("a-1", "vendor/batched", request_usage(301, 16)), answered("a-2", "vendor/batched-fee", request_usage(fee_input, 50))},
+                              *batch_priced);
+  EXPECT(joined(pricing::beyond_bound(bound, e)), "a-1:nano_usd total");
+  // A failed line adds what it reports, here nothing, and the provider may bill more.
+  e = runtime::batch_estimate(facts, family, {answered("a-1", "vendor/batched", request_usage(120, 7)), failed_line("a-2")}, *batch_priced);
+  EXPECT(estimated(e), "total " + std::to_string(first) + " | entry 'vendor/batched' requested 0 lower 1 lines a-1:nano_usd=vendor/batched:" +
+                           std::to_string(first) + "x1000000");
+  // One that reports usage is priced.
+  Failure partial;
+  partial.error = Error{ErrorKind::RemoteFailure, "the provider failed the batch request"};
+  partial.partial.usage = request_usage(900, 30);
+  partial.partial.model.requested = "vendor/batched-fee";
+  e = runtime::batch_estimate(facts, family, {batches::Line{"a-2", partial}}, *batch_priced);
+  EXPECT(estimated(e), "total " + std::to_string(second) + " | entry 'vendor/batched-fee' requested 0 lower 1 lines a-2:nano_usd=vendor/batched-fee:" +
+                           std::to_string(second) + "x1000000");
+  // Two lines of one request are both priced.
+  e = runtime::batch_estimate(facts, family, {answered("a-1", "vendor/batched", request_usage(120, 7)), answered("a-1", "vendor/batched", request_usage(120, 7))},
+                              *batch_priced);
+  EXPECT(e.total ? std::to_string(e.total->nano_usd) : "none", std::to_string(2 * first));
+  // Unpriced: a line of a request the submit did not carry, a model without batch rows, and the names a line's
+  // estimate leaves unpriced, each prefixed by its custom id; no lines and no partial total.
+  e = runtime::batch_estimate(facts, family, {answered("a-1", "vendor/standard-only", request_usage(120, 7)), answered("x-9", "vendor/batched", request_usage(1, 1)),
+                                              answered("a-2", "vendor/unknown", request_usage(1, 1))}, *batch_priced);
+  EXPECT(estimated(e), "no total | unpriced a-1:tier | unpriced x-9:custom_id | unpriced a-2:model | entry '' requested 0 lower 0 lines");
+  // The submit's facts decide first: a read is zero, and a submit without a carried tier, at another origin, or of
+  // another family than the lines' prices nothing.
+  EXPECT(estimated(runtime::batch_estimate(ok(messages_api.prepare(batches::Get{"msgbatch_1"})).endpoint_facts(), family,
+                                           {answered("a-1", "vendor/batched", request_usage(120, 7))}, *batch_priced)),
+         "total 0 | entry '' requested 0 lower 0 lines");
+  auto untiered = facts;
+  untiered.carried_tier.clear();
+  EXPECT(estimated(runtime::batch_estimate(untiered, family, {}, *batch_priced)), "no total | unpriced tier | entry '' requested 0 lower 0 lines");
+  EXPECT(estimated(runtime::batch_estimate(facts, google_generate(), {}, *batch_priced)),
+         "no total | unpriced origin | unpriced family | entry '' requested 0 lower 0 lines");
+  auto unstated = facts;
+  unstated.billing = descriptor::EndpointBilling::Unstated;
+  EXPECT(estimated(runtime::batch_estimate(unstated, family, {}, *batch_priced)), "no total | unpriced billing | entry '' requested 0 lower 0 lines");
+  // An OpenAI submit carries no inline requests: its lines are priced by the family that wrote the file.
+  auto chat_api = client_of(openai_chat());
+  const auto file_facts = ok(chat_api.prepare(batches::Submit{{}, "file-abc", "/v1/chat/completions"})).endpoint_facts();
+  e = runtime::batch_estimate(file_facts, openai_chat(), {answered("o-1", "vendor/batched", request_usage(120, 7))}, *batch_priced);
+  EXPECT(estimated(e), "total " + std::to_string(first) + " | entry 'vendor/batched' requested 0 lower 0 lines o-1:nano_usd=vendor/batched:" +
+                           std::to_string(first) + "x1000000");
+  report_mismatches("batch_estimates");
+  std::cout << "case passed: the estimate of a batch from its lines\n";
+}
+
+// For result lines within their requests' caps, priced by the entries the bound used, the estimate of a batch never
+// exceeds its bound: generated catalogues (batch rows with and without bands, standard rows, declared zeros, models
+// without batch rows), requests with caps and measured inputs, inline (Anthropic) and from an uploaded file (OpenAI),
+// and lines within each request, some of them failed.
+void batch_estimate_within_the_bound() {
+  std::uint64_t seed = 20261120;
+  auto next = [&](std::uint64_t limit) { seed = seed * 6364136223846793005u + 1442695040888963407u; return (seed >> 33) % (limit + 1); };
+  const auto messages_family = anthropic_messages();
+  const auto chat_family = openai_chat();
+  auto messages_api = client_of(anthropic_messages());
+  auto chat_api = client_of(openai_chat());
+  std::size_t rounds = 0, both = 0, bound_only = 0, estimate_only = 0, neither = 0, tight = 0, both_inline = 0, both_file = 0;
+  const char* const units[]{"input", "cache_read", "cache_write", "output", "reasoning", "request"};
+  for (; rounds < 2000; ++rounds) {
+    // The models: limits, and rows under the carried tier and the standard rates.
+    const std::size_t models = 1 + next(2);
+    std::vector<std::uint64_t> input_limits;
+    std::string json = "{\"version\":1,\"models\":[";
+    for (std::size_t m = 0; m < models; ++m) {
+      const auto limit = 1 + next(4000);
+      input_limits.push_back(limit);
+      std::vector<std::pair<std::string, std::uint64_t>> rows;
+      const bool batch_rows = next(9) != 0;
+      for (const auto* unit : units) {
+        const bool base = std::string_view(unit) == "input" || std::string_view(unit) == "output";
+        const auto rate = [&] { return next(4) == 0 ? std::uint64_t{0} : (1 + next(4999)) * 1'000'000 + next(999); };
+        if (next(5) != 0) rows.emplace_back(unit, rate());
+        if (batch_rows && (base ? next(19) != 0 : next(2) == 0)) {
+          rows.emplace_back(std::string(unit) + "/batch", rate());
+          if (next(3) == 0) rows.emplace_back(std::string(unit) + "/batch+" + std::to_string(1 + next(limit)), rate());
+        }
+      }
+      json += (m ? "," : "") + entry("vendor/p" + std::to_string(m), limits(limit), rows);
+    }
+    const auto catalogue = catalogue_of(json + "]}");
+    // The requests, and the lines within them.
+    const bool from_file = next(2) == 0;
+    const std::size_t count = 1 + next(3);
+    std::vector<batches::Item> items;
+    std::vector<std::uint64_t> caps, models_of;
+    runtime::EndpointCostOptions options;
+    std::vector<batches::Line> lines;
+    for (std::size_t i = 0; i < count; ++i) {
+      const auto id = "r-" + std::to_string(i);
+      const auto m = next(models - 1);
+      const auto cap = 1 + next(300);
+      const auto model = "vendor/p" + std::to_string(m);
+      if (from_file) items.push_back({id, chat::Request::simple(model, "Say: alpha", cap)});
+      else items.push_back({id, messages::Request::simple(model, "Say: alpha", cap)});
+      std::uint64_t input_bound = input_limits[m];
+      if (next(2) == 0) {
+        const auto counted_tokens = next(input_limits[m] + 50);
+        options.measured_carried_input_tokens.emplace_back(id, counted_tokens);
+        input_bound = (std::min)(input_bound, counted_tokens);
+      }
+      if (next(9) == 0) {
+        lines.push_back(failed_line(id));
+        continue;
+      }
+      const auto input = next(input_bound), output = next(cap);
+      lines.push_back(answered(id, model, request_usage(input, output, next(input), next(output))));
+    }
+    pricing::EndpointBound bound;
+    EndpointFacts facts;
+    if (from_file) {
+      const auto text = std::get<std::string>(batches::jsonl(chat_family, items));
+      const auto submit = chat_api.prepare(batches::Submit{{}, "file-p", "/v1/chat/completions"});
+      facts = ok(submit).endpoint_facts();
+      bound = runtime::batch_worst_case_cost(ok(submit), chat_family, items, uploaded("file-p", text), *catalogue, options);
+    } else {
+      const auto submit = messages_api.prepare(batches::Submit{items});
+      facts = ok(submit).endpoint_facts();
+      bound = runtime::endpoint_worst_case_cost(ok(submit), *catalogue, options);
+    }
+    const auto estimate = runtime::batch_estimate(facts, from_file ? chat_family : messages_family, lines, *catalogue);
+    if (bound.total && estimate.total) {
+      ++both;
+      ++(from_file ? both_file : both_inline);
+      if (estimate.total->nano_usd > bound.total->nano_usd)
+        throw std::runtime_error("round " + std::to_string(rounds) + ": estimate " + estimated(estimate) + " above bound " + described(bound));
+      const auto beyond = pricing::beyond_bound(bound, estimate);
+      if (std::find(beyond.begin(), beyond.end(), "total") != beyond.end()) throw std::runtime_error("round " + std::to_string(rounds) + ": beyond the total");
+      if (estimate.total->nano_usd == bound.total->nano_usd) ++tight;
+    } else if (bound.total) ++bound_only;
+    else if (estimate.total) ++estimate_only;
+    else ++neither;
+    // Every reason of a bound names the request it is about, or the submit.
+    for (const auto& reason : bound.unbounded)
+      if (!reason.subject.starts_with("r-") && reason.subject != "batches/submit")
+        throw std::runtime_error("round " + std::to_string(rounds) + ": a reason names no request: " + reason.subject);
+  }
+  // The property holds over a fair share of priced calls.
+  if (both < rounds / 4 || both_inline < rounds / 10 || both_file < rounds / 10)
+    throw std::runtime_error("too few batches priced both ways: " + std::to_string(both_inline) + " inline, " + std::to_string(both_file) + " from a file");
+  std::cout << "case passed: batch estimates within the bound (" << both << " both, " << bound_only << " bound only, " << estimate_only
+            << " estimate only, " << neither << " neither, " << tight << " at the bound)\n";
+}
 }  // namespace
 
 int main() {
@@ -831,6 +1233,10 @@ int main() {
     answers_per_billing();
     stated_facts();
     estimates_per_result();
+    batches_bound();
+    openai_batch_bound();
+    batch_estimates();
+    batch_estimate_within_the_bound();
     std::cout << "endpoint cost passed\n";
     return 0;
   } catch (const std::exception& error) {

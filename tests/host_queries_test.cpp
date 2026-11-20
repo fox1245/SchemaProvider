@@ -1547,7 +1547,7 @@ void reports(const runtime::PreparedEndpoint<Outcome>& call, std::string_view en
   if (facts.endpoint != endpoint || facts.operation != operation || facts.billing != billing || facts.model != model ||
       facts.family != d->family() || facts.origin != d->base_url() || facts.routed_gateway != descriptor::routed_gateway(*d) ||
       facts.carried_tier != (billing == Billing::Carried ? "batch" : "") || facts.quantities.empty() == (billing == Billing::Model) ||
-      !facts.carried.empty())
+      (billing != Billing::Carried && (!facts.carried.empty() || !facts.input_file.empty())))
     throw std::runtime_error(label + " reports " + facts.endpoint + "/" + facts.operation + " " + std::string(to_string(facts.billing)) +
                              " model '" + facts.model + "' at " + facts.origin);
 }
@@ -1599,6 +1599,9 @@ void endpoint_facts_of_prepared_calls() {
   reports(direct.prepare(files::Complete{whole}), "files", "complete", Billing::None);
   reports(direct.prepare(files::Cancel{uploads}), "files", "cancel", Billing::None);
   reports(direct.prepare(batches::Submit{{}, "file-in", "/v1/responses"}), "batches", "submit", Billing::Carried);
+  // An OpenAI submit names the file its requests are in; an inline one carries its requests.
+  CHECK(direct.prepare(batches::Submit{{}, "file-in", "/v1/responses"}).prepared().endpoint_facts().input_file == "file-in" &&
+        direct.prepare(batches::Submit{{}, "file-in", "/v1/responses"}).prepared().endpoint_facts().carried.empty());
   reports(direct.prepare(batches::Get{"batch_1"}), "batches", "get", Billing::None);
   reports(direct.prepare(batches::Cancel{"batch_1"}), "batches", "cancel", Billing::None);
   // An OpenAI batch's results are its output file.
@@ -1613,6 +1616,12 @@ void endpoint_facts_of_prepared_calls() {
   reports(messages_api.prepare(files::Delete{"file_1"}), "files", "delete", Billing::None);
   reports(messages_api.prepare(files::Download{"file_1"}), "files", "content", Billing::None);
   reports(messages_api.prepare(batches::Submit{{{"a-1", messages::Request::simple("zz-messages", "Say: alpha", 16)}}}), "batches", "submit", Billing::Carried);
+  {
+    const auto submit = messages_api.prepare(batches::Submit{{{"a-1", messages::Request::simple("zz-messages", "Say: alpha", 16)}}});
+    const auto& carried = submit.prepared().endpoint_facts().carried;
+    CHECK(carried.size() == 1 && carried[0].custom_id == "a-1" && carried[0].model == "zz-messages" && carried[0].output_tokens == 16u &&
+          carried[0].invocations == 1u && submit.prepared().endpoint_facts().input_file.empty());
+  }
   reports(messages_api.prepare(batches::Get{"msgbatch_1"}), "batches", "get", Billing::None);
   reports(messages_api.prepare(batches::Cancel{"msgbatch_1"}), "batches", "cancel", Billing::None);
   reports(messages_api.prepare(batches::Delete{"msgbatch_1"}), "batches", "delete", Billing::None);
@@ -1698,7 +1707,8 @@ void worst_case_endpoint_calls() {
   CHECK(has(bound_of(direct.prepare(decision("zz-model-1"))), pricing::UnboundedBy::OutputCap, "output"));
   CHECK(has(bound_of(router.prepare(videos::Request{"vendor/zz-video", "A fox in the snow."})), pricing::UnboundedBy::ModelPrice, "vendor/zz-video"));
   wc = bound_of(messages_api.prepare(batches::Submit{{{"a-1", messages::Request::simple("zz-model-1", "Say: alpha", 16)}}}));
-  CHECK(!wc.total && has(wc, pricing::UnboundedBy::Unmodeled, "batches"));
+  // A batch submit: its requests at the carried tier, which this catalogue prices nothing under.
+  CHECK(!wc.total && wc.unbounded.size() == 1 && has(wc, pricing::UnboundedBy::TierPrice, "a-1:zz-model-1"));
   // A policy that does not state the billing: no total, and the reason names the endpoint and operation.
   const auto older = load(policy_with_endpoints(facts_without_billing()));
   auto unstated = client_of(descriptor_of("openai.chat", older));

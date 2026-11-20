@@ -3,6 +3,7 @@
 #include "codecs/decisions.h"
 #include "codecs/endpoint.h"
 #include "runtime/request_facts.h"
+#include "codecs/batches_internal.h"
 #include "runtime/testing.h"
 #include "core/native.h"
 #include "codecs/messages.h"
@@ -1921,8 +1922,26 @@ EndpointCall<files::ProgressOutcome> Client::start(PreparedEndpoint<files::Progr
 }
 PreparedEndpoint<batches::Outcome> Client::prepare(batches::Submit call, RunOptions options) {
   auto client = state_;
+  // The caps the family encoder read from each inline item, kept from the one encoding the call sends.
+  std::vector<batches::detail::ItemCaps> caps;
+  const auto encode = [&]() -> std::variant<batches::Encoded, Error> {
+    auto encoded = batches::detail::encode_submit(client->descriptor, call);
+    if (auto* error = std::get_if<Error>(&encoded)) return std::move(*error);
+    auto& value = std::get<batches::detail::EncodedSubmit>(encoded);
+    caps = std::move(value.items);
+    return std::move(value.encoded);
+  };
+  // The requests the submit carries, inline; OpenAI's are in the uploaded file the submit names.
+  const auto facts = [&] {
+    auto out = endpoints::call_facts(client->descriptor, "batches", batches::operation(call), {});
+    if (call.items.empty()) out.input_file = call.input_file;
+    // One set of caps per item, in order; anything else carries nothing, and the bound refuses the call.
+    if (caps.size() == call.items.size())
+      for (std::size_t i = 0; i < call.items.size(); ++i) out.carried.push_back(detail::carried_request(client->descriptor, call.items[i].request, caps[i]));
+    return out;
+  };
   return PreparedEndpoint<batches::Outcome>(prepare_endpoint<batches::Encoded>(std::move(options), "batches",
-      static_cast<int>(reason::Source::BatchesRequest), [&] { return batches::encode(client->descriptor, call); }, [&] { return endpoints::call_facts(client->descriptor, "batches", batches::operation(call), {}); }));
+      static_cast<int>(reason::Source::BatchesRequest), encode, facts));
 }
 batches::Outcome Client::complete(batches::Submit call, RunOptions options) { return complete(prepare(std::move(call), std::move(options))); }
 PreparedEndpoint<batches::Outcome> Client::prepare(batches::Get call, RunOptions options) {

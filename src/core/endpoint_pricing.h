@@ -53,8 +53,8 @@ struct EndpointWorstCaseInput {
   // The length of the audio the call takes, in whole seconds rounded up: the quantity of a `StatedSeconds` unit. It
   // must not understate the audio; it is not checked.
   std::optional<std::uint64_t> stated_seconds;
-  // Measured input tokens of the chat requests a call carries, by custom id. No bound reads them yet: a call that bills
-  // the requests it carries has no total.
+  // The input tokens of each chat request a call carries as the host counted them, by custom id, each id once (worst_case's
+  // `measured_input_tokens` for that request). A request without one is bounded at its model's input limit.
   std::vector<std::pair<std::string, std::uint64_t>> measured_carried_input_tokens;
   // The attempts the retry policy allows the call.
   std::uint64_t attempts = 1;
@@ -69,7 +69,9 @@ struct EndpointBound {
   std::optional<UsdAmount> total;
   std::vector<UnboundedReason> unbounded;
   // How it was bounded, when it was: the entry that priced it, the model, the lines of one attempt (each quantity at
-  // its rate, and the request fee) and the attempts that multiply them.
+  // its rate, and the request fee) and the attempts that multiply them. A call that bills the requests it carries has
+  // one line per request (endpoint_worst_case), and the entry is the one every request was priced by, empty when they
+  // were priced by several.
   std::string entry, model;
   std::vector<EndpointLine> lines;
   std::uint64_t attempts = 0;
@@ -78,7 +80,18 @@ struct EndpointBound {
 // function of its arguments. By the billing of the call's operation:
 // - `None`: exactly zero, with no catalogue lookup, so the model needs no entry.
 // - `Unstated` (or a value this version does not know): no total, `Billing`, subject `<endpoint>/<operation>`.
-// - `Carried`: no total, `Unmodeled`, subject `<endpoint>/<operation>`: the requests it carries are not priced here.
+// - `Carried` (a batch submit): the sum of a bound of each chat request it carries (`facts->carried`), each by
+//   worst_case with the facts' family and origin, the request's model, facts, output cap and invocations, its measured
+//   input tokens from `measured_carried_input_tokens`, one attempt, and the service tier `facts->carried_tier`: an
+//   entry with no unit in that tier is `TierPrice`, never priced at other rates. Each request's reasons keep their kind
+//   with the subject `<custom_id>:<subject>` (`a-1:` for a reason without a subject). Also refused: no carried
+//   requests (`Unmodeled`, subject `<endpoint>/<operation>`; "the batch's requests are in an uploaded file" when the
+//   facts name an `input_file`), no `carried_tier` (`TierPrice`, same subject), a routing gateway (`RouteCeiling`, same
+//   subject), a custom id named by two requests or measured twice (`Unmodeled`, subject `<custom_id>:`), and a request
+//   whose facts name a service tier of its own (`TierPrice`, subject `<custom_id>:<model>`, "a batch item names its
+//   own service tier"). Each request's bound is rounded up on its own; their sum is exact, and one line per request
+//   holds it: unit `<custom_id>:nano_usd`, the entry that priced it, the request's bound in nano-USD as the quantity
+//   and a rate of one nano-USD per unit (1000000). The sum is multiplied by the attempts as below.
 // - `Model`: by the entry ModelCatalogue::find gives for the facts' family, origin and model, under `service_tier`:
 //   - No entry, or one without prices: `ModelPrice`, subject the model. At a routing gateway: `RouteCeiling`, subject
 //     the model, since no route ceiling or pin covers an endpoint call's prices. An entry with no price unit in the

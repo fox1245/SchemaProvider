@@ -26,7 +26,9 @@ struct EndpointCostOptions {
   // A transcription: the audio's length in whole seconds, rounded up. It must not understate the audio; it is not
   // checked. Unset: a model that prices `item:second` above zero gives the call no bound.
   std::optional<std::uint64_t> audio_seconds;
-  // Measured input tokens of the chat requests a call carries, by custom id. No bound reads them yet.
+  // A batch submit: the input tokens of each chat request it carries as the host counted them, by custom id, each once.
+  // They must not understate the input; they are not checked, and each is capped at its model's input limit. A request
+  // without one is bounded at that limit.
   std::vector<std::pair<std::string, std::uint64_t>> measured_carried_input_tokens;
 };
 // Bounds what `prepared` can bill, with the prices of `catalogue` (a host's overlay, merged over the descriptor
@@ -37,8 +39,9 @@ struct EndpointCostOptions {
 // states the provider does not bill it, with no catalogue lookup; no bound (`UnboundedBy::Billing`) when the policy
 // does not state it; endpoint_worst_case_cost, without the audio's length and with
 // WorstCaseOptions::measured_input_tokens, when the operation bills its model (its token counts, one invocation, and
-// the attempts that bound); and no bound (`Unmodeled`) when it bills the requests it carries (a batch submit). Free of
-// side effects, and nothing is reserved.
+// the attempts that bound); and endpoint_worst_case_cost, without measured input, when it bills the requests it
+// carries (a batch submit): its total, reasons, entry, model and attempts, with no tokens and no invocations of its own,
+// since each request it carries is bounded on its own. Free of side effects, and nothing is reserved.
 pricing::WorstCase worst_case_cost(const PreparedRequest& prepared, const descriptor::ModelCatalogue& catalogue,
                                    const WorstCaseOptions& options = {});
 // With the catalogue of the descriptor's policy.
@@ -49,12 +52,29 @@ pricing::WorstCase worst_case_cost(const PreparedRequest& prepared, const WorstC
 // billed operation of an endpoint fact that charges once it accepts a call (descriptor::EndpointFact::charge_on_accept)
 // is bounded at one attempt, since the runtime sends such a call again only when the provider did not accept it; any
 // other billed operation at the attempts. An operation that bills its model and states no quantities has no bound
-// (`Unmodeled`, subject `<endpoint>/<operation>`). A chat request, and a request that did not prepare, have no bound
-// (`Unmodeled`, subject `request`). Free of side effects, and nothing is reserved.
+// (`Unmodeled`, subject `<endpoint>/<operation>`). A batch submit with inline items (Anthropic, Google) is bounded from
+// the requests it carries (pricing::endpoint_worst_case), with `measured_carried_input_tokens`; an OpenAI submit, whose
+// requests are in an uploaded file, has no bound here (`Unmodeled`, subject `batches/submit`): batch_worst_case_cost
+// bounds it from the items. A chat request, and a request that did not prepare, have no bound (`Unmodeled`, subject
+// `request`). Free of side effects, and nothing is reserved.
 pricing::EndpointBound endpoint_worst_case_cost(const PreparedRequest& prepared, const descriptor::ModelCatalogue& catalogue,
                                                 const EndpointCostOptions& options = {});
 // With the catalogue of the descriptor's policy.
 pricing::EndpointBound endpoint_worst_case_cost(const PreparedRequest& prepared, const EndpointCostOptions& options = {});
+// Bounds an OpenAI batch submit, whose requests are in an uploaded file, from the items the host wrote that file from
+// with batches::jsonl(family, items), as endpoint_worst_case_cost bounds an inline batch. Only when the items are that
+// file: `input_file` is the file the submit names (its id) and its `uploaded_sha256`, the digest of the bytes the upload
+// sent (the files::File an upload returns), is the SHA-256 of jsonl(family, items). Otherwise no bound (`Unmodeled`,
+// subject `<endpoint>/<operation>`): a call that reads no uploaded input file, a `family` at another origin than the
+// submit's, and items that are not the uploaded file, or that do not encode. The requests are priced by `family`'s family
+// at the submit's origin. Free of side effects, and nothing is reserved.
+pricing::EndpointBound batch_worst_case_cost(const PreparedRequest& submit, const descriptor::ValidatedDescriptor& family,
+                                             const std::vector<batches::Item>& items, const files::File& input_file,
+                                             const descriptor::ModelCatalogue& catalogue, const EndpointCostOptions& options = {});
+// With the catalogue of the submit's descriptor policy.
+pricing::EndpointBound batch_worst_case_cost(const PreparedRequest& submit, const descriptor::ValidatedDescriptor& family,
+                                             const std::vector<batches::Item>& items, const files::File& input_file,
+                                             const EndpointCostOptions& options = {});
 
 // What a finished endpoint call cost by the catalogue, at the standard rates: pricing::endpoint_estimate over the facts
 // of the prepared call (PreparedRequest::endpoint_facts, which a host journals with the call) and what its result
@@ -75,4 +95,23 @@ pricing::EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const re
 pricing::EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const speech::Result& result, const descriptor::ModelCatalogue& catalogue);
 pricing::EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const transcription::Result& result, const descriptor::ModelCatalogue& catalogue);
 pricing::EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const jobs::State& result, const descriptor::ModelCatalogue& catalogue);
+// What a batch cost by the catalogue: the facts of its submit (PreparedRequest::endpoint_facts, journaled with it) and
+// its result lines, each decoded with batches::decode through `family`, the descriptor whose family encoded the requests
+// (the batch client's, or at OpenAI the Chat or Responses one that wrote the file). Each line is priced as
+// pricing::estimate prices a chat call's usage, by `family`'s family at the submit's origin under the submit's carried
+// tier, and rounded on its own, as each request's bound is; the lines are summed exactly. Each line is one EndpointLine:
+// unit `<custom_id>:nano_usd`, the entry that priced it, its estimate in nano-USD as the quantity and a rate of one
+// nano-USD per unit; `entry` is the one entry every line was priced by, empty when they were priced by several, and
+// `requested_entry` is set when any line was priced by its requested model's entry. A request the provider failed,
+// cancelled or let expire adds what its line reports (nothing, when it reports no usage), and sets `lower_bound`, since
+// whether the provider bills it is not stated. Two lines with one custom id are both priced. By the submit's billing:
+// `None` is exactly zero; any other value than `Carried` is "billing". Also unpriced: "tier" when the submit names no
+// carried tier, "origin" when `family` is at another origin, "family" when the submit carries inline requests of
+// another family than `family`'s, `<custom_id>:custom_id` for a line whose request the submit does not carry (inline
+// submits only), each name a line's estimate leaves unpriced as `<custom_id>:<name>`, and "overflow". Any unpriced
+// name leaves no total and no lines. A line's assumptions are named `<custom_id>:<rule>`, and "listed
+// rates" at a routing gateway. For lines within their requests' caps, priced by the entries the bound used, the
+// estimate is at most endpoint_worst_case_cost's (or batch_worst_case_cost's) total for one attempt.
+pricing::EndpointEstimate batch_estimate(const EndpointFacts& submit, const descriptor::ValidatedDescriptor& family,
+                                         const std::vector<batches::Line>& lines, const descriptor::ModelCatalogue& catalogue);
 } // namespace sp::runtime

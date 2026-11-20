@@ -1666,6 +1666,120 @@ void estimate_within_the_bound() {
 }  // namespace
 
 // Every case runs, and each failing one is reported, so one failure does not hide the cases after it.
+// Every member of a bound, so a failed comparison shows what the code answered.
+std::string described(const pricing::EndpointBound& b) {
+  std::string out = b.total ? "total " + std::to_string(b.total->nano_usd) : std::string("no total");
+  for (const auto& reason : b.unbounded) out += " | " + std::string(pricing::to_string(reason.by)) + " [" + reason.subject + "] " + reason.detail;
+  out += " | entry '" + b.entry + "' attempts " + std::to_string(b.attempts) + " lines";
+  for (const auto& l : b.lines) out += " " + l.unit + "=" + l.row + ":" + std::to_string(l.quantity) + "x" + std::to_string(l.rate);
+  return out;
+}
+#define SAME(actual, expected) do { const std::string got_ = (actual), want_ = (expected); \
+  if (got_ != want_) throw std::runtime_error("line " + std::to_string(__LINE__) + ":\n    got      " + got_ + "\n    expected " + want_); } while (false)
+CarriedRequest carried(std::string id, std::string model, std::optional<std::uint64_t> output, std::optional<std::uint64_t> invocations = 1,
+                       std::string tier = {}) {
+  CarriedRequest r;
+  r.custom_id = std::move(id);
+  r.model = std::move(model);
+  r.output_tokens = output;
+  r.invocations = invocations;
+  r.facts.service_tier = std::move(tier);
+  return r;
+}
+// A batch submit's facts: the requests it carries, priced under the tier `batch`.
+Call submit(std::vector<CarriedRequest> requests) {
+  Call call{facts("batches", "submit", {})};
+  call.facts.billing = descriptor::EndpointBilling::Carried;
+  call.facts.carried_tier = "batch";
+  call.facts.model.clear();
+  call.facts.carried = std::move(requests);
+  return call;
+}
+
+// A call that bills the chat requests it carries: each request bounded on its own at the carried tier and summed.
+void carried_requests() {
+  // Batch rates with a fraction of a nano-USD per token; the standard rates are dearer.
+  constexpr std::uint64_t in = 500'000'001, out = 2'000'000'003, cheap_in = 250'000'000, cheap_out = 1'000'000'000, fee = 1'500'000'000'007;
+  const auto c = catalogue(std::string(R"({"version":1,"models":[)") +
+      R"({"id":"vendor/model","input_limit":2000,"output_limit":100,"pricing":{"input":")" + usd(1'000'000'000) + R"(","output":")" + usd(4'000'000'000) +
+      R"(","input/batch":")" + usd(in) + R"(","output/batch":")" + usd(out) + R"("}},)" +
+      R"({"id":"vendor/other","input_limit":3000,"pricing":{"input/batch":")" + usd(cheap_in) + R"(","output/batch":")" + usd(cheap_out) +
+      R"(","request/batch":")" + usd(fee) + R"("}},)" +
+      R"({"id":"vendor/standard","input_limit":2000,"pricing":{"input":")" + usd(1'000'000'000) + R"(","output":")" + usd(4'000'000'000) + R"("}}]})");
+  const auto first = rounded(300 * in + 16 * out), second = rounded(3000 * cheap_in + 50 * cheap_out + fee);
+  auto call = submit({carried("b-1", "vendor/model", 16), carried("b-2", "vendor/other", 50)});
+  call.attempts = 3;
+  // One attempt: the submit is charged on acceptance. The measured input of b-1 replaces its model's input limit.
+  auto bounded = [&](const Call& at, std::vector<std::pair<std::string, std::uint64_t>> measured) {
+    pricing::EndpointWorstCaseInput input;
+    input.facts = &at.facts;
+    input.service_tier = at.tier;
+    input.attempts = at.attempts;
+    input.charge_on_accept = at.charge_on_accept;
+    input.measured_carried_input_tokens = std::move(measured);
+    return pricing::endpoint_worst_case(input, *c);
+  };
+  SAME(described(bounded(call, {{"b-1", 300}, {"elsewhere", 1}})),
+       "total " + std::to_string(first + second) + " | entry '' attempts 1 lines b-1:nano_usd=vendor/model:" + std::to_string(first) +
+       "x1000000 b-2:nano_usd=vendor/other:" + std::to_string(second) + "x1000000");
+  // Not charged on acceptance: every attempt bills the whole batch.
+  call.charge_on_accept = false;
+  CHECK(totals(bounded(call, {{"b-1", 300}}), 3 * (first + second)));
+  call.attempts = 0;
+  SAME(described(bounded(call, {})), "no total | Invocations [] the call states no attempts | entry '' attempts 0 lines");
+  call.attempts = 1;
+  call.charge_on_accept = true;
+  // One entry for every request is the bound's entry; the service tier of the input is not read for carried requests.
+  auto same_model = submit({carried("b-1", "vendor/model", 16), carried("b-2", "vendor/model", 20)});
+  same_model.tier = "flex";
+  SAME(described(bounded(same_model, {})), "total " + std::to_string(rounded(2000 * in + 16 * out) + rounded(2000 * in + 20 * out)) +
+       " | entry 'vendor/model' attempts 1 lines b-1:nano_usd=vendor/model:" + std::to_string(rounded(2000 * in + 16 * out)) +
+       "x1000000 b-2:nano_usd=vendor/model:" + std::to_string(rounded(2000 * in + 20 * out)) + "x1000000");
+
+  // Each request's reasons keep their kind, the subject prefixed by its custom id.
+  SAME(described(bounded(submit({carried("b-1", "vendor/standard", 16), carried("b-2", "vendor/model", std::nullopt), carried("b-3", "vendor/none", 5),
+                                 carried("b-4", "vendor/model", 5, std::nullopt)}), {})),
+       "no total | TierPrice [b-1:vendor/standard] the entry prices no unit under service tier 'batch' | OutputCap [b-2:] the request states no "
+       "output cap | ModelPrice [b-3:vendor/none] the catalogue has no price for the model at the origin | Invocations [b-4:] the request does not "
+       "state how many model invocations it may bill | entry '' attempts 0 lines");
+  // A request of its own service tier, a custom id twice, a measured input twice.
+  SAME(described(bounded(submit({carried("b-1", "vendor/model", 16, 1, "flex"), carried("b-2", "vendor/model", 16), carried("b-2", "vendor/model", 16),
+                                 carried("b-3", "vendor/model", 16)}), {{"b-3", 10}, {"b-3", 10}})),
+       "no total | TierPrice [b-1:vendor/model] a batch item names its own service tier | Unmodeled [b-2:] the custom id names more than one "
+       "carried request | Unmodeled [b-3:] the request's measured input tokens are stated more than once | entry '' attempts 0 lines");
+  // No carried tier, a routing gateway, and nothing carried.
+  auto untiered = submit({carried("b-1", "vendor/model", 16)});
+  untiered.facts.carried_tier.clear();
+  SAME(described(bounded(untiered, {})), "no total | TierPrice [batches/submit] the call names no tier for the requests it carries | entry '' attempts 0 lines");
+  auto routed = submit({carried("b-1", "vendor/model", 16)});
+  routed.facts.routed_gateway = true;
+  SAME(described(bounded(routed, {})),
+       "no total | RouteCeiling [batches/submit] a request a call carries at a routing gateway takes no pin from this bound | entry '' attempts 0 lines");
+  auto from_file = submit({});
+  from_file.facts.input_file = "file-abc";
+  SAME(described(bounded(from_file, {})), "no total | Unmodeled [batches/submit] the batch's requests are in an uploaded file | entry '' attempts 0 lines");
+  SAME(described(bounded(submit({}), {})), "no total | Unmodeled [batches/submit] the call states none of the requests it carries | entry '' attempts 0 lines");
+
+  // Sums past 64 bits: of the requests, and of the attempts.
+  constexpr std::uint64_t dear = 10'000'000'000'000'000'000u;  // 1e19 nano-USD per million tokens
+  const auto huge = catalogue(R"({"version":1,"models":[{"id":"vendor/dear","input_limit":1,"output_limit":1000000,"pricing":{"input/batch":"0","output/batch":")" +
+                              usd(dear) + R"("}}]})");
+  pricing::EndpointWorstCaseInput input;
+  auto one = submit({carried("b-1", "vendor/dear", 1'000'000)});
+  input.facts = &one.facts;
+  input.attempts = 1;
+  input.charge_on_accept = true;
+  CHECK(totals(pricing::endpoint_worst_case(input, *huge), 10'000'000'000'000'000'000u));
+  auto two = submit({carried("b-1", "vendor/dear", 1'000'000), carried("b-2", "vendor/dear", 1'000'000)});
+  input.facts = &two.facts;
+  SAME(described(pricing::endpoint_worst_case(input, *huge)), "no total | Overflow [] the bound does not fit 64 bits | entry '' attempts 0 lines");
+  input.facts = &one.facts;
+  input.attempts = 2;
+  input.charge_on_accept = false;
+  SAME(described(pricing::endpoint_worst_case(input, *huge)), "no total | Overflow [] the bound over the attempts does not fit 64 bits | entry '' attempts 0 lines");
+  std::cout << "case passed: carried requests\n";
+}
+
 int main() {
   const std::pair<const char*, void (*)()> cases[]{
       {"bound_covers_every_consistent_result", bound_covers_every_consistent_result}, {"estimate_within_the_bound", estimate_within_the_bound},
@@ -1675,7 +1789,7 @@ int main() {
       {"images_estimate", images_estimate}, {"estimate_rounds_once", estimate_rounds_once}, {"token_estimates", token_estimates},
       {"item_estimates", item_estimates}, {"estimate_refusals", estimate_refusals}, {"estimate_length_from_input", estimate_length_from_input},
       {"estimate_by_another_entry", estimate_by_another_entry}, {"estimate_zero_quantity", estimate_zero_quantity},
-      {"estimate_length_overflow", estimate_length_overflow}};
+      {"estimate_length_overflow", estimate_length_overflow}, {"carried_requests", carried_requests}};
   int failed = 0;
   for (const auto& [name, run] : cases) {
     try {

@@ -65,4 +65,15 @@ RequestFacts request_facts(const descriptor::ValidatedDescriptor& d, const inter
   for (const auto& tool : request.builtin_tools) facts.tools.push_back({{std::string(interactions::tool_type(tool))}, std::nullopt, {}, false});
   return facts;
 }
+CarriedRequest carried_request(const descriptor::ValidatedDescriptor& family, const FamilyRequest& request, const batches::detail::ItemCaps& caps) {
+  CarriedRequest out;
+  out.custom_id = caps.custom_id;
+  out.model = caps.model;
+  out.output_tokens = caps.max_output_tokens;
+  out.invocations = caps.model_invocation_limit;
+  out.facts = std::visit([&](const auto& typed) { return request_facts(family, typed); }, request);
+  std::string tier(family.policy()->billing_tier(family.family(), out.facts.service_tier));
+  out.facts.service_tier = std::move(tier);
+  return out;
+}
 } // namespace sp::runtime::detail
