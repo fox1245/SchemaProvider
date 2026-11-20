@@ -50,18 +50,17 @@ bool metadata_only(json::Value root) {
 Codec::Codec(const descriptor::ValidatedDescriptor& descriptor, Mode mode, Accumulator& accumulator,
              SemanticLimits limits, std::shared_ptr<const NativeContext> context)
     : descriptor_(descriptor), mode_(mode), accumulator_(accumulator), context_(std::move(context)), limits_(limits) {
-  if (descriptor_.family() != "openai.chat") fail(ErrorKind::InvalidConfig, "descriptor family does not match Chat codec");
+  if (descriptor_.family() != "openai.chat") fail(ErrorKind::InvalidConfig, reason::chat::descriptor_family_mismatch);
   if (context_ && !context_->matches_descriptor(descriptor_))
-    fail(ErrorKind::InvalidConfig, "Chat request context does not match descriptor");
+    fail(ErrorKind::InvalidConfig, reason::chat::context_descriptor_mismatch);
   served::observe(descriptor_, accumulator_, context_, {}, false);
 }
 bool Codec::emit(const Event& e) {
   return accumulator_.accept(e, buffered_failure_ ? &*buffered_failure_ : nullptr);
 }
-bool Codec::fail(ErrorKind kind, std::string message) {
+bool Codec::fail(ErrorKind kind, const reason::Reason& message) {
   if (buffered_failure_ && !closed_) return false;
-  Error error{kind, std::move(message)};
-  error.reason = reason::code(reason::Source::Chat, error.safe_message);
+  Error error = reason::error(kind, message);
   emit(Fail{std::move(error)}); return false;
 }
 void Codec::unknown(json::Value v, std::initializer_list<std::string_view> known) {
@@ -69,7 +68,7 @@ void Codec::unknown(json::Value v, std::initializer_list<std::string_view> known
 }
 bool Codec::buffered(std::string_view body, Close close) {
   if (closed_ || accumulator_.terminal()) return false;
-  if (mode_ != Mode::Buffered || body_seen_) return fail(ErrorKind::Misuse, "unexpected buffered document");
+  if (mode_ != Mode::Buffered || body_seen_) return fail(ErrorKind::Misuse, reason::chat::buffered_unexpected);
   body_seen_ = true;
   if (!close.normal) buffered_failure_ = Error{close.error, "abnormal response close"};
   const bool decoded = document(body, {}, false);
@@ -78,15 +77,15 @@ bool Codec::buffered(std::string_view body, Close close) {
 }
 bool Codec::frame(std::string_view event, std::string_view data) {
   if (closed_ || accumulator_.terminal()) return false;
-  if (mode_ != Mode::Sse) return fail(ErrorKind::Misuse, "unexpected stream frame");
+  if (mode_ != Mode::Sse) return fail(ErrorKind::Misuse, reason::chat::stream_frame_unexpected);
   if (data == "[DONE]" && event != "error") {
-    if (!event.empty() && event != "message") return fail(ErrorKind::Unsupported, "unknown stream event");
-    if (done_) return fail(ErrorKind::ProtocolCorrupt, "duplicate DONE");
+    if (!event.empty() && event != "message") return fail(ErrorKind::Unsupported, reason::chat::stream_event_unknown);
+    if (done_) return fail(ErrorKind::ProtocolCorrupt, reason::chat::done_duplicate);
     if (!stopped_) {
       // Audio streams may end with final usage and an expiry update instead of a finish reason.
       // Neither a heartbeat, usage alone nor an unfinished audio prefix supplies that evidence.
       if (!audio_usage_tail_ || !audio_.expires_at || !tools_.empty())
-        return fail(ErrorKind::ProtocolCorrupt, "DONE without family terminal evidence");
+        return fail(ErrorKind::ProtocolCorrupt, reason::chat::done_without_terminal);
       if (!finish_reasoning_details() || !finish_audio()) return false;
       if (!emit(Stop{{StopKind::EndTurn, "derived:audio_usage+audio.expires_at+DONE"}})) return false;
       stopped_ = true;
@@ -99,21 +98,21 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
   const bool named_error = streaming && event == "error";
   const bool unknown_event = streaming && !event.empty() && event != "message" && !named_error;
   if (bytes.size() > limits_.max_content_bytes - std::min(input_bytes_, limits_.max_content_bytes)) {
-    if (unknown_event) return fail(ErrorKind::Unsupported, "unknown stream event");
-    return fail(named_error ? ErrorKind::RemoteFailure : ErrorKind::ResourceLimit, named_error ? "remote error event" : "response byte limit");
+    if (unknown_event) return fail(ErrorKind::Unsupported, reason::chat::stream_event_unknown);
+    return fail(named_error ? ErrorKind::RemoteFailure : ErrorKind::ResourceLimit, named_error ? reason::chat::remote_error_event : reason::chat::response_byte_limit);
   }
   input_bytes_ += bytes.size();
   auto parsed = json::parse(bytes, {limits_.max_content_bytes, limits_.max_json_depth});
   if (auto* error = std::get_if<json::ParseError>(&parsed)) {
-    if (unknown_event) return fail(ErrorKind::Unsupported, "unknown stream event");
+    if (unknown_event) return fail(ErrorKind::Unsupported, reason::chat::stream_event_unknown);
     return fail(named_error ? ErrorKind::RemoteFailure : error->code == json::ParseCode::SizeExceeded || error->code == json::ParseCode::DepthExceeded ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt,
-                named_error ? "remote error event" : "invalid response JSON");
+                named_error ? reason::chat::remote_error_event : reason::chat::response_json_invalid);
   }
   auto wire = std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
   const auto root = wire->root();
   if (!root.is_object()) {
-    if (unknown_event) return fail(ErrorKind::Unsupported, "unknown stream event");
-    return fail(named_error ? ErrorKind::RemoteFailure : ErrorKind::ProtocolCorrupt, named_error ? "remote error event" : "response must be object");
+    if (unknown_event) return fail(ErrorKind::Unsupported, reason::chat::stream_event_unknown);
+    return fail(named_error ? ErrorKind::RemoteFailure : ErrorKind::ProtocolCorrupt, named_error ? reason::chat::remote_error_event : reason::chat::response_object_required);
   }
   const auto object = root.get("object");
   std::string wire_type = named_error ? std::string(event)
@@ -121,27 +120,28 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
       : !event.empty() ? std::string(event)
       : streaming ? "chat.completion.chunk" : "chat.completion";
   if (named_error || unknown_event) {
-    const Error classified{named_error ? ErrorKind::RemoteFailure : ErrorKind::Unsupported,
-                           named_error ? "remote error event" : "unknown stream event"};
+    const auto& refusal = named_error ? reason::chat::remote_error_event : reason::chat::stream_event_unknown;
+    // The classification takes precedence over a failure to retain the document, and carries no code there.
+    const Error classified{named_error ? ErrorKind::RemoteFailure : ErrorKind::Unsupported, std::string(refusal.message)};
     if (!accumulator_.accept(RawWire{std::move(wire_type), wire}, &classified)) return false;
-    return fail(classified.kind, classified.safe_message);
+    return fail(classified.kind, refusal);
   }
   if (!emit(RawWire{std::move(wire_type), wire})) return false;
-  if (root.get("error").valid()) return fail(ErrorKind::RemoteFailure, "remote error property");
-  if (done_) return fail(ErrorKind::ProtocolCorrupt, "frame after DONE");
-  for (auto name : {"id", "model", "object"}) if (!root.get(name).is_string()) return fail(ErrorKind::ProtocolCorrupt, "required response metadata must be string");
-  if (root.get("object").as_string() != (streaming ? "chat.completion.chunk" : "chat.completion")) return fail(ErrorKind::Unsupported, "unknown response object tag");
+  if (root.get("error").valid()) return fail(ErrorKind::RemoteFailure, reason::chat::remote_error_property);
+  if (done_) return fail(ErrorKind::ProtocolCorrupt, reason::chat::done_frame_after);
+  for (auto name : {"id", "model", "object"}) if (!root.get(name).is_string()) return fail(ErrorKind::ProtocolCorrupt, reason::chat::metadata_string_required);
+  if (root.get("object").as_string() != (streaming ? "chat.completion.chunk" : "chat.completion")) return fail(ErrorKind::Unsupported, reason::chat::object_tag_unknown);
   auto created = root.get("created");
-  if (!unsigned_count(created)) return fail(ErrorKind::ProtocolCorrupt, "creation counter required");
+  if (!unsigned_count(created)) return fail(ErrorKind::ProtocolCorrupt, reason::chat::created_required);
   // Stream identity is id + model. Some OpenAI-compatible servers stamp each chunk with
   // the current time, so created may repeat or advance between chunks but never go back.
   if (begun_ && (generation_ != root.get("id").as_string() || model_ != root.get("model").as_string()))
-    return fail(ErrorKind::ProtocolCorrupt, "inconsistent response identity");
-  if (begun_ && uint_value(created) < created_) return fail(ErrorKind::ProtocolCorrupt, "creation counter decreased");
+    return fail(ErrorKind::ProtocolCorrupt, reason::chat::identity_changed);
+  if (begun_ && uint_value(created) < created_) return fail(ErrorKind::ProtocolCorrupt, reason::chat::created_decreased);
   created_ = uint_value(created);
   // A gateway names the serving upstream on every chunk; the first usable name is kept and another one is a different stream.
   switch (served::observe_upstream(descriptor_, root, upstream_, accumulator_)) {
-    case served::UpstreamSeen::Conflict: return fail(ErrorKind::ProtocolCorrupt, "inconsistent response identity");
+    case served::UpstreamSeen::Conflict: return fail(ErrorKind::ProtocolCorrupt, reason::chat::identity_changed);
     case served::UpstreamSeen::Unusable: ++diagnostics_.unknown_properties; break;
     case served::UpstreamSeen::Fine: break;
   }
@@ -152,9 +152,9 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
   const bool omitted_choices = streaming && !choices.valid() &&
       (root.get("usage").valid() || root.get("obfuscation").is_string());
   if (!choices.is_array() && !omitted_choices)
-    return fail(ErrorKind::ProtocolCorrupt, "choices must be array");
+    return fail(ErrorKind::ProtocolCorrupt, reason::chat::choices_array_required);
   const auto choice_count = choices.is_array() ? choices.size() : 0;
-  if (choice_count > 1) return fail(ErrorKind::Unsupported, "multiple candidates unsupported");
+  if (choice_count > 1) return fail(ErrorKind::Unsupported, reason::chat::choices_multiple_unsupported);
   if (!begun_) {
     generation_ = root.get("id").as_string();
     model_ = root.get("model").as_string();
@@ -167,26 +167,26 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
   auto usage_value = root;
   for (const auto& key : descriptor_.usage_path()) {
     if (!usage_value.valid()) break;
-    if (!usage_value.is_object()) return fail(ErrorKind::ProtocolCorrupt, "usage path crosses non-object");
+    if (!usage_value.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::chat::usage_path_invalid);
     usage_value = usage_value.get(key);
   }
   if (choice_count == 0) {
     // Omitted or empty choices are genuine metadata heartbeats, not missing semantic deltas.
     if (!streaming || ((!choices.valid() || !usage_value.valid() || usage_value.is_null()) && !metadata_only(root)))
-      return fail(ErrorKind::ProtocolCorrupt, "empty choices without usage or metadata heartbeat");
+      return fail(ErrorKind::ProtocolCorrupt, reason::chat::choices_empty_unexplained);
   } else {
     const bool terminal_tail = stopped_ || audio_usage_tail_;
     auto choice = choices.at(0);
-    if (!choice.is_object()) return fail(ErrorKind::ProtocolCorrupt, "choice must be object");
+    if (!choice.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::chat::choice_object_required);
     unknown(choice, {"index", "message", "delta", "finish_reason", "logprobs"});
     if (auto opposite = choice.get(streaming ? "message" : "delta"); opposite.valid())
-      return fail(opposite.is_object() ? ErrorKind::Unsupported : ErrorKind::ProtocolCorrupt, "choice has wrong response shape");
+      return fail(opposite.is_object() ? ErrorKind::Unsupported : ErrorKind::ProtocolCorrupt, reason::chat::choice_shape_invalid);
     auto index = choice.get("index");
-    if (!unsigned_count(index)) return fail(ErrorKind::ProtocolCorrupt, "choice index required");
-    if (uint_value(index) != 0) return fail(ErrorKind::Unsupported, "nonzero candidate index");
+    if (!unsigned_count(index)) return fail(ErrorKind::ProtocolCorrupt, reason::chat::choice_index_required);
+    if (uint_value(index) != 0) return fail(ErrorKind::Unsupported, reason::chat::choice_index_unsupported);
     if (auto lp = choice.get("logprobs"); lp.valid() && !lp.is_null()) {
-      if (!lp.is_object()) return fail(ErrorKind::ProtocolCorrupt, "invalid logprobs");
-      return fail(ErrorKind::Unsupported, "logprobs outside first Chat cell");
+      if (!lp.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::chat::logprobs_invalid);
+      return fail(ErrorKind::Unsupported, reason::chat::logprobs_placement_unsupported);
     }
     auto reason = choice.get("finish_reason");
     const auto delta = choice.get(streaming ? "delta" : "message");
@@ -204,14 +204,14 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
     const bool omitted_open_reason = !reason.valid() && streaming && !terminal_tail;
     if ((!reason.valid() && !omitted_expiry_reason && !omitted_open_reason) ||
         (reason.valid() && !reason.is_null() && !reason.is_string()))
-      return fail(ErrorKind::ProtocolCorrupt, "invalid finish reason");
+      return fail(ErrorKind::ProtocolCorrupt, reason::chat::finish_reason_invalid);
     // A failure-class word (no stop table may list one) fails the call: no stop is emitted and nothing of the choice is
     // sealed, so no tool call of it is executable.
     const auto failure_word = reason.is_string() ? descriptor::failure_stop_class(reason.as_string()) : std::nullopt;
     const auto failure_reason = [&] {
-      if (*failure_word == descriptor::FailureStop::Cancelled) return fail(ErrorKind::Cancelled, "cancelled finish reason");
-      if (*failure_word == descriptor::FailureStop::Incomplete) return fail(ErrorKind::Unsupported, "unsupported finish reason");
-      return fail(ErrorKind::RemoteFailure, "remote failure terminal");
+      if (*failure_word == descriptor::FailureStop::Cancelled) return fail(ErrorKind::Cancelled, reason::chat::finish_reason_cancelled);
+      if (*failure_word == descriptor::FailureStop::Incomplete) return fail(ErrorKind::Unsupported, reason::chat::finish_reason_unsupported);
+      return fail(ErrorKind::RemoteFailure, reason::chat::remote_failure_terminal);
     };
     if (terminal_tail) {
       if (failure_word) return failure_reason();
@@ -219,29 +219,29 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
       const bool same_reason = reason.is_string() && !finish_reason_.empty() && reason.as_string() == finish_reason_;
       if (!streaming || !delta.is_object() || (!usage_value.is_object() && !expiry_tail) ||
           (!same_reason && !((reason.is_null() || omitted_expiry_reason) && expiry_tail)))
-        return fail(ErrorKind::ProtocolCorrupt, "contradictory terminal usage tail");
+        return fail(ErrorKind::ProtocolCorrupt, reason::chat::terminal_tail_contradiction);
       // Do not call item(): empty content could create a new semantic part.
       for (auto member : delta.members()) {
         if (member.key == "role") {
           if (!member.value.is_string() || member.value.as_string() != "assistant")
-            return fail(ErrorKind::ProtocolCorrupt, "role changed after finish reason");
+            return fail(ErrorKind::ProtocolCorrupt, reason::chat::finish_reason_role_changed);
           continue;
         }
         if (member.key == "audio") {
           // Expiry remains metadata after final usage with a null or omitted finish reason.
-          if (!member.value.is_object()) return fail(ErrorKind::ProtocolCorrupt, "data after finish reason");
+          if (!member.value.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::chat::finish_reason_data_after);
           for (auto field : member.value.members())
-            if (field.key != "expires_at") return fail(ErrorKind::ProtocolCorrupt, "data after finish reason");
+            if (field.key != "expires_at") return fail(ErrorKind::ProtocolCorrupt, reason::chat::finish_reason_data_after);
           const auto expires = member.value.get("expires_at");
           if (!audio_.seen || !unsigned_count(expires))
-            return fail(ErrorKind::ProtocolCorrupt, "invalid final audio expiry");
+            return fail(ErrorKind::ProtocolCorrupt, reason::chat::audio_expiry_invalid);
           audio_.expires_at = uint_value(expires);
           continue;
         }
         const bool text_channel = member.key == "content" || member.key == "refusal" ||
             member.key == "reasoning" || member.key == "reasoning_content";
         if (!text_channel || (!member.value.is_null() && (!member.value.is_string() || !member.value.as_string().empty())))
-          return fail(ErrorKind::ProtocolCorrupt, "data after finish reason");
+          return fail(ErrorKind::ProtocolCorrupt, reason::chat::finish_reason_data_after);
       }
     } else if (!streaming && failure_word) {
       // A buffered choice seals its content as it reads it, so the word is checked before it. The body's usage is still
@@ -251,7 +251,7 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
       return failure_reason();
     } else if (!item(delta, streaming)) return false;
     if (reason.is_string() && !terminal_tail) {
-      if (reason.as_string().empty()) return fail(ErrorKind::ProtocolCorrupt, "empty finish reason");
+      if (reason.as_string().empty()) return fail(ErrorKind::ProtocolCorrupt, reason::chat::finish_reason_empty);
       if (failure_word) return failure_reason();
       const auto kind = table_stop(descriptor_, reason.as_string());
       if (streaming && (!finish_reasoning_details() || !finish_audio())) return false;
@@ -273,26 +273,26 @@ bool Codec::document(std::string_view bytes, std::string_view event, bool stream
   return true;
 }
 bool Codec::item(json::Value value, bool streaming) {
-  if (!value.is_object()) return fail(ErrorKind::ProtocolCorrupt, "message or delta must be object");
+  if (!value.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::chat::delta_object_required);
   unknown(value, {"role", "content", "refusal", "tool_calls", "function_call", "annotations", "audio", "images", "reasoning", "reasoning_content", "reasoning_details"});
   auto role = value.get("role");
-  if ((!streaming && !role.valid()) || (role.valid() && (!role.is_string() || role.as_string() != "assistant"))) return fail(ErrorKind::ProtocolCorrupt, "assistant role required");
+  if ((!streaming && !role.valid()) || (role.valid() && (!role.is_string() || role.as_string() != "assistant"))) return fail(ErrorKind::ProtocolCorrupt, reason::chat::role_assistant_required);
   if (auto legacy = value.get("function_call"); legacy.valid() && !legacy.is_null())
-    return fail(legacy.is_object() ? ErrorKind::Unsupported : ErrorKind::ProtocolCorrupt, "unsupported known message feature");
+    return fail(legacy.is_object() ? ErrorKind::Unsupported : ErrorKind::ProtocolCorrupt, reason::chat::message_feature_unsupported);
   if (!annotations(value.get("annotations"))) return false;
   auto reasoning = value.get("reasoning"), reasoning_content = value.get("reasoning_content");
   for (auto fragment : {reasoning, reasoning_content})
     if (fragment.valid() && !fragment.is_null() && !fragment.is_string())
-      return fail(ErrorKind::ProtocolCorrupt, "reasoning must be string or null");
+      return fail(ErrorKind::ProtocolCorrupt, reason::chat::reasoning_type_invalid);
   if (reasoning.is_string() && reasoning_content.is_string() && !json::equal(reasoning, reasoning_content))
-    return fail(ErrorKind::Unsupported, "contradictory reasoning aliases");
+    return fail(ErrorKind::Unsupported, reason::chat::reasoning_alias_contradiction);
   if (!text(reasoning_content.is_string() ? reasoning_content : reasoning, PartKind::Thinking, streaming) ||
       !reasoning_details(value.get("reasoning_details"), streaming)) return false;
   auto content = value.get("content");
-  if (!streaming && !content.valid()) return fail(ErrorKind::ProtocolCorrupt, "buffered content required");
+  if (!streaming && !content.valid()) return fail(ErrorKind::ProtocolCorrupt, reason::chat::message_content_required);
   if (!this->content(content, streaming) || !text(value.get("refusal"), PartKind::Refusal, streaming)) return false;
   if (auto calls = value.get("tool_calls"); calls.valid()) {
-    if (!calls.is_array()) return fail(ErrorKind::ProtocolCorrupt, "tool_calls must be array");
+    if (!calls.is_array()) return fail(ErrorKind::ProtocolCorrupt, reason::chat::tool_calls_array_required);
     uint64_t pos = 0;
     for (auto call : calls.elements()) if (!tool(call, streaming, pos++)) return false;
   }
@@ -301,33 +301,33 @@ bool Codec::item(json::Value value, bool streaming) {
 }
 bool Codec::annotations(json::Value value) {
   if (!value.valid()) return true;
-  if (!value.is_array()) return fail(ErrorKind::ProtocolCorrupt, "annotations must be array");
-  if (value.size() > limits_.max_parts) return fail(ErrorKind::ResourceLimit, "annotation count limit");
+  if (!value.is_array()) return fail(ErrorKind::ProtocolCorrupt, reason::chat::annotations_array_required);
+  if (value.size() > limits_.max_parts) return fail(ErrorKind::ResourceLimit, reason::chat::annotations_count_limit);
   // These remain observations in the original owned RawWire document. They are
   // not semantic parts, imported file authority, or synthesized citation offsets.
   for (auto annotation : value.elements()) {
     if (!annotation.is_object() || !annotation.get("type").is_string())
-      return fail(ErrorKind::ProtocolCorrupt, "annotation requires a type");
+      return fail(ErrorKind::ProtocolCorrupt, reason::chat::annotation_type_required);
     const auto type = annotation.get("type").as_string();
     if (type == "file") {
       if (!descriptor::contains(descriptor_.family_policy().openrouter_origins, descriptor_.base_url()))
-        return fail(ErrorKind::Unsupported, "file annotations require declared OpenRouter origin");
+        return fail(ErrorKind::Unsupported, reason::chat::annotation_file_origin_required);
       const auto file = annotation.get("file");
       if (!file.is_object() || !file.get("hash").is_string() ||
           (file.get("name").valid() && !file.get("name").is_string()) || !file.get("content").is_array())
-        return fail(ErrorKind::ProtocolCorrupt, "invalid file annotation");
+        return fail(ErrorKind::ProtocolCorrupt, reason::chat::annotation_file_invalid);
       if (file.get("content").size() > limits_.max_parts)
-        return fail(ErrorKind::ResourceLimit, "file annotation content count limit");
+        return fail(ErrorKind::ResourceLimit, reason::chat::annotation_file_content_limit);
       for (auto part : file.get("content").elements()) {
         if (!part.is_object() || !part.get("type").is_string())
-          return fail(ErrorKind::ProtocolCorrupt, "invalid parsed file part");
+          return fail(ErrorKind::ProtocolCorrupt, reason::chat::annotation_file_part_invalid);
         const auto kind = part.get("type").as_string();
         if (kind == "text") {
-          if (!part.get("text").is_string()) return fail(ErrorKind::ProtocolCorrupt, "invalid parsed file text");
+          if (!part.get("text").is_string()) return fail(ErrorKind::ProtocolCorrupt, reason::chat::annotation_file_text_invalid);
         } else if (kind == "image_url") {
           if (!part.get("image_url").is_object() || !part.get("image_url").get("url").is_string())
-            return fail(ErrorKind::ProtocolCorrupt, "invalid parsed file image");
-        } else return fail(ErrorKind::Unsupported, "unsupported parsed file part type");
+            return fail(ErrorKind::ProtocolCorrupt, reason::chat::annotation_file_image_invalid);
+        } else return fail(ErrorKind::Unsupported, reason::chat::annotation_file_part_unsupported);
       }
     } else if (type == "url_citation") {
       const auto citation = annotation.get("url_citation");
@@ -335,14 +335,14 @@ bool Codec::annotations(json::Value value) {
           !unsigned_count(citation.get("start_index")) || !unsigned_count(citation.get("end_index")) ||
           uint_value(citation.get("start_index")) > uint_value(citation.get("end_index")) ||
           (citation.get("content").valid() && !citation.get("content").is_string()))
-        return fail(ErrorKind::ProtocolCorrupt, "invalid URL citation annotation");
+        return fail(ErrorKind::ProtocolCorrupt, reason::chat::annotation_url_citation_invalid);
       // A stream may repeat an annotation; each distinct one becomes a citation of the text.
       const auto bytes = annotation.dump();
       if (citation_bytes_ + bytes.size() > limits_.max_content_bytes || citations_.size() >= limits_.max_parts)
-        return fail(ErrorKind::ResourceLimit, "annotation count limit");
+        return fail(ErrorKind::ResourceLimit, reason::chat::annotations_count_limit);
       if (std::none_of(citations_.begin(), citations_.end(), [&](const Citation& seen) { return json::equal(seen.raw->root(), annotation); })) {
         auto parsed = json::parse(bytes);
-        if (!std::holds_alternative<json::Document>(parsed)) return fail(ErrorKind::ProtocolCorrupt, "invalid URL citation annotation");
+        if (!std::holds_alternative<json::Document>(parsed)) return fail(ErrorKind::ProtocolCorrupt, reason::chat::annotation_url_citation_invalid);
         Citation cited;
         cited.kind = "url_citation";
         cited.url = citation.get("url").as_string();
@@ -353,7 +353,7 @@ bool Codec::annotations(json::Value value) {
         citation_bytes_ += bytes.size();
         citations_.push_back(std::move(cited));
       }
-    } else return fail(ErrorKind::Unsupported, "unsupported annotation type");
+    } else return fail(ErrorKind::Unsupported, reason::chat::annotation_type_unsupported);
   }
   return true;
 }
@@ -379,25 +379,25 @@ bool Codec::content(json::Value value, bool streaming) {
     return structured_text(value.as_string(), streaming);
   }
   if (!descriptor::contains(descriptor_.family_policy().openrouter_origins, descriptor_.base_url()))
-    return fail(ErrorKind::Unsupported, "assistant content arrays require declared OpenRouter origin");
+    return fail(ErrorKind::Unsupported, reason::chat::content_array_origin_required);
   structured_content_ = true;
   for (auto part : value.elements()) {
     if (!part.is_object() || !part.get("type").is_string())
-      return fail(ErrorKind::ProtocolCorrupt, "assistant content part requires a type");
+      return fail(ErrorKind::ProtocolCorrupt, reason::chat::content_part_type_required);
     const auto type = part.get("type").as_string();
     if (type == "text") {
-      if (!part.get("text").is_string()) return fail(ErrorKind::ProtocolCorrupt, "content text must be string");
+      if (!part.get("text").is_string()) return fail(ErrorKind::ProtocolCorrupt, reason::chat::content_text_string_required);
       unknown(part, {"type", "text", "cache_control", "prompt_cache_breakpoint"});
       if (!structured_text(part.get("text").as_string(), streaming)) return false;
     } else if (type == "image_url") {
       if (!image(part, false)) return false;
-    } else return fail(ErrorKind::Unsupported, "unsupported assistant content part type");
+    } else return fail(ErrorKind::Unsupported, reason::chat::content_part_type_unsupported);
   }
   return true;
 }
 bool Codec::text(json::Value value, PartKind kind, bool streaming) {
   if (!value.valid() || value.is_null()) return true;
-  if (!value.is_string()) return fail(ErrorKind::ProtocolCorrupt, "text channels must be strings or null");
+  if (!value.is_string()) return fail(ErrorKind::ProtocolCorrupt, reason::chat::text_type_invalid);
   auto& id = kind == PartKind::Text ? text_ : kind == PartKind::Thinking ? thinking_ : refusal_;
   if (!id) {
     id = LocalId{next_part_++};
@@ -410,11 +410,11 @@ bool Codec::text(json::Value value, PartKind kind, bool streaming) {
 }
 bool Codec::reasoning_details(json::Value value, bool streaming) {
   if (!value.valid() || value.is_null()) return true;
-  if (!value.is_array()) return fail(ErrorKind::ProtocolCorrupt, "reasoning_details must be array");
+  if (!value.is_array()) return fail(ErrorKind::ProtocolCorrupt, reason::chat::reasoning_details_array_required);
   if (!descriptor::contains(descriptor_.family_policy().openrouter_origins, descriptor_.base_url()))
-    return fail(ErrorKind::Unsupported, "reasoning_details requires declared OpenRouter origin");
+    return fail(ErrorKind::Unsupported, reason::chat::reasoning_details_origin_required);
   for (auto detail : value.elements())
-    if (!detail.is_object()) return fail(ErrorKind::ProtocolCorrupt, "reasoning detail must be object");
+    if (!detail.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::chat::reasoning_detail_object_required);
   if (!streaming) return emit_reasoning_details(value);
   // A streamed frame holds fragments of entries, not parts of the answer. They merge into the entries a buffered
   // response carries, and the one part holding them is emitted with the finish reason. The detail values alias the
@@ -426,26 +426,26 @@ bool Codec::reasoning_details(json::Value value, bool streaming) {
   for (auto detail : value.elements()) {
     const auto detail_type = detail.get("type");
     if (!detail_type.is_string() || detail_type.as_string().empty())
-      return fail(ErrorKind::ProtocolCorrupt, "reasoning detail requires a type");
+      return fail(ErrorKind::ProtocolCorrupt, reason::chat::reasoning_detail_type_required);
     const auto name = detail_type.as_string();
     const auto identity = detail.get("id"), index = detail.get("index"), format = detail.get("format");
     if ((identity.valid() && !identity.is_null() && !identity.is_string()) ||
         (index.valid() && !unsigned_count(index)) ||
         (format.valid() && !format.is_null() && !format.is_string()))
-      return fail(ErrorKind::ProtocolCorrupt, "invalid reasoning detail identity");
+      return fail(ErrorKind::ProtocolCorrupt, reason::chat::reasoning_detail_identity_invalid);
     const std::string_view key = name == "reasoning.text" ? "text" : name == "reasoning.summary" ? "summary" : "";
     if (key.empty()) {
       if (name == "reasoning.encrypted" && !detail.get("data").is_string())
-        return fail(ErrorKind::ProtocolCorrupt, "encrypted reasoning requires a complete opaque blob");
+        return fail(ErrorKind::ProtocolCorrupt, reason::chat::reasoning_detail_encrypted_incomplete);
       if (reasoning_bindings_.size() >= limits_.max_parts)
-        return fail(ErrorKind::ResourceLimit, "reasoning detail count limit");
+        return fail(ErrorKind::ResourceLimit, reason::chat::reasoning_detail_count_limit);
       reasoning_bindings_.push_back({detail, {}, {}, {}});
       continue;
     }
     const auto fragment = detail.get(key), signature = detail.get("signature");
     if ((fragment.valid() && !fragment.is_null() && !fragment.is_string()) ||
         (signature.valid() && !signature.is_null() && !signature.is_string()))
-      return fail(ErrorKind::ProtocolCorrupt, "invalid reasoning text or signature fragment");
+      return fail(ErrorKind::ProtocolCorrupt, reason::chat::reasoning_detail_fragment_invalid);
     std::optional<size_t> binding_index;
     if (index.valid()) {
       const auto found = reasoning_indices_.find(uint_value(index));
@@ -466,7 +466,7 @@ bool Codec::reasoning_details(json::Value value, bool streaming) {
     }
     if (!binding_index) {
       if (reasoning_bindings_.size() >= limits_.max_parts)
-        return fail(ErrorKind::ResourceLimit, "reasoning detail count limit");
+        return fail(ErrorKind::ResourceLimit, reason::chat::reasoning_detail_count_limit);
       binding_index = reasoning_bindings_.size();
       reasoning_bindings_.push_back({detail, {}, key, {}});
     }
@@ -481,13 +481,13 @@ bool Codec::reasoning_details(json::Value value, bool streaming) {
         found->second = member.value;
       } else if (!json::equal(found->second, member.value) &&
                  !(member.value.is_string() && member.value.as_string().empty())) {
-        return fail(ErrorKind::ProtocolCorrupt, "contradictory reasoning detail metadata");
+        return fail(ErrorKind::ProtocolCorrupt, reason::chat::reasoning_detail_metadata_contradiction);
       }
     }
     if (fragment.is_string()) {
       const auto bytes = fragment.as_string();
       if (bytes.size() > limits_.max_content_bytes - std::min(binding.payload.size(), limits_.max_content_bytes))
-        return fail(ErrorKind::ResourceLimit, "reasoning payload limit");
+        return fail(ErrorKind::ResourceLimit, reason::chat::reasoning_detail_payload_limit);
       binding.payload.append(bytes);
     }
   }
@@ -507,14 +507,14 @@ bool Codec::emit_reasoning_details(json::Value details) {
   };
   json::BoundedWriter measure(limits);
   write(measure);
-  if (!measure.ok()) return fail(ErrorKind::ResourceLimit, "reasoning details metadata limit");
+  if (!measure.ok()) return fail(ErrorKind::ResourceLimit, reason::chat::reasoning_details_metadata_limit);
   std::string bytes;
   bytes.reserve(measure.size());
   json::BoundedWriter output(limits, &bytes);
   write(output);
   auto parsed = json::parse(bytes, limits);
   auto* document = std::get_if<json::Document>(&parsed);
-  if (!document) return fail(ErrorKind::ResourceLimit, "reasoning details metadata cannot be retained");
+  if (!document) return fail(ErrorKind::ResourceLimit, reason::chat::reasoning_details_metadata_unretainable);
   return emit_reasoning_part(std::make_shared<const json::Document>(std::move(*document)));
 }
 bool Codec::finish_reasoning_details() {
@@ -544,36 +544,36 @@ bool Codec::finish_reasoning_details() {
   };
   json::BoundedWriter measure(limits);
   write(measure);
-  if (!measure.ok()) return fail(ErrorKind::ResourceLimit, "completed reasoning metadata limit");
+  if (!measure.ok()) return fail(ErrorKind::ResourceLimit, reason::chat::reasoning_detail_completed_metadata_limit);
   std::string bytes;
   bytes.reserve(measure.size());
   json::BoundedWriter output(limits, &bytes);
   write(output);
   auto parsed = json::parse(bytes, limits);
   auto* document = std::get_if<json::Document>(&parsed);
-  if (!document) return fail(ErrorKind::ResourceLimit, "completed reasoning metadata cannot be retained");
+  if (!document) return fail(ErrorKind::ResourceLimit, reason::chat::reasoning_detail_completed_unretainable);
   reasoning_bindings_.clear();
   reasoning_indices_.clear();
   return emit_reasoning_part(std::make_shared<const json::Document>(std::move(*document)));
 }
 bool Codec::tool(json::Value value, bool streaming, uint64_t position) {
-  if (!value.is_object()) return fail(ErrorKind::ProtocolCorrupt, "tool call must be object");
+  if (!value.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::chat::tool_call_object_required);
   unknown(value, {"index", "id", "type", "function"});
   auto index = value.get("index"), id = value.get("id"), type = value.get("type"), function = value.get("function");
-  if (index.valid() && !unsigned_count(index)) return fail(ErrorKind::ProtocolCorrupt, "invalid tool index");
-  if (id.valid() && (!id.is_string() || id.as_string().empty())) return fail(ErrorKind::ProtocolCorrupt, "invalid tool id");
-  if ((!streaming && !type.valid()) || (type.valid() && !type.is_string())) return fail(ErrorKind::ProtocolCorrupt, "invalid tool type");
-  if (type.valid() && type.as_string() != "function") return fail(ErrorKind::Unsupported, "unsupported tool type");
-  if ((!streaming && !function.valid()) || (function.valid() && !function.is_object())) return fail(ErrorKind::ProtocolCorrupt, "invalid tool function");
+  if (index.valid() && !unsigned_count(index)) return fail(ErrorKind::ProtocolCorrupt, reason::chat::tool_call_index_invalid);
+  if (id.valid() && (!id.is_string() || id.as_string().empty())) return fail(ErrorKind::ProtocolCorrupt, reason::chat::tool_call_id_invalid);
+  if ((!streaming && !type.valid()) || (type.valid() && !type.is_string())) return fail(ErrorKind::ProtocolCorrupt, reason::chat::tool_call_type_invalid);
+  if (type.valid() && type.as_string() != "function") return fail(ErrorKind::Unsupported, reason::chat::tool_call_type_unsupported);
+  if ((!streaming && !function.valid()) || (function.valid() && !function.is_object())) return fail(ErrorKind::ProtocolCorrupt, reason::chat::tool_call_function_invalid);
   if (function.valid()) unknown(function, {"name", "arguments"});
   auto name = function.get("name"), args = function.get("arguments");
-  if (name.valid() && (!name.is_string() || name.as_string().empty())) return fail(ErrorKind::ProtocolCorrupt, "invalid function name");
-  if ((!streaming && !args.valid()) || (args.valid() && !args.is_string())) return fail(ErrorKind::ProtocolCorrupt, "invalid arguments fragment");
+  if (name.valid() && (!name.is_string() || name.as_string().empty())) return fail(ErrorKind::ProtocolCorrupt, reason::chat::tool_call_name_invalid);
+  if ((!streaming && !args.valid()) || (args.valid() && !args.is_string())) return fail(ErrorKind::ProtocolCorrupt, reason::chat::tool_call_arguments_invalid);
   std::optional<size_t> found;
   const bool indexed = !streaming || index.valid();
   const uint64_t wire_index = index.valid() ? uint_value(index) : position;
-  if (indexed && wire_index >= limits_.max_parts) return fail(ErrorKind::ResourceLimit, "tool index exceeds part limit");
-  if (indexed && indexed_tools_ == false) return fail(ErrorKind::ProtocolCorrupt, "mixed tool ordering is ambiguous");
+  if (indexed && wire_index >= limits_.max_parts) return fail(ErrorKind::ResourceLimit, reason::chat::tool_call_index_limit);
+  if (indexed && indexed_tools_ == false) return fail(ErrorKind::ProtocolCorrupt, reason::chat::tool_call_ordering_ambiguous);
   if (!streaming || index.valid()) {
     auto it = indices_.find(wire_index);
     if (it != indices_.end()) found = it->second;
@@ -581,14 +581,14 @@ bool Codec::tool(json::Value value, bool streaming, uint64_t position) {
   } else if (id.valid()) {
     for (size_t i = 0; i < tools_.size(); ++i) if (tools_[i].id == id.as_string()) found = i;
   } else {
-    if (tools_.size() != 1) return fail(ErrorKind::ProtocolCorrupt, "ambiguous unindexed tool fragment");
+    if (tools_.size() != 1) return fail(ErrorKind::ProtocolCorrupt, reason::chat::tool_call_fragment_ambiguous);
     found = 0;
   }
   if (!found) {
-    if (!id.valid() || !name.valid()) return fail(ErrorKind::ProtocolCorrupt, "new tool requires id and name");
-    for (const auto& call : tools_) if (call.id == id.as_string()) return fail(ErrorKind::ProtocolCorrupt, "tool id rebound to another index");
-    if (tools_.size() >= limits_.max_parts) return fail(ErrorKind::ResourceLimit, "tool count limit");
-    if (indexed_tools_ && *indexed_tools_ != indexed) return fail(ErrorKind::ProtocolCorrupt, "mixed tool ordering is ambiguous");
+    if (!id.valid() || !name.valid()) return fail(ErrorKind::ProtocolCorrupt, reason::chat::tool_call_identity_required);
+    for (const auto& call : tools_) if (call.id == id.as_string()) return fail(ErrorKind::ProtocolCorrupt, reason::chat::tool_call_id_rebound);
+    if (tools_.size() >= limits_.max_parts) return fail(ErrorKind::ResourceLimit, reason::chat::tool_call_count_limit);
+    if (indexed_tools_ && *indexed_tools_ != indexed) return fail(ErrorKind::ProtocolCorrupt, reason::chat::tool_call_ordering_ambiguous);
     indexed_tools_ = indexed;
     const uint64_t base = 3 + limits_.max_parts;
     const auto order = indexed ? base + wire_index * limits_.max_parts + tools_.size() : base + tools_.size();
@@ -598,26 +598,26 @@ bool Codec::tool(json::Value value, bool streaming, uint64_t position) {
     if (!streaming || index.valid()) indices_[wire_index] = *found;
   }
   auto& binding = tools_[*found];
-  if (name.valid() && binding.name != name.as_string()) return fail(ErrorKind::ProtocolCorrupt, "contradictory function name");
+  if (name.valid() && binding.name != name.as_string()) return fail(ErrorKind::ProtocolCorrupt, reason::chat::tool_call_name_contradiction);
   if (!streaming) return emit(PartSeal{binding.local, args.as_string()});
   return !args.valid() || emit(PartDelta{binding.local, {PartKind::ToolCall, args.as_string()}});
 }
 bool Codec::usage(json::Value value) {
-  if (!value.is_object()) return fail(ErrorKind::ProtocolCorrupt, "usage must be object");
+  if (!value.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::chat::usage_object_required);
   unknown(value, {"prompt_tokens", "completion_tokens", "total_tokens", "prompt_tokens_details", "completion_tokens_details", "cost", "cost_details", "is_byok"});
   for (auto key : {"prompt_tokens", "completion_tokens", "total_tokens"})
-    if (!value.get(key).valid()) return fail(ErrorKind::ProtocolCorrupt, "required usage counter missing");
+    if (!value.get(key).valid()) return fail(ErrorKind::ProtocolCorrupt, reason::chat::usage_counter_missing);
   Usage result; result.stage = UsageStage::Partial;
   result.provider_cost = codecs::provider_cost(value, descriptor_);
   auto counter = [&](json::Value parent, std::string_view key, std::optional<Count>& destination) {
     auto v = parent.get(key);
     if (!v.valid()) return true;
-    if (!unsigned_count(v)) return fail(ErrorKind::ProtocolCorrupt, "usage counter must be unsigned integer");
+    if (!unsigned_count(v)) return fail(ErrorKind::ProtocolCorrupt, reason::chat::usage_counter_invalid);
     destination = Count{uint_value(v), Evidence::Reported}; return true;
   };
   if (!counter(value, "prompt_tokens", result.input_total) || !counter(value, "completion_tokens", result.output_total) || !counter(value, "total_tokens", result.provider_reported_total)) return false;
   auto prompt = value.get("prompt_tokens_details"), completion = value.get("completion_tokens_details");
-  for (auto detail : {prompt, completion}) if (detail.valid() && !detail.is_null() && !detail.is_object()) return fail(ErrorKind::ProtocolCorrupt, "usage details must be object or null");
+  for (auto detail : {prompt, completion}) if (detail.valid() && !detail.is_null() && !detail.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::chat::usage_details_invalid);
   if (prompt.is_object()) {
     unknown(prompt, {"cached_tokens", "cache_write_tokens", "audio_tokens"});
     if (!counter(prompt, "cached_tokens", result.cache_read) || !counter(prompt, "cache_write_tokens", result.cache_write)) return false;
@@ -657,14 +657,14 @@ bool Codec::usage(json::Value value) {
   leaves(leaves, value, {});
   auto conflict = [&](std::string counter_name, std::string detail) { result.quality = UsageQuality::Inconsistent; result.conflicts.push_back({std::move(counter_name), std::move(detail)}); };
   if (result.input_total && result.output_total) {
-    if (result.output_total->value > std::numeric_limits<uint64_t>::max() - result.input_total->value) return fail(ErrorKind::ProtocolCorrupt, "usage sum overflow");
+    if (result.output_total->value > std::numeric_limits<uint64_t>::max() - result.input_total->value) return fail(ErrorKind::ProtocolCorrupt, reason::chat::usage_sum_overflow);
     result.total = Count{result.input_total->value + result.output_total->value, Evidence::Derived};
     if (result.provider_reported_total && result.total->value != result.provider_reported_total->value) conflict("total", "reported total differs from input plus output");
   }
   if (result.input_total) {
     const uint64_t read = result.cache_read ? result.cache_read->value : 0;
     const uint64_t written = result.cache_write ? result.cache_write->value : 0;
-    if (written > std::numeric_limits<uint64_t>::max() - read) return fail(ErrorKind::ProtocolCorrupt, "cache sum overflow");
+    if (written > std::numeric_limits<uint64_t>::max() - read) return fail(ErrorKind::ProtocolCorrupt, reason::chat::usage_cache_overflow);
     const uint64_t known_cached = read + written;
     // A declared OpenRouter origin always reports prompt_tokens_details.cache_write_tokens, so
     // its absence there leaves the cache-write share unknown. OpenAI-shaped Chat origins have no
@@ -680,8 +680,8 @@ bool Codec::usage(json::Value value) {
 void Codec::finish(Close close) {
   if (closed_ || accumulator_.terminal()) { closed_ = true; return; }
   closed_ = true;
-  if (!close.normal) { fail(close.error, "abnormal response close"); return; }
-  if (!begun_ || !stopped_ || (mode_ == Mode::Sse && !done_)) { fail(ErrorKind::Truncated, "missing family terminal evidence"); return; }
+  if (!close.normal) { fail(close.error, reason::transport::response_close); return; }
+  if (!begun_ || !stopped_ || (mode_ == Mode::Sse && !done_)) { fail(ErrorKind::Truncated, reason::chat::terminal_missing); return; }
   if (mode_ == Mode::Sse) {
     if (!finish_audio()) return;
     if (!end_structured_text()) return;
@@ -698,15 +698,15 @@ void Codec::finish(Close close) {
 uint64_t Codec::media_order() { return 4 + limits_.max_parts + limits_.max_parts * limits_.max_parts + media_parts_++; }
 bool Codec::audio(json::Value value, bool streaming) {
   if (!value.valid() || value.is_null()) return true;
-  if (!value.is_object()) return fail(ErrorKind::ProtocolCorrupt, "audio must be object");
+  if (!value.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::chat::audio_object_required);
   unknown(value, {"id", "data", "transcript", "expires_at"});
   const auto id = value.get("id"), data = value.get("data"), transcript = value.get("transcript"), expires = value.get("expires_at");
   for (const auto field : {id, data, transcript})
-    if (field.valid() && !field.is_null() && !field.is_string()) return fail(ErrorKind::ProtocolCorrupt, "audio fields must be strings");
-  if (expires.valid() && !expires.is_null() && !unsigned_count(expires)) return fail(ErrorKind::ProtocolCorrupt, "audio expiry must be a count");
+    if (field.valid() && !field.is_null() && !field.is_string()) return fail(ErrorKind::ProtocolCorrupt, reason::chat::audio_fields_invalid);
+  if (expires.valid() && !expires.is_null() && !unsigned_count(expires)) return fail(ErrorKind::ProtocolCorrupt, reason::chat::audio_expiry_type_invalid);
   if (unsigned_count(expires)) audio_.expires_at = uint_value(expires);
   if (id.is_string() && !id.as_string().empty()) {
-    if (!audio_.id.empty() && audio_.id != id.as_string()) return fail(ErrorKind::ProtocolCorrupt, "audio identity changed");
+    if (!audio_.id.empty() && audio_.id != id.as_string()) return fail(ErrorKind::ProtocolCorrupt, reason::chat::audio_identity_changed);
     audio_.id = id.as_string();
   }
   if (!audio_.seen && !end_structured_text()) return false;
@@ -714,7 +714,7 @@ bool Codec::audio(json::Value value, bool streaming) {
   audio_.seen = true;
   if (transcript.is_string()) {
     if (transcript.as_string().size() > limits_.max_content_bytes - std::min(audio_.transcript.size(), limits_.max_content_bytes))
-      return fail(ErrorKind::ResourceLimit, "audio transcript limit");
+      return fail(ErrorKind::ResourceLimit, reason::chat::audio_transcript_limit);
     audio_.transcript.append(transcript.as_string());
   }
   if (data.is_string() && !data.as_string().empty() && !audio_chunk(data.as_string(), streaming)) return false;
@@ -722,12 +722,12 @@ bool Codec::audio(json::Value value, bool streaming) {
 }
 bool Codec::audio_chunk(std::string_view data, bool streaming) {
   auto append = [&](std::string_view run) {
-    if (!canonical_base64(run)) return fail(ErrorKind::ProtocolCorrupt, "audio data must be canonical base64");
+    if (!canonical_base64(run)) return fail(ErrorKind::ProtocolCorrupt, reason::chat::audio_data_invalid);
     const auto current = audio_.payload.empty() ? 0 : base64_decoded_size(audio_.payload);
     const auto added = base64_decoded_size(run);
     if (added > limits_.max_content_bytes - std::min(current, limits_.max_content_bytes) ||
         current + added > limits_.max_content_bytes / 4 * 3)
-      return fail(ErrorKind::ResourceLimit, "audio byte limit");
+      return fail(ErrorKind::ResourceLimit, reason::chat::audio_byte_limit);
     media_output::append_audio(audio_.payload, run);
     return true;
   };
@@ -757,15 +757,15 @@ bool Codec::audio_chunk(std::string_view data, bool streaming) {
     const unsigned char c = audio_.pending[i];
     if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
           c == '+' || c == '/' || (c == '=' && i >= 2)))
-      return fail(ErrorKind::ProtocolCorrupt, "invalid audio base64 fragment");
+      return fail(ErrorKind::ProtocolCorrupt, reason::chat::audio_fragment_invalid);
   }
   return true;
 }
 bool Codec::finish_audio() {
   if (!audio_.seen || audio_.sealed) return true;
   audio_.sealed = true;
-  if (!audio_.pending.empty()) return fail(ErrorKind::ProtocolCorrupt, "incomplete audio base64 quartet");
-  if (audio_.payload.empty()) return fail(ErrorKind::ProtocolCorrupt, "audio reply carries no data");
+  if (!audio_.pending.empty()) return fail(ErrorKind::ProtocolCorrupt, reason::chat::audio_quartet_incomplete);
+  if (audio_.payload.empty()) return fail(ErrorKind::ProtocolCorrupt, reason::chat::audio_data_missing);
   Media media = media_output::describe(audio_mime(context_ ? context_->audio_format() : std::string_view{}), MediaSource::Inline);
   media.kind = MediaKind::Audio;
   media.id = std::move(audio_.id);
@@ -778,23 +778,23 @@ bool Codec::finish_audio() {
 }
 bool Codec::images(json::Value value) {
   if (!value.valid() || value.is_null()) return true;
-  if (!value.is_array()) return fail(ErrorKind::ProtocolCorrupt, "images must be array");
+  if (!value.is_array()) return fail(ErrorKind::ProtocolCorrupt, reason::chat::images_array_required);
   for (auto entry : value.elements()) if (!image(entry, true)) return false;
   return true;
 }
 bool Codec::image(json::Value entry, bool indexed) {
-    if (!entry.is_object()) return fail(ErrorKind::ProtocolCorrupt, "generated image must be object");
+    if (!entry.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::chat::image_object_required);
     unknown(entry, {"type", "image_url", "index"});
     const auto type = entry.get("type"), location = entry.get("image_url"), index = entry.get("index");
-    if (type.valid() && (!type.is_string() || type.as_string() != "image_url")) return fail(ErrorKind::Unsupported, "unsupported generated image type");
+    if (type.valid() && (!type.is_string() || type.as_string() != "image_url")) return fail(ErrorKind::Unsupported, reason::chat::image_type_unsupported);
     if (!location.is_object() || !location.get("url").is_string() || location.get("url").as_string().empty())
-      return fail(ErrorKind::ProtocolCorrupt, "generated image requires image_url.url");
+      return fail(ErrorKind::ProtocolCorrupt, reason::chat::image_url_required);
     const auto url = location.get("url").as_string();
     if (indexed && index.valid() && !index.is_null()) {
-      if (!unsigned_count(index)) return fail(ErrorKind::ProtocolCorrupt, "generated image index must be a count");
+      if (!unsigned_count(index)) return fail(ErrorKind::ProtocolCorrupt, reason::chat::image_index_invalid);
       const auto [found, inserted] = image_indices_.emplace(uint_value(index), url);
       if (!inserted) {
-        if (found->second != url) return fail(ErrorKind::ProtocolCorrupt, "indexed generated image changed");
+        if (found->second != url) return fail(ErrorKind::ProtocolCorrupt, reason::chat::image_indexed_changed);
         return true;
       }
     }
@@ -805,17 +805,17 @@ bool Codec::image(json::Value entry, bool indexed) {
              (url.starts_with("http://") && url.size() > 7 && url.size() <= 4096 &&
               std::all_of(url.begin(), url.end(), [](unsigned char c) { return c > 0x20 && c < 0x7f && c != '"' && c != '\\'; })))
       media = media_output::describe({}, MediaSource::Url, url), payload = {};
-    else return fail(ErrorKind::ProtocolCorrupt, "unsupported generated image location");
+    else return fail(ErrorKind::ProtocolCorrupt, reason::chat::image_location_unsupported);
     media.kind = MediaKind::Image;
     if (!indexed) {
       const auto detail = location.get("detail");
       if (detail.valid()) {
-        if (!detail.is_string()) return fail(ErrorKind::ProtocolCorrupt, "image detail must be string");
+        if (!detail.is_string()) return fail(ErrorKind::ProtocolCorrupt, reason::chat::image_detail_invalid);
         if (detail.as_string() == "auto") media.detail = ImageDetail::Auto;
         else if (detail.as_string() == "low") media.detail = ImageDetail::Low;
         else if (detail.as_string() == "high") media.detail = ImageDetail::High;
         else if (detail.as_string() == "original") media.detail = ImageDetail::Original;
-        else return fail(ErrorKind::Unsupported, "unsupported image detail");
+        else return fail(ErrorKind::Unsupported, reason::chat::image_detail_unsupported);
       }
     }
     if (!end_structured_text() || !media_output::emit_part([this](const Event& event) { return emit(event); }, LocalId{0}, LocalId{next_part_++},

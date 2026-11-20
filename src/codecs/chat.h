@@ -6,6 +6,7 @@
 #include <set>
 #include <utility>
 
+namespace sp::reason { struct Reason; }
 namespace sp::descriptor { class ValidatedDescriptor; }
 namespace sp::json { class Value; }
 namespace sp::chat {
@@ -135,7 +136,7 @@ class Codec {
   bool tool(json::Value, bool streaming, uint64_t position);
   bool usage(json::Value);
   bool emit(const Event&);
-  bool fail(ErrorKind, std::string);
+  bool fail(ErrorKind, const reason::Reason&);
   void unknown(json::Value, std::initializer_list<std::string_view>);
   bool text(json::Value, PartKind, bool streaming);
   bool content(json::Value, bool streaming);
