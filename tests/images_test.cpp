@@ -223,6 +223,9 @@ void policy_facts() {
            {R"(["image/png"])", "/endpoints/asset_formats"}, {R"({"image/png":7})", "/endpoints/asset_formats"}})
     refused_at(decisions_fact("decisions", "openrouter", "https://openrouter.ai", std::string(R"("asset_formats":)") + formats), pointer);
   refused_at(decisions_fact("decisions", "openai", "https://api.openai.com", R"("asset_formats":{"image/png":"png"})"), "/endpoints/asset_formats");
+  // `assets` is a member the decisions encoder writes: no fact's options may admit it, so no extension carries a second one.
+  for (const auto& [shape, origin] : std::initializer_list<std::pair<const char*, const char*>>{{"openrouter", "https://openrouter.ai"}, {"openai", "https://api.openai.com"}})
+    refused_at(decisions_fact("decisions", shape, origin, R"("options":{"type":"object","properties":{"assets":{"type":"boolean"},"user":{"type":"string","max_length":8}}})"), "/endpoints/options");
   refused_at("[" + base + R"(,"asset_formats":{"image/png":"png"}}])", "/endpoints/asset_formats");
   // `response_format` is an option of the transcription fact, not a member the SDK owns.
   CHECK(std::holds_alternative<descriptor::PolicySnapshot>(policy_with(transcription(R"("options":{"type":"object","properties":{"response_format":{"type":"enum","values":["json"]}}})"))));

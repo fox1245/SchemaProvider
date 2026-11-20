@@ -118,7 +118,7 @@ inline constexpr OwnedMember k_images[] = {
 
 inline constexpr OwnedMember k_decisions[] = {
     {"model", MemberRole::Written}, {"input", MemberRole::Written}, {"state", MemberRole::Written},
-    {"questions", MemberRole::Written},
+    {"questions", MemberRole::Written}, {"assets", MemberRole::Written},
 };
 
 inline constexpr OwnedMember k_embeddings[] = {

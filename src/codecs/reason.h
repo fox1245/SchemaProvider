@@ -1296,7 +1296,7 @@ inline constexpr Reason json_limit{"request.decisions.json_limit", "decision req
 inline constexpr Reason assets_unsupported{"request.decisions.assets_unsupported", "decision assets are OpenRouter only"};
 inline constexpr Reason asset_key_invalid{"request.decisions.asset_key_invalid", "a decision asset key is a non-empty UTF-8 string"};
 inline constexpr Reason asset_key_duplicate{"request.decisions.asset_key_duplicate", "decision asset keys need to be unique"};
-inline constexpr Reason asset_unsupported{"request.decisions.asset_unsupported", "a decision asset is an inline PNG or JPEG image"};
+inline constexpr Reason asset_unsupported{"request.decisions.asset_unsupported", "a decision asset is not an inline image of a format the endpoint's policy names"};
 // Every constant of the source, for the enumeration test.
 inline constexpr Reason all[]{
     endpoint_not_admitted, path_missing, model_and_questions_required, input_invalid, names_invalid, guidance_invalid,

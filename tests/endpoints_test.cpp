@@ -436,6 +436,8 @@ void endpoint_members_cover_encoders() {
   question.questions.push_back({"urgent", decisions::Kind::Predicate, document(R"("is it urgent?")")});
   add("decisions", json_members(encoded<decisions::Encoded>(decisions::encode, openai, question).body));
   add("decisions", json_members(encoded<decisions::Encoded>(decisions::encode, router, question).body));
+  question.assets = {{"picture", Media::image("image/png", std::make_shared<const std::string>(png))}};
+  add("decisions", json_members(encoded<decisions::Encoded>(decisions::encode, router, question).body));
 
   embeddings::Request vectors{"text-embedding-3-small", {{"a red fox"}, {"a blue whale"}}};
   vectors.dimensions = 256;

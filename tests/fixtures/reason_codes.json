@@ -991,7 +991,7 @@
   ["request.decisions.assets_unsupported", "decision assets are OpenRouter only"],
   ["request.decisions.asset_key_invalid", "a decision asset key is a non-empty UTF-8 string"],
   ["request.decisions.asset_key_duplicate", "decision asset keys need to be unique"],
-  ["request.decisions.asset_unsupported", "a decision asset is an inline PNG or JPEG image"],
+  ["request.decisions.asset_unsupported", "a decision asset is not an inline image of a format the endpoint's policy names"],
   ["embeddings.response.json_invalid", "invalid response JSON"],
   ["embeddings.response.not_object", "response must be object"],
   ["embeddings.response.remote_error", "remote error property"],
