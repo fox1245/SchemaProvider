@@ -133,7 +133,7 @@ std::string_view to_string(ModelRelation value) noexcept {
 std::string_view to_string(EndpointBilling value) noexcept {
   switch (value) {
     SP_NAME(EndpointBilling, Unstated); SP_NAME(EndpointBilling, None); SP_NAME(EndpointBilling, Model);
-    SP_NAME(EndpointBilling, Carried);
+    SP_NAME(EndpointBilling, Carried); SP_NAME(EndpointBilling, Unpriced);
   }
   return {};
 }

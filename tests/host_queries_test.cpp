@@ -60,7 +60,7 @@ void enum_names() {
   names_round_trip<RetrySafety>(4); names_round_trip<ServedRelation>(6); names_round_trip<ImageDetail>(4);
   names_round_trip<MediaKind>(4); names_round_trip<MediaSource>(3);
   names_round_trip<descriptor::StopKind>(11); names_round_trip<descriptor::ModelRelation>(4);
-  names_round_trip<descriptor::EndpointBilling>(4);
+  names_round_trip<descriptor::EndpointBilling>(5);
   // The last enumerator of each is the one a host used to bound an ordinal by.
   CHECK(from_string<ErrorKind>("Overloaded") == ErrorKind::Overloaded);
   CHECK(from_string<RetrySafety>("RejectedBeforeOutput") == RetrySafety::RejectedBeforeOutput);
@@ -1498,6 +1498,18 @@ constexpr BuiltinBilling builtin_billing[]{
     {"batches", "google", "delete", Billing::None},
     {"tokens", "openai", "count", Billing::None}, {"tokens", "anthropic", "count", Billing::None}, {"tokens", "google", "count", Billing::None},
     {"generations", "openrouter", "get", Billing::None},
+    {"stores", "openai", "create", Billing::Unpriced}, {"stores", "openai", "get", Billing::None}, {"stores", "openai", "list", Billing::None},
+    {"stores", "openai", "update", Billing::Unpriced}, {"stores", "openai", "delete", Billing::None},
+    {"stores", "openai", "search", Billing::Unpriced}, {"stores", "openai", "file_add", Billing::Unpriced},
+    {"stores", "openai", "file_get", Billing::None}, {"stores", "openai", "file_list", Billing::None},
+    {"stores", "openai", "file_update", Billing::Unpriced}, {"stores", "openai", "file_delete", Billing::None},
+    {"stores", "openai", "file_content", Billing::None}, {"stores", "openai", "batch_create", Billing::Unpriced},
+    {"stores", "openai", "batch_get", Billing::None}, {"stores", "openai", "batch_cancel", Billing::None},
+    {"stores", "openai", "batch_files", Billing::None},
+    {"stores", "google", "create", Billing::Unpriced}, {"stores", "google", "get", Billing::None}, {"stores", "google", "list", Billing::None},
+    {"stores", "google", "delete", Billing::None}, {"stores", "google", "import", Billing::Unpriced},
+    {"stores", "google", "document_get", Billing::None}, {"stores", "google", "document_list", Billing::None},
+    {"stores", "google", "document_delete", Billing::None}, {"stores", "google", "operation_get", Billing::None},
     {"realtime", "google", "connect", Billing::Model}, {"realtime", "openai", "connect", Billing::Model}};
 
 void endpoint_billing_builtin() {

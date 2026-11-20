@@ -9,6 +9,7 @@
 #include "codecs/moderation.h"
 #include "codecs/rerank.h"
 #include "codecs/speech.h"
+#include "codecs/stores.h"
 #include "codecs/tokens.h"
 #include "codecs/transcription.h"
 #include "core/pricing_internal.h"
@@ -99,6 +100,12 @@ std::unique_ptr<Codec> make_codec(std::string_view name, const descriptor::Valid
                                         std::pair{"files.complete", Step::Complete}, std::pair{"files.query", Step::Query}, std::pair{"files.cancel", Step::Cancel}})
     if (name == step_name) return std::make_unique<files::SessionCodec>(descriptor, accumulator, step, std::move(requested), limits, context.secret);
   if (name == "files.delete") return std::make_unique<files::Codec>(descriptor, accumulator, files::Codec::Kind::Deleted, std::move(requested), limits);
+  // A search store, one of its files, a batch or operation, a listing, search results, a file's content, or a deletion.
+  using Kind = stores::Codec::Kind;
+  for (const auto& [store_name, kind] : {std::pair{"stores", Kind::Store}, std::pair{"stores.file", Kind::File}, std::pair{"stores.batch", Kind::Batch},
+                                         std::pair{"stores.list", Kind::Stores}, std::pair{"stores.files", Kind::Files}, std::pair{"stores.search", Kind::Search},
+                                         std::pair{"stores.content", Kind::Content}, std::pair{"stores.delete", Kind::Deleted}})
+    if (name == store_name) return std::make_unique<stores::Codec>(descriptor, accumulator, kind, std::move(requested), limits);
   return nullptr;
 }
 EndpointFacts call_facts(const descriptor::ValidatedDescriptor& descriptor, std::string_view fact, std::string_view operation, std::string_view model) {

@@ -79,6 +79,12 @@ pricing::WorstCase worst_case_cost(const PreparedRequest& prepared, const descri
       }
       case descriptor::EndpointBilling::Carried:
         return projected(endpoint_worst_case_cost(prepared, catalogue), true);
+      case descriptor::EndpointBilling::Unpriced: {
+        // A fee that is not per request (a store's storage, the embeddings of indexing): no request states it.
+        pricing::WorstCase out;
+        out.unbounded.push_back({pricing::UnboundedBy::Unmodeled, facts.endpoint + "/" + facts.operation, std::string(pricing::unpriced_detail)});
+        return out;
+      }
       case descriptor::EndpointBilling::Unstated:
         break;
     }
