@@ -41,7 +41,7 @@ std::optional<std::uint64_t> ModelPrice::* slot_of(std::string_view name) {
       {"cache_write_1h", &ModelPrice::cache_write_1h}, {"output_image", &ModelPrice::output_image},
       {"input_audio", &ModelPrice::input_audio}, {"output_audio", &ModelPrice::output_audio},
       {"ceiling_input", &ModelPrice::ceiling_input}, {"ceiling_output", &ModelPrice::ceiling_output},
-      {"ceiling_request", &ModelPrice::ceiling_request}};
+      {"ceiling_request", &ModelPrice::ceiling_request}, {"cache_read_audio", &ModelPrice::cache_read_audio}};
   for (const auto& [unit, slot] : slots)
     if (unit == name) return slot;
   return nullptr;
@@ -163,7 +163,8 @@ ModelPrice dearest_price_of(const descriptor::CatalogueEntry& entry, std::string
 
 namespace {
 // The units of each side's token prices (plain names) beside the listing members a ceiling covers.
-constexpr std::string_view input_units[]{"input", "cache_read", "cache_write", "cache_write_1h", "input_audio", "input_image"};
+constexpr std::string_view input_units[]{"input", "cache_read", "cache_write", "cache_write_1h", "input_audio", "input_image",
+                                         "cache_read_audio"};
 constexpr std::string_view output_units[]{"output", "reasoning", "output_image", "output_audio"};
 bool counts_on(TokenSide side, std::string_view name) {
   const auto& units = side == TokenSide::Input ? std::span<const std::string_view>(input_units) : std::span<const std::string_view>(output_units);
@@ -207,6 +208,14 @@ constexpr std::array<std::string_view, 2> input_audio_counters{"input_audio", "i
 constexpr std::array<std::string_view, 2> output_audio_counters{"audio_tokens", "output_token_details.audio_tokens"};
 constexpr std::array<std::string_view, 1> output_image_counters{"completion_tokens_details.image_tokens"};
 constexpr std::array<std::string_view, 2> input_image_counters{"input_token_details.image_tokens", realtime_image_tokens};
+// The cached share of the input by modality, a part of the cache reads: Generate and Live `cacheTokensDetails.<MODALITY>`
+// and Interactions `cached_tokens_by_modality.<modality>`, else the OpenAI realtime codec's dotted counters. The input
+// breakdowns and counters above count every token of a modality, cached or not.
+constexpr std::array<std::string_view, 2> cached_breakdown{"cacheTokensDetails.", "cached_tokens_by_modality."};
+constexpr std::array<std::string_view, 1> cached_audio_counters{"input_token_details.cached_tokens_details.audio_tokens"};
+constexpr std::array<std::string_view, 1> cached_image_counters{"input_token_details.cached_tokens_details.image_tokens"};
+// The unit of cached audio input tokens, and the name of cached image input tokens, which no unit prices.
+constexpr std::string_view cached_audio_unit = "cache_read_audio", cached_image_name = "cache_read_image";
 // The tokens of one modality in a breakdown, matched without regard to case. Empty when the usage has none.
 std::optional<std::uint64_t> modality_tokens(const Usage& usage, std::span<const std::string_view> prefixes,
                                              std::string_view modality) {
@@ -265,10 +274,13 @@ UsageSum usage_sum(const Selection& selection, const Usage& usage, const UsageRu
       if (const auto found = usage.extra.find(std::string(counter)); found != usage.extra.end()) return found->second.value;
     return std::nullopt;
   };
-  // The audio tokens of the input or the output: a modality breakdown, else a counter that holds them.
-  auto audio_of = [&](std::span<const std::string_view> counters, std::span<const std::string_view> prefixes) {
-    const auto breakdown = modality_tokens(usage, prefixes, "audio");
+  // The tokens of a modality of the input or the output: a modality breakdown, else a counter that holds them.
+  auto tokens_of = [&](std::span<const std::string_view> counters, std::span<const std::string_view> prefixes, std::string_view modality) {
+    const auto breakdown = modality_tokens(usage, prefixes, modality);
     return breakdown ? *breakdown : counter_tokens(counters).value_or(0);
+  };
+  auto audio_of = [&](std::span<const std::string_view> counters, std::span<const std::string_view> prefixes) {
+    return tokens_of(counters, prefixes, "audio");
   };
   // Gemini bills the tool-use prompt beyond the prompt count; no price here covers it.
   if (extra("toolUsePromptTokenCount")) { out.unpriced.emplace_back("toolUsePromptTokenCount"); complete = false; }
@@ -316,15 +328,33 @@ UsageSum usage_sum(const Selection& selection, const Usage& usage, const UsageRu
       out.charges.push_back({unit, key_of(selection.keys, unit), 1, fee});
     }
   } else {
-    // Audio input bills at its own rate, out of the uncached input. Audio the cache counters hold has no split.
+    // The cached share of the cache reads by modality (#219): cached audio bills at `cache_read_audio` and no other rate,
+    // and the rest of the cache reads, cached text, at `cache_read`. The modality counters count cached tokens too, so
+    // the uncached audio and images are their counts less the cached ones. Cached audio above the audio count or the
+    // cache reads contradicts them, and prices nothing.
+    const auto audio_count = audio_of(input_audio_counters, input_breakdown);
+    const auto cached_audio = tokens_of(cached_audio_counters, cached_breakdown, "audio");
+    const bool cached_audio_contradicts = cached_audio > audio_count || cached_audio > cache_read;
+    if (cached_audio_contradicts) {
+      out.unpriced.emplace_back(cached_audio_unit);
+      complete = false;
+    }
+    const auto cached_audio_in = (std::min)({cached_audio, audio_count, cache_read});
+    // Audio input bills at its own rate, out of the uncached input.
     std::uint64_t audio_in = 0;
-    if (const auto audio = audio_of(input_audio_counters, input_breakdown); audio && uncached) {
+    if (const auto audio = audio_count - cached_audio_in; audio && uncached) {
       if (price.input_audio && audio <= *uncached) audio_in = audio;
       else { out.unpriced.emplace_back("input_audio"); complete = false; }
     }
     // The image tokens of the input, when the caller counts them, the same way at `input_image`.
     // A realtime turn counts them in `input_token_details.image_tokens` (OpenAI) or `realtime.image_tokens` (Google Live).
+    // Where they bill apart, their cached share has no unit and is not priced as cached text; elsewhere (a Generate
+    // usage) image tokens bill at the input rates, and cached ones stay among the cache reads.
     const auto image_count = rules.input_image && *rules.input_image ? rules.input_image : counter_tokens(input_image_counters);
+    if (image_count && tokens_of(cached_image_counters, cached_breakdown, "image")) {
+      out.unpriced.emplace_back(cached_image_name);
+      complete = false;
+    }
     std::uint64_t image_in = 0;
     if (image_count && *image_count && uncached) {
       if (selection.input_image && *image_count <= *uncached - audio_in) image_in = *image_count;
@@ -345,8 +375,10 @@ UsageSum usage_sum(const Selection& selection, const Usage& usage, const UsageRu
       if (general) assume(rule);
       return Rate{general, "input"};
     };
-    const auto read_rate = fallback("cache_read", price.cache_read, price.input, "cache_read at input", cache_read);
-    charge(read_rate.unit, cache_read, read_rate.value, "cache_read", price.input);
+    const auto cached_text = cache_read - cached_audio_in;
+    const auto read_rate = fallback("cache_read", price.cache_read, price.input, "cache_read at input", cached_text);
+    charge(read_rate.unit, cached_text, read_rate.value, "cache_read", price.input);
+    if (!cached_audio_contradicts) charge(cached_audio_unit, cached_audio_in, price.cache_read_audio, cached_audio_unit, price.input_audio);
     // Messages splits cache writes into 5-minute and 1-hour writes; without the split, all of them bill at the
     // dearer rate.
     const auto write = fallback("cache_write", price.cache_write, price.input, "cache_write at input", cache_write);
@@ -546,12 +578,13 @@ Bound bounded(const ModelPrice& price, const detail::UnitKeys& variable, const B
     name_variable({"ceiling_input", "ceiling_output"});
     if (!absent) name_variable({"request", "ceiling_request"});
   } else {
-    input = price.input ? dearest({price.input, price.cache_read, price.cache_write, price.cache_write_1h, price.input_audio}) : std::nullopt;
+    input = price.input ? dearest({price.input, price.cache_read, price.cache_write, price.cache_write_1h, price.input_audio, price.cache_read_audio})
+                        : std::nullopt;
     output = price.output ? dearest({price.output, price.reasoning, price.output_image, price.output_audio}) : std::nullopt;
     fee = price.request;
     if (!input && request.input_tokens) out.unpriced.emplace_back("input");
     if (!output && request.output_tokens) out.unpriced.emplace_back("output");
-    if (request.input_tokens) name_variable({"cache_read", "cache_write", "cache_write_1h", "input_audio"});
+    if (request.input_tokens) name_variable({"cache_read", "cache_write", "cache_write_1h", "input_audio", "cache_read_audio"});
     if (request.output_tokens) name_variable({"reasoning", "output_image", "output_audio"});
     name_variable({"request"});
   }
@@ -990,7 +1023,8 @@ EndpointBound realtime_response_bound(const RealtimeResponseInput& in, const des
     sum += Wide::product(quantity, rate->value);
   };
   if (tokens.text) charge("input", dearest({"input", "cache_read", "cache_write", "cache_write_1h"}), tokens.text);
-  if (tokens.audio) charge("input_audio", dearest({"input_audio"}), tokens.audio);
+  // Cached audio bills at its own rate (estimate), which may be dearer than the audio input rate.
+  if (tokens.audio) charge("input_audio", dearest({"input_audio", "cache_read_audio"}), tokens.audio);
   if (tokens.image) charge(input_image_unit, dearest({input_image_unit}), tokens.image);
   if (output) {
     const auto rate = in.audio_output ? dearest({"output", "reasoning", "output_image", "output_audio"}) : dearest({"output", "reasoning", "output_image"});

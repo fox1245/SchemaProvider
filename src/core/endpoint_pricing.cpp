@@ -120,7 +120,8 @@ constexpr std::uint64_t every_band = detail::kMax;
 // The token units an endpoint call's input and output tokens bill at, by the plain name the catalogue reads
 // (descriptor::plain_price_unit): the first is the unit a line of them needs, and the line takes the dearest of all.
 // The input's image tokens bill at `input_image`.
-constexpr std::string_view input_units[]{"input", "cache_read", "cache_write", "cache_write_1h", "input_audio", "input_image"};
+constexpr std::string_view input_units[]{"input", "cache_read", "cache_write", "cache_write_1h", "input_audio", "input_image",
+                                         "cache_read_audio"};
 constexpr std::string_view output_units[]{"output", "reasoning", "output_image", "output_audio"};
 constexpr std::string_view image_token_units[]{"input_image"};
 constexpr std::string_view request_units[]{"request"};
@@ -787,7 +788,7 @@ EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const EndpointCou
     const auto cap = *facts.max_price->prompt_nano_usd;
     bool lowered = false;
     for (auto* rate : {&selection.price.input, &selection.price.cache_read, &selection.price.cache_write, &selection.price.cache_write_1h,
-                       &selection.price.input_audio, &selection.input_image})
+                       &selection.price.input_audio, &selection.input_image, &selection.price.cache_read_audio})
       if (*rate && **rate > cap) {
         *rate = cap;
         lowered = true;

@@ -174,7 +174,8 @@ bool valid_price_text(std::string_view price) noexcept;
 // than a digit or one '.', or an amount that does not fit 64 bits.
 std::optional<std::uint64_t> price_per_million(std::string_view price) noexcept;
 // The plain name of a price unit that OpenRouter names otherwise (`prompt` is `input`, `input_cache_write_1h` is
-// `cache_write_1h`, `image_output` is `output_image`); any other name is its own. Pricing reads both names as the same unit.
+// `cache_write_1h`, `input_audio_cache` is `cache_read_audio`, `image_output` is `output_image`); any other name is its
+// own. Pricing reads both names as the same unit.
 std::string_view plain_price_unit(std::string_view name) noexcept;
 // The most digits of the input band of a price unit, `<unit>+<tokens>`.
 inline constexpr std::size_t max_band_digits = 19;
@@ -199,11 +200,10 @@ struct ListedMember {
 // each prices. The one table of this listing-grammar knowledge: a route ceiling covers the token members
 // (transport/catalogue_refresh.cpp lists them among its price members), pricing floors a ceiling by them, and a bound
 // over an item member above zero has no total for a request that carries its feature. A member that is in no unit and
-// not here is unknown, and a bound over it above zero has no total either. `image_output` is the unit `output_image`
-// (plain_price_unit), not a member here.
+// not here is unknown, and a bound over it above zero has no total either. `image_output` is the unit `output_image` and
+// `input_audio_cache` the unit `cache_read_audio` (plain_price_unit), not members here.
 inline constexpr ListedMember listed_members[]{
     {"image_token", ListedRole::EitherTokens, ListedFeature::None},
-    {"input_audio_cache", ListedRole::InputTokens, ListedFeature::None},
     {"image", ListedRole::Item, ListedFeature::ImageInput},
     {"web_search", ListedRole::Item, ListedFeature::WebSearch}};
 // The unit a price unit names without its input band: `prompt` for `prompt+272000`; a unit without a band is itself.

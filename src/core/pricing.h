@@ -22,8 +22,8 @@ std::string decimal_text(std::uint64_t rate);
 
 // Exact nano-USD per million units: per million tokens, and for `request` per million requests. Parsed from the
 // entry's decimal USD per unit. OpenRouter's unit names (prompt, completion, input_cache_read, input_cache_write,
-// input_cache_write_1h, internal_reasoning, audio, audio_output) and the plain ones (input, output, cache_read,
-// cache_write, cache_write_1h, reasoning, input_audio, output_audio) name the same units
+// input_cache_write_1h, internal_reasoning, audio, audio_output, input_audio_cache) and the plain ones (input, output,
+// cache_read, cache_write, cache_write_1h, reasoning, input_audio, output_audio, cache_read_audio) name the same units
 // (descriptor::plain_price_unit); the plain name wins when both are present. A negative listed price (OpenRouter's
 // "-1", a variable price) is no price, and a unit with such a row that applies to the request has no price at all,
 // whatever its other rows (price_of). Other listed units (OpenRouter's `image`, `web_search`) are not read: nothing in a
@@ -39,10 +39,12 @@ struct ModelPrice {
   // The fee per use of a server tool, by tool type (`tool:<type>`), in nano-USD per million uses, sorted by type.
   // A listed "0" is a declared zero.
   std::vector<std::pair<std::string, std::uint64_t>> tool_fees;
+  // A cached audio input token (`cache_read_audio`, OpenRouter's `input_audio_cache`), which no other rate stands in for.
+  std::optional<std::uint64_t> cache_read_audio;
   bool empty() const noexcept {
     return !input && !output && !cache_read && !cache_write && !reasoning && !request && !cache_write_1h &&
            !output_image && !input_audio && !output_audio && !ceiling_input && !ceiling_output && !ceiling_request &&
-           tool_fees.empty();
+           tool_fees.empty() && !cache_read_audio;
   }
 };
 // The entry's prices for a request in `service_tier` with `input_tokens` input tokens (cache reads and writes
@@ -79,7 +81,7 @@ struct CostEstimate {
   std::vector<std::string> assumptions;
   // Why there is no total: "model" (no priced entry), "tier" (an entry priced only outside the asked service
   // tier), "ceiling" (no route ceiling), a counter the call billed with no price or no count ("input", "output",
-  // "input_audio", "output_audio", "output_image"), a unit with a row that applies at a variable price that the call
+  // "input_audio", "output_audio", "output_image", "cache_read_audio", "cache_read_image"), a unit with a row that applies at a variable price that the call
   // billed ("cache_read", "cache_write", "cache_write_1h", "reasoning", "request", "ceiling_request", or one of
   // those), or a usage counter the estimate does not price ("toolUsePromptTokenCount").
   std::vector<std::string> unpriced;
@@ -92,6 +94,16 @@ struct CostEstimate {
 // catalogue first (transport::refresh_catalogue) when prices may have changed.
 // - Input: input_uncached at `input`, cache reads at `cache_read` and cache writes at `cache_write`. Without
 //   input_uncached it is input_total less the cache counters.
+// - Cached input by modality (#219): the cached audio tokens among the cache reads (OpenAI realtime
+//   `input_token_details.cached_tokens_details.audio_tokens`, Generate and Live `cacheTokensDetails.AUDIO`, Interactions
+//   `cached_tokens_by_modality.audio`) at `cache_read_audio`, and the rest of the cache reads at `cache_read`. Without a
+//   `cache_read_audio` rate, or with one at a variable price, cached audio has no price ("cache_read_audio"): it is never
+//   billed at another rate. Cached audio above the audio input tokens or the cache reads leaves no total either. The
+//   audio count of the input includes its cached share, so the audio billed at `input_audio` is that count less the
+//   cached audio. A realtime turn whose image tokens bill at `input_image` and whose cached share has image tokens
+//   (`cached_tokens_details.image_tokens`, `cacheTokensDetails.IMAGE`) has no total ("cache_read_image"), since no unit
+//   prices cached image tokens; a Generate usage's cached image tokens bill among the cache reads, as its image tokens
+//   bill at the input rates.
 // - Output: with a `reasoning` price, reasoning tokens at it and the rest of output_total at `output`; otherwise
 //   all of output_total at `output`.
 // - Messages: the compaction iterations (Usage::extra `compaction.input_tokens`, `compaction.output_tokens` and
@@ -106,8 +118,8 @@ struct CostEstimate {
 //   `input_tokens_by_modality.audio`, realtime `input_token_details.audio_tokens`) at `input_audio`, and of the
 //   output (Chat `audio_tokens`, Generate `candidatesTokensDetails.AUDIO`, Interactions
 //   `output_tokens_by_modality.audio`, realtime `output_token_details.audio_tokens` and
-//   `responseTokensDetails.AUDIO`) at `output_audio`. Audio tokens without that rate, or more audio input than
-//   uncached input, leave no total ("input_audio", "output_audio").
+//   `responseTokensDetails.AUDIO`) at `output_audio`, the input's cached audio aside (above). Audio tokens without that
+//   rate, or more uncached audio input than uncached input, leave no total ("input_audio", "output_audio").
 // - Image input: a realtime turn's image tokens (OpenAI `input_token_details.image_tokens`, Google Live
 //   `realtime.image_tokens`) at `input_image`, out of the uncached input; without that rate no total ("input_image").
 // - A zero rate for a unit whose base unit has a price is applied and named in `assumptions` ("<unit> at zero").
@@ -152,8 +164,8 @@ inline constexpr std::string_view realtime_image_tokens = "realtime.image_tokens
 // A side of a call's tokens.
 enum class TokenSide : std::uint8_t { Input, Output };
 // The dearest token price the entry itself lists on a side, in the tier and over the bands a request of `input_tokens`
-// input tokens may reach (the default reaches every band): input, cache reads and writes, audio and image input on the
-// input side; output, reasoning, image output and audio output on the output side; and the listing members a route
+// input tokens may reach (the default reaches every band): input, cache reads and writes, audio, cached audio and image
+// input on the input side; output, reasoning, image output and audio output on the output side; and the listing members a route
 // ceiling covers on their side (descriptor::listed_members). `unknown` is set when a row of such a unit is at a price
 // that is not a fixed amount: the floor is then not known.
 struct ListedFloor {
@@ -185,7 +197,7 @@ struct Bound {
   std::vector<std::string> unpriced;
 };
 // A reservation bound, from `dearest_price_of` when the entry prices input bands: input tokens at the dearest input
-// rate (input, cache reads and writes, the 1-hour write, audio input), output tokens at the dearest output rate
+// rate (input, cache reads and writes, the 1-hour write, audio input, cached audio input), output tokens at the dearest output rate
 // (output, reasoning, image output, audio output), the request fee, and each tool's fee times its uses. With
 // `route_ceiling` the ceiling rates replace the listed ones. For usage within the request, `estimate` with the same
 // prices never exceeds it. Messages compaction iterations and Gemini's tool-use prompt tokens bill outside the call's
@@ -196,7 +208,7 @@ struct Bound {
 Bound upper_bound(const ModelPrice& price, const BoundRequest& request);
 // The bound with the entry's dearest prices over every input band the request may reach. A unit with a row in one of
 // them at a price that is not a fixed amount gives no total when the bound reads it: an input rate (`input`,
-// `cache_read`, `cache_write`, `cache_write_1h`, `input_audio`) when the request has input tokens, an output rate
+// `cache_read`, `cache_write`, `cache_write_1h`, `input_audio`, `cache_read_audio`) when the request has input tokens, an output rate
 // (`output`, `reasoning`, `output_image`, `output_audio`) when it has output tokens, the request fee always, at the
 // route ceiling `ceiling_input`, `ceiling_output` and `ceiling_request`, and a tool's fee when it has uses. At the
 // route ceiling "ceiling" names only a ceiling the entry does not list; a variable ceiling row is named as its unit,

@@ -665,9 +665,9 @@ void response_bounds() {
     {"id":"text-only-model","output_limit":4096,"pricing":{"input":"0.000004","output":"0.000016"}},
     {"id":"thinking-model","output_limit":4096,"pricing":{"input":"0.000004","output":"0.000016","reasoning":"0.00004"}},
     {"id":"reasoning-audio-model","output_limit":4096,"pricing":{"input":"0.000004","output":"0.000016","input_audio":"0.000032","output_audio":"0.000064","reasoning":"0.0001"}},
-    {"id":"dense-model","output_limit":4096,"pricing":{"input":"0.000004","input+1000":"0.000008","cache_read":"0.000001","output":"0.000016","input_audio":"0.000032",
+    {"id":"dense-model","output_limit":4096,"pricing":{"input":"0.000004","input+1000":"0.000008","cache_read":"0.000001","output":"0.000016","input_audio":"0.000032","cache_read_audio":"0.00005",
                                                        "input_image":"0.00001","output_audio":"0.000064","reasoning":"0.00004","request":"0.0001"}},
-    {"id":"dear-cache-model","output_limit":4096,"pricing":{"input":"0.000004","cache_read":"0.000006","output":"0.000016","input_audio":"0.000032",
+    {"id":"dear-cache-model","output_limit":4096,"pricing":{"input":"0.000004","cache_read":"0.000006","output":"0.000016","input_audio":"0.000032","cache_read_audio":"0.000003",
                                                             "input_image":"0.000002","output_audio":"0.000064"}},
     {"id":"variable-audio-model","output_limit":4096,"pricing":{"input":"0.000004","output":"0.000016","input_audio":"-1","output_audio":"0.000064"}},
     {"id":"seconds-audio-model","output_limit":4096,"pricing":{"input":"0.000004","output":"0.000016","input_audio":"0.000032","output_audio":"0.000064","item:second":"0.0001"}},
@@ -912,9 +912,10 @@ void response_bounds() {
     const std::string model = i % 3 == 0 ? "dense-model" : i % 3 == 1 ? "dear-cache-model" : "reasoning-audio-model";
     const bool images = model != "reasoning-audio-model", google_shaped = i % 2 == 1, speaks = i % 4 != 3, tools = i % 5 == 0;
     const std::uint64_t text = draw(3000), audio = draw(800), image = images ? draw(300) : 0, cap = 1 + draw(600);
-    // The turn: at most the stated input of each modality, cache reads among its text (some of them cached audio, which
-    // the estimate prices out of the text share), at most the cap; no audio out when the setup answers in text.
-    const std::uint64_t t = draw(text + 1), a = draw(audio + 1), im = draw(image + 1), cached = draw(t + 1), cached_audio = draw((std::min)(a, cached) + 1);
+    // The turn: at most the stated input of each modality, cache reads among its text and its audio, drawn apart (#219:
+    // cached audio may exceed the text), at most the cap; no audio out when the setup answers in text.
+    const std::uint64_t t = draw(text + 1), a = draw(audio + 1), im = draw(image + 1), cached_text = draw(t + 1), cached_audio = draw(a + 1);
+    const std::uint64_t cached = cached_text + cached_audio;
     const std::uint64_t out = draw(cap + 1), reasoning = google_shaped ? 0 : draw(out + 1), out_audio = speaks ? draw(out - reasoning + 1) : 0;
     const std::uint64_t thoughts = google_shaped ? draw(200) : 0;
     Usage usage;
@@ -963,6 +964,13 @@ void response_bounds() {
     }
     const auto turn_bound = pricing::realtime_response_bound(response, catalogue);
     const auto turn_cost = pricing::estimate(catalogue, response.family, response.origin, served(model), usage);
+    // An entry without a cached audio rate prices no turn with cached audio, not even at the cached text rate.
+    if (model == "reasoning-audio-model" && cached_audio) {
+      if (turn_cost.total || turn_cost.unpriced != std::vector<std::string>({"cache_read_audio"}))
+        throw std::runtime_error("generated turn " + std::to_string(i) + " priced its cached audio without a rate for it");
+      ++checked;
+      continue;
+    }
     if (!turn_cost.total) throw std::runtime_error("generated turn " + std::to_string(i) + " has no estimate: " + (turn_cost.unpriced.empty() ? "" : turn_cost.unpriced[0]));
     if (!turn_bound.total || turn_cost.total->nano_usd > turn_bound.total->nano_usd)
       throw std::runtime_error("generated turn " + std::to_string(i) + " of " + model + ": estimate " + std::to_string(turn_cost.total->nano_usd) + " above bound " +

@@ -2333,9 +2333,10 @@ void worst_case_listed_members() {
     CHECK(std::find(entry.pricing.begin(), entry.pricing.end(), std::pair<std::string, std::string>{"image", "0.0001"}) != entry.pricing.end());
     CHECK(std::find(entry.pricing.begin(), entry.pricing.end(), std::pair<std::string, std::string>{"web_search", "0.01"}) != entry.pricing.end());
     // The table of listing members no unit reads: the token members a ceiling covers and the item members.
-    CHECK(std::size(descriptor::listed_members) == 4 && descriptor::listed_members[2].member == "image" &&
-          descriptor::listed_members[2].feature == descriptor::ListedFeature::ImageInput &&
-          descriptor::listed_members[3].member == "web_search" && descriptor::listed_members[3].feature == descriptor::ListedFeature::WebSearch);
+    // `input_audio_cache` is the unit `cache_read_audio` (#219), so it is not among them.
+    CHECK(std::size(descriptor::listed_members) == 3 && descriptor::listed_members[0].member == "image_token" &&
+          descriptor::listed_members[1].member == "image" && descriptor::listed_members[1].feature == descriptor::ListedFeature::ImageInput &&
+          descriptor::listed_members[2].member == "web_search" && descriptor::listed_members[2].feature == descriptor::ListedFeature::WebSearch);
   }
   // The ceiling a refresh writes covers the image output tokens (the endpoints' `image_output` is on the output side) and
   // the image tokens (`image_token`, on both): 0.00002 on the input side, 0.00003 on the output side.
