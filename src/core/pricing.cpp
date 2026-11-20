@@ -48,6 +48,9 @@ std::optional<std::uint64_t> ModelPrice::* slot_of(std::string_view name) {
 }
 // The unit of the image tokens of an input, which only the endpoint pricing reads.
 constexpr std::string_view input_image_unit = "input_image";
+// The usage counter of the seconds of audio a transcription billed (the realtime and transcription codecs write it),
+// and the item unit that prices them.
+constexpr std::string_view seconds_counter = "seconds", second_unit = "item:second";
 // Whether the selection reads the unit of plain name `name`.
 bool held(std::string_view name) {
   return slot_of(name) || name.starts_with(descriptor::tool_fee_prefix) || name == input_image_unit;
@@ -203,7 +206,7 @@ constexpr std::array<std::string_view, 3> output_breakdown{"candidatesTokensDeta
 constexpr std::array<std::string_view, 2> input_audio_counters{"input_audio", "input_token_details.audio_tokens"};
 constexpr std::array<std::string_view, 2> output_audio_counters{"audio_tokens", "output_token_details.audio_tokens"};
 constexpr std::array<std::string_view, 1> output_image_counters{"completion_tokens_details.image_tokens"};
-constexpr std::array<std::string_view, 1> input_image_counters{"input_token_details.image_tokens"};
+constexpr std::array<std::string_view, 2> input_image_counters{"input_token_details.image_tokens", realtime_image_tokens};
 // The tokens of one modality in a breakdown, matched without regard to case. Empty when the usage has none.
 std::optional<std::uint64_t> modality_tokens(const Usage& usage, std::span<const std::string_view> prefixes,
                                              std::string_view modality) {
@@ -320,7 +323,7 @@ UsageSum usage_sum(const Selection& selection, const Usage& usage, const UsageRu
       else { out.unpriced.emplace_back("input_audio"); complete = false; }
     }
     // The image tokens of the input, when the caller counts them, the same way at `input_image`.
-    // A realtime turn counts them in `input_token_details.image_tokens`.
+    // A realtime turn counts them in `input_token_details.image_tokens` (OpenAI) or `realtime.image_tokens` (Google Live).
     const auto image_count = rules.input_image && *rules.input_image ? rules.input_image : counter_tokens(input_image_counters);
     std::uint64_t image_in = 0;
     if (image_count && *image_count && uncached) {
@@ -485,7 +488,26 @@ CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_v
   rules.stale_ceiling = route_ceiling &&
       ((selection.price.ceiling_input && ceiling_below_listed(*entry, TokenSide::Input, *selection.price.ceiling_input, service_tier, input_length)) ||
        (selection.price.ceiling_output && ceiling_below_listed(*entry, TokenSide::Output, *selection.price.ceiling_output, service_tier, input_length)));
+  // A transcription turn of a realtime session reports the length of the utterance it billed (OpenAI's `seconds`).
+  // Without a token counter beside it the turn bills no tokens, which the entry must state as declared zeros.
+  const auto seconds = usage.extra.find(std::string(seconds_counter));
+  const bool tokens_reported = usage.input_total || usage.input_uncached || usage.cache_read || usage.cache_write || usage.output_total || usage.reasoning;
+  const bool by_seconds = seconds != usage.extra.end();
+  if (by_seconds && !tokens_reported) rules.input = rules.output = false;
   auto summed = detail::usage_sum(selection, usage, rules);
+  if (by_seconds) {
+    if (!tokens_reported) {
+      const auto every = dearest_price_of(*entry, service_tier, detail::kMax);
+      if (!every.input || *every.input) { summed.unpriced.emplace_back("input"); summed.complete = false; }
+      if (!every.output || *every.output) { summed.unpriced.emplace_back("output"); summed.complete = false; }
+    }
+    // The seconds at `item:second`, as endpoint_estimate prices a transcription's: the row without a qualifier, since a
+    // usage states no dimensions. No row, or one at a variable price, leaves no total.
+    if (seconds->second.value) {
+      if (const auto rate = item_price(*entry, second_unit, {}, service_tier, input_length)) summed.sum += Wide::product(seconds->second.value, rate->first);
+      else { summed.unpriced.emplace_back(second_unit); summed.complete = false; }
+    }
+  }
   out.assumptions = std::move(summed.assumptions);
   out.unpriced = std::move(summed.unpriced);
   if (!summed.complete) return out;
@@ -966,8 +988,7 @@ EndpointBound realtime_response_bound(const RealtimeResponseInput& in, const des
   };
   if (tokens.text) charge("input", dearest({"input", "cache_read", "cache_write", "cache_write_1h"}), tokens.text);
   if (tokens.audio) charge("input_audio", dearest({"input_audio"}), tokens.audio);
-  // A Google Live turn reports image tokens only in its prompt breakdown, which the estimate bills at the text rates.
-  if (tokens.image) charge(input_image_unit, dearest({input_image_unit, "input", "cache_read", "cache_write", "cache_write_1h"}), tokens.image);
+  if (tokens.image) charge(input_image_unit, dearest({input_image_unit}), tokens.image);
   if (output) {
     const auto rate = in.audio_output ? dearest({"output", "reasoning", "output_image", "output_audio"}) : dearest({"output", "reasoning", "output_image"});
     // Audio output tokens are not billed at the text output rate.

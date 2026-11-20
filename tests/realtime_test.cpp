@@ -621,6 +621,24 @@ void turn_usage_is_priced() {
   CHECK(estimate.total && estimate.total->nano_usd == 900u * 4000u + 100u * 10'000u + 10u * 16'000u);
   estimate = pricing::estimate(*catalogue, "openai.chat", "", text_only, image_turn);
   CHECK(!estimate.total && estimate.unpriced == std::vector<std::string>({"input_image"}));
+  // Google Live names image tokens only in its prompt breakdown, which a Generate usage shares; the codec copies them to
+  // their own counter, so they bill at `input_image` too: 100 of 1000 input tokens, and 10 output tokens.
+  auto images = realtime::make_codec(descriptor::presets::google_generate());
+  std::get<std::vector<realtime::Event>>(images->decode(false, R"({"serverContent":{"modelTurn":{"parts":[{"text":"hi"}]}}})"));
+  const auto image_events = std::get<std::vector<realtime::Event>>(images->decode(false,
+      R"({"serverContent":{"turnComplete":true},"usageMetadata":{"promptTokenCount":1000,"responseTokenCount":10,"totalTokenCount":1010,
+          "promptTokensDetails":[{"modality":"TEXT","tokenCount":900},{"modality":"IMAGE","tokenCount":100}]}})"));
+  const auto& live_images = all<realtime::TurnCommitted>(image_events).at(0)->turn.usage;
+  CHECK(live_images.extra.at(std::string(pricing::realtime_image_tokens)).value == 100 && live_images.extra.at("promptTokensDetails.IMAGE").value == 100);
+  estimate = pricing::estimate(*catalogue, "google.generate", "", ServedModel{"image-model", "image-model", ServedRelation::Exact}, live_images);
+  CHECK(estimate.total && estimate.total->nano_usd == 900u * 4000u + 100u * 10'000u + 10u * 16'000u);
+  estimate = pricing::estimate(*catalogue, "google.generate", "", text_only, live_images);
+  CHECK(!estimate.total && estimate.unpriced == std::vector<std::string>({"input_image"}));
+  // A Generate usage with the same breakdown still bills its image tokens at the input rate.
+  auto generated = live_images;
+  generated.extra.erase(std::string(pricing::realtime_image_tokens));
+  estimate = pricing::estimate(*catalogue, "google.generate", "", text_only, generated);
+  CHECK(estimate.total && estimate.total->nano_usd == 1000u * 4000u + 10u * 16'000u);
 }
 
 // The reasons of a bound, as "<kind> [<subject>]; ...".
@@ -803,6 +821,27 @@ void response_bounds() {
   CHECK(facts.endpoint == "realtime" && facts.operation == "connect" && facts.billing == descriptor::EndpointBilling::Model);
   const auto heard_cost = pricing::endpoint_estimate(facts, counted, catalogue);
   CHECK(heard_cost.total && heard_cost.total->nano_usd == bound.total->nano_usd && pricing::beyond_bound(bound, heard_cost).empty());
+  // The chat estimate prices the turn's seconds the same way: at `item:second`, the tokens at their declared zeros.
+  auto heard_estimate = pricing::estimate(catalogue, "openai.chat", "https://api.openai.com", served("gpt-live-transcribe"), heard);
+  CHECK(heard_estimate.total && heard_estimate.total->nano_usd == bound.total->nano_usd && heard_estimate.unpriced.empty());
+  // No `item:second` row, token rates that are not declared zeros, or a second at a variable price: no total, never zero.
+  heard_estimate = pricing::estimate(catalogue, "openai.chat", "https://api.openai.com", served("tokens-transcribe"), heard);
+  CHECK(!heard_estimate.total && heard_estimate.unpriced == std::vector<std::string>({"input", "output", "item:second"}));
+  {
+    auto more = descriptor::load_catalogue(R"({"version":1,"models":[{"id":"seconds-only","pricing":{"item:second":"0.0001"}},
+        {"id":"variable-second","pricing":{"input":"0","output":"0","item:second":"-1"}},{"id":"qualified-second","pricing":{"input":"0","output":"0","item:second[operation=transcribe]":"0.0001"}}]})");
+    CHECK(std::holds_alternative<descriptor::CatalogueSnapshot>(more));
+    const auto& other = *std::get<descriptor::CatalogueSnapshot>(more);
+    // An entry with no token price at all prices no chat usage, as before.
+    CHECK(pricing::estimate(other, "openai.chat", "", served("seconds-only"), heard).unpriced == std::vector<std::string>({"model"}));
+    CHECK(pricing::estimate(other, "openai.chat", "", served("variable-second"), heard).unpriced == std::vector<std::string>({"item:second"}));
+    CHECK(pricing::estimate(other, "openai.chat", "", served("qualified-second"), heard).unpriced == std::vector<std::string>({"item:second"}));
+    // Zero seconds bill nothing.
+    auto silent = heard;
+    silent.extra.at("seconds").value = 0;
+    const auto none = pricing::estimate(other, "openai.chat", "", served("variable-second"), silent);
+    CHECK(none.total && none.total->nano_usd == 0);
+  }
   // Without the length, and for an entry that prices no second, no bound.
   CHECK(reasons_of(realtime::response_bound(openai, transcribe, {}, catalogue)) == "Quantity [item:second]; ");
   transcribe.model = "tokens-transcribe";
@@ -832,7 +871,10 @@ void response_bounds() {
     if (google_shaped) {
       usage.extra["promptTokensDetails.TEXT"] = Count{t, Evidence::Reported};
       usage.extra["promptTokensDetails.AUDIO"] = Count{a, Evidence::Reported};
-      if (im) usage.extra["promptTokensDetails.IMAGE"] = Count{im, Evidence::Reported};
+      if (im) {
+        usage.extra["promptTokensDetails.IMAGE"] = Count{im, Evidence::Reported};
+        usage.extra[std::string(pricing::realtime_image_tokens)] = Count{im, Evidence::Reported};
+      }
       usage.extra["responseTokensDetails.AUDIO"] = Count{out_audio, Evidence::Reported};
       usage.extra["responseTokensDetails.TEXT"] = Count{out - out_audio, Evidence::Reported};
       if (thoughts) usage.extra["thoughtsTokenCount"] = Count{thoughts, Evidence::Reported};
