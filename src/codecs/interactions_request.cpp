@@ -1,4 +1,6 @@
 #include "codecs/interactions_request.h"
+#include "codecs/reason.h"
+#include "descriptor/policy_refusals.h"
 #include "codecs/request_checks.h"
 #include "core/request_controls.h"
 #include "codecs/media_input.h"
@@ -126,37 +128,37 @@ std::string operation_path(std::string_view route, std::string_view suffix) {
   return path;
 }
 EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request, bool streaming) {
-  auto bad = [](std::string label) -> EncodeResult { return Error{ErrorKind::InvalidRequest, std::move(label)}; };
-  auto replay_bad = []() -> EncodeResult { return Error{ErrorKind::ReplayIneligible, "native replay provenance, binding or content mismatch"}; };
+  auto bad = [](const reason::Reason& label) -> EncodeResult { return reason::error(ErrorKind::InvalidRequest, label); };
+  auto replay_bad = []() -> EncodeResult { return reason::error(ErrorKind::ReplayIneligible, reason::interactions_request::native_replay_provenance_binding_or); };
   // The paths are the route fact of the descriptor's origin, which the policy states (descriptor::route_admitted).
   if (descriptor.family() != "google.interactions" || !descriptor::route_admitted(descriptor))
-    return Error{ErrorKind::InvalidConfig, "Interactions requires the model interaction endpoint"};
-  if (auto refusal = descriptor::route_refusal(descriptor, request.model)) return bad(std::move(*refusal));
-  if (auto refusal = descriptor::literal_route_refusal(descriptor, request.model)) return Error{ErrorKind::InvalidConfig, std::move(*refusal)};
+    return reason::error(ErrorKind::InvalidConfig, reason::interactions_request::interactions_requires_the_model);
+  if (auto refusal = descriptor::route_refusal_reason(descriptor, request.model)) return bad(std::move(*refusal));
+  if (auto refusal = descriptor::literal_route_refusal_reason(descriptor, request.model)) return reason::error(ErrorKind::InvalidConfig, *refusal);
   const auto& resources = descriptor.policy()->resources();
   auto effective = descriptor::effective_defaults(descriptor, request.model);
   if (request.max_output_tokens) effective.max_output_tokens = request.max_output_tokens;
   if (request.thinking_level) effective.thinking_level = *request.thinking_level;
   if (request.thinking_summaries) effective.thinking_summaries = request.thinking_summaries;
   if (request.service_tier) effective.service_tier = *request.service_tier;
-  if (auto error = descriptor::validate_choices(descriptor, request.model, effective)) return bad(std::move(*error));
+  if (auto error = descriptor::choices_refusal(descriptor, request.model, effective)) return bad(std::move(*error));
   const auto name = [](std::string_view value, std::string_view more) {
     return !value.empty() && value.size() <= 256 && std::all_of(value.begin(), value.end(), [&](char c) {
       return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' ||
              more.find(c) != std::string_view::npos;
     });
   };
-  if (request.model.empty() == !request.agent.has_value()) return bad("exactly one of model or agent required");
-  if (request.agent && !name(*request.agent, {})) return bad("invalid interaction agent");
+  if (request.model.empty() == !request.agent.has_value()) return bad(reason::interactions_request::model_or_agent_required);
+  if (request.agent && !name(*request.agent, {})) return bad(reason::interactions_request::invalid_agent);
   if (request.lifecycle != Lifecycle::Create) {
     // An operation on a stored interaction: no input, no stream, the id in the path.
     // The id is one path segment: never `.` or `..`, and no `..` inside it.
     if (!name(request.interaction_id, "=") || request.interaction_id == "." || request.interaction_id.find("..") != std::string::npos)
-      return bad("invalid interaction id");
-    if (!request.messages.empty() || streaming) return bad("an interaction lifecycle request sends no input and is not streamed");
-    if (request.extensions) return bad("an interaction lifecycle request carries no extensions");
+      return bad(reason::interactions_request::invalid_interaction_id);
+    if (!request.messages.empty() || streaming) return bad(reason::interactions_request::lifecycle_request_invalid);
+    if (request.extensions) return bad(reason::interactions_request::an_interaction_lifecycle_request_carries_no);
     auto context = std::shared_ptr<const NativeContext>(new NativeContext(descriptor, request, effective, false));
-    if (!context->valid_) return Error{ErrorKind::ResourceLimit, "native binding could not be captured"};
+    if (!context->valid_) return reason::error(ErrorKind::ResourceLimit, reason::interactions_request::native_binding_could_not_be_captured);
     const auto cancel = request.lifecycle == Lifecycle::Cancel;
     EncodedRequest result{request.lifecycle == Lifecycle::Get ? "GET" : cancel ? "POST" : "DELETE",
                           operation_path(descriptor.resolved_path(false, request.model), "/" + request.interaction_id + (cancel ? "/cancel" : "")), {}, {}, {}};
@@ -169,57 +171,57 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     result.context = std::move(context);
     return result;
   }
-  if (request.background.value_or(false) && !request.store.value_or(false)) return bad("a background interaction needs store");
+  if (request.background.value_or(false) && !request.store.value_or(false)) return bad(reason::interactions_request::background_needs_store);
   CacheMarkReport mark_report;
   if (auto error = cache_marks::drop(descriptor, request.model, request.messages, mark_report)) return std::move(*error);
   if (request.messages.empty() || request.messages.size() > resources.request_messages ||
       request.tools.size() + request.builtin_tools.size() > resources.request_tools)
-    return bad("model and bounded messages/tools required");
+    return bad(reason::interactions_request::model_and_bounded_messages_tools_required);
   // Values the service extends (tasks, search types) are tokens, not a fixed list; the service judges them.
   const auto token = [](std::string_view value) {
     return !value.empty() && value.size() <= 64 &&
            std::all_of(value.begin(), value.end(), [](char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'; });
   };
-  if (request.video_task && !token(*request.video_task)) return bad("video task must be a lower-case token");
+  if (request.video_task && !token(*request.video_task)) return bad(reason::interactions_request::video_task_must_be_a_lower_case_token);
   for (const auto& tool : request.builtin_tools)
     if (const auto* search = std::get_if<GoogleSearchTool>(&tool)) {
-      if (search->search_types.size() > 8) return bad("google_search search types must be bounded unique tokens");
+      if (search->search_types.size() > 8) return bad(reason::interactions_request::google_search_search_types_must_be_bounded);
       std::set<std::string_view> seen;
       for (const auto& type : search->search_types)
-        if (!token(type) || !seen.insert(type).second) return bad("google_search search types must be bounded unique tokens");
+        if (!token(type) || !seen.insert(type).second) return bad(reason::interactions_request::google_search_search_types_must_be_bounded);
     }
   if (request.previous_interaction_id) {
     const auto& id = *request.previous_interaction_id;
     if (id.empty() || id.size() > 256 || std::any_of(id.begin(), id.end(), [](unsigned char c) { return c <= 0x20 || c >= 0x7f; }))
-      return bad("invalid previous interaction id");
+      return bad(reason::interactions_request::invalid_previous_interaction_id);
     for (const auto& message : request.messages)
       if (message.native || message.role == Role::Assistant)
-        return bad("previous interaction input must be new input only");
+        return bad(reason::interactions_request::previous_interaction_input_not_new);
   }
-  if (request.response_format.size() > resources.request_parts) return bad("response format count limit exceeded");
+  if (request.response_format.size() > resources.request_parts) return bad(reason::interactions_request::response_format_count_limit_exceeded);
   for (const auto& format : request.response_format) {
-    const char* error = nullptr;
+    const reason::Reason* error = nullptr;
     std::visit([&](const auto& value) {
       using T = std::decay_t<decltype(value)>;
       if constexpr (!std::is_same_v<T, TextResponseFormat>)
-        if (value.delivery && *value.delivery != Delivery::Inline && *value.delivery != Delivery::Uri) error = "invalid delivery mode";
+        if (value.delivery && *value.delivery != Delivery::Inline && *value.delivery != Delivery::Uri) error = &reason::interactions_request::invalid_delivery_mode;
       if constexpr (std::is_same_v<T, AudioResponseFormat>) {
         // The service names the formats; the SDK checks their shape and the media kind.
-        if (value.mime_type && (!mime_syntax(*value.mime_type) || mime_kind(*value.mime_type) != MediaKind::Audio)) error = "audio output MIME type must be an audio MIME type";
+        if (value.mime_type && (!mime_syntax(*value.mime_type) || mime_kind(*value.mime_type) != MediaKind::Audio)) error = &reason::interactions_request::audio_output_mime_type_must_be_an_audio;
       } else if constexpr (std::is_same_v<T, ImageResponseFormat>) {
-        if (value.mime_type && (!mime_syntax(*value.mime_type) || mime_kind(*value.mime_type) != MediaKind::Image)) error = "image output MIME type must be an image MIME type";
-        if (value.aspect_ratio && !request_controls::aspect_ratio_syntax(*value.aspect_ratio)) error = "image aspect ratio must be W:H";
-        if (value.image_size && !request_controls::size_token(*value.image_size)) error = "image size must be a short token";
+        if (value.mime_type && (!mime_syntax(*value.mime_type) || mime_kind(*value.mime_type) != MediaKind::Image)) error = &reason::interactions_request::image_output_mime_type_must_be_an_image;
+        if (value.aspect_ratio && !request_controls::aspect_ratio_syntax(*value.aspect_ratio)) error = &reason::interactions_request::image_aspect_ratio_must_be_w_h;
+        if (value.image_size && !request_controls::size_token(*value.image_size)) error = &reason::interactions_request::image_size_must_be_a_short_token;
       } else if constexpr (std::is_same_v<T, VideoResponseFormat>) {
-        if (value.aspect_ratio && !request_controls::aspect_ratio_syntax(*value.aspect_ratio)) error = "video aspect ratio must be W:H";
-        if (value.resolution && !request_controls::size_token(*value.resolution)) error = "video resolution must be a short token";
-        if (value.duration && !duration_valid(*value.duration)) error = "video duration requires protobuf Duration syntax";
+        if (value.aspect_ratio && !request_controls::aspect_ratio_syntax(*value.aspect_ratio)) error = &reason::interactions_request::video_aspect_ratio_must_be_w_h;
+        if (value.resolution && !request_controls::size_token(*value.resolution)) error = &reason::interactions_request::video_resolution_must_be_a_short_token;
+        if (value.duration && !duration_valid(*value.duration)) error = &reason::interactions_request::video_duration_requires_protobuf_duration;
       } else {
-        if (value.mime_type && !mime_syntax(*value.mime_type)) error = "text output MIME type must be a MIME type";
-        if (value.schema && (!value.mime_type || *value.mime_type != "application/json" || !value.schema->root().is_object())) error = "text schema requires application/json and an object schema";
+        if (value.mime_type && !mime_syntax(*value.mime_type)) error = &reason::interactions_request::text_output_mime_type_must_be_a_mime_type;
+        if (value.schema && (!value.mime_type || *value.mime_type != "application/json" || !value.schema->root().is_object())) error = &reason::interactions_request::text_schema_requires_application_json_and;
       }
     }, format);
-    if (error) return bad(error);
+    if (error) return bad(*error);
   }
   if (request.speech_config) {
     const auto count = std::visit([](const auto& value) {
@@ -227,38 +229,38 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       if constexpr (std::is_same_v<T, SpeakerConfig>) return value.speakers.size();
       else return value.size();
     }, *request.speech_config);
-    if (count > resources.request_parts) return bad("speech configuration count limit exceeded");
+    if (count > resources.request_parts) return bad(reason::interactions_request::speech_configuration_count_limit_exceeded);
   }
   if (request.transcription_config) {
     const auto& transcription = *request.transcription_config;
     if (transcription.language_codes.size() > resources.request_parts || descriptor::over_limit(descriptor, "transcription_vocabulary", transcription.custom_vocabulary.size()) ||
-        transcription.custom_vocabulary.size() > resources.request_parts) return bad("transcription list count limit exceeded");
+        transcription.custom_vocabulary.size() > resources.request_parts) return bad(reason::interactions_request::transcription_list_count_limit_exceeded);
     if (transcription.mode && *transcription.mode != TranscriptionMode::Verbatim && *transcription.mode != TranscriptionMode::Smart)
-      return bad("invalid transcription mode");
+      return bad(reason::interactions_request::invalid_transcription_mode);
     if ((transcription.speaker_diarization || transcription.word_timestamps) &&
         (transcription.mode == TranscriptionMode::Smart || !transcription.custom_vocabulary.empty()))
-      return bad("timestamps and diarization cannot combine with smart mode or custom vocabulary");
+      return bad(reason::interactions_request::timestamps_and_diarization_cannot_combine);
   }
   bool captured_history = false;
   std::optional<Error> tool_error;
   for (const auto& message : request.messages) {
-    if (message.parts.size() > resources.request_parts) return bad("request part count limit exceeded");
+    if (message.parts.size() > resources.request_parts) return bad(reason::interactions_request::request_part_count_limit_exceeded);
     captured_history = captured_history || static_cast<bool>(message.native);
     for (const auto& part : message.parts) if (const auto* tool = std::get_if<ToolResult>(&part); tool && !tool_error) {
       if (!tool->content_parts.empty() && !tool->content.empty())
-        tool_error = Error{ErrorKind::InvalidRequest, "tool result content and content_parts are mutually exclusive"};
+        tool_error = reason::error(ErrorKind::InvalidRequest, reason::interactions_request::tool_result_content_and_content_parts_are);
       else if (tool->content_parts.size() > resources.request_parts)
-        tool_error = Error{ErrorKind::InvalidRequest, "tool result part count limit exceeded"};
+        tool_error = reason::error(ErrorKind::InvalidRequest, reason::interactions_request::tool_result_part_count_limit_exceeded);
       else if (std::any_of(tool->content_parts.begin(), tool->content_parts.end(), [](const auto& nested) { return std::holds_alternative<Opaque>(nested); }))
-        tool_error = Error{ErrorKind::Unsupported, "tool result blocks are not admitted for this family"};
+        tool_error = reason::error(ErrorKind::Unsupported, reason::interactions_request::tool_result_blocks_not_admitted);
       else for (const auto& nested : tool->content_parts) if (const auto* media = std::get_if<Media>(&nested)) {
         if (static_cast<unsigned>(media->kind) < media_kind_count && static_cast<unsigned>(media->source) <= 2 &&
             media->kind != MediaKind::Image)
-          tool_error = Error{ErrorKind::Unsupported, "Interactions function result supports image and text subcontent only"};
+          tool_error = reason::error(ErrorKind::Unsupported, reason::interactions_request::interactions_function_result_supports);
         else tool_error = media_input::admit(descriptor, *media);
         if (!tool_error && (media->detail != ImageDetail::Auto ||
             !media->name.empty() || !media->id.empty() || !media->transcript.empty()))
-          tool_error = Error{ErrorKind::Unsupported, "Interactions function result image has unsupported controls or metadata"};
+          tool_error = reason::error(ErrorKind::Unsupported, reason::interactions_request::interactions_function_result_image_has);
         if (tool_error) break;
       }
     }
@@ -268,20 +270,20 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       if (message.role == Role::Assistant || message.wire_output) return replay_bad();
       for (const auto& part : message.parts) {
         if (const auto* media = std::get_if<Media>(&part)) {
-          if (message.role != Role::User) return bad("media inputs require user role");
+          if (message.role != Role::User) return bad(reason::interactions_request::media_inputs_require_user_role);
           if (auto error = media_input::admit(descriptor, *media)) return *error;
           if (!media->name.empty() && media->kind != MediaKind::Video)
-            return Error{ErrorKind::Unsupported, "Interactions only supports a media name for video content"};
+            return reason::error(ErrorKind::Unsupported, reason::interactions_request::interactions_only_supports_a_media_name);
         } else if (!std::holds_alternative<Text>(part) && !std::holds_alternative<ToolResult>(part)) return replay_bad();
       }
     }
   }
   if (tool_error && !captured_history) return *tool_error;
   if (auto refusal = request_controls::validate_extensions(descriptor, request.extensions))
-    return Error{refusal->admitted ? ErrorKind::InvalidRequest : ErrorKind::Unsupported, refusal->cause};
+    return reason::error(refusal->admitted ? ErrorKind::InvalidRequest : ErrorKind::Unsupported, refusal->cause);
   auto context = std::shared_ptr<const NativeContext>(new NativeContext(descriptor, request, effective, streaming));
   if (!context->history_valid_) return replay_bad();
-  if (!context->valid_) return Error{ErrorKind::ResourceLimit, "native binding could not be captured"};
+  if (!context->valid_) return reason::error(ErrorKind::ResourceLimit, reason::interactions_request::native_binding_could_not_be_captured);
   if (tool_error) return *tool_error;
   EncodedRequest result{"POST", descriptor.resolved_path(streaming, request.model), {}, {}, {}};
   for (const auto& header : descriptor.headers()) {
@@ -294,29 +296,29 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
   std::set<std::string_view> names;
   for (const auto& tool : request.tools) {
     if (!function_name(tool.name) || !names.insert(tool.name).second || !tool.parameters ||
-        !tool.parameters->root().is_object()) return bad("unique valid functions and object parameters required");
+        !tool.parameters->root().is_object()) return bad(reason::interactions_request::unique_valid_functions_and_object);
   }
   if (request.tool_choice) {
     // The names a choice allows are functions the request declares.
     const auto& choice = *request.tool_choice;
-    if (request.required_tool) return bad("tool choice and required tool are mutually exclusive");
-    if (tool_choice_name(choice.mode).empty()) return bad("invalid tool choice mode");
+    if (request.required_tool) return bad(reason::interactions_request::tool_choice_and_required_tool_exclusive);
+    if (tool_choice_name(choice.mode).empty()) return bad(reason::interactions_request::invalid_tool_choice_mode);
     if (choice.allowed) {
-      if (choice.allowed->empty()) return bad("allowed tools require at least one function");
+      if (choice.allowed->empty()) return bad(reason::interactions_request::allowed_tools_require_at_least_one);
       std::set<std::string_view> seen;
       for (const auto& allowed : *choice.allowed) {
-        if (!names.contains(allowed)) return bad("allowed tools must be declared functions");
-        if (!seen.insert(allowed).second) return bad("allowed tools must name each function once");
+        if (!names.contains(allowed)) return bad(reason::interactions_request::allowed_tools_must_be_declared);
+        if (!seen.insert(allowed).second) return bad(reason::interactions_request::allowed_tools_must_be_unique);
       }
     }
   }
   // Over the size limit, a request with media is a resource limit; one of text alone is invalid.
   const bool has_media = media_input::carries_media(request.messages);
   const auto limit_error = [&] {
-    return Error{has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest, "request exceeds JSON limits"};
+    return reason::error(has_media ? ErrorKind::ResourceLimit : ErrorKind::InvalidRequest, reason::interactions_request::request_exceeds_json_limits);
   };
   auto build = [&](json::BoundedWriter& body) -> std::optional<Error> {
-    auto invalid = [](std::string label) { return Error{ErrorKind::InvalidRequest, std::move(label)}; };
+    auto invalid = [](const reason::Reason& label) { return reason::error(ErrorKind::InvalidRequest, label); };
     if (request.agent) body.raw("{\"agent\":").quoted(*request.agent);
     else body.raw("{").quoted(descriptor.request_model_member()).raw(":").quoted(request.model);
     body.raw(",\"store\":").raw(request.store.value_or(false) ? "true" : "false").raw(",")
@@ -406,7 +408,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
       generation_comma = true;
     }
     if (request.required_tool) {
-      if (!names.contains(*request.required_tool)) return invalid("required tool must name a declared function");
+      if (!names.contains(*request.required_tool)) return invalid(reason::interactions_request::required_tool_must_name_a_declared);
       if (generation_comma) body.raw(",");
       body.raw("\"tool_choice\":{\"allowed_tools\":{\"mode\":\"any\",\"tools\":[").quoted(*request.required_tool).raw("]}}");
     } else if (request.tool_choice) {
@@ -426,7 +428,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     std::set<std::string_view> ids;
     for (const auto& message : request.messages) {
       if (message.native) {
-        if (!pending.empty()) return invalid("client results must precede next assistant generation");
+        if (!pending.empty()) return invalid(reason::interactions_request::client_results_must_precede_next);
         std::map<std::string_view, const ToolCall*> calls;
         for (const auto& part : message.parts) {
           if (const auto* call = std::get_if<ToolCall>(&part); call && call->kind == ToolCallKind::ServerExecuted) continue;
@@ -434,36 +436,36 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
           if (const auto* call = std::get_if<ToolCall>(&part)) {
             if (call->kind != ToolCallKind::ClientExecuted || call->wire_type != "function_call" ||
                 call->id.empty() || !names.contains(call->name) || !call->input || !call->input->root().is_object() ||
-                !ids.insert(call->id).second) return invalid("captured function lacks unique declared ownership");
+                !ids.insert(call->id).second) return invalid(reason::interactions_request::captured_function_lacks_unique_declared);
             calls.emplace(call->id, call); pending.emplace(call->id, call->name);
           } else if (!std::holds_alternative<Text>(part) && !std::holds_alternative<Thought>(part) && !std::holds_alternative<Media>(part))
-            return Error{ErrorKind::Unsupported, "unsupported captured interaction part"};
+            return reason::error(ErrorKind::Unsupported, reason::interactions_request::unsupported_captured_interaction_part);
         }
         for (auto step : message.wire_output->root().elements()) {
-          if (!step.is_object() || !step.get("type").is_string()) return invalid("captured step requires type");
+          if (!step.is_object() || !step.get("type").is_string()) return invalid(reason::interactions_request::captured_step_requires_type);
           auto type = step.get("type").as_string();
           if (type == "function_call") {
             auto id = step.get("id"), name = step.get("name"), arguments = step.get("arguments");
-            if (!id.is_string() || !name.is_string() || !arguments.is_object()) return invalid("captured function identity invalid");
+            if (!id.is_string() || !name.is_string() || !arguments.is_object()) return invalid(reason::interactions_request::captured_function_identity_invalid);
             auto found = calls.find(id.as_string());
             if (found == calls.end() || found->second->name != name.as_string() ||
-                !json::equal(arguments, found->second->input->root())) return invalid("captured function ownership mismatch");
+                !json::equal(arguments, found->second->input->root())) return invalid(reason::interactions_request::captured_function_ownership_mismatch);
             calls.erase(found);
           } else if (type != "thought" && type != "model_output" &&
                      !(type != "function_result" && (type.ends_with("_call") || type.ends_with("_result"))))
-            return Error{ErrorKind::Unsupported, "unsupported captured interaction step"};
+            return reason::error(ErrorKind::Unsupported, reason::interactions_request::unsupported_captured_interaction_step);
           separator(); body.value(step, 2);
         }
-        if (!calls.empty()) return invalid("captured function step missing");
+        if (!calls.empty()) return invalid(reason::interactions_request::captured_function_step_missing);
       } else {
-        if (message.parts.empty()) return invalid("input content required");
+        if (message.parts.empty()) return invalid(reason::interactions_request::input_content_required);
         if (std::holds_alternative<ToolResult>(message.parts.front())) {
-          if (message.role != Role::Tool && message.role != Role::User) return invalid("tool results require user or tool role");
+          if (message.role != Role::Tool && message.role != Role::User) return invalid(reason::interactions_request::tool_results_require_user_or_tool_role);
           for (const auto& part : message.parts) {
             auto tool = std::get_if<ToolResult>(&part);
-            if (!tool) return invalid("tool results cannot mix with plain content");
+            if (!tool) return invalid(reason::interactions_request::tool_results_cannot_mix_with_plain);
             auto found = pending.find(tool->tool_use_id);
-            if (found == pending.end()) return invalid("tool result requires exactly one pending client call");
+            if (found == pending.end()) return invalid(reason::interactions_request::tool_result_requires_exactly_one_pending);
             separator(); body.raw("{\"type\":\"function_result\",\"call_id\":").quoted(tool->tool_use_id)
                 .raw(",\"name\":").quoted(found->second).raw(",\"result\":");
             if (tool->content_parts.empty()) body.quoted(tool->content);
@@ -483,21 +485,21 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
             pending.erase(found);
           }
         } else {
-          if (message.role != Role::User || !pending.empty()) return invalid("plain input requires user role and resolved calls");
+          if (message.role != Role::User || !pending.empty()) return invalid(reason::interactions_request::plain_input_requires_user_role_and);
           separator(); body.raw("{\"type\":\"user_input\",\"content\":["); bool content_comma = false;
           for (const auto& part : message.parts) {
             if (content_comma) body.raw(",");
             content_comma = true;
             if (auto text = std::get_if<Text>(&part)) body.raw("{\"type\":\"text\",\"text\":").quoted(text->value).raw("}");
             else if (auto media = std::get_if<Media>(&part)) write_media(body, *media);
-            else return Error{ErrorKind::Unsupported, "unsupported input content"};
+            else return reason::error(ErrorKind::Unsupported, reason::interactions_request::unsupported_input_content);
           }
           body.raw("]}");
         }
       }
       if (!body.ok()) return limit_error();
     }
-    if (!pending.empty()) return invalid("all pending functions require host results");
+    if (!pending.empty()) return invalid(reason::interactions_request::all_pending_functions_require_host);
     body.raw("]");
     request_controls::write_extensions(body, request.extensions);
     body.raw("}");
