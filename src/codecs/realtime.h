@@ -174,7 +174,9 @@ EndpointFacts transcription_facts(const descriptor::ValidatedDescriptor&, const 
 //   fact names in `output_cap`, when it is an unsigned integer (OpenAI's `"inf"`, an absent member and a fact without
 //   `output_cap` are no cap, `OutputCap`). At Google, whose usage counts thinking beside the output, thinking needs a
 //   cap the setup cannot state, and the policy admits no output cap there, so a Google response has no bound.
-// Also refused: an origin without a realtime fact (`Unmodeled`, subject `realtime`), extensions the fact does not admit
+// Also refused: a session with input transcription (`Unmodeled`, subject `input_transcription`, after the response's own
+// reasons), whose transcription bills beside the response and commits no turn, so no usage of it reaches the host; an
+// origin without a realtime fact (`Unmodeled`, subject `realtime`), extensions the fact does not admit
 // (`Unmodeled`, subject `extensions`), a routing gateway (`RouteCeiling`), and a connection whose billing the policy does
 // not state (`Billing`, subject `realtime/connect`); one it states is not billed is exactly zero.
 pricing::EndpointBound response_bound(const descriptor::ValidatedDescriptor&, const Setup&, const ResponseInput&,

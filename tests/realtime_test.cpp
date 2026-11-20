@@ -777,6 +777,12 @@ void response_bounds() {
   auto foreign = capped("audio-model", "40");
   foreign.extensions = document(R"({"max_output_tokens":40,"temperature":1})");
   CHECK(reasons_of(realtime::response_bound(openai, foreign, stated(1, 0), catalogue)) == "Unmodeled [extensions]; ");
+  // A transcript of the user's audio bills a transcription no turn reports.
+  auto transcribed = capped("audio-model", "40");
+  transcribed.input_transcription = true;
+  transcribed.transcription_model = "gpt-live-transcribe";
+  bound = realtime::response_bound(openai, transcribed, stated(100, 20), catalogue);
+  CHECK(!bound.total && bound.lines.empty() && reasons_of(bound) == "Unmodeled [input_transcription]; ");
 
   // Transcription sessions bill by the second where the entry prices it: the recorded OpenAI utterance of 4 seconds.
   realtime::Setup transcribe;
