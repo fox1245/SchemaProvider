@@ -6,9 +6,8 @@
 
 namespace sp::webhooks {
 namespace {
-Error reject(ErrorKind kind, std::string text) {
-  Error error{kind, std::move(text)};
-  error.reason = std::string(reason::code(reason::Source::Webhooks, error.safe_message));
+Error reject(ErrorKind kind, const reason::Reason& text) {
+  Error error = reason::error(kind, text);
   return error;
 }
 std::string_view header(const std::vector<std::pair<std::string, std::string>>& headers, std::string_view name) {
@@ -25,13 +24,13 @@ std::variant<Event, Error> verify(std::string_view secret, const std::vector<std
   // The key is the base64 after `whsec_`.
   if (secret.starts_with("whsec_")) secret.remove_prefix(6);
   std::string key;
-  if (secret.empty() || !base64_decode(secret, key) || key.empty()) return reject(ErrorKind::InvalidRequest, "a webhook secret is whsec_ and base64");
+  if (secret.empty() || !base64_decode(secret, key) || key.empty()) return reject(ErrorKind::InvalidRequest, reason::webhooks::secret_invalid);
   const auto id = header(headers, "webhook-id"), timestamp = header(headers, "webhook-timestamp"), signatures = header(headers, "webhook-signature");
-  if (id.empty() || timestamp.empty() || signatures.empty()) return reject(ErrorKind::InvalidRequest, "a webhook carries its id, timestamp and signature headers");
+  if (id.empty() || timestamp.empty() || signatures.empty()) return reject(ErrorKind::InvalidRequest, reason::webhooks::headers_missing);
   if (timestamp.size() > 19 || !std::all_of(timestamp.begin(), timestamp.end(), [](char c) { return c >= '0' && c <= '9'; }))
-    return reject(ErrorKind::InvalidRequest, "a webhook timestamp is Unix seconds");
+    return reject(ErrorKind::InvalidRequest, reason::webhooks::timestamp_invalid);
   const auto sent = std::stoull(std::string(timestamp));
-  if ((sent > now && sent - now > tolerance) || (now > sent && now - sent > tolerance)) return reject(ErrorKind::InvalidRequest, "the webhook timestamp is outside the tolerance");
+  if ((sent > now && sent - now > tolerance) || (now > sent && now - sent > tolerance)) return reject(ErrorKind::InvalidRequest, reason::webhooks::timestamp_stale);
   std::string signed_content;
   signed_content.append(id).append(".").append(timestamp).append(".").append(body);
   const auto digest = crypto::hmac_sha256(key, signed_content);
@@ -45,10 +44,10 @@ std::variant<Event, Error> verify(std::string_view secret, const std::vector<std
     if (entry.starts_with("v1,") && crypto::constant_time_equal(entry.substr(3), expected)) matched = true;
     at = end + 1;
   }
-  if (!matched) return reject(ErrorKind::InvalidRequest, "the webhook signature does not match");
+  if (!matched) return reject(ErrorKind::InvalidRequest, reason::webhooks::signature_mismatch);
   auto parsed = json::parse(body);
   if (!std::holds_alternative<json::Document>(parsed) || !std::get<json::Document>(parsed).root().is_object())
-    return reject(ErrorKind::InvalidRequest, "a webhook body is a JSON object");
+    return reject(ErrorKind::InvalidRequest, reason::webhooks::body_invalid);
   Event event;
   event.raw = std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
   const auto root = event.raw->root();
