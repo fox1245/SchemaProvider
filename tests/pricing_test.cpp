@@ -279,6 +279,24 @@ void unpriced_usage() {
   interactions.extra["output_tokens_by_modality.audio"] = Count{100, Evidence::Reported};
   e = pricing::estimate(*c, "google.interactions", "", audio, interactions);
   CHECK(e.total && e.total->nano_usd == 16'800'000u);
+  // A realtime turn counts them under the codec's names: OpenAI's `input_token_details.audio_tokens` and
+  // `output_token_details.audio_tokens`, Google's breakdown under `responseTokensDetails.`.
+  auto realtime_openai = usage(1'000, 300);
+  realtime_openai.extra["input_token_details.audio_tokens"] = Count{200, Evidence::Reported};
+  realtime_openai.extra["output_token_details.audio_tokens"] = Count{100, Evidence::Reported};
+  e = pricing::estimate(*c, "openai.chat", "", audio, realtime_openai);
+  CHECK(e.total && e.total->nano_usd == 16'800'000u && e.unpriced.empty() && e.assumptions.empty());
+  e = pricing::estimate(*c, "openai.chat", "", plain, realtime_openai);
+  CHECK(!e.total && e.unpriced == std::vector<std::string>({"input_audio", "output_audio"}));
+  auto realtime_google = usage(1'000, 300);
+  realtime_google.extra["promptTokensDetails.TEXT"] = Count{800, Evidence::Reported};
+  realtime_google.extra["promptTokensDetails.AUDIO"] = Count{200, Evidence::Reported};
+  realtime_google.extra["responseTokensDetails.TEXT"] = Count{200, Evidence::Reported};
+  realtime_google.extra["responseTokensDetails.AUDIO"] = Count{100, Evidence::Reported};
+  e = pricing::estimate(*c, "google.generate", "", audio, realtime_google);
+  CHECK(e.total && e.total->nano_usd == 16'800'000u);
+  e = pricing::estimate(*c, "google.generate", "", plain, realtime_google);
+  CHECK(!e.total && e.unpriced == std::vector<std::string>({"input_audio", "output_audio"}));
   // Without an audio rate the audio tokens are not priced at the text rate.
   e = pricing::estimate(*c, "openai.chat", "", plain, chat);
   CHECK(!e.total && e.unpriced == std::vector<std::string>({"input_audio", "output_audio"}));
