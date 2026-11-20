@@ -1,11 +1,12 @@
 #include "codecs/jobs.h"
+#include "codecs/reason.h"
 #include "descriptor/policy.h"
 #include "json/json.h"
 #include <algorithm>
 
 namespace sp::jobs {
 namespace {
-Error bad(std::string message) { return Error{ErrorKind::InvalidRequest, std::move(message)}; }
+Error bad(const reason::Reason& message) { return reason::error(ErrorKind::InvalidRequest, message); }
 // A path segment the handle names; `.` and `..` would move the request elsewhere.
 bool token(std::string_view value) {
   return !value.empty() && value.size() <= 128 && value != "." && value != ".." && std::all_of(value.begin(), value.end(), [](char c) {
@@ -15,12 +16,12 @@ bool token(std::string_view value) {
 // The fact and path of one operation on a job the handle names, at the origin that started it.
 std::variant<std::pair<const descriptor::EndpointFact*, std::string>, Error> job_path(const descriptor::ValidatedDescriptor& descriptor,
                                                                                        const Handle& handle, std::string_view operation) {
-  if (handle.origin != descriptor.base_url()) return bad("a job is reached at the origin that started it");
+  if (handle.origin != descriptor.base_url()) return bad(reason::jobs_request::origin_mismatch);
   const auto* fact = descriptor.policy()->endpoint(handle.endpoint, descriptor.base_url());
-  if (!fact) return Error{ErrorKind::Unsupported, "job endpoints are not admitted at this origin"};
+  if (!fact) return reason::error(ErrorKind::Unsupported, reason::jobs_request::endpoint_not_admitted);
   const auto path = descriptor::endpoint_path(*fact, operation);
-  if (!path) return Error{ErrorKind::Unsupported, "the job endpoint has no path for this operation"};
-  if (!token(handle.id)) return bad("a job id is a token");
+  if (!path) return reason::error(ErrorKind::Unsupported, reason::jobs_request::path_missing);
+  if (!token(handle.id)) return bad(reason::jobs_request::id_invalid);
   std::string resolved(*path);
   if (const auto at = resolved.find("{id}"); at != std::string::npos) resolved.replace(at, 4, handle.id);
   return std::pair{fact, std::move(resolved)};
@@ -44,7 +45,7 @@ std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descr
   auto found = job_path(descriptor, download.handle, operation(download));
   if (auto* error = std::get_if<Error>(&found)) return *error;
   auto& [fact, path] = std::get<0>(found);
-  if (!download.max_bytes) return bad("a download needs a positive byte limit");
+  if (!download.max_bytes) return bad(reason::jobs_request::download_limit_invalid);
   Encoded encoded{std::move(path) + "?index=" + std::to_string(download.index), {}, download.handle.model, false, fact->auth};
   endpoints::add_fact_headers(encoded, *fact);
   encoded.method = "GET";
