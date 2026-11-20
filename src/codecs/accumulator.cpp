@@ -85,29 +85,28 @@ bool Accumulator::accept(const Event& event, const Error* failure_override) {
   }
   return ok;
 }
-bool Accumulator::reject(ErrorKind kind, std::string message) {
-  Error error{kind, std::move(message)};
-  error.reason = reason::code(reason::Source::Accumulator, error.safe_message);
+bool Accumulator::reject(ErrorKind kind, const reason::Reason& message) {
+  Error error = reason::error(kind, message);
   Fail e{failure_override_ ? *failure_override_ : std::move(error)};
   apply(e);
   if (sink_) sink_(Event{e});
   return false;
 }
 bool Accumulator::apply(const Begin&) {
-  if (state_ != State::Created) return reject(ErrorKind::ProtocolCorrupt, "duplicate begin");
+  if (state_ != State::Created) return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::begin_duplicate);
   state_ = State::Receiving; return true;
 }
 bool Accumulator::apply(const MessageBegin& e) {
-  if (state_ != State::Receiving || messages_.contains(e.message.value)) return reject(ErrorKind::ProtocolCorrupt, "invalid message begin");
-  if (messages_.size() >= limits_.max_parts) return reject(ErrorKind::ResourceLimit, "message limit");
+  if (state_ != State::Receiving || messages_.contains(e.message.value)) return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::message_begin_invalid);
+  if (messages_.size() >= limits_.max_parts) return reject(ErrorKind::ResourceLimit, reason::accumulator::message_limit);
   messages_.emplace(e.message.value, MessageCursor{Message{e.vendor_id.value_or(""), e.role, {}}, false, e.native_context, {}});
   return true;
 }
 bool Accumulator::apply(const PartBegin& e) {
   auto m = messages_.find(e.message.value);
-  if (state_ != State::Receiving || m == messages_.end() || m->second.sealed || parts_.contains(e.part.value)) return reject(ErrorKind::ProtocolCorrupt, "invalid part begin");
-  if (parts_.size() >= limits_.max_parts) return reject(ErrorKind::ResourceLimit, "part limit");
-  if (m->second.parts_by_order.contains(e.order)) return reject(ErrorKind::ProtocolCorrupt, "duplicate part order");
+  if (state_ != State::Receiving || m == messages_.end() || m->second.sealed || parts_.contains(e.part.value)) return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::part_begin_invalid);
+  if (parts_.size() >= limits_.max_parts) return reject(ErrorKind::ResourceLimit, reason::accumulator::part_limit);
+  if (m->second.parts_by_order.contains(e.order)) return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::part_order_duplicate);
   const size_t remaining = limits_.max_content_bytes - std::min(content_bytes_, limits_.max_content_bytes);
   size_t header_bytes = 0;
   auto count_header = [&](size_t bytes) {
@@ -115,23 +114,23 @@ bool Accumulator::apply(const PartBegin& e) {
     header_bytes += bytes; return true;
   };
   if (!count_header(e.header.wire_id.size()) || !count_header(e.header.name.size()) || !count_header(e.header.wire_type.size()))
-    return reject(ErrorKind::ResourceLimit, "part header limit");
+    return reject(ErrorKind::ResourceLimit, reason::accumulator::part_header_limit);
   if (e.kind == PartKind::Media) {
     const auto& media = e.header.media;
     if (static_cast<unsigned>(media.kind) >= media_kind_count ||
         static_cast<unsigned>(media.source) > static_cast<unsigned>(MediaSource::File))
-      return reject(ErrorKind::ProtocolCorrupt, "invalid generated media header");
-    if (media.data) return reject(ErrorKind::ProtocolCorrupt, "generated media header must not carry payload");
+      return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::media_header_invalid);
+    if (media.data) return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::media_header_payload);
     if ((!media.mime.empty() && !mime_syntax(media.mime)) ||
         (media.source == MediaSource::Inline ? !media.reference.empty() : media.reference.empty()))
-      return reject(ErrorKind::ProtocolCorrupt, "invalid generated media description");
+      return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::media_description_invalid);
     if (!count_header(media.mime.size()) || !count_header(media.reference.size()) || !count_header(media.name.size()) ||
         !count_header(media.id.size()) || !count_header(media.transcript.size()))
-      return reject(ErrorKind::ResourceLimit, "part header limit");
+      return reject(ErrorKind::ResourceLimit, reason::accumulator::part_header_limit);
   }
   if (e.header.wire_metadata) {
     const auto root = e.header.wire_metadata->root();
-    if (!root.is_object()) return reject(ErrorKind::ProtocolCorrupt, "tool metadata must be object");
+    if (!root.is_object()) return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::part_metadata_object_required);
     // Metadata arrives as one bounded immutable object, never as argument fragments.
     auto count_value = [&](auto&& self, json::Value value, size_t depth) -> bool {
       if (depth > limits_.max_json_depth || !count_header(8)) return false;
@@ -141,7 +140,7 @@ bool Accumulator::apply(const PartBegin& e) {
       if (value.is_array()) for (auto element : value.elements()) if (!self(self, element, depth + 1)) return false;
       return true;
     };
-    if (!count_value(count_value, root, 0)) return reject(ErrorKind::ResourceLimit, "part metadata limit");
+    if (!count_value(count_value, root, 0)) return reject(ErrorKind::ResourceLimit, reason::accumulator::part_metadata_limit);
   }
   content_bytes_ += header_bytes;
   Cursor cursor{e.kind, {e.header.wire_id, e.header.name, e.header.tool_kind, e.header.wire_type, e.header.wire_metadata}, {}, {},
@@ -153,13 +152,13 @@ bool Accumulator::apply(const PartBegin& e) {
 }
 bool Accumulator::apply(const PartDelta& e) {
   auto p = parts_.find(e.part.value);
-  if (state_ != State::Receiving || p == parts_.end() || p->second.sealed || p->second.kind != e.payload.kind) return reject(ErrorKind::ProtocolCorrupt, "invalid part delta");
+  if (state_ != State::Receiving || p == parts_.end() || p->second.sealed || p->second.kind != e.payload.kind) return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::part_delta_invalid);
   auto& c = p->second;
   if (e.payload.channel != DeltaChannel::Content && e.payload.channel != DeltaChannel::Signature)
-    return reject(ErrorKind::ProtocolCorrupt, "invalid delta channel");
+    return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::part_delta_channel_invalid);
   if (e.payload.channel == DeltaChannel::Signature && c.kind != PartKind::Thinking)
-    return reject(ErrorKind::ProtocolCorrupt, "signature on non-thinking part");
-  if (e.payload.bytes.size() > limits_.max_content_bytes - std::min(content_bytes_, limits_.max_content_bytes) || (c.kind == PartKind::ToolCall && e.payload.bytes.size() > limits_.max_tool_bytes - std::min(c.bytes.size(), limits_.max_tool_bytes))) return reject(ErrorKind::ResourceLimit, "content limit");
+    return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::part_signature_misplaced);
+  if (e.payload.bytes.size() > limits_.max_content_bytes - std::min(content_bytes_, limits_.max_content_bytes) || (c.kind == PartKind::ToolCall && e.payload.bytes.size() > limits_.max_tool_bytes - std::min(c.bytes.size(), limits_.max_tool_bytes))) return reject(ErrorKind::ResourceLimit, reason::accumulator::part_content_limit);
   if (e.payload.channel == DeltaChannel::Signature) {
     if (!c.signature) c.signature.emplace();
     c.signature->append(e.payload.bytes);
@@ -168,10 +167,10 @@ bool Accumulator::apply(const PartDelta& e) {
 }
 bool Accumulator::apply(const PartSeal& e) {
   auto p = parts_.find(e.part.value);
-  if ((state_ != State::Receiving && state_ != State::Draining) || p == parts_.end()) return reject(ErrorKind::ProtocolCorrupt, "invalid part seal");
+  if ((state_ != State::Receiving && state_ != State::Draining) || p == parts_.end()) return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::part_seal_invalid);
   auto& c = p->second;
   if (!e.citations.empty()) {
-    if (c.kind != PartKind::Text) return reject(ErrorKind::ProtocolCorrupt, "citations on a part that is not text");
+    if (c.kind != PartKind::Text) return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::citations_not_text);
     if (!c.sealed) c.citations = e.citations;
   }
   if (e.wire_metadata) {
@@ -179,44 +178,44 @@ bool Accumulator::apply(const PartSeal& e) {
     if (!metadata.is_object() ||
         (c.kind != PartKind::Reasoning && c.kind != PartKind::Opaque && c.kind != PartKind::ToolCall &&
          c.kind != PartKind::Thought && !(c.google_part && (c.kind == PartKind::Text || c.kind == PartKind::Thinking))))
-      return reject(ErrorKind::ProtocolCorrupt, "invalid native part metadata");
+      return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::part_native_metadata_invalid);
     if (c.sealed) {
       if (!c.header.wire_metadata || !json::equal(c.header.wire_metadata->root(), metadata))
-        return reject(ErrorKind::ProtocolCorrupt, "contradictory native part snapshot");
+        return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::part_native_snapshot_contradiction);
     } else {
       size_t bytes = 0;
       if (!metadata_size(metadata, 0, limits_.max_content_bytes - std::min(content_bytes_, limits_.max_content_bytes),
                          limits_.max_json_depth, bytes))
-        return reject(ErrorKind::ResourceLimit, "native part metadata limit");
+        return reject(ErrorKind::ResourceLimit, reason::accumulator::part_native_metadata_limit);
       content_bytes_ += bytes;
       c.header.wire_metadata = e.wire_metadata;
     }
   }
   if (!c.sealed && c.kind == PartKind::Reasoning) {
     if (!c.header.wire_metadata || !reasoning_metadata(c.header.wire_metadata->root(), c.header.wire_id))
-      return reject(ErrorKind::ProtocolCorrupt, "invalid completed reasoning item");
+      return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::reasoning_item_invalid);
     std::string_view prefix(c.bytes);
     for (auto item : c.header.wire_metadata->root().get("summary").elements()) {
       const auto text = item.get("text").as_string();
       const auto size = std::min(prefix.size(), text.size());
       if (prefix.substr(0, size) != text.substr(0, size))
-        return reject(ErrorKind::ProtocolCorrupt, "contradictory reasoning summary snapshot");
+        return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::reasoning_summary_contradiction);
       prefix.remove_prefix(size);
     }
-    if (!prefix.empty()) return reject(ErrorKind::ProtocolCorrupt, "incomplete reasoning summary snapshot");
+    if (!prefix.empty()) return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::reasoning_summary_incomplete);
   }
   if (!c.sealed && c.kind == PartKind::Thought) {
     if (!c.header.wire_metadata || c.header.wire_metadata->root().get("type").as_string() != "thought")
-      return reject(ErrorKind::ProtocolCorrupt, "invalid completed thought step");
+      return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::thought_step_invalid);
     const auto metadata = c.header.wire_metadata->root();
     const auto signature = metadata.get("signature"), summary = metadata.get("summary");
     if ((signature.valid() && !signature.is_null() && !signature.is_string()) ||
         (summary.valid() && !summary.is_null() && !summary.is_array()))
-      return reject(ErrorKind::ProtocolCorrupt, "invalid thought fields");
+      return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::thought_fields_invalid);
     std::string_view prefix(c.bytes);
     for (auto item : summary.elements()) {
       if (!item.is_object() || !item.get("type").is_string())
-        return reject(ErrorKind::ProtocolCorrupt, "invalid thought summary content");
+        return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::thought_summary_content_invalid);
       if (item.get("type").as_string() == "image") {
         const auto data = item.get("data"), uri = item.get("uri"), mime = item.get("mime_type");
         const bool inline_data = data.valid() && !data.is_null(), location = uri.valid() && !uri.is_null();
@@ -224,33 +223,33 @@ bool Accumulator::apply(const PartSeal& e) {
             (mime.valid() && !mime.is_null() && (!mime.is_string() || !mime_syntax(mime.as_string()))) ||
             (inline_data ? !data.is_string() || !canonical_base64(data.as_string())
                          : !uri.is_string() || !reference_syntax(uri.as_string())))
-          return reject(ErrorKind::ProtocolCorrupt, "invalid thought image summary");
+          return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::thought_image_invalid);
         continue;
       }
       if (item.get("type").as_string() != "text" || !item.get("text").is_string())
-        return reject(ErrorKind::Unsupported, "unsupported thought summary content");
+        return reject(ErrorKind::Unsupported, reason::accumulator::thought_summary_unsupported);
       const auto text = item.get("text").as_string();
       const auto size = std::min(prefix.size(), text.size());
       if (prefix.substr(0, size) != text.substr(0, size))
-        return reject(ErrorKind::ProtocolCorrupt, "contradictory thought summary snapshot");
+        return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::thought_summary_contradiction);
       prefix.remove_prefix(size);
     }
-    if (!prefix.empty()) return reject(ErrorKind::ProtocolCorrupt, "incomplete thought summary snapshot");
+    if (!prefix.empty()) return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::thought_summary_incomplete);
   }
   if (!c.sealed && c.kind == PartKind::Opaque) {
-    if (!c.header.wire_metadata) return reject(ErrorKind::ProtocolCorrupt, "missing opaque item metadata");
+    if (!c.header.wire_metadata) return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::opaque_metadata_missing);
     const auto metadata = c.header.wire_metadata->root();
     if (c.google_part) {
       if (metadata.get("type").valid() || (c.header.wire_type != "empty" && !metadata.get(c.header.wire_type).is_object()))
-        return reject(ErrorKind::ProtocolCorrupt, "invalid native Google opaque part");
+        return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::opaque_google_invalid);
     } else if (metadata.get("type").as_string() != c.header.wire_type)
-      return reject(ErrorKind::ProtocolCorrupt, "invalid opaque item metadata");
+      return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::opaque_metadata_invalid);
   }
   if (c.sealed) {
     if (!e.snapshot) return true;
     if (e.snapshot->size() > limits_.max_content_bytes ||
         (c.kind == PartKind::ToolCall && e.snapshot->size() > limits_.max_tool_bytes))
-      return reject(ErrorKind::ResourceLimit, "snapshot limit");
+      return reject(ErrorKind::ResourceLimit, reason::accumulator::part_snapshot_limit);
     bool equal = false;
     if (const auto* text = std::get_if<Text>(&*c.value)) equal = text->value == *e.snapshot;
     else if (const auto* refusal = std::get_if<Refusal>(&*c.value)) equal = refusal->text == *e.snapshot;
@@ -268,19 +267,19 @@ bool Accumulator::apply(const PartSeal& e) {
       if (const auto* document = std::get_if<json::Document>(&snapshot))
         equal = json::equal(tool->input->root(), document->root());
     }
-    return equal || reject(ErrorKind::ProtocolCorrupt, "contradictory sealed snapshot");
+    return equal || reject(ErrorKind::ProtocolCorrupt, reason::accumulator::part_sealed_contradiction);
   }
   if (e.snapshot) {
-    if (!e.snapshot->starts_with(c.bytes)) return reject(ErrorKind::ProtocolCorrupt, "contradictory part snapshot");
+    if (!e.snapshot->starts_with(c.bytes)) return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::part_snapshot_contradiction);
     const auto extra = e.snapshot->size() - c.bytes.size();
-    if (extra > limits_.max_content_bytes - std::min(content_bytes_, limits_.max_content_bytes) || (c.kind == PartKind::ToolCall && e.snapshot->size() > limits_.max_tool_bytes)) return reject(ErrorKind::ResourceLimit, "snapshot limit");
+    if (extra > limits_.max_content_bytes - std::min(content_bytes_, limits_.max_content_bytes) || (c.kind == PartKind::ToolCall && e.snapshot->size() > limits_.max_tool_bytes)) return reject(ErrorKind::ResourceLimit, reason::accumulator::part_snapshot_limit);
     c.bytes.assign(*e.snapshot); content_bytes_ += extra;
   }
   if (c.kind == PartKind::Media && (std::get<Media>(*c.value).source == MediaSource::Inline ? !canonical_base64(c.bytes) : !c.bytes.empty()))
-    return reject(ErrorKind::ProtocolCorrupt, "invalid generated media payload");
+    return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::media_payload_invalid);
   c.value = seal_value(c, false); c.sealed = true;
   if (const auto* result = std::get_if<ServerToolResult>(&*c.value); result && !result->content)
-    return reject(ErrorKind::ProtocolCorrupt, "invalid server result block");
+    return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::part_server_result_invalid);
   return true;
 }
 Part Accumulator::seal_value(Cursor& c, bool partial) {
@@ -369,18 +368,18 @@ Part Accumulator::seal_value(Cursor& c, bool partial) {
 }
 bool Accumulator::apply(const MessageSeal& e) {
   auto m = messages_.find(e.message.value);
-  if ((state_ != State::Receiving && state_ != State::Draining) || m == messages_.end() || m->second.sealed) return reject(ErrorKind::ProtocolCorrupt, "invalid message seal");
+  if ((state_ != State::Receiving && state_ != State::Draining) || m == messages_.end() || m->second.sealed) return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::message_seal_invalid);
   for (const auto& [order, id] : m->second.parts_by_order) {
     (void)order;
-    if (!parts_.at(id).sealed) return reject(ErrorKind::ProtocolCorrupt, "unsealed message part");
+    if (!parts_.at(id).sealed) return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::message_part_unsealed);
   }
   if (e.wire_output) {
-    if (!e.wire_output->root().is_array()) return reject(ErrorKind::ProtocolCorrupt, "native output must be ordered array");
+    if (!e.wire_output->root().is_array()) return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::message_native_output_invalid);
     size_t bytes = 0;
     if (!metadata_size(e.wire_output->root(), 0,
                        limits_.max_content_bytes - std::min(content_bytes_, limits_.max_content_bytes),
                        limits_.max_json_depth, bytes))
-      return reject(ErrorKind::ResourceLimit, "native output metadata limit");
+      return reject(ErrorKind::ResourceLimit, reason::accumulator::message_native_output_limit);
     content_bytes_ += bytes;
     m->second.message.wire_output = e.wire_output;
   }
@@ -391,30 +390,30 @@ bool Accumulator::apply(const RawWire& e) {
   const bool wrapped_error = e.payload && e.type == http_error_event && e.payload->root().is_array() &&
       e.payload->root().size() == 1 && e.payload->root().at(0).is_object();
   if (e.type.empty() || !e.payload || (!e.payload->root().is_object() && !wrapped_error))
-    return reject(ErrorKind::ProtocolCorrupt, "invalid raw wire event");
+    return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::raw_event_invalid);
   const auto bytes = add_size(add_size(e.payload->retained_bytes(), sizeof(RawWire)),
       add_size(e.type.capacity(), sizeof(std::shared_ptr<const json::Document>) + 1));
   if (bytes > raw_bytes_limit_ - raw_bytes_)
-    return reject(ErrorKind::ResourceLimit, "raw wire retention limit");
+    return reject(ErrorKind::ResourceLimit, reason::accumulator::raw_retention_limit);
   raw_events_.push_back(e);
   raw_bytes_ += bytes;
   return true;
 }
 bool Accumulator::apply(const ResponseEnvelope& e) {
   if (!e.payload || !e.payload->root().is_object())
-    return reject(ErrorKind::ProtocolCorrupt, "invalid response envelope");
+    return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::envelope_invalid);
   size_t bytes = 0;
   if (!metadata_size(e.payload->root(), 0, limits_.max_content_bytes, limits_.max_json_depth, bytes))
-    return reject(ErrorKind::ResourceLimit, "response envelope limit");
+    return reject(ErrorKind::ResourceLimit, reason::accumulator::envelope_limit);
   wire_envelope_ = e.payload;
   return true;
 }
 bool Accumulator::apply(const UsageUpdate& e) {
-  if (state_ != State::Receiving && state_ != State::Draining) return reject(ErrorKind::ProtocolCorrupt, "invalid usage transition");
+  if (state_ != State::Receiving && state_ != State::Draining) return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::usage_transition_invalid);
   usage_ = e.snapshot; return true;
 }
 bool Accumulator::apply(const Stop& e) {
-  if (state_ != State::Receiving || e.reason.raw.empty()) return reject(ErrorKind::ProtocolCorrupt, "invalid stop transition");
+  if (state_ != State::Receiving || e.reason.raw.empty()) return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::stop_transition_invalid);
   if (e.reason.kind == StopKind::MaxTokens) {
     for (auto& [id, p] : parts_) {
       (void)id;
@@ -464,8 +463,8 @@ void Accumulator::withhold_replay() {
   }
 }
 bool Accumulator::apply(const Commit& e) {
-  if (state_ != State::Draining || !stop_ || e.evidence.empty()) return reject(ErrorKind::ProtocolCorrupt, "commit without evidence");
-  for (const auto& [id, m] : messages_) { (void)id; if (!m.sealed) return reject(ErrorKind::ProtocolCorrupt, "commit with open message"); }
+  if (state_ != State::Draining || !stop_ || e.evidence.empty()) return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::commit_evidence_missing);
+  for (const auto& [id, m] : messages_) { (void)id; if (!m.sealed) return reject(ErrorKind::ProtocolCorrupt, reason::accumulator::commit_message_open); }
   auto messages = take_messages(false);
   // A job still running (Pending) has the usage it accrued so far, not its final count.
   if (usage_.stage != UsageStage::Missing) usage_.stage = stop_->kind == StopKind::Pending ? UsageStage::Partial : UsageStage::Final;
