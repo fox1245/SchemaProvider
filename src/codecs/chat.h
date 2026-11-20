@@ -25,9 +25,13 @@ struct ReasoningOptions {
   std::optional<bool> exclude, enabled;
 };
 enum class OutputModality { Text, Audio, Image };
-// OpenAI audio output parameters. `voice` is a preset name or a custom `voice_...` id; `format`
-// is wav, aac, mp3, flac, opus or pcm16.
-struct AudioOutput { std::string voice, format; };
+// OpenAI audio output parameters. Exactly one of `voice` and `voice_id` is set. `voice` is a preset name and is sent
+// as that name whatever its text; `voice_id` is the id of a custom voice and is sent as `{"id": ...}`. `format` is wav,
+// aac, mp3, flac, opus or pcm16. `voice_id` came after the others and stays the last member.
+struct AudioOutput {
+  std::string voice, format;
+  std::string voice_id{};
+};
 // OpenRouter image_config. Every present field is sent as given.
 using ImageOutput = sp::OpenRouterImageConfig;
 // What the model may call (`tool_choice`). Auto, Required and None stand alone, or Auto and Required come with

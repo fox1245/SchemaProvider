@@ -76,6 +76,7 @@ void interface_contract_capabilities() {
   static_assert((RequiredProvider & ModelControlFacts) == ModelControlFacts);
   static_assert((RequiredProvider & TypedToolChoice) == TypedToolChoice);
   static_assert((RequiredProvider & RealtimeRuntimeDefaults) == RealtimeRuntimeDefaults);
+  static_assert((RequiredProvider & ChatVoiceId) == ChatVoiceId);
   static_assert((RequiredProvider & EndpointCostBounds) == 0);
   const auto linked = sp::runtime::interface_contract();
   require(linked.revision == sp::EXPECTED_INTERFACE_REVISION, "linked interface revision differs");
@@ -89,6 +90,7 @@ void interface_contract_capabilities() {
   require((sp::core_interface_contract().capabilities & ModelControlFacts) != 0, "core omits CatalogueEntry::control_values");
   require((sp::core_interface_contract().capabilities & TypedToolChoice) != 0, "core omits the typed tool choice");
   require((sp::core_interface_contract().capabilities & RealtimeRuntimeDefaults) != 0, "core omits the realtime runtime defaults");
+  require((sp::core_interface_contract().capabilities & ChatVoiceId) != 0, "core omits AudioOutput::voice_id");
   require((linked.capabilities & EndpointCostBounds) != 0, "the runtime omits endpoint cost bounds");
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, OpenRouterRoutingMaxPrice);
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, ErrorReason);
@@ -99,6 +101,7 @@ void interface_contract_capabilities() {
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, ModelControlFacts);
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, TypedToolChoice);
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, RealtimeRuntimeDefaults);
+  sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, ChatVoiceId);
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, EndpointCostBounds);
   sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, RequiredProvider);
   constexpr std::uint64_t ungranted = 1ULL << 63;

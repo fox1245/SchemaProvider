@@ -298,7 +298,13 @@ bool configuration_digest(const descriptor::ValidatedDescriptor& descriptor, con
   hash.number(request.modalities.size());
   for (const auto modality : request.modalities) hash.number(static_cast<uint64_t>(modality));
   hash.number(request.audio.has_value());
-  if (request.audio) { hash.text(request.audio->voice); hash.text(request.audio->format); }
+  if (request.audio) {
+    // A custom voice id is bound behind its own marker, so it never shares a digest with a preset name of the same
+    // text. Audio with a preset name keeps its earlier digest, whatever the name's text.
+    if (request.audio->voice_id.empty()) hash.text(request.audio->voice);
+    else { hash.text("sp.chat.voice_id.v1"); hash.text(request.audio->voice_id); }
+    hash.text(request.audio->format);
+  }
   hash.number(request.image_config.has_value());
   if (request.image_config) {
     const auto& image = *request.image_config;
@@ -931,7 +937,7 @@ InterfaceContract core_interface_contract() noexcept {
       capability::OpenRouterRoutingMaxPrice | capability::ErrorReason | capability::PolicyAdmittedExtensions |
       capability::CompletionSecret | capability::PartCacheMarks | capability::ServedByUpstream |
       capability::TransportConnectionCache | capability::ModelControlFacts | capability::TypedToolChoice |
-      capability::RealtimeRuntimeDefaults;
+      capability::RealtimeRuntimeDefaults | capability::ChatVoiceId;
   if (json::retained_size_contract() == 1) capabilities |= capability::RetainedJsonSize;
   if (custody_ops::available()) capabilities |= capability::HostArchiveCustody;
 #if defined(__unix__) || defined(__APPLE__) || defined(_WIN32)

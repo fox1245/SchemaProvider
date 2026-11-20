@@ -127,7 +127,11 @@ std::optional<std::string> validate_output(const descriptor::ValidatedDescriptor
   if (audio != request.audio.has_value()) return "audio output needs both the audio modality and audio parameters";
   if (request.audio) {
     const auto& output = *request.audio;
-    if (!config_token(output.voice, 128) || !audio_format_name(output.format)) return "audio output needs a voice and a supported format";
+    const bool preset = !output.voice.empty(), custom = !output.voice_id.empty();
+    if (preset && custom) return "audio output takes a voice or a voice id, not both";
+    if (!preset && !custom) return "audio output needs a voice or a voice id";
+    if (!config_token(preset ? output.voice : output.voice_id, 128) || !audio_format_name(output.format))
+      return "audio output needs a voice and a supported format";
   }
   if (request.image_config && !image) return "image_config needs the image modality";
   if (image && !descriptor::contains(descriptor.family_policy().openrouter_origins, descriptor.base_url()))
@@ -559,7 +563,7 @@ EncodeResult encode(const descriptor::ValidatedDescriptor& descriptor, const Req
     }
     if (request.audio) {
       body.raw(",\"audio\":{\"voice\":");
-      if (request.audio->voice.starts_with("voice_")) body.raw("{\"id\":").quoted(request.audio->voice).raw("}");
+      if (!request.audio->voice_id.empty()) body.raw("{\"id\":").quoted(request.audio->voice_id).raw("}");
       else body.quoted(request.audio->voice);
       body.raw(",\"format\":").quoted(request.audio->format).raw("}");
     }

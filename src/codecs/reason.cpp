@@ -580,6 +580,8 @@ constexpr Entry chat_request_table[] = {
   {"output modalities require unique valid values", "request.chat.output_modalities_require_unique_valid_values"},
   {"audio output needs both the audio modality and audio parameters", "request.chat.audio_output_needs_both_the_audio_modality_and"},
   {"audio output needs a voice and a supported format", "request.chat.audio_output_needs_a_voice_and_a_supported_format"},
+  {"audio output needs a voice or a voice id", "request.chat.audio_output_needs_a_voice_or_a_voice_id"},
+  {"audio output takes a voice or a voice id, not both", "request.chat.audio_output_takes_a_voice_or_a_voice_id_not_both"},
   {"image_config needs the image modality", "request.chat.image_config_needs_the_image_modality"},
   {"image output requires a declared OpenRouter origin", "request.chat.image_output_requires_a_declared_openrouter"},
   {"Chat carries cache marks on text parts only", "request.chat.cache_marks_text_only"},
