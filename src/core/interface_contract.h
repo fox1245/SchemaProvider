@@ -88,11 +88,16 @@ inline constexpr std::uint64_t RealtimeRuntimeDefaults = 1ULL << 21;
 // A library built before the member has a smaller AudioOutput, which a consumer built with this header would read
 // past, so it lacks this bit and a require_interface_contract call with RequiredProvider refuses it.
 inline constexpr std::uint64_t ChatVoiceId = 1ULL << 22;
+// descriptor::ExtensionFact carries `prices`, the extension values that change the price of a call, and RequestFacts
+// carries `priced_extensions`, which the cost bound and the estimate read. A library built before the members has a
+// smaller ExtensionFact and RequestFacts, which a consumer built with this header would read past, so it lacks this
+// bit and a require_interface_contract call with RequiredProvider refuses it.
+inline constexpr std::uint64_t PricedExtensions = 1ULL << 23;
 inline constexpr std::uint64_t RequiredProvider = TypedRuntime | PreparedAdmission |
     NullableUsage | All5Native | TrustedArchive | OrderedWireEvents | NativeSocketRuntime |
     RetainedJsonSize | CompleteAttemptEvidence | OpenRouterRoutingMaxPrice | ErrorReason | PolicyAdmittedExtensions |
     CompletionSecret | PartCacheMarks | ServedByUpstream | TransportConnectionCache | ModelControlFacts | TypedToolChoice |
-    RealtimeRuntimeDefaults | ChatVoiceId;
+    RealtimeRuntimeDefaults | ChatVoiceId | PricedExtensions;
 }
 InterfaceContract core_interface_contract() noexcept;
 std::uint32_t codec_interface_revision() noexcept;
