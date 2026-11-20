@@ -2032,8 +2032,37 @@ void gateway_estimate_within_the_bound() {
   std::cout << "case passed: the estimate at a routing gateway within the bound\n";
 }
 
+// A cached audio input token (#219) is among the input rates of an endpoint call's bound, and the request's cap on the
+// prompt price at a routing gateway binds neither its estimate nor its bound: `provider.max_price` names no such price.
+void cached_audio_rates() {
+  constexpr std::uint64_t input = 20'000'000, ceiling = 30'000'000, cached_audio = 50'000'000, cap = 25'000'000;
+  const auto direct = entry({{"input", usd(input)}, {"cache_read_audio", usd(cached_audio)}}, R"("input_limit":2048)");
+  Call call{facts("embeddings", "embed", {quantity("input", std::nullopt, Source::InputLimit, 3)})};
+  auto b = bound(call, *direct);
+  CHECK(totals(b, rounded(3 * 2048 * cached_audio)) && line(b, "input", "cache_read_audio", 3 * 2048, cached_audio));
+  const auto routed = entry({{"input", usd(input)}, {"ceiling_input", usd(ceiling)}, {"cache_read_audio", usd(cached_audio)}}, R"("input_limit":2048)");
+  call.facts.routed_gateway = true;
+  call.facts.max_price = OpenRouterMaxPrice{};
+  call.facts.max_price->prompt_nano_usd = cap;
+  b = bound(call, *routed);
+  CHECK(totals(b, rounded(3 * 2048 * cached_audio)) && line(b, "input", "cache_read_audio", 3 * 2048, cached_audio));
+  // 900 input tokens, 600 of them cached audio: 300 at the input rate (below the cap) and 600 at the listed cached
+  // audio rate, not at the cap.
+  auto u = tokens(900, std::nullopt, 600);
+  u.extra["promptTokensDetails.AUDIO"] = Count{600, Evidence::Reported};
+  u.extra["cacheTokensDetails.AUDIO"] = Count{600, Evidence::Reported};
+  const auto e = estimated(call.facts, &u, {}, *routed);
+  CHECK(estimates(e, rounded(300 * input + 600 * cached_audio)) && line(e, "input", "cache_read_audio", 600, cached_audio));
+  CHECK(e.total->nano_usd <= b.total->nano_usd);
+  // A variable cached audio rate leaves the pinned bound without a total.
+  const auto variable = entry({{"input", usd(input)}, {"ceiling_input", usd(ceiling)}, {"cache_read_audio", "-1"}}, R"("input_limit":2048)");
+  CHECK(refuses(bound(call, *variable), UnboundedBy::ModelPrice, "cache_read_audio"));
+  std::cout << "case passed: cached audio rates in endpoint bounds and estimates\n";
+}
+
 int main() {
   const std::pair<const char*, void (*)()> cases[]{
+      {"cached_audio_rates", cached_audio_rates},
       {"bound_covers_every_consistent_result", bound_covers_every_consistent_result}, {"estimate_within_the_bound", estimate_within_the_bound},
       {"images", images}, {"decisions", decisions}, {"embeddings", embeddings}, {"rerank", rerank}, {"speech", speech},
       {"transcription", transcription}, {"videos", videos}, {"billing", billing}, {"refusals", refusals}, {"zeros", zeros},

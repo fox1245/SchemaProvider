@@ -324,6 +324,8 @@ void usage_details() {
           usage.extra.at("input_token_details.cached_tokens_details.text_tokens").value == 1 && usage.extra.at("output_token_details.text_tokens").value == 2 &&
           usage.extra.at("output_token_details.audio_tokens").value == 8);
     CHECK(usage.extra.size() == 7);
+    // The input by modality sums to the input total: 5 + 9 + 6 = 20.
+    CHECK(usage.quality == UsageQuality::Consistent && usage.conflicts.empty());
   }
   {
     // A transcription that bills tokens reports them by modality too.
@@ -664,7 +666,7 @@ void response_bounds() {
     {"id":"audio-model","output_limit":4096,"pricing":{"input":"0.000004","output":"0.000016","input_audio":"0.000032","output_audio":"0.000064"}},
     {"id":"text-only-model","output_limit":4096,"pricing":{"input":"0.000004","output":"0.000016"}},
     {"id":"thinking-model","output_limit":4096,"pricing":{"input":"0.000004","output":"0.000016","reasoning":"0.00004"}},
-    {"id":"reasoning-audio-model","output_limit":4096,"pricing":{"input":"0.000004","output":"0.000016","input_audio":"0.000032","output_audio":"0.000064","reasoning":"0.0001"}},
+    {"id":"reasoning-audio-model","output_limit":4096,"pricing":{"input":"0.000004","cache_read":"0.000002","output":"0.000016","input_audio":"0.000032","output_audio":"0.000064","reasoning":"0.0001"}},
     {"id":"dense-model","output_limit":4096,"pricing":{"input":"0.000004","input+1000":"0.000008","cache_read":"0.000001","output":"0.000016","input_audio":"0.000032","cache_read_audio":"0.00005",
                                                        "input_image":"0.00001","output_audio":"0.000064","reasoning":"0.00004","request":"0.0001"}},
     {"id":"dear-cache-model","output_limit":4096,"pricing":{"input":"0.000004","cache_read":"0.000006","output":"0.000016","input_audio":"0.000032","cache_read_audio":"0.000003",
@@ -988,12 +990,54 @@ void response_bounds() {
   CHECK(checked == 400);
 }
 
+// Three turns of one OpenAI realtime session (gpt-realtime-2.1-mini, 2026-11-20), their usage as reported: 70 s of
+// speech is cached after the first turn, so the later turns' cached audio (704) exceeds their text tokens, the shape of
+// #219. Each turn's text, audio and image tokens sum to its input total, and the cache reads are its cached audio and
+// text. Priced here at fixture rates.
+void live_cached_audio_turns() {
+  auto loaded = descriptor::load_catalogue(R"({"version":1,"models":[{"id":"cached-audio-fixture","pricing":{"input":"0.0000006",
+      "cache_read":"0.00000006","input_audio":"0.00001","cache_read_audio":"0.0000003","output":"0.0000024"}}]})");
+  CHECK(std::holds_alternative<descriptor::CatalogueSnapshot>(loaded));
+  const auto& catalogue = *std::get<descriptor::CatalogueSnapshot>(loaded);
+  const auto turn = [](std::string_view usage) {
+    auto codec = realtime::make_codec(descriptor::presets::openai_chat());
+    const auto events = std::get<std::vector<realtime::Event>>(
+        codec->decode(false, std::string(R"({"type":"response.done","response":{"id":"r","status":"completed","usage":)") + std::string(usage) + "}}"));
+    return all<realtime::TurnCommitted>(events).at(0)->turn.usage;
+  };
+  const std::string_view reported[]{
+      R"({"total_tokens":796,"input_tokens":726,"output_tokens":70,"input_token_details":{"text_tokens":21,"audio_tokens":705,"image_tokens":0,"cached_tokens":0,
+          "cached_tokens_details":{"text_tokens":0,"audio_tokens":0,"image_tokens":0}},"output_token_details":{"text_tokens":70,"audio_tokens":0}})",
+      R"({"total_tokens":797,"input_tokens":768,"output_tokens":29,"input_token_details":{"text_tokens":63,"audio_tokens":705,"image_tokens":0,"cached_tokens":704,
+          "cached_tokens_details":{"text_tokens":0,"audio_tokens":704,"image_tokens":0}},"output_token_details":{"text_tokens":29,"audio_tokens":0}})",
+      R"({"total_tokens":809,"input_tokens":790,"output_tokens":19,"input_token_details":{"text_tokens":85,"audio_tokens":705,"image_tokens":0,"cached_tokens":768,
+          "cached_tokens_details":{"text_tokens":64,"audio_tokens":704,"image_tokens":0}},"output_token_details":{"text_tokens":19,"audio_tokens":0}})"};
+  // Turn 0: 21 text at 6e-7, 705 audio at 1e-5, 70 out at 2.4e-6. Turn 1: 63 text, 1 audio, 704 cached audio at 3e-7,
+  // 29 out. Turn 2: 21 text, 1 audio, 64 cached text at 6e-8, 704 cached audio, 19 out.
+  const std::uint64_t expected[]{7'230'600u, 328'600u, 283'240u};
+  const ServedModel model{"cached-audio-fixture", "cached-audio-fixture", ServedRelation::Exact};
+  for (std::size_t i = 0; i < std::size(reported); ++i) {
+    const auto usage = turn(reported[i]);
+    CHECK(usage.quality == UsageQuality::Consistent && usage.conflicts.empty());
+    const auto estimate = pricing::estimate(catalogue, "openai.chat", "", model, usage);
+    if (!estimate.total || estimate.total->nano_usd != expected[i] || !estimate.unpriced.empty())
+      throw std::runtime_error("live turn " + std::to_string(i) + " estimate " + (estimate.total ? std::to_string(estimate.total->nano_usd) : std::string("none")) +
+                               (estimate.unpriced.empty() ? "" : " unpriced " + estimate.unpriced[0]));
+  }
+  // Modality counters that do not sum to the input total contradict it: the usage says so, and the input has no price.
+  const auto off = turn(R"({"total_tokens":797,"input_tokens":768,"output_tokens":29,"input_token_details":{"text_tokens":62,"audio_tokens":705,"image_tokens":0,
+      "cached_tokens":704,"cached_tokens_details":{"text_tokens":0,"audio_tokens":704,"image_tokens":0}},"output_token_details":{"text_tokens":29,"audio_tokens":0}})");
+  CHECK(off.quality == UsageQuality::Inconsistent && off.conflicts.size() == 1 && off.conflicts[0].counter == "input_tokens");
+  const auto contradicted = pricing::estimate(catalogue, "openai.chat", "", model, off);
+  CHECK(!contradicted.total && contradicted.unpriced == std::vector<std::string>({"input"}) && contradicted.lower_bound);
+}
+
 int main(int argc, char** argv) {
   try {
     if (argc != 2) throw std::runtime_error("usage: sp_realtime_tests <fixture directory>");
     fixtures = argv[1];
     google_live(); openai_realtime(); response_statuses(); usage_details(); tool_turn_usage(); turn_usage_is_priced(); audio_formats(); policy_facts(); transcription();
-    response_bounds();
+    response_bounds(); live_cached_audio_turns();
     std::cout << "realtime properties passed\n";
     return 0;
   } catch (const std::exception& error) { std::cerr << "realtime test failed: " << error.what() << '\n'; return 1; }
