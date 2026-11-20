@@ -29,26 +29,25 @@ std::optional<Count> counter(json::Value value) {
 Codec::Codec(const descriptor::ValidatedDescriptor& descriptor, Accumulator& accumulator, std::string requested, SemanticLimits limits)
     : descriptor_(descriptor), accumulator_(accumulator), requested_(std::move(requested)), limits_(limits) {}
 bool Codec::emit(const Event& event) { return accumulator_.accept(event); }
-bool Codec::fail(ErrorKind kind, std::string text) {
-  Error error{kind, std::move(text)};
-  error.reason = reason::code(reason::Source::Images, error.safe_message);
+bool Codec::fail(ErrorKind kind, const reason::Reason& text) {
+  Error error = reason::error(kind, text);
   emit(Fail{std::move(error)});
   return false;
 }
 bool Codec::buffered(std::string_view body, Close close) {
-  if (!close.normal) return fail(close.error, "abnormal response close");
+  if (!close.normal) return fail(close.error, reason::transport::response_close);
   auto parsed = json::parse(body, {limits_.max_content_bytes, limits_.max_json_depth});
   if (auto* error = std::get_if<json::ParseError>(&parsed))
     return fail(error->code == json::ParseCode::SizeExceeded || error->code == json::ParseCode::DepthExceeded
-                    ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, "invalid response JSON");
+                    ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, reason::images::response_json_invalid);
   auto wire = std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
   const auto root = wire->root();
-  if (!root.is_object()) return fail(ErrorKind::ProtocolCorrupt, "response must be object");
+  if (!root.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::images::response_not_object);
   if (!emit(RawWire{"images.response", wire})) return false;
-  if (root.get("error").valid() && !root.get("error").is_null()) return fail(ErrorKind::RemoteFailure, "remote error property");
+  if (root.get("error").valid() && !root.get("error").is_null()) return fail(ErrorKind::RemoteFailure, reason::images::response_remote_error);
   const auto data = root.get("data");
-  if (!data.is_array()) return fail(ErrorKind::ProtocolCorrupt, "image data required");
-  if (data.size() >= limits_.max_parts) return fail(ErrorKind::ResourceLimit, "image count limit");
+  if (!data.is_array()) return fail(ErrorKind::ProtocolCorrupt, reason::images::data_required);
+  if (data.size() >= limits_.max_parts) return fail(ErrorKind::ResourceLimit, reason::images::data_count_limit);
   // Neither provider names the model in an image response.
   accumulator_.served_model({requested_, {}, ServedRelation::NotReported});
   if (!emit(Begin{}) || !emit(MessageBegin{{0}, std::nullopt, Role::Assistant, nullptr})) return false;
@@ -57,7 +56,7 @@ bool Codec::buffered(std::string_view body, Close close) {
   const std::string shared_mime = format.is_string() && token(format.as_string()) ? "image/" + std::string(format.as_string()) : std::string();
   std::uint32_t index = 0;
   for (auto item : data.elements()) {
-    if (!item.is_object()) return fail(ErrorKind::ProtocolCorrupt, "image item must be object");
+    if (!item.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::images::item_not_object);
     const auto b64 = item.get("b64_json"), url = item.get("url"), type = item.get("media_type");
     PartHeader header;
     header.media.kind = MediaKind::Image;
@@ -66,13 +65,13 @@ bool Codec::buffered(std::string_view body, Close close) {
     if (inline_image) header.media.source = MediaSource::Inline;
     else if (url.is_string() && !url.as_string().empty()) {
       // A result is reused as a reference, which admits https locations only.
-      if (!url_syntax(url.as_string())) return fail(ErrorKind::ProtocolCorrupt, "image URL is not an https location");
+      if (!url_syntax(url.as_string())) return fail(ErrorKind::ProtocolCorrupt, reason::images::item_url_invalid);
       header.media.source = MediaSource::Url;
       header.media.reference = std::string(url.as_string());
     }
-    else return fail(ErrorKind::ProtocolCorrupt, "image item has no data");
+    else return fail(ErrorKind::ProtocolCorrupt, reason::images::item_no_data);
     if (inline_image && header.media.mime.empty()) header.media.mime = sniffed_type(b64.as_string());
-    if (inline_image && header.media.mime.empty()) return fail(ErrorKind::ProtocolCorrupt, "image item has no media type");
+    if (inline_image && header.media.mime.empty()) return fail(ErrorKind::ProtocolCorrupt, reason::images::item_no_media_type);
     const LocalId local{++index};
     if (!emit(PartBegin{{0}, local, PartKind::Media, std::move(header), index - 1})) return false;
     if (inline_image && !emit(PartDelta{local, {PartKind::Media, b64.as_string()}})) return false;
