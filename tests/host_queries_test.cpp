@@ -1498,6 +1498,8 @@ constexpr BuiltinBilling builtin_billing[]{
     {"batches", "anthropic", "results", Billing::None},
     {"batches", "google", "submit", Billing::Carried}, {"batches", "google", "get", Billing::None}, {"batches", "google", "cancel", Billing::None},
     {"batches", "google", "delete", Billing::None},
+    {"batches", "openrouter", "submit", Billing::Carried}, {"batches", "openrouter", "get", Billing::None},
+    {"batches", "openrouter", "list", Billing::None}, {"batches", "openrouter", "delete", Billing::None},
     {"tokens", "openai", "count", Billing::None}, {"tokens", "anthropic", "count", Billing::None}, {"tokens", "google", "count", Billing::None},
     {"generations", "openrouter", "get", Billing::None},
     {"stores", "openai", "create", Billing::Unpriced}, {"stores", "openai", "get", Billing::None}, {"stores", "openai", "list", Billing::None},

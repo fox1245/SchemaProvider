@@ -1433,6 +1433,120 @@ void batch_estimate_within_the_bound() {
             << " estimate only, " << neither << " neither, " << tight << " at the bound)\n";
 }
 
+// OpenRouter (#228): a batch is billed at the price its `vendor/model:batch` catalogue variant lists, which a refresh
+// writes onto the base entry under the tier `batch` (`input/batch`, and the variant's route ceiling as
+// `ceiling_input/batch`). The gateway may run the batch on any endpoint that serves the variant, so the bound is at
+// that tier's route ceiling, never at the standard rates; the estimate is at the listed batch rates.
+constexpr std::uint64_t router_sync_in = 2'000'000'000, router_sync_out = 8'000'000'000, router_batch_in = 1'000'000'001,
+                        router_batch_out = 4'000'000'003, router_ceiling_in = 1'200'000'007, router_ceiling_out = 4'500'000'009;
+constexpr std::uint64_t router_input = 2000;
+const auto router_priced = catalogue_of("{\"version\":1,\"models\":[" +
+    entry("vendor/routed", limits(router_input),
+          {{"input", router_sync_in}, {"output", router_sync_out}, {"ceiling_input", router_sync_in}, {"ceiling_output", router_sync_out},
+           {"input/batch", router_batch_in}, {"output/batch", router_batch_out}, {"ceiling_input/batch", router_ceiling_in},
+           {"ceiling_output/batch", router_ceiling_out}}) + "," +
+    // Batch rates without the variant's route ceiling: an estimate, and no bound.
+    entry("vendor/listed-only", limits(router_input),
+          {{"input", router_sync_in}, {"output", router_sync_out}, {"ceiling_input", router_sync_in}, {"ceiling_output", router_sync_out},
+           {"input/batch", router_batch_in}, {"output/batch", router_batch_out}}) + "," +
+    // No batch price listed: no total either way, never the standard rates.
+    entry("vendor/sync-only", limits(router_input),
+          {{"input", router_sync_in}, {"output", router_sync_out}, {"ceiling_input", router_sync_in}, {"ceiling_output", router_sync_out}}) + "]}");
+
+void openrouter_batch_bound() {
+  auto router = client_of(openrouter_chat());
+  const auto family = openrouter_chat();
+  const auto submit = router.prepare(batches::Submit{{{"r-1", chat::Request::simple("vendor/routed", "Say: alpha", 16)},
+                                                      {"r-2", chat::Request::simple("vendor/routed", "Say: beta", 50)}}}, run_with(3));
+  EXPECT(carried_of(ok(submit).endpoint_facts()), "r-1/vendor/routed/16/1/ r-2/vendor/routed/50/1/ file ''");
+  EXPECT(ok(submit).endpoint_facts().carried_tier, "batch");
+  runtime::EndpointCostOptions measured_first;
+  measured_first.measured_carried_input_tokens = {{"r-1", 300}};
+  const auto first = rounded(300 * router_ceiling_in + 16 * router_ceiling_out), second = rounded(router_input * router_ceiling_in + 50 * router_ceiling_out);
+  const auto bound = runtime::endpoint_worst_case_cost(ok(submit), *router_priced, measured_first);
+  EXPECT(described(bound), "total " + std::to_string(first + second) + " | entry 'vendor/routed' model '' attempts 1 lines r-1:nano_usd=vendor/routed:" +
+                               std::to_string(first) + "x1000000 r-2:nano_usd=vendor/routed:" + std::to_string(second) + "x1000000");
+  // Not at the standard rates, and not at the listed batch rates either.
+  const auto at_sync = rounded(300 * router_sync_in + 16 * router_sync_out) + rounded(router_input * router_sync_in + 50 * router_sync_out);
+  const auto at_listed = rounded(300 * router_batch_in + 16 * router_batch_out) + rounded(router_input * router_batch_in + 50 * router_batch_out);
+  CHECK(bound.total && bound.total->nano_usd != at_sync && bound.total->nano_usd != at_listed && !bound.pin);
+  EXPECT(describe(runtime::worst_case_cost(ok(submit), *router_priced)),
+         "total " + std::to_string(rounded(router_input * router_ceiling_in + 16 * router_ceiling_out) + second) +
+             " Derived CeilingCatalogueProduct | entry 'vendor/routed' model '' tokens 0/0/0 fees 0 invocations 0 attempts 1 tools 0 ceiling 0 pinned 0 pin 0");
+  // The estimate: each line at the listed batch rates.
+  const EndpointFacts facts = ok(submit).endpoint_facts();
+  const auto l1 = rounded(120 * router_batch_in + 7 * router_batch_out), l2 = rounded(900 * router_batch_in + 30 * router_batch_out);
+  const auto e = runtime::batch_estimate(facts, family, {answered("r-1", "vendor/routed", request_usage(120, 7)), answered("r-2", "vendor/routed", request_usage(900, 30))},
+                                         *router_priced);
+  EXPECT(estimated(e), "total " + std::to_string(l1 + l2) + " | assumed listed rates | entry 'vendor/routed' requested 0 lower 0 lines r-1:nano_usd=vendor/routed:" +
+                           std::to_string(l1) + "x1000000 r-2:nano_usd=vendor/routed:" + std::to_string(l2) + "x1000000");
+  EXPECT(joined(pricing::beyond_bound(bound, e)), "");
+  // Without the variant's route ceiling the router may pick any batch endpoint: no bound, and the estimate stands.
+  const auto listed_only = router.prepare(batches::Submit{{{"r-1", chat::Request::simple("vendor/listed-only", "Say: alpha", 16)}}});
+  EXPECT(reasons_of(runtime::endpoint_worst_case_cost(ok(listed_only), *router_priced)),
+         "RouteCeiling [r-1:vendor/listed-only] the entry lists no route ceiling (ceiling_input, ceiling_output), so the router may pick any price; ");
+  EXPECT(estimated(runtime::batch_estimate(ok(listed_only).endpoint_facts(), family, {answered("r-1", "vendor/listed-only", request_usage(120, 7))}, *router_priced)),
+         "total " + std::to_string(l1) + " | assumed listed rates | entry 'vendor/listed-only' requested 0 lower 0 lines r-1:nano_usd=vendor/listed-only:" +
+             std::to_string(l1) + "x1000000");
+  // No listed batch price: no total, never the standard rates.
+  const auto sync_only = router.prepare(batches::Submit{{{"r-1", chat::Request::simple("vendor/sync-only", "Say: alpha", 16)}}});
+  EXPECT(reasons_of(runtime::endpoint_worst_case_cost(ok(sync_only), *router_priced)),
+         "TierPrice [r-1:vendor/sync-only] the entry prices no unit under service tier 'batch'; ");
+  EXPECT(estimated(runtime::batch_estimate(ok(sync_only).endpoint_facts(), family, {answered("r-1", "vendor/sync-only", request_usage(120, 7))}, *router_priced)),
+         "no total | unpriced r-1:tier | assumed listed rates | entry '' requested 0 lower 0 lines");
+  // The reads bill nothing.
+  EXPECT(described(runtime::endpoint_worst_case_cost(ok(router.prepare(batches::Get{"batch_1"})), *router_priced)), "total 0 | entry '' model '' attempts 1 lines");
+  EXPECT(described(runtime::endpoint_worst_case_cost(ok(router.prepare(batches::List{})), *router_priced)), "total 0 | entry '' model '' attempts 1 lines");
+  EXPECT(described(runtime::endpoint_worst_case_cost(ok(router.prepare(batches::Delete{"batch_1"})), *router_priced)), "total 0 | entry '' model '' attempts 1 lines");
+  report_mismatches("openrouter_batch_bound");
+
+  // Generated catalogues and usages: at OpenRouter the estimate of lines within their requests' caps never exceeds the
+  // bound, whatever the listed batch rates below the variant's ceiling.
+  std::uint64_t seed = 20261121;
+  auto next = [&](std::uint64_t limit) { seed = seed * 6364136223846793005u + 1442695040888963407u; return (seed >> 33) % (limit + 1); };
+  std::size_t compared = 0;
+  for (std::size_t round = 0; round < 1000; ++round) {
+    const auto limit = 1 + next(4000);
+    const auto listed_in = next(5000) * 1'000'000 + next(999), listed_out = next(5000) * 1'000'000 + next(999);
+    const auto ceiling_in = listed_in + next(3000) * 1'000'000 + next(999), ceiling_out = listed_out + next(3000) * 1'000'000 + next(999);
+    std::vector<std::pair<std::string, std::uint64_t>> rows{{"input", router_sync_in}, {"output", router_sync_out}, {"input/batch", listed_in},
+                                                            {"output/batch", listed_out}, {"ceiling_input/batch", ceiling_in}, {"ceiling_output/batch", ceiling_out}};
+    if (next(1)) rows.emplace_back("request/batch", next(3) * 1'000'000'000);
+    const auto catalogue = catalogue_of("{\"version\":1,\"models\":[" + entry("vendor/generated", limits(limit), rows) + "]}");
+    const std::size_t count = 1 + next(3);
+    std::vector<batches::Item> items;
+    runtime::EndpointCostOptions options;
+    std::vector<batches::Line> lines;
+    for (std::size_t i = 0; i < count; ++i) {
+      const auto id = "g-" + std::to_string(i);
+      const auto cap = 1 + next(300);
+      items.push_back({id, chat::Request::simple("vendor/generated", "Say: alpha", cap)});
+      std::uint64_t input_bound = limit;
+      if (next(1)) {
+        const auto counted_tokens = next(limit + 50);
+        options.measured_carried_input_tokens.emplace_back(id, counted_tokens);
+        input_bound = (std::min)(input_bound, counted_tokens);
+      }
+      if (next(9) == 0) { lines.push_back(failed_line(id)); continue; }
+      const auto input = next(input_bound), output = next(cap);
+      lines.push_back(answered(id, "vendor/generated", request_usage(input, output, next(input), next(output))));
+    }
+    const auto prepared = router.prepare(batches::Submit{items});
+    const auto generated_bound = runtime::endpoint_worst_case_cost(ok(prepared), *catalogue, options);
+    const auto generated_estimate = runtime::batch_estimate(ok(prepared).endpoint_facts(), family, lines, *catalogue);
+    if (!generated_bound.total || !generated_estimate.total)
+      throw std::runtime_error("round " + std::to_string(round) + ": " + described(generated_bound) + " / " + estimated(generated_estimate));
+    // Every line is priced by the bound's entry; an estimate of failed lines alone names none, which is not a line beyond.
+    auto beyond = pricing::beyond_bound(generated_bound, generated_estimate);
+    if (generated_estimate.entry.empty()) std::erase(beyond, std::string("entry"));
+    if (generated_estimate.total->nano_usd > generated_bound.total->nano_usd || !beyond.empty())
+      throw std::runtime_error("round " + std::to_string(round) + ": estimate " + estimated(generated_estimate) + " beyond bound " + described(generated_bound));
+    ++compared;
+  }
+  std::cout << "case passed: an OpenRouter batch, bounded at the batch tier's route ceiling and estimated at its listed rates (" << compared
+            << " generated batches)\n";
+}
+
 // ---- extension values that change the price: a tier's rows, or no bound --------------------------------------
 
 // Fast rates dearer than the standard ones, each with a fraction of a nano-USD per token so a bound rounds up.
@@ -1773,6 +1887,7 @@ int main() {
     units_outside_the_tier();
     batch_estimates();
     batch_estimate_within_the_bound();
+    openrouter_batch_bound();
     priced_extensions();
     std::cout << "endpoint cost passed\n";
     return 0;

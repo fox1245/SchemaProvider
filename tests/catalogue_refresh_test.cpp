@@ -1305,6 +1305,46 @@ void ceilings_count_listed_bands(transport::Transport& transport, Peer& peer) {
   passed("route ceilings: listed bands count, and listed prices left out leave out their side");
 }
 
+// OpenRouter lists the batch-priced version of a model as its own catalogue variant, `vendor/model:batch` (#228). The
+// policy's `tier_variants` make a refresh write that entry's prices onto `vendor/model` under the tier `batch`, its
+// route ceiling (read from the variant's endpoints) included; the variant's entry stays as listed. A model with no
+// batch variant gets no batch row, and without the policy fact nothing is written.
+void batch_variants_price_the_batch_tier(transport::Transport& transport, Peer& peer) {
+  peer.command(R"({"set":"ceilings-batch","models":{"vendor/batched":[{"prompt":"0.000002","completion":"0.000008"}],)"
+               R"("vendor/batched:batch":[{"prompt":"0.000001","completion":"0.000004"},{"prompt":"0.0000012","completion":"0.000003"}],)"
+               R"("vendor/sync-only":[{"prompt":"0.000002","completion":"0.000008"}]},)"
+               R"("listed":{"vendor/batched":{"prompt":"0.000002","completion":"0.000008"},)"
+               R"("vendor/batched:batch":{"prompt":"0.000001","completion":"0.000004","overrides":[{"min_prompt_tokens":200000,"prompt":"0.000002"}]},)"
+               R"("vendor/sync-only":{"prompt":"0.000002","completion":"0.000008"}}})");
+  transport::RefreshRequest request;
+  request.sources = {ceiling_source(peer, "ceilings-batch", {"vendor/batched", "vendor/batched:batch"})};
+  const auto result = refreshed(transport, request);
+  require(result.sources[0].ok, "the listing refreshed");
+  const auto& c = *result.generated;
+  require(pricing_text(c.entry("vendor/batched")) ==
+              "ceiling_input=0.000002 ceiling_input/batch=0.000002 ceiling_output=0.000008 ceiling_output/batch=0.000004 completion=0.000008 "
+              "completion/batch=0.000004 prompt=0.000002 prompt/batch=0.000001 prompt/batch+200000=0.000002",
+          "the batch variant's prices are the batch tier's, not " + pricing_text(c.entry("vendor/batched")));
+  require(pricing_text(c.entry("vendor/batched:batch")) ==
+              "ceiling_input=0.000002 ceiling_output=0.000004 completion=0.000004 prompt=0.000001 prompt+200000=0.000002",
+          "the variant's own entry stays as listed, not " + pricing_text(c.entry("vendor/batched:batch")));
+  require(pricing_text(c.entry("vendor/sync-only")) == "completion=0.000008 prompt=0.000002",
+          "a model without a batch variant gets no batch row, not " + pricing_text(c.entry("vendor/sync-only")));
+  // A policy without the fact writes nothing.
+  auto text = std::string(config_defaults::descriptor_policy_json);
+  const auto at = text.find("\"tier_variants\"");
+  require(at != std::string::npos, "the built-in policy states the batch variant");
+  const auto comma = text.rfind(',', at), close = text.find('}', at);
+  text.erase(comma, close + 1 - comma);
+  auto loaded = descriptor::load_policy(text, config_defaults::codec_defaults_json);
+  require(std::holds_alternative<descriptor::PolicySnapshot>(loaded), "the policy without the fact loads");
+  request.policy = std::get<descriptor::PolicySnapshot>(loaded);
+  const auto without = refreshed(transport, request);
+  require(pricing_text(without.generated->entry("vendor/batched")) == "ceiling_input=0.000002 ceiling_output=0.000008 completion=0.000008 prompt=0.000002",
+          "without the policy fact nothing is written, not " + pricing_text(without.generated->entry("vendor/batched")));
+  passed("batch variants: the variant's prices and route ceiling are the batch tier of the base model");
+}
+
 #ifndef _WIN32
 // sp_catalogue_refresh --ceiling reads the route ceilings of the models it names and prints what it could not.
 void the_tool_reads_route_ceilings(Peer& peer, const std::string& tool) {
@@ -1390,6 +1430,7 @@ int main(int argc, char** argv) {
     ceilings_bound_every_endpoint(transport, peer);
     ceilings_count_listed_bands(transport, peer);
     default_origins_are_policy_data(transport, peer);
+    batch_variants_price_the_batch_tier(transport, peer);
 #ifndef _WIN32
     if (argc == 4) the_tool_reads_route_ceilings(peer, argv[3]);
     if (argc == 4) the_tool_prints_no_listed_key_text(peer, argv[3]);

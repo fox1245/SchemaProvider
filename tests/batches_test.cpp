@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -264,13 +265,224 @@ void result_lines() {
   CHECK(std::holds_alternative<Error>(batches::decode(anthropic(), request, R"({"hello":1})")));
   CHECK(std::holds_alternative<Error>(batches::decode(anthropic(), request, "not json")));
 }
+
+// OpenRouter (#228). The shapes follow https://openrouter.ai/docs/batch-quickstart and the API reference pages
+// (api-reference/batch/create-a-batch, get-a-batch, list-batches, delete-a-batch), read on 2026-11-21:
+// openrouter-batch.json is the quickstart's "Completed batch" with the fields of its 202 answer, its response body
+// given created_at and usage; openrouter-chat-batch.json is a chat completions batch written from the get-a-batch schema.
+const descriptor::ValidatedDescriptor& router_chat() { static const auto d = descriptor::presets::openrouter_chat(); return d; }
+const descriptor::ValidatedDescriptor& router_responses() { static const auto d = descriptor::presets::openrouter_responses(); return d; }
+const descriptor::ValidatedDescriptor& router_messages() { static const auto d = descriptor::presets::openrouter_messages(); return d; }
+template <class Request> std::string refusal(const descriptor::ValidatedDescriptor& d, const Request& r) {
+  auto result = batches::encode(d, r);
+  CHECK(std::holds_alternative<Error>(result));
+  return std::get<Error>(result).reason;
+}
+std::vector<std::string> member_names(std::string_view body) {
+  std::vector<std::string> out;
+  for (auto member : document(body)->root().members()) out.emplace_back(member.key);
+  return out;
+}
+chat::Request chat_item(std::string prompt, std::string model = "vendor/model") { return chat::Request::simple(std::move(model), std::move(prompt), 16); }
+chat::Request with_media(Media media) {
+  auto request = chat::Request::simple("vendor/model", std::vector<Message>{Message::user_text("Describe it.")}, 16);
+  request.canonical_messages.back().parts.push_back(std::move(media));
+  return request;
+}
+Media url_media(MediaKind kind, std::string mime, std::string url) {
+  Media media;
+  media.kind = kind;
+  media.mime = std::move(mime);
+  media.source = MediaSource::Url;
+  media.reference = std::move(url);
+  return media;
+}
+
+void openrouter_requests() {
+  // One model and one family per batch; the batch's members, then `requests` last, each item the body its family
+  // sends on its own.
+  const auto submit = encoded(router_chat(), batches::Submit{{{"c-1", chat_item("Say: alpha")}, {"c-2", chat_item("Say: beta")}}});
+  CHECK(submit.path == "/api/v1/batches" && submit.method == "POST" && submit.charge_on_accept && submit.model == "vendor/model");
+  CHECK((member_names(submit.body) == std::vector<std::string>{"endpoint", "model", "requests"}));
+  {
+    const auto body = document(submit.body);
+    const auto requests = body->root().get("requests");
+    CHECK(body->root().get("endpoint").as_string() == "/v1/chat/completions" && body->root().get("model").as_string() == "vendor/model" &&
+          requests.size() == 2 && requests.at(1).get("custom_id").as_string() == "c-2" &&
+          requests.at(0).get("body").get("messages").at(0).get("content").as_string() == "Say: alpha" &&
+          requests.at(0).get("body").get("model").as_string() == "vendor/model");
+  }
+  // The options the fact admits go before `requests`.
+  auto routed = batches::Submit{{{"c-1", chat_item("Say: alpha")}}};
+  routed.extensions = document(R"({"callback_url":"https://example.com/hook","provider":{"only":["provider-a"],"allow_fallbacks":false}})");
+  CHECK((member_names(encoded(router_chat(), routed).body) == std::vector<std::string>{"endpoint", "model", "callback_url", "provider", "requests"}));
+  // Provider `order` and `sort`, and members the fact does not name, are refused before sending.
+  for (const auto* options : {R"({"provider":{"order":["provider-a"]}})", R"({"provider":{"sort":"price"}})", R"({"provider":{"zdr":true}})",
+                              R"({"completion_window":"24h"})", R"({"metadata":{"run":"7"}})"}) {
+    auto refused_options = routed;
+    refused_options.extensions = document(options);
+    CHECK(refusal(router_chat(), refused_options) == "request.batches.options_invalid");
+  }
+  // The endpoint of each family's requests.
+  CHECK(document(encoded(router_responses(), batches::Submit{{{"r-1", responses::Request::simple("vendor/model", "Say: alpha", 16)}}}).body)
+            ->root().get("endpoint").as_string() == "/v1/responses");
+  CHECK(document(encoded(router_messages(), batches::Submit{{{"m-1", messages::Request::simple("vendor/model", "Say: alpha", 16)}}}).body)
+            ->root().get("endpoint").as_string() == "/v1/messages");
+  // Refused before anything is sent: no items, a file, a display name, two models, a request of another family, a
+  // refused variant, routing or fallbacks of an item's own, a refused plugin, image or audio output.
+  CHECK(refusal(router_chat(), batches::Submit{}) == "request.batches.items_required");
+  CHECK(refusal(router_chat(), batches::Submit{{}, "file-9", "/v1/chat/completions"}) == "request.batches.file_unsupported");
+  auto named = batches::Submit{{{"c-1", chat_item("x")}}};
+  named.display_name = "run";
+  CHECK(refusal(router_chat(), named) == "request.batches.display_name_unsupported");
+  CHECK(refusal(router_chat(), batches::Submit{{{"c-1", chat_item("x")}, {"c-2", chat_item("y", "vendor/other")}}}) == "request.batches.model_mismatch");
+  CHECK(refusal(router_chat(), batches::Submit{{{"c-1", chat_item("x")}, {"c-1", chat_item("y")}}}) == "request.batches.custom_id_invalid");
+  CHECK(refusal(router_chat(), batches::Submit{{{"m-1", messages::Request::simple("vendor/model", "x", 16)}}}) == "request.batches.item_family");
+  CHECK(refusal(router_chat(), batches::Submit{{{"c-1", chat_item("x", "vendor/model:online")}}}) == "request.batches.item_variant");
+  CHECK(refusal(router_chat(), batches::Submit{{{"c-1", chat_item("x", "vendor/model:nitro:online")}}}) == "request.batches.item_variant");
+  auto with_provider = chat_item("x");
+  with_provider.provider = OpenRouterRouting{};
+  with_provider.provider->order = {"provider-a"};
+  CHECK(refusal(router_chat(), batches::Submit{{{"c-1", with_provider}}}) == "request.batches.item_routing");
+  auto zdr = chat_item("x");
+  zdr.provider = OpenRouterRouting{};
+  zdr.provider->zdr = true;
+  CHECK(refusal(router_chat(), batches::Submit{{{"c-1", zdr}}}) == "request.batches.item_routing");
+  auto fallbacks = chat_item("x");
+  fallbacks.models = {"vendor/other"};
+  CHECK(refusal(router_chat(), batches::Submit{{{"c-1", fallbacks}}}) == "request.batches.item_fallbacks");
+  auto web = chat_item("x");
+  web.plugins = {OpenRouterPlugin{"web", nullptr}};
+  CHECK(refusal(router_chat(), batches::Submit{{{"c-1", web}}}) == "request.batches.item_plugin");
+  auto responses_web = responses::Request::simple("vendor/model", "x", 16);
+  responses_web.plugins = {OpenRouterPlugin{"web", nullptr}};
+  CHECK(refusal(router_responses(), batches::Submit{{{"r-1", responses_web}}}) == "request.batches.item_plugin");
+  auto image_out = chat_item("x");
+  image_out.modalities = {chat::OutputModality::Text, chat::OutputModality::Image};
+  CHECK(refusal(router_chat(), batches::Submit{{{"c-1", image_out}}}) == "request.batches.item_output");
+  auto audio_out = chat_item("x");
+  audio_out.modalities = {chat::OutputModality::Text, chat::OutputModality::Audio};
+  audio_out.audio = chat::AudioOutput{"alloy", "wav"};
+  CHECK(refusal(router_chat(), batches::Submit{{{"c-1", audio_out}}}) == "request.batches.item_output");
+  auto responses_image = responses::Request::simple("vendor/model", "x", 16);
+  responses_image.modalities = {responses::OutputModality::Image};
+  CHECK(refusal(router_responses(), batches::Submit{{{"r-1", responses_image}}}) == "request.batches.item_output");
+  // Media: public image and document URLs are taken; base64 images, audio input and video are refused.
+  CHECK(document(encoded(router_chat(), batches::Submit{{{"c-1", with_media(url_media(MediaKind::Image, "image/png", "https://example.com/shoe.png"))}}}).body)
+            ->root().get("requests").size() == 1);
+  CHECK(document(encoded(router_chat(), batches::Submit{{{"c-1", with_media(url_media(MediaKind::Document, "application/pdf", "https://example.com/a.pdf"))}}}).body)
+            ->root().get("requests").size() == 1);
+  CHECK(refusal(router_chat(), batches::Submit{{{"c-1", with_media(Media::image("image/png", std::make_shared<const std::string>("iVBORw0KGgo=")))}}}) == "request.batches.item_media");
+  CHECK(refusal(router_chat(), batches::Submit{{{"c-1", with_media(Media::audio("audio/wav", std::make_shared<const std::string>("UklGRg==")))}}}) == "request.batches.item_media");
+  CHECK(refusal(router_chat(), batches::Submit{{{"c-1", with_media(url_media(MediaKind::Video, "video/mp4", "https://example.com/v.mp4"))}}}) ==
+        "request.batches.item_media");
+  // No cancel: refused for that reason. A batch is read, listed and deleted by id.
+  CHECK(refusal(router_chat(), batches::Cancel{"batch_123"}) == "request.batches.cancel_unsupported");
+  const auto get = encoded(router_chat(), batches::Get{"batch-1794949632-xDGJGOegxjgSVABzTiky"});
+  CHECK(get.method == "GET" && get.path == "/api/v1/batches/batch-1794949632-xDGJGOegxjgSVABzTiky" && get.body.empty() && !get.charge_on_accept);
+  const auto del = encoded(router_chat(), batches::Delete{"batch_123"});
+  CHECK(del.method == "DELETE" && del.path == "/api/v1/batches/batch_123");
+  CHECK(refusal(router_chat(), batches::Get{".."}) == "request.batches.id_invalid");
+  CHECK(encoded(router_chat(), batches::List{}).path == "/api/v1/batches");
+  const auto page = encoded(router_chat(), batches::List{10, "batch_123"});
+  CHECK(page.method == "GET" && page.path == "/api/v1/batches?limit=10&after=batch_123");
+  CHECK(refusal(router_chat(), batches::List{0, {}}) == "request.batches.limit_invalid");
+  CHECK(refusal(router_chat(), batches::List{std::nullopt, "a&b"}) == "request.batches.cursor_invalid");
+  CHECK(refusal(openai_chat(), batches::List{}) == "request.batches.path_missing");
+  // The other shapes keep their cancel.
+  CHECK(encoded(openai_chat(), batches::Cancel{"batch_1"}).path == "/v1/batches/batch_1/cancel");
+}
+
+void openrouter_batches() {
+  const auto batch = std::get<batches::Batch>(batch_of(router_responses(), read("openrouter-batch.json")));
+  CHECK(batch.id == "batch_123" && batch.shape == "openrouter" && batch.origin == "https://openrouter.ai" && batch.status == jobs::Status::Completed &&
+        batch.raw_status == "completed" && batch.counts.total == 2 && batch.counts.succeeded == 1 && batch.counts.failed == 1 && batch.counts.pending == 0 &&
+        batch.results_ready && batch.created_at == 1782097200u && batch.expires_at == 1782183600u && batch.ended_at == 1782097800u);
+  CHECK(batch.usage.input_total->value == 40 && batch.usage.output_total->value == 12 && batch.usage.total->value == 52);
+  // usage.cost is what OpenRouter charged for the whole batch, in USD.
+  CHECK(batch.usage.provider_cost.source == CostSource::OpenRouterUsd && batch.usage.provider_cost.total && batch.usage.provider_cost.total->nano_usd == 5000 &&
+        batch.usage.provider_cost.is_byok == false);
+  CHECK(batches::inline_lines(batch).size() == 2);
+  // Each status as documented; one the SDK does not know is Unknown, with the word kept.
+  const std::pair<const char*, jobs::Status> statuses[]{
+      {"validating", jobs::Status::Pending}, {"in_progress", jobs::Status::Running}, {"finalizing", jobs::Status::Running},
+      {"completed", jobs::Status::Completed}, {"failed", jobs::Status::Failed}, {"expired", jobs::Status::Expired},
+      {"cancelling", jobs::Status::Running}, {"cancelled", jobs::Status::Cancelled}, {"paused", jobs::Status::Unknown}};
+  for (const auto& [word, status] : statuses) {
+    const auto read_back = std::get<batches::Batch>(batch_of(router_chat(), std::string(R"({"id":"batch_1","status":")") + word +
+                                                                                R"(","request_counts":{"total":2,"completed":0,"failed":0},"results":null})"));
+    CHECK(read_back.status == status && read_back.raw_status == word && !read_back.results_ready && read_back.counts.pending == 2);
+  }
+  // A failed batch names why, and carries no results.
+  const auto failed = std::get<batches::Batch>(batch_of(router_chat(), R"({"id":"batch_456","object":"batch","status":"failed","request_counts":{"total":2,"completed":0,"failed":0},"usage":null,"results":null,"error":{"message":"Batch request 'review-2' contains unsupported 'input_audio' content."}})"));
+  CHECK(failed.status == jobs::Status::Failed && !failed.results_ready && !failed.usage.input_total);
+  // The results are inline: there is no file to download.
+  CHECK(refused(router_chat(), batches::Results{batch}) == ErrorKind::InvalidRequest);
+  // A deletion names the batch and what each deletion target did.
+  const auto deleted = [](std::string_view body) {
+    Accumulator accumulator;
+    batches::Codec codec(router_chat(), accumulator, batches::Codec::Kind::Deleted, "batch_123");
+    codec.buffered(body, {});
+    CHECK(accumulator.outcome());
+    return batches::typed_deleted(*accumulator.outcome());
+  };
+  CHECK(std::get<batches::Deleted>(deleted(R"({"id":"batch_123","object":"batch","deletion":{"openrouter":"deleted","upstream":{"provider":"Anthropic","status":"deleted"}}})")).id == "batch_123");
+  CHECK(std::get<Failure>(deleted(R"({"id":"batch_123","object":"batch"})")).error.reason == "batches.delete.unconfirmed");
+  CHECK(std::get<Failure>(deleted(R"({"id":"batch_9","object":"batch","deletion":{}})")).error.reason == "batches.delete.unconfirmed");
+  // A page of batches, newest first, with the cursor of the next.
+  const auto paged = [](std::string_view body) {
+    Accumulator accumulator;
+    batches::Codec codec(router_chat(), accumulator, batches::Codec::Kind::Page, {});
+    codec.buffered(body, {});
+    CHECK(accumulator.outcome());
+    return batches::typed_page(*accumulator.outcome());
+  };
+  const auto page = std::get<batches::Page>(paged(R"({"object":"list","data":[{"id":"batch_123","object":"batch","status":"in_progress","model":"anthropic/claude-haiku-5.5","provider":"Anthropic","request_counts":{"total":2,"completed":1,"failed":0},"results":null}],"first_id":"batch_123","last_id":"batch_123","has_more":true})"));
+  CHECK(page.batches.size() == 1 && page.batches[0].id == "batch_123" && page.batches[0].status == jobs::Status::Running && page.batches[0].counts.pending == 1 &&
+        page.next == "batch_123" && page.batches[0].raw);
+  CHECK(std::get<batches::Page>(paged(R"({"object":"list","data":[],"first_id":null,"last_id":null,"has_more":false})")).next.empty());
+  CHECK(std::get<Failure>(paged(R"({"object":"list","data":{}})")).error.reason == "batches.page.invalid");
+  CHECK(std::get<Failure>(paged(R"({"object":"list","data":[{"object":"batch"}]})")).error.reason == "batches.page.invalid");
+}
+
+std::string results_refusal(const descriptor::ValidatedDescriptor& family, const batches::Batch& batch, const std::vector<batches::Item>& items) {
+  const auto decoded = batches::results(family, batch, items);
+  CHECK(std::holds_alternative<Error>(decoded));
+  return std::get<Error>(decoded).reason;
+}
+void openrouter_results() {
+  // Each result decoded through the family of the batch's requests, matched by custom id, not by order.
+  const auto batch = std::get<batches::Batch>(batch_of(router_responses(), read("openrouter-batch.json")));
+  const std::vector<batches::Item> items{{"review-1", responses::Request::simple("anthropic/claude-haiku-5.5", "Classify: The fit is perfect.", 16)},
+                                         {"review-2", responses::Request::simple("anthropic/claude-haiku-5.5", "Classify: It arrived broken.", 16)}};
+  const auto decoded = std::get<std::vector<batches::Line>>(batches::results(router_responses(), batch, items));
+  CHECK(decoded.size() == 2 && decoded[0].custom_id == "review-1" && text_of(decoded[0].outcome) == "positive");
+  CHECK(decoded[1].custom_id == "review-2" && std::get<Failure>(decoded[1].outcome).error.reason == "batches.line.failed");
+  // Another family's descriptor does not decode them: the batch names the path its requests went to.
+  const std::vector<batches::Item> chat_items{{"review-1", chat_item("x")}, {"review-2", chat_item("y")}};
+  CHECK(results_refusal(router_chat(), batch, chat_items) == "batches.results.family");
+  CHECK(results_refusal(router_messages(), batch, items) == "batches.results.family");
+  CHECK(results_refusal(router_responses(), batch, {items[0]}) == "batches.results.custom_id");
+  CHECK(results_refusal(router_responses(), batch, {items[0], items[0]}) == "batches.results.custom_id");
+  auto pending = batch;
+  pending.raw = document(R"({"id":"batch_123","status":"in_progress","endpoint":"/v1/responses","results":null})");
+  CHECK(results_refusal(router_responses(), pending, items) == "batches.results.missing");
+  // A chat completions batch, its results out of order.
+  const auto chat_batch = std::get<batches::Batch>(batch_of(router_chat(), read("openrouter-chat-batch.json")));
+  CHECK(chat_batch.usage.provider_cost.total && chat_batch.usage.provider_cost.total->nano_usd == 2500);
+  const std::vector<batches::Item> chats{{"c-1", chat_item("Say: alpha")}, {"c-2", chat_item("Say: beta")}};
+  const auto lines = std::get<std::vector<batches::Line>>(batches::results(router_chat(), chat_batch, chats));
+  CHECK(lines.size() == 2 && lines[0].custom_id == "c-2" && text_of(lines[0].outcome) == "beta" && lines[1].custom_id == "c-1" &&
+        text_of(lines[1].outcome) == "alpha" && std::get<Completion>(lines[1].outcome).usage.output_total->value == 2);
+  CHECK(results_refusal(router_responses(), chat_batch, items) == "batches.results.family");
+}
 }  // namespace
 
 int main(int argc, char** argv) {
   try {
     if (argc != 2) throw std::runtime_error("usage: sp_batches_tests <fixture directory>");
     fixtures = argv[1];
-    requests(); captured_caps(); batch_objects(); result_lines();
+    requests(); captured_caps(); batch_objects(); result_lines(); openrouter_requests(); openrouter_batches(); openrouter_results();
     std::cout << "batch properties passed\n";
     return 0;
   } catch (const std::exception& error) { std::cerr << "batch test failed: " << error.what() << '\n'; return 1; }
