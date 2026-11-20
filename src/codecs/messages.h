@@ -4,6 +4,7 @@
 #include <map>
 #include <set>
 
+namespace sp::reason { struct Reason; }
 namespace sp::descriptor { class ValidatedDescriptor; }
 namespace sp::json { class Value; }
 namespace sp::messages {
@@ -52,7 +53,7 @@ class Codec {
   bool server_content(std::string_view, json::Value);
   bool all_blocks_closed();
   bool emit(const Event&);
-  bool fail(ErrorKind, std::string);
+  bool fail(ErrorKind, const reason::Reason&);
   void unknown(json::Value, std::initializer_list<std::string_view>);
   std::shared_ptr<const json::Document> own(json::Value);
   const descriptor::ValidatedDescriptor& descriptor_;
