@@ -152,9 +152,9 @@ std::string session_document(const Session& session, std::uint64_t part) {
 }
 
 std::variant<Media, Error> media(const File& file, std::string_view origin, std::uint64_t now) {
-  if (file.origin != origin) return Error{ErrorKind::InvalidRequest, "a file is named only at the origin that holds it"};
-  if (file.state != State::Active) return Error{ErrorKind::InvalidRequest, "a file is named once it is active"};
-  if (file.expires_at && *file.expires_at <= now) return Error{ErrorKind::InvalidRequest, "the file has expired"};
+  if (file.origin != origin) return reason::error(ErrorKind::InvalidRequest, reason::files::media_origin_mismatch);
+  if (file.state != State::Active) return reason::error(ErrorKind::InvalidRequest, reason::files::media_not_active);
+  if (file.expires_at && *file.expires_at <= now) return reason::error(ErrorKind::InvalidRequest, reason::files::media_expired);
   const std::string_view mime = file.mime;
   const auto kind = mime.starts_with("image/") ? MediaKind::Image : mime.starts_with("audio/") ? MediaKind::Audio
                   : mime.starts_with("video/") ? MediaKind::Video : MediaKind::Document;
@@ -165,25 +165,24 @@ std::variant<Media, Error> media(const File& file, std::string_view origin, std:
 Codec::Codec(const descriptor::ValidatedDescriptor& descriptor, Accumulator& accumulator, Kind kind, std::string subject, SemanticLimits limits)
     : descriptor_(descriptor), accumulator_(accumulator), kind_(kind), subject_(std::move(subject)), limits_(limits) {}
 bool Codec::emit(const Event& event) { return accumulator_.accept(event); }
-bool Codec::fail(ErrorKind kind, std::string text) {
-  Error error{kind, std::move(text)};
-  error.reason = reason::code(reason::Source::Files, error.safe_message);
+bool Codec::fail(ErrorKind kind, const reason::Reason& text) {
+  Error error = reason::error(kind, text);
   emit(Fail{std::move(error)});
   return false;
 }
 bool Codec::buffered(std::string_view body, Close close) {
-  if (!close.normal) return fail(close.error, "abnormal response close");
+  if (!close.normal) return fail(close.error, reason::transport::response_close);
   const auto* fact = descriptor_.policy()->endpoint("files", descriptor_.base_url());
-  if (!fact) return fail(ErrorKind::Unsupported, "file endpoints are not admitted at this origin");
+  if (!fact) return fail(ErrorKind::Unsupported, reason::files::endpoint_not_admitted);
   const std::string_view shape = fact->shape;
   // Google answers a deletion with an empty object, or nothing at all.
   auto parsed = json::parse(body.empty() ? std::string_view("{}") : body, {limits_.max_content_bytes, limits_.max_json_depth});
   if (auto* error = std::get_if<json::ParseError>(&parsed))
     return fail(error->code == json::ParseCode::SizeExceeded || error->code == json::ParseCode::DepthExceeded
-                    ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, "invalid response JSON");
+                    ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, reason::files::response_json_invalid);
   auto wire = std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
   const auto root = wire->root();
-  if (!root.is_object()) return fail(ErrorKind::ProtocolCorrupt, "response must be object");
+  if (!root.is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::files::response_not_object);
   auto context = json::parse("{\"shape\":" + json::quote(shape) + ",\"origin\":" + json::quote(descriptor_.base_url()) +
                              ",\"subject\":" + json::quote(subject_) + ",\"uploaded_sha256\":" + json::quote(close.upload_sha256) + "}");
   if (!emit(RawWire{"files.context", std::make_shared<const json::Document>(std::move(std::get<json::Document>(context)))}) ||
@@ -191,21 +190,21 @@ bool Codec::buffered(std::string_view body, Close close) {
     return false;
   File probe;
   if (kind_ == Kind::File) {
-    if (!file_of(file_object(root, shape), shape, descriptor_.base_url(), probe)) return fail(ErrorKind::ProtocolCorrupt, "a file object names its id");
+    if (!file_of(file_object(root, shape), shape, descriptor_.base_url(), probe)) return fail(ErrorKind::ProtocolCorrupt, reason::files::file_id_required);
   } else if (kind_ == Kind::Page) {
     const auto items = root.get(shape == "google" ? "files" : "data");
     // Google leaves out an empty list.
-    if (!(items.is_array() || (shape == "google" && !items.valid()))) return fail(ErrorKind::ProtocolCorrupt, "a file listing holds a list");
-    if (items.valid() && items.size() >= limits_.max_parts) return fail(ErrorKind::ResourceLimit, "a file listing exceeds the part limit");
+    if (!(items.is_array() || (shape == "google" && !items.valid()))) return fail(ErrorKind::ProtocolCorrupt, reason::files::page_list_required);
+    if (items.valid() && items.size() >= limits_.max_parts) return fail(ErrorKind::ResourceLimit, reason::files::page_limit);
     if (items.valid())
-      for (auto item : items.elements()) if (!file_of(item, shape, descriptor_.base_url(), probe)) return fail(ErrorKind::ProtocolCorrupt, "a file object names its id");
+      for (auto item : items.elements()) if (!file_of(item, shape, descriptor_.base_url(), probe)) return fail(ErrorKind::ProtocolCorrupt, reason::files::file_id_required);
     for (const char* cursor : {"nextPageToken", "next_page", "last_id"})
-      if (!optional_member(root.get(cursor), is_string)) return fail(ErrorKind::ProtocolCorrupt, "a page cursor is a string");
+      if (!optional_member(root.get(cursor), is_string)) return fail(ErrorKind::ProtocolCorrupt, reason::files::page_cursor_invalid);
   } else {
     // OpenAI says `deleted`, Anthropic answers a `file_deleted` object, Google an empty one.
     const bool refused = (shape == "openai" && !(root.get("deleted").is_bool() && root.get("deleted").as_bool())) ||
                          (shape == "anthropic" && text_of(root.get("type")) != "file_deleted");
-    if (refused) return fail(ErrorKind::ProtocolCorrupt, "the response does not confirm the deletion");
+    if (refused) return fail(ErrorKind::ProtocolCorrupt, reason::files::delete_unconfirmed);
   }
   if (!emit(Begin{}) || !emit(MessageBegin{{0}, std::nullopt, Role::Assistant, nullptr})) return false;
   return emit(UsageUpdate{Usage{}}) && emit(Stop{StopReason{StopKind::EndTurn, "completed"}}) && emit(MessageSeal{{0}}) &&
@@ -216,29 +215,28 @@ SessionCodec::SessionCodec(const descriptor::ValidatedDescriptor& descriptor, Ac
                            SemanticLimits limits, std::string url)
     : descriptor_(descriptor), accumulator_(accumulator), step_(step), subject_(std::move(subject)), url_(std::move(url)), limits_(limits) {}
 bool SessionCodec::emit(const Event& event) { return accumulator_.accept(event); }
-bool SessionCodec::fail(ErrorKind kind, std::string text) {
-  Error error{kind, std::move(text)};
-  error.reason = reason::code(reason::Source::Files, error.safe_message);
+bool SessionCodec::fail(ErrorKind kind, const reason::Reason& text) {
+  Error error = reason::error(kind, text);
   emit(Fail{std::move(error)});
   return false;
 }
 bool SessionCodec::buffered(std::string_view body, Close close) {
-  if (!close.normal) return fail(close.error, "abnormal response close");
+  if (!close.normal) return fail(close.error, reason::transport::response_close);
   const auto* fact = descriptor_.policy()->endpoint("files", descriptor_.base_url());
-  if (!fact) return fail(ErrorKind::Unsupported, "file endpoints are not admitted at this origin");
+  if (!fact) return fail(ErrorKind::Unsupported, reason::files::endpoint_not_admitted);
   const bool google = fact->shape == "google";
   auto subject = json::parse(subject_);
   if (!std::holds_alternative<json::Document>(subject) || !session_of(std::get<json::Document>(subject).root()))
-    return fail(ErrorKind::ProtocolCorrupt, "the upload session is not readable");
+    return fail(ErrorKind::ProtocolCorrupt, reason::files::session_unreadable);
   // Google answers most steps in headers alone; a body is JSON when there is one.
   std::shared_ptr<const json::Document> wire;
   if (!body.empty()) {
     auto parsed = json::parse(body, {limits_.max_content_bytes, limits_.max_json_depth});
     if (auto* error = std::get_if<json::ParseError>(&parsed))
       return fail(error->code == json::ParseCode::SizeExceeded || error->code == json::ParseCode::DepthExceeded
-                      ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, "invalid response JSON");
+                      ? ErrorKind::ResourceLimit : ErrorKind::ProtocolCorrupt, reason::files::response_json_invalid);
     wire = std::make_shared<const json::Document>(std::move(std::get<json::Document>(parsed)));
-    if (!wire->root().is_object()) return fail(ErrorKind::ProtocolCorrupt, "response must be object");
+    if (!wire->root().is_object()) return fail(ErrorKind::ProtocolCorrupt, reason::files::response_not_object);
   }
   const auto root = wire ? wire->root() : json::Value{};
   const std::string status(google ? header(close, "x-goog-upload-status") : (wire ? std::string_view(text_of(root.get("status"))) : std::string_view{}));
@@ -246,20 +244,20 @@ bool SessionCodec::buffered(std::string_view body, Close close) {
       received(header(close, "x-goog-upload-size-received"));
   File probe;
   if (google) {
-    if (status.empty()) return fail(ErrorKind::ProtocolCorrupt, "a Google upload reports its status");
+    if (status.empty()) return fail(ErrorKind::ProtocolCorrupt, reason::files::session_status_required);
     if (step_ == Step::Start && (status != "active" || !upload_url(descriptor_.base_url(), url) ||
                                  (!granularity.empty() && !digits(granularity))))
-      return fail(ErrorKind::ProtocolCorrupt, "a Google upload begins with its upload URL");
+      return fail(ErrorKind::ProtocolCorrupt, reason::files::session_url_required);
     if (status == "final" && !(wire && file_of(file_object(root, "google"), "google", descriptor_.base_url(), probe)))
-      return fail(ErrorKind::ProtocolCorrupt, "a finished upload names its file");
-    if (!received.empty() && !digits(received)) return fail(ErrorKind::ProtocolCorrupt, "a Google upload reports its size as digits");
-    if (step_ == Step::Cancel && status != "cancelled") return fail(ErrorKind::ProtocolCorrupt, "the response does not confirm the cancellation");
+      return fail(ErrorKind::ProtocolCorrupt, reason::files::session_file_required);
+    if (!received.empty() && !digits(received)) return fail(ErrorKind::ProtocolCorrupt, reason::files::session_size_invalid);
+    if (step_ == Step::Cancel && status != "cancelled") return fail(ErrorKind::ProtocolCorrupt, reason::files::session_cancel_unconfirmed);
   } else {
-    if (!wire || !root.get("id").is_string() || root.get("id").as_string().empty()) return fail(ErrorKind::ProtocolCorrupt, "an upload step names its id");
+    if (!wire || !root.get("id").is_string() || root.get("id").as_string().empty()) return fail(ErrorKind::ProtocolCorrupt, reason::files::session_id_required);
     if (step_ == Step::Complete && (status != "completed" || !file_of(root.get("file"), fact->shape, descriptor_.base_url(), probe)))
-      return fail(ErrorKind::ProtocolCorrupt, "a finished upload names its file");
-    if (step_ == Step::Cancel && status != "cancelled") return fail(ErrorKind::ProtocolCorrupt, "the response does not confirm the cancellation");
-    if (!optional_member(root.get("expires_at"), is_uint)) return fail(ErrorKind::ProtocolCorrupt, "an upload step names its id");
+      return fail(ErrorKind::ProtocolCorrupt, reason::files::session_file_required);
+    if (step_ == Step::Cancel && status != "cancelled") return fail(ErrorKind::ProtocolCorrupt, reason::files::session_cancel_unconfirmed);
+    if (!optional_member(root.get("expires_at"), is_uint)) return fail(ErrorKind::ProtocolCorrupt, reason::files::session_id_required);
   }
   // The session's URL goes to the completion's secret, not to a raw event: a Start answers with the new one.
   const auto& session_url = step_ == Step::Start ? url : url_;
