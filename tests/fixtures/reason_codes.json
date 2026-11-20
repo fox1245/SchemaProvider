@@ -1255,5 +1255,22 @@
   ["request.stores.batch_files_invalid", "a file batch names file_ids or files, one of them"],
   ["request.stores.update_empty", "a store update changes a member"],
   ["files.page.cursor_missing", "a page that says more follow names its last id"],
-  ["stores.page.cursor_missing", "a store listing that says more follow names its last id"]
+  ["stores.page.cursor_missing", "a store listing that says more follow names its last id"],
+  ["request.batches.cancel_unsupported", "the batch endpoint has no cancel; delete a finished batch instead"],
+  ["request.batches.file_unsupported", "this batch endpoint takes its items inline, not from an uploaded file"],
+  ["request.batches.display_name_unsupported", "this batch endpoint takes no display name"],
+  ["request.batches.item_endpoint", "the batch endpoint takes no requests of this family"],
+  ["request.batches.model_mismatch", "every item of a batch names the batch's one model"],
+  ["request.batches.item_variant", "a batch item's model names a variant the batch endpoint refuses"],
+  ["request.batches.item_routing", "a batch item carries no provider routing of its own"],
+  ["request.batches.item_fallbacks", "a batch item names no fallback models"],
+  ["request.batches.item_plugin", "a batch item uses a plugin the batch endpoint refuses"],
+  ["request.batches.item_output", "a batch item asks for no image or audio output"],
+  ["request.batches.item_media", "a batch item carries media of a kind or source the batch endpoint refuses"],
+  ["request.batches.limit_invalid", "a page of batches needs a positive limit"],
+  ["request.batches.cursor_invalid", "a page cursor is a batch id"],
+  ["batches.page.invalid", "a page of batches lists batch objects"],
+  ["batches.results.missing", "the batch carries no results"],
+  ["batches.results.family", "the results are decoded through the family of the batch's requests"],
+  ["batches.results.custom_id", "a result answers one item of the batch"]
 ]

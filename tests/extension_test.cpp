@@ -770,6 +770,7 @@ constexpr std::string_view recorded_answers[] = {
     "endpoint:batches completion_window",
     "endpoint:batches endpoint",
     "endpoint:batches input_file_id",
+    "endpoint:batches model",
     "endpoint:batches requests",
     "tool:anthropic.messages allowed_callers",
     "tool:anthropic.messages allowed_domains",

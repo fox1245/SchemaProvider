@@ -476,6 +476,9 @@ void endpoint_members_cover_encoders() {
       batches::Submit{{{"a-1", messages::Request::simple("claude-haiku-4-5", "Say: alpha", 16)}}}).body));
   add("batches", json_members(encoded<batches::Encoded>(static_cast<BatchEncode>(batches::encode), descriptor::presets::google_generate(),
       batches::Submit{{{"g-1", gemini::Request::simple("gemini-3.5-flash-lite", "x")}}}).body));
+  // OpenRouter: the batch's endpoint and model, then the requests.
+  add("batches", json_members(encoded<batches::Encoded>(static_cast<BatchEncode>(batches::encode), descriptor::presets::openrouter_chat(),
+      batches::Submit{{{"r-1", chat::Request::simple("vendor/model", "x", 16)}}}).body));
 
   // A realtime session sets itself up with one message: Google's `setup` object, and OpenAI's `session` object.
   const auto setup_members = [&](const descriptor::ValidatedDescriptor& d, const realtime::Setup& setup, std::string_view wrapper) {

@@ -1783,10 +1783,35 @@ void carried_requests() {
   auto untiered = submit({carried("b-1", "vendor/model", 16)});
   untiered.facts.carried_tier.clear();
   SAME(described(bounded(untiered, {})), "no total | TierPrice [batches/submit] the call names no tier for the requests it carries | entry '' attempts 0 lines");
+  // At a routing gateway each request is bounded at its entry's route ceiling under the carried tier: none listed is
+  // no bound, and a ceiling at the standard rates is not the tier's.
   auto routed = submit({carried("b-1", "vendor/model", 16)});
   routed.facts.routed_gateway = true;
   SAME(described(bounded(routed, {})),
-       "no total | RouteCeiling [batches/submit] a request a call carries at a routing gateway takes no pin from this bound | entry '' attempts 0 lines");
+       "no total | RouteCeiling [b-1:vendor/model] the entry lists no route ceiling (ceiling_input, ceiling_output), so the router may pick any "
+       "price | entry '' attempts 0 lines");
+  constexpr std::uint64_t ceil_in = 700'000'001, ceil_out = 3'000'000'003;
+  const auto ceilinged = catalogue(std::string(R"({"version":1,"models":[)") +
+      R"({"id":"vendor/routed","input_limit":2000,"pricing":{"input":")" + usd(1'000'000'000) + R"(","output":")" + usd(4'000'000'000) +
+      R"(","ceiling_input":")" + usd(1'000'000'000) + R"(","ceiling_output":")" + usd(4'000'000'000) + R"(","input/batch":")" + usd(in) +
+      R"(","output/batch":")" + usd(out) + R"(","ceiling_input/batch":")" + usd(ceil_in) + R"(","ceiling_output/batch":")" + usd(ceil_out) + R"("}},)" +
+      R"({"id":"vendor/untiered-ceiling","input_limit":2000,"pricing":{"input/batch":")" + usd(in) + R"(","output/batch":")" + usd(out) +
+      R"(","ceiling_input":")" + usd(ceil_in) + R"(","ceiling_output":")" + usd(ceil_out) + R"("}}]})");
+  auto routed_ceiling = submit({carried("b-1", "vendor/routed", 16)});
+  routed_ceiling.facts.routed_gateway = true;
+  pricing::EndpointWorstCaseInput at_ceiling;
+  at_ceiling.facts = &routed_ceiling.facts;
+  at_ceiling.attempts = 1;
+  at_ceiling.charge_on_accept = true;
+  SAME(described(pricing::endpoint_worst_case(at_ceiling, *ceilinged)),
+       "total " + std::to_string(rounded(2000 * ceil_in + 16 * ceil_out)) + " | entry 'vendor/routed' attempts 1 lines b-1:nano_usd=vendor/routed:" +
+       std::to_string(rounded(2000 * ceil_in + 16 * ceil_out)) + "x1000000");
+  auto untiered_ceiling = submit({carried("b-1", "vendor/untiered-ceiling", 16)});
+  untiered_ceiling.facts.routed_gateway = true;
+  at_ceiling.facts = &untiered_ceiling.facts;
+  SAME(described(pricing::endpoint_worst_case(at_ceiling, *ceilinged)),
+       "no total | RouteCeiling [b-1:vendor/untiered-ceiling] the entry lists no route ceiling (ceiling_input, ceiling_output), so the router may "
+       "pick any price | entry '' attempts 0 lines");
   auto from_file = submit({});
   from_file.facts.input_file = "file-abc";
   SAME(described(bounded(from_file, {})), "no total | Unmodeled [batches/submit] the batch's requests are in an uploaded file | entry '' attempts 0 lines");
