@@ -45,7 +45,8 @@ struct EndpointLine {
 // An endpoint call, as endpoint_worst_case reads it.
 struct EndpointWorstCaseInput {
   const EndpointFacts* facts = nullptr;
-  // The catalogue tier the call is priced under: empty for the standard rates.
+  // The catalogue tier the call is priced under: empty for the standard rates. The facts' own tier
+  // (EndpointFacts::service_tier) is the call's when they name one; this may repeat it, and naming another refuses.
   std::string_view service_tier;
   // The input tokens of the call as the host counted them. It must not understate the input; it is not checked, and it
   // is capped at the entry's input limit times the quantity's `per`.
@@ -75,6 +76,11 @@ struct EndpointBound {
   std::string entry, model;
   std::vector<EndpointLine> lines;
   std::uint64_t attempts = 0;
+  // Priced at a routing gateway, at the lower of the route ceiling and the request's own cap, and not at the listed
+  // rates. The bound holds only if the request carries `pin` as `provider.max_price`: the request's own cap with each
+  // amount the bound reads lowered to the route ceiling. `pinned` is true when it already does.
+  bool route_ceiling = false, pinned = false;
+  std::optional<OpenRouterMaxPrice> pin;
 };
 // A bound on what one endpoint call can bill, from the facts of the call and the catalogue's prices; a stateless
 // function of its arguments. By the billing of the call's operation:
@@ -92,10 +98,23 @@ struct EndpointBound {
 //   own service tier"). Each request's bound is rounded up on its own; their sum is exact, and one line per request
 //   holds it: unit `<custom_id>:nano_usd`, the entry that priced it, the request's bound in nano-USD as the quantity
 //   and a rate of one nano-USD per unit (1000000). The sum is multiplied by the attempts as below.
-// - `Model`: by the entry ModelCatalogue::find gives for the facts' family, origin and model, under `service_tier`:
-//   - No entry, or one without prices: `ModelPrice`, subject the model. At a routing gateway: `RouteCeiling`, subject
-//     the model, since no route ceiling or pin covers an endpoint call's prices. An entry with no price unit in the
-//     tier: `TierPrice`. An entry with a route ceiling at an origin that is not a routing gateway: `RouteCeiling`.
+// - `Model`: by the entry ModelCatalogue::find gives for the facts' family, origin and model, under the call's tier: the
+//   facts' `service_tier`, else the input's `service_tier` (both named and different: `TierPrice`, subject the model).
+//   - No entry, or one without prices: `ModelPrice`, subject the model. An entry with no price unit in the tier:
+//     `TierPrice`; and so is an entry that prices a unit the call may be priced by (a token unit by its plain name, the
+//     request fee, a route ceiling, an item unit without its qualifier) at the standard rates and not in the tier, in
+//     any band, since under the tier that unit would be priced at another's rate. An entry with a route ceiling at an
+//     origin that is not a routing gateway: `RouteCeiling`.
+//   - At a routing gateway, only a call whose every quantity is input tokens (`input`, an embeddings call) and whose
+//     facts state the request's cap on the router's prompt price (`max_price` with a prompt amount) has a bound; any
+//     other is `RouteCeiling`, subject the model, since no route ceiling or pin covers its prices. The input tokens are
+//     priced at the lower of the entry's `ceiling_input` (the dearest row that applies, as for a token unit) and the
+//     cap, in a line whose row is `ceiling_input`'s key or, when the cap is lower, `provider.max_price.prompt`; the
+//     listed rates are not read. No `ceiling_input` row: `RouteCeiling`, subject the model; a variable one:
+//     `ModelPrice`, subject `ceiling_input`. A request fee above zero, listed (`request`) or as a route ceiling
+//     (`ceiling_request`): `RouteCeiling`, subject `request`, since no amount of the cap is known to bind one; a
+//     variable one: `ModelPrice`, subject the unit. The bound then sets `route_ceiling`, the `pin` (the request's cap
+//     with its prompt amount lowered to the ceiling) and `pinned` (the cap is already at most the ceiling).
 //   - The call offers its dimensions and `operation` with the facts' operation; dimensions that are not sorted by key
 //     with each key once, or that name another operation, are `Unmodeled`.
 //   - Each quantity is its `at_most`, else by its source: the entry's input limit (the smaller of `input_limit` and
@@ -157,8 +176,8 @@ struct EndpointEstimate {
   std::vector<EndpointLine> lines;
   // Rules applied where the result says less than the bill: those of `estimate` for the tokens ("cache_read at
   // input", "<unit> at zero", ...), "<unit> at the request's bound" for an item unit the result does not count and the
-  // request does not fix, priced at the most the request asks, and "listed rates" at a routing gateway, whose bound is
-  // at the route ceiling.
+  // request does not fix, priced at the most the request asks, "listed rates" at a routing gateway, whose bound is at
+  // the route ceiling, and "input at the pin" where the request's cap is below a listed input rate.
   std::vector<std::string> assumptions;
   // Why there is no total: "billing" (the policy does not state how the operation bills), "carried" (the call bills
   // the requests it carries), "model", "tier", "operation" or "dimensions" (as the bound refuses them), a token side
@@ -175,9 +194,13 @@ struct EndpointEstimate {
 // result's own quantities. The provider's own figure, where it reports one (Usage::provider_cost), is the cost; this is
 // a cross-check. By the billing of the operation: `None` is exactly zero and reads nothing of the result; `Unstated`
 // is "billing"; `Carried` is "carried". For `Model`:
+// - The tier: the facts' `service_tier`, else `service_tier` ("tier" when both name one and they differ).
 // - The entry: the served model's when the response names another model and that model has an entry with a price
-//   under `service_tier`, else the requested one's (`requested_entry`); "model" when neither has one, "tier" when one
-//   prices only other tiers. At a routing gateway the entry's listed rates price the call ("listed rates").
+//   under the tier, else the requested one's (`requested_entry`); "model" when neither has one, "tier" when one
+//   prices only other tiers, or prices a unit at the standard rates and not in the tier, as the bound refuses it. At a
+//   routing gateway the entry's listed rates price the call ("listed rates"); a call the bound prices at the request's
+//   cap (an embeddings call with a prompt amount in `max_price`) has each input rate above the cap priced at the cap,
+//   since the router does not choose a dearer endpoint ("input at the pin").
 // - The dimensions and the operation as the bound reads them.
 // - Tokens, when the usage reports a counter: priced as `estimate` prices a usage, at the rates of the input band of
 //   the usage's input tokens (cache reads and writes included), with the same cache, reasoning and modality rules. The
@@ -201,7 +224,8 @@ struct EndpointEstimate {
 // total. The estimate is never limited to the bound: a result beyond its request is priced as it came
 // (beyond_bound names what exceeds the bound). For the same facts, catalogue and tier, a result whose every counted
 // quantity is at most the bound's quantity of its unit, priced by the entry the bound used (the requested model's), is
-// estimated at most at the bound. A served model's own entry may price it above the bound at every quantity within.
+// estimated at most at the bound; at a routing gateway, while the listed input rates are at most the route ceiling. A
+// served model's own entry may price it above the bound at every quantity within.
 EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const EndpointCounted& counted, const descriptor::ModelCatalogue& catalogue,
                                    std::string_view service_tier = {});
 // What of `estimate` exceeds `bound`: first "entry" when the estimate is priced by another entry than the bound's (the

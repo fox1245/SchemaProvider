@@ -37,6 +37,9 @@ pricing::WorstCase projected(pricing::EndpointBound bound, bool carried = false)
   out.entry = std::move(bound.entry);
   out.model = std::move(bound.model);
   out.attempts = bound.attempts;
+  out.route_ceiling = bound.route_ceiling;
+  out.pinned = bound.pinned;
+  out.pin = std::move(bound.pin);
   if (out.total && !carried) {
     for (const auto& line : bound.lines) {
       if (line.unit == "input") out.input_tokens = line.quantity;

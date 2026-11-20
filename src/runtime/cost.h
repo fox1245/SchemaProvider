@@ -38,8 +38,9 @@ struct EndpointCostOptions {
 // endpoint call is bounded by its operation's billing (PreparedRequest::endpoint_facts): exactly zero when the policy
 // states the provider does not bill it, with no catalogue lookup; no bound (`UnboundedBy::Billing`) when the policy
 // does not state it; endpoint_worst_case_cost, without the audio's length and with
-// WorstCaseOptions::measured_input_tokens, when the operation bills its model (its token counts, one invocation, and
-// the attempts that bound); and endpoint_worst_case_cost, without measured input, when it bills the requests it
+// WorstCaseOptions::measured_input_tokens, when the operation bills its model (its token counts, one invocation, the
+// attempts that bound, and at a routing gateway `route_ceiling`, `pin` and `pinned` as the endpoint bound states them);
+// and endpoint_worst_case_cost, without measured input, when it bills the requests it
 // carries (a batch submit): its total, reasons, entry, model and attempts, with no tokens and no invocations of its own,
 // since each request it carries is bounded on its own. Free of side effects, and nothing is reserved.
 pricing::WorstCase worst_case_cost(const PreparedRequest& prepared, const descriptor::ModelCatalogue& catalogue,
@@ -47,7 +48,8 @@ pricing::WorstCase worst_case_cost(const PreparedRequest& prepared, const descri
 // With the catalogue of the descriptor's policy.
 pricing::WorstCase worst_case_cost(const PreparedRequest& prepared, const WorstCaseOptions& options = {});
 // Bounds what the prepared non-chat endpoint call `prepared` can bill: pricing::endpoint_worst_case over the call's
-// facts (PreparedRequest::endpoint_facts), at the standard rates of `catalogue`, with the host's `options`. The call's
+// facts (PreparedRequest::endpoint_facts), at the rates of `catalogue` in the facts' service tier (the standard rates,
+// since no endpoint request names a tier), with the host's `options`. The call's
 // retry policy gives the attempts: its `max_attempts`, one when retry is off, none (`Invocations`) without a policy. A
 // billed operation of an endpoint fact that charges once it accepts a call (descriptor::EndpointFact::charge_on_accept)
 // is bounded at one attempt, since the runtime sends such a call again only when the provider did not accept it; any
@@ -56,7 +58,9 @@ pricing::WorstCase worst_case_cost(const PreparedRequest& prepared, const WorstC
 // the requests it carries (pricing::endpoint_worst_case), with `measured_carried_input_tokens`; an OpenAI submit, whose
 // requests are in an uploaded file, has no bound here (`Unmodeled`, subject `batches/submit`): batch_worst_case_cost
 // bounds it from the items. A chat request, and a request that did not prepare, have no bound (`Unmodeled`, subject
-// `request`). Free of side effects, and nothing is reserved.
+// `request`). An embeddings call at a routing gateway whose request sets `provider.max_price.prompt` is bounded at the
+// lower of that cap and the route ceiling, with the pin the request must carry (EndpointBound::pin); every other call at
+// a routing gateway has no bound (`RouteCeiling`). Free of side effects, and nothing is reserved.
 pricing::EndpointBound endpoint_worst_case_cost(const PreparedRequest& prepared, const descriptor::ModelCatalogue& catalogue,
                                                 const EndpointCostOptions& options = {});
 // With the catalogue of the descriptor's policy.
@@ -76,7 +80,7 @@ pricing::EndpointBound batch_worst_case_cost(const PreparedRequest& submit, cons
                                              const std::vector<batches::Item>& items, const files::File& input_file,
                                              const EndpointCostOptions& options = {});
 
-// What a finished endpoint call cost by the catalogue, at the standard rates: pricing::endpoint_estimate over the facts
+// What a finished endpoint call cost by the catalogue, in the facts' service tier: pricing::endpoint_estimate over the facts
 // of the prepared call (PreparedRequest::endpoint_facts, which a host journals with the call) and what its result
 // counted. Where the provider reports the cost (Usage::provider_cost, at OpenRouter) that figure is the cost and this
 // is a cross-check. Each result type gives:

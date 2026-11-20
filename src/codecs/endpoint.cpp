@@ -11,8 +11,10 @@
 #include "codecs/speech.h"
 #include "codecs/tokens.h"
 #include "codecs/transcription.h"
+#include "core/pricing_internal.h"
 #include "descriptor/catalogue.h"
 #include <algorithm>
+#include <cmath>
 
 namespace sp::endpoints {
 std::variant<std::optional<std::pair<std::string, std::string>>, Error> credential(std::string_view scheme, std::string_view key) {
@@ -162,6 +164,64 @@ EndpointQuantity input_limited(std::string unit, std::uint64_t per) {
   quantity.source = EndpointQuantity::Source::InputLimit;
   quantity.per = per;
   return quantity;
+}
+namespace {
+// A JSON number of USD as whole nano-USD, rounded up from the number's exact binary value, so that no amount a reader of
+// the number may take is above it. Nothing for a value that is not a number, a negative number, and an amount above
+// max_price_limit_nano_usd.
+std::optional<std::uint64_t> nano_usd(json::Value value) {
+  constexpr std::uint64_t nano = 1'000'000'000;
+  if (!value.is_number()) return std::nullopt;
+  if (value.is_uint()) {
+    const auto usd = value.as_uint();
+    if (usd > max_price_limit_nano_usd / nano) return std::nullopt;
+    return usd * nano;
+  }
+  const double usd = value.as_double();
+  if (!std::isfinite(usd) || usd < 0) return std::nullopt;
+  if (usd == 0) return 0;
+  // usd = mantissa / 2^shift, exactly: frexp and ldexp only move the exponent.
+  int exponent = 0;
+  const auto mantissa = static_cast<std::uint64_t>(std::ldexp(std::frexp(usd, &exponent), 53));
+  const int shift = 53 - exponent;
+  if (shift <= 0) return std::nullopt;  // at least 2^52 USD
+  // The quotient of mantissa x 1e9 (below 2^83) by 2^shift, and whether it leaves a remainder.
+  const auto product = pricing::detail::Wide::product(mantissa, nano);
+  std::uint64_t quotient = 0;
+  bool remainder = false;
+  if (shift >= 128) {
+    remainder = true;
+  } else if (shift >= 64) {
+    const int rest = shift - 64;
+    quotient = rest ? product.high >> rest : product.high;
+    remainder = product.low != 0 || (rest && (product.high & ((std::uint64_t{1} << rest) - 1)) != 0);
+  } else {
+    if (product.high >> shift) return std::nullopt;
+    quotient = (product.low >> shift) | (product.high << (64 - shift));
+    remainder = (product.low & ((std::uint64_t{1} << shift) - 1)) != 0;
+  }
+  if (remainder) ++quotient;
+  if (quotient > max_price_limit_nano_usd) return std::nullopt;
+  return quotient;
+}
+}  // namespace
+std::optional<OpenRouterMaxPrice> max_price(const std::shared_ptr<const json::Document>& extensions) {
+  if (!extensions) return std::nullopt;
+  const auto cap = extensions->root().get("provider").get("max_price");
+  if (!cap.is_object()) return std::nullopt;
+  // OpenRouter's members of max_price, as OpenRouterRouting::max_price sends them.
+  constexpr std::pair<std::string_view, std::optional<std::uint64_t> OpenRouterMaxPrice::*> amounts[]{
+      {"prompt", &OpenRouterMaxPrice::prompt_nano_usd}, {"completion", &OpenRouterMaxPrice::completion_nano_usd},
+      {"image", &OpenRouterMaxPrice::image_nano_usd}, {"audio", &OpenRouterMaxPrice::audio_nano_usd},
+      {"request", &OpenRouterMaxPrice::request_nano_usd}};
+  OpenRouterMaxPrice out;
+  for (auto member : cap.members()) {
+    const auto found = std::find_if(std::begin(amounts), std::end(amounts), [&](const auto& amount) { return amount.first == member.key; });
+    const auto amount = found == std::end(amounts) ? std::nullopt : nano_usd(member.value);
+    if (!amount) return std::nullopt;
+    out.*(found->second) = amount;
+  }
+  return out;
 }
 EndpointQuantity output_limited() {
   EndpointQuantity quantity;

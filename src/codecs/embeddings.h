@@ -45,7 +45,8 @@ std::string_view operation(const Request&) noexcept;
 // What a request bills by (core/endpoint_facts.h): the embeddings fact and `embed`, with the quantity `input`, the input
 // tokens up to the model's input limit for each input (an embedding model's limit counts per input) or the host's
 // measured count; `input_image`, the image tokens among them, bounded the same way, when an input has media; and the
-// dimensions `dimensions` and `task` when they are set, with the request's extensions (endpoints::dimensions).
+// dimensions `dimensions` and `task` when they are set, with the request's extensions (endpoints::dimensions); and the
+// cap the extensions set on a routing gateway's choice (`provider.max_price`, endpoints::max_price).
 EndpointFacts endpoint_facts(const descriptor::ValidatedDescriptor&, const Request&);
 
 using Close = endpoints::Close;

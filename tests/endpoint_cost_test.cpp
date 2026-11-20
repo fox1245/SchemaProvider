@@ -730,6 +730,146 @@ const auto items_priced = catalogue_of("{\"version\":1,\"models\":[" +
           {{"input", 0}, {"input_image", 0}, {"output", 0}, {"item:second", video_second_rate}, {"item:second[resolution=1080p]", video_1080p_rate},
            {"item:input_image", reference_rate}}) + "]}");
 
+// ---- endpoint calls at the routing gateway -----------------------------------------------------------------------
+
+// Entries at the routing gateway, with listed rates and route ceilings for every unit an endpoint counts.
+constexpr std::uint64_t routed_embed_rate = 100'000'000, routed_embed_ceiling = 150'000'000;
+const auto routed = catalogue_of("{\"version\":1,\"models\":[" +
+    entry("vendor/embed", limits(embed_input), {{"input", routed_embed_rate}, {"ceiling_input", routed_embed_ceiling}}) + "," +
+    entry("vendor/image", limits(image_input, image_output),
+          {{"input", in_rate}, {"input_image", image_token_rate}, {"output", out_rate}, {"item:image", image_rate}, {"item:input_image", reference_rate},
+           {"ceiling_input", in_rate}, {"ceiling_output", out_rate}}) + "," +
+    entry("vendor/decider", limits(decider_input, decider_output),
+          {{"input", in_rate}, {"output", small_out_rate}, {"ceiling_input", in_rate}, {"ceiling_output", small_out_rate}}) + "," +
+    entry("vendor/ranker", limits(long_input),
+          {{"input", in_rate}, {"item:document", document_rate}, {"item:search_unit", 0}, {"ceiling_input", in_rate}}) + "," +
+    entry("vendor/speaker", limits(long_input, long_output),
+          {{"input", in_rate}, {"output", small_out_rate}, {"item:character", character_rate}, {"ceiling_input", in_rate}, {"ceiling_output", small_out_rate}}) + "," +
+    entry("vendor/transcriber", limits(long_input, long_output),
+          {{"input", in_rate}, {"output", small_out_rate}, {"item:second", second_rate}, {"ceiling_input", in_rate}, {"ceiling_output", small_out_rate}}) + "," +
+    entry("vendor/video", limits(long_input, long_output),
+          {{"input", in_rate}, {"input_image", image_token_rate}, {"output", small_out_rate}, {"item:second", video_second_rate},
+           {"item:input_image", reference_rate}, {"ceiling_input", in_rate}, {"ceiling_output", small_out_rate}}) + "]}");
+// Three inputs, with `extensions` when given.
+embeddings::Request embedding(std::string_view extensions = {}) {
+  embeddings::Request request{"vendor/embed", {{"a"}, {"b"}, {"c"}}};
+  if (!extensions.empty()) request.extensions = document(extensions);
+  return request;
+}
+std::string capped(std::string_view prompt) { return R"({"provider":{"sort":"price","max_price":{"prompt":)" + std::string(prompt) + "}}}"; }
+const std::string unpinned = "an endpoint call at a routing gateway has no per-item route ceiling and no pin";
+
+// Embeddings at the routing gateway: the request's `provider.max_price.prompt` caps the router's choice, so the input
+// is bounded at the lower of that cap and the route ceiling, and the bound states the pin the request must carry.
+void gateway_embeddings_bound() {
+  auto router = client_of(openrouter_chat());
+  const auto bound_at = [&](const embeddings::Request& request, runtime::EndpointCostOptions options = {}) {
+    return runtime::endpoint_worst_case_cost(ok(router.prepare(request)), *routed, options);
+  };
+  // Without a cap, no bound.
+  auto bound = bound_at(embedding());
+  CHECK(reasons_of(bound) == "RouteCeiling [vendor/embed] " + unpinned + "; " && !bound.route_ceiling && !bound.pin);
+  CHECK(!ok(router.prepare(embedding())).endpoint_facts().max_price);
+  CHECK(reasons_of(bound_at(embedding(R"({"provider":{"sort":"price"}})"))) == "RouteCeiling [vendor/embed] " + unpinned + "; ");
+  // 0.12 USD per million tokens: the binary number is just below 0.12, so its exact value rounds up to 120000000 nano-USD.
+  const auto pinned = embedding(capped("0.12"));
+  const auto facts = ok(router.prepare(pinned)).endpoint_facts();
+  CHECK(facts.max_price && facts.max_price->prompt_nano_usd == 120'000'000 && !facts.max_price->completion_nano_usd && facts.service_tier.empty());
+  bound = bound_at(pinned);
+  CHECK(nano(bound) == rounded(3 * embed_input * 120'000'000) && line_of(bound, "input") == "provider.max_price.prompt 1536 x 120000000");
+  CHECK(bound.route_ceiling && bound.pinned && bound.pin && bound.pin->prompt_nano_usd == 120'000'000 && bound.attempts == 1);
+  CHECK(nano(bound_at(pinned, measured(700))) == rounded(std::uint64_t{700} * 120'000'000));
+  // The projection onto a chat request's bound carries the ceiling and the pin.
+  CHECK(describe(runtime::worst_case_cost(ok(router.prepare(pinned, run_with(3))), *routed)) ==
+        "total " + std::to_string(rounded(3 * embed_input * 120'000'000)) +
+            " Derived CeilingCatalogueProduct | entry 'vendor/embed' model 'vendor/embed' tokens 1536/0/1536 fees 0 invocations 1 attempts 1 tools 0 "
+            "ceiling 1 pinned 1 pin 1");
+  // The binary values of 0.1 and 1e-9 are just above them: one nano-USD more, never less.
+  CHECK(ok(router.prepare(embedding(capped("0.1")))).endpoint_facts().max_price->prompt_nano_usd == 100'000'001);
+  CHECK(ok(router.prepare(embedding(capped("1e-9")))).endpoint_facts().max_price->prompt_nano_usd == 2);
+  CHECK(ok(router.prepare(embedding(capped("1")))).endpoint_facts().max_price->prompt_nano_usd == 1'000'000'000);
+  CHECK(ok(router.prepare(embedding(capped("0")))).endpoint_facts().max_price->prompt_nano_usd == 0);
+  // A cap above the route ceiling: the ceiling bounds the call, and the pin to carry is the ceiling.
+  bound = bound_at(embedding(capped("0.2")));
+  CHECK(nano(bound) == rounded(3 * embed_input * routed_embed_ceiling) && line_of(bound, "input") == "ceiling_input 1536 x 150000000");
+  CHECK(bound.route_ceiling && !bound.pinned && bound.pin && bound.pin->prompt_nano_usd == routed_embed_ceiling);
+  // A cap above the largest amount max_price takes is no cap the bound reads.
+  CHECK(!ok(router.prepare(embedding(capped("10000000")))).endpoint_facts().max_price);
+  CHECK(reasons_of(bound_at(embedding(capped("10000000")))) == "RouteCeiling [vendor/embed] " + unpinned + "; ");
+  // A cap the policy does not admit: text, a negative number, another amount.
+  for (const auto* refused : {R"("0.12")", "-1"}) {
+    const auto call = router.prepare(embedding(capped(refused)));
+    CHECK(call.prepared().error() && call.prepared().error()->reason == "request.embeddings.options_invalid");
+  }
+  const auto completion = router.prepare(embedding(R"({"provider":{"max_price":{"prompt":0.1,"completion":0.1}}})"));
+  CHECK(completion.prepared().error() && completion.prepared().error()->reason == "request.embeddings.options_invalid");
+  // At an origin that is not a routing gateway the policy admits no cap: the call is bounded at the listed rate.
+  auto direct = client_of(openai_chat());
+  CHECK(direct.prepare(embedding(capped("0.12"))).prepared().error());
+  CHECK(nano(bound_of(direct.prepare(embedding()))) == rounded(3 * embed_input * embed_rate));
+
+  // The estimate: the reported tokens at the listed rate, and at the cap where the cap is lower.
+  embeddings::Result result;
+  result.usage = counted(900, std::nullopt);
+  result.model = ServedModel{"vendor/embed", "vendor/embed", ServedRelation::Exact};
+  auto e = runtime::endpoint_estimate(facts, result, *routed);
+  CHECK(nano(e) == rounded(900 * routed_embed_rate) && e.assumptions == std::vector<std::string>{"listed rates"} && e.total->nano_usd <= nano(bound_at(pinned)));
+  const auto low = ok(router.prepare(embedding(capped("0.05")))).endpoint_facts();
+  e = runtime::endpoint_estimate(low, result, *routed);
+  CHECK(nano(e) == rounded(std::uint64_t{900} * 50'000'001) && e.assumptions == (std::vector<std::string>{"listed rates", "input at the pin"}));
+  CHECK(e.total->nano_usd <= nano(bound_at(embedding(capped("0.05")))));
+}
+
+// Every other endpoint at the routing gateway keeps no bound, with an entry that lists every unit and the route
+// ceilings: decisions, images, rerank, speech, transcription and videos. Their policy facts admit no cap.
+void gateway_refusals() {
+  auto router = client_of(openrouter_chat());
+  const auto refused = [&](const auto& call, std::string_view model) {
+    const auto bound = runtime::endpoint_worst_case_cost(ok(call), *routed, seconds(30));
+    return reasons_of(bound) == "RouteCeiling [" + std::string(model) + "] " + unpinned + "; " && !bound.route_ceiling && !bound.pin &&
+           !ok(call).endpoint_facts().max_price;
+  };
+  CHECK(refused(router.prepare(decision("vendor/decider")), "vendor/decider"));
+  CHECK(refused(router.prepare(image("vendor/image", 1)), "vendor/image"));
+  CHECK(refused(router.prepare(rerank::Request{"vendor/ranker", "fox", {"a fox", "a dog"}}), "vendor/ranker"));
+  CHECK(refused(router.prepare(speech::Request{"vendor/speaker", "Hello there.", "alloy"}), "vendor/speaker"));
+  CHECK(refused(router.prepare(transcript("vendor/transcriber")), "vendor/transcriber"));
+  videos::Request video{"vendor/video", "A fox in the snow."};
+  video.duration = 5;
+  CHECK(refused(router.prepare(video), "vendor/video"));
+  // A cap on a decision, an image or a video is not admitted.
+  auto capped_decision = decision("vendor/decider");
+  capped_decision.extensions = document(capped("0.1"));
+  CHECK(router.prepare(capped_decision).prepared().error());
+  auto capped_image = image("vendor/image", 1);
+  capped_image.extensions = document(capped("0.1"));
+  CHECK(router.prepare(capped_image).prepared().error());
+  auto capped_video = video;
+  capped_video.extensions = document(capped("0.1"));
+  CHECK(router.prepare(capped_video).prepared().error());
+}
+
+// No endpoint request names a service tier: no endpoint fact of the built-in policy admits one as an option, so every
+// prepared endpoint call states none and is priced at the standard rates. A fact that admits one must carry it into
+// EndpointFacts::service_tier.
+void no_endpoint_names_a_tier() {
+  auto parsed = json::parse(config_defaults::descriptor_policy_json);
+  const auto root = std::get<json::Document>(parsed).root();
+  std::size_t facts = 0;
+  for (auto fact : root.get("endpoints").elements()) {
+    ++facts;
+    const auto options = fact.get("options");
+    if (!options.valid()) continue;
+    CHECK(!options.get("properties").get("service_tier").valid());
+  }
+  CHECK(facts > 0);
+  auto direct = client_of(openai_chat());
+  auto router = client_of(openrouter_chat());
+  CHECK(ok(direct.prepare(image("vendor/image", 1))).endpoint_facts().service_tier.empty());
+  CHECK(ok(direct.prepare(embedding())).endpoint_facts().service_tier.empty());
+  CHECK(ok(router.prepare(decision("vendor/decider"))).endpoint_facts().service_tier.empty());
+}
+
 void estimates_per_result() {
   auto direct = client_of(openai_chat());
   // Images: two asked at high quality; 300 input tokens of which 100 are image tokens, 50 output tokens, and both images.
@@ -1600,6 +1740,9 @@ int main() {
     speech_bound();
     transcription_bound();
     videos_bound();
+    gateway_embeddings_bound();
+    gateway_refusals();
+    no_endpoint_names_a_tier();
     answers_per_billing();
     stated_facts();
     estimates_per_result();

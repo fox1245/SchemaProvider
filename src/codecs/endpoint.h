@@ -108,6 +108,12 @@ EndpointQuantity requested(std::string unit, std::optional<std::uint64_t> count,
 // limit.
 EndpointQuantity input_limited(std::string unit, std::uint64_t per = 1);
 EndpointQuantity output_limited();
+// The cap a request's `extensions` set on a routing gateway's choice (OpenRouter's `provider.max_price`), as
+// EndpointFacts::max_price holds it: each member (`prompt`, `completion`, `image`, `audio`, `request`) in nano-USD,
+// rounded up from the exact value of its JSON number, so that no amount the gateway may read from the number is above
+// it (0.1 is 100000001). Nothing without such a member, when it is not an object, and when any of its members is
+// another name, not a number, a negative number or above max_price_limit_nano_usd.
+std::optional<OpenRouterMaxPrice> max_price(const std::shared_ptr<const json::Document>& extensions);
 class Codec {
  public:
   virtual ~Codec() = default;

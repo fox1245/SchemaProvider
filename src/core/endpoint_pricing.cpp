@@ -126,6 +126,55 @@ constexpr std::string_view image_token_units[]{"input_image"};
 constexpr std::string_view request_units[]{"request"};
 // The dimension every call offers: the operation it performs.
 constexpr std::string_view operation_dimension = "operation";
+// The route ceilings a call at a routing gateway is priced at: the input's, and the request fee's.
+constexpr std::string_view ceiling_input_units[]{"ceiling_input"};
+constexpr std::string_view ceiling_request_units[]{"ceiling_request"};
+// The row a line priced at the request's own cap names: the member of the request that states it.
+constexpr std::string_view pin_row = "provider.max_price.prompt";
+
+// Whether a call at a routing gateway is bounded by the cap its request sets on the router's choice: every quantity it
+// states is input tokens (`input`), which the cap's prompt amount covers, and the request states that amount. A call
+// that states any other quantity (output tokens, the input's image tokens, an item unit) has no amount of the cap that
+// is known to bind it.
+bool pinned_input(const EndpointFacts& facts) {
+  return facts.max_price && facts.max_price->prompt_nano_usd && !facts.quantities.empty() &&
+         std::all_of(facts.quantities.begin(), facts.quantities.end(), [](const EndpointQuantity& q) { return q.unit == input_units[0]; });
+}
+// The tier a call is priced under: the facts' own, else the one the caller names (empty for the standard rates). Empty
+// with `conflict` set when both name one and they differ.
+std::string_view call_tier(const EndpointFacts& facts, std::string_view named, bool& conflict) {
+  conflict = !facts.service_tier.empty() && !named.empty() && named != facts.service_tier;
+  if (conflict) return {};
+  return facts.service_tier.empty() ? named : std::string_view(facts.service_tier);
+}
+// A unit an endpoint call is priced by that `entry` lists at the standard rates and not under `tier`, in any band: a
+// token unit (by its plain name), the request fee, a route ceiling, or an item unit (without its qualifier). Under
+// `tier` such a unit would be priced at another unit's rate, or not at all, which is not the tier's price for it. Empty
+// when `tier` is empty and when every such unit has a row in it.
+std::string unit_outside_tier(const descriptor::CatalogueEntry& entry, std::string_view tier) {
+  if (tier.empty()) return {};
+  // The unit a price key is read as, and its tier; nothing for a key no endpoint call is priced by.
+  const auto read = [](std::string_view key) -> std::optional<std::pair<std::string_view, std::string_view>> {
+    if (const auto item = descriptor::item_price_key(key)) return std::pair{item->unit, item->tier};
+    const auto unit = parse_unit(key);
+    if (!unit) return std::nullopt;
+    const auto name = descriptor::plain_price_unit(unit->name);
+    for (const auto units : {std::span<const std::string_view>(input_units), std::span<const std::string_view>(output_units),
+                             std::span<const std::string_view>(request_units), std::span<const std::string_view>(descriptor::route_ceiling_units)})
+      if (std::find(units.begin(), units.end(), name) != units.end()) return std::pair{name, unit->tier};
+    return std::nullopt;
+  };
+  for (const auto& price : entry.pricing) {
+    const auto unit = read(price.first);
+    if (!unit || !unit->second.empty()) continue;
+    if (std::none_of(entry.pricing.begin(), entry.pricing.end(), [&](const auto& other) {
+          const auto row = read(other.first);
+          return row && row->second == tier && row->first == unit->first;
+        }))
+      return std::string(unit->first);
+  }
+  return {};
+}
 
 // The rows of the token units `units` under `tier` that apply to a call of at most `input_tokens` input tokens: each
 // row of no band, and each row whose band such a call may exceed.
@@ -327,14 +376,21 @@ EndpointBound endpoint_worst_case(const EndpointWorstCaseInput& in, const descri
     else if (at->second != facts.operation) block(UnboundedBy::Unmodeled, "dimensions", "the call's dimensions name an operation other than the call's");
   }
   if (in.attempts == 0) block(UnboundedBy::Invocations, {}, "the call states no attempts");
+  // The tier the facts name, which the input may repeat but not contradict.
+  bool conflict = false;
+  const std::string_view tier = call_tier(facts, in.service_tier, conflict);
+  if (conflict)
+    block(UnboundedBy::TierPrice, facts.model, "the call's facts name service tier '" + facts.service_tier + "' and the input names '" + std::string(in.service_tier) + "'");
   if (!out.unbounded.empty()) return out;
 
   const auto* entry = catalogue.find(facts.family, facts.origin, facts.model).entry;
   if (!entry || entry->pricing.empty()) block(UnboundedBy::ModelPrice, facts.model, "the catalogue has no price for the model at the origin");
-  if (facts.routed_gateway)
+  // At a routing gateway only a call whose request caps the router's choice, and whose quantities that cap covers, has a
+  // bound: the input tokens at the lower of the route ceiling and the cap.
+  const bool gateway = facts.routed_gateway;
+  if (gateway && !pinned_input(facts))
     block(UnboundedBy::RouteCeiling, facts.model, "an endpoint call at a routing gateway has no per-item route ceiling and no pin");
   if (!out.unbounded.empty()) return out;
-  const std::string_view tier = in.service_tier;
   bool in_tier = false, ceiling = false;
   for (const auto& [key, text] : entry->pricing) {
     const auto unit = parse_unit(key);
@@ -348,7 +404,11 @@ EndpointBound endpoint_worst_case(const EndpointWorstCaseInput& in, const descri
           tier.empty() ? "the entry prices no unit at the standard rates" : "the entry prices no unit under service tier '" + std::string(tier) + "'");
     return out;
   }
-  if (ceiling) {
+  if (const auto outside = unit_outside_tier(*entry, tier); !outside.empty()) {
+    block(UnboundedBy::TierPrice, facts.model, "the entry prices " + outside + " at the standard rates but not under service tier '" + std::string(tier) + "'");
+    return out;
+  }
+  if (ceiling && !gateway) {
     block(UnboundedBy::RouteCeiling, facts.model, "the entry lists a route ceiling but the origin is not a routing gateway, so it cannot be pinned");
     return out;
   }
@@ -476,15 +536,53 @@ EndpointBound endpoint_worst_case(const EndpointWorstCaseInput& in, const descri
     }
     if (priced) charge(unit, rows.dearest->second, *count, rows.dearest->first);
   };
-  tokens(input_units, UnboundedBy::InputBound, "no measured input and no catalogue input limit", image_tokens);
-  tokens(output_units, UnboundedBy::OutputCap, "the request states no output cap and the entry no output limit", false);
-  // The request fee, once.
-  if (const auto fee = token_rows(*entry, request_units, tier, length); !fee.variable.empty())
-    block(UnboundedBy::ModelPrice, std::string(request_units[0]), "catalogue entry '" + entry->id + "' prices it at a variable price (" + std::string(fee.variable) + ")");
-  else if (fee.dearest && unstated_length && !unbanded(request_units))
-    block(UnboundedBy::ModelPrice, std::string(request_units[0]), std::string(below_band));
-  else if (fee.dearest)
-    charge(request_units[0], fee.dearest->second, 1, fee.dearest->first);
+  std::optional<OpenRouterMaxPrice> pin;
+  if (gateway) {
+    // Every input token at the lower of the route ceiling, the dearest price of the endpoints the router may choose,
+    // and the request's own cap, which the router does not exceed. The listed rates are not the bound's.
+    std::optional<std::uint64_t> count = 0;
+    for (std::size_t i = 0; i < quantities.size() && count; ++i) {
+      std::uint64_t total = 0;
+      if (!counts[i]) count.reset();
+      else if (!checked_add(*count, *counts[i], total)) {
+        block(UnboundedBy::Overflow, std::string(input_units[0]), "the tokens do not fit 64 bits");
+        return out;
+      } else count = total;
+    }
+    if (!count) block(UnboundedBy::InputBound, std::string(input_units[0]), "no measured input and no catalogue input limit");
+    const auto rows = token_rows(*entry, ceiling_input_units, tier, length);
+    if (!rows.variable.empty())
+      block(UnboundedBy::ModelPrice, std::string(ceiling_input_units[0]),
+            "catalogue entry '" + entry->id + "' prices it at a variable price (" + std::string(rows.variable) + ")");
+    else if (!rows.base)
+      block(UnboundedBy::RouteCeiling, facts.model, "the entry lists no route ceiling (ceiling_input), so the router may pick any price");
+    // A request fee, listed or as a route ceiling: no amount of the request's cap is known to bind it.
+    for (const auto units : {std::span<const std::string_view>(request_units), std::span<const std::string_view>(ceiling_request_units)}) {
+      const auto fee = token_rows(*entry, units, tier, length);
+      if (!fee.variable.empty())
+        block(UnboundedBy::ModelPrice, std::string(units[0]), "catalogue entry '" + entry->id + "' prices it at a variable price (" + std::string(fee.variable) + ")");
+      else if (fee.dearest && fee.dearest->first > 0)
+        block(UnboundedBy::RouteCeiling, std::string(request_units[0]), "the entry lists a request fee, which the request's cap is not known to bind at a routing gateway");
+    }
+    if (out.unbounded.empty()) {
+      const auto own = *facts.max_price->prompt_nano_usd, highest = rows.dearest->first;
+      if (own < highest) charge(input_units[0], pin_row, *count, own);
+      else charge(input_units[0], rows.dearest->second, *count, highest);
+      // The pin the request must carry: its own cap, the prompt amount lowered to the route ceiling.
+      pin = *facts.max_price;
+      pin->prompt_nano_usd = (std::min)(own, highest);
+    }
+  } else {
+    tokens(input_units, UnboundedBy::InputBound, "no measured input and no catalogue input limit", image_tokens);
+    tokens(output_units, UnboundedBy::OutputCap, "the request states no output cap and the entry no output limit", false);
+    // The request fee, once.
+    if (const auto fee = token_rows(*entry, request_units, tier, length); !fee.variable.empty())
+      block(UnboundedBy::ModelPrice, std::string(request_units[0]), "catalogue entry '" + entry->id + "' prices it at a variable price (" + std::string(fee.variable) + ")");
+    else if (fee.dearest && unstated_length && !unbanded(request_units))
+      block(UnboundedBy::ModelPrice, std::string(request_units[0]), std::string(below_band));
+    else if (fee.dearest)
+      charge(request_units[0], fee.dearest->second, 1, fee.dearest->first);
+  }
   // The items, each at the dearest row the call's dimensions match.
   std::vector<std::string_view> counted;
   for (std::size_t i = 0; i < quantities.size(); ++i) {
@@ -536,6 +634,11 @@ EndpointBound endpoint_worst_case(const EndpointWorstCaseInput& in, const descri
   out.entry = entry->id;
   out.model = facts.model;
   out.attempts = attempts;
+  if (pin) {
+    out.route_ceiling = true;
+    out.pinned = facts.max_price->prompt_nano_usd == pin->prompt_nano_usd;
+    out.pin = std::move(pin);
+  }
   return out;
 }
 
@@ -550,7 +653,7 @@ std::string_view line_of(std::string_view unit) {
 }  // namespace
 
 EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const EndpointCounted& counted, const descriptor::ModelCatalogue& catalogue,
-                                   std::string_view tier) {
+                                   std::string_view service_tier) {
   EndpointEstimate out;
   const auto refuse = [&](std::string_view name) {
     if (std::find(out.unpriced.begin(), out.unpriced.end(), name) == out.unpriced.end()) out.unpriced.emplace_back(name);
@@ -588,6 +691,10 @@ EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const EndpointCou
     if (at == offered.end() || at->first != operation_dimension) offered.insert(at, {std::string(operation_dimension), facts.operation});
     else if (at->second != facts.operation) refuse("dimensions");
   }
+  // The tier the facts name, which the caller may repeat but not contradict.
+  bool conflict = false;
+  const std::string_view tier = call_tier(facts, service_tier, conflict);
+  if (conflict) refuse("tier");
   if (!out.unpriced.empty()) return out;
 
   // The entry: the served model's when the response names another model with a price in the tier, else the requested
@@ -613,6 +720,10 @@ EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const EndpointCou
   const bool by_served = served && priced(model.served);
   if (!by_served && !priced(facts.model)) {
     refuse(other_tier ? "tier" : "model");
+    return out;
+  }
+  if (!unit_outside_tier(*entry, tier).empty()) {
+    refuse("tier");
     return out;
   }
   out.entry = entry->id;
@@ -662,7 +773,19 @@ EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const EndpointCou
   const auto band = length.value_or(0);
 
   // The tokens and the request fee: the chat estimate's own sum, not rounded.
-  const auto selection = detail::select(*entry, tier, band, false);
+  auto selection = detail::select(*entry, tier, band, false);
+  // At a routing gateway, a request that caps the router's choice of the input's price is billed at most that cap.
+  if (facts.routed_gateway && pinned_input(facts)) {
+    const auto cap = *facts.max_price->prompt_nano_usd;
+    bool lowered = false;
+    for (auto* rate : {&selection.price.input, &selection.price.cache_read, &selection.price.cache_write, &selection.price.cache_write_1h,
+                       &selection.price.input_audio, &selection.input_image})
+      if (*rate && **rate > cap) {
+        *rate = cap;
+        lowered = true;
+      }
+    if (lowered) assume("input at the pin");
+  }
   detail::UsageRules rules;
   rules.input = reported && counts_input;
   rules.output = reported && counts_output;

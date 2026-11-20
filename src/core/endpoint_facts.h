@@ -61,5 +61,16 @@ struct EndpointFacts {
   std::vector<EndpointQuantity> quantities;
   std::vector<CarriedRequest> carried;
   std::string input_file;
+  // The catalogue tier the call is priced under, as DescriptorPolicy::billing_tier maps the tier its request names:
+  // empty for the standard rates. No endpoint request names a tier (no request type has a tier member, and no endpoint
+  // fact of the built-in policy admits one as an option), so every prepared call states none. A call that states one
+  // is priced at that tier's rows only (pricing::endpoint_worst_case, endpoint_estimate).
+  std::string service_tier;
+  // The prices the request caps the routing gateway's choice at (OpenRouter's `provider.max_price`, a member of its
+  // extensions), each amount in nano-USD as OpenRouterMaxPrice holds it, rounded up from the exact value of the JSON
+  // number the request sends. Unset when the request states none, and when a member of it is not a non-negative number
+  // of at most max_price_limit_nano_usd nano-USD. An embeddings request states it (embeddings::endpoint_facts); the
+  // other request types leave it unset.
+  std::optional<OpenRouterMaxPrice> max_price;
 };
 }  // namespace sp
