@@ -108,6 +108,118 @@ void requests() {
   CHECK(document(encoded(router, box).body)->root().get("questions").get("where").get("type").as_string() == "box");
 }
 
+// OpenRouter's top-level `assets` member: images sent once under a key that the state refers to.
+void assets() {
+  const auto openai = at("https://api.openai.com"), router = at("https://openrouter.ai");
+  const std::string png = "iVBORw0KGgo=", jpeg = "/9j/";
+  const auto asset = [](std::string key, const std::string& mime, const std::string& data) {
+    return decisions::Asset{std::move(key), Media::image(mime, std::make_shared<const std::string>(data))};
+  };
+  const auto base = [&] {
+    decisions::Request request{"typesafe/jev-1.14", document(R"({"photo":"a3f1c2e8-found"})")};
+    request.questions = {{"same_dog", decisions::Kind::Predicate, text("Is the dog in `photo` the dog in 77b0d4a1-poster?")}};
+    return request;
+  };
+  auto request = base();
+  // Without assets the body has no `assets` member.
+  CHECK(!document(encoded(router, request).body)->root().get("assets").valid());
+  request.assets = {asset("a3f1c2e8-found", "image/png", png), asset("77b0d4a1-poster", "image/jpeg", jpeg)};
+  {
+    const auto body = document(encoded(router, request).body);
+    const auto root = body->root();
+    CHECK(root.get("state").get("photo").as_string() == "a3f1c2e8-found" && root.get("questions").get("same_dog").get("type").as_string() == "noul");
+    const auto sent = root.get("assets");
+    CHECK(sent.is_object() && sent.size() == 2);
+    CHECK(sent.get("a3f1c2e8-found").get("type").as_string() == "image" && sent.get("a3f1c2e8-found").get("format").as_string() == "png" &&
+          sent.get("a3f1c2e8-found").get("data_base64").as_string() == png);
+    CHECK(sent.get("77b0d4a1-poster").get("type").as_string() == "image" && sent.get("77b0d4a1-poster").get("format").as_string() == "jpg" &&
+          sent.get("77b0d4a1-poster").get("data_base64").as_string() == jpeg);
+    // The members of the request are still sent beside the assets.
+    request.extensions = document(R"({"session_id":"s-2"})");
+    CHECK(document(encoded(router, request).body)->root().get("session_id").as_string() == "s-2");
+    request.extensions = {};
+  }
+  // An asset nothing refers to is still sent: the service resolves the references.
+  {
+    auto unreferenced = base();
+    unreferenced.assets = {asset("unused-key", "image/png", png)};
+    CHECK(document(encoded(router, unreferenced).body)->root().get("assets").get("unused-key").valid());
+  }
+  const auto refuse = [&](const descriptor::ValidatedDescriptor& d, const decisions::Request& r, ErrorKind kind, std::string_view reason) {
+    auto result = decisions::encode(d, r);
+    CHECK(std::holds_alternative<Error>(result));
+    const auto& error = std::get<Error>(result);
+    if (error.kind != kind || error.reason != reason) throw std::runtime_error("line " + std::to_string(__LINE__) + ": refused with " + error.reason);
+  };
+  // OpenAI's request has no such member.
+  auto direct = request;
+  direct.input = text("The dog in a3f1c2e8-found is the dog in 77b0d4a1-poster.");
+  refuse(openai, direct, ErrorKind::Unsupported, "request.decisions.assets_unsupported");
+  // A key is non-empty and unique; the typed member is a list, so a key listed twice would write one JSON key twice.
+  auto edit = request;
+  edit.assets[0].key.clear();
+  refuse(router, edit, ErrorKind::InvalidRequest, "request.decisions.asset_key_invalid");
+  edit = request;
+  edit.assets[1].key = edit.assets[0].key;
+  refuse(router, edit, ErrorKind::InvalidRequest, "request.decisions.asset_key_duplicate");
+  edit = request;
+  edit.assets[0].key = "bad\xff";
+  refuse(router, edit, ErrorKind::InvalidRequest, "request.decisions.asset_key_invalid");
+  // An asset is an inline PNG or JPEG image.
+  edit = request;
+  edit.assets[0].media = Media::audio("audio/wav", std::make_shared<const std::string>("UklGRiQAAABXQVZFZm10IHN5bnRoZXRpYw=="));
+  refuse(router, edit, ErrorKind::Unsupported, "request.decisions.asset_unsupported");
+  edit = request;
+  edit.assets[0].media = Media::image("image/png", {});
+  edit.assets[0].media.source = MediaSource::Url;
+  edit.assets[0].media.reference = "https://example.com/a.png";
+  refuse(router, edit, ErrorKind::Unsupported, "request.decisions.asset_unsupported");
+  // The policy admits WebP and GIF images at the gateway, but the member names only PNG and JPEG.
+  edit = request;
+  edit.assets[0].media = Media::image("image/gif", std::make_shared<const std::string>("R0lGODlh"));
+  refuse(router, edit, ErrorKind::Unsupported, "request.decisions.asset_unsupported");
+  // Media admission applies: the bytes must match the type, and the decoded size is capped.
+  edit = request;
+  edit.assets[0].media = Media::image("image/png", std::make_shared<const std::string>(jpeg));
+  CHECK(refused(router, edit) == ErrorKind::InvalidRequest);
+  {
+    constexpr std::size_t limit = 5 * 1024 * 1024;
+    std::string big = "iVBORw0KGgoA";
+    for (std::size_t decoded = 9; decoded <= limit; decoded += 3) big += "AAAA";
+    edit = request;
+    edit.assets[0].media = Media::image("image/png", std::make_shared<const std::string>(std::move(big)));
+    CHECK(refused(router, edit) == ErrorKind::ResourceLimit);
+  }
+  // `assets` is no extension member: the typed member is the only way, so it cannot be sent twice.
+  for (const auto* d : {&openai, &router}) {
+    edit = d == &openai ? direct : request;
+    edit.assets.clear();
+    edit.extensions = document(R"({"assets":{"k":{"type":"image","format":"png","data_base64":"iVBORw0KGgo="}}})");
+    refuse(*d, edit, ErrorKind::InvalidRequest, "request.decisions.options_schema_invalid");
+  }
+  // With the typed member as well, the extension is still refused: it is never sent beside the typed one.
+  edit = request;
+  edit.extensions = document(R"({"assets":{}})");
+  refuse(router, edit, ErrorKind::InvalidRequest, "request.decisions.options_schema_invalid");
+  // Money: the call bills input tokens up to the model's input limit however they are written, so an asset counts as
+  // the same image placed in `state` does; neither adds a quantity of its own.
+  {
+    const auto with_asset = decisions::endpoint_facts(router, request);
+    auto inline_image = base();
+    inline_image.input = document(R"([{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}}])");
+    const auto in_state = decisions::endpoint_facts(router, inline_image);
+    const auto plain = decisions::endpoint_facts(router, base());
+    for (const auto* other : {&in_state, &plain}) {
+      CHECK(with_asset.quantities.size() == other->quantities.size() && with_asset.quantities.size() == 2);
+      for (std::size_t i = 0; i < with_asset.quantities.size(); ++i) {
+        const auto &a = with_asset.quantities[i], &b = other->quantities[i];
+        CHECK(a.unit == b.unit && a.at_most == b.at_most && a.source == b.source && a.per == b.per && a.exact == b.exact);
+      }
+    }
+    CHECK(with_asset.quantities[0].unit == "input" && with_asset.quantities[0].source == EndpointQuantity::Source::InputLimit && !with_asset.quantities[0].at_most);
+  }
+}
+
 void answers() {
   const auto openai = at("https://api.openai.com"), router = at("https://openrouter.ai");
   const auto direct = decoded(openai, R"({"model":"gpt-6-luna","answers":[
@@ -148,6 +260,6 @@ void answers() {
 }  // namespace
 
 int main() {
-  try { requests(); answers(); std::cout << "decision endpoint properties passed\n"; return 0; }
+  try { requests(); assets(); answers(); std::cout << "decision endpoint properties passed\n"; return 0; }
   catch (const std::exception& error) { std::cerr << "decision endpoint test failed: " << error.what() << '\n'; return 1; }
 }

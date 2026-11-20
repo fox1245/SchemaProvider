@@ -491,6 +491,10 @@ Provider-side search stores: OpenAI vector stores and Google file search stores 
 - **Refused now.** An OpenAI file listing that says `has_more` without a `last_id` fails (`files.page.cursor_missing`, `ProtocolCorrupt`); its `next` used to be empty, which reads as the last page.
 - **Layout.** No installed struct grows, so there is no new capability bit, and the interface revision stays 7. The WebAssembly host exposes no file calls, and no store calls either.
 
+A Decisions request can send OpenRouter's assets (#226). See [decisions](USAGE.md#non-chat-endpoints).
+- **Assets.** `decisions::Request` gains `assets`, a list of `decisions::Asset` (a `key` and an inline PNG or JPEG `Media` image), which OpenRouter's request carries in its top-level `assets` member. It is refused at OpenAI (`request.decisions.assets_unsupported`) and for an asset that is not an inline PNG or JPEG image, or has an empty or repeated key (`request.decisions.asset_unsupported`, `request.decisions.asset_key_invalid`, `request.decisions.asset_key_duplicate`). A request without assets is encoded as before, and `assets` in `Request::extensions` is still refused.
+- **Layout.** **`decisions::Request` grows at the end by `assets`; no existing member moves.** The new capability bit `sp::capability::DecisionAssets` (bit 27) is part of `RequiredProvider`. The interface revision stays 7: rebuild every consumer against the new headers and library. The embedded policy, its digests and the archive bindings do not change.
+
 ## From interface 5 to 6
 
 Package 0.3.0 alpha adds `Usage::provider_cost` and the fixed-size `ProviderReportedCost`, `UsdAmount`, `CostSource`, `CostStatus` and `CostRounding` types. Existing field access remains source-compatible, but `Usage`, `UsageUpdate`, `Completion`, `PartialCompletion` and the containing `Event` layouts grow. Rebuild every consumer against the same headers and generation 6 libraries (`libsp_*.so.6`); interface 5 binaries must not load interface 6 libraries. CMake consumers select `SchemaProvider 0.3.0 EXACT`.

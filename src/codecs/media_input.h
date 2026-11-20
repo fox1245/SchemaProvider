@@ -25,6 +25,9 @@ bool carries_media(const std::vector<Message>&) noexcept;
 std::optional<Error> admit_audio(const descriptor::ValidatedDescriptor&, const Media&, const descriptor::AcceptedAudioFact&);
 // OpenAI-style `input_audio.format` short name for an admitted audio MIME type.
 std::optional<std::string_view> audio_format(std::string_view mime) noexcept;
+// The `format` that OpenRouter's decision `assets` member names an image MIME type by: `png` or `jpg`. Nothing for
+// any other type.
+std::optional<std::string_view> asset_image_format(std::string_view mime) noexcept;
 // The name the fact gives an audio MIME type, if it lists the type.
 std::optional<std::string_view> audio_format(const descriptor::AcceptedAudioFact&, std::string_view mime) noexcept;
 // The caller's name, or a MIME-derived one for providers that read a file extension.
