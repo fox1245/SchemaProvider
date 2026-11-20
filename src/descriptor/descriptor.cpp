@@ -119,7 +119,11 @@ bool ipv6(std::string_view host) {
     if (compressed == std::string_view::npos) return side(host) && groups == 8;
     return side(host.substr(0, compressed)) && side(host.substr(compressed + 2)) && groups < 8;
 }
-bool origin(std::string_view url, bool https_only = false) {
+// Whether `url` is an origin a descriptor may name. Where it is and `canonical` is given, it receives the origin's
+// serialization (RFC 6454 section 6.2): the scheme as written (only lower-case `https://` and `http://` are taken),
+// the host with its ASCII letters lower-cased (an IPv6 literal in its brackets, not otherwise rewritten), and the port
+// as its decimal number unless it is the scheme's default, 443 or 80. A trailing slash is dropped.
+bool origin(std::string_view url, bool https_only = false, std::string* canonical = nullptr) {
     bool secure = url.starts_with("https://");
     if (!secure && (https_only || !url.starts_with("http://"))) return false;
     auto authority = url.substr(secure ? 8 : 7);
@@ -161,12 +165,21 @@ bool origin(std::string_view url, bool https_only = false) {
             }
         }
     }
+    unsigned number = 0;
     if (has_port) {
-        unsigned number = 0;
         auto result = std::from_chars(port.data(), port.data() + port.size(), number);
         if (port.empty() || result.ec != std::errc{} || result.ptr != port.data() + port.size() || !number || number > 65535) return false;
     }
-    return secure || loopback;
+    if (!secure && !loopback) return false;
+    if (canonical) {
+        const bool bracketed = authority.front() == '[';
+        *canonical = secure ? "https://" : "http://";
+        if (bracketed) *canonical += '[';
+        *canonical += lower(host);
+        if (bracketed) *canonical += ']';
+        if (has_port && number != (secure ? 443u : 80u)) *canonical += ':' + std::to_string(number);
+    }
+    return true;
 }
 constexpr std::string_view placeholder = "{model}";
 // The longest path a descriptor, a route template or a request may have.
@@ -339,8 +352,12 @@ private:
     void connection(Value item) {
         object(item, "/connection");
         value_.base_url_ = string(item.get("base_url"), "/connection/base_url", 2048);
-        if (!origin(value_.base_url_)) fail("/connection/base_url", "HTTPS origin, or HTTP canonical loopback origin");
-        if (value_.base_url_.ends_with('/')) value_.base_url_.pop_back();
+        // The descriptor holds its origin's serialization, which every origin a policy or catalogue lists is in, so
+        // another spelling of the same origin (upper-case host letters, the default port, a trailing slash) meets the
+        // same facts and binds the same digests.
+        std::string canonical;
+        if (!origin(value_.base_url_, false, &canonical)) fail("/connection/base_url", "HTTPS origin, or HTTP canonical loopback origin");
+        value_.base_url_ = std::move(canonical);
         auto paths = item.get("paths");
         object(paths, "/connection/paths");
         value_.buffered_path_ = string(paths.get("buffered"), "/connection/paths/buffered", 2048);
@@ -626,6 +643,11 @@ LoadResult load_with_environment_headers(
 
 namespace sp::descriptor {
 bool valid_origin(std::string_view url) { return origin(url); }
+std::string canonical_origin(std::string_view url) {
+    std::string canonical;
+    return origin(url, false, &canonical) ? canonical : std::string();
+}
+bool canonical_origin_spelling(std::string_view url) { return !url.empty() && canonical_origin(url) == url; }
 bool valid_path(std::string_view path) noexcept { return relative_path(path, false); }
 bool valid_route_template(std::string_view path) noexcept { return path.size() <= path_limit && stated_path(path, true); }
 bool route_model_name(std::string_view model) noexcept {
