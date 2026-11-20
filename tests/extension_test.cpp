@@ -480,7 +480,7 @@ void admitted_options() {
 // slots, a free option of every endpoint and of every tool. A binding digit names the slot (1 model, 2 messages,
 // 3 stream, 4 max_output_tokens) at whose pointer the descriptor was refused; a dash admits it.
 constexpr std::string_view recorded_names[] = {
-    "access_programs", "agent", "agent_config", "allowed_callers", "allowed_domains", "aspect_ratio", "audio",
+    "access_programs", "agent", "agent_config", "allowed_callers", "allowed_domains", "aspect_ratio", "assets", "audio",
     "background", "batch", "blocked_domains", "cache_control", "cachedContent", "cached_content", "citations",
     "compaction", "completion_window", "container", "contents", "context_management", "conversation", "description",
     "diagnostics", "dimensions", "documents", "duration", "encoding_format", "endpoint", "environment",
@@ -713,6 +713,7 @@ constexpr std::string_view recorded_answers[] = {
     "endpoint:images quality",
     "endpoint:images size",
     "endpoint:images stream",
+    "endpoint:decisions assets",
     "endpoint:decisions input",
     "endpoint:decisions model",
     "endpoint:decisions questions",

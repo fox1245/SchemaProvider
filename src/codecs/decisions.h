@@ -36,7 +36,8 @@ struct Question {
 // An image sent once under the OpenRouter top-level `assets` member, keyed by `key`. The service resolves the key
 // wherever `input` (the `state`) or a question's guidance writes it, as a whole string and, at the models that read
 // them, inside longer text; the SDK does not read the text, so it does not check that a key is referred to, and the
-// service refuses a request with an asset nothing refers to. The image is inline PNG or JPEG data.
+// service refuses a request with an asset nothing refers to. The image is inline data of a format that the endpoint's
+// policy fact (`asset_formats`) names.
 struct Asset {
   std::string key;
   Media media;

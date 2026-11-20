@@ -166,7 +166,7 @@ void assets() {
   edit = request;
   edit.assets[0].key = "bad\xff";
   refuse(router, edit, ErrorKind::InvalidRequest, "request.decisions.asset_key_invalid");
-  // An asset is an inline PNG or JPEG image.
+  // An asset is an inline image of a format the policy fact names.
   edit = request;
   edit.assets[0].media = Media::audio("audio/wav", std::make_shared<const std::string>("UklGRiQAAABXQVZFZm10IHN5bnRoZXRpYw=="));
   refuse(router, edit, ErrorKind::Unsupported, "request.decisions.asset_unsupported");
