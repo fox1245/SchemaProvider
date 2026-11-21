@@ -236,21 +236,23 @@ void assets() {
     refuse(with_formats(""), picture, ErrorKind::Unsupported, "request.decisions.asset_unsupported");
   }
   // Money: the call bills input tokens up to the model's input limit however they are written, so an asset counts as
-  // the same image placed in `state` does; neither adds a quantity of its own.
+  // the same image placed in `state` does: both state the image tokens among the input (`input_image`, #237), which a
+  // text-only state does not.
   {
     const auto with_asset = decisions::endpoint_facts(router, request);
     auto inline_image = base();
     inline_image.input = document(R"([{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}}])");
     const auto in_state = decisions::endpoint_facts(router, inline_image);
     const auto plain = decisions::endpoint_facts(router, base());
-    for (const auto* other : {&in_state, &plain}) {
-      CHECK(with_asset.quantities.size() == other->quantities.size() && with_asset.quantities.size() == 2);
-      for (std::size_t i = 0; i < with_asset.quantities.size(); ++i) {
-        const auto &a = with_asset.quantities[i], &b = other->quantities[i];
-        CHECK(a.unit == b.unit && a.at_most == b.at_most && a.source == b.source && a.per == b.per && a.exact == b.exact);
-      }
+    CHECK(with_asset.quantities.size() == 3 && in_state.quantities.size() == 3 && plain.quantities.size() == 2);
+    for (std::size_t i = 0; i < with_asset.quantities.size(); ++i) {
+      const auto &a = with_asset.quantities[i], &b = in_state.quantities[i];
+      CHECK(a.unit == b.unit && a.at_most == b.at_most && a.source == b.source && a.per == b.per && a.exact == b.exact);
+      if (i < plain.quantities.size()) CHECK(a.unit == plain.quantities[i].unit && a.source == plain.quantities[i].source);
     }
     CHECK(with_asset.quantities[0].unit == "input" && with_asset.quantities[0].source == EndpointQuantity::Source::InputLimit && !with_asset.quantities[0].at_most);
+    CHECK(with_asset.quantities[2].unit == "input_image" && with_asset.quantities[2].source == EndpointQuantity::Source::InputLimit &&
+          !with_asset.quantities[2].at_most);
   }
 }
 
