@@ -116,7 +116,10 @@ pricing::EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const jo
 // submits only), each name a line's estimate leaves unpriced as `<custom_id>:<name>`, and "overflow". Any unpriced
 // name leaves no total and no lines. A line's assumptions are named `<custom_id>:<rule>`, and "listed
 // rates" at a routing gateway. For lines within their requests' caps, priced by the entries the bound used, the
-// estimate is at most endpoint_worst_case_cost's (or batch_worst_case_cost's) total for one attempt.
+// estimate is at most endpoint_worst_case_cost's (or batch_worst_case_cost's) total for one attempt; except that a
+// submit that carries no request (an OpenAI file batch) does not state whether a request carried an image, so its
+// lines are priced as if each may have (pricing::estimate without facts, #237) and may be above batch_worst_case_cost's
+// bound of a text-only item; the overload with the items reads each item's facts.
 pricing::EndpointEstimate batch_estimate(const EndpointFacts& submit, const descriptor::ValidatedDescriptor& family,
                                          const std::vector<batches::Line>& lines, const descriptor::ModelCatalogue& catalogue);
 // The same for a batch whose requests are `items` (an OpenAI batch, whose submit carries none inline): a line whose

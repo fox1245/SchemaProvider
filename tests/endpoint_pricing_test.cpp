@@ -1837,6 +1837,37 @@ void carried_requests() {
   std::cout << "case passed: carried requests\n";
 }
 
+// A carried request that takes an image is bounded with its input tokens at the batch tier's `input_image` rate where
+// that is dearer than its input rate (#237); a text-only one at the input rate.
+void carried_image_input() {
+  constexpr std::uint64_t in = 500'000'001, out = 2'000'000'003, image = 4'500'000'007;
+  const auto c = catalogue(std::string(R"({"version":1,"models":[)") +
+      R"({"id":"vendor/vision","input_limit":2000,"pricing":{"input/batch":")" + usd(in) + R"(","output/batch":")" + usd(out) +
+      R"(","input_image/batch":")" + usd(image) + R"("}},)" +
+      R"({"id":"vendor/variable","input_limit":2000,"pricing":{"input/batch":")" + usd(in) + R"(","output/batch":")" + usd(out) +
+      R"(","input_image/batch":"-1"}}]})");
+  auto with_image = carried("i-1", "vendor/vision", 16);
+  with_image.facts.image_input = true;
+  auto variable_image = carried("i-3", "vendor/variable", 16);
+  variable_image.facts.image_input = true;
+  const auto bounded = [&](const Call& at) {
+    pricing::EndpointWorstCaseInput input;
+    input.facts = &at.facts;
+    input.attempts = 1;
+    input.charge_on_accept = true;
+    return pricing::endpoint_worst_case(input, *c);
+  };
+  const auto with = rounded(2000 * image + 16 * out), without = rounded(2000 * in + 16 * out);
+  SAME(described(bounded(submit({with_image, carried("i-2", "vendor/vision", 16)}))),
+       "total " + std::to_string(with + without) + " | entry 'vendor/vision' attempts 1 lines i-1:nano_usd=vendor/vision:" + std::to_string(with) +
+       "x1000000 i-2:nano_usd=vendor/vision:" + std::to_string(without) + "x1000000");
+  SAME(described(bounded(submit({variable_image}))),
+       "no total | ModelPrice [i-3:vendor/variable] catalogue entry 'vendor/variable' prices input_image at a variable price (input_image/batch) | entry '' attempts 0 lines");
+  SAME(described(bounded(submit({carried("i-4", "vendor/variable", 16)}))),
+       "total " + std::to_string(without) + " | entry 'vendor/variable' attempts 1 lines i-4:nano_usd=vendor/variable:" + std::to_string(without) + "x1000000");
+  std::cout << "case passed: a carried request with an image\n";
+}
+
 // A tier the facts name: the call is priced at that tier's rows only, whether the input names the tier or not; an
 // entry with no row in it, a unit it prices at the standard rates and not in the tier, and another tier in the input
 // all refuse.
@@ -2095,7 +2126,7 @@ int main() {
       {"images_estimate", images_estimate}, {"estimate_rounds_once", estimate_rounds_once}, {"token_estimates", token_estimates},
       {"item_estimates", item_estimates}, {"estimate_refusals", estimate_refusals}, {"estimate_length_from_input", estimate_length_from_input},
       {"estimate_by_another_entry", estimate_by_another_entry}, {"estimate_zero_quantity", estimate_zero_quantity},
-      {"estimate_length_overflow", estimate_length_overflow}, {"carried_requests", carried_requests}, {"tier_from_facts", tier_from_facts},
+      {"estimate_length_overflow", estimate_length_overflow}, {"carried_requests", carried_requests}, {"carried_image_input", carried_image_input}, {"tier_from_facts", tier_from_facts},
       {"gateway_embeddings", gateway_embeddings}, {"gateway_refusals", gateway_refusals},
       {"gateway_estimate_within_the_bound", gateway_estimate_within_the_bound}};
   int failed = 0;

@@ -825,6 +825,9 @@ EndpointEstimate endpoint_estimate(const EndpointFacts& facts, const EndpointCou
   rules.input = reported && counts_input;
   rules.output = reported && counts_output;
   rules.input_image = counted.input_image_tokens;
+  // A call that may bill image tokens among its input, whose result does not count them, may have billed any of its
+  // input at `input_image` (#237).
+  rules.image_input = counts_images;
   const Usage none;
   const auto summed = detail::usage_sum(selection, reported ? *usage : none, rules);
   for (const auto& name : summed.unpriced) refuse(name);

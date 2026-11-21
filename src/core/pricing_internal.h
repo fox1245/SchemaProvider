@@ -188,6 +188,10 @@ struct UsageRules {
   // The image tokens among the input, when the caller counts them: carved out of the uncached input and billed at
   // `input_image`, as audio input is at `input_audio`.
   std::optional<std::uint64_t> input_image;
+  // The request may have carried an image (#237): the usage's uncached input that is not audio may then be image
+  // tokens, when the usage states no count of them (`input_image` here, an image counter, a modality breakdown of the
+  // input or the OpenAI realtime counters), and bills at the dearer of `input` and `input_image`.
+  bool image_input = false;
   // At the route ceiling: a ceiling the entry lists is below a token price the same entry lists on its side (a ceiling
   // written before that price was listed, or kept from an earlier refresh), so it bounds nothing.
   bool stale_ceiling = false;
@@ -212,7 +216,8 @@ UsageSum usage_sum(const Selection& selection, const Usage& usage, const UsageRu
 // The token units a chat request's bound and estimate read (by the plain name descriptor::plain_price_unit gives), and
 // the tool fees (`tool:<type>`).
 inline constexpr std::string_view chat_units[]{"input", "cache_read", "cache_write", "cache_write_1h", "input_audio",
-                                               "output", "reasoning", "output_image", "output_audio", "request", "cache_read_audio"};
+                                               "output", "reasoning", "output_image", "output_audio", "request", "cache_read_audio",
+                                               "input_image"};
 // A unit a chat request is priced by that `entry` lists at the standard rates and not under `tier`, in any band: under
 // `tier` such a unit would be priced at another unit's rate, or not at all, which is not the tier's price for it.
 // Empty when every such unit has a row in the tier, and when `tier` is empty or the entry prices nothing under it (which

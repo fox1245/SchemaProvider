@@ -76,7 +76,7 @@ struct CostEstimate {
   bool requested_entry = false;
   // Rules applied where the entry or the usage says less than the bill: "cache_read at input", "cache_write at
   // input", "cache_write_1h at cache_write", the dearer rates "cache_write at cache_write_1h", "output at
-  // output_image" and "route ceiling", and "<unit> at zero" where the entry prices a unit at zero while the unit it
+  // output_image", "input at input_image" and "route ceiling", and "<unit> at zero" where the entry prices a unit at zero while the unit it
   // refines ("input" for cache and audio input, "output" for reasoning, image and audio output) has a price.
   std::vector<std::string> assumptions;
   // Why there is no total: "model" (no priced entry), "tier" (an entry priced only outside the asked service
@@ -128,6 +128,12 @@ struct CostEstimate {
 //   rate, or more uncached audio input than uncached input, leave no total ("input_audio", "output_audio").
 // - Image input: a realtime turn's image tokens (OpenAI `input_token_details.image_tokens`, Google Live
 //   `realtime.image_tokens`) at `input_image`, out of the uncached input; without that rate no total ("input_image").
+//   A usage that states no count of image tokens, no modality breakdown of the input and none of the OpenAI realtime
+//   input counters (a Chat or Responses usage) does not say how many of its input tokens were image tokens: for a
+//   request that may have carried an image, its uncached input that is not audio bills at the dearer of `input` and
+//   `input_image` ("input at input_image"), and a variable `input_image` leaves no total ("input_image"). Without
+//   the request's facts (this overload) the request may have carried an image; the overload that takes the facts reads
+//   RequestFacts::image_input, so a text-only request bills at `input` (#237). The cache reads keep their rates.
 // - A zero rate for a unit whose base unit has a price is applied and named in `assumptions` ("<unit> at zero").
 // - `request` is charged once.
 // - A unit with a row that applies at a price that is not a fixed amount (price_of) prices none of the tokens it may
@@ -155,7 +161,8 @@ CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_v
                       const ServedModel& model, const Usage& usage, std::string_view service_tier = {},
                       bool route_ceiling = false);
 // As above, under the tier the request bills under (billed_tier(facts, service_tier), #207): the facts the request
-// was prepared with (PreparedRequest::facts()) and its service tier as DescriptorPolicy::billing_tier maps it. With no
+// was prepared with (PreparedRequest::facts()) and its service tier as DescriptorPolicy::billing_tier maps it. The
+// image input rule above reads whether the request carried an image (RequestFacts::image_input). With no
 // such tier there is no total: "extension:<key>" for an extension whose value no catalogue row prices, "tier" for two
 // tiers.
 CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_view family, std::string_view origin,
@@ -210,11 +217,15 @@ struct Bound {
 // counters and are not bounded here. A price from `price_of` leaves out a unit with a row at a variable price, which
 // this overload cannot tell from a unit the entry does not list; a price from `dearest_price_of` with such a row has no
 // rate, so this overload has no total ("input", "output" for the sides with tokens, each tool fee). The overload that
-// takes the entry names the unit. At the route ceiling a missing ceiling is "ceiling".
+// takes the entry names the unit. At the route ceiling a missing ceiling is "ceiling". ModelPrice holds no rate for
+// the input's image tokens (`input_image`), so this overload does not read it and is below the bill of a request that
+// carries an image where the entry prices `input_image` above its other input rates: bound such a request with the
+// overload that takes the entry, or with worst_case.
 Bound upper_bound(const ModelPrice& price, const BoundRequest& request);
-// The bound with the entry's dearest prices over every input band the request may reach. A unit with a row in one of
+// The bound with the entry's dearest prices over every input band the request may reach. The request may carry an
+// image, so the input rates include `input_image` (#237). A unit with a row in one of
 // them at a price that is not a fixed amount gives no total when the bound reads it: an input rate (`input`,
-// `cache_read`, `cache_write`, `cache_write_1h`, `input_audio`, `cache_read_audio`) when the request has input tokens, an output rate
+// `cache_read`, `cache_write`, `cache_write_1h`, `input_audio`, `cache_read_audio`, `input_image`) when the request has input tokens, an output rate
 // (`output`, `reasoning`, `output_image`, `output_audio`) when it has output tokens, the request fee always, at the
 // route ceiling `ceiling_input`, `ceiling_output` and `ceiling_request`, and a tool's fee when it has uses. At the
 // route ceiling "ceiling" names only a ceiling the entry does not list; a variable ceiling row is named as its unit,
@@ -299,6 +310,9 @@ struct WorstCase {
 // host that may send several requests (the steps of a run, a loop, a retry of its own) multiplies by their number.
 // Per attempt it is the sum over the invocations of the input tokens at the dearest input rate and the output cap at
 // the dearest output rate, the request fee once, and the capped server tools' fees once:
+// - Image input: for a request that carries an image (RequestFacts::image_input), and for one whose facts are not
+//   given, the dearest input rate includes `input_image`, and a variable `input_image` is `ModelPrice` (#237). A
+//   text-only request's bound does not read it.
 // - Input: with one invocation, the measured input, else the catalogue's input limit, never above that limit. With
 //   several (server tools re-prompt the model with the tool results), the first invocation as above and each later
 //   one at the limit, which must then exist.

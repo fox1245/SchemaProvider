@@ -1371,8 +1371,10 @@ void cached_audio_input() {
   // cached at 3e-7, which is at least the bill whether the audio count holds the cached audio (800 text at 6e-7 and 200
   // cached audio: 564'000) or not (2'444'000). An entry that lists no cached audio rate bills them as before.
   const auto chat = with(usage(1'000, 10, 200), {{"input_audio", 200}});
+  // A text-only request: the entry also lists `input_image`, which bills a request that may have carried an image (#237).
+  const RequestFacts text_only;
   {
-    const auto e = pricing::estimate(*c, "openai.chat", "", model("cached-audio"), chat);
+    const auto e = pricing::estimate(*c, "openai.chat", "", model("cached-audio"), chat, text_only, "");
     expect_total(e, 360'000u + 2'000'000u + 60'000u + 24'000u, __LINE__);
     SOFT(e.total && e.total->nano_usd >= 564'000u && e.total->nano_usd >= 2'444'000u);
     SOFT(e.assumptions == std::vector<std::string>({"cache_read at cache_read_audio"}));
@@ -1380,7 +1382,7 @@ void cached_audio_input() {
   expect_total(pricing::estimate(*c, "openai.chat", "", model("no-cached-audio"), chat), 360'000u + 2'000'000u + 12'000u + 24'000u, __LINE__);
   expect_unpriced(pricing::estimate(*c, "openai.chat", "", model("variable-cached-audio"), chat), {"cache_read_audio"}, __LINE__);
   // Without audio, or without cache reads, nothing may be cached audio.
-  expect_total(pricing::estimate(*c, "openai.chat", "", model("cached-audio"), usage(1'000, 10, 200)), 480'000u + 12'000u + 24'000u, __LINE__);
+  expect_total(pricing::estimate(*c, "openai.chat", "", model("cached-audio"), usage(1'000, 10, 200), text_only, ""), 480'000u + 12'000u + 24'000u, __LINE__);
   // The bounds reserve at the dearest input rate, the cached audio rate included: at 1e-4 it is dearer than the audio
   // rate, and the estimate of the issue's turn at that rate stays below each bound.
   const auto& dear = *c->entry("dear-cached-audio");
@@ -1415,6 +1417,168 @@ void cached_audio_input() {
   }
   std::cout << "case passed: cached input is priced by modality\n";
 }
+
+// The input's image tokens at `input_image` in the chat bound and estimate (#237). A chat request that carries an
+// image may bill any of its input tokens at `input_image`; a Chat usage does not say how many were image tokens.
+void image_input_rate() {
+  const auto c = catalogue(R"({"version":1,"models":[
+    {"id":"vision","pricing":{"input":"0.000001","output":"0.000002","input_image":"0.000009"}},
+    {"id":"cheap-image","pricing":{"input":"0.000001","output":"0.000002","input_image":"0.0000005"}},
+    {"id":"variable-image","pricing":{"input":"0.000001","output":"0.000002","input_image":"-1"}},
+    {"id":"text","pricing":{"input":"0.000001","output":"0.000002"}},
+    {"id":"cached-vision","pricing":{"input":"0.000001","cache_read":"0.0000001","input_audio":"0.000004","output":"0.000002","input_image":"0.000009"}},
+    {"id":"tier-vision","pricing":{"input":"0.000001","output":"0.000002","input_image":"0.000009","input/flex":"0.0000005","output/flex":"0.000001"}}]})");
+  soft_failures.clear();
+  RequestFacts images, text;
+  images.image_input = true;
+  const auto worst = [&](std::string_view model, std::uint64_t measured, const RequestFacts* facts, std::uint64_t cap = 100, std::string_view tier = {}) {
+    pricing::WorstCaseInput in;
+    in.family = "openai.chat";
+    in.model = model;
+    in.facts = facts;
+    in.service_tier = tier;
+    in.output_tokens = cap;
+    in.measured_input_tokens = measured;
+    in.invocations = 1;
+    return pricing::worst_case(in, *c);
+  };
+  const auto worst_text = [](const pricing::WorstCase& w) {
+    std::string out = w.total ? "total " + std::to_string(w.total->nano_usd) : std::string("no total");
+    for (const auto& r : w.unbounded) out += " | " + std::string(pricing::to_string(r.by)) + " [" + r.subject + "] " + r.detail;
+    return out;
+  };
+  const auto bound_text = [](const pricing::Bound& b) {
+    std::string out = b.total ? "total " + std::to_string(b.total->nano_usd) : std::string("no total");
+    for (const auto& name : b.unpriced) out += " | " + name;
+    return out;
+  };
+  const auto estimate_text = [](const pricing::CostEstimate& e) {
+    std::string out = described(e) + " assumed [";
+    for (const auto& rule : e.assumptions) out += rule + ";";
+    return out + "]";
+  };
+  const auto expect = [](const std::string& got, const std::string& want, int line) {
+    if (got != want) soft_failures.push_back("line " + std::to_string(line) + ":\n    got      " + got + "\n    expected " + want);
+  };
+  // The issue's example: 1000 input tokens and 100 output tokens of a request that carries an image, at input 1e-6,
+  // input_image 9e-6 and output 2e-6 USD. Billed with every input token at `input_image` it is 9'000'000 + 200'000
+  // nano-USD; with the image tokens at `input`, 1'000'000 + 200'000. The bound and the estimate are at least both.
+  constexpr std::uint64_t at_image = 9'200'000, at_input = 1'200'000;
+  expect(worst_text(worst("vision", 1000, &images)), "total " + std::to_string(at_image), __LINE__);
+  // Without request facts the request may carry an image.
+  expect(worst_text(worst("vision", 1000, nullptr)), "total " + std::to_string(at_image), __LINE__);
+  expect(bound_text(pricing::upper_bound(*c->entry("vision"), {}, {1000, 100, false, {}})), "total " + std::to_string(at_image), __LINE__);
+  // A text-only request's bound is unchanged, and so is one whose entry prices image tokens below `input`.
+  expect(worst_text(worst("vision", 1000, &text)), "total " + std::to_string(at_input), __LINE__);
+  expect(worst_text(worst("cheap-image", 1000, &images)), "total " + std::to_string(at_input), __LINE__);
+  expect(worst_text(worst("text", 1000, &images)), "total " + std::to_string(at_input), __LINE__);
+  // A variable `input_image` leaves no bound for a request that may carry an image, and none from the entry alone.
+  expect(worst_text(worst("variable-image", 1000, &images)),
+         "no total | ModelPrice [variable-image] catalogue entry 'variable-image' prices input_image at a variable price (input_image)", __LINE__);
+  expect(worst_text(worst("variable-image", 1000, &text)), "total " + std::to_string(at_input), __LINE__);
+  expect(bound_text(pricing::upper_bound(*c->entry("variable-image"), {}, {1000, 100, false, {}})), "no total | input_image", __LINE__);
+  // Under a tier, an `input_image` the entry lists at the standard rates only is not priced at the tier's `input`.
+  expect(worst_text(worst("tier-vision", 1000, &text, 100, "flex")),
+         "no total | TierPrice [tier-vision] the entry prices input_image at the standard rates but not under service tier 'flex'", __LINE__);
+  expect(estimate_text(pricing::estimate(*c, "openai.chat", "", exact("tier-vision"), usage(1000, 100), text, "flex")), "total none, unpriced [tier;] assumed []",
+         __LINE__);
+
+  // The estimate of a Chat usage, which counts no image tokens: for a request that carried an image, every uncached
+  // input token at the dearer of `input` and `input_image`, the rule named.
+  const auto u = usage(1000, 100);
+  const auto e = pricing::estimate(*c, "openai.chat", "", exact("vision"), u, images, "");
+  expect(estimate_text(e), "total " + std::to_string(at_image) + ", unpriced [] assumed [input at input_image;]", __LINE__);
+  SOFT(e.total && e.total->nano_usd >= at_image && e.total->nano_usd >= at_input);
+  // Without the facts the usage may be of such a request.
+  expect(estimate_text(pricing::estimate(*c, "openai.chat", "", exact("vision"), u)),
+         "total " + std::to_string(at_image) + ", unpriced [] assumed [input at input_image;]", __LINE__);
+  // A text-only request, an entry that prices image tokens below `input` or lists no `input_image`: at `input`.
+  expect(estimate_text(pricing::estimate(*c, "openai.chat", "", exact("vision"), u, text, "")), "total " + std::to_string(at_input) + ", unpriced [] assumed []",
+         __LINE__);
+  expect(estimate_text(pricing::estimate(*c, "openai.chat", "", exact("cheap-image"), u, images, "")),
+         "total " + std::to_string(at_input) + ", unpriced [] assumed []", __LINE__);
+  expect(estimate_text(pricing::estimate(*c, "openai.chat", "", exact("text"), u, images, "")), "total " + std::to_string(at_input) + ", unpriced [] assumed []",
+         __LINE__);
+  // A variable `input_image` prices none of them.
+  expect(estimate_text(pricing::estimate(*c, "openai.chat", "", exact("variable-image"), u, images, "")), "total none, unpriced [input_image;] assumed []",
+         __LINE__);
+  expect(estimate_text(pricing::estimate(*c, "openai.chat", "", exact("variable-image"), u, text, "")),
+         "total " + std::to_string(at_input) + ", unpriced [] assumed []", __LINE__);
+  // Audio input and cache reads keep their rates: 200 cached at 1e-7, 100 audio at 4e-6 and the other 700 uncached
+  // tokens at 9e-6 USD, beside the output.
+  {
+    auto mixed = usage(1000, 100, 200);
+    mixed.extra["input_audio"] = Count{100, Evidence::Reported};
+    expect(estimate_text(pricing::estimate(*c, "openai.chat", "", exact("cached-vision"), mixed, images, "")),
+           "total " + std::to_string(20'000u + 400'000u + 6'300'000u + 200'000u) + ", unpriced [] assumed [input at input_image;]", __LINE__);
+  }
+  // A usage that counts the image tokens (a realtime turn) or breaks its input down by modality (Generate) is priced
+  // as before: 900 text and 100 image tokens; 1000 tokens of a Generate prompt at the input rate.
+  {
+    auto counted = usage(1000, 100);
+    counted.extra["input_token_details.text_tokens"] = Count{900, Evidence::Reported};
+    counted.extra["input_token_details.image_tokens"] = Count{100, Evidence::Reported};
+    expect(estimate_text(pricing::estimate(*c, "openai.chat", "", exact("vision"), counted, images, "")),
+           "total " + std::to_string(900'000u + 900'000u + 200'000u) + ", unpriced [] assumed []", __LINE__);
+    auto generate = usage(1000, 100);
+    generate.extra["promptTokensDetails.TEXT"] = Count{1000, Evidence::Reported};
+    expect(estimate_text(pricing::estimate(*c, "google.generate", "", exact("vision"), generate, images, "")),
+           "total " + std::to_string(at_input) + ", unpriced [] assumed []", __LINE__);
+  }
+
+  // Generated chat requests with and without images, without facts, over entries with and without `input_image`:
+  // the estimate of a usage within the request is at most its bound, and at least the bill whether the image tokens
+  // bill at `input_image` or at `input`.
+  const auto rate_of = [](std::string_view usd) { return *pricing::per_million(usd); };
+  struct Rates { std::uint64_t input, output, image, cache_read, audio; };
+  const std::pair<const char*, Rates> entries[]{
+      {"vision", {rate_of("0.000001"), rate_of("0.000002"), rate_of("0.000009"), rate_of("0.000001"), 0}},
+      {"cheap-image", {rate_of("0.000001"), rate_of("0.000002"), rate_of("0.0000005"), rate_of("0.000001"), 0}},
+      {"variable-image", {rate_of("0.000001"), rate_of("0.000002"), 0, rate_of("0.000001"), 0}},
+      {"text", {rate_of("0.000001"), rate_of("0.000002"), rate_of("0.000001"), rate_of("0.000001"), 0}},
+      {"cached-vision", {rate_of("0.000001"), rate_of("0.000002"), rate_of("0.000009"), rate_of("0.0000001"), rate_of("0.000004")}}};
+  std::uint64_t seed = 237;
+  const auto draw = [&](std::uint64_t below) {
+    seed = seed * 6364136223846793005ULL + 1442695040888963407ULL;
+    return below ? (seed >> 33) % below : 0;
+  };
+  const auto round_up = [](std::uint64_t sum) { return sum / 1'000'000 + (sum % 1'000'000 != 0 ? 1 : 0); };
+  std::size_t compared = 0;
+  for (int i = 0; i < 600; ++i) {
+    const auto& [model, r] = entries[i % 5];
+    const int kind = static_cast<int>(draw(3));  // 0: carries an image, 1: text only, 2: no facts
+    const RequestFacts* facts = kind == 0 ? &images : kind == 1 ? &text : nullptr;
+    const bool may_carry = kind != 1;
+    const std::uint64_t measured = 1 + draw(5000), cap = 1 + draw(1000);
+    const std::uint64_t input = draw(measured + 1), cached = draw(input + 1), output = draw(cap + 1);
+    const std::uint64_t uncached = input - cached, audio = r.audio ? draw(uncached + 1) : 0, image = may_carry ? draw(uncached - audio + 1) : 0;
+    auto used = usage(input, output, cached);
+    if (!input) used.input_total = Count{0, Evidence::Reported};
+    if (!output) used.output_total = Count{0, Evidence::Reported};
+    if (audio) used.extra["input_audio"] = Count{audio, Evidence::Reported};
+    const auto bound = worst(model, measured, facts, cap);
+    const auto estimate = facts ? pricing::estimate(*c, "openai.chat", "", exact(model), used, *facts, "") : pricing::estimate(*c, "openai.chat", "", exact(model), used);
+    const bool variable = std::string_view(model) == "variable-image";
+    if (variable && may_carry && (bound.total || (estimate.total && uncached > audio)))
+      soft_failures.push_back("case " + std::to_string(i) + ": a variable input_image priced a request that may carry an image");
+    if (!bound.total || !estimate.total) continue;
+    ++compared;
+    const std::uint64_t rest = cached * r.cache_read + audio * r.audio + output * r.output;
+    const std::uint64_t by_image = round_up(rest + (uncached - audio - image) * r.input + image * r.image);
+    const std::uint64_t by_input = round_up(rest + (uncached - audio) * r.input);
+    if (estimate.total->nano_usd > bound.total->nano_usd || estimate.total->nano_usd < by_image || estimate.total->nano_usd < by_input ||
+        bound.total->nano_usd < by_image)
+      soft_failures.push_back("case " + std::to_string(i) + " " + model + " kind " + std::to_string(kind) + ": bound " + std::to_string(bound.total->nano_usd) +
+                              " estimate " + std::to_string(estimate.total->nano_usd) + " bills " + std::to_string(by_image) + "/" + std::to_string(by_input));
+  }
+  SOFT(compared > 300);
+  if (!soft_failures.empty()) {
+    std::string all;
+    for (const auto& failure : soft_failures) all += "\n  " + failure;
+    throw std::runtime_error(std::to_string(soft_failures.size()) + " checks failed:" + all);
+  }
+  std::cout << "case passed: image input tokens are bounded and estimated at input_image\n";
+}
 } // namespace
 
 // Every case runs, and each failing one is reported, so one failure does not hide the cases after it.
@@ -1428,7 +1592,8 @@ int main() {
       {"listed_overrides_bound_every_call", listed_overrides_bound_every_call}, {"item_rows_change_no_token_price", item_rows_change_no_token_price},
       {"item_prices", item_prices}, {"item_prices_follow_the_rows", item_prices_follow_the_rows}, {"variable_rows", variable_rows},
       {"variable_dearest_price", variable_dearest_price}, {"variable_compaction", variable_compaction}, {"variable_ceilings", variable_ceilings},
-      {"sums_past_64_bits", sums_past_64_bits}, {"cached_audio_input", cached_audio_input}};
+      {"sums_past_64_bits", sums_past_64_bits}, {"cached_audio_input", cached_audio_input},
+      {"image_input_rate", image_input_rate}};
   int failed = 0;
   for (const auto& [name, run] : cases) {
     try {
