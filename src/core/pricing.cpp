@@ -378,6 +378,21 @@ UsageSum usage_sum(const Selection& selection, const Usage& usage, const UsageRu
       if (selection.input_image && *image_count <= *uncached - audio_in) image_in = *image_count;
       else { out.unpriced.emplace_back(input_image_unit); complete = false; }
     }
+    // A usage that states how many of its input tokens are image tokens: a count of them (above, zero included), a
+    // modality breakdown of the input, or the OpenAI realtime counters, which split the input by modality.
+    const bool images_stated = rules.input_image || image_count || modality_tokens(usage, input_breakdown, "image") ||
+        std::any_of(realtime_input_counters.begin(), realtime_input_counters.end(),
+                    [&](std::string_view counter) { return usage.extra.contains(std::string(counter)); });
+    // Without that statement (a Chat or Responses usage), a request that may have carried an image may have billed any
+    // of its uncached input that is not audio at `input_image` (#237): at the dearer of `input` and `input_image`, the
+    // rule named; a variable `input_image` prices none of it.
+    if (rules.image_input && !images_stated && uncached && *uncached > audio_in) {
+      if (selection.is_variable(input_image_unit)) { out.unpriced.emplace_back(input_image_unit); complete = false; }
+      else if (price.input && selection.input_image && *selection.input_image > *price.input) {
+        assume("input at input_image");
+        image_in = *uncached - audio_in;
+      }
+    }
     if (!uncached) { if (rules.input) { out.unpriced.emplace_back("input"); complete = false; } }
     else {
       charge("input", *uncached - audio_in - image_in, price.input, "input");
@@ -504,8 +519,10 @@ UsageSum usage_sum(const Selection& selection, const Usage& usage, const UsageRu
 }
 }  // namespace detail
 
-CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_view family, std::string_view origin,
-                      const ServedModel& model, const Usage& usage, std::string_view service_tier, bool route_ceiling) {
+namespace {
+// The estimate, where `images` says whether the request may have carried an image (UsageRules::image_input).
+CostEstimate estimate_usage(const descriptor::ModelCatalogue& catalogue, std::string_view family, std::string_view origin,
+                            const ServedModel& model, const Usage& usage, std::string_view service_tier, bool route_ceiling, bool images) {
   CostEstimate out;
   out.lower_bound = usage.stage == UsageStage::Partial || usage.quality == UsageQuality::Inconsistent;
   const descriptor::CatalogueEntry* entry = nullptr;
@@ -549,6 +566,7 @@ CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_v
   detail::UsageRules rules;
   rules.compaction = family == "anthropic.messages";
   rules.route_ceiling = route_ceiling;
+  rules.image_input = images;
   rules.stale_ceiling = route_ceiling &&
       ((selection.price.ceiling_input && ceiling_below_listed(*entry, TokenSide::Input, *selection.price.ceiling_input, service_tier, input_length)) ||
        (selection.price.ceiling_output && ceiling_below_listed(*entry, TokenSide::Output, *selection.price.ceiling_output, service_tier, input_length)));
@@ -581,11 +599,21 @@ CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_v
   out.total = UsdAmount{*nano, Evidence::Derived, CostRounding::CeilingCatalogueProduct};
   return out;
 }
+}  // namespace
+
+// Without the request's facts, the request may have carried an image.
+CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_view family, std::string_view origin,
+                      const ServedModel& model, const Usage& usage, std::string_view service_tier, bool route_ceiling) {
+  return estimate_usage(catalogue, family, origin, model, usage, service_tier, route_ceiling, true);
+}
 
 namespace {
 // The bound of upper_bound, where `variable` names the units of `price` that a row applies to at a price that is not a
 // fixed amount: a rate the bound reads among them is not known, and neither is the dearest of a set that holds it.
-Bound bounded(const ModelPrice& price, const detail::UnitKeys& variable, const BoundRequest& request) {
+// `input_image` is the entry's rate for the input's image tokens (Selection::input_image, which ModelPrice does not
+// hold), read among the input rates when the request may carry an image (`images`).
+Bound bounded(const ModelPrice& price, const detail::UnitKeys& variable, const BoundRequest& request, const std::optional<std::uint64_t>& input_image,
+              bool images) {
   Bound out;
   auto dearest = [](std::initializer_list<std::optional<std::uint64_t>> rates) {
     std::optional<std::uint64_t> result;
@@ -610,13 +638,16 @@ Bound bounded(const ModelPrice& price, const detail::UnitKeys& variable, const B
     name_variable({"ceiling_input", "ceiling_output"});
     if (!absent) name_variable({"request", "ceiling_request"});
   } else {
-    input = price.input ? dearest({price.input, price.cache_read, price.cache_write, price.cache_write_1h, price.input_audio, price.cache_read_audio})
+    // A request that may carry an image may bill any input token at `input_image`.
+    input = price.input ? dearest({price.input, price.cache_read, price.cache_write, price.cache_write_1h, price.input_audio, price.cache_read_audio,
+                                   images ? input_image : std::nullopt})
                         : std::nullopt;
     output = price.output ? dearest({price.output, price.reasoning, price.output_image, price.output_audio}) : std::nullopt;
     fee = price.request;
     if (!input && request.input_tokens) out.unpriced.emplace_back("input");
     if (!output && request.output_tokens) out.unpriced.emplace_back("output");
     if (request.input_tokens) name_variable({"cache_read", "cache_write", "cache_write_1h", "input_audio", "cache_read_audio"});
+    if (request.input_tokens && images) name_variable({input_image_unit});
     if (request.output_tokens) name_variable({"reasoning", "output_image", "output_audio"});
     name_variable({"request"});
   }
@@ -640,13 +671,14 @@ Bound bounded(const ModelPrice& price, const detail::UnitKeys& variable, const B
 }
 }  // namespace
 
-Bound upper_bound(const ModelPrice& price, const BoundRequest& request) { return bounded(price, {}, request); }
+Bound upper_bound(const ModelPrice& price, const BoundRequest& request) { return bounded(price, {}, request, std::nullopt, false); }
 
 Bound upper_bound(const descriptor::CatalogueEntry& entry, std::string_view service_tier, const BoundRequest& request) {
   auto selected = select(entry, service_tier, request.input_tokens, true);
   // A ceiling below a price the entry lists bounds nothing.
   drop_stale_ceilings(selected.price, entry, service_tier, request.input_tokens);
-  auto out = bounded(selected.price, selected.variable, request);
+  // Without request facts the request may carry an image.
+  auto out = bounded(selected.price, selected.variable, request, selected.input_image, true);
   // A listed member that no unit reads and the table does not know, above zero, is priced at no amount the bound can read.
   if (out.total)
     if (const auto unknown = unread_members_carried(entry, nullptr); !unknown.empty()) {
@@ -725,7 +757,7 @@ BilledTier billed_tier(const RequestFacts& facts, std::string_view service_tier)
 CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_view family, std::string_view origin, const ServedModel& model,
                       const Usage& usage, const RequestFacts& facts, std::string_view service_tier, bool route_ceiling) {
   const auto billed = billed_tier(facts, service_tier);
-  if (!billed.refused) return estimate(catalogue, family, origin, model, usage, billed.tier, route_ceiling);
+  if (!billed.refused) return estimate_usage(catalogue, family, origin, model, usage, billed.tier, route_ceiling, facts.image_input);
   CostEstimate out;
   out.lower_bound = usage.stage == UsageStage::Partial || usage.quality == UsageQuality::Inconsistent;
   out.unpriced.push_back(billed.refused->by == UnboundedBy::Unmodeled ? "extension:" + billed.refused->subject : std::string("tier"));
@@ -769,7 +801,11 @@ WorstCase worst_case(const WorstCaseInput& in, const descriptor::ModelCatalogue&
     ModelPrice price;
     // The units a row applies to at a price that is not a fixed amount, with that row.
     detail::UnitKeys variable;
+    // The rate of the input's image tokens (Selection::input_image).
+    std::optional<std::uint64_t> input_image;
   };
+  // A request whose facts are not given may carry an image.
+  const bool images = !in.facts || in.facts->image_input;
   std::vector<Candidate> candidates;
   std::vector<std::string> models{std::string(in.model)};
   for (const auto& model : facts.fallback_models)
@@ -788,7 +824,7 @@ WorstCase worst_case(const WorstCaseInput& in, const descriptor::ModelCatalogue&
             !first ? "no measured input and no catalogue input limit" : "later invocations need a catalogue input limit");
       continue;
     }
-    Candidate candidate{model, entry, *first, invocations > 1 ? *limit : *first, {}, {}};
+    Candidate candidate{model, entry, *first, invocations > 1 ? *limit : *first, {}, {}, {}};
     std::uint64_t rest = 0;
     if (invocations > 1 && (!checked_mul(invocations - 1, *limit, rest) || !checked_add(candidate.input, rest, candidate.input))) {
       block(UnboundedBy::Overflow, model, "the input tokens do not fit 64 bits");
@@ -797,6 +833,7 @@ WorstCase worst_case(const WorstCaseInput& in, const descriptor::ModelCatalogue&
     auto selected = select(*entry, tier, candidate.invocation_input, true);
     candidate.price = selected.price;
     candidate.variable = std::move(selected.variable);
+    candidate.input_image = selected.input_image;
     if (!selected.priced) {
       block(UnboundedBy::TierPrice, model,
             tier.empty() ? "the entry prices no unit at the standard rates"
@@ -932,7 +969,7 @@ WorstCase worst_case(const WorstCaseInput& in, const descriptor::ModelCatalogue&
     }
     if (!priced) continue;
     std::sort(fees.tool_fees.begin(), fees.tool_fees.end());
-    const auto bound = bounded(candidate.price, candidate.variable, {candidate.input, output, in.routed_gateway, uses});
+    const auto bound = bounded(candidate.price, candidate.variable, {candidate.input, output, in.routed_gateway, uses}, candidate.input_image, images);
     if (!bound.total) {
       for (const auto& name : bound.unpriced) {
         const auto variable = detail::key_of(candidate.variable, name);
