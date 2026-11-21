@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/value.h"
 #include "descriptor/owned_keys.h"
 #include "descriptor/policy.h"
 #include "json/json.h"
@@ -50,6 +51,12 @@ struct OpenRouterImageConfig {
 };
 
 namespace request_controls {
+// Checks an OpenRouter routing against a descriptor, for a host that validates a default routing once, when it builds
+// its client. Returns std::nullopt for a routing the encoders accept, and otherwise the Error that chat::encode,
+// responses::encode and messages::encode give for the same routing: ErrorKind::InvalidRequest, the same `reason` and
+// text, and RetrySafety::NotSent. It checks the routing alone, not the model or the rest of a request. Defined in the
+// codecs library.
+std::optional<Error> check_routing(const descriptor::ValidatedDescriptor& descriptor, const OpenRouterRouting& routing);
 // Shapes of values the providers name and extend: an aspect ratio W:H, and a size or resolution token such as 2K or
 // 1080p. The service decides which values a model accepts.
 inline bool aspect_ratio_syntax(std::string_view value) noexcept {

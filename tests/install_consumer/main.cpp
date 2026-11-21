@@ -5,6 +5,7 @@
 #include <core/native.h>
 #include <core/native_archive.h>
 #include <core/native_archive_custody.h>
+#include <core/request_controls.h>
 #include <core/value.h>
 #include <descriptor/descriptor.h>
 
@@ -64,6 +65,13 @@ int main() {
     return fail("descriptor::load", cfg_err->message);
   }
   const auto& descriptor = std::get<sp::descriptor::ValidatedDescriptor>(loaded);
+
+  // A routing default is checked against the descriptor with the installed check: this one is not an OpenRouter origin.
+  const auto routing_refusal = sp::request_controls::check_routing(descriptor, sp::OpenRouterRouting{});
+  if (!routing_refusal || routing_refusal->kind != sp::ErrorKind::InvalidRequest || routing_refusal->reason.empty() ||
+      routing_refusal->retry_safety != sp::RetrySafety::NotSent) {
+    return fail("request_controls::check_routing");
+  }
 
   std::string secret(32, '\0');
   for (std::size_t i = 0; i < secret.size(); ++i) {
