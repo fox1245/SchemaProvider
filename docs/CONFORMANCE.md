@@ -8,6 +8,20 @@ Scope: the cells and properties below cover the chat families and the artifacts 
 
 Current source scope is five typed buffered/SSE families, bounded prepare/start/complete lifecycle, owned nullable/raw outcomes, exact native binding and archive v3 custody, plus interface 4 controls, Responses cursor ownership and explicit Generate portable history. General sidecar fixture schema, constraints engine, generated support tables, SDK journal projection/kit, cross-origin equivalence and general Drop/Demote remain historical proposals. Generate's explicit imported-call sentinel is a narrow current path, not those historical treatments. WebSocket sessions have no chat cell; NeoGraph owns its outcome/checkpoint serializers.
 
+## 0.4.7 release record
+
+**Source.** The 0.4.7 release tree: interface revision 7, shared-library generation 7, with libsodium 1.0.22 (`SP_WITH_SODIUM=ON`). Every build below and the live matrix ran on git tree `eefc479922b2efd01df0cd1e7933046d434af1fa`, the tree of the release commit that bumps the version; the commit that adds this record changes documents only. The native builds ran on Linux x86_64 (Ubuntu 24.04) with GCC 13.3, CMake 3.28, libcurl 8.5.0 and Node 24.19, on 2026-11-21, with `SP_BUILD_TESTS`, `SP_BUILD_CANARY` and `SP_BUILD_RUNTIME_TESTS` on and `SP_BUILD_BENCHMARKS` off (87 registered entries).
+
+| Build | Result |
+|---|---|
+| Release | 87 of 87 registered entries passed |
+| ASan+UBSan, RelWithDebInfo | 86 passed, none failed; `native_archive_key_residue` skipped because its scan does not run under an instrumented allocator, as in the earlier sanitizer cohorts. No AddressSanitizer, UndefinedBehaviorSanitizer or LeakSanitizer report |
+| TSan, RelWithDebInfo | 86 passed, none failed; `native_archive_key_residue` skipped for the same reason. No ThreadSanitizer report. The entries ran under the `setarch -R` runner |
+
+- **CI.** The project's CI passed on the head of #241, the one pull request merged since 0.4.6, and on the head of #242, the release commit, whose tree is the tree above.
+- **Live.** On 2026-11-21 the live matrix of the 0.4.1 record ran on the release build, with the same cells, models and settings, retries off. 58 of 59 passed. The Responses custody cell at reasoning effort low failed at its first assertion: the model returned no encrypted reasoning (zero reasoning tokens), as in the 0.4.1 to 0.4.3, 0.4.5 and 0.4.6 runs. The OpenRouter video job was not run, as in the 0.4.4 to 0.4.6 records.
+- **Not run here.** The installed-consumer configurations and the WebAssembly suite ran only in CI; aarch64, Windows and HTTP/3 were not run for this record. The endpoint rows of #241 are catalogue data that no bound or estimate reads. The matrix's catalogue refresh cell names no ceiling models, so it reads no endpoint listing; the rows were checked against recorded listing shapes in the test suite.
+
 ## 0.4.6 release record
 
 **Source.** The 0.4.6 release tree: interface revision 7, shared-library generation 7, with libsodium 1.0.22 (`SP_WITH_SODIUM=ON`). Every build below and the live matrix ran on git tree `653bf11f5c641289f011c1fdf28e28d588939270`, the tree of the release commit that bumps the version; the commit that adds this record changes documents only. The native builds ran on Linux x86_64 (Ubuntu 24.04) with GCC 13.3, CMake 3.28, libcurl 8.5.0 and Node 24.19, on 2026-11-21, with `SP_BUILD_TESTS`, `SP_BUILD_CANARY` and `SP_BUILD_RUNTIME_TESTS` on and `SP_BUILD_BENCHMARKS` off (87 registered entries).
