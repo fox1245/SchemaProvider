@@ -202,6 +202,50 @@ const ceilingDocs = (version) => ({
   'vendor/listed-dear': { endpoints: [price('0.000001', '0.000005'), price('0.000002', '0.000004')] },
   'vendor/listed-variable': { endpoints: [price('0.000001', '0.000002')] },
 });
+// Endpoint rows (scenario `ceilings-rows`, and `ceilings-rows-v2` where one listing fails). The two openai models are
+// endpoints listings as OpenRouter served them on 2026-11-20 for openai/gpt-5-nano and its batch variant, recorded
+// whole, performance statistics included; the vendor models are the same shape with one thing changed each.
+const recorded = (tag, providerName, serviceTier, pricing, more = {}) => ({
+  name: `${providerName} | openai/gpt-5-nano-2025-08-07`, model_id: 'openai/gpt-5-nano', model_name: 'OpenAI: GPT-5 Nano', context_length: 400000,
+  pricing: { web_search: '0.01', discount: 0, ...pricing }, provider_name: providerName, tag, service_tier: serviceTier, quantization: 'unknown',
+  max_completion_tokens: 128000, max_prompt_tokens: 272000,
+  supported_parameters: ['reasoning', 'include_reasoning', 'structured_outputs', 'response_format', 'seed', 'max_tokens', 'tools', 'tool_choice', 'verbosity', 'reasoning_effort'],
+  supports_tool_choice: { none: true, auto: true, required: true, function: true }, status: 0, uptime_last_30m: 100, uptime_last_5m: 100,
+  uptime_last_1d: 100, supports_implicit_caching: true, native_tools: { 'openrouter:apply_patch': { type: 'apply_patch' } },
+  supports_voice_cloning: false, supports_multiple_audio_references: false, supports_image_reference: false, supports_diarization: false,
+  latency_last_30m: null, throughput_last_30m: null, ...more,
+});
+const rowDocs = (version) => ({
+  'openai/gpt-5-nano': { endpoints: [
+    recorded('openai/flex', 'OpenAI', 'flex', { prompt: '0.000000025', completion: '0.0000002', input_cache_read: '0.0000000025' }, { uptime_last_5m: null }),
+    recorded('azure', 'Azure', null, { prompt: '0.00000005', completion: '0.0000004', input_cache_read: '0.00000001' }, {
+      max_completion_tokens: 360000, max_prompt_tokens: null,
+      supported_parameters: ['reasoning', 'include_reasoning', 'max_completion_tokens', 'tools', 'tool_choice', 'seed', 'response_format', 'structured_outputs', 'verbosity', 'reasoning_effort'],
+    }),
+    recorded('openai', 'OpenAI', null, { prompt: '0.00000005', completion: '0.0000004', input_cache_read: '0.000000005' }),
+  ] },
+  'openai/gpt-5-nano:batch': { endpoints: [
+    recorded('openai', 'OpenAI', null, { prompt: '0.000000025', completion: '0.0000002', input_cache_read: '0.0000000025' }, {
+      model_id: 'openai/gpt-5-nano:batch', max_prompt_tokens: null, uptime_last_30m: null, uptime_last_5m: null, uptime_last_1d: null, native_tools: {},
+    }),
+  ] },
+  // One provider under two tags: a quantization with a long-context band, and a priority tier at a discount.
+  'vendor/two-tags': { endpoints: [
+    recorded('deepinfra/fp8', 'DeepInfra', null, { prompt: '0.0000002', completion: '0.0000008', overrides: [{ min_prompt_tokens: 128000, prompt: '0.0000004' }] },
+      { quantization: 'fp8', max_prompt_tokens: null }),
+    recorded('deepinfra/turbo', 'DeepInfra', 'priority', { prompt: '0.0000004', completion: '0.0000016', discount: 0.25 }, { quantization: 'fp8', status: -2 }),
+  ] },
+  // A row whose discount may raise its prices: its tag stays, its prices go.
+  'vendor/bad-row-discount': { endpoints: [
+    recorded('alpha', 'Alpha', null, { prompt: '0.000001', completion: '0.000002' }),
+    recorded('beta', 'Beta', null, { prompt: '0.000001', completion: '0.000002', discount: 1.5 }),
+  ] },
+  // An endpoint without a tag, and two endpoints under one tag: the set is not complete, so no row is written.
+  'vendor/untagged': { endpoints: [recorded('alpha', 'Alpha', null, { prompt: '0.000001', completion: '0.000002' }), recorded(undefined, 'Beta', null, { prompt: '0.000001', completion: '0.000002' })] },
+  'vendor/same-tag': { endpoints: [recorded('alpha', 'Alpha', null, { prompt: '0.000001', completion: '0.000002' }), recorded('alpha', 'Alpha', null, { prompt: '0.000003', completion: '0.000004' })] },
+  // A listing that fails in version 2.
+  'vendor/flaky': version === 1 ? { endpoints: [recorded('alpha', 'Alpha', null, { prompt: '0.000001', completion: '0.000002' })] } : { status: 500 },
+});
 // The prices the models listing gives: below every endpoint's unless a model says otherwise.
 const listedPrices = {
   'vendor/full': Object.fromEntries(Array.from({ length: 64 }, (_, i) => [`unit_${i}`, '0'])),
@@ -215,7 +259,8 @@ const listedEntry = (scenario) => (id) => ({
 function ceilings(scenario, path, url, h, res) {
   if (!scenario.startsWith('ceilings')) return false;
   if (h.authorization && h.authorization !== 'Bearer openrouter-test-key') return send(res, 401, {}), true;
-  const docs = generated[scenario] ?? ceilingDocs(scenario === 'ceilings-v2' ? 2 : 1);
+  const docs = generated[scenario] ??
+    (scenario.startsWith('ceilings-rows') ? rowDocs(scenario === 'ceilings-rows-v2' ? 2 : 1) : ceilingDocs(scenario === 'ceilings-v2' ? 2 : 1));
   if (path === '/api/v1/models') {
     if (url.searchParams.get('output_modalities') !== 'all') return send(res, 404, {}), true;
     return send(res, 200, { data: [...Object.keys(docs), 'vendor/unasked'].map(listedEntry(scenario)) }), true;

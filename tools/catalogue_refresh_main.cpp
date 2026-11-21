@@ -160,6 +160,14 @@ int main(int argc, char** argv) {
                   << (gap.price.empty() ? "" : gap.price + ": ") << gap.reason << (gap.kept ? "; the previous ceiling is kept" : "")
                   << ")\n";
     }
+    if (report.endpoint_rows || !report.endpoint_gaps.empty()) {
+      const auto name = sp::descriptor::listing_name(report.listing);
+      std::cout << name << " endpoint rows: " << report.endpoint_rows << " model(s) written, " << report.endpoint_gaps.size() << " gap(s)\n";
+      for (const auto& gap : report.endpoint_gaps)
+        std::cout << name << " endpoint rows " << gap.model << ": "
+                  << (gap.tag.empty() ? std::string("no rows") : gap.tag + (gap.price.empty() ? " without prices" : " without " + gap.price))
+                  << " (" << gap.reason << ")\n";
+    }
     all_ok = all_ok && report.ok;
   }
   std::cout << "diff: " << refreshed.diff.added.size() << " added, " << refreshed.diff.removed.size() << " removed, "

@@ -257,11 +257,81 @@ DefaultsOverlay overlay(std::string_view family, Value value, const std::string&
   return out;
 }
 
+// A price unit of an entry or of an endpoint row: a unit token, or an item unit in its one canonical spelling.
+void price_unit_key(std::string_view key, const std::string& where) {
+  if (item_grammar(key)) {
+    ItemPriceKey item;
+    if (const auto refusal = read_item_key(key, item); !refusal.empty()) fail(where, refusal);
+  } else if (!token(key)) {
+    fail(where, "price unit token");
+  }
+}
+std::vector<std::pair<std::string, std::string>> prices(Value pricing, const std::string& pointer) {
+  std::vector<std::pair<std::string, std::string>> out;
+  if (!present(pricing)) return out;
+  if (!pricing.is_object() || pricing.size() > max_prices) fail(pointer, "bounded object");
+  for (auto member : pricing.members()) {
+    const auto where = at(pointer, member.key);
+    price_unit_key(member.key, where);
+    out.emplace_back(std::string(member.key), text(member.value, where, decimal, "decimal USD text"));
+  }
+  std::sort(out.begin(), out.end());
+  return out;
+}
+// An endpoint row's tier: a tier name as a price unit spells it after its '/', without a band.
+bool tier_name(std::string_view value) noexcept {
+  return token(value) && value.find('/') == std::string_view::npos && value.find('+') == std::string_view::npos;
+}
+bool discount_value(Value value) noexcept { return value.is_number() && value.as_double() >= 0 && value.as_double() <= 1; }
+// A JSON integer that fits 64 signed bits.
+std::optional<std::int64_t> signed_value(Value value) noexcept {
+  if (!value.is_int() || (value.is_uint() && value.as_uint() > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))) return std::nullopt;
+  return value.as_int();
+}
+EndpointRow parse_row(Value value, const std::string& pointer) {
+  closed(value, {"tag"},
+         {"tier", "provider_name", "quantization", "service_tier", "status", "context_length", "max_prompt_tokens",
+          "max_completion_tokens", "supported_parameters", "discount", "pricing"},
+         pointer);
+  EndpointRow row;
+  row.tag = text(value.get("tag"), at(pointer, "tag"), token, "endpoint tag token");
+  if (const auto tier = optional_text(value.get("tier"), at(pointer, "tier"), tier_name, "tier token without '/' or '+'")) row.tier = *tier;
+  row.provider_name = optional_text(value.get("provider_name"), at(pointer, "provider_name"), display, "display text");
+  row.quantization = optional_text(value.get("quantization"), at(pointer, "quantization"), token, "token");
+  row.service_tier = optional_text(value.get("service_tier"), at(pointer, "service_tier"), token, "token");
+  if (const auto status = value.get("status"); present(status)) {
+    row.status = signed_value(status);
+    if (!row.status) fail(at(pointer, "status"), "integer");
+  }
+  row.context_length = positive(value.get("context_length"), at(pointer, "context_length"));
+  row.max_prompt_tokens = positive(value.get("max_prompt_tokens"), at(pointer, "max_prompt_tokens"));
+  row.max_completion_tokens = positive(value.get("max_completion_tokens"), at(pointer, "max_completion_tokens"));
+  row.supported_parameters = list(value.get("supported_parameters"), at(pointer, "supported_parameters"), token, "token");
+  if (const auto discount = value.get("discount"); present(discount)) {
+    if (!discount_value(discount)) fail(at(pointer, "discount"), "number from 0 to 1");
+    row.discount = discount.as_double();
+  }
+  row.pricing = prices(value.get("pricing"), at(pointer, "pricing"));
+  return row;
+}
+bool row_less(const EndpointRow& a, const EndpointRow& b) { return std::tie(a.tier, a.tag) < std::tie(b.tier, b.tag); }
+std::vector<EndpointRow> rows(Value value, const std::string& pointer) {
+  std::vector<EndpointRow> out;
+  if (!present(value)) return out;
+  if (!value.is_array() || value.size() > max_list) fail(pointer, "bounded array");
+  std::size_t i = 0;
+  for (auto element : value.elements()) out.push_back(parse_row(element, at(pointer, i++)));
+  std::sort(out.begin(), out.end(), row_less);
+  for (std::size_t j = 1; j < out.size(); ++j)
+    if (out[j].tier == out[j - 1].tier && out[j].tag == out[j - 1].tag) fail(pointer, "each tier and tag once");
+  return out;
+}
+
 CatalogueEntry parse_entry(Value value, const std::string& pointer) {
   closed(value, {"id"},
          {"match", "families", "origins", "aliases", "served_as", "alias_of", "name", "lifecycle", "retires_at", "source",
           "context_window", "input_limit", "output_limit", "input_modalities", "output_modalities", "methods", "parameters",
-          "temperature", "pricing", "defaults", "control_values"},
+          "temperature", "pricing", "defaults", "control_values", "endpoints"},
          pointer);
   CatalogueEntry entry;
   entry.id = text(value.get("id"), at(pointer, "id"), model_name, "model name");
@@ -301,20 +371,7 @@ CatalogueEntry parse_entry(Value value, const std::string& pointer) {
     if (!t.is_bool()) fail(at(pointer, "temperature"), "boolean");
     entry.temperature = t.as_bool();
   }
-  if (const auto pricing = value.get("pricing"); present(pricing)) {
-    if (!pricing.is_object() || pricing.size() > max_prices) fail(at(pointer, "pricing"), "bounded object");
-    for (auto member : pricing.members()) {
-      const auto where = at(at(pointer, "pricing"), member.key);
-      if (item_grammar(member.key)) {
-        ItemPriceKey item;
-        if (const auto refusal = read_item_key(member.key, item); !refusal.empty()) fail(where, refusal);
-      } else if (!token(member.key)) {
-        fail(where, "price unit token");
-      }
-      entry.pricing.emplace_back(std::string(member.key), text(member.value, where, decimal, "decimal USD text"));
-    }
-    std::sort(entry.pricing.begin(), entry.pricing.end());
-  }
+  entry.pricing = prices(value.get("pricing"), at(pointer, "pricing"));
   if (const auto defaults = value.get("defaults"); present(defaults)) {
     if (!defaults.is_object()) fail(at(pointer, "defaults"), "object keyed by family");
     for (auto member : defaults.members()) {
@@ -338,6 +395,7 @@ CatalogueEntry parse_entry(Value value, const std::string& pointer) {
     }
     std::sort(entry.control_values.begin(), entry.control_values.end());
   }
+  entry.endpoints = rows(value.get("endpoints"), at(pointer, "endpoints"));
   return entry;
 }
 
@@ -394,6 +452,27 @@ std::string overlay_json(const DefaultsOverlay& d) {
   number("top_p", d.top_p);
   return '{' + out + '}';
 }
+void put_prices(std::string& out, const std::vector<std::pair<std::string, std::string>>& pricing) {
+  if (pricing.empty()) return;
+  out += ",\"pricing\":{";
+  for (std::size_t i = 0; i < pricing.size(); ++i) out += (i ? "," : "") + json::quote(pricing[i].first) + ':' + json::quote(pricing[i].second);
+  out += '}';
+}
+std::string row_json(const EndpointRow& r) {
+  std::string out = "{\"tag\":" + json::quote(r.tag);
+  if (!r.tier.empty()) out += ",\"tier\":" + json::quote(r.tier);
+  put_text(out, "provider_name", r.provider_name);
+  put_text(out, "quantization", r.quantization);
+  put_text(out, "service_tier", r.service_tier);
+  if (r.status) out += ",\"status\":" + std::to_string(*r.status);
+  put_number(out, "context_length", r.context_length);
+  put_number(out, "max_prompt_tokens", r.max_prompt_tokens);
+  put_number(out, "max_completion_tokens", r.max_completion_tokens);
+  put_list(out, "supported_parameters", r.supported_parameters);
+  if (r.discount) out += ",\"discount\":" + number_text(*r.discount);
+  put_prices(out, r.pricing);
+  return out + '}';
+}
 std::string entry_json(const CatalogueEntry& e) {
   std::string out = "{\"id\":" + json::quote(e.id);
   if (e.prefix) out += ",\"match\":\"prefix\"";
@@ -424,17 +503,17 @@ std::string entry_json(const CatalogueEntry& e) {
     }
     out += '}';
   }
-  if (!e.pricing.empty()) {
-    out += ",\"pricing\":{";
-    for (std::size_t i = 0; i < e.pricing.size(); ++i)
-      out += (i ? "," : "") + json::quote(e.pricing[i].first) + ':' + json::quote(e.pricing[i].second);
-    out += '}';
-  }
+  put_prices(out, e.pricing);
   if (!e.defaults.empty()) {
     out += ",\"defaults\":{";
     for (std::size_t i = 0; i < e.defaults.size(); ++i)
       out += (i ? "," : "") + json::quote(e.defaults[i].family) + ':' + overlay_json(e.defaults[i]);
     out += '}';
+  }
+  if (!e.endpoints.empty()) {
+    out += ",\"endpoints\":[";
+    for (std::size_t i = 0; i < e.endpoints.size(); ++i) out += (i ? "," : "") + row_json(e.endpoints[i]);
+    out += ']';
   }
   return out + '}';
 }
@@ -529,6 +608,15 @@ const CatalogueEntry* ModelCatalogue::entry(std::string_view id, bool prefix) co
     return std::tie(e.id, e.prefix) < std::tuple<std::string_view, bool>(key.first, key.second);
   });
   return found != entries_.end() && found->id == id && found->prefix == prefix ? &*found : nullptr;
+}
+
+std::span<const EndpointRow> ModelCatalogue::endpoints(std::string_view model, std::string_view tier) const noexcept {
+  const auto* found = entry(model);
+  if (!found) return {};
+  const auto& all = found->endpoints;
+  const auto first = std::find_if(all.begin(), all.end(), [&](const EndpointRow& row) { return row.tier == tier; });
+  const auto last = std::find_if(first, all.end(), [&](const EndpointRow& row) { return row.tier != tier; });
+  return {first, last};
 }
 
 std::string ModelCatalogue::digest_hex() const {
@@ -653,6 +741,8 @@ void merge_entry(CatalogueEntry& into, const CatalogueEntry& from) {
     else into.control_values.emplace_back(control, values);
   }
   std::sort(into.control_values.begin(), into.control_values.end());
+  // Endpoint rows are one set: a later layer's replace every earlier row, so no set mixes rows of two listings.
+  if (!from.endpoints.empty()) into.endpoints = from.endpoints;
 }
 } // namespace
 
@@ -1311,6 +1401,73 @@ ListingResult parse_listing(Listing listing, std::string_view body, std::string_
       page.next = std::string(last.as_string());
     }
     return page;
+  } catch (ConfigError& error) { return std::move(error); }
+}
+
+EndpointsResult parse_endpoints_listing(std::string_view body, std::string_view model) {
+  try {
+    auto parsed = json::parse(body, {32u * 1024u * 1024u, 64});
+    if (std::holds_alternative<json::ParseError>(parsed)) fail("", "a JSON endpoints listing");
+    const auto root = std::get<json::Document>(parsed).root();
+    const auto data = root.get("data");
+    const auto endpoints = data.get("endpoints");
+    if (!root.is_object() || !data.is_object()) fail("/data", "an endpoints listing object");
+    if (!data.get("id").is_string() || data.get("id").as_string() != model) fail("/data/id", "the id of the model asked for");
+    if (!endpoints.is_array()) fail("/data/endpoints", "an endpoint array");
+    std::size_t i = 0;
+    for (auto endpoint : endpoints.elements()) {
+      if (!endpoint.is_object() || !endpoint.get("pricing").is_object()) fail(at("/data/endpoints", i), "an endpoint with a pricing object");
+      ++i;
+    }
+    EndpointsListing out;
+    const auto refuse = [&](std::string_view why) {
+      out.rows.clear();
+      out.discounts.clear();
+      out.withheld.clear();
+      out.refused = std::string(why);
+      return out;
+    };
+    if (endpoints.size() > max_list) return refuse("more endpoints than an entry holds");
+    for (auto endpoint : endpoints.elements()) {
+      const auto tag = endpoint.get("tag");
+      if (!tag.is_string() || !token(tag.as_string())) return refuse("an endpoint has no tag the catalogue can hold");
+      auto& row = out.rows.emplace_back();
+      row.tag = std::string(tag.as_string());
+      row.provider_name = listed_text(endpoint.get("provider_name"), display);
+      row.quantization = listed_text(endpoint.get("quantization"), token);
+      row.service_tier = listed_text(endpoint.get("service_tier"), token);
+      row.status = signed_value(endpoint.get("status"));
+      row.context_length = listed_count(endpoint.get("context_length"));
+      row.max_prompt_tokens = listed_count(endpoint.get("max_prompt_tokens"));
+      row.max_completion_tokens = listed_count(endpoint.get("max_completion_tokens"));
+      row.supported_parameters = listed_tokens(endpoint.get("supported_parameters"));
+      std::sort(row.supported_parameters.begin(), row.supported_parameters.end());
+      const auto pricing = endpoint.get("pricing");
+      // The listing multiplies the prices by (1 - discount): a discount from 0 to 1 keeps each at most the price listed,
+      // and any other may raise every price, as the route ceiling reads it.
+      if (const auto discount = pricing.get("discount"); present(discount)) {
+        if (!discount_value(discount)) {
+          out.discounts.push_back(row.tag);
+          continue;
+        }
+        row.discount = discount.as_double();
+      }
+      // The prices as a models listing's are read, the row's tag standing for the model.
+      CatalogueEntry prices_of;
+      prices_of.id = row.tag;
+      ListingPage scratch;
+      read_pricing(pricing, prices_of, scratch);
+      row.pricing = std::move(prices_of.pricing);
+      for (auto& unit : scratch.withheld) out.withheld.push_back(std::move(unit));
+    }
+    std::sort(out.rows.begin(), out.rows.end(), row_less);
+    for (std::size_t j = 1; j < out.rows.size(); ++j)
+      if (out.rows[j].tag == out.rows[j - 1].tag) return refuse("two endpoints share a tag");
+    std::sort(out.discounts.begin(), out.discounts.end());
+    std::sort(out.withheld.begin(), out.withheld.end(),
+              [](const WithheldUnit& a, const WithheldUnit& b) { return std::tie(a.model, a.unit) < std::tie(b.model, b.unit); });
+    out.withheld.erase(std::unique(out.withheld.begin(), out.withheld.end()), out.withheld.end());
+    return out;
   } catch (ConfigError& error) { return std::move(error); }
 }
 

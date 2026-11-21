@@ -49,6 +49,18 @@ struct CeilingGap {
   bool kept = false;
 };
 
+// Endpoint rows (descriptor::CatalogueEntry::endpoints) of a model asked for in `ceiling_models` that the refresh did not
+// write, for the whole model or for one endpoint's prices, and why.
+struct EndpointGap {
+  std::string model;  // the id as asked for
+  // The endpoint's tag; empty when the gap is the whole model, which then has no rows.
+  std::string tag;
+  // "discount", or a price member the row left out ("prompt"); empty for every price of the row or for the whole model.
+  std::string price;
+  // Fixed text: never a URL, header, credential or response body.
+  std::string reason;
+};
+
 struct RefreshRequest {
   std::vector<ListingSource> sources;
   // The catalogue an earlier refresh generated. Its entries from a source that fails this time are
@@ -94,6 +106,11 @@ struct SourceReport {
   // written whole from their endpoints, and every model or unit asked for that was not, by model id in order.
   std::size_t ceiling_requests = 0, ceilings = 0;
   std::vector<CeilingGap> ceiling_gaps;
+  // Endpoint rows from the same endpoints requests: the models whose rows were written, and every model asked for whose
+  // rows were not, or whose row left out a price, by model id, then tag, in order; then each listing variant whose rows
+  // its base entry could not hold under the variant's tier.
+  std::size_t endpoint_rows = 0;
+  std::vector<EndpointGap> endpoint_gaps;
 };
 
 struct RefreshResult {
@@ -121,7 +138,9 @@ struct RefreshResult {
 // With ListingSource::ceiling_models, each listed model named there gets the route ceiling its endpoints
 // listing gives, every unit at the dearest price of its side over every endpoint, or no ceiling for a unit
 // that any endpoint's prices cannot bound (USAGE.md, refreshing the catalogue). A model whose endpoints
-// request fails keeps the ceiling `previous` had and does not fail the source.
+// request fails keeps the ceiling `previous` had and does not fail the source. The same listing gives the
+// model's endpoint rows, every listed endpoint or none; a model whose endpoints request fails has none, since a
+// row is never older than the refresh that wrote it.
 std::variant<RefreshResult, descriptor::ConfigError> refresh_catalogue(Transport& transport, const RefreshRequest& request);
 
 // The default origin the built-in policy states for a listing (DescriptorPolicy::listing_origin): the provider's public

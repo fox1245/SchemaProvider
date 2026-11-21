@@ -1005,9 +1005,11 @@ void failed_endpoints_keep_previous_ceilings(transport::Transport& transport, Pe
   require(has(lines, "vendor/outage|||endpoints answered HTTP 500|kept") && has(lines, "vendor/stall|||endpoints request did not complete|kept") &&
           has(lines, "vendor/fee|||not an endpoints listing"), "the failed models are named, and whether the previous ceiling was kept");
   require(report.ceilings == 5, "vendor/many, vendor/zero-fee, vendor/cached, vendor/override-fees and vendor/listed-dear are written whole");
-  // The diff reports a changed ceiling the way it reports a changed price.
-  require(result.diff.changed == (std::vector<std::string>{"vendor/fee", "vendor/many"}) && result.diff.added.empty() && result.diff.removed.empty(),
-          "the diff names the entries whose ceiling changed, and only those");
+  // The diff reports a changed ceiling the way it reports a changed price, and the endpoint rows a failed request drops
+  // (vendor/outage and vendor/stall keep their ceilings and lose their rows).
+  require(result.diff.changed == (std::vector<std::string>{"vendor/fee", "vendor/many", "vendor/outage", "vendor/stall"}) && result.diff.added.empty() &&
+              result.diff.removed.empty(),
+          "the diff names the entries whose ceiling or rows changed, and only those");
 
   // A previous ceiling below a price the listing now gives for the model (written before that price was listed) is not
   // kept, and neither is its other side: here the previous output ceiling is half the listed 0.0000001 completion price.
@@ -1356,6 +1358,127 @@ void batch_variants_price_the_batch_tier(transport::Transport& transport, Peer& 
   passed("batch variants: the variant's prices and route ceiling are the batch tier of the base model");
 }
 
+// The canonical text of an entry's endpoint rows, or "-" when it writes none.
+std::string rows_text(const descriptor::CatalogueSnapshot& catalogue, std::string_view id) {
+  const auto text = catalogue->to_json();
+  const auto at = text.find("{\"id\":" + json::quote(id) + ",");
+  if (at == std::string::npos) return "no entry";
+  const auto next = text.find("{\"id\":", at + 1);
+  const auto entry = text.substr(at, next == std::string::npos ? std::string::npos : next - at);
+  const auto rows = entry.find(",\"endpoints\":");
+  if (rows == std::string::npos) return "-";
+  // The array up to its own closing bracket; no text the rows hold has a bracket.
+  const auto open = rows + 13;
+  std::size_t depth = 0, end = open;
+  for (; end < entry.size(); ++end) {
+    if (entry[end] == '[' || entry[end] == '{') ++depth;
+    else if ((entry[end] == ']' || entry[end] == '}') && --depth == 0) break;
+  }
+  return entry.substr(open, end + 1 - open);
+}
+// The rows the endpoints listings of the models asked for give: one per tag, from listings recorded whole.
+void endpoint_rows_from_the_endpoints_listings(transport::Transport& transport, Peer& peer) {
+  const std::vector<std::string> asked{"openai/gpt-5-nano", "openai/gpt-5-nano:batch", "vendor/two-tags", "vendor/bad-row-discount",
+                                       "vendor/untagged", "vendor/same-tag", "vendor/flaky"};
+  transport::RefreshRequest request;
+  request.sources = {ceiling_source(peer, "ceilings-rows", asked)};
+  const auto result = refreshed(transport, request);
+  require(result.sources[0].ok, "the listing refreshed");
+  const auto& c = result.generated;
+  const std::string chat_parameters =
+      R"("supported_parameters":["include_reasoning","max_tokens","reasoning","reasoning_effort","response_format","seed","structured_outputs",)"
+      R"("tool_choice","tools","verbosity"])";
+  // The recorded listing: the flex tier and the standard endpoint of one provider are two rows, keyed by tag. The
+  // performance statistics and the members no row holds are left out; a null member is not written.
+  const std::string nano =
+      R"([{"tag":"azure","provider_name":"Azure","quantization":"unknown","status":0,"context_length":400000,"max_completion_tokens":360000,)"
+      R"("supported_parameters":["include_reasoning","max_completion_tokens","reasoning","reasoning_effort","response_format","seed",)"
+      R"("structured_outputs","tool_choice","tools","verbosity"],"discount":0,)"
+      R"("pricing":{"completion":"0.0000004","input_cache_read":"0.00000001","prompt":"0.00000005","web_search":"0.01"}},)"
+      R"({"tag":"openai","provider_name":"OpenAI","quantization":"unknown","status":0,"context_length":400000,"max_prompt_tokens":272000,)"
+      R"("max_completion_tokens":128000,)" + chat_parameters + R"(,"discount":0,)"
+      R"("pricing":{"completion":"0.0000004","input_cache_read":"0.000000005","prompt":"0.00000005","web_search":"0.01"}},)"
+      R"({"tag":"openai/flex","provider_name":"OpenAI","quantization":"unknown","service_tier":"flex","status":0,"context_length":400000,)"
+      R"("max_prompt_tokens":272000,"max_completion_tokens":128000,)" + chat_parameters + R"(,"discount":0,)"
+      R"("pricing":{"completion":"0.0000002","input_cache_read":"0.0000000025","prompt":"0.000000025","web_search":"0.01"}},)";
+  // The batch variant's row is the base entry's under the tier, as its prices are; the variant keeps its own.
+  const std::string batch_row =
+      R"("provider_name":"OpenAI","quantization":"unknown","status":0,"context_length":400000,"max_completion_tokens":128000,)" + chat_parameters +
+      R"(,"discount":0,"pricing":{"completion":"0.0000002","input_cache_read":"0.0000000025","prompt":"0.000000025","web_search":"0.01"}})";
+  require(rows_text(c, "openai/gpt-5-nano") == nano + R"({"tag":"openai","tier":"batch",)" + batch_row + "]",
+          "the recorded endpoints are rows by tag, the batch tier's beside them, not " + rows_text(c, "openai/gpt-5-nano"));
+  require(rows_text(c, "openai/gpt-5-nano:batch") == R"([{"tag":"openai",)" + batch_row + "]",
+          "the variant's own entry keeps its row, not " + rows_text(c, "openai/gpt-5-nano:batch"));
+  // One provider under two tags; a long-context band is held as the entry's prices are, and the discount as listed.
+  require(rows_text(c, "vendor/two-tags") ==
+              R"([{"tag":"deepinfra/fp8","provider_name":"DeepInfra","quantization":"fp8","status":0,"context_length":400000,"max_completion_tokens":128000,)" +
+                  chat_parameters + R"(,"discount":0,"pricing":{"completion":"0.0000008","prompt":"0.0000002","prompt+128000":"0.0000004","web_search":"0.01"}},)"
+                  R"({"tag":"deepinfra/turbo","provider_name":"DeepInfra","quantization":"fp8","service_tier":"priority","status":-2,"context_length":400000,)"
+                  R"("max_prompt_tokens":272000,"max_completion_tokens":128000,)" +
+                  chat_parameters + R"(,"discount":0.25,"pricing":{"completion":"0.0000016","prompt":"0.0000004","web_search":"0.01"}}])",
+          "two tags of one provider are two rows, not " + rows_text(c, "vendor/two-tags"));
+  // A row whose discount may raise its prices keeps its tag and loses its prices, so the set stays complete.
+  require(rows_text(c, "vendor/bad-row-discount") ==
+              R"([{"tag":"alpha","provider_name":"Alpha","quantization":"unknown","status":0,"context_length":400000,"max_prompt_tokens":272000,)"
+              R"("max_completion_tokens":128000,)" + chat_parameters + R"(,"discount":0,"pricing":{"completion":"0.000002","prompt":"0.000001","web_search":"0.01"}},)"
+              R"({"tag":"beta","provider_name":"Beta","quantization":"unknown","status":0,"context_length":400000,"max_prompt_tokens":272000,)"
+              R"("max_completion_tokens":128000,)" + chat_parameters + "}]",
+          "an unusable discount leaves the row without prices, not " + rows_text(c, "vendor/bad-row-discount"));
+  // An endpoint without a tag, or a tag twice, leaves the model without rows.
+  require(rows_text(c, "vendor/untagged") == "-" && rows_text(c, "vendor/same-tag") == "-", "an incomplete set writes no row");
+  require(rows_text(c, "vendor/unasked") == "-", "no rows for a model not asked for");
+  // The report names every model without rows and every row without prices, with fixed text.
+  const auto& report = result.sources[0];
+  std::vector<std::string> lines;
+  for (const auto& gap : report.endpoint_gaps) lines.push_back(gap.model + "|" + gap.tag + "|" + gap.price + "|" + gap.reason);
+  const std::vector<std::string> expected{"vendor/bad-row-discount|beta|discount|discount at an endpoint is not from 0 to 1",
+                                          "vendor/same-tag|||two endpoints share a tag",
+                                          "vendor/untagged|||an endpoint has no tag the catalogue can hold"};
+  if (lines != expected) {
+    std::string all;
+    for (const auto& line : lines) all += "\n  " + line;
+    throw std::runtime_error("the endpoint gaps are not the expected ones:" + all);
+  }
+  require(report.endpoint_rows == 5, "five models written: both openai entries, two-tags, bad-row-discount and flaky");
+  // The accessor reads one tier's rows of the exact entry, by tag.
+  const auto standard = c->endpoints("openai/gpt-5-nano");
+  const auto batch = c->endpoints("openai/gpt-5-nano", "batch");
+  require(standard.size() == 3 && standard[0].tag == "azure" && standard[1].tag == "openai" && standard[2].tag == "openai/flex" &&
+              standard[2].service_tier == std::optional<std::string>("flex") && standard[0].max_prompt_tokens == std::nullopt &&
+              standard[0].max_completion_tokens == std::optional<std::uint64_t>(360000),
+          "the model's own rows, by tag");
+  require(batch.size() == 1 && batch[0].tag == "openai" && batch[0].tier == "batch", "the batch tier's rows");
+  require(c->endpoints("openai/gpt-5-nano", "flex").empty() && c->endpoints("vendor/absent").empty() && c->endpoints("vendor/untagged").empty(),
+          "no rows for a tier, a model or an entry that states none");
+  const auto turbo = c->endpoints("vendor/two-tags");
+  require(turbo.size() == 2 && turbo[1].tag == "deepinfra/turbo" && turbo[1].status == std::optional<std::int64_t>(-2) &&
+              turbo[1].discount == std::optional<double>(0.25) && turbo[1].provider_name == std::optional<std::string>("DeepInfra"),
+          "a row's status and discount as listed");
+  // The rows read back.
+  auto again = descriptor::load_catalogue(c->to_json());
+  require(std::holds_alternative<descriptor::CatalogueSnapshot>(again) && std::get<descriptor::CatalogueSnapshot>(again)->digest() == c->digest(),
+          "the generated rows read back as the same catalogue");
+
+  // A failed endpoints request keeps the previous ceiling and writes no row: a row is never older than this refresh.
+  transport::RefreshRequest later;
+  later.previous = c;
+  later.sources = {ceiling_source(peer, "ceilings-rows-v2", {"vendor/flaky", "vendor/two-tags"})};
+  const auto second = refreshed(transport, later);
+  require(second.sources[0].ok, "the second listing refreshed");
+  require(rows_text(c, "vendor/flaky") != "-" && rows_text(second.generated, "vendor/flaky") == "-" &&
+              ceiling_of(second.generated->entry("vendor/flaky")) == ceiling_of(c->entry("vendor/flaky")),
+          "an outage keeps the ceiling and drops the rows");
+  require(rows_text(second.generated, "vendor/two-tags") == rows_text(c, "vendor/two-tags"), "a listing read again gives the same rows");
+  require(second.sources[0].endpoint_rows == 1 && second.sources[0].endpoint_gaps.size() == 1 &&
+              second.sources[0].endpoint_gaps[0].model == "vendor/flaky" && second.sources[0].endpoint_gaps[0].tag.empty() &&
+              second.sources[0].endpoint_gaps[0].reason == "no endpoints listing read in this refresh",
+          "the model without rows is named");
+  for (const auto& gap : second.sources[0].endpoint_gaps)
+    for (const std::string_view banned : {"127.0.0.1", "http", "Bearer", "openrouter-test-key", "synthetic"})
+      require(gap.reason.find(banned) == std::string::npos, "an endpoint gap carries fixed text only");
+  passed("endpoint rows: one per tag from recorded listings, batch tier, unusable discounts, incomplete sets, failures");
+}
+
 #ifndef _WIN32
 // sp_catalogue_refresh --ceiling reads the route ceilings of the models it names and prints what it could not.
 void the_tool_reads_route_ceilings(Peer& peer, const std::string& tool) {
@@ -1442,6 +1565,7 @@ int main(int argc, char** argv) {
     ceilings_count_listed_bands(transport, peer);
     default_origins_are_policy_data(transport, peer);
     batch_variants_price_the_batch_tier(transport, peer);
+    endpoint_rows_from_the_endpoints_listings(transport, peer);
 #ifndef _WIN32
     if (argc == 4) the_tool_reads_route_ceilings(peer, argv[3]);
     if (argc == 4) the_tool_prints_no_listed_key_text(peer, argv[3]);
