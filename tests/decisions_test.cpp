@@ -245,6 +245,12 @@ void assets() {
     const auto in_state = decisions::endpoint_facts(router, inline_image);
     const auto plain = decisions::endpoint_facts(router, base());
     CHECK(with_asset.quantities.size() == 3 && in_state.quantities.size() == 3 && plain.quantities.size() == 2);
+    // A video's frames bill as image input too.
+    auto video = base();
+    video.input = document(R"([{"type":"video_url","video_url":{"url":"https://example.com/a.mp4"}}])");
+    const auto with_video = decisions::endpoint_facts(router, video);
+    CHECK(with_video.quantities.size() == 3 && with_video.quantities[2].unit == "input_image" &&
+          with_video.quantities[2].source == EndpointQuantity::Source::InputLimit);
     for (std::size_t i = 0; i < with_asset.quantities.size(); ++i) {
       const auto &a = with_asset.quantities[i], &b = in_state.quantities[i];
       CHECK(a.unit == b.unit && a.at_most == b.at_most && a.source == b.source && a.per == b.per && a.exact == b.exact);

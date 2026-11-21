@@ -655,7 +655,7 @@ The prepared call supplies the rest:
 | Endpoint (operation) | Quantities | Dimensions |
 |---|---|---|
 | images (`generate`; `edit` at OpenAI when the request has references) | `item:image`: `count`. `item:input_image`: the references. `input`: the input limit. `input_image`: the input limit, when there are references. `output`: the output limit | `background`, `output_compression`, `output_format`, `quality`, `size` |
-| decisions (`decide`) | `input`: the input limit. `input_image`: the input limit, when the request sends an image: an asset, or a part of the input whose `type` is `image`, `input_image` or `image_url`, at any depth. `output`: the output limit | |
+| decisions (`decide`) | `input`: the input limit. `input_image`: the input limit, when the request sends an image: an asset, or a part of the input whose `type` is `image`, `input_image`, `image_url` or `video_url`, at any depth. `output`: the output limit | |
 | embeddings (`embed`) | `input`: the input limit for each input. `input_image`: the same, when an input has media. At OpenRouter, the request's cap `provider.max_price.prompt` (`EndpointFacts::max_price`) | `dimensions`, `task` |
 | rerank (`rank`) | `item:document`: the documents. `item:search_unit`: not stated, so the entry must list it: unlisted, the call has no total (`ModelPrice`); listed above zero, none either (`Quantity`), since nothing bounds the count; listed as `"0"`, where the provider does not bill search units, it has one. `input`: the input limit for each document | `top` |
 | speech (`speak`) | `item:character`: the bytes of `input` in UTF-8. `input`: the input limit. `output`: the output limit | `format`, `speed` (its key alone), `voice` |

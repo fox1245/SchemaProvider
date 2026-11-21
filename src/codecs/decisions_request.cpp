@@ -13,9 +13,9 @@
 namespace sp::decisions {
 namespace {
 Error bad(const reason::Reason& message) { return reason::error(ErrorKind::InvalidRequest, message); }
-// The `type` of a content part that holds an image, in the wire formats an input may carry: OpenRouter's `image`,
-// OpenAI Responses' `input_image` and Chat's `image_url`.
-constexpr std::string_view image_part_types[]{"image", "input_image", "image_url"};
+// The `type` of a content part that bills as image input, in the wire formats an input may carry: OpenRouter's `image`
+// and `video_url` (a video's frames bill as image input), OpenAI Responses' `input_image` and Chat's `image_url`.
+constexpr std::string_view image_part_types[]{"image", "input_image", "image_url", "video_url"};
 // Whether the input holds such a part at any depth, read by each object's `type` member.
 bool holds_image_part(const json::Value& value) {
   if (value.is_array()) {
