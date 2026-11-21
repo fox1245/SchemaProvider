@@ -2410,7 +2410,9 @@ void worst_case_listed_members() {
   CHECK(pricing::upper_bound(pricing::dearest_price_of(*c->entry("vendor/zz-image-out"), {}, 1000), {1000, 1120, true, {}}).total.has_value());
   // The same through the entry's reservation bound.
   CHECK(!pricing::upper_bound(*low->entry("vendor/zz-image-out"), {}, {1000, 1120, true, {}}).total);
-  CHECK(pricing::upper_bound(*c->entry("vendor/zz-image-out"), {}, {1000, 1120, true, {}}).total);
+  // Its ceiling is not stale; the entry's per-image `image` price is what leaves the bound from the entry, which takes
+  // the request to carry an image, without a total (#237).
+  CHECK(pricing::upper_bound(*c->entry("vendor/zz-image-out"), {}, {1000, 1120, true, {}}).unpriced == std::vector<std::string>({"image"}));
   // A ceiling above the listed prices on each side is not stale; the input side is checked too: a ceiling_input below
   // the cache read price the entry lists.
   {
