@@ -855,6 +855,165 @@ void item_units_merge_and_diff() {
     CHECK(plain->digest_hex() == "8185bd8c7a0b473bea215247c71dd5abfe83d127d4a03d6613161954fa7f51b7");
 }
 
+// A routing gateway's endpoints of one model (`endpoints`): rows sorted by tier, then tag, each tier and tag once, in a
+// canonical text that reads back as the same catalogue.
+void endpoint_rows_load_and_read_back() {
+    const std::string canonical =
+        R"({"version":1,"models":[{"id":"openai/gpt-5-nano","source":"openrouter","pricing":{"completion":"0.0000004","prompt":"0.00000005"},)"
+        R"("endpoints":[{"tag":"azure","provider_name":"Azure","quantization":"unknown","status":0,"context_length":400000,)"
+        R"("max_prompt_tokens":272000,"max_completion_tokens":128000,"supported_parameters":["max_tokens","tools"],"discount":0,)"
+        R"("pricing":{"completion":"0.0000004","input_cache_read":"0.00000001","prompt":"0.00000005","web_search":"0.01"}},)"
+        R"({"tag":"openai","provider_name":"OpenAI","status":0,"pricing":{"completion":"0.0000004","prompt":"0.00000005"}},)"
+        R"({"tag":"openai/flex","provider_name":"OpenAI","service_tier":"flex","status":-2,"discount":0.25,)"
+        R"("pricing":{"completion":"0.0000002","prompt":"0.000000025"}},)"
+        R"({"tag":"openai","tier":"batch","provider_name":"OpenAI","pricing":{"completion":"0.0000002","prompt":"0.000000025","prompt+200000":"-1"}}]}]})";
+    auto loaded = load_catalogue(canonical);
+    if (auto* error = std::get_if<ConfigError>(&loaded)) {
+        std::fprintf(stderr, "CHECK FAILED: endpoint rows refused at %s: %s\n", error->pointer.c_str(), error->expected.c_str());
+        ++failures;
+        return;
+    }
+    const auto& c = std::get<CatalogueSnapshot>(loaded);
+    CHECK(c->to_json() == canonical);
+    // The order rows are given in changes neither the text nor the digest.
+    const auto shuffled = catalogue(
+        R"([{"id":"openai/gpt-5-nano","source":"openrouter","pricing":{"prompt":"0.00000005","completion":"0.0000004"},"endpoints":[)"
+        R"({"tier":"batch","tag":"openai","provider_name":"OpenAI","pricing":{"prompt+200000":"-1","prompt":"0.000000025","completion":"0.0000002"}},)"
+        R"({"tag":"openai/flex","provider_name":"OpenAI","service_tier":"flex","status":-2,"discount":0.25,"pricing":{"prompt":"0.000000025","completion":"0.0000002"}},)"
+        R"({"tag":"openai","provider_name":"OpenAI","status":0,"pricing":{"prompt":"0.00000005","completion":"0.0000004"}},)"
+        R"({"tag":"azure","provider_name":"Azure","quantization":"unknown","status":0,"context_length":400000,"max_prompt_tokens":272000,)"
+        R"("max_completion_tokens":128000,"supported_parameters":["tools","max_tokens"],"discount":0,)"
+        R"("pricing":{"web_search":"0.01","prompt":"0.00000005","input_cache_read":"0.00000001","completion":"0.0000004"}}]}])");
+    CHECK(shuffled && shuffled->to_json() == canonical && shuffled->digest() == c->digest());
+    // An entry without rows writes no member, so a catalogue persisted before them keeps its bytes.
+    const auto bare = catalogue(R"([{"id":"vendor/model","endpoints":[]}])");
+    CHECK(bare && bare->to_json() == R"({"version":1,"models":[{"id":"vendor/model"}]})");
+
+    // A row is closed and bounded like the entry; a tier and tag twice, a tag that is not a token, or a discount outside
+    // 0 to 1 is refused at its pointer.
+    const auto row = [](std::string_view members) { return std::string(R"([{"id":"vendor/model","endpoints":[)") + std::string(members) + "]}]"; };
+    refused_as(row(R"({"provider_name":"P"})"), "/models/0/endpoints/0/tag", "required member");
+    refused_as(row(R"({"tag":"has space"})"), "/models/0/endpoints/0/tag", "endpoint tag token");
+    refused_as(row(R"({"tag":"p","latency_last_30m":1})"), "/models/0/endpoints/0/latency_last_30m", "declared member");
+    refused_as(row(R"({"tag":"p"},{"tag":"p"})"), "/models/0/endpoints", "each tier and tag once");
+    refused_as(row(R"({"tag":"p","tier":"batch/x"})"), "/models/0/endpoints/0/tier", "tier token without '/' or '+'");
+    refused_as(row(R"({"tag":"p","discount":1.5})"), "/models/0/endpoints/0/discount", "number from 0 to 1");
+    refused_as(row(R"({"tag":"p","discount":"0"})"), "/models/0/endpoints/0/discount", "number from 0 to 1");
+    refused_as(row(R"({"tag":"p","status":0.5})"), "/models/0/endpoints/0/status", "integer");
+    refused_as(row(R"({"tag":"p","context_length":0})"), "/models/0/endpoints/0/context_length", "positive integer");
+    refused_as(row(R"({"tag":"p","pricing":{"prompt":"free"}})"), "/models/0/endpoints/0/pricing/prompt", "decimal USD text");
+    refused_as(R"([{"id":"vendor/model","endpoints":{}}])", "/models/0/endpoints", "bounded array");
+    {
+        std::string many;
+        for (int i = 0; i < 257; ++i) many += (i ? "," : "") + std::string(R"({"tag":"p)") + std::to_string(i) + R"("})";
+        refused_as(row(many), "/models/0/endpoints", "bounded array");
+    }
+
+    // A later layer's rows replace the whole set, never one row; a layer without rows keeps them.
+    const auto host = catalogue(R"([{"id":"openai/gpt-5-nano","endpoints":[{"tag":"openai","pricing":{"prompt":"0.0000001","completion":"0.0000008"}}]}])");
+    const auto prices_only = catalogue(R"([{"id":"openai/gpt-5-nano","pricing":{"prompt":"0.00000006"}}])");
+    if (!host || !prices_only) return;
+    const CatalogueSnapshot replaced_layers[]{c, host};
+    auto replaced = merge_catalogues(replaced_layers);
+    CHECK(std::holds_alternative<CatalogueSnapshot>(replaced));
+    if (std::holds_alternative<CatalogueSnapshot>(replaced)) {
+        const auto& merged = std::get<CatalogueSnapshot>(replaced);
+        CHECK(merged->to_json() ==
+              R"({"version":1,"models":[{"id":"openai/gpt-5-nano","source":"openrouter","pricing":{"completion":"0.0000004","prompt":"0.00000005"},)"
+              R"("endpoints":[{"tag":"openai","pricing":{"completion":"0.0000008","prompt":"0.0000001"}}]}]})");
+        const auto diff = diff_catalogues(*c, *merged);
+        CHECK(diff.changed == std::vector<std::string>{"openai/gpt-5-nano"} && diff.added.empty() && diff.removed.empty());
+    }
+    const CatalogueSnapshot kept_layers[]{c, prices_only};
+    auto kept = merge_catalogues(kept_layers);
+    CHECK(std::holds_alternative<CatalogueSnapshot>(kept) &&
+          std::get<CatalogueSnapshot>(kept)->to_json().find(R"("endpoints":[{"tag":"azure")") != std::string::npos);
+}
+
+// The rows an endpoints listing gives, from the shape OpenRouter serves (GET /api/v1/models/{author}/{slug}/endpoints).
+void endpoints_listing_gives_rows() {
+    using Prices = std::vector<std::pair<std::string, std::string>>;
+    const auto listing = [](std::string_view endpoints, std::string_view id = "vendor/model") {
+        return std::string(R"({"data":{"id":)") + sp::json::quote(id) + R"(,"name":"Vendor: Model","endpoints":[)" + std::string(endpoints) + "]}}";
+    };
+    const auto read = [&](std::string_view endpoints) -> EndpointsListing {
+        auto parsed = parse_endpoints_listing(listing(endpoints), "vendor/model");
+        if (auto* error = std::get_if<ConfigError>(&parsed)) {
+            std::fprintf(stderr, "CHECK FAILED: endpoints listing refused at %s: %s\n", error->pointer.c_str(), error->expected.c_str());
+            ++failures;
+            return {};
+        }
+        return std::get<EndpointsListing>(std::move(parsed));
+    };
+    // One provider under two tags, as OpenRouter lists a quantization and a priority tier of one provider; the
+    // performance statistics are not kept, and a member a row cannot hold is left out.
+    const auto two = read(
+        R"({"name":"DeepInfra | vendor/model","provider_name":"DeepInfra","tag":"deepinfra/turbo","service_tier":"priority","quantization":"fp8",)"
+        R"("status":-1,"context_length":131072,"max_completion_tokens":16384,"max_prompt_tokens":null,"supported_parameters":["tools","seed","bad token!"],)"
+        R"("pricing":{"prompt":"0.0000004","completion":"0.0000016","discount":0.25},"uptime_last_30m":99.5,"latency_last_30m":{"p50":0.4},)"
+        R"("throughput_last_30m":{"p50":80}},)"
+        R"({"name":"DeepInfra | vendor/model","provider_name":"DeepInfra","tag":"deepinfra/fp8","service_tier":null,"quantization":"fp8","status":0,)"
+        R"("context_length":0,"pricing":{"prompt":"0.0000002","completion":"0.0000008","discount":0,)"
+        R"("overrides":[{"min_prompt_tokens":128000,"prompt":"0.0000004"}]}})");
+    CHECK(two.refused.empty() && two.discounts.empty() && two.withheld.empty() && two.rows.size() == 2);
+    if (two.rows.size() == 2) {
+        const auto& fp8 = two.rows[0];
+        const auto& turbo = two.rows[1];
+        CHECK(fp8.tag == "deepinfra/fp8" && fp8.tier.empty() && !fp8.service_tier && fp8.status == std::optional<std::int64_t>(0) && !fp8.context_length);
+        CHECK(fp8.pricing == (Prices{{"completion", "0.0000008"}, {"prompt", "0.0000002"}, {"prompt+128000", "0.0000004"}}));
+        CHECK(fp8.discount == std::optional<double>(0.0));
+        CHECK(turbo.tag == "deepinfra/turbo" && turbo.provider_name == std::optional<std::string>("DeepInfra") &&
+              turbo.service_tier == std::optional<std::string>("priority") && turbo.quantization == std::optional<std::string>("fp8") &&
+              turbo.status == std::optional<std::int64_t>(-1) && turbo.context_length == std::optional<std::uint64_t>(131072) &&
+              turbo.max_completion_tokens == std::optional<std::uint64_t>(16384) && !turbo.max_prompt_tokens);
+        CHECK(turbo.supported_parameters == (std::vector<std::string>{"seed", "tools"}) && turbo.discount == std::optional<double>(0.25));
+        // The prices as listed: the discount is kept beside them, never multiplied into them.
+        CHECK(turbo.pricing == (Prices{{"completion", "0.0000016"}, {"prompt", "0.0000004"}}));
+    }
+    // A row whose discount may raise its prices keeps its tag and loses its prices and its discount, so the set stays
+    // whole; the other row is untouched.
+    const auto discounted = read(R"({"tag":"alpha","pricing":{"prompt":"0.000001","completion":"0.000002","discount":1.5}},)"
+                                 R"({"tag":"beta","pricing":{"prompt":"0.000001","completion":"0.000002","discount":"0.1"}},)"
+                                 R"({"tag":"gamma","pricing":{"prompt":"0.000001","completion":"0.000002"}})");
+    CHECK(discounted.refused.empty() && discounted.rows.size() == 3 && discounted.discounts == (std::vector<std::string>{"alpha", "beta"}));
+    if (discounted.rows.size() == 3) {
+        CHECK(discounted.rows[0].tag == "alpha" && discounted.rows[0].pricing.empty() && !discounted.rows[0].discount);
+        CHECK(discounted.rows[1].tag == "beta" && discounted.rows[1].pricing.empty() && !discounted.rows[1].discount);
+        CHECK(discounted.rows[2].tag == "gamma" && discounted.rows[2].pricing == (Prices{{"completion", "0.000002"}, {"prompt", "0.000001"}}) &&
+              !discounted.rows[2].discount);
+    }
+    // An override the row cannot hold leaves its member out, as it does in a models listing's entry.
+    const auto withheld = read(R"({"tag":"alpha","pricing":{"prompt":"0.000001","completion":"0.000002",)"
+                               R"("overrides":[{"min_prompt_tokens":1000,"prompt":"0.000003","discount":0.5}]}})");
+    CHECK(withheld.rows.size() == 1 && withheld.withheld == (std::vector<WithheldUnit>{{"alpha", "prompt"}}));
+    if (withheld.rows.size() == 1) CHECK(withheld.rows[0].pricing == (Prices{{"completion", "0.000002"}}));
+    // An endpoint without a tag the catalogue can hold, or two endpoints under one tag, give no row at all.
+    CHECK(read(R"({"tag":"alpha","pricing":{}},{"pricing":{}})").refused == "an endpoint has no tag the catalogue can hold");
+    CHECK(read(R"({"tag":"alpha","pricing":{}},{"tag":"has space","pricing":{}})").refused == "an endpoint has no tag the catalogue can hold");
+    CHECK(read(R"({"tag":"alpha","pricing":{}},{"tag":"alpha","pricing":{}})").refused == "two endpoints share a tag");
+    CHECK(read(R"({"tag":"alpha","pricing":{}},{"tag":"alpha","pricing":{}})").rows.empty());
+    {
+        std::string many;
+        for (int i = 0; i < 257; ++i) many += (i ? "," : "") + std::string(R"({"tag":"p)") + std::to_string(i) + R"(","pricing":{}})";
+        CHECK(read(many).refused == "more endpoints than an entry holds");
+    }
+    // A body that is not this model's endpoints listing is refused.
+    for (const auto& [body, pointer] : std::vector<std::pair<std::string, std::string>>{
+             {"<html>captive portal</html>", ""}, {R"({"data":[]})", "/data"}, {listing(R"({"tag":"a","pricing":{}})", "vendor/other"), "/data/id"},
+             {R"({"data":{"id":"vendor/model","endpoints":{}}})", "/data/endpoints"}, {listing(R"({"tag":"a"})"), "/data/endpoints/0"},
+             {listing(R"("not an endpoint")"), "/data/endpoints/0"}}) {
+        auto parsed = parse_endpoints_listing(body, "vendor/model");
+        auto* error = std::get_if<ConfigError>(&parsed);
+        CHECK(error && error->pointer == pointer);
+    }
+    // The rows load as an entry's.
+    auto entry = CatalogueEntry{};
+    entry.id = "vendor/model";
+    entry.endpoints = two.rows;
+    auto made = make_catalogue({entry});
+    CHECK(std::holds_alternative<CatalogueSnapshot>(made) && std::get<CatalogueSnapshot>(made)->endpoints("vendor/model").size() == 2);
+}
+
 // A models listing never puts a price in the item namespace: a key that starts with `item:` or `ceiling_item:` is a
 // skipped price, in the base prices and in overrides, and the entry is the one the listing gives without it.
 void listing_gives_no_item_units() {
@@ -925,6 +1084,8 @@ int main() {
         item_units_refused();
         item_units_merge_and_diff();
         listing_gives_no_item_units();
+        endpoint_rows_load_and_read_back();
+        endpoints_listing_gives_rows();
         catalogue_files();
     } catch (const std::exception& error) {
         std::fprintf(stderr, "catalogue test threw: %s\n", error.what());

@@ -116,11 +116,17 @@ inline constexpr std::uint64_t DecisionAssets = 1ULL << 27;
 // library built before the members has a smaller File and EndpointFact, which a consumer built with this header would read
 // past, so it lacks this bit and a require_interface_contract call with RequiredProvider refuses it.
 inline constexpr std::uint64_t ProviderFileShape = 1ULL << 28;
+// descriptor::CatalogueEntry carries `endpoints`, a routing gateway's endpoint rows (descriptor::EndpointRow), which
+// ModelCatalogue::endpoints reads, and transport::SourceReport carries `endpoint_rows` and `endpoint_gaps`. A library built
+// before the members has a smaller CatalogueEntry and SourceReport, which a consumer built with this header would read
+// past, so it lacks this bit and a require_interface_contract call with RequiredProvider refuses it.
+inline constexpr std::uint64_t GatewayEndpointRows = 1ULL << 29;
 inline constexpr std::uint64_t RequiredProvider = TypedRuntime | PreparedAdmission |
     NullableUsage | All5Native | TrustedArchive | OrderedWireEvents | NativeSocketRuntime |
     RetainedJsonSize | CompleteAttemptEvidence | OpenRouterRoutingMaxPrice | ErrorReason | PolicyAdmittedExtensions |
     CompletionSecret | PartCacheMarks | ServedByUpstream | TransportConnectionCache | ModelControlFacts | TypedToolChoice |
-    RealtimeRuntimeDefaults | ChatVoiceId | PricedExtensions | EndpointTierAndPin | RealtimeResponseBound | CachedAudioPrice | DecisionAssets | ProviderFileShape;
+    RealtimeRuntimeDefaults | ChatVoiceId | PricedExtensions | EndpointTierAndPin | RealtimeResponseBound | CachedAudioPrice | DecisionAssets | ProviderFileShape |
+    GatewayEndpointRows;
 }
 InterfaceContract core_interface_contract() noexcept;
 std::uint32_t codec_interface_revision() noexcept;

@@ -30,6 +30,33 @@ struct DefaultsOverlay {
   std::optional<std::optional<double>> temperature, top_p;
 };
 
+// One endpoint that serves a model at a routing gateway, as the gateway's endpoints listing gives it (OpenRouter's
+// GET /api/v1/models/{author}/{slug}/endpoints). A refresh writes the rows of the models a source names in
+// `ceiling_models` (transport/catalogue_refresh.h), every listed endpoint once, only from an endpoints listing it read
+// in that refresh; a models listing gives none. The listing's performance statistics are not catalogue data.
+struct EndpointRow {
+  // The listing's `tag`, which is the endpoint's routing slug (`provider[/variant][/region][/tier]`, as `deepinfra/fp8`
+  // or `openai/flex`): it keys the row. `provider_name` is the provider's display name, which is not a slug.
+  std::string tag;
+  // Empty for the endpoints of the entry's own model. A tier name (`batch`) for the endpoints of a listing variant whose
+  // prices are a tier of the entry's (DescriptorPolicy::listing_tier_variants), written onto the base entry as the
+  // variant's prices are.
+  std::string tier;
+  std::optional<std::string> provider_name, quantization, service_tier;
+  // The listing's endpoint status, as listed (0, or a negative code).
+  std::optional<std::int64_t> status;
+  std::optional<std::uint64_t> context_length, max_prompt_tokens, max_completion_tokens;
+  std::vector<std::string> supported_parameters;  // sorted
+  // The listed `discount`, from 0 to 1. The listing multiplies the row's prices by (1 - discount), so the prices as
+  // listed are at least what a call at the endpoint is billed. An endpoint whose discount is not from 0 to 1 has its
+  // row without prices and without a discount.
+  std::optional<double> discount;
+  // Price per unit in USD as listed, by unit name, read as a models listing's prices are: the input bands of its
+  // long-context overrides (`prompt+128000`), and a listed member left out for a conditional price the catalogue
+  // cannot hold kept at a variable price ("-1") where no unit reads it. Empty: the row states no price.
+  std::vector<std::pair<std::string, std::string>> pricing;
+};
+
 // One model, or with `prefix` a profile for every id that starts with `id`. The list members
 // (families, origins, aliases, served_as and the provider-reported tokens) are sets: a catalogue
 // keeps each one sorted, so the order of a listing or a file never shows in `to_json()`, the
@@ -61,6 +88,10 @@ struct CatalogueEntry {
   // list sorted. They narrow the family's list for this model and never widen it. A control the
   // entry does not name is not stated (DescriptorPolicy::control_value_admitted).
   std::vector<std::pair<std::string, std::vector<std::string>>> control_values;
+  // A routing gateway's endpoints of the model (EndpointRow), sorted by tier, then tag, each tier and tag once. The set
+  // is whole: a refresh writes every endpoint the listing names or none of them, and a later layer's rows replace the
+  // earlier layer's rows all together (merge_catalogues). Empty: the entry states no endpoints.
+  std::vector<EndpointRow> endpoints;
 };
 
 enum class ModelRelation : std::uint8_t {
@@ -94,6 +125,10 @@ class ModelCatalogue final {
   ModelMatch find(std::string_view family, std::string_view origin, std::string_view model) const noexcept;
   // The exact or prefix entry with this id, or nullptr.
   const CatalogueEntry* entry(std::string_view id, bool prefix = false) const noexcept;
+  // The endpoint rows of the exact entry `model` for `tier` (empty: the model's own endpoints; `batch`: its batch
+  // variant's), sorted by tag. Empty when the catalogue has no such entry or the entry states no rows for the tier. A
+  // host that picks an endpoint before it sends (the cheapest, or one quantization) reads them here.
+  std::span<const EndpointRow> endpoints(std::string_view model, std::string_view tier = {}) const noexcept;
   // SHA-256 over the canonical JSON (to_json).
   std::string_view digest() const noexcept { return digest_; }
   std::string digest_hex() const;
@@ -281,5 +316,25 @@ using ListingResult = std::variant<ListingPage, ConfigError>;
 // The listing is provider data, so unknown members are ignored and a value the catalogue cannot
 // hold is left out; only a body that is not that listing at all is refused.
 ListingResult parse_listing(Listing listing, std::string_view body, std::string_view origin);
+
+// The endpoint rows one OpenRouter endpoints listing gives (GET /api/v1/models/{author}/{slug}/endpoints).
+struct EndpointsListing {
+  // Every listed endpoint, sorted by tag, with an empty tier. Empty when `refused` is set.
+  std::vector<EndpointRow> rows;
+  // Why the listing gives no rows, as fixed text: an endpoint without a tag the catalogue can hold, a tag listed twice,
+  // or more endpoints than an entry holds. Rows are a whole set, so a listing that cannot give one row gives none.
+  std::string refused;
+  // The rows whose discount is not a number from 0 to 1, by tag: each keeps its tag and loses its prices.
+  std::vector<std::string> discounts;
+  // The price members a row left out for a conditional price it cannot hold (as ListingPage::withheld), with the row's
+  // tag in `model`; an empty `unit` is every price of that row.
+  std::vector<WithheldUnit> withheld;
+};
+using EndpointsResult = std::variant<EndpointsListing, ConfigError>;
+// Reads the endpoints listing of `model`. The listing is provider data: a member a row cannot hold is left out of it
+// (a provider name, a count, a parameter), and the prices are read as a models listing's are. Only a body that is not
+// the endpoints listing of `model` is refused: not JSON, a `data.id` of another model, `endpoints` that is not an array,
+// or an endpoint that is not an object with a `pricing` object.
+EndpointsResult parse_endpoints_listing(std::string_view body, std::string_view model);
 
 } // namespace sp::descriptor
