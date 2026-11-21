@@ -81,7 +81,7 @@ struct CostEstimate {
   std::vector<std::string> assumptions;
   // Why there is no total: "model" (no priced entry), "tier" (an entry priced only outside the asked service
   // tier), "ceiling" (no route ceiling), a counter the call billed with no price or no count ("input", "output",
-  // "input_audio", "output_audio", "output_image", "cache_read_audio", "cache_read_image"), a unit with a row that applies at a variable price that the call
+  // "input_audio", "output_audio", "output_image", "input_image", "cache_read_audio", "cache_read_image"), a unit with a row that applies at a variable price that the call
   // billed ("cache_read", "cache_write", "cache_write_1h", "reasoning", "request", "ceiling_request", or one of
   // those), or a usage counter the estimate does not price ("toolUsePromptTokenCount").
   std::vector<std::string> unpriced;
