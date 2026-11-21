@@ -2452,6 +2452,28 @@ void worst_case_listed_members() {
   canonical.models = {"vendor/zz-image-out"};
   CHECK(!cost(canonical).total && has(cost(canonical), pricing::UnboundedBy::ModelPrice, "vendor/zz-image-out"));
   CHECK(prepared_ok(gateway, with_image).facts().image_input);
+  // A document or a video bills its pages and frames as image input, so it is image input too (#237); audio is not.
+  {
+    const auto data = std::make_shared<const std::string>("JVBERi0=");
+    const auto facts_with = [&](Media media) {
+      chat::Request request = chat_request("vendor/zz-image-out", 100);
+      request.messages.back().media.push_back(media);
+      Message user = Message::user_text("look");
+      user.parts.push_back(std::move(media));
+      chat::Request generic = chat_request("vendor/zz-image-out", 100);
+      generic.messages.clear();
+      generic.canonical_messages.push_back(user);
+      const auto descriptor = openrouter_chat();
+      const bool typed = runtime::detail::request_facts(descriptor, request).image_input;
+      CHECK(typed == runtime::detail::request_facts(descriptor, generic).image_input);
+      return typed;
+    };
+    CHECK(facts_with(Media::document("application/pdf", data, "a.pdf")));
+    CHECK(facts_with(Media::video("video/mp4", data)));
+    CHECK(facts_with(Media::image("image/png", data)));
+    CHECK(!facts_with(Media::audio("audio/wav", data)));
+    CHECK(!runtime::detail::request_facts(openrouter_chat(), chat_request("vendor/zz-image-out", 100)).image_input);
+  }
   // An override that is dearer than the base price for `image` (with a discount from 0 to 1, which the catalogue cannot
   // hold) leaves the price out of the entry; the entry keeps the member at no fixed amount, so an image input still has no
   // total. Without the override, and with an image of no price, it has one.

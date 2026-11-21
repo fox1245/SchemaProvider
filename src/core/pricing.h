@@ -76,7 +76,7 @@ struct CostEstimate {
   bool requested_entry = false;
   // Rules applied where the entry or the usage says less than the bill: "cache_read at input", "cache_write at
   // input", "cache_write_1h at cache_write", the dearer rates "cache_write at cache_write_1h", "output at
-  // output_image", "input at input_image" and "route ceiling", and "<unit> at zero" where the entry prices a unit at zero while the unit it
+  // output_image", "input at input_image", "cache_read at input_image", "cache_write at input_image" and "route ceiling", and "<unit> at zero" where the entry prices a unit at zero while the unit it
   // refines ("input" for cache and audio input, "output" for reasoning, image and audio output) has a price.
   std::vector<std::string> assumptions;
   // Why there is no total: "model" (no priced entry), "tier" (an entry priced only outside the asked service
@@ -133,7 +133,12 @@ struct CostEstimate {
 //   request that may have carried an image, its uncached input that is not audio bills at the dearer of `input` and
 //   `input_image` ("input at input_image"), and a variable `input_image` leaves no total ("input_image"). Without
 //   the request's facts (this overload) the request may have carried an image; the overload that takes the facts reads
-//   RequestFacts::image_input, so a text-only request bills at `input` (#237). The cache reads keep their rates.
+//   RequestFacts::image_input, so a text-only request bills at `input` (#237). The cache reads, the cache writes and a
+//   Messages compaction iteration's input tokens may be image tokens the same way: each bills at the dearer of its own
+//   rate and `input_image` ("cache_read at input_image", "cache_write at input_image", "input at input_image").
+//   A realtime turn of Google Live without a prompt breakdown states no image tokens: pass the facts with
+//   `image_input` set exactly when the response's stated image tokens (RealtimeInputTokens::image) are above zero, the
+//   fact the response bound reads.
 // - A zero rate for a unit whose base unit has a price is applied and named in `assumptions` ("<unit> at zero").
 // - `request` is charged once.
 // - A unit with a row that applies at a price that is not a fixed amount (price_of) prices none of the tokens it may
@@ -173,6 +178,9 @@ CostEstimate estimate(const descriptor::ModelCatalogue& catalogue, std::string_v
 // breakdown (`promptTokensDetails.IMAGE`), for `estimate` to bill at `input_image`. The breakdown's key is also a
 // Generate usage's, whose image tokens bill at the input rates, so the estimate does not read it for images.
 inline constexpr std::string_view realtime_image_tokens = "realtime.image_tokens";
+// The assumptions `estimate` names when tokens that may be the input's image tokens bill at `input_image` (#237): the
+// uncached input, the cache reads and the cache writes.
+inline constexpr std::string_view image_rate_assumptions[]{"input at input_image", "cache_read at input_image", "cache_write at input_image"};
 
 // A side of a call's tokens.
 enum class TokenSide : std::uint8_t { Input, Output };
@@ -217,13 +225,13 @@ struct Bound {
 // counters and are not bounded here. A price from `price_of` leaves out a unit with a row at a variable price, which
 // this overload cannot tell from a unit the entry does not list; a price from `dearest_price_of` with such a row has no
 // rate, so this overload has no total ("input", "output" for the sides with tokens, each tool fee). The overload that
-// takes the entry names the unit. At the route ceiling a missing ceiling is "ceiling". ModelPrice holds no rate for
-// the input's image tokens (`input_image`), so this overload does not read it and is below the bill of a request that
-// carries an image where the entry prices `input_image` above its other input rates: bound such a request with the
-// overload that takes the entry, or with worst_case.
+// takes the entry names the unit. At the route ceiling a missing ceiling is "ceiling". This overload bounds a request
+// without image input: ModelPrice holds no rate for the input's image tokens (`input_image`) and no per-image price,
+// so it reads neither. Bound a request with image input with the overload that takes the entry, or with worst_case.
 Bound upper_bound(const ModelPrice& price, const BoundRequest& request);
 // The bound with the entry's dearest prices over every input band the request may reach. The request may carry an
-// image, so the input rates include `input_image` (#237). A unit with a row in one of
+// image, so the input rates include `input_image`, and a per-image member (`image`) above zero or at no fixed amount
+// leaves no total, naming it (#237). A unit with a row in one of
 // them at a price that is not a fixed amount gives no total when the bound reads it: an input rate (`input`,
 // `cache_read`, `cache_write`, `cache_write_1h`, `input_audio`, `cache_read_audio`, `input_image`) when the request has input tokens, an output rate
 // (`output`, `reasoning`, `output_image`, `output_audio`) when it has output tokens, the request fee always, at the
@@ -311,8 +319,9 @@ struct WorstCase {
 // Per attempt it is the sum over the invocations of the input tokens at the dearest input rate and the output cap at
 // the dearest output rate, the request fee once, and the capped server tools' fees once:
 // - Image input: for a request that carries an image (RequestFacts::image_input), and for one whose facts are not
-//   given, the dearest input rate includes `input_image`, and a variable `input_image` is `ModelPrice` (#237). A
-//   text-only request's bound does not read it.
+//   given, the dearest input rate includes `input_image`, a variable `input_image` is `ModelPrice`, and an entry that
+//   lists `input_image` at the standard rates and not under the tier is `TierPrice` (#237). A text-only request's bound
+//   does not read it.
 // - Input: with one invocation, the measured input, else the catalogue's input limit, never above that limit. With
 //   several (server tools re-prompt the model with the tool results), the first invocation as above and each later
 //   one at the limit, which must then exist.
@@ -324,7 +333,8 @@ struct WorstCase {
 // - Prices beyond tokens: an entry that lists a member no unit reads (descriptor::listed_members: the item members
 //   `image` and `web_search`, or a member the table does not know) above zero, or at no fixed amount, has no total
 //   (`ModelPrice`, the member in the detail) for a request that carries what an item member prices
-//   (RequestFacts::image_input, RequestFacts::plugins), and for any request where the member is unknown.
+//   (RequestFacts::image_input, RequestFacts::plugins; a request whose facts are not given may carry an image), and for
+//   any request where the member is unknown.
 // - Gateway: at the route ceiling, the dearest over the candidates. A ceiling below a token price the entry lists on
 //   its side (ceiling_below_listed) is `RouteCeiling`.
 // - Variable prices: a unit with a row that applies at a price that is not a fixed amount (upper_bound with the entry)

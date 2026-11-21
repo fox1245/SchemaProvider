@@ -183,6 +183,7 @@ const auto priced = catalogue_of("{\"version\":1,\"models\":[" +
           {{"input", in_rate}, {"input_image", image_token_rate}, {"output", out_rate}, {"item:image", 0}, {"item:input_image", 0}}) + "," +
     entry("vendor/decider", limits(decider_input, decider_output), {{"input", in_rate}, {"output", small_out_rate}}) + "," +
     entry("vendor/decider-open", limits(decider_input), {{"input", in_rate}, {"output", small_out_rate}}) + "," +
+    entry("vendor/decider-vision", limits(decider_input, decider_output), {{"input", in_rate}, {"input_image", image_token_rate}, {"output", small_out_rate}}) + "," +
     entry("vendor/embed", limits(embed_input), {{"input", embed_rate}}) + "," +
     entry("vendor/ranker", limits(long_input), {{"input", in_rate}, {"item:document", document_rate}, {"item:search_unit", 0}}) + "," +
     entry("vendor/ranker-units", limits(long_input), {{"input", in_rate}, {"item:document", document_rate}, {"item:search_unit", search_unit_rate}}) + "," +
@@ -916,6 +917,22 @@ void estimates_per_result() {
   decided.usage = counted(120, 30);
   decided.model = ServedModel{"vendor/decider", "vendor/decider", ServedRelation::Exact};
   CHECK(nano(runtime::endpoint_estimate(decision_facts, decided, *priced)) == rounded(120 * in_rate + 30 * small_out_rate));
+  // A decision whose input holds an image part states the image tokens among its input (#237): the bound needs an
+  // `input_image` rate, and the estimate of a result that counts none bills the input at the dearer of the two rates.
+  CHECK(quantities_of(decision_facts) == "input<input output<output");
+  auto pictured = decision("vendor/decider-vision");
+  pictured.input = document(R"([{"type":"message","role":"user","content":[{"type":"input_text","text":"Is this a defect?"},)"
+                            R"({"type":"input_image","image_url":"https://example.com/a.png"}]}])");
+  const auto pictured_facts = ok(direct.prepare(pictured)).endpoint_facts();
+  CHECK(quantities_of(pictured_facts) == "input<input output<output input_image<input");
+  decided.model = ServedModel{"vendor/decider-vision", "vendor/decider-vision", ServedRelation::Exact};
+  e = runtime::endpoint_estimate(pictured_facts, decided, *priced);
+  CHECK(nano(e) == rounded(120 * image_token_rate + 30 * small_out_rate) && e.assumptions == std::vector<std::string>({"input at input_image"}));
+  const auto pictured_bound = bound_of(direct.prepare(pictured), measured(120));
+  CHECK(nano(pictured_bound) >= nano(e) && pricing::beyond_bound(pictured_bound, e).empty());
+  pictured.model = "vendor/decider";
+  CHECK(reasons_of(bound_of(direct.prepare(pictured), measured(120))) ==
+        "ModelPrice [input_image] catalogue entry 'vendor/decider' lists no rate for the input's image tokens; ");
   const auto embed_facts = ok(direct.prepare(embeddings::Request{"vendor/embed", {{"a"}, {"b"}, {"c"}}})).endpoint_facts();
   embeddings::Result embedded;
   embedded.usage = counted(40, std::nullopt);
@@ -1329,6 +1346,15 @@ void batch_estimates() {
   EXPECT(estimated(e), "no total | unpriced o-9:custom_id | entry '' requested 0 lower 0 lines");
   EXPECT(estimated(runtime::batch_estimate(file_facts, openai_chat(), std::vector<batches::Item>{}, {}, *batch_priced)),
          "no total | unpriced items | entry '' requested 0 lower 0 lines");
+  // Without the items a line does not state whether its request carried an image: where the entry prices image tokens
+  // above `input` it has no estimate (#237). With the items, a text-only request bills at `input`.
+  const auto vision = catalogue_of("{\"version\":1,\"models\":[" +
+      entry("vendor/vision", limits(batched_input, batched_output), {{"input/batch", batch_in}, {"output/batch", batch_out}, {"input_image/batch", 4 * batch_in}}) + "]}");
+  EXPECT(estimated(runtime::batch_estimate(file_facts, openai_chat(), {answered("o-1", "vendor/vision", request_usage(120, 7))}, *vision)),
+         "no total | unpriced o-1:input_image | entry '' requested 0 lower 0 lines");
+  const std::vector<batches::Item> vision_items{{"o-1", chat::Request::simple("vendor/vision", "Say: alpha", 16)}};
+  e = runtime::batch_estimate(file_facts, openai_chat(), vision_items, {answered("o-1", "vendor/vision", request_usage(120, 7))}, *vision);
+  EXPECT(e.total ? std::to_string(e.total->nano_usd) : "none", std::to_string(rounded(120 * batch_in + 7 * batch_out)));
   report_mismatches("batch_estimates");
   std::cout << "case passed: the estimate of a batch from its lines\n";
 }

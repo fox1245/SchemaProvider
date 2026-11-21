@@ -384,12 +384,32 @@ UsageSum usage_sum(const Selection& selection, const Usage& usage, const UsageRu
         std::any_of(realtime_input_counters.begin(), realtime_input_counters.end(),
                     [&](std::string_view counter) { return usage.extra.contains(std::string(counter)); });
     // Without that statement (a Chat or Responses usage), a request that may have carried an image may have billed any
-    // of its uncached input that is not audio at `input_image` (#237): at the dearer of `input` and `input_image`, the
-    // rule named; a variable `input_image` prices none of it.
-    if (rules.image_input && !images_stated && uncached && *uncached > audio_in) {
-      if (selection.is_variable(input_image_unit)) { out.unpriced.emplace_back(input_image_unit); complete = false; }
-      else if (price.input && selection.input_image && *selection.input_image > *price.input) {
-        assume("input at input_image");
+    // of its input tokens that are not audio at `input_image` (#237): the uncached input, the cache reads and writes
+    // and a compaction iteration's input, each at the dearer of its own rate and `input_image`, the rule named
+    // (image_rate_assumptions); a variable `input_image` prices none of them.
+    const bool maybe_images = rules.image_input && !images_stated;
+    const bool variable_image = maybe_images && selection.is_variable(input_image_unit);
+    const auto image_rate = maybe_images && !variable_image ? selection.input_image : std::nullopt;
+    const auto image_unknown = [&] {
+      if (std::find(out.unpriced.begin(), out.unpriced.end(), input_image_unit) == out.unpriced.end()) out.unpriced.emplace_back(input_image_unit);
+      complete = false;
+    };
+    // Tokens that bill at `rate` (as `charge`), or at `input_image` when they may be image tokens and that is dearer.
+    const auto maybe_image = [&](std::string_view unit, std::uint64_t units, const std::optional<std::uint64_t>& rate, std::string_view name,
+                                 const std::optional<std::uint64_t>& base, std::string_view rule) {
+      if (!units) return;
+      if (variable_image) image_unknown();
+      if (image_rate && rate && *image_rate > *rate) {
+        assume(rule);
+        charge(input_image_unit, units, image_rate, input_image_unit, base);
+        return;
+      }
+      charge(unit, units, rate, name, base);
+    };
+    if (maybe_images && uncached && *uncached > audio_in) {
+      if (variable_image) image_unknown();
+      else if (price.input && image_rate && *image_rate > *price.input) {
+        assume(image_rate_assumptions[0]);
         image_in = *uncached - audio_in;
       }
     }
@@ -415,15 +435,16 @@ UsageSum usage_sum(const Selection& selection, const Usage& usage, const UsageRu
     const bool audio_cache_listed = price.cache_read_audio || selection.is_variable(cached_audio_unit);
     const auto maybe_audio = !cached_split && audio_cache_listed ? (std::min)(cache_read, audio_count) : std::uint64_t{0};
     const auto read_rate = fallback("cache_read", price.cache_read, price.input, "cache_read at input", cached_text);
+    const auto read_image = image_rate_assumptions[1];
     if (maybe_audio && !price.cache_read_audio) {
-      charge(read_rate.unit, cached_text - maybe_audio, read_rate.value, "cache_read", price.input);
+      maybe_image(read_rate.unit, cached_text - maybe_audio, read_rate.value, "cache_read", price.input, read_image);
       charge(cached_audio_unit, maybe_audio, std::nullopt, cached_audio_unit);
     } else if (maybe_audio && read_rate.value && *price.cache_read_audio > *read_rate.value) {
-      charge(read_rate.unit, cached_text - maybe_audio, read_rate.value, "cache_read", price.input);
+      maybe_image(read_rate.unit, cached_text - maybe_audio, read_rate.value, "cache_read", price.input, read_image);
       assume("cache_read at cache_read_audio");
-      charge(cached_audio_unit, maybe_audio, price.cache_read_audio, cached_audio_unit, price.input_audio);
+      maybe_image(cached_audio_unit, maybe_audio, price.cache_read_audio, cached_audio_unit, price.input_audio, read_image);
     } else {
-      charge(read_rate.unit, cached_text, read_rate.value, "cache_read", price.input);
+      maybe_image(read_rate.unit, cached_text, read_rate.value, "cache_read", price.input, read_image);
     }
     if (!cached_audio_contradicts) charge(cached_audio_unit, cached_audio_in, price.cache_read_audio, cached_audio_unit, price.input_audio);
     // Messages splits cache writes into 5-minute and 1-hour writes; without the split, all of them bill at the
@@ -441,14 +462,14 @@ UsageSum usage_sum(const Selection& selection, const Usage& usage, const UsageRu
       if (variable_hour) { out.unpriced.emplace_back("cache_write_1h"); complete = false; }
     } else if (price.cache_write_1h && cache_write && five != usage.extra.end() && hour != usage.extra.end() &&
         five->second.value <= cache_write && hour->second.value == cache_write - five->second.value) {
-      charge(write.unit, five->second.value, write.value, "cache_write", price.input);
-      charge("cache_write_1h", hour->second.value, price.cache_write_1h, "cache_write_1h", write.value);
+      maybe_image(write.unit, five->second.value, write.value, "cache_write", price.input, image_rate_assumptions[2]);
+      maybe_image("cache_write_1h", hour->second.value, price.cache_write_1h, "cache_write_1h", write.value, image_rate_assumptions[2]);
     } else if (price.cache_write_1h && cache_write && (!write.value || *price.cache_write_1h > *write.value)) {
       assume("cache_write at cache_write_1h");
-      charge("cache_write_1h", cache_write, price.cache_write_1h, "cache_write_1h", write.value);
+      maybe_image("cache_write_1h", cache_write, price.cache_write_1h, "cache_write_1h", write.value, image_rate_assumptions[2]);
     } else {
       if (hour != usage.extra.end() && hour->second.value && !price.cache_write_1h) assume("cache_write_1h at cache_write");
-      charge(write.unit, cache_write, write.value, "cache_write", price.input);
+      maybe_image(write.unit, cache_write, write.value, "cache_write", price.input, image_rate_assumptions[2]);
     }
     if (!usage.output_total) { if (rules.output) { out.unpriced.emplace_back("output"); complete = false; } }
     else {
@@ -500,11 +521,12 @@ UsageSum usage_sum(const Selection& selection, const Usage& usage, const UsageRu
         if (std::find(out.unpriced.begin(), out.unpriced.end(), unit) == out.unpriced.end()) out.unpriced.emplace_back(unit);
         complete = false;
       };
-      charge("input", extra("compaction.input_tokens"), price.input, "input");
+      // The iteration's input states no image tokens either: the rule above applies to it.
+      maybe_image("input", extra("compaction.input_tokens"), price.input, "input", std::nullopt, image_rate_assumptions[0]);
       const auto compaction_read = fallback("cache_read", price.cache_read, price.input, "cache_read at input", read);
-      charge(compaction_read.unit, read, compaction_read.value, "cache_read", price.input);
+      maybe_image(compaction_read.unit, read, compaction_read.value, "cache_read", price.input, image_rate_assumptions[1]);
       const auto compaction_write = fallback("cache_write", price.cache_write, price.input, "cache_write at input", written);
-      charge(compaction_write.unit, written, compaction_write.value, "cache_write", price.input);
+      maybe_image(compaction_write.unit, written, compaction_write.value, "cache_write", price.input, image_rate_assumptions[2]);
       variable("cache_write_1h", written);
       charge("output", compacted_output, price.output, "output");
       variable("output_image", compacted_output);
@@ -557,7 +579,7 @@ CostEstimate estimate_usage(const descriptor::ModelCatalogue& catalogue, std::st
   }
   // Under a tier, a unit the entry prices at the standard rates and not in the tier would be billed at another unit's
   // rate, which is not the tier's price for it.
-  if (!detail::unit_outside_tier(*entry, service_tier).empty()) {
+  if (!detail::unit_outside_tier(*entry, service_tier, images).empty()) {
     out.unpriced.push_back("tier");
     return out;
   }
@@ -679,9 +701,12 @@ Bound upper_bound(const descriptor::CatalogueEntry& entry, std::string_view serv
   drop_stale_ceilings(selected.price, entry, service_tier, request.input_tokens);
   // Without request facts the request may carry an image.
   auto out = bounded(selected.price, selected.variable, request, selected.input_image, true);
-  // A listed member that no unit reads and the table does not know, above zero, is priced at no amount the bound can read.
+  // A listed member that no unit reads and the table does not know, above zero, is priced at no amount the bound can
+  // read; so is a per-image member (`image`), since the request may carry an image.
+  RequestFacts carried;
+  carried.image_input = true;
   if (out.total)
-    if (const auto unknown = unread_members_carried(entry, nullptr); !unknown.empty()) {
+    if (const auto unknown = unread_members_carried(entry, &carried); !unknown.empty()) {
       out.total.reset();
       for (const auto member : unknown) out.unpriced.emplace_back(member);
     }
@@ -804,8 +829,11 @@ WorstCase worst_case(const WorstCaseInput& in, const descriptor::ModelCatalogue&
     // The rate of the input's image tokens (Selection::input_image).
     std::optional<std::uint64_t> input_image;
   };
-  // A request whose facts are not given may carry an image.
+  // A request whose facts are not given may carry an image: the bound reads `input_image` and refuses a per-image
+  // member (`image`) for it as for one that carries an image.
   const bool images = !in.facts || in.facts->image_input;
+  RequestFacts carried = facts;
+  carried.image_input = images;
   std::vector<Candidate> candidates;
   std::vector<std::string> models{std::string(in.model)};
   for (const auto& model : facts.fallback_models)
@@ -842,13 +870,13 @@ WorstCase worst_case(const WorstCaseInput& in, const descriptor::ModelCatalogue&
     }
     // Under a tier, a unit the entry prices at the standard rates and not in the tier would be bounded at another unit's
     // rate, which is not the tier's price for it.
-    if (const auto outside = detail::unit_outside_tier(*entry, tier); !outside.empty()) {
+    if (const auto outside = detail::unit_outside_tier(*entry, tier, images); !outside.empty()) {
       block(UnboundedBy::TierPrice, model,
             "the entry prices " + std::string(outside) + " at the standard rates but not under service tier '" + std::string(tier) + "'");
       continue;
     }
     // A price beyond tokens that no unit reads, for something the request carries: the bound would be a total below the bill.
-    if (const auto unread = unread_members_carried(*entry, &facts); !unread.empty()) {
+    if (const auto unread = unread_members_carried(*entry, &carried); !unread.empty()) {
       for (const auto member : unread)
         block(UnboundedBy::ModelPrice, model,
               "catalogue entry '" + entry->id + "' lists a price for '" + std::string(member) + "' that no bound reads, and the request carries what it prices");

@@ -426,7 +426,7 @@ const std::vector<Pin> pins{
     {"bound flat priority zero", "0 Derived CeilingCatalogueProduct unpriced=[]"},
     {"bound input only", "none unpriced=[output]"},
     {"bound input only no output", "200000 Derived CeilingCatalogueProduct unpriced=[]"},
-    {"bound listed", "41300000 Derived CeilingCatalogueProduct unpriced=[]"},
+    {"bound listed", "none unpriced=[image]"},
     {"bound zero rates", "1020000 Derived CeilingCatalogueProduct unpriced=[]"},
     {"bound half", "2 Derived CeilingCatalogueProduct unpriced=[]"},
     {"bound half sum", "1 Derived CeilingCatalogueProduct unpriced=[]"},

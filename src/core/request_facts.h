@@ -44,7 +44,9 @@ struct RequestFacts {
   std::vector<ToolCap> tools;
   // The request takes an image as input: a message part, a tool result's part, or input the service holds for a
   // continuation (a Responses `previous_response_id`, an Interactions `previous_interaction_id`), whose images are not
-  // visible here. An entry that prices an image beyond its tokens (`image` in a models listing) has no bound for it.
+  // visible here. A document or a video part counts too, since providers bill its pages and frames as image input. An
+  // entry that prices an image beyond its tokens (`image` in a models listing) has no bound for it, and the bound and
+  // the estimate read `input_image` for it (#237).
   bool image_input = false;
   // The extension members the request sends whose value changes the price, in the request's order. A value the policy
   // prices at the standard rates is left out.

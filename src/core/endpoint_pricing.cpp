@@ -301,7 +301,7 @@ EndpointBound carried_worst_case(const EndpointWorstCaseInput& in, const descrip
     for (const auto& fallback : request.facts.fallback_models) models.push_back(fallback);
     for (const auto model : models)
       if (const auto* found = catalogue.find(facts.family, facts.origin, model).entry; found && outside.empty())
-        outside = std::string(detail::unit_outside_tier(*found, facts.carried_tier));
+        outside = std::string(detail::unit_outside_tier(*found, facts.carried_tier, request.facts.image_input));
     if (!outside.empty()) {
       block(UnboundedBy::TierPrice, carried_subject(id, request.model),
             "the entry prices " + outside + " at the standard rates but not under service tier '" + facts.carried_tier + "'");
