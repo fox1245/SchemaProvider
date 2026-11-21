@@ -1,5 +1,6 @@
 #include "descriptor/catalogue.h"
 #include "crypto/crypto.h"
+#include "descriptor/endpoints_listing.h"
 #include "descriptor/policy.h"
 #include "json/json.h"
 #include "sp/config_defaults.h"
@@ -741,8 +742,15 @@ void merge_entry(CatalogueEntry& into, const CatalogueEntry& from) {
     else into.control_values.emplace_back(control, values);
   }
   std::sort(into.control_values.begin(), into.control_values.end());
-  // Endpoint rows are one set: a later layer's replace every earlier row, so no set mixes rows of two listings.
-  if (!from.endpoints.empty()) into.endpoints = from.endpoints;
+  // Endpoint rows are one set per tier: a later layer's rows of a tier replace every earlier row of that tier, so no
+  // tier mixes rows of two listings, and the other tiers stay.
+  if (!from.endpoints.empty()) {
+    std::erase_if(into.endpoints, [&](const EndpointRow& row) {
+      return std::any_of(from.endpoints.begin(), from.endpoints.end(), [&](const EndpointRow& later) { return later.tier == row.tier; });
+    });
+    into.endpoints.insert(into.endpoints.end(), from.endpoints.begin(), from.endpoints.end());
+    std::sort(into.endpoints.begin(), into.endpoints.end(), row_less);
+  }
 }
 } // namespace
 
@@ -1405,10 +1413,13 @@ ListingResult parse_listing(Listing listing, std::string_view body, std::string_
 }
 
 EndpointsResult parse_endpoints_listing(std::string_view body, std::string_view model) {
+  auto parsed = json::parse(body, {32u * 1024u * 1024u, 64});
+  if (std::holds_alternative<json::ParseError>(parsed)) return ConfigError{"", "a JSON endpoints listing", 0, "model catalogue value rejected"};
+  return endpoint_prices::read_endpoints_listing(std::get<json::Document>(parsed).root(), model);
+}
+
+EndpointsResult endpoint_prices::read_endpoints_listing(json::Value root, std::string_view model) {
   try {
-    auto parsed = json::parse(body, {32u * 1024u * 1024u, 64});
-    if (std::holds_alternative<json::ParseError>(parsed)) fail("", "a JSON endpoints listing");
-    const auto root = std::get<json::Document>(parsed).root();
     const auto data = root.get("data");
     const auto endpoints = data.get("endpoints");
     if (!root.is_object() || !data.is_object()) fail("/data", "an endpoints listing object");
@@ -1458,15 +1469,32 @@ EndpointsResult parse_endpoints_listing(std::string_view body, std::string_view 
       prices_of.id = row.tag;
       ListingPage scratch;
       read_pricing(pricing, prices_of, scratch);
-      row.pricing = std::move(prices_of.pricing);
       for (auto& unit : scratch.withheld) out.withheld.push_back(std::move(unit));
-      // The prices every endpoint lists, as the route ceiling requires them: one left out or not readable is named.
-      for (const std::string_view required : {"prompt", "completion"}) {
-        const auto value = pricing.get(required);
-        if (!present(value)) out.price_gaps.push_back({row.tag, std::string(required), "price missing at an endpoint"});
-        else if (!value.is_string() || !decimal(value.as_string()))
-          out.price_gaps.push_back({row.tag, std::string(required), "price at an endpoint is not decimal text"});
+      // The members the route ceiling reads (endpoint_prices::members), named where they cannot be a price of the row:
+      // missing where every endpoint lists them, not decimal text, variable (negative) or too large. A variable or too
+      // large one is left out of the row with the units its tokens would be billed at instead, as a models listing's
+      // member is (leave_out), so no bound or estimate of the row reads a rate below the bill.
+      std::vector<std::string_view> named;
+      for (const auto& member : endpoint_prices::members) {
+        if (std::find(named.begin(), named.end(), member.name) != named.end()) continue;
+        named.push_back(member.name);
+        const auto value = pricing.get(member.name);
+        const auto gap = [&](std::string_view why) { out.price_gaps.push_back({row.tag, std::string(member.name), std::string(why)}); };
+        if (!present(value)) {
+          if (member.required) gap("price missing at an endpoint");
+          continue;
+        }
+        if (!value.is_string() || !decimal(value.as_string())) {
+          gap("price at an endpoint is not decimal text");
+          continue;
+        }
+        const bool variable = value.as_string().front() == '-';
+        if (!variable && price_per_million(value.as_string())) continue;
+        gap(variable ? "variable price at an endpoint" : "price at an endpoint is too large for the catalogue");
+        std::vector<WithheldUnit> left_out;
+        leave_out(prices_of, member.name, left_out);
       }
+      row.pricing = std::move(prices_of.pricing);
     }
     std::sort(out.rows.begin(), out.rows.end(), row_less);
     for (std::size_t j = 1; j < out.rows.size(); ++j)

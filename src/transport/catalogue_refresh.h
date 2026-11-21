@@ -52,7 +52,9 @@ struct CeilingGap {
 // Endpoint rows (descriptor::CatalogueEntry::endpoints) of a model asked for in `ceiling_models` that the refresh did not
 // write, for the whole model or for one endpoint's prices, and why.
 struct EndpointGap {
-  std::string model;  // the id as asked for
+  // The id as asked for. Empty for the gap that says every row of the source was dropped because the catalogue could
+  // not hold the refresh's rows (refresh_catalogue then drops every row of every source and tries once more).
+  std::string model;
   // The endpoint's tag; empty when the gap is the whole model, which then has no rows.
   std::string tag;
   // "discount", or a price member the row left out ("prompt"); empty for every price of the row or for the whole model.
@@ -108,7 +110,9 @@ struct SourceReport {
   std::vector<CeilingGap> ceiling_gaps;
   // Endpoint rows from the same endpoints requests: the models whose rows were written, and every model asked for whose
   // rows were not, or whose row left out a price, by model id, then tag, in order; then each listing variant whose rows
-  // its base entry could not hold under the variant's tier.
+  // its base entry could not hold under the variant's tier, and the gap with no model when every row was dropped. A
+  // source that fails has no rows written and one gap per model, "listing failed", as its ceilings do. The rows one
+  // refresh reads are at most `max_endpoint_rows` of config/catalogue-refresh.json: a model past it has no rows and a gap.
   std::size_t endpoint_rows = 0;
   std::vector<EndpointGap> endpoint_gaps;
 };

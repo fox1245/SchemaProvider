@@ -162,12 +162,15 @@ def main():
     number(archive_custody['max_epochs'], 'max_epochs')
     if not archive_custody['max_epochs']:
         raise ValueError('archive custody max_epochs rejected')
-    closed(catalogue_refresh, {'version', 'max_ceiling_models'})
+    closed(catalogue_refresh, {'version', 'max_ceiling_models', 'max_endpoint_rows'})
     if type(catalogue_refresh['version']) is not int or catalogue_refresh['version'] != 1:
         raise ValueError('catalogue refresh version rejected')
     number(catalogue_refresh['max_ceiling_models'], 'max_ceiling_models')
     if not catalogue_refresh['max_ceiling_models']:
         raise ValueError('catalogue refresh max_ceiling_models rejected')
+    number(catalogue_refresh['max_endpoint_rows'], 'max_endpoint_rows')
+    if not catalogue_refresh['max_endpoint_rows']:
+        raise ValueError('catalogue refresh max_endpoint_rows rejected')
     lines = ['#pragma once', '#include <cstdint>', '#include <string_view>', 'namespace sp::config_defaults {']
     for prefix, values in [('defaults', runtime['defaults']), ('admission', runtime['admission'])]:
         for key, value in sorted(values.items()):
@@ -180,6 +183,8 @@ def main():
     lines.append(f"inline constexpr std::uint64_t archive_custody_max_epochs = {archive_custody['max_epochs']}ULL;")
     lines.append('inline constexpr std::uint64_t catalogue_refresh_max_ceiling_models = '
                  f"{catalogue_refresh['max_ceiling_models']}ULL;")
+    lines.append('inline constexpr std::uint64_t catalogue_refresh_max_endpoint_rows = '
+                 f"{catalogue_refresh['max_endpoint_rows']}ULL;")
     assets = {'runtime_defaults_json': runtime, 'error_policy_json': errors,
               'descriptor_policy_json': descriptor_policy, 'codec_defaults_json': codec_defaults,
               'archive_custody_json': archive_custody, 'catalogue_refresh_json': catalogue_refresh}
@@ -194,7 +199,7 @@ def main():
     reserved = {prefix + '_' + key for prefix, values in [('defaults', runtime['defaults']),
                 ('admission', runtime['admission'])] for key in values} | keywords
     reserved |= {f'codec_{group}_{key}' for group in ('resources', 'admission') for key in RESOURCES}
-    reserved |= {'archive_custody_max_epochs', 'catalogue_refresh_max_ceiling_models'}
+    reserved |= {'archive_custody_max_epochs', 'catalogue_refresh_max_ceiling_models', 'catalogue_refresh_max_endpoint_rows'}
     for name, path in args.asset:
         if not name or not name.isascii() or not name.isidentifier() or name.startswith('_') or name in assets or name in reserved:
             raise ValueError('configuration asset symbol rejected')

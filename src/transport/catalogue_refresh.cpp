@@ -1,5 +1,6 @@
 #include "transport/catalogue_refresh.h"
 #include "core/pricing.h"
+#include "descriptor/endpoints_listing.h"
 #include "json/json.h"
 #include "sp/config_defaults.h"
 #include <algorithm>
@@ -205,7 +206,8 @@ std::string endpoints_url(std::string base, std::string_view id) {
   return base + "/api/v1/models/" + std::string(id) + "/endpoints";
 }
 
-enum Side : std::size_t { Input, Output, Request };
+using Side = descriptor::endpoint_prices::Side;
+using enum descriptor::endpoint_prices::Side;
 constexpr const auto& ceiling_units = descriptor::route_ceiling_units;
 bool ceiling_unit(std::string_view unit) noexcept {
   return std::find(std::begin(ceiling_units), std::end(ceiling_units), unit) != std::end(ceiling_units);
@@ -225,17 +227,8 @@ bool ceiling_unit(std::string_view unit) noexcept {
 // (descriptor::listed_members names them for the bound). The prices the models listing gives for the model on a side
 // count too, its input bands included, so a ceiling is never below a price the same refresh lists; a side with a listed price the entry leaves out for an
 // override it cannot hold (descriptor::ListingPage::withheld) has no known floor and gets no ceiling.
-struct PriceMember {
-  std::string_view name;
-  Side side;
-  bool required;
-};
-constexpr PriceMember price_members[]{
-    {"prompt", Input, true},          {"input_cache_read", Input, false},   {"input_cache_write", Input, false},
-    {"input_cache_write_1h", Input, false}, {"audio", Input, false},      {"input_audio_cache", Input, false},
-    {"image_token", Input, false},     {"completion", Output, true},          {"internal_reasoning", Output, false},
-    {"audio_output", Output, false},   {"image_output", Output, false},       {"image_token", Output, false},
-    {"request", Request, false}};
+using PriceMember = descriptor::endpoint_prices::Member;
+constexpr const auto& price_members = descriptor::endpoint_prices::members;
 
 // Why a price cannot bound a ceiling: one of an endpoint, or one the models listing gives.
 enum class Unusable : std::uint8_t { Missing, Variable, NotDecimal, TooLarge, ListedVariable, ListedTooLarge, ListedLeftOut };
@@ -266,11 +259,10 @@ struct EndpointsRead {
   // price by (1 - discount), so only such a discount keeps the listed prices an upper bound.
   bool discount = false;
 };
-EndpointsRead read_endpoints(std::string_view body, std::string_view id) {
+// `document` is the parsed body, or nullptr for a body that is not JSON.
+EndpointsRead read_endpoints(const json::Document* document, std::string_view id) {
   using Shape = EndpointsRead::Shape;
   EndpointsRead out;
-  const auto parsed = json::parse(body, {max_page_bytes, 64});
-  const auto* document = std::get_if<json::Document>(&parsed);
   if (!document) { out.shape = Shape::NotListing; return out; }
   const auto root = document->root();
   const auto data = root.get("data");
@@ -372,7 +364,7 @@ using RowsRead = std::map<std::string, descriptor::EndpointsResult>;
 // model, and reports every model and unit it could not write. The endpoint rows each listing read gives go to `rows`.
 void read_ceilings(Transport& transport, const RefreshRequest& request, const descriptor::DescriptorPolicy& policy, const Planned& plan,
                    std::chrono::steady_clock::time_point deadline, std::vector<CatalogueEntry>& entries, SourceReport& report,
-                   RowsRead& rows) {
+                   RowsRead& rows, std::size_t& rows_held) {
   for (const auto& id : plan.ceilings) {
     const auto gap = [&](std::string_view unit, std::string_view price, std::string reason, bool kept = false) {
       report.ceiling_gaps.push_back({id, std::string(unit), std::string(price), std::move(reason), kept});
@@ -425,13 +417,28 @@ void read_ceilings(Transport& transport, const RefreshRequest& request, const de
     }
     if (page.status != 200) { keep_previous("endpoints answered HTTP " + std::to_string(page.status)); continue; }
     if (page.too_large) { gap({}, {}, "endpoints listing exceeds 32 MiB"); continue; }
-    auto read = read_endpoints(page.body, id);
+    // The body is parsed once, for the ceiling and for the rows, and is not kept.
+    const auto parsed = json::parse(page.body, {max_page_bytes, 64});
+    std::string().swap(page.body);
+    const auto* document = std::get_if<json::Document>(&parsed);
+    auto read = read_endpoints(document, id);
     if (read.shape == EndpointsRead::Shape::NotListing || read.shape == EndpointsRead::Shape::OtherModel) {
       rows.insert_or_assign(id, ConfigError{{}, "the endpoints listing of the model", 0, {}});
       gap({}, {}, read.shape == EndpointsRead::Shape::NotListing ? "not an endpoints listing" : "endpoints listing names another model");
       continue;
     }
-    rows.insert_or_assign(id, descriptor::parse_endpoints_listing(page.body, id));
+    // The rows one refresh holds are bounded (`max_endpoint_rows` of config/catalogue-refresh.json): a listing past the
+    // bound gives no row and is not read for rows. The ceiling is read either way.
+    const auto listed_endpoints = document->root().get("data").get("endpoints").size();
+    if (rows_held + listed_endpoints > config_defaults::catalogue_refresh_max_endpoint_rows) {
+      descriptor::EndpointsListing over;
+      over.refused = "more endpoint rows than config/catalogue-refresh.json allows in one refresh";
+      rows.insert_or_assign(id, std::move(over));
+    } else {
+      auto listed = descriptor::endpoint_prices::read_endpoints_listing(document->root(), id);
+      if (const auto* held = std::get_if<descriptor::EndpointsListing>(&listed)) rows_held += held->rows.size();
+      rows.insert_or_assign(id, std::move(listed));
+    }
     if (read.shape == EndpointsRead::Shape::Empty) { gap({}, {}, "no endpoints"); continue; }
     // The prices the models listing gives for the model bound each token side from below, as the endpoints do, its
     // input bands included. A listed price the entry left out is a price of no known amount.
@@ -478,7 +485,7 @@ void read_ceilings(Transport& transport, const RefreshRequest& request, const de
 // refresh (RowsRead), and reports every model whose rows it did not write and every row that left out a price. Rows are
 // a whole set: a model whose listing could not give one row gets none. A model whose endpoints request failed gets none
 // either, whatever ceiling it keeps: a listed entry carries no row of an earlier refresh.
-void write_rows(const Planned& plan, const RowsRead& rows, std::vector<CatalogueEntry>& entries, SourceReport& report) {
+void write_rows(const Planned& plan, RowsRead& rows, std::vector<CatalogueEntry>& entries, SourceReport& report) {
   for (const auto& id : plan.ceilings) {
     const auto gap = [&](std::string tag, std::string price, std::string reason) {
       report.endpoint_gaps.push_back({id, std::move(tag), std::move(price), std::move(reason)});
@@ -488,14 +495,12 @@ void write_rows(const Planned& plan, const RowsRead& rows, std::vector<Catalogue
     const auto read = rows.find(id);
     if (read == rows.end()) { gap({}, {}, "no endpoints listing read in this refresh"); continue; }
     if (std::holds_alternative<ConfigError>(read->second)) { gap({}, {}, "not the endpoints listing of the model"); continue; }
-    const auto& listed = std::get<descriptor::EndpointsListing>(read->second);
+    auto& listed = std::get<descriptor::EndpointsListing>(read->second);
     if (!listed.refused.empty()) { gap({}, {}, listed.refused); continue; }
     if (listed.rows.empty()) { gap({}, {}, "no endpoints"); continue; }
-    auto candidate = *found;
-    candidate.endpoints = listed.rows;
-    std::vector<CatalogueEntry> alone{candidate};
-    if (std::holds_alternative<ConfigError>(descriptor::make_catalogue(std::move(alone)))) { gap({}, {}, "the entry cannot hold the endpoint rows"); continue; }
-    found->endpoints = std::move(candidate.endpoints);
+    // The listing reader gives only rows an entry holds (each tag once, at most an entry's rows, every member checked), and
+    // the source's catalogue is built from the entries next, which checks them again.
+    found->endpoints = std::move(listed.rows);
     ++report.endpoint_rows;
     // By tag: a discount that may raise the row's prices, a price every endpoint lists missing or unreadable, then the
     // members a row left out.
@@ -622,7 +627,40 @@ std::variant<RefreshResult, ConfigError> refresh_catalogue(Transport& transport,
     const auto deadline = after(std::chrono::steady_clock::now(), request.total_timeout);
     std::vector<CatalogueSnapshot> fresh;
     Refreshed refreshed;
-    out.generated = generated_from(request.previous, refreshed, fresh);
+    // Endpoint rows never cost the refresh an entry or a ceiling: when the catalogue cannot hold the rows (a source's
+    // listing with them, the sources together, or the overlays over them), every row of the refresh is dropped, from the
+    // listings taken and from the previous entries kept, and the step is tried once more; only then does it fail as it
+    // would without rows. Each source whose rows are dropped says so in one gap. `rows_held` counts the rows read, which
+    // config/catalogue-refresh.json bounds.
+    bool rows_dropped = false;
+    std::size_t rows_held = 0;
+    CatalogueSnapshot previous_layer = request.previous;
+    const auto holds_rows = [](const CatalogueSnapshot& c) {
+      return c && std::any_of(c->entries().begin(), c->entries().end(), [](const CatalogueEntry& e) { return !e.endpoints.empty(); });
+    };
+    const auto strip = [](std::vector<CatalogueEntry>& entries) {
+      for (auto& entry : entries) std::vector<descriptor::EndpointRow>().swap(entry.endpoints);
+    };
+    const auto without_rows = [&](const CatalogueSnapshot& c) -> CatalogueSnapshot {
+      if (!holds_rows(c)) return c;
+      auto entries = c->entries();
+      strip(entries);
+      return catalogue_of(std::move(entries));
+    };
+    const auto dropped = [](SourceReport& r) {
+      r.endpoint_rows = 0;
+      r.endpoint_gaps.push_back({{}, {}, {}, "endpoint rows dropped: the catalogue cannot hold them"});
+    };
+    const auto drop_all_rows = [&](SourceReport& current) {
+      rows_dropped = true;
+      for (auto& layer : fresh) layer = without_rows(layer);
+      previous_layer = without_rows(previous_layer);
+      for (auto& earlier : out.sources)
+        if (earlier.endpoint_rows) dropped(earlier);
+      if (current.endpoint_rows) dropped(current);
+      out.generated = generated_from(previous_layer, refreshed, fresh);
+    };
+    out.generated = generated_from(previous_layer, refreshed, fresh);
     for (const auto& plan : planned) {
       const auto& [source, url, origin, ceilings] = plan;
       SourceReport report;
@@ -676,57 +714,46 @@ std::variant<RefreshResult, ConfigError> refresh_catalogue(Transport& transport,
                                               static_cast<std::uint64_t>(listed_before(request.previous, name, origin)) * request.min_kept_percent)
             report.error = "listing named far fewer models than before";
           else {
-            // The listing without its endpoint rows, and the models that have rows, in case the catalogue cannot hold
-            // the rows: alone or beside the other sources.
-            std::optional<CatalogueSnapshot> without_rows;
-            std::set<std::string> with_rows;
             if (!ceilings.empty() || !policy->listing_tier_variants(source.listing).empty()) {
               auto entries = listed->entries();
               RowsRead rows;
               if (!ceilings.empty()) {
-                read_ceilings(transport, request, *policy, plan, deadline, entries, report, rows);
+                read_ceilings(transport, request, *policy, plan, deadline, entries, report, rows, rows_held);
                 write_rows(plan, rows, entries, report);
               }
               // After the ceilings and the rows, so a variant's route ceiling and rows are written under its tier too.
               write_tier_variants(*policy, source.listing, entries, report);
-              for (const auto& entry : entries)
-                if (!entry.endpoints.empty()) with_rows.insert(entry.id);
-              if (!with_rows.empty()) {
-                auto bare = entries;
-                for (auto& entry : bare) entry.endpoints.clear();
-                without_rows = catalogue_of(std::move(bare));
+              const bool with_rows = std::any_of(entries.begin(), entries.end(), [](const CatalogueEntry& e) { return !e.endpoints.empty(); });
+              if (with_rows && rows_dropped) {
+                strip(entries);
+                dropped(report);
               }
-              try {
-                listed = catalogue_of(std::move(entries));
-              } catch (ConfigError&) {
-                if (!without_rows) throw;
-                listed = nullptr;
+              if (!with_rows || rows_dropped) listed = catalogue_of(std::move(entries));
+              else {
+                try {
+                  listed = catalogue_of(entries);
+                } catch (ConfigError&) {
+                  // The listing does not fit with its rows: the refresh drops every row and tries once more.
+                  strip(entries);
+                  drop_all_rows(report);
+                  listed = catalogue_of(std::move(entries));
+                }
               }
             }
             // The catalogue has to hold this listing next to the others; if it cannot, only this source fails. A listing
-            // that fits only without its endpoint rows is taken without them, and every model that had rows is named.
-            const auto drop_rows = [&] {
-              report.endpoint_rows = 0;
-              std::erase_if(report.endpoint_gaps, [&](const EndpointGap& gap) { return with_rows.count(gap.model) != 0; });
-              for (const auto& id : with_rows) report.endpoint_gaps.push_back({id, {}, {}, "the catalogue cannot hold the endpoint rows"});
-              std::stable_sort(report.endpoint_gaps.begin(), report.endpoint_gaps.end(),
-                               [](const EndpointGap& a, const EndpointGap& b) { return a.model < b.model; });
-            };
-            if (!listed) {
-              listed = *without_rows;
-              drop_rows();
-            }
+            // that fits only once the refresh holds no endpoint rows is taken without them.
             auto with_refreshed = refreshed;
             with_refreshed.emplace_back(name, origin);
             auto with_fresh = fresh;
-            with_fresh.push_back(std::move(listed));
+            with_fresh.push_back(listed);
             try {
-              out.generated = generated_from(request.previous, with_refreshed, with_fresh);
+              out.generated = generated_from(previous_layer, with_refreshed, with_fresh);
             } catch (ConfigError&) {
-              if (!without_rows || with_fresh.back() == *without_rows) throw;
-              with_fresh.back() = *without_rows;
-              out.generated = generated_from(request.previous, with_refreshed, with_fresh);
-              drop_rows();
+              if (rows_dropped || (std::none_of(with_fresh.begin(), with_fresh.end(), holds_rows) && !holds_rows(previous_layer))) throw;
+              drop_all_rows(report);
+              with_fresh = fresh;
+              with_fresh.push_back(without_rows(listed));
+              out.generated = generated_from(previous_layer, with_refreshed, with_fresh);
             }
             refreshed = std::move(with_refreshed);
             fresh = std::move(with_fresh);
@@ -734,12 +761,15 @@ std::variant<RefreshResult, ConfigError> refresh_catalogue(Transport& transport,
         } catch (ConfigError&) { report.error = "listing exceeds the catalogue limits"; }
         report.ok = report.error.empty();
       }
-      // A source that fails keeps its previous entries whole, ceilings included.
+      // A source that fails keeps its previous entries whole, ceilings and rows included.
       if (!report.ok && !ceilings.empty()) {
         report.ceilings = 0;
         report.ceiling_gaps.clear();
         for (const auto& id : ceilings)
           report.ceiling_gaps.push_back({id, {}, {}, "listing failed", !previous_ceiling(request.previous, id, origin).empty()});
+        report.endpoint_rows = 0;
+        report.endpoint_gaps.clear();
+        for (const auto& id : ceilings) report.endpoint_gaps.push_back({id, {}, {}, "listing failed"});
       }
       out.sources.push_back(std::move(report));
     }
@@ -747,6 +777,12 @@ std::variant<RefreshResult, ConfigError> refresh_catalogue(Transport& transport,
     std::vector<CatalogueSnapshot> overlays{out.generated};
     for (const auto& overlay : request.overlays) if (overlay) overlays.push_back(overlay);
     auto layered = descriptor::merge_catalogues(overlays);
+    if (std::holds_alternative<ConfigError>(layered) && !rows_dropped && (holds_rows(out.generated) || holds_rows(previous_layer))) {
+      SourceReport none;
+      drop_all_rows(none);
+      overlays.front() = out.generated;
+      layered = descriptor::merge_catalogues(overlays);
+    }
     if (auto* error = std::get_if<ConfigError>(&layered)) {
       error->pointer = "/overlays" + error->pointer;
       return std::move(*error);

@@ -55,6 +55,7 @@ struct EndpointRow {
   // long-context overrides (`prompt+128000`), and a listed member left out for a conditional price the catalogue
   // cannot hold kept at a variable price ("-1") where no unit reads it. Empty: the row states no price.
   std::vector<std::pair<std::string, std::string>> pricing;
+  bool operator==(const EndpointRow&) const = default;
 };
 
 // One model, or with `prefix` a profile for every id that starts with `id`. The list members
@@ -89,8 +90,9 @@ struct CatalogueEntry {
   // entry does not name is not stated (DescriptorPolicy::control_value_admitted).
   std::vector<std::pair<std::string, std::vector<std::string>>> control_values;
   // A routing gateway's endpoints of the model (EndpointRow), sorted by tier, then tag, each tier and tag once. The set
-  // is whole: a refresh writes every endpoint the listing names or none of them, and a later layer's rows replace the
-  // earlier layer's rows all together (merge_catalogues). Empty: the entry states no endpoints.
+  // is whole per tier: a refresh writes every endpoint the listing names or none of them, and a later layer's rows of a
+  // tier replace the earlier layer's rows of that tier all together (merge_catalogues). Empty: the entry states no
+  // endpoints.
   std::vector<EndpointRow> endpoints;
 };
 
@@ -326,9 +328,11 @@ struct EndpointsListing {
   std::string refused;
   // The rows whose discount is not a number from 0 to 1, by tag: each keeps its tag and loses its prices.
   std::vector<std::string> discounts;
-  // The rows without a price the listing requires of every endpoint (`prompt`, `completion`), by tag: the member, and
-  // why as fixed text ("price missing at an endpoint", "price at an endpoint is not decimal text"). Such a row keeps its
-  // tag and its other prices.
+  // The price members a route ceiling reads that a row has no price for, by tag, then member: the member, and why as
+  // fixed text, as the ceiling names it: "price missing at an endpoint" (`prompt` or `completion`, which every endpoint
+  // lists), "price at an endpoint is not decimal text", "variable price at an endpoint" (a negative price) or "price at an
+  // endpoint is too large for the catalogue". A variable or too large price is left out of the row, with the units its
+  // tokens would otherwise be billed at; the row keeps its tag and its other prices.
   struct PriceGap {
     std::string tag, price, reason;
     bool operator==(const PriceGap&) const = default;
