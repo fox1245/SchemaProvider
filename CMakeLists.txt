@@ -352,7 +352,7 @@ add_library(sp_descriptor src/descriptor/descriptor.cpp src/descriptor/policy.cp
 target_compile_options(sp_descriptor PRIVATE ${SP_WARNING_OPTIONS})
 target_link_libraries(sp_descriptor PUBLIC sp_json)
 
-add_library(sp_codecs src/codecs/accumulator.cpp src/codecs/served_model.cpp src/codecs/media_input.cpp src/codecs/media_output.cpp
+add_library(sp_codecs src/codecs/accumulator.cpp src/codecs/request_routing.cpp src/codecs/served_model.cpp src/codecs/media_input.cpp src/codecs/media_output.cpp
             src/codecs/chat.cpp src/codecs/chat_request.cpp
             src/codecs/messages.cpp src/codecs/messages_request.cpp
             src/codecs/responses.cpp src/codecs/responses_request.cpp
@@ -659,6 +659,9 @@ if(SP_BUILD_TESTS)
   target_link_libraries(sp_tokens_tests PRIVATE sp_codecs sp_descriptor sp_json)
   add_executable(sp_webhooks_tests tests/webhooks_test.cpp)
   target_link_libraries(sp_webhooks_tests PRIVATE sp_codecs sp_core sp_json)
+  add_executable(sp_routing_check_tests tests/routing_check_test.cpp)
+  target_compile_options(sp_routing_check_tests PRIVATE ${SP_WARNING_OPTIONS})
+  target_link_libraries(sp_routing_check_tests PRIVATE sp_codecs sp_core sp_descriptor sp_json)
   add_executable(sp_chat_tests tests/chat_semantic_test.cpp)
   target_link_libraries(sp_chat_tests PRIVATE sp_codecs sp_descriptor sp_json sp_transport)
   add_executable(sp_error_reason_tests tests/error_reason_test.cpp)
@@ -790,6 +793,7 @@ if(SP_BUILD_TESTS)
   add_test(NAME batches_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_batches_tests> ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/batches)
   add_test(NAME extension_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_extension_tests>)
   add_test(NAME chat_properties COMMAND ${sp_test_runner} $<TARGET_FILE:sp_chat_tests>)
+  add_test(NAME routing_check COMMAND ${sp_test_runner} $<TARGET_FILE:sp_routing_check_tests>)
   add_test(NAME error_reason COMMAND ${sp_test_runner} $<TARGET_FILE:sp_error_reason_tests>
          ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/reason_codes.json)
   add_test(NAME stop_reasoning_preservation COMMAND ${sp_test_runner} $<TARGET_FILE:sp_stop_reasoning_preservation_tests>)
