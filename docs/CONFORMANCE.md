@@ -8,6 +8,27 @@ Scope: the cells and properties below cover the chat families and the artifacts 
 
 Current source scope is five typed buffered/SSE families, bounded prepare/start/complete lifecycle, owned nullable/raw outcomes, exact native binding and archive v3 custody, plus interface 4 controls, Responses cursor ownership and explicit Generate portable history. General sidecar fixture schema, constraints engine, generated support tables, SDK journal projection/kit, cross-origin equivalence and general Drop/Demote remain historical proposals. Generate's explicit imported-call sentinel is a narrow current path, not those historical treatments. WebSocket sessions have no chat cell; NeoGraph owns its outcome/checkpoint serializers.
 
+## 0.4.5 release record
+
+**Source.** The 0.4.5 release tree: interface revision 7, shared-library generation 7, with libsodium 1.0.22 (`SP_WITH_SODIUM=ON`). Every build below and the live matrix ran on git tree `a8de68fd233ab561b90bf849ba09e59b5f24aa7b`, the tree of the release commit that bumps the version; the commit that adds this record changes documents only. The native builds ran on Linux x86_64 (Ubuntu 24.04) with GCC 13.3, CMake 3.28, libcurl 8.5.0 and Node 24.19, on 2026-11-21, with `SP_BUILD_TESTS`, `SP_BUILD_CANARY` and `SP_BUILD_RUNTIME_TESTS` on and `SP_BUILD_BENCHMARKS` off (87 registered entries).
+
+| Build | Result |
+|---|---|
+| Release | 87 of 87 registered entries passed |
+| ASan+UBSan, RelWithDebInfo | 86 passed, none failed; `native_archive_key_residue` skipped because its scan does not run under an instrumented allocator, as in the earlier sanitizer cohorts. No AddressSanitizer, UndefinedBehaviorSanitizer or LeakSanitizer report |
+| TSan, RelWithDebInfo | 86 passed, none failed; `native_archive_key_residue` skipped for the same reason. No ThreadSanitizer report. The entries ran under the `setarch -R` runner |
+
+- **CI.** The project's CI passed on the head of every pull request merged since 0.4.4 (#223, #224, #229 to #233 and #235). Each was rebased on `main` before it merged.
+- **Live.** On 2026-11-21 the live matrix of the 0.4.1 record ran on the release build, with the same cells, models and settings, retries off. 58 of 59 passed. The Responses custody cell at reasoning effort low failed at its first assertion: the model returned no encrypted reasoning (zero reasoning tokens), as in the 0.4.1, 0.4.2 and 0.4.3 runs. The OpenRouter video job was not run, as in the 0.4.4 record.
+- **Live, per change.** Each change was checked live before it merged:
+  - #219: a realtime session at OpenAI (`gpt-realtime-2.1-mini`, 70 s of speech, then two text turns). `input_tokens` equalled text plus audio plus image, and the audio count included its cached share. Those three turns are a test fixture.
+  - #222: turn detection off started no response until `Respond`.
+  - #225: a search store at OpenAI and at Google was created, filled, searched, and read through a chat request's file search, then deleted.
+  - #226: a PNG sent as an OpenRouter decisions asset was answered by `liquid/d1.2` and `typesafe/jev-1.14`.
+  - #227: OpenRouter Files ran upload, get, listing by cursor, a refused content read, and delete.
+  - #228: an OpenRouter batch of two `openai/gpt-5-nano` items completed. Its `usage.cost` of 8,250 nano-USD equalled `batch_estimate` and was within the batch bound.
+- **Not run here.** The installed-consumer configurations and the WebAssembly suite ran only in CI; aarch64, Windows and HTTP/3 were not run for this record.
+
 ## 0.4.4 release record
 
 **Source.** The 0.4.4 release tree: interface revision 7, shared-library generation 7, with libsodium 1.0.22 (`SP_WITH_SODIUM=ON`). The sanitizer builds ran on git tree `dc8f1e0c232e2883c74ec29a00d236bc97de0195`, the tree of `main` at `eab8db7` (after #217); the release commit changes from there version numbers and documents only, nothing under `src/`, `config/` or `cmake/`, and the Release build and the live matrix ran on the release commit. The native builds ran on Linux x86_64 (Ubuntu 24.04) with GCC 13.3, CMake 3.28, libcurl 8.5.0 and Node 24.19, on 2026-11-20, with `SP_BUILD_TESTS`, `SP_BUILD_CANARY` and `SP_BUILD_RUNTIME_TESTS` on and `SP_BUILD_BENCHMARKS` off (85 registered entries).
