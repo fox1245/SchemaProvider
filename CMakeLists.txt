@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(SchemaProvider VERSION 0.4.6 LANGUAGES C CXX)
+project(SchemaProvider VERSION 0.4.7 LANGUAGES C CXX)
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
