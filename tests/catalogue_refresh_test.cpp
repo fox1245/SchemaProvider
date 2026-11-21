@@ -1379,7 +1379,7 @@ std::string rows_text(const descriptor::CatalogueSnapshot& catalogue, std::strin
 // The rows the endpoints listings of the models asked for give: one per tag, from listings recorded whole.
 void endpoint_rows_from_the_endpoints_listings(transport::Transport& transport, Peer& peer) {
   const std::vector<std::string> asked{"openai/gpt-5-nano", "openai/gpt-5-nano:batch", "vendor/two-tags", "vendor/bad-row-discount",
-                                       "vendor/untagged", "vendor/same-tag", "vendor/flaky"};
+                                       "vendor/untagged", "vendor/same-tag", "vendor/flaky", "vendor/no-prompt"};
   transport::RefreshRequest request;
   request.sources = {ceiling_source(peer, "ceilings-rows", asked)};
   const auto result = refreshed(transport, request);
@@ -1432,6 +1432,8 @@ void endpoint_rows_from_the_endpoints_listings(transport::Transport& transport, 
   std::vector<std::string> lines;
   for (const auto& gap : report.endpoint_gaps) lines.push_back(gap.model + "|" + gap.tag + "|" + gap.price + "|" + gap.reason);
   const std::vector<std::string> expected{"vendor/bad-row-discount|beta|discount|discount at an endpoint is not from 0 to 1",
+                                          "vendor/no-prompt|alpha|prompt|price missing at an endpoint",
+                                          "vendor/no-prompt|beta|prompt|price at an endpoint is not decimal text",
                                           "vendor/same-tag|||two endpoints share a tag",
                                           "vendor/untagged|||an endpoint has no tag the catalogue can hold"};
   if (lines != expected) {
@@ -1439,7 +1441,13 @@ void endpoint_rows_from_the_endpoints_listings(transport::Transport& transport, 
     for (const auto& line : lines) all += "\n  " + line;
     throw std::runtime_error("the endpoint gaps are not the expected ones:" + all);
   }
-  require(report.endpoint_rows == 5, "five models written: both openai entries, two-tags, bad-row-discount and flaky");
+  require(report.endpoint_rows == 6, "six models written: both openai entries, two-tags, bad-row-discount, flaky and no-prompt");
+  // A row without a price every endpoint lists keeps its tag and its other prices.
+  const auto unpriced = c->endpoints("vendor/no-prompt");
+  require(unpriced.size() == 2 && unpriced[0].tag == "alpha" && unpriced[1].tag == "beta" &&
+              unpriced[0].pricing == (std::vector<std::pair<std::string, std::string>>{{"completion", "0.000002"}, {"web_search", "0.01"}}) &&
+              unpriced[1].pricing == unpriced[0].pricing,
+          "rows without a readable prompt price keep their tags");
   // The accessor reads one tier's rows of the exact entry, by tag.
   const auto standard = c->endpoints("openai/gpt-5-nano");
   const auto batch = c->endpoints("openai/gpt-5-nano", "batch");
@@ -1459,7 +1467,7 @@ void endpoint_rows_from_the_endpoints_listings(transport::Transport& transport, 
   require(std::holds_alternative<descriptor::CatalogueSnapshot>(again) && std::get<descriptor::CatalogueSnapshot>(again)->digest() == c->digest(),
           "the generated rows read back as the same catalogue");
 
-  // A failed endpoints request keeps the previous ceiling and writes no row: a row is never older than this refresh.
+  // A failed endpoints request keeps the previous ceiling and writes no row: a listed entry carries no earlier row.
   transport::RefreshRequest later;
   later.previous = c;
   later.sources = {ceiling_source(peer, "ceilings-rows-v2", {"vendor/flaky", "vendor/two-tags"})};

@@ -982,6 +982,13 @@ void endpoints_listing_gives_rows() {
         CHECK(discounted.rows[2].tag == "gamma" && discounted.rows[2].pricing == (Prices{{"completion", "0.000002"}, {"prompt", "0.000001"}}) &&
               !discounted.rows[2].discount);
     }
+    // A row without a price every endpoint lists, or with one that is not decimal text, keeps its tag and is named.
+    const auto unpriced = read(R"({"tag":"alpha","pricing":{"completion":"0.000002"}},{"tag":"beta","pricing":{"prompt":0.000001,"completion":"free"}})");
+    CHECK(unpriced.refused.empty() && unpriced.rows.size() == 2 &&
+          unpriced.price_gaps == (std::vector<EndpointsListing::PriceGap>{{"alpha", "prompt", "price missing at an endpoint"},
+                                                                          {"beta", "completion", "price at an endpoint is not decimal text"},
+                                                                          {"beta", "prompt", "price at an endpoint is not decimal text"}}));
+    CHECK(two.price_gaps.empty() && discounted.price_gaps.empty());
     // An override the row cannot hold leaves its member out, as it does in a models listing's entry.
     const auto withheld = read(R"({"tag":"alpha","pricing":{"prompt":"0.000001","completion":"0.000002",)"
                                R"("overrides":[{"min_prompt_tokens":1000,"prompt":"0.000003","discount":0.5}]}})");

@@ -1423,6 +1423,7 @@ EndpointsResult parse_endpoints_listing(std::string_view body, std::string_view 
     const auto refuse = [&](std::string_view why) {
       out.rows.clear();
       out.discounts.clear();
+      out.price_gaps.clear();
       out.withheld.clear();
       out.refused = std::string(why);
       return out;
@@ -1459,11 +1460,20 @@ EndpointsResult parse_endpoints_listing(std::string_view body, std::string_view 
       read_pricing(pricing, prices_of, scratch);
       row.pricing = std::move(prices_of.pricing);
       for (auto& unit : scratch.withheld) out.withheld.push_back(std::move(unit));
+      // The prices every endpoint lists, as the route ceiling requires them: one left out or not readable is named.
+      for (const std::string_view required : {"prompt", "completion"}) {
+        const auto value = pricing.get(required);
+        if (!present(value)) out.price_gaps.push_back({row.tag, std::string(required), "price missing at an endpoint"});
+        else if (!value.is_string() || !decimal(value.as_string()))
+          out.price_gaps.push_back({row.tag, std::string(required), "price at an endpoint is not decimal text"});
+      }
     }
     std::sort(out.rows.begin(), out.rows.end(), row_less);
     for (std::size_t j = 1; j < out.rows.size(); ++j)
       if (out.rows[j].tag == out.rows[j - 1].tag) return refuse("two endpoints share a tag");
     std::sort(out.discounts.begin(), out.discounts.end());
+    std::sort(out.price_gaps.begin(), out.price_gaps.end(),
+              [](const EndpointsListing::PriceGap& a, const EndpointsListing::PriceGap& b) { return std::tie(a.tag, a.price) < std::tie(b.tag, b.price); });
     std::sort(out.withheld.begin(), out.withheld.end(),
               [](const WithheldUnit& a, const WithheldUnit& b) { return std::tie(a.model, a.unit) < std::tie(b.model, b.unit); });
     out.withheld.erase(std::unique(out.withheld.begin(), out.withheld.end()), out.withheld.end());
