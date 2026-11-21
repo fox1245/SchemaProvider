@@ -4,12 +4,33 @@
 #include "descriptor/policy.h"
 #include "descriptor/value_schema.h"
 #include "json/json.h"
+#include <algorithm>
+#include <iterator>
 #include <set>
+#include <string_view>
 #include <utility>
 
 namespace sp::decisions {
 namespace {
 Error bad(const reason::Reason& message) { return reason::error(ErrorKind::InvalidRequest, message); }
+// The `type` of a content part that holds an image, in the wire formats an input may carry: OpenRouter's `image`,
+// OpenAI Responses' `input_image` and Chat's `image_url`.
+constexpr std::string_view image_part_types[]{"image", "input_image", "image_url"};
+// Whether the input holds such a part at any depth, read by each object's `type` member.
+bool holds_image_part(const json::Value& value) {
+  if (value.is_array()) {
+    for (const auto element : value.elements())
+      if (holds_image_part(element)) return true;
+    return false;
+  }
+  if (!value.is_object()) return false;
+  if (const auto type = value.get("type"); type.is_string() &&
+      std::find(std::begin(image_part_types), std::end(image_part_types), type.as_string()) != std::end(image_part_types))
+    return true;
+  for (const auto member : value.members())
+    if (holds_image_part(member.value)) return true;
+  return false;
+}
 // Guidance is a string; OpenRouter also takes a JSON object or array.
 bool guidance(const std::shared_ptr<const json::Document>& value, bool structured) {
   if (!value) return false;
@@ -33,6 +54,9 @@ EndpointFacts endpoint_facts(const descriptor::ValidatedDescriptor& descriptor, 
   facts.dimensions = endpoints::dimensions(operation(request), {}, request.extensions);
   facts.quantities.push_back(endpoints::input_limited("input"));
   facts.quantities.push_back(endpoints::output_limited());
+  // The image tokens among the input, when the request sends an image: an asset, or an image part in the input (#237).
+  if (!request.assets.empty() || (request.input && holds_image_part(request.input->root())))
+    facts.quantities.push_back(endpoints::input_limited("input_image"));
   return facts;
 }
 std::variant<Encoded, Error> encode(const descriptor::ValidatedDescriptor& descriptor, const Request& request) {

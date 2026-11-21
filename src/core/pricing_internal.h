@@ -221,14 +221,16 @@ inline constexpr std::string_view chat_units[]{"input", "cache_read", "cache_wri
 // A unit a chat request is priced by that `entry` lists at the standard rates and not under `tier`, in any band: under
 // `tier` such a unit would be priced at another unit's rate, or not at all, which is not the tier's price for it.
 // Empty when every such unit has a row in the tier, and when `tier` is empty or the entry prices nothing under it (which
-// a bound refuses as a tier the entry does not price).
-inline std::string_view unit_outside_tier(const descriptor::CatalogueEntry& entry, std::string_view tier) {
+// a bound refuses as a tier the entry does not price). `input_image` prices only a request that may carry an image
+// (`images`), so a text-only request's check leaves it out (#237).
+inline std::string_view unit_outside_tier(const descriptor::CatalogueEntry& entry, std::string_view tier, bool images) {
   if (tier.empty() || std::none_of(entry.pricing.begin(), entry.pricing.end(), [&](const auto& price) {
         const auto unit = parse_unit(price.first);
         return unit && unit->tier == tier;
       }))
     return {};
-  const auto read = [](std::string_view name) {
+  const auto read = [&](std::string_view name) {
+    if (!images && name == "input_image") return false;
     return name.starts_with(descriptor::tool_fee_prefix) || std::find(std::begin(chat_units), std::end(chat_units), name) != std::end(chat_units);
   };
   for (const auto& [key, text] : entry.pricing) {

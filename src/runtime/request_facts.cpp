@@ -23,9 +23,14 @@ RequestFacts common(const descriptor::ValidatedDescriptor& d, const std::string&
   return facts;
 }
 const std::optional<std::string> no_tier;
-// Whether a message of the conversation carries an image, in a part or in a tool result's part.
+// Whether a medium may bill as image input: an image, and a document or a video, whose pages and frames providers bill
+// as image input (#237).
+bool image_billed(const Media& media) {
+  return media.kind == MediaKind::Image || media.kind == MediaKind::Document || media.kind == MediaKind::Video;
+}
+// Whether a message of the conversation carries such a medium, in a part or in a tool result's part.
 bool carries_image(const std::vector<Message>& messages) {
-  const auto image = [](const Media& media) { return media.kind == MediaKind::Image; };
+  const auto image = [](const Media& media) { return image_billed(media); };
   for (const auto& message : messages)
     for (const auto& part : message.parts) {
       if (const auto* media = std::get_if<Media>(&part)) {
@@ -59,7 +64,7 @@ RequestFacts request_facts(const descriptor::ValidatedDescriptor& d, const chat:
   facts.routing = request.provider;
   facts.image_input = carries_image(request.canonical_messages) ||
                       std::any_of(request.messages.begin(), request.messages.end(), [](const chat::InputMessage& message) {
-                        return std::any_of(message.media.begin(), message.media.end(), [](const Media& media) { return media.kind == MediaKind::Image; });
+                        return std::any_of(message.media.begin(), message.media.end(), [](const Media& media) { return image_billed(media); });
                       });
   price_extensions(facts, d, request.extensions);
   return facts;

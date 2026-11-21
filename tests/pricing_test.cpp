@@ -1427,7 +1427,8 @@ void image_input_rate() {
     {"id":"variable-image","pricing":{"input":"0.000001","output":"0.000002","input_image":"-1"}},
     {"id":"text","pricing":{"input":"0.000001","output":"0.000002"}},
     {"id":"cached-vision","pricing":{"input":"0.000001","cache_read":"0.0000001","input_audio":"0.000004","output":"0.000002","input_image":"0.000009"}},
-    {"id":"tier-vision","pricing":{"input":"0.000001","output":"0.000002","input_image":"0.000009","input/flex":"0.0000005","output/flex":"0.000001"}}]})");
+    {"id":"tier-vision","pricing":{"input":"0.000001","output":"0.000002","input_image":"0.000009","input/flex":"0.0000005","output/flex":"0.000001"}},
+    {"id":"per-image","pricing":{"input":"0.000001","output":"0.000002","image":"0.04"}}]})");
   soft_failures.clear();
   RequestFacts images, text;
   images.image_input = true;
@@ -1477,11 +1478,22 @@ void image_input_rate() {
          "no total | ModelPrice [variable-image] catalogue entry 'variable-image' prices input_image at a variable price (input_image)", __LINE__);
   expect(worst_text(worst("variable-image", 1000, &text)), "total " + std::to_string(at_input), __LINE__);
   expect(bound_text(pricing::upper_bound(*c->entry("variable-image"), {}, {1000, 100, false, {}})), "no total | input_image", __LINE__);
-  // Under a tier, an `input_image` the entry lists at the standard rates only is not priced at the tier's `input`.
-  expect(worst_text(worst("tier-vision", 1000, &text, 100, "flex")),
+  // Under a tier, an `input_image` the entry lists at the standard rates only is not priced at the tier's `input` for a
+  // request that may carry an image; a text-only request bills no image tokens, so its bound and estimate stand: 1000
+  // input tokens at 5e-7 and 100 output tokens at 1e-6 USD.
+  expect(worst_text(worst("tier-vision", 1000, &images, 100, "flex")),
          "no total | TierPrice [tier-vision] the entry prices input_image at the standard rates but not under service tier 'flex'", __LINE__);
-  expect(estimate_text(pricing::estimate(*c, "openai.chat", "", exact("tier-vision"), usage(1000, 100), text, "flex")), "total none, unpriced [tier;] assumed []",
+  expect(worst_text(worst("tier-vision", 1000, &text, 100, "flex")), "total 600000", __LINE__);
+  expect(estimate_text(pricing::estimate(*c, "openai.chat", "", exact("tier-vision"), usage(1000, 100), images, "flex")),
+         "total none, unpriced [tier;] assumed []", __LINE__);
+  expect(estimate_text(pricing::estimate(*c, "openai.chat", "", exact("tier-vision"), usage(1000, 100), text, "flex")),
+         "total 600000, unpriced [] assumed []", __LINE__);
+  // A per-image price (`image`) is read by no bound: a request that may carry an image, or one without facts, has none.
+  expect(worst_text(worst("per-image", 1000, nullptr)),
+         "no total | ModelPrice [per-image] catalogue entry 'per-image' lists a price for 'image' that no bound reads, and the request carries what it prices",
          __LINE__);
+  expect(bound_text(pricing::upper_bound(*c->entry("per-image"), {}, {1000, 100, false, {}})), "no total | image", __LINE__);
+  expect(worst_text(worst("per-image", 1000, &text)), "total " + std::to_string(at_input), __LINE__);
 
   // The estimate of a Chat usage, which counts no image tokens: for a request that carried an image, every uncached
   // input token at the dearer of `input` and `input_image`, the rule named.
@@ -1504,13 +1516,36 @@ void image_input_rate() {
          __LINE__);
   expect(estimate_text(pricing::estimate(*c, "openai.chat", "", exact("variable-image"), u, text, "")),
          "total " + std::to_string(at_input) + ", unpriced [] assumed []", __LINE__);
-  // Audio input and cache reads keep their rates: 200 cached at 1e-7, 100 audio at 4e-6 and the other 700 uncached
-  // tokens at 9e-6 USD, beside the output.
+  // Audio input keeps its rate, and the cache reads may be cached image tokens: 100 audio at 4e-6, the other 700
+  // uncached tokens and the 200 cache reads at 9e-6 USD (not at 1e-7), beside the output.
   {
     auto mixed = usage(1000, 100, 200);
     mixed.extra["input_audio"] = Count{100, Evidence::Reported};
     expect(estimate_text(pricing::estimate(*c, "openai.chat", "", exact("cached-vision"), mixed, images, "")),
-           "total " + std::to_string(20'000u + 400'000u + 6'300'000u + 200'000u) + ", unpriced [] assumed [input at input_image;]", __LINE__);
+           "total " + std::to_string(1'800'000u + 400'000u + 6'300'000u + 200'000u) + ", unpriced [] assumed [input at input_image;cache_read at input_image;]",
+           __LINE__);
+    expect(estimate_text(pricing::estimate(*c, "openai.chat", "", exact("cached-vision"), mixed, text, "")),
+           "total " + std::to_string(20'000u + 400'000u + 700'000u + 200'000u) + ", unpriced [] assumed []", __LINE__);
+    // Cache writes the same way: 300 written, at `input` for want of a write rate, and so at 9e-6.
+    expect(estimate_text(pricing::estimate(*c, "openai.chat", "", exact("vision"), usage(1000, 100, 0, 300), images, "")),
+           "total " + std::to_string(6'300'000u + 2'700'000u + 200'000u) + ", unpriced [] assumed [input at input_image;cache_write at input;cache_write at input_image;]",
+           __LINE__);
+  }
+  // A Messages compaction iteration's input tokens may be image tokens too: 500 of them at 9e-6 beside the turn's
+  // 1000; at 1e-6 for a text-only request; none priced at a variable `input_image`.
+  {
+    auto compacted = usage(1000, 100);
+    compacted.extra["compaction.input_tokens"] = Count{500, Evidence::Reported};
+    expect(estimate_text(pricing::estimate(*c, "anthropic.messages", "", exact("vision"), compacted, images, "")),
+           "total " + std::to_string(at_image + 4'500'000u) + ", unpriced [] assumed [input at input_image;]", __LINE__);
+    expect(estimate_text(pricing::estimate(*c, "anthropic.messages", "", exact("vision"), compacted, text, "")),
+           "total " + std::to_string(at_input + 500'000u) + ", unpriced [] assumed []", __LINE__);
+    auto only_compaction = usage(0, 100);
+    only_compaction.extra["compaction.input_tokens"] = Count{500, Evidence::Reported};
+    expect(estimate_text(pricing::estimate(*c, "anthropic.messages", "", exact("vision"), only_compaction, images, "")),
+           "total " + std::to_string(4'500'000u + 200'000u) + ", unpriced [] assumed [input at input_image;]", __LINE__);
+    expect(estimate_text(pricing::estimate(*c, "anthropic.messages", "", exact("variable-image"), only_compaction, images, "")),
+           "total none, unpriced [input_image;] assumed []", __LINE__);
   }
   // A usage that counts the image tokens (a realtime turn) or breaks its input down by modality (Generate) is priced
   // as before: 900 text and 100 image tokens; 1000 tokens of a Generate prompt at the input rate.

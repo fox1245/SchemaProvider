@@ -298,16 +298,27 @@ pricing::EndpointEstimate estimate_lines(const EndpointFacts& submit, const desc
     const bool served = model->relation != ServedRelation::NotReported && !model->served.empty() && model->served != model->requested;
     const auto* pricing_entry = served ? entry_of(model->served) : nullptr;
     if (!pricing_entry) pricing_entry = entry_of(model->requested);
-    if (pricing_entry && !pricing::detail::unit_outside_tier(*pricing_entry, submit.carried_tier).empty()) {
+    const auto facts = carried.find(id);
+    // Without the request's facts the request may have carried an image (#237).
+    const bool images = facts == carried.end() || facts->second->image_input;
+    if (pricing_entry && !pricing::detail::unit_outside_tier(*pricing_entry, submit.carried_tier, images).empty()) {
       refuse(id + ":tier");
       continue;
     }
-    const auto facts = carried.find(id);
     const auto priced = facts != carried.end()
                             ? pricing::estimate(catalogue, family.family(), submit.origin, *model, *usage, *facts->second, submit.carried_tier)
                             : pricing::estimate(catalogue, family.family(), submit.origin, *model, *usage, submit.carried_tier);
     if (!priced.total) {
       for (const auto& name : priced.unpriced) refuse(id + ":" + name);
+      continue;
+    }
+    // A line whose request is not stated (an OpenAI file batch priced without its items) and whose usage may hold image
+    // tokens that the entry prices above `input` has no estimate: priced at `input_image` it could be above the bound of
+    // a text-only item, and at `input` below the bill of one with an image. The items overload states each request.
+    if (facts == carried.end() && std::any_of(priced.assumptions.begin(), priced.assumptions.end(), [](const std::string& rule) {
+          return std::find(std::begin(pricing::image_rate_assumptions), std::end(pricing::image_rate_assumptions), rule) != std::end(pricing::image_rate_assumptions);
+        })) {
+      refuse(id + ":input_image");
       continue;
     }
     for (const auto& rule : priced.assumptions) assume(id + ":" + rule);
