@@ -32,8 +32,8 @@ struct DefaultsOverlay {
 
 // One endpoint that serves a model at a routing gateway, as the gateway's endpoints listing gives it (OpenRouter's
 // GET /api/v1/models/{author}/{slug}/endpoints). A refresh writes the rows of the models a source names in
-// `ceiling_models` (transport/catalogue_refresh.h), every listed endpoint once, only from an endpoints listing it read
-// in that refresh; a models listing gives none. The listing's performance statistics are not catalogue data.
+// `ceiling_models` (transport/catalogue_refresh.h), every listed endpoint once, from an endpoints listing it read; a
+// models listing gives none. Rows are as old as the entry that carries them. The listing's performance statistics are not catalogue data.
 struct EndpointRow {
   // The listing's `tag`, which is the endpoint's routing slug (`provider[/variant][/region][/tier]`, as `deepinfra/fp8`
   // or `openai/flex`): it keys the row. `provider_name` is the provider's display name, which is not a slug.
@@ -326,6 +326,14 @@ struct EndpointsListing {
   std::string refused;
   // The rows whose discount is not a number from 0 to 1, by tag: each keeps its tag and loses its prices.
   std::vector<std::string> discounts;
+  // The rows without a price the listing requires of every endpoint (`prompt`, `completion`), by tag: the member, and
+  // why as fixed text ("price missing at an endpoint", "price at an endpoint is not decimal text"). Such a row keeps its
+  // tag and its other prices.
+  struct PriceGap {
+    std::string tag, price, reason;
+    bool operator==(const PriceGap&) const = default;
+  };
+  std::vector<PriceGap> price_gaps;
   // The price members a row left out for a conditional price it cannot hold (as ListingPage::withheld), with the row's
   // tag in `model`; an empty `unit` is every price of that row.
   std::vector<WithheldUnit> withheld;

@@ -477,7 +477,7 @@ void read_ceilings(Transport& transport, const RefreshRequest& request, const de
 // Writes the endpoint rows of each model asked for onto its listed entry, in id order, from the listing read in this
 // refresh (RowsRead), and reports every model whose rows it did not write and every row that left out a price. Rows are
 // a whole set: a model whose listing could not give one row gets none. A model whose endpoints request failed gets none
-// either, whatever ceiling it keeps, so no row is older than the refresh that wrote it.
+// either, whatever ceiling it keeps: a listed entry carries no row of an earlier refresh.
 void write_rows(const Planned& plan, const RowsRead& rows, std::vector<CatalogueEntry>& entries, SourceReport& report) {
   for (const auto& id : plan.ceilings) {
     const auto gap = [&](std::string tag, std::string price, std::string reason) {
@@ -497,9 +497,11 @@ void write_rows(const Planned& plan, const RowsRead& rows, std::vector<Catalogue
     if (std::holds_alternative<ConfigError>(descriptor::make_catalogue(std::move(alone)))) { gap({}, {}, "the entry cannot hold the endpoint rows"); continue; }
     found->endpoints = std::move(candidate.endpoints);
     ++report.endpoint_rows;
-    // By tag: a discount that may raise the row's prices, then the members a row left out.
+    // By tag: a discount that may raise the row's prices, a price every endpoint lists missing or unreadable, then the
+    // members a row left out.
     std::vector<EndpointGap> rows_gaps;
     for (const auto& tag : listed.discounts) rows_gaps.push_back({id, tag, "discount", "discount at an endpoint is not from 0 to 1"});
+    for (const auto& missing : listed.price_gaps) rows_gaps.push_back({id, missing.tag, missing.price, missing.reason});
     for (const auto& unit : listed.withheld)
       rows_gaps.push_back({id, unit.model, unit.unit,
                            unit.unit.empty() ? "every price left out: conditional prices that cannot be read"

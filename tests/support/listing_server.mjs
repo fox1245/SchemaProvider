@@ -240,6 +240,8 @@ const rowDocs = (version) => ({
     recorded('alpha', 'Alpha', null, { prompt: '0.000001', completion: '0.000002' }),
     recorded('beta', 'Beta', null, { prompt: '0.000001', completion: '0.000002', discount: 1.5 }),
   ] },
+  // A row without its prompt price, and one whose prompt price is not decimal text: each keeps its tag and is named.
+  'vendor/no-prompt': { endpoints: [recorded('alpha', 'Alpha', null, { completion: '0.000002' }), recorded('beta', 'Beta', null, { prompt: 'free', completion: '0.000002' })] },
   // An endpoint without a tag, and two endpoints under one tag: the set is not complete, so no row is written.
   'vendor/untagged': { endpoints: [recorded('alpha', 'Alpha', null, { prompt: '0.000001', completion: '0.000002' }), recorded(undefined, 'Beta', null, { prompt: '0.000001', completion: '0.000002' })] },
   'vendor/same-tag': { endpoints: [recorded('alpha', 'Alpha', null, { prompt: '0.000001', completion: '0.000002' }), recorded('alpha', 'Alpha', null, { prompt: '0.000003', completion: '0.000004' })] },

@@ -139,8 +139,8 @@ struct RefreshResult {
 // listing gives, every unit at the dearest price of its side over every endpoint, or no ceiling for a unit
 // that any endpoint's prices cannot bound (USAGE.md, refreshing the catalogue). A model whose endpoints
 // request fails keeps the ceiling `previous` had and does not fail the source. The same listing gives the
-// model's endpoint rows, every listed endpoint or none; a model whose endpoints request fails has none, since a
-// row is never older than the refresh that wrote it.
+// model's endpoint rows, every listed endpoint or none; a model whose endpoints request fails has none, while a
+// source that fails keeps its previous entries, their rows and ceilings included.
 std::variant<RefreshResult, descriptor::ConfigError> refresh_catalogue(Transport& transport, const RefreshRequest& request);
 
 // The default origin the built-in policy states for a listing (DescriptorPolicy::listing_origin): the provider's public
