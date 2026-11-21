@@ -909,8 +909,10 @@ void endpoint_rows_load_and_read_back() {
         refused_as(row(many), "/models/0/endpoints", "bounded array");
     }
 
-    // A later layer's rows replace the whole set, never one row; a layer without rows keeps them.
+    // A later layer's rows of a tier replace every row of that tier, never one row, and the other tiers stay; a layer
+    // without rows keeps them.
     const auto host = catalogue(R"([{"id":"openai/gpt-5-nano","endpoints":[{"tag":"openai","pricing":{"prompt":"0.0000001","completion":"0.0000008"}}]}])");
+    const auto host_batch = catalogue(R"([{"id":"openai/gpt-5-nano","endpoints":[{"tag":"other","tier":"batch","pricing":{"prompt":"0.0000001"}}]}])");
     const auto prices_only = catalogue(R"([{"id":"openai/gpt-5-nano","pricing":{"prompt":"0.00000006"}}])");
     if (!host || !prices_only) return;
     const CatalogueSnapshot replaced_layers[]{c, host};
@@ -920,9 +922,20 @@ void endpoint_rows_load_and_read_back() {
         const auto& merged = std::get<CatalogueSnapshot>(replaced);
         CHECK(merged->to_json() ==
               R"({"version":1,"models":[{"id":"openai/gpt-5-nano","source":"openrouter","pricing":{"completion":"0.0000004","prompt":"0.00000005"},)"
-              R"("endpoints":[{"tag":"openai","pricing":{"completion":"0.0000008","prompt":"0.0000001"}}]}]})");
+              R"("endpoints":[{"tag":"openai","pricing":{"completion":"0.0000008","prompt":"0.0000001"}},)"
+              R"({"tag":"openai","tier":"batch","provider_name":"OpenAI","pricing":{"completion":"0.0000002","prompt":"0.000000025","prompt+200000":"-1"}}]}]})");
         const auto diff = diff_catalogues(*c, *merged);
         CHECK(diff.changed == std::vector<std::string>{"openai/gpt-5-nano"} && diff.added.empty() && diff.removed.empty());
+    }
+    if (!host_batch) return;
+    const CatalogueSnapshot batch_layers[]{c, host_batch};
+    auto batch_replaced = merge_catalogues(batch_layers);
+    CHECK(std::holds_alternative<CatalogueSnapshot>(batch_replaced));
+    if (std::holds_alternative<CatalogueSnapshot>(batch_replaced)) {
+        const auto& merged = std::get<CatalogueSnapshot>(batch_replaced);
+        const auto standard = merged->endpoints("openai/gpt-5-nano");
+        const auto batch = merged->endpoints("openai/gpt-5-nano", "batch");
+        CHECK(standard.size() == 3 && standard[0].tag == "azure" && batch.size() == 1 && batch[0].tag == "other");
     }
     const CatalogueSnapshot kept_layers[]{c, prices_only};
     auto kept = merge_catalogues(kept_layers);
@@ -989,6 +1002,22 @@ void endpoints_listing_gives_rows() {
                                                                           {"beta", "completion", "price at an endpoint is not decimal text"},
                                                                           {"beta", "prompt", "price at an endpoint is not decimal text"}}));
     CHECK(two.price_gaps.empty() && discounted.price_gaps.empty());
+    // A variable (negative) or too large price of a member the route ceiling reads is named and left out of the row, with
+    // the units its tokens would otherwise be billed at: a variable cache read takes the prompt price with it.
+    const auto variable = read(R"({"tag":"v","pricing":{"prompt":"0.000001","completion":"0.000002","input_cache_read":"-1"}},)"
+                               R"({"tag":"w","pricing":{"prompt":"-0.5","completion":"0.000002","internal_reasoning":"0.000003"}},)"
+                               R"({"tag":"x","pricing":{"prompt":"0.000001","completion":"99999999999"}})");
+    CHECK(variable.refused.empty() && variable.rows.size() == 3 &&
+          variable.price_gaps == (std::vector<EndpointsListing::PriceGap>{{"v", "input_cache_read", "variable price at an endpoint"},
+                                                                          {"w", "prompt", "variable price at an endpoint"},
+                                                                          {"x", "completion", "price at an endpoint is too large for the catalogue"}}));
+    if (variable.rows.size() == 3) {
+        CHECK(variable.rows[0].pricing == (Prices{{"completion", "0.000002"}}));
+        CHECK(variable.rows[1].pricing == (Prices{{"completion", "0.000002"}, {"internal_reasoning", "0.000003"}}));
+        CHECK(variable.rows[2].pricing == (Prices{{"prompt", "0.000001"}}));
+        for (const auto& row : variable.rows)
+            for (const auto& price : row.pricing) CHECK(price.second.front() != '-');
+    }
     // An override the row cannot hold leaves its member out, as it does in a models listing's entry.
     const auto withheld = read(R"({"tag":"alpha","pricing":{"prompt":"0.000001","completion":"0.000002",)"
                                R"("overrides":[{"min_prompt_tokens":1000,"prompt":"0.000003","discount":0.5}]}})");
@@ -1012,6 +1041,43 @@ void endpoints_listing_gives_rows() {
         auto parsed = parse_endpoints_listing(body, "vendor/model");
         auto* error = std::get_if<ConfigError>(&parsed);
         CHECK(error && error->pointer == pointer);
+    }
+    // Rows the writer puts in the catalogue text read back member by member from that text.
+    {
+        EndpointRow full;
+        full.tag = "baseten/fp4/us/priority";
+        full.provider_name = "Base Ten";
+        full.quantization = "fp4";
+        full.service_tier = "priority";
+        full.status = -10;
+        full.context_length = 131072;
+        full.max_prompt_tokens = 120000;
+        full.max_completion_tokens = 8192;
+        full.supported_parameters = {"seed", "tools"};
+        full.discount = 0.125;
+        full.pricing = {{"completion", "0.0000016"}, {"prompt", "0.0000004"}, {"prompt+128000", "0.0000008"}, {"web_search", "-1"}};
+        EndpointRow bare;
+        bare.tag = "alpha";
+        bare.tier = "batch";
+        CatalogueEntry holder;
+        holder.id = "vendor/model";
+        holder.endpoints = {full, bare};
+        auto written = make_catalogue({holder});
+        CHECK(std::holds_alternative<CatalogueSnapshot>(written));
+        if (std::holds_alternative<CatalogueSnapshot>(written)) {
+            const auto text = std::get<CatalogueSnapshot>(written)->to_json();
+            CHECK(text == R"({"version":1,"models":[{"id":"vendor/model","endpoints":[{"tag":"baseten/fp4/us/priority","provider_name":"Base Ten",)"
+                          R"("quantization":"fp4","service_tier":"priority","status":-10,"context_length":131072,"max_prompt_tokens":120000,)"
+                          R"("max_completion_tokens":8192,"supported_parameters":["seed","tools"],"discount":0.125,)"
+                          R"("pricing":{"completion":"0.0000016","prompt":"0.0000004","prompt+128000":"0.0000008","web_search":"-1"}},)"
+                          R"({"tag":"alpha","tier":"batch"}]}]})");
+            auto parsed = load_catalogue(text);
+            CHECK(std::holds_alternative<CatalogueSnapshot>(parsed));
+            if (std::holds_alternative<CatalogueSnapshot>(parsed)) {
+                const auto& read_back = std::get<CatalogueSnapshot>(parsed)->entry("vendor/model")->endpoints;
+                CHECK(read_back.size() == 2 && read_back[0] == full && read_back[1] == bare);
+            }
+        }
     }
     // The rows load as an entry's.
     auto entry = CatalogueEntry{};

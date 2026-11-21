@@ -1,4 +1,5 @@
 {
   "version": 1,
-  "max_ceiling_models": 256
+  "max_ceiling_models": 256,
+  "max_endpoint_rows": 4096
 }

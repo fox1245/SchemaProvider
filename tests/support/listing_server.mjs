@@ -125,7 +125,7 @@ process.stdin.on('data', (chunk) => {
         const counts = seen[command.requests] ?? { total: 0, endpoints: [], headers: [] };
         answer = { total: counts.total, endpoints: counts.endpoints, headers: counts.headers };
       } else if (typeof command.set === 'string' && command.models && typeof command.models === 'object') {
-        generated[command.set] = Object.fromEntries(Object.entries(command.models).map(([id, prices]) => [id, { endpoints: prices.map(endpoint) }]));
+        generated[command.set] = Object.fromEntries(Object.entries(command.models).map(([id, prices]) => [id, { endpoints: prices.map(generatedEndpoint) }]));
         if (command.listed && typeof command.listed === 'object') generatedListed[command.set] = command.listed;
         answer = { set: command.set };
       } else answer = { error: 'unknown command' };
@@ -152,6 +152,14 @@ const endpoint = (pricing) => ({
   max_prompt_tokens: null, supported_parameters: ['tools'], supports_tool_choice: {}, uptime_last_30m: 99.5, status: 0,
 });
 const price = (prompt, completion, more = {}) => ({ prompt, completion, ...more });
+// An endpoint of a generated scenario: its pricing alone, or {tag, pricing, pad} for an endpoint under its own tag whose
+// supported_parameters lists `pad` parameters of 64 characters each (rows of a known size).
+const generatedEndpoint = (e) => {
+  if (!e.tag) return endpoint(e);
+  const out = { ...endpoint(e.pricing), tag: e.tag };
+  if (e.pad) out.supported_parameters = Array.from({ length: e.pad }, (_, i) => 'p'.repeat(60) + String(i).padStart(4, '0'));
+  return out;
+};
 const ceilingDocs = (version) => ({
   // The dearest of several endpoints, unit by unit; the third endpoint writes a trailing zero.
   'vendor/many': { endpoints: [price('0.000001', '0.000004'), price('0.000003', '0.000002'), price('0.0000020', version === 1 ? '0.000005' : '0.000006')] },

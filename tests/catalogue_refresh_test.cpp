@@ -1487,6 +1487,138 @@ void endpoint_rows_from_the_endpoints_listings(transport::Transport& transport, 
   passed("endpoint rows: one per tag from recorded listings, batch tier, unusable discounts, incomplete sets, failures");
 }
 
+// The endpoints of a generated model: `count` endpoints tagged `<prefix><i>`, each `pad` parameters of 64 characters long.
+std::string tagged_endpoints(std::string_view prefix, std::size_t count, std::size_t pad = 0) {
+  std::string out = "[";
+  for (std::size_t i = 0; i < count; ++i)
+    out += (i ? "," : "") + std::string(R"({"tag":")") + std::string(prefix) + std::to_string(i) +
+           R"(","pricing":{"prompt":"0.000001","completion":"0.000002"})" + (pad ? ",\"pad\":" + std::to_string(pad) : std::string()) + "}";
+  return out + "]";
+}
+std::string gap_text(const transport::SourceReport& report) {
+  std::string out;
+  for (const auto& gap : report.endpoint_gaps) out += "\n  " + gap.model + "|" + gap.tag + "|" + gap.price + "|" + gap.reason;
+  return out;
+}
+bool holds_rows(const descriptor::CatalogueSnapshot& c) {
+  return std::any_of(c->entries().begin(), c->entries().end(), [](const descriptor::CatalogueEntry& e) { return !e.endpoints.empty(); });
+}
+bool dropped_for_size(const transport::SourceReport& report) {
+  return std::any_of(report.endpoint_gaps.begin(), report.endpoint_gaps.end(), [](const transport::EndpointGap& gap) {
+    return gap.model.empty() && gap.reason == "endpoint rows dropped: the catalogue cannot hold them";
+  });
+}
+// A catalogue of `count` entries without a source, each about 12 KiB of aliases: entries a refresh keeps or layers over.
+descriptor::CatalogueSnapshot padding(std::size_t count) {
+  std::vector<descriptor::CatalogueEntry> entries(count);
+  for (std::size_t i = 0; i < count; ++i) {
+    entries[i].id = "pad/" + std::to_string(i);
+    for (std::size_t k = 0; k < 200; ++k) entries[i].aliases.push_back("pad/" + std::to_string(i) + "-" + std::to_string(k) + "-" + std::string(48, 'x'));
+  }
+  auto made = descriptor::make_catalogue(std::move(entries));
+  require(std::holds_alternative<descriptor::CatalogueSnapshot>(made), "the padding catalogue loads");
+  return std::get<descriptor::CatalogueSnapshot>(std::move(made));
+}
+
+// Endpoint rows never cost a refresh an entry or a ceiling, and the rows one refresh holds are bounded.
+void endpoint_rows_never_cost_entries(transport::Transport& transport, Peer& peer) {
+  constexpr std::size_t catalogue_limit = 8u * 1024u * 1024u;
+  // The rows one refresh reads stop at `max_endpoint_rows`: the models past it have no rows, and every ceiling is written.
+  {
+    const auto limit = static_cast<std::size_t>(config_defaults::catalogue_refresh_max_endpoint_rows);
+    const std::size_t full = limit / 256, count = full + 1;
+    std::string models;
+    std::vector<std::string> ids;
+    for (std::size_t i = 0; i < count; ++i) {
+      ids.push_back("vendor/r" + std::string(i < 10 ? "0" : "") + std::to_string(i));
+      models += (i ? "," : "") + json::quote(ids.back()) + ":" + tagged_endpoints("t", 256);
+    }
+    peer.command(R"({"set":"ceilings-budget","models":{)" + models + "}}");
+    transport::RefreshRequest request;
+    request.sources = {ceiling_source(peer, "ceilings-budget", ids)};
+    const auto result = refreshed(transport, request);
+    const auto& report = result.sources[0];
+    require(report.ok && report.ceilings == count, "every ceiling is written past the row bound");
+    require(report.endpoint_rows == full && result.generated->endpoints(ids[full - 1]).size() == 256 && result.generated->endpoints(ids[full]).empty(),
+            "the models within the bound have rows, the next has none");
+    require(gap_text(report) == "\n  " + ids[full] + "|||more endpoint rows than config/catalogue-refresh.json allows in one refresh",
+            "the model past the bound is named:" + gap_text(report));
+  }
+  // A variant's rows the base entry cannot hold under the tier (more rows than an entry holds) are not written there.
+  {
+    peer.command(R"({"set":"ceilings-tierfull","models":{"vendor/wide":)" + tagged_endpoints("t", 200) + R"(,"vendor/wide:batch":)" +
+                 tagged_endpoints("b", 100) + "}}");
+    transport::RefreshRequest request;
+    request.sources = {ceiling_source(peer, "ceilings-tierfull", {"vendor/wide", "vendor/wide:batch"})};
+    const auto result = refreshed(transport, request);
+    const auto& c = result.generated;
+    require(c->endpoints("vendor/wide").size() == 200 && c->endpoints("vendor/wide", "batch").empty() && c->endpoints("vendor/wide:batch").size() == 100,
+            "the base keeps its rows and the variant its own, and the tier gets none");
+    require(gap_text(result.sources[0]) == "\n  vendor/wide:batch|||the base entry cannot hold the variant's endpoint rows under tier 'batch'",
+            "the variant is named:" + gap_text(result.sources[0]));
+  }
+  // Rows that do not fit beside the source's own listing: every row is dropped, and the ceilings are the same.
+  {
+    peer.command(R"({"set":"ceilings-heavy","models":{"vendor/heavy-a":)" + tagged_endpoints("t", 256, 256) + R"(,"vendor/heavy-b":)" +
+                 tagged_endpoints("t", 256, 256) + R"(,"vendor/light":)" + tagged_endpoints("t", 1) + "}}");
+    transport::RefreshRequest request;
+    request.sources = {ceiling_source(peer, "ceilings-heavy", {"vendor/heavy-a", "vendor/heavy-b", "vendor/light"})};
+    const auto result = refreshed(transport, request);
+    const auto& report = result.sources[0];
+    require(report.ok && report.ceilings == 3 && !holds_rows(result.generated) && report.endpoint_rows == 0 && dropped_for_size(report),
+            "the listing is taken with its ceilings and without rows:" + gap_text(report));
+    for (const char* id : {"vendor/heavy-a", "vendor/heavy-b", "vendor/light"})
+      require(ceiling_of(result.generated->entry(id)) == "0.000001 0.000002 -", "the ceilings are the ones the endpoints give");
+  }
+  // Rows that fit with the listing but not beside the entries a refresh keeps, or under its overlays: the same.
+  {
+    peer.command(R"({"set":"ceilings-medium","models":{"vendor/medium":)" + tagged_endpoints("t", 256, 256) + R"(,"vendor/light":)" +
+                 tagged_endpoints("t", 1) + "}}");
+    transport::RefreshRequest request;
+    request.sources = {ceiling_source(peer, "ceilings-medium", {"vendor/light", "vendor/medium"})};
+    const auto alone = refreshed(transport, request);
+    require(alone.sources[0].ok && alone.sources[0].endpoint_rows == 2 && holds_rows(alone.generated), "the rows fit beside the listing alone");
+    const auto with_rows = alone.generated->to_json().size();
+    auto entries = alone.generated->entries();
+    for (auto& entry : entries) entry.endpoints.clear();
+    auto made = descriptor::make_catalogue(std::move(entries));
+    require(std::holds_alternative<descriptor::CatalogueSnapshot>(made), "the listing without rows loads");
+    const auto bare = std::get<descriptor::CatalogueSnapshot>(made)->to_json().size();
+    // Padding that fits beside the listing without its rows and not beside it with them, by half the rows' size.
+    const auto one = padding(1)->to_json().size() - std::string_view(R"({"version":1,"models":[]})").size();
+    const auto pad = padding((catalogue_limit - bare - (with_rows - bare) / 2) / (one + 1));
+    require(bare + pad->to_json().size() < catalogue_limit && with_rows + pad->to_json().size() > catalogue_limit + 1024, "the padding is sized");
+    for (const bool kept : {true, false}) {
+      transport::RefreshRequest padded = request;
+      if (kept) padded.previous = pad;
+      else padded.overlays = {pad};
+      const auto result = refreshed(transport, padded);
+      const auto& report = result.sources[0];
+      require(report.ok && !holds_rows(result.generated) && report.endpoint_rows == 0 && dropped_for_size(report),
+              std::string(kept ? "beside kept entries" : "under an overlay") + ", the rows are dropped and the source is taken:" + gap_text(report));
+      for (const char* id : {"vendor/light", "vendor/medium"})
+        require(ceiling_of(result.generated->entry(id)) == ceiling_of(alone.generated->entry(id)), "the ceilings are the same as with the rows");
+      require((kept ? result.generated : result.catalogue)->entry("pad/0") != nullptr, "the padding entries are kept");
+    }
+  }
+  // A source that fails once its rows are written reports no rows, as it reports no ceilings.
+  {
+    std::string models = R"("vendor/m0":)" + tagged_endpoints("solo", 1);
+    for (int i = 1; i < 6400; ++i) models += ",\"vendor/m" + std::to_string(i) + R"(":[{"prompt":"0.000001","completion":"0.000002"}])";
+    peer.command(R"({"set":"ceilings-many","models":{)" + models + "}}");
+    transport::RefreshRequest request;
+    request.sources = {{Listing::OpenAI, base(peer, "openai-wide-a"), "openai-test-key", "https://a.example.test", {}},
+                       ceiling_source(peer, "ceilings-many", {"vendor/m0"})};
+    const auto result = refreshed(transport, request);
+    const auto& report = result.sources[1];
+    require(result.sources[0].ok && !report.ok && report.error == "listing exceeds the catalogue limits" && report.ceiling_requests == 1,
+            "the second source fails after its endpoints were read");
+    require(report.endpoint_rows == 0 && gap_text(report) == "\n  vendor/m0|||listing failed", "its rows are reported as not written:" + gap_text(report));
+    require(!result.generated->entry("vendor/m0"), "its entries are not taken");
+  }
+  passed("endpoint rows: the row bound, a tier that cannot hold a variant's rows, rows dropped for size, a failed source");
+}
+
 #ifndef _WIN32
 // sp_catalogue_refresh --ceiling reads the route ceilings of the models it names and prints what it could not.
 void the_tool_reads_route_ceilings(Peer& peer, const std::string& tool) {
@@ -1574,6 +1706,7 @@ int main(int argc, char** argv) {
     default_origins_are_policy_data(transport, peer);
     batch_variants_price_the_batch_tier(transport, peer);
     endpoint_rows_from_the_endpoints_listings(transport, peer);
+    endpoint_rows_never_cost_entries(transport, peer);
 #ifndef _WIN32
     if (argc == 4) the_tool_reads_route_ceilings(peer, argv[3]);
     if (argc == 4) the_tool_prints_no_listed_key_text(peer, argv[3]);
