@@ -1868,6 +1868,31 @@ void carried_image_input() {
   std::cout << "case passed: a carried request with an image\n";
 }
 
+// A call whose quantities include the input's image tokens, and whose result does not count them, may have billed any
+// of its input at `input_image` (#237): the estimate prices it at the dearer of `input` and `input_image`, named, and
+// stays within the bound.
+void uncounted_image_tokens() {
+  constexpr std::uint64_t in = 1'000'000'000, image = 9'000'000'000;
+  const auto c = entry({{"input", usd(in)}, {"input_image", usd(image)}});
+  const auto variable = entry({{"input", usd(in)}, {"input_image", "-1"}});
+  const auto f = facts("embeddings", "embed", {quantity("input", 1000), quantity("input_image", 1000)});
+  const auto b = bound(Call{f}, *c);
+  CHECK(totals(b, rounded(1000 * image)));
+  const auto u = tokens(1000, std::nullopt);
+  auto e = estimated(f, &u, {}, *c);
+  if (!estimates(e, rounded(1000 * image)) || e.assumptions != Names({"input at input_image"}) || !pricing::beyond_bound(b, e).empty())
+    throw std::runtime_error("line " + std::to_string(__LINE__) + ": estimate " + (e.total ? std::to_string(e.total->nano_usd) : std::string("none")));
+  // Counted image tokens bill at their own rate and the rest at `input`, with no rule named.
+  e = estimated(f, &u, {}, *c, 300);
+  CHECK(estimates(e, rounded(700 * in + 300 * image)) && e.assumptions.empty() && pricing::beyond_bound(b, e).empty());
+  e = estimated(f, &u, {}, *c, 0);
+  CHECK(estimates(e, rounded(1000 * in)) && e.assumptions.empty());
+  // A call without image tokens bills at `input`; a variable `input_image` prices none of a call that may have them.
+  CHECK(estimates(estimated(facts("embeddings", "embed", {quantity("input", 1000)}), &u, {}, *c), rounded(1000 * in)));
+  CHECK(unpriced(estimated(f, &u, {}, *variable), {"input_image"}));
+  std::cout << "case passed: image tokens the result does not count\n";
+}
+
 // A tier the facts name: the call is priced at that tier's rows only, whether the input names the tier or not; an
 // entry with no row in it, a unit it prices at the standard rates and not in the tier, and another tier in the input
 // all refuse.
@@ -2126,7 +2151,7 @@ int main() {
       {"images_estimate", images_estimate}, {"estimate_rounds_once", estimate_rounds_once}, {"token_estimates", token_estimates},
       {"item_estimates", item_estimates}, {"estimate_refusals", estimate_refusals}, {"estimate_length_from_input", estimate_length_from_input},
       {"estimate_by_another_entry", estimate_by_another_entry}, {"estimate_zero_quantity", estimate_zero_quantity},
-      {"estimate_length_overflow", estimate_length_overflow}, {"carried_requests", carried_requests}, {"carried_image_input", carried_image_input}, {"tier_from_facts", tier_from_facts},
+      {"estimate_length_overflow", estimate_length_overflow}, {"carried_requests", carried_requests}, {"carried_image_input", carried_image_input}, {"uncounted_image_tokens", uncounted_image_tokens}, {"tier_from_facts", tier_from_facts},
       {"gateway_embeddings", gateway_embeddings}, {"gateway_refusals", gateway_refusals},
       {"gateway_estimate_within_the_bound", gateway_estimate_within_the_bound}};
   int failed = 0;
